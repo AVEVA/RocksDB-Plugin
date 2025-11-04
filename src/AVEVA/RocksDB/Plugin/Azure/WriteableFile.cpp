@@ -1,0 +1,133 @@
+#include "AVEVA/RocksDB/Plugin/Azure/WriteableFile.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
+
+#include <boost/log/trivial.hpp>
+namespace AVEVA::RocksDB::Plugin::Azure
+{
+    using namespace boost::log::trivial;
+
+    WriteableFile::WriteableFile(Impl::WriteableFileImpl file, std::shared_ptr<boost::log::sources::logger_mt> logger)
+        : m_file(std::move(file)),
+        m_logger(std::move(logger))
+    {
+    }
+
+    rocksdb::IOStatus WriteableFile::Append(const rocksdb::Slice& data, const rocksdb::IOOptions&, rocksdb::IODebugContext*)
+    {
+        try
+        {
+            m_file.Append(data.data(), data.size());
+        }
+        catch (const ::Azure::Core::RequestFailedException& ex)
+        {
+            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        }
+        catch (const std::exception& ex)
+        {
+            BOOST_LOG_SEV(*m_logger, error) << ex.what();
+            return rocksdb::IOStatus::IOError(ex.what());
+        }
+        catch (...)
+        {
+            return rocksdb::IOStatus::IOError("Unknown error when appending to file");
+        }
+
+        return rocksdb::IOStatus::OK();
+    }
+
+    rocksdb::IOStatus WriteableFile::Close(const rocksdb::IOOptions&, rocksdb::IODebugContext*)
+    {
+        try
+        {
+            m_file.Close();
+        }
+        catch (const ::Azure::Core::RequestFailedException& ex)
+        {
+            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        }
+        catch (const std::exception& ex)
+        {
+            BOOST_LOG_SEV(*m_logger, error) << ex.what();
+            return rocksdb::IOStatus::IOError(ex.what());
+        }
+        catch (...)
+        {
+            return rocksdb::IOStatus::IOError("Unknown error when closing file");
+        }
+
+        return rocksdb::IOStatus::OK();
+    }
+
+    rocksdb::IOStatus WriteableFile::Flush(const rocksdb::IOOptions&, rocksdb::IODebugContext*)
+    {
+        try
+        {
+            m_file.Flush();
+        }
+        catch (const ::Azure::Core::RequestFailedException& ex)
+        {
+            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        }
+        catch (const std::exception& ex)
+        {
+            BOOST_LOG_SEV(*m_logger, error) << ex.what();
+            return rocksdb::IOStatus::IOError(ex.what());
+        }
+        catch (...)
+        {
+            return rocksdb::IOStatus::IOError("Unknown error when flushing file");
+        }
+
+        return rocksdb::IOStatus::OK();
+    }
+
+    rocksdb::IOStatus WriteableFile::Sync(const rocksdb::IOOptions&, rocksdb::IODebugContext*)
+    {
+        try
+        {
+            m_file.Sync();
+        }
+        catch (const ::Azure::Core::RequestFailedException& ex)
+        {
+            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        }
+        catch (const std::exception& ex)
+        {
+            BOOST_LOG_SEV(*m_logger, error) << ex.what();
+            return rocksdb::IOStatus::IOError(ex.what());
+        }
+        catch (...)
+        {
+            return rocksdb::IOStatus::IOError("Unknown error when syncing file");
+        }
+
+        return rocksdb::IOStatus::OK();
+    }
+
+    uint64_t WriteableFile::GetFileSize(const rocksdb::IOOptions&, rocksdb::IODebugContext*)
+    {
+        try
+        {
+            return m_file.GetFileSize();
+        }
+        catch (const ::Azure::Core::RequestFailedException& ex)
+        {
+            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            return 0;
+        }
+        catch (const std::exception& ex)
+        {
+            BOOST_LOG_SEV(*m_logger, error) << ex.what();
+            return 0;
+        }
+        catch (...)
+        {
+            BOOST_LOG_SEV(*m_logger, error) << "Unknown error when syncing file";
+            return 0;
+        }
+    }
+}
