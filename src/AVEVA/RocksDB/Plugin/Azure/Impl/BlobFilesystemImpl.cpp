@@ -576,7 +576,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         // TODO: Check if there is already a file with this name
         const auto size = BlobHelpers::GetFileSize(srcClient);
         const auto cap = BlobHelpers::GetBlobCapacity(srcClient);
-        destClient.CreateIfNotExists(cap);
+        destClient.CreateIfNotExists(static_cast<int64_t>(cap));
         ::Azure::Storage::Blobs::DownloadBlobOptions opt;
         opt.Range.Emplace(0, size);
         const auto downloadResponse = srcClient.Download(opt);
