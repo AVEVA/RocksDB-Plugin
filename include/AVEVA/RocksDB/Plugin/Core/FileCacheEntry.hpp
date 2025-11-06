@@ -22,7 +22,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         std::chrono::time_point<std::chrono::system_clock> m_lastAccessTime;
 
     public:
-        FileCacheEntry(std::string filePath, std::size_t size);
+        FileCacheEntry(std::string_view filePath, std::size_t size);
         void Accessed();
 
         std::size_t GetSize() const noexcept;

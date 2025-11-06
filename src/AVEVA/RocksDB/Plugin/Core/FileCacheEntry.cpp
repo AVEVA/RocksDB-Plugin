@@ -5,7 +5,7 @@ namespace AVEVA::RocksDB::Plugin::Core
     // This way, there is no confusion if another read request is made before
     // the file has finished downloading and we can safely return nothing without
     // queuing up another download.
-    FileCacheEntry::FileCacheEntry(std::string filePath, std::size_t size)
+    FileCacheEntry::FileCacheEntry(const std::string_view filePath, const std::size_t size)
         : m_state(State::QueuedForDownload), m_filePath(std::move(filePath)), m_size(size)
     {
     }

@@ -28,11 +28,11 @@ public:
         : Filesystem(std::make_shared<FilesystemMock>()),
         ContainerClient(std::make_shared<ContainerClientMock>()),
         Logger(std::make_shared<logger_mt>()),
-        Cache("tmp", 1073741824, ContainerClient, Filesystem, Logger)
+        Cache("tmp", static_cast<size_t>(1073741824), ContainerClient, Filesystem, Logger)
     {
     }
 
-    void EnsureReadFromCache(const std::string& filePath, size_t expectedCacheSize)
+    void EnsureReadFromCache(const std::string_view filePath, const size_t expectedCacheSize)
     {
         char buffer[1];
         while (true)
@@ -53,7 +53,7 @@ public:
 
 TEST_F(FileCacheTests, ReadEvenSpaced256MbFiles)
 {
-    const auto fileSize = 268435456;
+    const auto fileSize = static_cast<size_t>(268435456);
     EXPECT_CALL(*ContainerClient, GetBlobClient(_))
         .WillRepeatedly(Invoke([fileSize](const std::string&)
             {
@@ -76,11 +76,15 @@ TEST_F(FileCacheTests, ReadEvenSpaced256MbFiles)
                 return file;
             }));
 
-    EnsureReadFromCache("1.sst", static_cast<size_t>(fileSize));
-    EnsureReadFromCache("2.sst", static_cast<size_t>(fileSize * 2));
-    EnsureReadFromCache("3.sst", static_cast<size_t>(fileSize * 3));
-    EnsureReadFromCache("4.sst", static_cast<size_t>(fileSize * 4));
-    EnsureReadFromCache("5.sst", static_cast<size_t>(fileSize * 4));
+    EnsureReadFromCache("1.sst", fileSize);
+    EnsureReadFromCache("2.sst", fileSize * 2);
+    EnsureReadFromCache("3.sst", fileSize * 3);
+    EnsureReadFromCache("4.sst", fileSize * 4);
+    EnsureReadFromCache("5.sst", fileSize * 4);
 
-    ASSERT_FALSE(Cache.HasFile("1.sst"));
+    EXPECT_FALSE(Cache.HasFile("1.sst"));
+    EXPECT_TRUE(Cache.HasFile("2.sst"));
+    EXPECT_TRUE(Cache.HasFile("3.sst"));
+    EXPECT_TRUE(Cache.HasFile("4.sst"));
+    EXPECT_TRUE(Cache.HasFile("5.sst"));
 }

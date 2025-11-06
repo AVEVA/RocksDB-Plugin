@@ -57,7 +57,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
     }
 
-    std::optional<std::size_t> FileCache::ReadFile(const std::string& filePath, uint64_t offset, std::size_t bytesToRead, char* buffer)
+    std::optional<std::size_t> FileCache::ReadFile(const std::string_view filePath, uint64_t offset, std::size_t bytesToRead, char* buffer)
     {
         // If there are extensions that should be filtered on then we need to process that first.
         const auto fileType = RocksDBHelpers::GetFileType(filePath);
@@ -75,12 +75,12 @@ namespace AVEVA::RocksDB::Plugin::Core
 
             auto [inserted, _] = m_cache.emplace(
                 std::piecewise_construct,
-                std::forward_as_tuple(filePath),
+                std::forward_as_tuple(std::string(filePath)),
                 std::forward_as_tuple(filePath, 0));
             m_entryList.push_front(inserted->second);
 
             BOOST_LOG_SEV(*m_logger, info) << "Queueing for download: '" << filePath << "'";
-            m_fileDownloadQueue.push(filePath);
+            m_fileDownloadQueue.emplace(filePath);
 
             lock.unlock();
             m_cv.notify_one();
@@ -96,7 +96,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                 if (state == FileCacheEntry::State::Stale)
                 {
                     BOOST_LOG_SEV(*m_logger, info) << "File is stale. Queueing for redownload: '" << filePath << "'";
-                    m_fileDownloadQueue.push(filePath);
+                    m_fileDownloadQueue.emplace(filePath);
 
                     // Mark as downloading now so we don't queue it again.
                     fileEntry.SetState(FileCacheEntry::State::QueuedForDownload);

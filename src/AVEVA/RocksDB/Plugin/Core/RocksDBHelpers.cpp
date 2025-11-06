@@ -1,7 +1,7 @@
 #include "AVEVA/RocksDB/Plugin/Core/RocksDBHelpers.hpp"
 namespace AVEVA::RocksDB::Plugin::Core
 {
-    static bool IsFile(const std::string& pathname, const std::string_view file)
+    static bool IsFile(const std::string_view pathname, const std::string_view file)
     {
         static const constexpr std::string_view pathsep{ "/" };
 
@@ -23,12 +23,12 @@ namespace AVEVA::RocksDB::Plugin::Core
         return false;
     }
 
-    bool RocksDBHelpers::IsManifestFile(const std::string& pathname)
+    bool RocksDBHelpers::IsManifestFile(const std::string_view pathname)
     {
         return IsFile(pathname, "MANIFEST");
     }
 
-    bool RocksDBHelpers::IsIdentityFile(const std::string& pathname)
+    bool RocksDBHelpers::IsIdentityFile(const std::string_view pathname)
     {
         return IsFile(pathname, "IDENTITY");
     }
@@ -46,7 +46,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
     }
 
-    RocksDBHelpers::FileClass RocksDBHelpers::GetFileType(const std::string& pathname)
+    RocksDBHelpers::FileClass RocksDBHelpers::GetFileType(const std::string_view pathname)
     {
         // Is this a sst file, i.e. ends in ".sst" or ".ldb"
         if (pathname.ends_with(FileType::sst) || pathname.ends_with(FileType::ldb))
