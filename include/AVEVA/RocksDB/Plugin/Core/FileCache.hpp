@@ -16,6 +16,7 @@
 #include <unordered_map>
 #include <queue>
 #include <condition_variable>
+#include <stop_token>
 namespace AVEVA::RocksDB::Plugin::Core
 {
     class FileCache
@@ -25,9 +26,9 @@ namespace AVEVA::RocksDB::Plugin::Core
         std::shared_ptr<ContainerClient> m_containerClient;
         std::shared_ptr<Filesystem> m_filesystem;
         std::shared_ptr<boost::log::sources::logger_mt> m_logger;
-        bool m_shouldClose;
 
         std::mutex m_mutex;
+        std::stop_source m_stopSource;
         std::condition_variable m_cv;
         std::unordered_map<std::string, FileCacheEntry, StringHash, StringEqual> m_cache;
         std::queue<std::string> m_fileDownloadQueue;
@@ -52,7 +53,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         [[nodiscard]] size_t CacheSize();
         void SetCacheSize(std::size_t size);
     private:
-        void BackgroundDownload();
+        void BackgroundDownload(std::stop_token stopToken);
         void EntryAccessedUnsafe(FileCacheEntry& file);
         bool EvictAtLeast(std::size_t bytes);
         void RemoveFileUnsafe(std::string_view filePath);

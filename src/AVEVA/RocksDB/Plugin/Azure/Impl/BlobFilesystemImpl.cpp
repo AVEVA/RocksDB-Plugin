@@ -35,7 +35,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 std::make_shared<Core::FileCache>(*cachePath,
                     maxCacheSize,
                     std::make_shared<AzureContainerClient>(containerClient),
-                    std::make_shared<Core::LocalFilesystem>(),
+                    std::make_shared<Core::LocalFilesystem>(logger),
                     logger));
         }
 
@@ -69,7 +69,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 std::make_shared<Core::FileCache>(*cachePath,
                     maxCacheSize,
                     std::make_shared<AzureContainerClient>(containerClient),
-                    std::make_shared<Core::LocalFilesystem>(),
+                    std::make_shared<Core::LocalFilesystem>(logger),
                     logger));
         }
 
@@ -103,7 +103,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 std::make_shared<Core::FileCache>(*cachePath,
                     maxCacheSize,
                     std::make_shared<AzureContainerClient>(containerClient),
-                    std::make_shared<Core::LocalFilesystem>(),
+                    std::make_shared<Core::LocalFilesystem>(logger),
                     logger));
         }
 
@@ -128,7 +128,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 std::make_shared<Core::FileCache>(*cachePath,
                     maxCacheSize,
                     std::make_shared<AzureContainerClient>(containerClient),
-                    std::make_shared<Core::LocalFilesystem>(),
+                    std::make_shared<Core::LocalFilesystem>(logger),
                     logger));
         }
 
@@ -165,7 +165,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 std::make_shared<Core::FileCache>(*cachePath,
                     maxCacheSize,
                     std::make_shared<AzureContainerClient>(containerClient),
-                    std::make_shared<Core::LocalFilesystem>(),
+                    std::make_shared<Core::LocalFilesystem>(logger),
                     logger));
         }
 

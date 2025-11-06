@@ -9,7 +9,8 @@ namespace AVEVA::RocksDB::Plugin::Core
         virtual ~Filesystem() = default;
 
         virtual std::unique_ptr<File> Open(const std::filesystem::path& path) = 0;
-        virtual void DeleteDir(const std::filesystem::path& path) = 0;
-        virtual void CreateDir(const std::filesystem::path& path) = 0;
+        virtual bool DeleteFile(const std::filesystem::path& path) = 0;
+        virtual bool DeleteDir(const std::filesystem::path& path) = 0;
+        virtual bool CreateDir(const std::filesystem::path& path) = 0;
     };
 }
