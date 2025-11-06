@@ -81,7 +81,7 @@
             "inherits":
             [
                 "_RootConfig",
-                "_DebugBase"
+                "_ReleaseBase"
             ],
             "cacheVariables":
             {
