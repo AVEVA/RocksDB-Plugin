@@ -15,6 +15,7 @@
 #include <thread>
 #include <unordered_map>
 #include <queue>
+#include <condition_variable>
 namespace AVEVA::RocksDB::Plugin::Core
 {
     class FileCache
