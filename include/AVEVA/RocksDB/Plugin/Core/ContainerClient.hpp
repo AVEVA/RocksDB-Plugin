@@ -9,10 +9,6 @@ namespace AVEVA::RocksDB::Plugin::Core
     public:
         ContainerClient() = default;
         virtual ~ContainerClient() = default;
-        ContainerClient(const ContainerClient&) = default;
-        ContainerClient& operator=(const ContainerClient&) = default;
-        ContainerClient(ContainerClient&&) noexcept = default;
-        ContainerClient& operator=(ContainerClient&&) noexcept = default;
 
         virtual std::unique_ptr<BlobClient> GetBlobClient(const std::string& path) = 0;
     };

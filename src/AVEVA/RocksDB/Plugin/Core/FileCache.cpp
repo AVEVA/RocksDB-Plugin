@@ -14,7 +14,8 @@ namespace AVEVA::RocksDB::Plugin::Core
         m_containerClient(std::move(containerClient)),
         m_filesystem(std::move(filesystem)),
         m_logger(std::move(logger)),
-        m_shouldClose(false)
+        m_shouldClose(false),
+        m_backgroundDownloader(&FileCache::BackgroundDownload, this)
     {
     }
 
@@ -27,6 +28,13 @@ namespace AVEVA::RocksDB::Plugin::Core
 
         m_cv.notify_all();
         m_backgroundDownloader.join();
+    }
+
+    bool FileCache::HasFile(std::string_view filePath)
+    {
+        std::scoped_lock lock(m_mutex);
+        auto it = m_cache.find(filePath);
+        return it != m_cache.end();
     }
 
     void FileCache::MarkFileAsStaleIfExists(const std::string& filePath)

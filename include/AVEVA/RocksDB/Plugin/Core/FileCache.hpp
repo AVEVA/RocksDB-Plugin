@@ -45,6 +45,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         FileCache(FileCache&&) = delete;
         FileCache& operator=(FileCache&&) = delete;
 
+        [[nodiscard]] bool HasFile(std::string_view filePath);
         void MarkFileAsStaleIfExists(const std::string& filePath);
         [[nodiscard]] std::optional<std::size_t> ReadFile(const std::string& filePath, uint64_t offset, std::size_t bytesToRead, char* buffer);
         void RemoveFile(std::string_view filePath);
