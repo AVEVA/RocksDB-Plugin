@@ -229,7 +229,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         }
 
         auto cache = m_fileCaches.find(prefix);
-        auto blobClient = std::make_shared<PageBlob>(std::move(client));
+        auto blobClient = std::make_unique<PageBlob>(std::move(client));
         if (cache != m_fileCaches.end())
         {
             return WriteableFileImpl{ realPath, static_cast<size_t>(bufferSize), std::move(blobClient), cache->second, m_logger };
@@ -269,7 +269,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         const auto bufferSize =
             isData ? m_dataFileBufferSize : Configuration::PageBlob::DefaultBufferSize;
 
-        auto client = std::make_shared<PageBlob>(container.GetPageBlobClient(std::string(realPath)));
+        auto client = std::make_unique<PageBlob>(container.GetPageBlobClient(std::string(realPath)));
         auto cache = m_fileCaches.find(prefix);
         if (cache != m_fileCaches.end())
         {

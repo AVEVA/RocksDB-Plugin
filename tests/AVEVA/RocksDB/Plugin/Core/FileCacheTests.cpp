@@ -1,8 +1,8 @@
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
-#include "FilesystemMock.hpp"
-#include "ContainerClientMock.hpp"
-#include "BlobClientMock.hpp"
-#include "FileMock.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/Mocks/FilesystemMock.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/Mocks/ContainerClientMock.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/Mocks/BlobClientMock.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/Mocks/FileMock.hpp"
 
 #include <gtest/gtest.h>
 
@@ -13,10 +13,10 @@ using ::testing::Invoke;
 using ::testing::Return;
 using ::testing::Matcher;
 using AVEVA::RocksDB::Plugin::Core::FileCache;
-using AVEVA::RocksDB::Plugin::Core::FilesystemMock;
-using AVEVA::RocksDB::Plugin::Core::ContainerClientMock;
-using AVEVA::RocksDB::Plugin::Core::BlobClientMock;
-using AVEVA::RocksDB::Plugin::Core::FileMock;
+using AVEVA::RocksDB::Plugin::Core::Mocks::FilesystemMock;
+using AVEVA::RocksDB::Plugin::Core::Mocks::ContainerClientMock;
+using AVEVA::RocksDB::Plugin::Core::Mocks::BlobClientMock;
+using AVEVA::RocksDB::Plugin::Core::Mocks::FileMock;
 class FileCacheTests : public ::testing::Test
 {
 protected:

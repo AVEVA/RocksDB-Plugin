@@ -2,7 +2,7 @@
 #include "AVEVA/RocksDB/Plugin/Core/File.hpp"
 #include <gmock/gmock.h>
 
-namespace AVEVA::RocksDB::Plugin::Core
+namespace AVEVA::RocksDB::Plugin::Core::Mocks
 {
     class FileMock : public File
     {

@@ -1,6 +1,6 @@
 #include "FileMock.hpp"
 
-namespace AVEVA::RocksDB::Plugin::Core
+namespace AVEVA::RocksDB::Plugin::Core::Mocks
 {
     FileMock::FileMock()
     {

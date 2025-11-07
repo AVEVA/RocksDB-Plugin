@@ -1,5 +1,5 @@
 #include "ContainerClientMock.hpp"
-namespace AVEVA::RocksDB::Plugin::Core
+namespace AVEVA::RocksDB::Plugin::Core::Mocks
 {
     ContainerClientMock::ContainerClientMock()
     {

@@ -2,7 +2,7 @@
 #include "AVEVA/RocksDB/Plugin/Core/Filesystem.hpp"
 #include <gmock/gmock.h>
 
-namespace AVEVA::RocksDB::Plugin::Core
+namespace AVEVA::RocksDB::Plugin::Core::Mocks
 {
     class FilesystemMock : public Filesystem
     {
