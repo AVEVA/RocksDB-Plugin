@@ -5,7 +5,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AzureContainerClient.hpp"
-
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.hpp"
 
 #include <azure/storage/blobs.hpp>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
@@ -213,29 +213,30 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
         const auto& container = GetContainer(prefix);
 
-        auto client = std::make_shared<::Azure::Storage::Blobs::PageBlobClient>(container.GetPageBlobClient(std::string(realPath)));
-        auto res = client->CreateIfNotExists(initialSize);
+        auto client = container.GetPageBlobClient(std::string(realPath));
+        auto res = client.CreateIfNotExists(initialSize);
 
         // Creating a writeable file is intended to always provide a "new" file.
         // If the file previosuly existed, efficiently truncate it so that for
         // all intents and purposes, it's a new file.
         if (!res.Value.Created)
         {
-            BlobHelpers::SetFileSize(*client, 0);
-            if (client->GetProperties().Value.BlobSize > initialSize)
+            BlobHelpers::SetFileSize(client, 0);
+            if (client.GetProperties().Value.BlobSize > initialSize)
             {
-                client->Resize(initialSize);
+                client.Resize(initialSize);
             }
         }
 
         auto cache = m_fileCaches.find(prefix);
+        auto blobClient = std::make_shared<PageBlob>(std::move(client));
         if (cache != m_fileCaches.end())
         {
-            return WriteableFileImpl{ realPath, static_cast<size_t>(bufferSize), std::move(client), cache->second, m_logger };
+            return WriteableFileImpl{ realPath, static_cast<size_t>(bufferSize), std::move(blobClient), cache->second, m_logger };
         }
         else
         {
-            return WriteableFileImpl{ realPath, static_cast<size_t>(bufferSize), std::move(client), nullptr, m_logger };
+            return WriteableFileImpl{ realPath, static_cast<size_t>(bufferSize), std::move(blobClient), nullptr, m_logger };
         }
     }
 
@@ -268,8 +269,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         const auto bufferSize =
             isData ? m_dataFileBufferSize : Configuration::PageBlob::DefaultBufferSize;
 
-        auto client = std::make_shared<::Azure::Storage::Blobs::PageBlobClient>(container.GetPageBlobClient(std::string(realPath)));
-
+        auto client = std::make_shared<PageBlob>(container.GetPageBlobClient(std::string(realPath)));
         auto cache = m_fileCaches.find(prefix);
         if (cache != m_fileCaches.end())
         {
@@ -292,18 +292,19 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         const auto bufferSize = isData ? m_dataFileBufferSize : Configuration::PageBlob::DefaultBufferSize;
 
         // TODO: figure out what the intent here is for now just delete and recreate
-        auto client = std::make_shared<::Azure::Storage::Blobs::PageBlobClient>(container.GetPageBlobClient(std::string(realPath)));
-        client->DeleteIfExists();
-        client->CreateIfNotExists(initialSize);
+        auto client = container.GetPageBlobClient(std::string(realPath));
+        client.DeleteIfExists();
+        client.CreateIfNotExists(initialSize);
 
         auto cache = m_fileCaches.find(prefix);
+        auto blobClient = std::make_shared<PageBlob>(std::move(client));
         if (cache != m_fileCaches.end())
         {
-            return WriteableFileImpl{ realPath, static_cast<size_t>(bufferSize), std::move(client), cache->second, m_logger };
+            return WriteableFileImpl{ realPath, static_cast<size_t>(bufferSize), std::move(blobClient), cache->second, m_logger };
         }
         else
         {
-            return WriteableFileImpl{ realPath, static_cast<size_t>(bufferSize), std::move(client), nullptr, m_logger };
+            return WriteableFileImpl{ realPath, static_cast<size_t>(bufferSize), std::move(blobClient), nullptr, m_logger };
         }
     }
 
@@ -312,9 +313,11 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
         const auto& container = GetContainer(prefix);
 
-        auto client = std::make_shared<::Azure::Storage::Blobs::PageBlobClient>(container.GetPageBlobClient(std::string(realPath)));
-        client->CreateIfNotExists(Configuration::PageBlob::DefaultSize);
-        auto impl = std::make_unique<WriteableFileImpl>(realPath, Configuration::PageBlob::DefaultSize, std::move(client), nullptr, m_logger);
+        auto client = container.GetPageBlobClient(std::string(realPath));
+        client.CreateIfNotExists(Configuration::PageBlob::DefaultSize);
+
+        auto blobClient = std::make_shared<PageBlob>(std::move(client));
+        auto impl = std::make_unique<WriteableFileImpl>(realPath, Configuration::PageBlob::DefaultSize, std::move(blobClient), nullptr, m_logger);
         return LoggerImpl{ std::move(impl), logLevel };
     }
 

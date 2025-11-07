@@ -11,6 +11,7 @@ using boost::log::sources::logger_mt;
 using ::testing::_;
 using ::testing::Invoke;
 using ::testing::Return;
+using ::testing::Matcher;
 using AVEVA::RocksDB::Plugin::Core::FileCache;
 using AVEVA::RocksDB::Plugin::Core::FilesystemMock;
 using AVEVA::RocksDB::Plugin::Core::ContainerClientMock;
@@ -241,7 +242,7 @@ TEST_F(FileCacheTests, ReadFileFromCache)
                 auto blob = std::make_unique<BlobClientMock>();
                 EXPECT_CALL(*blob, GetSize())
                     .WillRepeatedly(Return(fileData.size()));
-                EXPECT_CALL(*blob, DownloadTo(_, _, _))
+                EXPECT_CALL(*blob, DownloadTo(Matcher<const std::string&>(_), _, _))
                     .Times(1);
 
                 return blob;

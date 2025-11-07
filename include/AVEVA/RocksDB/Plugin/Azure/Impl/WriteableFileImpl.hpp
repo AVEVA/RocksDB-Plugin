@@ -14,7 +14,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     {
         std::string m_name;
         size_t m_bufferSize;
-        std::shared_ptr<::Azure::Storage::Blobs::PageBlobClient> m_blobClient;
+        std::shared_ptr<Core::BlobClient> m_blobClient;
         std::shared_ptr<Core::FileCache> m_fileCache;
         std::shared_ptr<boost::log::sources::logger_mt> m_logger;
 
@@ -29,7 +29,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     public:
         WriteableFileImpl(std::string_view name,
             size_t bufferSize,
-            std::shared_ptr<::Azure::Storage::Blobs::PageBlobClient> blobClient,
+            std::shared_ptr<Core::BlobClient> blobClient,
             std::shared_ptr<Core::FileCache> fileCache,
             std::shared_ptr<boost::log::sources::logger_mt> logger);
         ~WriteableFileImpl();

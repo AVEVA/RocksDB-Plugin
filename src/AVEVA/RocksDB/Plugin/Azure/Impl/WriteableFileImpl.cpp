@@ -1,6 +1,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/BlobClient.hpp"
 
 #include <boost/log/trivial.hpp>
 
@@ -13,7 +14,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
     WriteableFileImpl::WriteableFileImpl(const std::string_view name,
         const size_t bufferSize,
-        std::shared_ptr<::Azure::Storage::Blobs::PageBlobClient> blobClient,
+        std::shared_ptr<Core::BlobClient> blobClient,
         std::shared_ptr<Core::FileCache> fileCache,
         std::shared_ptr<boost::log::sources::logger_mt> logger)
         : m_name(name),
@@ -22,8 +23,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         m_fileCache(std::move(fileCache)),
         m_logger(std::move(logger)),
         m_lastPageOffset(0),
-        m_size(BlobHelpers::GetFileSize(*m_blobClient)),
-        m_capacity(BlobHelpers::GetBlobCapacity(*m_blobClient)),
+        m_size(m_blobClient->GetSize()),
+        m_capacity(m_blobClient->GetCapacity()),
         m_bufferOffset(0),
         m_closed(false)
     {
@@ -36,18 +37,14 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         m_buffer.resize(static_cast<size_t>(m_bufferSize));
         if (m_size > 0) // Existing file with data
         {
-            m_lastPageOffset = m_size / Configuration::PageBlob::PageSize;;
+            m_lastPageOffset = m_size / Configuration::PageBlob::PageSize;
             const auto lastPageBytes = m_size % Configuration::PageBlob::PageSize;
             if (lastPageBytes > 0) // There is a partially filled page
             {
                 DownloadBlobToOptions opt;
                 opt.Range.Emplace(m_lastPageOffset, static_cast<size_t>(lastPageBytes));
-                const auto res =
-                    m_blobClient->DownloadTo(reinterpret_cast<uint8_t*>(m_buffer.data()), static_cast<size_t>(lastPageBytes), opt);
-                assert((res.Value.ContentRange.Length.HasValue()
-                    ? res.Value.ContentRange.Length.Value()
-                    : 0) == static_cast<int64_t>(lastPageBytes));
-
+                const auto bytesDownoaded = m_blobClient->DownloadTo(m_buffer, m_lastPageOffset, lastPageBytes);
+                assert(bytesDownoaded == static_cast<int64_t>(lastPageBytes));
                 m_bufferOffset = lastPageBytes;
             }
         }
@@ -154,9 +151,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             Expand();
         }
 
-        MemoryBodyStream dataStream(reinterpret_cast<uint8_t*>(m_buffer.data()), numToWrite);
-        auto resp = m_blobClient->UploadPages(static_cast<int64_t>(m_lastPageOffset), dataStream);
-        auto code = resp.RawResponse->GetStatusCode();
+        m_blobClient->UploadPages(std::span(m_buffer.begin(), m_buffer.begin() + numToWrite), static_cast<int64_t>(m_lastPageOffset));
         if (remaining != 0)
         {
             const auto residualOffsetBegin = m_bufferOffset - remaining;
@@ -168,8 +163,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             // TODO: Set target offset appropriately for next flush.
         }
 
-        BOOST_LOG_SEV(*m_logger, debug) << "Flushed " << numToWrite << " bytes to writeable file '" << m_name << "'. HttpStatus(" << static_cast<int>(code) << ")";
-
+        BOOST_LOG_SEV(*m_logger, debug) << "Flushed " << numToWrite << " bytes to writeable file '" << m_name << "'.";
         m_bufferOffset = remaining;
         m_lastPageOffset = (m_size / Configuration::PageBlob::PageSize) * Configuration::PageBlob::PageSize;
     }
@@ -182,7 +176,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         }
 
         Flush();
-        BlobHelpers::SetFileSize(*m_blobClient, m_size);
+        m_blobClient->SetSize(static_cast<int64_t>(m_size));
         BOOST_LOG_SEV(*m_logger, debug) << "Synced writeable file '" << m_name << "' to " << m_size << " bytes";
     }
 
@@ -198,9 +192,9 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
         m_size = size;
         const auto [_, totalPageOffset] = BlobHelpers::RoundToNearestPage(size);
-        m_blobClient->Resize(static_cast<int64_t>(totalPageOffset));
+        m_blobClient->SetCapacity(static_cast<int64_t>(totalPageOffset));
         m_capacity = totalPageOffset;
-        BlobHelpers::SetFileSize(*m_blobClient, m_size);
+        m_blobClient->SetSize(static_cast<int64_t>(m_size));
     }
 
     uint64_t WriteableFileImpl::GetFileSize() const noexcept
@@ -223,7 +217,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
         BOOST_LOG_SEV(*m_logger, debug) << "Expanding writeable file '" << m_name << "' to " << desiredSize << " bytes";
 
-        m_blobClient->Resize(static_cast<int64_t>(desiredSize));
+        m_blobClient->SetCapacity(static_cast<int64_t>(desiredSize));
         m_capacity = desiredSize;
     }
 }
