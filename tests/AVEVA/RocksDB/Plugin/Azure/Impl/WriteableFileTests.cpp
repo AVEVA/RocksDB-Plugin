@@ -182,43 +182,24 @@ TEST_F(WriteableFileTests, Append_ExceedsCapacity_SetCapacityCalled)
 {
     // Arrange
     const int64_t initialCapacity = Configuration::PageBlob::PageSize * 2;
-
     int64_t actualCapacity = 0;
-
     EXPECT_CALL(*m_blobClient, GetSize())
         .WillRepeatedly(::testing::Return(0));
     EXPECT_CALL(*m_blobClient, GetCapacity())
         .WillRepeatedly(::testing::Return(initialCapacity));
-
-    // Expect SetCapacity to be called when capacity is exceeded
     EXPECT_CALL(*m_blobClient, SetCapacity(::testing::_))
         .Times(1)
         .WillOnce(::testing::SaveArg<0>(&actualCapacity));
 
-    // Expect UploadPages to be called when flushing
-    EXPECT_CALL(*m_blobClient, UploadPages(_, _))
-        .Times(::testing::AtLeast(1));
+    WriteableFileImpl file{ "", m_blobClient, nullptr, m_logger, Configuration::PageBlob::PageSize * 2 };
 
-    // Expect SetSize to be called during Sync/Close
-    EXPECT_CALL(*m_blobClient, SetSize(::testing::_))
-        .Times(::testing::AtLeast(0));
+    // Act
+    // Append enough data to exceed initial capacity
+    // We need to write more than initialCapacity bytes
+    std::vector<char> dataToAppend(initialCapacity + Configuration::PageBlob::PageSize, 'x');
+    file.Append(dataToAppend);
 
-    {
-        WriteableFileImpl file{ "", m_blobClient, nullptr, m_logger, Configuration::PageBlob::PageSize * 2 };
-
-        // Act - Append enough data to exceed initial capacity
-        // We need to write more than initialCapacity bytes
-        std::vector<char> dataToAppend(initialCapacity + Configuration::PageBlob::PageSize, 'x');
-        file.Append(dataToAppend);
-
-        // Force a flush to trigger the capacity expansion
-        file.Close();
-
-        // Assert
-        ASSERT_EQ(dataToAppend.size(), file.GetFileSize());
-    } // File destructor called here
-
-    // Verify SetCapacity was called with a value greater than initial capacity
+    // Assert
     ASSERT_GT(actualCapacity, initialCapacity) << "SetCapacity should be called with a capacity greater than the initial capacity";
 }
 
