@@ -56,15 +56,21 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         return static_cast<uint64_t>(props.Value.BlobSize);
     }
 
-    std::pair<uint64_t, uint64_t> BlobHelpers::RoundToNearestPage(uint64_t size)
+    std::pair<uint64_t, uint64_t> BlobHelpers::RoundToEndOfNearestPage(uint64_t size)
+    {
+        auto [partialPageSize, roundedSize] = RoundToBeginningOfNearestPage(size);
+        if (partialPageSize != 0)
+        {
+            roundedSize += Configuration::PageBlob::PageSize;
+        }
+
+        return std::make_pair(partialPageSize, roundedSize);
+    }
+
+    std::pair<uint64_t, uint64_t> BlobHelpers::RoundToBeginningOfNearestPage(uint64_t size)
     {
         const auto partialPageSize = size % static_cast<uint64_t>(Configuration::PageBlob::PageSize);
         auto pages = (size / static_cast<uint64_t>(Configuration::PageBlob::PageSize));
-        if (partialPageSize != 0)
-        {
-            pages++;
-        }
-
         const auto roundedSize = pages * static_cast<uint64_t>(Configuration::PageBlob::PageSize);
         return std::make_pair(partialPageSize, roundedSize);
     }

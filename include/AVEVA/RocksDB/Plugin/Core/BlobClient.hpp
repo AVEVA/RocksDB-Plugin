@@ -7,7 +7,6 @@ namespace AVEVA::RocksDB::Plugin::Core
     class BlobClient
     {
     public:
-        BlobClient() = default;
         virtual ~BlobClient() = default;
 
         /// <summary>

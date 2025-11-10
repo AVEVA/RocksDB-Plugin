@@ -10,7 +10,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             static const constexpr int64_t PageSize = 512;
             static const constexpr int64_t PageBits = 9;
             static const constexpr int64_t DefaultSize = 128 * PageSize * 2;
-            static const constexpr int64_t DefaultBufferSize = 128 * PageSize * 2;
+            static const constexpr int64_t DefaultBufferSize = 10 * PageSize * 2;
         };
 
         static const constexpr std::chrono::seconds LeaseLength = std::chrono::seconds(20);

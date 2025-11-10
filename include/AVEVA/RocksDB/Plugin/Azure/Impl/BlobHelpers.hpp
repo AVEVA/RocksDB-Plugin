@@ -19,7 +19,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         static void SetFileSize(const ::Azure::Storage::Blobs::PageBlobClient& client, uint64_t size);
         static uint64_t GetFileSize(const ::Azure::Storage::Blobs::PageBlobClient& client);
         static uint64_t GetBlobCapacity(const ::Azure::Storage::Blobs::PageBlobClient& client);
-        static std::pair<uint64_t, uint64_t> RoundToNearestPage(uint64_t size);
+        static std::pair<uint64_t, uint64_t> RoundToEndOfNearestPage(uint64_t size);
+        static std::pair<uint64_t, uint64_t> RoundToBeginningOfNearestPage(uint64_t size);
         static ::Azure::Storage::Blobs::BlobClientOptions CreateBlobClientOptions();
         static ::Azure::Identity::ClientSecretCredentialOptions CreateClientSecretCredentialOptions();
         static ::Azure::Identity::AzurePipelinesCredentialOptions CreatePipelinesCredentialOptions();
