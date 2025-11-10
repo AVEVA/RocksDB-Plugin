@@ -1,13 +1,14 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Mocks/BlobClientMock.hpp"
 
 #include <gtest/gtest.h>
 
 using AVEVA::RocksDB::Plugin::Azure::Impl::WriteableFileImpl;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Configuration;
 using AVEVA::RocksDB::Plugin::Core::Mocks::BlobClientMock;
 using boost::log::sources::logger_mt;
 using ::testing::_;
-using ::testing::Matcher;
 
 class WriteableFileTests : public ::testing::Test
 {
@@ -85,7 +86,7 @@ TEST_F(WriteableFileTests, Constructor_PartialPageInBlob_DataDownloaded)
     EXPECT_CALL(*m_blobClient, GetSize())
         .WillRepeatedly(::testing::Return(333));
     EXPECT_CALL(*m_blobClient, GetCapacity())
-        .WillRepeatedly(::testing::Return(512));
+        .WillRepeatedly(::testing::Return(Configuration::PageBlob::PageSize));
     EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), _, _))
         .WillOnce([this, &existingData](std::span<char> buffer, int64_t blobOffset, int64_t length)
             {
@@ -107,13 +108,13 @@ TEST_F(WriteableFileTests, Constructor_PartialLastPageInBlob_DataDownloaded)
     // Arrange
     std::vector<char> existingData(333, 'p');
     EXPECT_CALL(*m_blobClient, GetSize())
-        .WillRepeatedly(::testing::Return(512 + existingData.size()));
+        .WillRepeatedly(::testing::Return(Configuration::PageBlob::PageSize + existingData.size()));
     EXPECT_CALL(*m_blobClient, GetCapacity())
-        .WillRepeatedly(::testing::Return(1024));
+        .WillRepeatedly(::testing::Return(Configuration::PageBlob::PageSize * 2));
     EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), _, _))
         .WillOnce([this, existingData](std::span<char> buffer, int64_t blobOffset, int64_t length)
             {
-                EXPECT_EQ(512, blobOffset);
+                EXPECT_EQ(Configuration::PageBlob::PageSize, blobOffset);
                 EXPECT_EQ(length, existingData.size());
                 std::copy(existingData.begin(), existingData.end(), buffer.begin());
                 return length;
