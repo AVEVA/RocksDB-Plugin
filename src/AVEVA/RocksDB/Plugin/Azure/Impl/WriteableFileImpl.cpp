@@ -12,11 +12,11 @@ using namespace ::Azure::Core::IO;
 using namespace boost::log::trivial;
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
-    WriteableFileImpl::WriteableFileImpl(const std::string_view name,
-        const size_t bufferSize,
+    AVEVA::RocksDB::Plugin::Azure::Impl::WriteableFileImpl::WriteableFileImpl(const std::string_view name,
         std::shared_ptr<Core::BlobClient> blobClient,
         std::shared_ptr<Core::FileCache> fileCache,
-        std::shared_ptr<boost::log::sources::logger_mt> logger)
+        std::shared_ptr<boost::log::sources::logger_mt> logger,
+        const size_t bufferSize)
         : m_name(name),
         m_bufferSize(bufferSize),
         m_blobClient(std::move(blobClient)),
@@ -28,9 +28,9 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         m_bufferOffset(0),
         m_closed(false)
     {
-        if (m_bufferSize < Configuration::PageBlob::DefaultBufferSize)
+        if (m_bufferSize < Configuration::PageBlob::PageSize)
         {
-            m_bufferSize = Configuration::PageBlob::DefaultBufferSize;
+            throw std::invalid_argument("Buffer size cannot be smaller than a page");
         }
 
         assert(m_bufferSize > 0);
@@ -133,6 +133,30 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             {
                 Flush();
             }
+        }
+    }
+
+    void WriteableFileImpl::Append(const std::span<char> data)
+    {
+        const char* dataPos = data.data();
+        auto dataSize = data.size();
+        while (dataSize > 0)
+        {
+            const auto spaceLeft = m_bufferSize - m_bufferOffset;
+            if (spaceLeft < Configuration::PageBlob::PageSize)
+            {
+                Flush();
+                continue;
+            }
+
+            auto bufPos = &m_buffer[m_bufferOffset];
+            const auto bytesToCopy = std::min(spaceLeft, dataSize);
+            std::copy(dataPos, dataPos + bytesToCopy, bufPos);
+
+            dataSize -= bytesToCopy;
+            m_bufferOffset += bytesToCopy;
+            dataPos += bytesToCopy;
+            m_size += bytesToCopy;
         }
     }
 

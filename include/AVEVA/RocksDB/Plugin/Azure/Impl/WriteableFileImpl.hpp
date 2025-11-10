@@ -1,4 +1,5 @@
 #pragma once
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 
 #include <azure/storage/blobs/page_blob_client.hpp>
@@ -28,10 +29,10 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     public:
         WriteableFileImpl(std::string_view name,
-            size_t bufferSize,
             std::shared_ptr<Core::BlobClient> blobClient,
             std::shared_ptr<Core::FileCache> fileCache,
-            std::shared_ptr<boost::log::sources::logger_mt> logger);
+            std::shared_ptr<boost::log::sources::logger_mt> logger,
+            size_t bufferSize = Configuration::PageBlob::DefaultBufferSize);
         ~WriteableFileImpl();
         WriteableFileImpl(const WriteableFileImpl&) = delete;
         WriteableFileImpl& operator=(const WriteableFileImpl&) = delete;
@@ -40,6 +41,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
         void Close();
         void Append(const char* data, size_t size);
+        void Append(const std::span<char> data);
         void Flush();
         void Sync();
         void Truncate(uint64_t size);
