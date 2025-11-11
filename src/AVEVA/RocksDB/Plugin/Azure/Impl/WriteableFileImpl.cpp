@@ -113,30 +113,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         }
     }
 
-    void WriteableFileImpl::Append(const char* data, size_t size)
-    {
-        auto dataPos = data;
-        while (size > 0)
-        {
-            auto space = m_bufferSize - m_bufferOffset;
-            auto bufPos = &m_buffer[m_bufferOffset];
-            const auto numBytes = size > space ? space : size;
-
-            std::copy(dataPos, dataPos + numBytes, bufPos);
-
-            size -= numBytes;
-            m_bufferOffset += numBytes;
-            dataPos += numBytes;
-            m_size += numBytes;
-            space -= numBytes;
-            if (space < Configuration::PageBlob::PageSize)
-            {
-                Flush();
-            }
-        }
-    }
-
-    void WriteableFileImpl::Append(const std::span<char> data)
+    void WriteableFileImpl::Append(const std::span<const char> data)
     {
         const char* dataPos = data.data();
         auto dataSize = data.size();

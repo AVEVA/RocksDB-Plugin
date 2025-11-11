@@ -16,7 +16,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
     {
         try
         {
-            m_file.Append(data.data(), data.size());
+            m_file.Append(std::span(data.data(), data.size()));
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {

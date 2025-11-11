@@ -57,7 +57,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             }
         }
 
-        m_file->Append(m_buffer.data(), totalBufferOffset);
+        m_file->Append(std::span(m_buffer.data(), m_buffer.data() + totalBufferOffset));
         va_end(ap);
     }
 

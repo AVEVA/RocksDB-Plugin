@@ -35,11 +35,11 @@ TEST_F(WriteableFileTests, AppendBytes_LessThanAPage_PageWritten)
     WriteableFileImpl file{ "", m_blobClient, nullptr, m_logger };
 
     // Act
-    constexpr size_t singleByte = 1;
-    file.Append("1", singleByte);
+    std::string_view data = "1";
+    file.Append(data);
 
     // Assert
-    ASSERT_EQ(singleByte, file.GetFileSize());
+    ASSERT_EQ(data.size(), file.GetFileSize());
 }
 
 TEST_F(WriteableFileTests, AppendBytes_EqualToAPage_PageWritten)
@@ -55,7 +55,7 @@ TEST_F(WriteableFileTests, AppendBytes_EqualToAPage_PageWritten)
     WriteableFileImpl file{ "",  m_blobClient, nullptr, m_logger };
 
     // Act
-    file.Append(expected.data(), expected.size());
+    file.Append(expected);
 
     // Assert
     ASSERT_EQ(expected.size(), file.GetFileSize());
@@ -75,7 +75,7 @@ TEST_F(WriteableFileTests, AppendBytes_MoreThanAPage_2PagesWritten)
     WriteableFileImpl file{ "", m_blobClient, nullptr, m_logger };
 
     // Act
-    file.Append(expected.data(), expected.size());
+    file.Append(expected);
 
     // Assert
     ASSERT_EQ(expected.size(), file.GetFileSize());
@@ -290,7 +290,7 @@ TEST_F(WriteableFileTests, Close_WithUnflushedData_DataIsSynced)
         .WillOnce(::testing::SaveArg<0>(&setSizeValue));
 
     WriteableFileImpl file{ "test.dat", m_blobClient, nullptr, m_logger };
-    file.Append(dataToWrite.data(), dataToWrite.size());
+    file.Append(dataToWrite);
 
     // Act
     file.Close();
@@ -336,18 +336,18 @@ TEST_F(WriteableFileTests, Sync_CalledMultipleTimes_SetsSizeCorrectly)
 
     // Act
     file.Sync();
-    static const constexpr size_t firstAppendSize = 4;
-    file.Append("test", firstAppendSize);
+    static const constexpr std::string_view firstAppend = "test";
+    file.Append(firstAppend);
     file.Sync();
-    static const constexpr size_t secondAppendSize = 4;
-    file.Append("data", secondAppendSize);
+    static const constexpr std::string_view secondAppend = "data";
+    file.Append(secondAppend);
     file.Sync();
 
     // Assert
     ASSERT_EQ(3, setSizeCalls.size());
     EXPECT_EQ(0, setSizeCalls[0]);
-    EXPECT_EQ(firstAppendSize, setSizeCalls[1]);
-    EXPECT_EQ(firstAppendSize + secondAppendSize, setSizeCalls[2]);
+    EXPECT_EQ(firstAppend.size(), setSizeCalls[1]);
+    EXPECT_EQ(firstAppend.size() + secondAppend.size(), setSizeCalls[2]);
 }
 
 TEST_F(WriteableFileTests, Sync_WithPartialPage_FlushesAndSetsSizeCorrectly)
@@ -363,7 +363,7 @@ TEST_F(WriteableFileTests, Sync_WithPartialPage_FlushesAndSetsSizeCorrectly)
         .WillOnce(::testing::SaveArg<0>(&setSizeValue));
 
     WriteableFileImpl file{ "test.dat", m_blobClient, nullptr, m_logger };
-    file.Append(dataToWrite.data(), dataToWrite.size());
+    file.Append(dataToWrite);
 
     // Act
     file.Sync();
@@ -401,7 +401,7 @@ TEST_F(WriteableFileTests, Flush_ExactlyOnePage_OneUploadCall)
             });
 
     WriteableFileImpl file{ "test.dat", m_blobClient, nullptr, m_logger };
-    file.Append(dataToWrite.data(), dataToWrite.size());
+    file.Append(dataToWrite);
 
     // Act
     file.Flush();
@@ -427,7 +427,7 @@ TEST_F(WriteableFileTests, Truncate_ToZero_FileEmptied)
         .Times(1);
 
     WriteableFileImpl file{ "test.dat", m_blobClient, nullptr, m_logger };
-    file.Append(initialData.data(), initialData.size());
+    file.Append(initialData);
 
     // Act
     file.Truncate(0);
@@ -597,7 +597,7 @@ TEST_F(WriteableFileTests, MoveConstructor_TransfersState_Correctly)
 
     const std::vector<char> testData(100, 'm');
     WriteableFileImpl file1{ "test.dat", m_blobClient, nullptr, m_logger };
-    file1.Append(testData.data(), testData.size());
+    file1.Append(testData);
 
     // Act - move construct file2 from file1
     const WriteableFileImpl file2{ std::move(file1) };

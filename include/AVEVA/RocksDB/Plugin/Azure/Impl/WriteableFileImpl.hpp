@@ -40,8 +40,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         WriteableFileImpl& operator=(WriteableFileImpl&&) noexcept;
 
         void Close();
-        void Append(const char* data, size_t size);
-        void Append(const std::span<char> data);
+        void Append(const std::span<const char> data);
         void Flush();
         void Sync();
         void Truncate(uint64_t size);
