@@ -249,14 +249,16 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         auto client = std::make_shared<::Azure::Storage::Blobs::PageBlobClient>(container.GetPageBlobClient(std::string(realPath)));
         auto response = client->CreateIfNotExists(Configuration::PageBlob::DefaultSize);
 
+        auto blobClient = std::make_shared<PageBlob>(std::move(*client));
+
         auto cache = m_fileCaches.find(prefix);
         if (cache != m_fileCaches.end())
         {
-            return ReadWriteFileImpl{ realPath, std::move(client), cache->second, m_logger };
+            return ReadWriteFileImpl{ realPath, std::move(blobClient), cache->second, m_logger };
         }
         else
         {
-            return ReadWriteFileImpl{ realPath, std::move(client), nullptr, m_logger };
+            return ReadWriteFileImpl{ realPath, std::move(blobClient), nullptr, m_logger };
         }
     }
 
@@ -270,7 +272,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         const auto bufferSize =
             isData ? m_dataFileBufferSize : Configuration::PageBlob::DefaultBufferSize;
 
-        auto client = std::make_unique<PageBlob>(container.GetPageBlobClient(std::string(realPath)));
+        auto client = std::make_shared<PageBlob>(container.GetPageBlobClient(std::string(realPath)));
         auto cache = m_fileCaches.find(prefix);
         if (cache != m_fileCaches.end())
         {
@@ -297,15 +299,15 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         client.DeleteIfExists();
         client.CreateIfNotExists(initialSize);
 
-        auto cache = m_fileCaches.find(prefix);
+    auto cache = m_fileCaches.find(prefix);
         auto blobClient = std::make_shared<PageBlob>(std::move(client));
         if (cache != m_fileCaches.end())
         {
-            return WriteableFileImpl{ realPath, std::move(blobClient), cache->second, m_logger, static_cast<size_t>(bufferSize) };
+     return WriteableFileImpl{ realPath, std::move(blobClient), cache->second, m_logger, static_cast<size_t>(bufferSize) };
         }
         else
         {
-            return WriteableFileImpl{ realPath, std::move(blobClient), nullptr, m_logger, static_cast<size_t>(bufferSize) };
+       return WriteableFileImpl{ realPath, std::move(blobClient), nullptr, m_logger, static_cast<size_t>(bufferSize) };
         }
     }
 

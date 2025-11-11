@@ -4,21 +4,20 @@
 #include <boost/log/trivial.hpp>
 
 #include <algorithm>
-using namespace ::Azure::Storage::Blobs;
 using namespace boost::log::trivial;
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
     ReadWriteFileImpl::ReadWriteFileImpl(std::string_view name,
-        std::shared_ptr<::Azure::Storage::Blobs::PageBlobClient> blobClient,
+        std::shared_ptr<Core::BlobClient> blobClient,
         std::shared_ptr<Core::FileCache> fileCache,
         std::shared_ptr<boost::log::sources::logger_mt> logger)
         : m_name(name),
         m_blobClient(std::move(blobClient)),
         m_fileCache(std::move(fileCache)),
         m_logger(std::move(logger)),
-        m_size(BlobHelpers::GetFileSize(*m_blobClient)),
+        m_size(static_cast<int64_t>(m_blobClient->GetSize())),
         m_syncSize(m_size),
-        m_capacity(BlobHelpers::GetBlobCapacity(*m_blobClient)),
+        m_capacity(static_cast<int64_t>(m_blobClient->GetCapacity())),
         m_closed(false),
         m_buffer(Configuration::PageBlob::DefaultBufferSize)
     {
@@ -92,19 +91,35 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
         Flush();
 
-        BlobHelpers::SetFileSize(*m_blobClient, m_size);
+        m_blobClient->SetSize(m_size);
         m_syncSize = m_size;
         BOOST_LOG_SEV(*m_logger, debug) << "Synced read/writeable file '" << m_name << "' to " << m_size << " bytes";
     }
 
     void ReadWriteFileImpl::Flush()
     {
-        const auto props = m_blobClient->GetProperties();
-        m_capacity = props.Value.BlobSize;
+        m_capacity = static_cast<int64_t>(m_blobClient->GetCapacity());
         auto roundSize = m_size + Configuration::PageBlob::DefaultBufferSize;
         if (m_size % Configuration::PageBlob::PageSize != 0)
         {
             roundSize += Configuration::PageBlob::PageSize;
+        }
+
+        // Pre-calculate the maximum size we'll need and expand if necessary
+        int64_t maxSizeNeeded = m_size;
+        for (const auto& chunk : m_bufferStats)
+        {
+            const auto chunkEnd = chunk.targetOffset + chunk.dataLength;
+            if (chunkEnd > maxSizeNeeded)
+            {
+                maxSizeNeeded = chunkEnd;
+            }
+        }
+
+        // Expand capacity if needed BEFORE processing chunks
+        while ((maxSizeNeeded + Configuration::PageBlob::PageSize) > m_capacity)
+        {
+            Expand();
         }
 
         // Flush has to happen per chunk in the buffer and fetch any partial pages
@@ -123,10 +138,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 assert(chunk.prePadding < Configuration::PageBlob::PageSize && "Pre-padding should not exceed page size");
 
                 // read in the padding bits from first page
-                DownloadBlobToOptions opt;
-                opt.Range.Emplace(targetStart, chunk.prePadding);
-                m_blobClient->DownloadTo(reinterpret_cast<uint8_t*>(m_buffer.data() + chunk.bufferOffset),
-                    static_cast<size_t>(chunk.prePadding), opt);
+                std::span<char> prePaddingBuffer(m_buffer.data() + chunk.bufferOffset, static_cast<size_t>(chunk.prePadding));
+                m_blobClient->DownloadTo(prePaddingBuffer, targetStart, chunk.prePadding);
             }
             if (chunk.postPadding > 0)
             {
@@ -134,33 +147,24 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 assert((targetEnd + chunk.postPadding) % Configuration::PageBlob::PageSize == 0 && "TargetEnd should be page aligned");
                 assert((targetEnd + chunk.postPadding) <= m_capacity && "We shouldn't try to read data that isn't at least reserved");
 
-
                 // NOTE: If the data we're writing is APPENDED at the end, this post padding may be trash data and can be skipped.
                 if (!(targetEnd > m_size))
                 {
                     assert(chunk.postPadding < Configuration::PageBlob::PageSize && "PostPadding shouldn't be greater than a page's size");
 
                     // read in the padding bits from last page
-                    DownloadBlobToOptions opt;
-                    opt.Range.Emplace(targetEnd, chunk.postPadding);
-
-                    auto postRead = m_blobClient->DownloadTo(reinterpret_cast<uint8_t*>(&m_buffer[chunk.bufferOffset + chunk.prePadding + chunk.dataLength]),
-                        static_cast<size_t>(chunk.postPadding), opt);
+                    std::span<char> postPaddingBuffer(&m_buffer[chunk.bufferOffset + chunk.prePadding + chunk.dataLength], static_cast<size_t>(chunk.postPadding));
+                    m_blobClient->DownloadTo(postPaddingBuffer, targetEnd, chunk.postPadding);
                 }
             }
 
             if ((chunk.targetOffset + chunk.dataLength) > m_size)
             {
                 m_size = chunk.targetOffset + chunk.dataLength;
-
-                if ((m_size + Configuration::PageBlob::PageSize) > m_capacity)
-                {
-                    Expand();
-                }
             }
 
-            ::Azure::Core::IO::MemoryBodyStream upStream(reinterpret_cast<uint8_t*>(&m_buffer[chunk.bufferOffset]), static_cast<size_t>(chunk.ChunkSize()));
-            m_blobClient->UploadPages(targetStart, upStream);
+            std::span<char> uploadBuffer(&m_buffer[chunk.bufferOffset], static_cast<size_t>(chunk.ChunkSize()));
+            m_blobClient->UploadPages(uploadBuffer, targetStart);
 
             BOOST_LOG_SEV(*m_logger, debug) << "Flushed " << chunk.ChunkSize() << " bytes to read/writeable file '" << m_name << "'";
         }
@@ -182,15 +186,14 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         auto targetOffset = offset;
         auto bufferOffset = m_bufferStats.empty()
             ? 0LL
-            : m_bufferStats.back().bufferOffset +
-        m_bufferStats.back().dataLength;
+            : m_bufferStats.back().bufferOffset + m_bufferStats.back().ChunkSize();
         while (size > 0)
         {
             const auto space = Configuration::PageBlob::DefaultBufferSize - bufferOffset;
             auto numBytes = std::min(size, space);
 
             // calculate the relevant padding to leave space to merge
-            // existing page data when flushing
+     // existing page data when flushing
             const auto startPaddingFirstPage = targetOffset % Configuration::PageBlob::PageSize;
 
             int64_t endPaddingLastPage;
@@ -250,23 +253,17 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         }
 
         const auto bytesCanRead = m_syncSize - offset;
-        if (bytesCanRead > bytesRequested) bytesRequested = bytesCanRead;
+        if (bytesCanRead < bytesRequested) bytesRequested = bytesCanRead;
 
-        DownloadBlobToOptions opt;
-        opt.Range.Emplace(offset, bytesRequested);
-        const auto res = m_blobClient->DownloadTo(reinterpret_cast<uint8_t*>(buffer), static_cast<size_t>(bytesRequested), opt);
-        int64_t bytesRead = res.Value.ContentRange.Length.HasValue()
-            ? static_cast<int64_t>(res.Value.ContentRange.Length.Value())
-            : 0LL;
-        assert(bytesRead <= bytesRequested);
-        return bytesRead;
+        std::span<char> readBuffer(buffer, static_cast<size_t>(bytesRequested));
+        return m_blobClient->DownloadTo(readBuffer, offset, bytesRequested);
     }
 
     void ReadWriteFileImpl::Expand()
     {
         const auto [_, rounded] = BlobHelpers::RoundToEndOfNearestPage((m_size + Configuration::PageBlob::DefaultBufferSize) * 2);
         const auto desiredSize = rounded;
-        m_blobClient->Resize(desiredSize);
+        m_blobClient->SetCapacity(desiredSize);
         m_capacity = desiredSize;
 
         BOOST_LOG_SEV(*m_logger, debug) << "Expanding read/writeable file '" << m_name << "' to " << desiredSize << " bytes";

@@ -1,9 +1,9 @@
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/BlobClient.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BufferChunkInfo.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 
-#include <azure/storage/blobs/page_blob_client.hpp>
 #include <boost/log/sources/logger.hpp>
 
 #include <cstdint>
@@ -16,7 +16,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     class ReadWriteFileImpl
     {
         std::string m_name;
-        std::shared_ptr<::Azure::Storage::Blobs::PageBlobClient> m_blobClient;
+        std::shared_ptr<Core::BlobClient> m_blobClient;
         std::shared_ptr<Core::FileCache> m_fileCache;
         std::shared_ptr<boost::log::sources::logger_mt> m_logger;
 
@@ -29,7 +29,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::vector<BufferChunkInfo> m_bufferStats; // to track where page info is to be inserted
     public:
         ReadWriteFileImpl(std::string_view name,
-            std::shared_ptr<::Azure::Storage::Blobs::PageBlobClient> blobClient,
+            std::shared_ptr<Core::BlobClient> blobClient,
             std::shared_ptr<Core::FileCache> fileCache,
             std::shared_ptr<boost::log::sources::logger_mt> logger);
         ~ReadWriteFileImpl();

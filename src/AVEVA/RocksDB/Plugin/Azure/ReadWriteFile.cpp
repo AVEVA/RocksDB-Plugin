@@ -1,5 +1,6 @@
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/ReadWriteFile.hpp"
+#include <azure/core/exception.hpp>
 #include <boost/log/trivial.hpp>
 #include <cassert>
 #include <limits>
