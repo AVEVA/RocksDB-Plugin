@@ -188,15 +188,16 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     {
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
         const auto& container = GetContainer(prefix);
-        auto pageBlobClient = std::make_shared<::Azure::Storage::Blobs::PageBlobClient>(container.GetPageBlobClient(std::string(realPath)));
+        auto pageBlobClient = container.GetPageBlobClient(std::string(realPath));
+        auto blobClient = std::make_shared<PageBlob>(std::move(pageBlobClient));
         auto cache = m_fileCaches.find(prefix);
         if (cache != m_fileCaches.end())
         {
-            return ReadableFileImpl{ realPath, std::move(pageBlobClient), cache->second };
+            return ReadableFileImpl{ realPath, std::move(blobClient), cache->second };
         }
         else
         {
-            return ReadableFileImpl{ realPath, std::move(pageBlobClient), nullptr };
+            return ReadableFileImpl{ realPath, std::move(blobClient), nullptr };
         }
     }
 
@@ -217,7 +218,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         auto res = client.CreateIfNotExists(initialSize);
 
         // Creating a writeable file is intended to always provide a "new" file.
-        // If the file previosuly existed, efficiently truncate it so that for
+        // If the file previosly existed, efficiently truncate it so that for
         // all intents and purposes, it's a new file.
         if (!res.Value.Created)
         {

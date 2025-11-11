@@ -1,16 +1,15 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include <cassert>
-using namespace ::Azure::Storage::Blobs;
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
     ReadableFileImpl::ReadableFileImpl(std::string_view name,
-        std::shared_ptr<::Azure::Storage::Blobs::PageBlobClient> blobClient,
+        std::shared_ptr<Core::BlobClient> blobClient,
         std::shared_ptr<Core::FileCache> fileCache)
         : m_name(name),
         m_blobClient(std::move(blobClient)),
         m_fileCache(std::move(fileCache)),
         m_offset(0),
-        m_size(0)
+        m_size(m_blobClient ? m_blobClient->GetSize() : 0)
     {
     }
 
@@ -35,12 +34,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             return 0;
         }
 
-        DownloadBlobToOptions options;
-        options.Range.Emplace(m_offset, bytesRequested);
-        const auto res = m_blobClient->DownloadTo(reinterpret_cast<uint8_t*>(buffer), bytesRequested, options);
-        bytesRead = res.Value.ContentRange.Length.HasValue()
-            ? static_cast<uint64_t>(res.Value.ContentRange.Length.Value())
-            : 0;
+        const auto result = m_blobClient->DownloadTo(std::span<char>(buffer, bytesRequested), m_offset, bytesRequested);
+        bytesRead = result > 0 ? static_cast<uint64_t>(result) : 0;
 
         m_offset += bytesRead;
         return bytesRead;
@@ -67,12 +62,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             return 0;
         }
 
-        DownloadBlobToOptions options;
-        options.Range.Emplace(offset, bytesRequested);
-        const auto res = m_blobClient->DownloadTo(reinterpret_cast<uint8_t*>(buffer), bytesRequested, options);
-        bytesRead = res.Value.ContentRange.Length.HasValue()
-            ? static_cast<uint64_t>(res.Value.ContentRange.Length.Value())
-            : 0;
+        const auto result = m_blobClient->DownloadTo(std::span<char>(buffer, bytesRequested), offset, bytesRequested);
+        bytesRead = result > 0 ? static_cast<uint64_t>(result) : 0;
 
         return bytesRead;
     }
@@ -85,5 +76,10 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     void ReadableFileImpl::Skip(const uint64_t n)
     {
         m_offset += n;
+    }
+
+    uint64_t ReadableFileImpl::GetSize() const
+    {
+        return m_size;
     }
 }

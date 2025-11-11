@@ -1,6 +1,8 @@
 #include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 
+#include <azure/core/exception.hpp>
+
 namespace AVEVA::RocksDB::Plugin::Azure
 {
     ReadableFile::ReadableFile(Impl::ReadableFileImpl file)
