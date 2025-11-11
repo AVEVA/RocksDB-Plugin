@@ -1,3 +1,4 @@
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Mocks/BlobClientMock.hpp"
 
@@ -5,6 +6,7 @@
 #include <gmock/gmock.h>
 
 using AVEVA::RocksDB::Plugin::Azure::Impl::ReadableFileImpl;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Configuration;
 using AVEVA::RocksDB::Plugin::Core::Mocks::BlobClientMock;
 using ::testing::_;
 using ::testing::Return;
@@ -15,7 +17,7 @@ class ReadableFileTests : public ::testing::Test
 {
 protected:
     std::shared_ptr<BlobClientMock> m_blobClient;
-    static constexpr uint64_t DefaultBlobSize = 1024;
+    static const constexpr uint64_t DefaultBlobSize = Configuration::PageBlob::PageSize * 2;
 
     void SetUp() override
     {
@@ -30,7 +32,7 @@ protected:
 TEST_F(ReadableFileTests, Constructor_InitializesWithBlobSize)
 {
     // Arrange
-    constexpr uint64_t expectedSize = 2048;
+    static constexpr uint64_t expectedSize = Configuration::PageBlob::PageSize;
     EXPECT_CALL(*m_blobClient, GetSize())
         .WillOnce(Return(expectedSize));
 
@@ -45,7 +47,7 @@ TEST_F(ReadableFileTests, Constructor_InitializesWithBlobSize)
 TEST_F(ReadableFileTests, SequentialRead_WithoutCache_ReadsFromBlob)
 {
     // Arrange
-    constexpr size_t bytesToRead = 100;
+    static const constexpr size_t bytesToRead = 100;
     std::vector<char> buffer(bytesToRead);
     std::vector<char> expectedData(bytesToRead, 'A');
 
@@ -70,8 +72,8 @@ TEST_F(ReadableFileTests, SequentialRead_WithoutCache_ReadsFromBlob)
 TEST_F(ReadableFileTests, SequentialRead_MultipleReads_IncrementsOffset)
 {
     // Arrange
-    constexpr size_t firstRead = 50;
-    constexpr size_t secondRead = 75;
+    const constexpr size_t firstRead = 50;
+    const constexpr size_t secondRead = 75;
     std::vector<char> buffer1(firstRead);
     std::vector<char> buffer2(secondRead);
 
@@ -112,9 +114,8 @@ TEST_F(ReadableFileTests, SequentialRead_RequestMoreThanAvailable_ReadsOnlyAvail
         .WillOnce(Return(blobSize));
 
     EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), 0, blobSize))
-        .WillOnce([blobSize](std::span<char> buffer, int64_t /*offset*/, int64_t /*length*/)
+        .WillOnce([blobSize](std::span<char> /*buffer*/, int64_t /*offset*/, int64_t /*length*/)
             {
-                std::fill_n(buffer.begin(), blobSize, 'Z');
                 return static_cast<int64_t>(blobSize);
             });
 

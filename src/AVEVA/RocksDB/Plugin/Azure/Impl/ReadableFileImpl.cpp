@@ -54,7 +54,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
         uint64_t bytesRead = 0;
 
-        assert(m_size > offset && "m_size needs to be bigger than offset or else we will overflow");
+        assert(m_size >= offset && "m_size needs to be bigger than or equal to offset or else we will overflow");
         size_t bytesRequested = m_size - offset;
         if (bytesRequested > bytesToRead) bytesRequested = bytesToRead;
         if (bytesRequested <= 0)
