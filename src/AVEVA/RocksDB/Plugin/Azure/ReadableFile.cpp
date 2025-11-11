@@ -2,6 +2,8 @@
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 
 #include <azure/core/exception.hpp>
+#include <cassert>
+#include <limits>
 
 namespace AVEVA::RocksDB::Plugin::Azure
 {
@@ -18,8 +20,13 @@ namespace AVEVA::RocksDB::Plugin::Azure
     {
         try
         {
-            const auto bytesRead = m_file.SequentialRead(n, scratch);
-            *result = rocksdb::Slice(scratch, bytesRead);
+            assert(n <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) &&
+                "size_t value exceeds int64_t max value");
+            const auto bytesRead = m_file.SequentialRead(static_cast<int64_t>(n), scratch);
+            assert(bytesRead >= 0 && "SequentialRead should not return negative values");
+            assert(static_cast<size_t>(bytesRead) <= std::numeric_limits<size_t>::max() &&
+                "bytesRead exceeds size_t max value");
+            *result = rocksdb::Slice(scratch, static_cast<size_t>(bytesRead));
             return rocksdb::IOStatus::OK();
         }
         catch (const ::Azure::Core::RequestFailedException& e)
@@ -45,8 +52,15 @@ namespace AVEVA::RocksDB::Plugin::Azure
     {
         try
         {
-            const auto bytesRead = m_file.RandomRead(offset, n, scratch);
-            *result = rocksdb::Slice(scratch, bytesRead);
+            assert(offset <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) &&
+                "offset exceeds int64_t max value");
+            assert(n <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) &&
+                "size_t value exceeds int64_t max value");
+            const auto bytesRead = m_file.RandomRead(static_cast<int64_t>(offset), static_cast<int64_t>(n), scratch);
+            assert(bytesRead >= 0 && "RandomRead should not return negative values");
+            assert(static_cast<uint64_t>(bytesRead) <= std::numeric_limits<size_t>::max() &&
+                "bytesRead exceeds size_t max value");
+            *result = rocksdb::Slice(scratch, static_cast<size_t>(bytesRead));
             return rocksdb::IOStatus::OK();
         }
         catch (const ::Azure::Core::RequestFailedException& e)
@@ -67,7 +81,9 @@ namespace AVEVA::RocksDB::Plugin::Azure
     {
         try
         {
-            m_file.Skip(n);
+            assert(n <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) &&
+                "skip value exceeds int64_t max value");
+            m_file.Skip(static_cast<int64_t>(n));
             return rocksdb::IOStatus::OK();
         }
         catch (const ::Azure::Core::RequestFailedException& e)
