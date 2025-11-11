@@ -27,26 +27,27 @@ TEST_F(WriteableFileTests, AppendBytes_LessThanAPage_PageWritten)
 {
     // Arrange
     EXPECT_CALL(*m_blobClient, UploadPages(_, _))
-        .WillOnce([this](std::span<char> expected, int64_t blobOffset)
+        .WillOnce([this](const std::span<char> expected, const int64_t blobOffset)
             {
                 ASSERT_EQ(0, blobOffset);
-                ASSERT_EQ(512, expected.size());
+                ASSERT_EQ(Configuration::PageBlob::PageSize, expected.size());
             });
     WriteableFileImpl file{ "", m_blobClient, nullptr, m_logger };
 
     // Act
-    file.Append("1", 1);
+    constexpr size_t singleByte = 1;
+    file.Append("1", singleByte);
 
     // Assert
-    ASSERT_EQ(1, file.GetFileSize());
+    ASSERT_EQ(singleByte, file.GetFileSize());
 }
 
 TEST_F(WriteableFileTests, AppendBytes_EqualToAPage_PageWritten)
 {
     // Arrange
-    std::vector<char> expected(512, 'a');
+    const std::vector<char> expected(Configuration::PageBlob::PageSize, 'a');
     EXPECT_CALL(*m_blobClient, UploadPages(_, _))
-        .WillOnce([this, expected](std::span<char> toWrite, int64_t blobOffset)
+        .WillOnce([this, &expected](const std::span<char> toWrite, const int64_t blobOffset)
             {
                 ASSERT_EQ(0, blobOffset);
                 ASSERT_EQ(expected, std::vector<char>(toWrite.begin(), toWrite.end()));
@@ -63,9 +64,10 @@ TEST_F(WriteableFileTests, AppendBytes_EqualToAPage_PageWritten)
 TEST_F(WriteableFileTests, AppendBytes_MoreThanAPage_2PagesWritten)
 {
     // Arrange
-    std::vector<char> expected(515, 'b');
+    constexpr size_t dataSize = Configuration::PageBlob::PageSize + 3; // 3 bytes over one page
+    const std::vector<char> expected(dataSize, 'b');
     EXPECT_CALL(*m_blobClient, UploadPages(_, _))
-        .WillOnce([this, expected](std::span<char> toWrite, int64_t blobOffset)
+        .WillOnce([this, &expected](const std::span<char> toWrite, const int64_t blobOffset)
             {
                 ASSERT_EQ(0, blobOffset);
                 ASSERT_EQ(expected, std::vector<char>(toWrite.begin(), toWrite.begin() + expected.size()));
@@ -82,13 +84,14 @@ TEST_F(WriteableFileTests, AppendBytes_MoreThanAPage_2PagesWritten)
 TEST_F(WriteableFileTests, Constructor_PartialPageInBlob_DataDownloaded)
 {
     // Arrange
-    std::vector<char> existingData(333, 'p');
+    constexpr size_t partialPageSize = 333;
+    const std::vector<char> existingData(partialPageSize, 'p');
     EXPECT_CALL(*m_blobClient, GetSize())
-        .WillRepeatedly(::testing::Return(333));
+        .WillRepeatedly(::testing::Return(partialPageSize));
     EXPECT_CALL(*m_blobClient, GetCapacity())
         .WillRepeatedly(::testing::Return(Configuration::PageBlob::PageSize));
     EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), _, _))
-        .WillOnce([this, &existingData](std::span<char> buffer, int64_t blobOffset, int64_t length)
+        .WillOnce([this, &existingData](std::span<char> buffer, const int64_t blobOffset, const int64_t length)
             {
                 EXPECT_EQ(0, blobOffset);
                 EXPECT_EQ(length, existingData.size());
@@ -100,19 +103,20 @@ TEST_F(WriteableFileTests, Constructor_PartialPageInBlob_DataDownloaded)
     WriteableFileImpl file{ "", std::move(m_blobClient), nullptr, m_logger };
 
     // Assert
-    EXPECT_EQ(file.GetFileSize(), 333);
+    EXPECT_EQ(file.GetFileSize(), partialPageSize);
 }
 
 TEST_F(WriteableFileTests, Constructor_PartialLastPageInBlob_DataDownloaded)
 {
     // Arrange
-    std::vector<char> existingData(333, 'p');
+    constexpr size_t partialPageSize = 333;
+    const std::vector<char> existingData(partialPageSize, 'p');
     EXPECT_CALL(*m_blobClient, GetSize())
         .WillRepeatedly(::testing::Return(Configuration::PageBlob::PageSize + existingData.size()));
     EXPECT_CALL(*m_blobClient, GetCapacity())
         .WillRepeatedly(::testing::Return(Configuration::PageBlob::PageSize * 2));
     EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), _, _))
-        .WillOnce([this, existingData](std::span<char> buffer, int64_t blobOffset, int64_t length)
+        .WillOnce([this, &existingData](std::span<char> buffer, const int64_t blobOffset, const int64_t length)
             {
                 EXPECT_EQ(Configuration::PageBlob::PageSize, blobOffset);
                 EXPECT_EQ(length, existingData.size());
@@ -124,7 +128,7 @@ TEST_F(WriteableFileTests, Constructor_PartialLastPageInBlob_DataDownloaded)
     WriteableFileImpl file{ "", std::move(m_blobClient), nullptr, m_logger };
 
     // Assert
-    ASSERT_EQ(512 + existingData.size(), file.GetFileSize());
+    ASSERT_EQ(Configuration::PageBlob::PageSize + existingData.size(), file.GetFileSize());
 }
 
 TEST_F(WriteableFileTests, Append_LessThanAPage_UploadPagesNotCalled)
@@ -133,7 +137,8 @@ TEST_F(WriteableFileTests, Append_LessThanAPage_UploadPagesNotCalled)
     EXPECT_CALL(*m_blobClient, UploadPages(_, _))
         .Times(0);
 
-    std::vector<char> dataToAppend(333, 'p');
+    constexpr size_t partialPageSize = 333;
+    std::vector<char> dataToAppend(partialPageSize, 'p');
     WriteableFileImpl file{ "", std::move(m_blobClient), nullptr, m_logger, Configuration::PageBlob::PageSize * 2 };
 
     // Act
@@ -149,14 +154,14 @@ TEST_F(WriteableFileTests, Append_MultipleWritesLargerThanPage_UploadPagesCalled
     std::vector<char> dataToAppend1(Configuration::PageBlob::PageSize + 1, 'p');
     std::vector<char> dataToAppend2(Configuration::PageBlob::PageSize + 1, 'z');
     EXPECT_CALL(*m_blobClient, UploadPages(_, _))
-        .WillOnce([this, &dataToAppend1](const std::span<char> buffer, int64_t blobOffset)
+        .WillOnce([this, &dataToAppend1](const std::span<char> buffer, const int64_t blobOffset)
             {
                 EXPECT_EQ(Configuration::PageBlob::PageSize * 2, buffer.size());
                 const auto realData = buffer.subspan(0, dataToAppend1.size());
                 EXPECT_EQ(dataToAppend1, std::vector(realData.begin(), realData.end()));
                 EXPECT_EQ(0, blobOffset);
             })
-        .WillOnce([this, &dataToAppend1, &dataToAppend2](const std::span<char> buffer, int64_t blobOffset)
+        .WillOnce([this, &dataToAppend1, &dataToAppend2](const std::span<char> buffer, const int64_t blobOffset)
             {
                 EXPECT_EQ(Configuration::PageBlob::PageSize * 2, buffer.size());
 
@@ -181,27 +186,577 @@ TEST_F(WriteableFileTests, Append_MultipleWritesLargerThanPage_UploadPagesCalled
 TEST_F(WriteableFileTests, Append_ExceedsCapacity_SetCapacityCalled)
 {
     // Arrange
-    const int64_t initialCapacity = Configuration::PageBlob::PageSize * 2;
+    constexpr int64_t initialCapacity = Configuration::PageBlob::PageSize * 2;
+    bool setCapacityCalled = false;
     int64_t actualCapacity = 0;
+
     EXPECT_CALL(*m_blobClient, GetSize())
         .WillRepeatedly(::testing::Return(0));
     EXPECT_CALL(*m_blobClient, GetCapacity())
         .WillRepeatedly(::testing::Return(initialCapacity));
+    EXPECT_CALL(*m_blobClient, UploadPages(_, _))
+        .Times(::testing::AtLeast(1));
     EXPECT_CALL(*m_blobClient, SetCapacity(::testing::_))
         .Times(1)
-        .WillOnce(::testing::SaveArg<0>(&actualCapacity));
+        .WillOnce(::testing::DoAll(
+            ::testing::SaveArg<0>(&actualCapacity),
+            ::testing::Assign(&setCapacityCalled, true)
+        ));
+    EXPECT_CALL(*m_blobClient, SetSize(_))
+        .Times(::testing::AtLeast(0));
 
     WriteableFileImpl file{ "", m_blobClient, nullptr, m_logger, Configuration::PageBlob::PageSize * 2 };
 
     // Act
-    // Append enough data to exceed initial capacity
-    // We need to write more than initialCapacity bytes
     std::vector<char> dataToAppend(initialCapacity + Configuration::PageBlob::PageSize, 'x');
     file.Append(dataToAppend);
+    file.Sync(); // Trigger flush which will call Expand
 
     // Assert
+    ASSERT_TRUE(setCapacityCalled) << "SetCapacity should have been called";
     ASSERT_GT(actualCapacity, initialCapacity) << "SetCapacity should be called with a capacity greater than the initial capacity";
 }
+
+// ============================================================================
+// Constructor Tests
+// ============================================================================
+
+TEST_F(WriteableFileTests, Constructor_BufferSizeSmallerThanPage_ThrowsException)
+{
+    // Arrange
+    constexpr size_t invalidBufferSize = Configuration::PageBlob::PageSize - 1;
+
+    // Act & Assert
+    EXPECT_THROW(
+        WriteableFileImpl file("test.dat", m_blobClient, nullptr, m_logger, invalidBufferSize),
+        std::invalid_argument
+    );
+}
+
+TEST_F(WriteableFileTests, Constructor_EmptyBlob_InitializesCorrectly)
+{
+    // Arrange
+    EXPECT_CALL(*m_blobClient, GetSize())
+        .WillRepeatedly(::testing::Return(0));
+    EXPECT_CALL(*m_blobClient, GetCapacity())
+        .WillRepeatedly(::testing::Return(Configuration::PageBlob::PageSize));
+
+    // Act
+    const WriteableFileImpl file("test.dat", m_blobClient, nullptr, m_logger);
+
+    // Assert
+    EXPECT_EQ(0, file.GetFileSize());
+}
+
+TEST_F(WriteableFileTests, Constructor_FullPagesInBlob_NoDataDownloaded)
+{
+    // Arrange
+    EXPECT_CALL(*m_blobClient, GetSize())
+        .WillRepeatedly(::testing::Return(Configuration::PageBlob::PageSize * 3));
+    EXPECT_CALL(*m_blobClient, GetCapacity())
+        .WillRepeatedly(::testing::Return(Configuration::PageBlob::PageSize * 4));
+    EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), _, _))
+        .Times(0);
+
+    // Act
+    const WriteableFileImpl file("test.dat", m_blobClient, nullptr, m_logger);
+
+    // Assert
+    EXPECT_EQ(Configuration::PageBlob::PageSize * 3, file.GetFileSize());
+}
+
+// ============================================================================
+// Close() Tests
+// ============================================================================
+
+TEST_F(WriteableFileTests, Close_CalledMultipleTimes_OnlySyncsOnce)
+{
+    // Arrange
+    EXPECT_CALL(*m_blobClient, SetSize(_))
+        .Times(1);
+    WriteableFileImpl file("test.dat", m_blobClient, nullptr, m_logger);
+
+    // Act
+    file.Close();
+    file.Close();
+    file.Close();
+
+    // Assert
+    // Expectations verified by mock
+}
+
+TEST_F(WriteableFileTests, Close_WithUnflushedData_DataIsSynced)
+{
+    // Arrange
+    constexpr size_t testDataSize = 100;
+    const std::vector<char> dataToWrite(testDataSize, 'x');
+    int64_t setSizeValue = -1;
+
+    EXPECT_CALL(*m_blobClient, UploadPages(_, _))
+        .Times(1);
+    EXPECT_CALL(*m_blobClient, SetSize(_))
+        .WillOnce(::testing::SaveArg<0>(&setSizeValue));
+
+    WriteableFileImpl file("test.dat", m_blobClient, nullptr, m_logger);
+    file.Append(dataToWrite.data(), dataToWrite.size());
+
+    // Act
+    file.Close();
+
+    // Assert
+    EXPECT_EQ(testDataSize, setSizeValue);
+}
+
+TEST_F(WriteableFileTests, Close_EmptyFile_NoErrors)
+{
+    // Arrange
+    EXPECT_CALL(*m_blobClient, SetSize(0))
+        .Times(1);
+    WriteableFileImpl file("test.dat", m_blobClient, nullptr, m_logger);
+
+    // Act & Assert
+    EXPECT_NO_THROW(file.Close());
+}
+
+// ============================================================================
+// Sync() Tests
+// ============================================================================
+
+TEST_F(WriteableFileTests, Sync_WithoutFileCache_NoError)
+{
+    // Arrange
+    EXPECT_CALL(*m_blobClient, SetSize(_))
+        .Times(1);
+    WriteableFileImpl file("test.dat", m_blobClient, nullptr, m_logger);
+
+    // Act & Assert
+    EXPECT_NO_THROW(file.Sync());
+}
+
+TEST_F(WriteableFileTests, Sync_CalledMultipleTimes_SetsSizeCorrectly)
+{
+    // Arrange
+    std::vector<int64_t> setSizeCalls;
+    EXPECT_CALL(*m_blobClient, SetSize(_))
+        .Times(3)
+        .WillRepeatedly([&setSizeCalls](const int64_t size) {
+        setSizeCalls.push_back(size);
+            });
+
+    WriteableFileImpl file("test.dat", m_blobClient, nullptr, m_logger);
+
+    // Act
+    file.Sync();
+    constexpr size_t firstAppendSize = 4;
+    file.Append("test", firstAppendSize);
+    file.Sync();
+    constexpr size_t secondAppendSize = 4;
+    file.Append("data", secondAppendSize);
+    file.Sync();
+
+    // Assert
+    ASSERT_EQ(3, setSizeCalls.size());
+    EXPECT_EQ(0, setSizeCalls[0]);
+    EXPECT_EQ(firstAppendSize, setSizeCalls[1]);
+    EXPECT_EQ(firstAppendSize + secondAppendSize, setSizeCalls[2]);
+}
+
+TEST_F(WriteableFileTests, Sync_WithPartialPage_FlushesAndSetsSizeCorrectly)
+{
+    // Arrange
+    constexpr size_t partialPageSize = 256;
+    const std::vector<char> dataToWrite(partialPageSize, 'y');
+    int64_t setSizeValue = -1;
+
+    EXPECT_CALL(*m_blobClient, UploadPages(_, _))
+        .Times(1);
+    EXPECT_CALL(*m_blobClient, SetSize(_))
+        .WillOnce(::testing::SaveArg<0>(&setSizeValue));
+
+    WriteableFileImpl file("test.dat", m_blobClient, nullptr, m_logger);
+    file.Append(dataToWrite.data(), dataToWrite.size());
+
+    // Act
+    file.Sync();
+
+    // Assert
+    EXPECT_EQ(partialPageSize, setSizeValue);
+}
+
+// ============================================================================
+// Flush() Tests
+// ============================================================================
+
+TEST_F(WriteableFileTests, Flush_EmptyBuffer_NoUploadCalled)
+{
+    // Arrange
+    EXPECT_CALL(*m_blobClient, UploadPages(_, _))
+        .Times(0);
+
+    WriteableFileImpl file("test.dat", m_blobClient, nullptr, m_logger);
+
+    // Act
+    file.Flush();
+
+    // Assert
+       // Expectations verified by mock
+}
+
+TEST_F(WriteableFileTests, Flush_ExactlyOnePage_OneUploadCall)
+{
+    // Arrange
+    const std::vector<char> dataToWrite(Configuration::PageBlob::PageSize, 'z');
+
+    EXPECT_CALL(*m_blobClient, UploadPages(_, _))
+        .Times(1)
+        .WillOnce([](const std::span<char> buffer, const int64_t offset) {
+        EXPECT_EQ(Configuration::PageBlob::PageSize, buffer.size());
+        EXPECT_EQ(0, offset);
+            });
+
+    WriteableFileImpl file("test.dat", m_blobClient, nullptr, m_logger);
+    file.Append(dataToWrite.data(), dataToWrite.size());
+
+    // Act
+    file.Flush();
+
+    // Assert
+    // Expectations verified by mock
+}
+
+// ============================================================================
+// Truncate() Tests
+// ============================================================================
+
+TEST_F(WriteableFileTests, Truncate_ToZero_FileEmptied)
+{
+    // Arrange
+    constexpr size_t initialDataSize = 1000;
+    const std::vector<char> initialData(initialDataSize, 'a');
+    EXPECT_CALL(*m_blobClient, SetSize(0))
+        .Times(2); // Once in Sync before truncate, once in Truncate
+    EXPECT_CALL(*m_blobClient, SetCapacity(0))
+        .Times(1);
+
+    WriteableFileImpl file("test.dat", m_blobClient, nullptr, m_logger);
+    file.Append(initialData.data(), initialData.size());
+
+    // Act
+    file.Truncate(0);
+
+    // Assert
+    EXPECT_EQ(0, file.GetFileSize());
+}
+
+TEST_F(WriteableFileTests, Truncate_ToSmallerSize_DataReducedCorrectly)
+{
+    // Arrange
+    constexpr size_t initialDataSize = 1000;
+    constexpr size_t truncatedSize = 500;
+    constexpr size_t truncatedSizeRoundedUp = 512; // Rounded up to page size
+    const std::vector<char> initialData(initialDataSize, 'b');
+    EXPECT_CALL(*m_blobClient, SetSize(truncatedSize))
+        .Times(1);
+    EXPECT_CALL(*m_blobClient, SetCapacity(truncatedSizeRoundedUp))
+        .Times(1);
+
+    WriteableFileImpl file("test.dat", m_blobClient, nullptr, m_logger);
+    file.Append(initialData.data(), initialData.size());
+
+    // Act
+    file.Truncate(truncatedSize);
+
+    // Assert
+    EXPECT_EQ(truncatedSize, file.GetFileSize());
+}
+
+TEST_F(WriteableFileTests, Truncate_ToLargerSize_FileExpanded)
+{
+    // Arrange
+    constexpr size_t initialDataSize = 100;
+    constexpr size_t expandedSize = 2000;
+    constexpr size_t expandedSizeRoundedUp = 2048; // Rounded up to page size
+    const std::vector<char> initialData(initialDataSize, 'c');
+    EXPECT_CALL(*m_blobClient, SetSize(expandedSize))
+        .Times(1);
+    EXPECT_CALL(*m_blobClient, SetCapacity(expandedSizeRoundedUp))
+        .Times(1);
+
+    WriteableFileImpl file("test.dat", m_blobClient, nullptr, m_logger);
+    file.Append(initialData.data(), initialData.size());
+
+    // Act
+    file.Truncate(expandedSize);
+
+    // Assert
+    EXPECT_EQ(expandedSize, file.GetFileSize());
+}
+
+TEST_F(WriteableFileTests, Truncate_ToPartialPage_BufferOffsetSetCorrectly)
+{
+    // Arrange
+    constexpr uint64_t partialPageOffset = 123;
+    constexpr uint64_t truncateSize = Configuration::PageBlob::PageSize + partialPageOffset;
+    EXPECT_CALL(*m_blobClient, SetSize(truncateSize))
+        .Times(1);
+
+    WriteableFileImpl file("test.dat", m_blobClient, nullptr, m_logger);
+
+    // Act
+    file.Truncate(truncateSize);
+
+    // Assert
+    EXPECT_EQ(truncateSize, file.GetFileSize());
+}
+
+// ============================================================================
+// GetUniqueId() Tests
+// ============================================================================
+
+TEST_F(WriteableFileTests, GetUniqueId_BufferLargerThanName_ReturnsFullName)
+{
+    // Arrange
+    constexpr auto filename = "test.dat";
+    const WriteableFileImpl file(filename, m_blobClient, nullptr, m_logger);
+    constexpr size_t largeBufferSize = 100;
+    std::vector<char> id(largeBufferSize, '\0');
+
+    // Act
+    const auto length = file.GetUniqueId(id.data(), id.size());
+
+    // Assert
+    EXPECT_EQ(std::string_view(filename).size(), length);
+    EXPECT_EQ(filename, std::string(id.data(), length));
+}
+
+TEST_F(WriteableFileTests, GetUniqueId_BufferSmallerThanName_ReturnsTruncatedName)
+{
+    // Arrange
+    constexpr auto filename = "very_long_filename_for_testing.dat";
+    const WriteableFileImpl file(filename, m_blobClient, nullptr, m_logger);
+    constexpr size_t smallBufferSize = 10;
+    std::vector<char> id(smallBufferSize, '\0');
+
+    // Act
+    const auto length = file.GetUniqueId(id.data(), id.size());
+
+    // Assert
+    EXPECT_EQ(smallBufferSize, length);
+    EXPECT_EQ(std::string_view(filename).substr(0, smallBufferSize), std::string(id.data(), length));
+}
+
+TEST_F(WriteableFileTests, GetUniqueId_EmptyName_ReturnsZero)
+{
+    // Arrange
+    const WriteableFileImpl file("", m_blobClient, nullptr, m_logger);
+    constexpr size_t bufferSize = 100;
+    std::vector<char> id(bufferSize, '\0');
+
+    // Act
+    const auto length = file.GetUniqueId(id.data(), id.size());
+
+    // Assert
+    EXPECT_EQ(0, length);
+}
+
+// ============================================================================
+// Move Semantics Tests
+// ============================================================================
+
+TEST_F(WriteableFileTests, MoveConstructor_TransfersState_Correctly)
+{
+    // Arrange - create a file with some data
+    const auto blobClientLocal = std::make_shared<BlobClientMock>();
+    const auto loggerLocal = std::make_shared<logger_mt>();
+    EXPECT_CALL(*blobClientLocal, GetSize())
+        .WillRepeatedly(::testing::Return(0));
+    EXPECT_CALL(*blobClientLocal, GetCapacity())
+        .WillRepeatedly(::testing::Return(Configuration::PageBlob::PageSize));
+    EXPECT_CALL(*blobClientLocal, UploadPages(_, _))
+        .Times(::testing::AtLeast(0));
+    EXPECT_CALL(*blobClientLocal, SetSize(_))
+        .Times(::testing::AtLeast(0));
+
+    constexpr size_t testDataSize = 100;
+    const std::vector<char> testData(testDataSize, 'm');
+    WriteableFileImpl file1("test.dat", blobClientLocal, nullptr, loggerLocal);
+    file1.Append(testData.data(), testData.size());
+
+    // Act - move construct file2 from file1
+    const WriteableFileImpl file2(std::move(file1));
+
+    // Assert - file2 should have the data
+    EXPECT_EQ(testDataSize, file2.GetFileSize());
+
+    // file1 is now in a moved-from state and its destructor should not crash
+}
+
+TEST_F(WriteableFileTests, MoveAssignment_TransfersState_Correctly)
+{
+    // Arrange
+    const auto blobClient1 = std::make_shared<BlobClientMock>();
+    const auto blobClient2 = std::make_shared<BlobClientMock>();
+    const auto logger1 = std::make_shared<logger_mt>();
+    const auto logger2 = std::make_shared<logger_mt>();
+
+    EXPECT_CALL(*blobClient1, GetSize())
+        .WillRepeatedly(::testing::Return(0));
+    EXPECT_CALL(*blobClient1, GetCapacity())
+        .WillRepeatedly(::testing::Return(Configuration::PageBlob::PageSize));
+    EXPECT_CALL(*blobClient1, UploadPages(_, _))
+        .Times(::testing::AtLeast(0));
+    EXPECT_CALL(*blobClient1, SetSize(_))
+        .Times(::testing::AtLeast(0));
+
+    EXPECT_CALL(*blobClient2, GetSize())
+        .WillRepeatedly(::testing::Return(0));
+    EXPECT_CALL(*blobClient2, GetCapacity())
+        .WillRepeatedly(::testing::Return(Configuration::PageBlob::PageSize));
+    EXPECT_CALL(*blobClient2, UploadPages(_, _))
+        .Times(::testing::AtLeast(0));
+    EXPECT_CALL(*blobClient2, SetSize(_))
+        .Times(::testing::AtLeast(0));
+
+    constexpr size_t testDataSize = 200;
+    const std::vector<char> testData(testDataSize, 'n');
+    WriteableFileImpl file1("test1.dat", blobClient1, nullptr, logger1);
+    WriteableFileImpl file2("test2.dat", blobClient2, nullptr, logger2);
+    file1.Append(testData.data(), testData.size());
+
+    // Act - move assign file1 to file2
+    file2 = std::move(file1);
+
+    // Assert - file2 should have file1's data
+    EXPECT_EQ(testDataSize, file2.GetFileSize());
+
+    // file1 is now in a moved-from state and its destructor should not crash
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

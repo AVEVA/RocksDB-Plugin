@@ -83,7 +83,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         m_size(other.m_size),
         m_capacity(other.m_capacity),
         m_bufferOffset(other.m_bufferOffset),
-        m_closed(std::exchange(other.m_closed, false)),
+        m_closed(std::exchange(other.m_closed, true)),
         m_buffer(std::move(other.m_buffer))
     {
     }
@@ -99,7 +99,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         m_size = other.m_size;
         m_capacity = other.m_capacity;
         m_bufferOffset = other.m_bufferOffset;
-        m_closed = std::exchange(other.m_closed, false);
+        m_closed = std::exchange(other.m_closed, true);
         m_buffer = std::move(other.m_buffer);
         return *this;
     }
