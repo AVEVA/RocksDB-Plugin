@@ -204,20 +204,35 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     void WriteableFileImpl::Truncate(uint64_t size)
     {
+        // Truncate only allows shrinking, not expanding
+        if (size > m_size)
+        {
+            throw std::invalid_argument("Truncate can only shrink the file. Cannot expand from " +
+                std::to_string(m_size) + " to " + std::to_string(size) + " bytes.");
+        }
+
         // Ensure all data is written to blob before modifications are made
         Sync();
-        const auto [partialPageSize, totalPageOffset] = BlobHelpers::RoundToEndOfNearestPage(size);
-        m_bufferOffset = partialPageSize;
+
+        const auto [partialPageSize, totalPageOffset] = BlobHelpers::RoundToBeginningOfNearestPage(size);
+        m_bufferOffset = 0;
+        m_lastPageOffset = totalPageOffset;
+
         if (partialPageSize != 0)
         {
             // Read the partial page into memory for further appends
-
+            const auto bytesDownloaded = m_blobClient->DownloadTo(m_buffer, static_cast<int64_t>(totalPageOffset), static_cast<int64_t>(partialPageSize));
+            assert(bytesDownloaded == static_cast<int64_t>(partialPageSize));
+            m_bufferOffset = partialPageSize;
         }
 
         m_size = size;
         m_blobClient->SetSize(static_cast<int64_t>(m_size));
-        m_capacity = totalPageOffset;
-        m_blobClient->SetCapacity(static_cast<int64_t>(totalPageOffset));
+
+        // Calculate new capacity rounded up to page size
+        const auto [_, newCapacity] = BlobHelpers::RoundToEndOfNearestPage(size);
+        m_capacity = newCapacity;
+        m_blobClient->SetCapacity(static_cast<int64_t>(newCapacity));
     }
 
     uint64_t WriteableFileImpl::GetFileSize() const noexcept

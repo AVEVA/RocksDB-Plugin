@@ -415,6 +415,12 @@ TEST_F(WriteableFileTests, Truncate_ToZero_FileEmptied)
     // Arrange
     static const constexpr size_t initialDataSize = 1000;
     const std::vector<char> initialData(initialDataSize, 'a');
+    EXPECT_CALL(*m_blobClient, GetSize())
+        .WillRepeatedly(::testing::Return(0));
+    EXPECT_CALL(*m_blobClient, GetCapacity())
+        .WillRepeatedly(::testing::Return(Configuration::PageBlob::PageSize * 2));
+    EXPECT_CALL(*m_blobClient, UploadPages(_, _))
+        .Times(::testing::AtLeast(1));
     EXPECT_CALL(*m_blobClient, SetSize(0))
         .Times(2); // Once in Sync before truncate, once in Truncate
     EXPECT_CALL(*m_blobClient, SetCapacity(0))
@@ -436,14 +442,31 @@ TEST_F(WriteableFileTests, Truncate_ToSmallerSize_DataReducedCorrectly)
     static const constexpr int64_t initialDataSize = 1000;
     static const constexpr int64_t truncatedSize = 500;
     static const constexpr auto truncatedSizeRoundedUp = Configuration::PageBlob::PageSize; // Rounded up to page size
-    const std::vector<char> initialData(initialDataSize, 'b');
-    EXPECT_CALL(*m_blobClient, SetSize(truncatedSize))
-        .Times(1);
+    static const constexpr auto partialPageSize = truncatedSize % Configuration::PageBlob::PageSize;
+    std::vector<char> initialData(initialDataSize, 'b');
+    const std::vector<char> expectedPartialData(partialPageSize, 'b');
+
+    EXPECT_CALL(*m_blobClient, GetSize())
+        .WillRepeatedly(::testing::Return(0));
+    EXPECT_CALL(*m_blobClient, GetCapacity())
+        .WillRepeatedly(::testing::Return(Configuration::PageBlob::PageSize * 2));
+    EXPECT_CALL(*m_blobClient, UploadPages(_, _))
+        .Times(::testing::AtLeast(1));
+    EXPECT_CALL(*m_blobClient, SetSize(_))
+        .Times(::testing::AtLeast(1));
     EXPECT_CALL(*m_blobClient, SetCapacity(truncatedSizeRoundedUp))
         .Times(1);
+    EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(),
+        0,
+        partialPageSize))
+        .WillOnce([&expectedPartialData](std::span<char> buffer, int64_t /*offset*/, int64_t length)
+            {
+                std::copy(expectedPartialData.begin(), expectedPartialData.end(), buffer.begin());
+                return length;
+            });
 
     WriteableFileImpl file{ "test.dat", m_blobClient, nullptr, m_logger };
-    file.Append(initialData.data(), initialData.size());
+    file.Append(initialData);
 
     // Act
     file.Truncate(truncatedSize);
@@ -452,43 +475,66 @@ TEST_F(WriteableFileTests, Truncate_ToSmallerSize_DataReducedCorrectly)
     EXPECT_EQ(truncatedSize, file.GetFileSize());
 }
 
-TEST_F(WriteableFileTests, Truncate_ToLargerSize_FileExpanded) // TODO: This probably shouldn't happen
+TEST_F(WriteableFileTests, Truncate_ToLargerSize_ThrowsException)
 {
     // Arrange
     static const constexpr int64_t initialDataSize = 100;
     static const constexpr int64_t expandedSize = 2000;
-    static const constexpr auto expandedSizeRoundedUp = Configuration::PageBlob::PageSize * 4; // Rounded up to page size
-    const std::vector<char> initialData(initialDataSize, 'c');
-    EXPECT_CALL(*m_blobClient, SetSize(expandedSize))
-        .Times(1);
-    EXPECT_CALL(*m_blobClient, SetCapacity(expandedSizeRoundedUp))
-        .Times(1);
+    std::vector<char> initialData(initialDataSize, 'c');
+
+    EXPECT_CALL(*m_blobClient, GetSize())
+        .WillRepeatedly(::testing::Return(0));
+    EXPECT_CALL(*m_blobClient, GetCapacity())
+        .WillRepeatedly(::testing::Return(Configuration::PageBlob::PageSize));
 
     WriteableFileImpl file{ "test.dat", m_blobClient, nullptr, m_logger };
-    file.Append(initialData.data(), initialData.size());
+    file.Append(initialData);
 
-    // Act
-    file.Truncate(expandedSize);
-
-    // Assert
-    EXPECT_EQ(expandedSize, file.GetFileSize());
+    // Act & Assert
+    EXPECT_THROW(file.Truncate(expandedSize), std::invalid_argument);
 }
 
-TEST_F(WriteableFileTests, Truncate_ToPartialPage_BufferOffsetSetCorrectly) // TODO: This needs to be mocked correctly for GetSize and GetCapacity for it to work properly
+TEST_F(WriteableFileTests, Truncate_ToPartialPage_BufferOffsetSetCorrectly)
 {
     // Arrange
     static const constexpr int64_t partialPageOffset = 123;
+    static const constexpr auto initialSize = Configuration::PageBlob::PageSize * 2;
     static const constexpr auto truncateSize = Configuration::PageBlob::PageSize + partialPageOffset;
-    EXPECT_CALL(*m_blobClient, SetSize(truncateSize))
-        .Times(1);
+    std::vector<char> initialData(initialSize, 'd');
+    const std::vector<char> expectedPartialData(partialPageOffset, 'd');
+
+    EXPECT_CALL(*m_blobClient, GetSize())
+        .WillRepeatedly(::testing::Return(0));
+    EXPECT_CALL(*m_blobClient, GetCapacity())
+        .WillRepeatedly(::testing::Return(Configuration::PageBlob::PageSize * 4));
+    EXPECT_CALL(*m_blobClient, UploadPages(_, _))
+        .Times(::testing::AtLeast(1));
+    EXPECT_CALL(*m_blobClient, SetSize(_))
+        .Times(::testing::AtLeast(1));
+    EXPECT_CALL(*m_blobClient, SetCapacity(_))
+        .Times(::testing::AtLeast(1));
+    EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(),
+        Configuration::PageBlob::PageSize,
+        partialPageOffset))
+        .WillOnce([&expectedPartialData](std::span<char> buffer, int64_t /*offset*/, int64_t length)
+            {
+                std::copy(expectedPartialData.begin(), expectedPartialData.end(), buffer.begin());
+                return length;
+            });
 
     WriteableFileImpl file{ "test.dat", m_blobClient, nullptr, m_logger };
+    file.Append(initialData);
 
     // Act
     file.Truncate(truncateSize);
 
     // Assert
     EXPECT_EQ(truncateSize, file.GetFileSize());
+
+    // Verify we can append after truncation
+    std::vector<char> appendData(10, 'e');
+    EXPECT_NO_THROW(file.Append(appendData));
+    EXPECT_EQ(truncateSize + appendData.size(), file.GetFileSize());
 }
 
 TEST_F(WriteableFileTests, GetUniqueId_BufferLargerThanName_ReturnsFullName)
