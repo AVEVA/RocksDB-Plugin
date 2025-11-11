@@ -107,8 +107,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::vector<BlobAttributes> GetChildrenFileAttributes(const std::string& directoryPath);
         [[nodiscard]] bool DeleteFile(const std::string& filePath) const;
         [[nodiscard]] size_t DeleteDir(const std::string& directoryPath) const;
-        void Truncate(const std::string& filePath, size_t size) const;
-        [[nodiscard]] uint64_t GetFileSize(const std::string& filePath) const;
+        void Truncate(const std::string& filePath, int64_t size) const;
+        [[nodiscard]] int64_t GetFileSize(const std::string& filePath) const;
         [[nodiscard]] uint64_t GetFileModificationTime(const std::string& filePath) const;
         size_t GetLeaseClientCount();
         void RenameFile(const std::string& fromFilePath, const std::string& toFilePath) const;

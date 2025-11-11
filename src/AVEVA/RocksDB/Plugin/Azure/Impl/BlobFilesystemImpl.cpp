@@ -523,7 +523,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         return blobsInDirectory.Blobs.size();
     }
 
-    void BlobFilesystemImpl::Truncate(const std::string& filePath, size_t size) const
+    void BlobFilesystemImpl::Truncate(const std::string& filePath, int64_t size) const
     {
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
         const auto& container = GetContainer(prefix);
@@ -533,11 +533,11 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         if (fileSize > size)
         {
             BlobHelpers::SetFileSize(client, size);
-            client.Resize(static_cast<int64_t>(size));
+            client.Resize(size);
         }
     }
 
-    uint64_t BlobFilesystemImpl::GetFileSize(const std::string& filePath) const
+    int64_t BlobFilesystemImpl::GetFileSize(const std::string& filePath) const
     {
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
         const auto& container = GetContainer(prefix);
@@ -580,44 +580,44 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         // TODO: Check if there is already a file with this name
         const auto size = BlobHelpers::GetFileSize(srcClient);
         const auto cap = BlobHelpers::GetBlobCapacity(srcClient);
-        destClient.CreateIfNotExists(static_cast<int64_t>(cap));
-        ::Azure::Storage::Blobs::DownloadBlobOptions opt;
+        destClient.CreateIfNotExists(cap);
+     ::Azure::Storage::Blobs::DownloadBlobOptions opt;
         opt.Range.Emplace(0, size);
         const auto downloadResponse = srcClient.Download(opt);
-        const auto& content = downloadResponse.Value;
+      const auto& content = downloadResponse.Value;
 
-        static const constexpr auto maxUploadSize = static_cast<size_t>(4) * 1024 * 1024;
+        static const constexpr auto maxUploadSize = static_cast<int64_t>(4) * 1024 * 1024;
         if (size > maxUploadSize)
         {
-            size_t uploadOffset = 0;
-            std::vector<uint8_t> buffer(maxUploadSize);
+          int64_t uploadOffset = 0;
+          std::vector<uint8_t> buffer(static_cast<size_t>(maxUploadSize));
 
-            while (uploadOffset != size)
-            {
-                assert(size > uploadOffset);
-                const auto readSize = std::min(size - uploadOffset, maxUploadSize);
-                const auto bytesRead = content.BodyStream->ReadToCount(buffer.data(), readSize);
-                const auto bytesRemaining = bytesRead % Configuration::PageBlob::PageSize;
+  while (uploadOffset != size)
+     {
+    assert(size > uploadOffset);
+         const auto readSize = std::min(size - uploadOffset, maxUploadSize);
+       const auto bytesRead = content.BodyStream->ReadToCount(buffer.data(), static_cast<size_t>(readSize));
+    const auto bytesRemaining = bytesRead % Configuration::PageBlob::PageSize;
 
-                if (bytesRemaining != 0)
-                {
-                    const auto padding = Configuration::PageBlob::PageSize - bytesRemaining;
+   if (bytesRemaining != 0)
+   {
+         const auto padding = Configuration::PageBlob::PageSize - bytesRemaining;
 
-                    const auto endOfRealData = bytesRead;
-                    const auto endOfUpload = bytesRead + padding;
-                    std::fill(buffer.data() + endOfRealData, buffer.data() + endOfUpload, static_cast<uint8_t>(0));
+  const auto endOfRealData = bytesRead;
+  const auto endOfUpload = bytesRead + padding;
+     std::fill(buffer.data() + endOfRealData, buffer.data() + endOfUpload, static_cast<uint8_t>(0));
 
                     ::Azure::Core::IO::MemoryBodyStream sendStream(buffer.data(), endOfUpload);
-                    destClient.UploadPages(static_cast<int64_t>(uploadOffset), sendStream);
-                }
-                else
-                {
-                    ::Azure::Core::IO::MemoryBodyStream sendStream(buffer.data(), bytesRead);
-                    destClient.UploadPages(static_cast<int64_t>(uploadOffset), sendStream);
-                }
+                destClient.UploadPages(uploadOffset, sendStream);
+    }
+      else
+  {
+      ::Azure::Core::IO::MemoryBodyStream sendStream(buffer.data(), bytesRead);
+     destClient.UploadPages(uploadOffset, sendStream);
+       }
 
-                uploadOffset += bytesRead;
-            }
+                uploadOffset += static_cast<int64_t>(bytesRead);
+    }
         }
         else
         {

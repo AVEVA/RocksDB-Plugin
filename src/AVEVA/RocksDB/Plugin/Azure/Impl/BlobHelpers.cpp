@@ -33,30 +33,30 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         }
     }
 
-    void BlobHelpers::SetFileSize(const ::Azure::Storage::Blobs::PageBlobClient& client, uint64_t size)
+    void BlobHelpers::SetFileSize(const ::Azure::Storage::Blobs::PageBlobClient& client, int64_t size)
     {
         ::Azure::Storage::Metadata metadata;
         metadata.emplace(g_sizeMetadata, std::to_string(size));
         client.SetMetadata(std::move(metadata));
     }
 
-    uint64_t BlobHelpers::GetFileSize(const ::Azure::Storage::Blobs::PageBlobClient& client)
+    int64_t BlobHelpers::GetFileSize(const ::Azure::Storage::Blobs::PageBlobClient& client)
     {
         const auto props = client.GetProperties();
         auto metaIter = props.Value.Metadata.find(g_sizeMetadata);
         return metaIter != props.Value.Metadata.end()
-            ? static_cast<uint64_t>(std::stoll(metaIter->second))
+            ? static_cast<int64_t>(std::stoll(metaIter->second))
             : 0;
     }
 
-    uint64_t BlobHelpers::GetBlobCapacity(const ::Azure::Storage::Blobs::PageBlobClient& client)
+    int64_t BlobHelpers::GetBlobCapacity(const ::Azure::Storage::Blobs::PageBlobClient& client)
     {
         auto props = client.GetProperties();
         assert(props.Value.BlobSize >= 0);
-        return static_cast<uint64_t>(props.Value.BlobSize);
+        return static_cast<int64_t>(props.Value.BlobSize);
     }
 
-    std::pair<uint64_t, uint64_t> BlobHelpers::RoundToEndOfNearestPage(uint64_t size)
+    std::pair<int64_t, int64_t> BlobHelpers::RoundToEndOfNearestPage(int64_t size)
     {
         auto [partialPageSize, roundedSize] = RoundToBeginningOfNearestPage(size);
         if (partialPageSize != 0)
@@ -67,11 +67,11 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         return std::make_pair(partialPageSize, roundedSize);
     }
 
-    std::pair<uint64_t, uint64_t> BlobHelpers::RoundToBeginningOfNearestPage(uint64_t size)
+    std::pair<int64_t, int64_t> BlobHelpers::RoundToBeginningOfNearestPage(int64_t size)
     {
-        const auto partialPageSize = size % static_cast<uint64_t>(Configuration::PageBlob::PageSize);
-        auto pages = (size / static_cast<uint64_t>(Configuration::PageBlob::PageSize));
-        const auto roundedSize = pages * static_cast<uint64_t>(Configuration::PageBlob::PageSize);
+        const auto partialPageSize = size % static_cast<int64_t>(Configuration::PageBlob::PageSize);
+        auto pages = (size / static_cast<int64_t>(Configuration::PageBlob::PageSize));
+        const auto roundedSize = pages * static_cast<int64_t>(Configuration::PageBlob::PageSize);
         return std::make_pair(partialPageSize, roundedSize);
     }
 

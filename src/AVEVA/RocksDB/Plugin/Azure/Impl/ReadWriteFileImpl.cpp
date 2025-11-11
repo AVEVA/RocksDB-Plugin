@@ -100,7 +100,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     void ReadWriteFileImpl::Flush()
     {
         const auto props = m_blobClient->GetProperties();
-        m_capacity = static_cast<size_t>(props.Value.BlobSize);
+        m_capacity = props.Value.BlobSize;
         auto roundSize = m_size + Configuration::PageBlob::DefaultBufferSize;
         if (m_size % Configuration::PageBlob::PageSize != 0)
         {
@@ -126,7 +126,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 DownloadBlobToOptions opt;
                 opt.Range.Emplace(targetStart, chunk.prePadding);
                 m_blobClient->DownloadTo(reinterpret_cast<uint8_t*>(m_buffer.data() + chunk.bufferOffset),
-                    chunk.prePadding, opt);
+                    static_cast<size_t>(chunk.prePadding), opt);
             }
             if (chunk.postPadding > 0)
             {
@@ -145,7 +145,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                     opt.Range.Emplace(targetEnd, chunk.postPadding);
 
                     auto postRead = m_blobClient->DownloadTo(reinterpret_cast<uint8_t*>(&m_buffer[chunk.bufferOffset + chunk.prePadding + chunk.dataLength]),
-                        chunk.postPadding, opt);
+                        static_cast<size_t>(chunk.postPadding), opt);
                 }
             }
 
@@ -159,8 +159,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 }
             }
 
-            ::Azure::Core::IO::MemoryBodyStream upStream(reinterpret_cast<uint8_t*>(&m_buffer[chunk.bufferOffset]), chunk.ChunkSize());
-            m_blobClient->UploadPages(static_cast<int64_t>(targetStart), upStream);
+            ::Azure::Core::IO::MemoryBodyStream upStream(reinterpret_cast<uint8_t*>(&m_buffer[chunk.bufferOffset]), static_cast<size_t>(chunk.ChunkSize()));
+            m_blobClient->UploadPages(targetStart, upStream);
 
             BOOST_LOG_SEV(*m_logger, debug) << "Flushed " << chunk.ChunkSize() << " bytes to read/writeable file '" << m_name << "'";
         }
@@ -173,7 +173,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 #endif // _DEBUG
     }
 
-    void ReadWriteFileImpl::Write(size_t offset, const char* data, size_t size)
+    void ReadWriteFileImpl::Write(int64_t offset, const char* data, int64_t size)
     {
         // This one is TRICKY. Incomplete pages must track the location within a page
         // along with length information and then fetch the relevant page before committing
@@ -181,9 +181,9 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         auto* dataPos = data;
         auto targetOffset = offset;
         auto bufferOffset = m_bufferStats.empty()
-            ? 0
+            ? 0LL
             : m_bufferStats.back().bufferOffset +
-            m_bufferStats.back().dataLength;
+        m_bufferStats.back().dataLength;
         while (size > 0)
         {
             const auto space = Configuration::PageBlob::DefaultBufferSize - bufferOffset;
@@ -193,7 +193,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             // existing page data when flushing
             const auto startPaddingFirstPage = targetOffset % Configuration::PageBlob::PageSize;
 
-            size_t endPaddingLastPage;
+            int64_t endPaddingLastPage;
             const auto dataEndPos = (targetOffset + numBytes) % Configuration::PageBlob::PageSize;
             if (dataEndPos == 0)
             {
@@ -233,7 +233,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         }
     }
 
-    size_t ReadWriteFileImpl::Read(size_t offset, size_t bytesRequested, char* buffer) const
+    int64_t ReadWriteFileImpl::Read(int64_t offset, int64_t bytesRequested, char* buffer) const
     {
         if (offset >= m_syncSize)
         {
@@ -242,10 +242,10 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
         if (m_fileCache)
         {
-            const auto bytesRead = m_fileCache->ReadFile(m_name, offset, bytesRequested, buffer);
+            const auto bytesRead = m_fileCache->ReadFile(m_name, static_cast<size_t>(offset), static_cast<size_t>(bytesRequested), buffer);
             if (bytesRead)
             {
-                return *bytesRead;
+                return static_cast<int64_t>(*bytesRead);
             }
         }
 
@@ -254,10 +254,10 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
         DownloadBlobToOptions opt;
         opt.Range.Emplace(offset, bytesRequested);
-        const auto res = m_blobClient->DownloadTo(reinterpret_cast<uint8_t*>(buffer), bytesRequested, opt);
-        uint64_t bytesRead = res.Value.ContentRange.Length.HasValue()
-            ? static_cast<uint64_t>(res.Value.ContentRange.Length.Value())
-            : 0;
+        const auto res = m_blobClient->DownloadTo(reinterpret_cast<uint8_t*>(buffer), static_cast<size_t>(bytesRequested), opt);
+        int64_t bytesRead = res.Value.ContentRange.Length.HasValue()
+            ? static_cast<int64_t>(res.Value.ContentRange.Length.Value())
+            : 0LL;
         assert(bytesRead <= bytesRequested);
         return bytesRead;
     }
@@ -266,7 +266,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     {
         const auto [_, rounded] = BlobHelpers::RoundToEndOfNearestPage((m_size + Configuration::PageBlob::DefaultBufferSize) * 2);
         const auto desiredSize = rounded;
-        m_blobClient->Resize(static_cast<int64_t>(desiredSize));
+        m_blobClient->Resize(desiredSize);
         m_capacity = desiredSize;
 
         BOOST_LOG_SEV(*m_logger, debug) << "Expanding read/writeable file '" << m_name << "' to " << desiredSize << " bytes";

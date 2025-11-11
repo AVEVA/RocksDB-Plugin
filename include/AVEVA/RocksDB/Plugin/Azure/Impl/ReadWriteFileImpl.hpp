@@ -20,9 +20,9 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::shared_ptr<Core::FileCache> m_fileCache;
         std::shared_ptr<boost::log::sources::logger_mt> m_logger;
 
-        size_t m_size;
-        size_t m_syncSize;
-        size_t m_capacity;
+        int64_t m_size;
+        int64_t m_syncSize;
+        int64_t m_capacity;
         bool m_closed;
 
         std::vector<char> m_buffer;
@@ -41,8 +41,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         void Close();
         void Sync();
         void Flush();
-        void Write(size_t offset, const char* data, size_t size);
-        size_t Read(size_t offset, size_t bytesRequested, char* buffer) const;
+        void Write(int64_t offset, const char* data, int64_t size);
+        int64_t Read(int64_t offset, int64_t bytesRequested, char* buffer) const;
 
     private:
         void Expand();
