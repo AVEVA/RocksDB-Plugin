@@ -283,15 +283,15 @@ TEST_F(ReadWriteFileImplTests, Sync_UpdatesFileSizeMetadata) {
         .Times(::testing::Exactly(1))
         .WillOnce(::testing::DoDefault());
 
-    auto file = ReadWriteFileImpl{ m_testFileName, m_mockBlobClient, nullptr, m_logger };
+    auto file = CreateFile();
     std::vector<char> data(dataSize, 'E');
 
     // Act
-    file.Write(0, data.data(), dataSize);
-    file.Sync();
+    file->Write(0, data.data(), dataSize);
+    file->Close(); // Close will call Sync internally
 
     // Assert - verify that the file size was actually updated in the simulator
-    // EXPECT_EQ(dataSize, m_blobSim->GetSize());
+    EXPECT_EQ(dataSize, m_blobSim->GetSize());
 }
 
 // Test Read returns correct data

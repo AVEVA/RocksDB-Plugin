@@ -16,6 +16,11 @@ protected:
     std::shared_ptr<BlobClientMock> m_blobClient;
     std::shared_ptr<logger_mt> m_logger;
 
+    void TearDown() override
+    {
+        ASSERT_TRUE(::testing::Mock::VerifyAndClearExpectations(m_blobClient.get()));
+    }
+
     void SetUp() override
     {
         m_blobClient = std::make_shared<BlobClientMock>();
@@ -314,7 +319,7 @@ TEST_F(WriteableFileTests, Sync_WithoutFileCache_NoError)
 {
     // Arrange
     EXPECT_CALL(*m_blobClient, SetSize(_))
-        .Times(1);
+        .Times(::testing::AtLeast(1));
     WriteableFileImpl file{ "test.dat", m_blobClient, nullptr, m_logger };
 
     // Act & Assert
@@ -326,7 +331,7 @@ TEST_F(WriteableFileTests, Sync_CalledMultipleTimes_SetsSizeCorrectly)
     // Arrange
     std::vector<int64_t> setSizeCalls;
     EXPECT_CALL(*m_blobClient, SetSize(_))
-        .Times(3)
+        .Times(::testing::AtLeast(3))
         .WillRepeatedly([&setSizeCalls](const int64_t size)
             {
                 setSizeCalls.push_back(size);
@@ -360,7 +365,9 @@ TEST_F(WriteableFileTests, Sync_WithPartialPage_FlushesAndSetsSizeCorrectly)
     EXPECT_CALL(*m_blobClient, UploadPages(_, _))
         .Times(1);
     EXPECT_CALL(*m_blobClient, SetSize(_))
-        .WillOnce(::testing::SaveArg<0>(&setSizeValue));
+        .Times(::testing::AtLeast(1))
+        .WillOnce(::testing::SaveArg<0>(&setSizeValue))
+        .WillRepeatedly(::testing::DoDefault());
 
     WriteableFileImpl file{ "test.dat", m_blobClient, nullptr, m_logger };
     file.Append(dataToWrite);

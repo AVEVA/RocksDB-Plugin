@@ -91,7 +91,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
         Flush();
 
-        // m_blobClient->SetSize(m_size);
+        m_blobClient->SetSize(m_size);
         m_syncSize = m_size;
         BOOST_LOG_SEV(*m_logger, debug) << "Synced read/writeable file '" << m_name << "' to " << m_size << " bytes";
     }
