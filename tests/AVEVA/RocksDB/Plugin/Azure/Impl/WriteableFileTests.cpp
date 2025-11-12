@@ -362,6 +362,10 @@ TEST_F(WriteableFileTests, Sync_WithPartialPage_FlushesAndSetsSizeCorrectly)
     const std::vector<char> dataToWrite(partialPageSize, 'y');
     int64_t setSizeValue = -1;
 
+    EXPECT_CALL(*m_blobClient, GetSize())
+        .WillRepeatedly(::testing::Return(0));
+    EXPECT_CALL(*m_blobClient, GetCapacity())
+        .WillRepeatedly(::testing::Return(Configuration::PageBlob::PageSize));
     EXPECT_CALL(*m_blobClient, UploadPages(_, _))
         .Times(1);
     EXPECT_CALL(*m_blobClient, SetSize(_))
@@ -654,6 +658,134 @@ TEST_F(WriteableFileTests, MoveAssignment_TransfersState_Correctly)
 
     // file1 is now in a moved-from state and its destructor should not crash
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

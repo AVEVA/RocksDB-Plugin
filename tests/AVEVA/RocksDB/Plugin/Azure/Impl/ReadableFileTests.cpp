@@ -20,6 +20,11 @@ protected:
   std::shared_ptr<BlobClientMock> m_blobClient;
     static const constexpr uint64_t DefaultBlobSize = Configuration::PageBlob::PageSize * 2;
 
+    void TearDown() override
+    {
+        ASSERT_TRUE(::testing::Mock::VerifyAndClearExpectations(m_blobClient.get()));
+    }
+
     void SetUp() override
     {
         m_blobClient = std::make_shared<BlobClientMock>();

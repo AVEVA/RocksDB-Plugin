@@ -24,6 +24,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         size_t m_capacity;
         size_t m_bufferOffset;
         bool m_closed;
+        bool m_flushed;
 
         std::vector<char> m_buffer;
 

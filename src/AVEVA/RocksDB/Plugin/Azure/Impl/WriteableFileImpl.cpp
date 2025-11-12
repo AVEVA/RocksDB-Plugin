@@ -26,7 +26,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         m_size(m_blobClient->GetSize()),
         m_capacity(m_blobClient->GetCapacity()),
         m_bufferOffset(0),
-        m_closed(false)
+        m_closed(false),
+        m_flushed(true)
     {
         if (m_bufferSize < Configuration::PageBlob::PageSize)
         {
@@ -44,6 +45,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 const auto bytesDownoaded = m_blobClient->DownloadTo(m_buffer, m_lastPageOffset, lastPageBytes);
                 assert(bytesDownoaded == static_cast<int64_t>(lastPageBytes));
                 m_bufferOffset = lastPageBytes;
+                m_flushed = false;  // We have existing partial page data in buffer
             }
         }
     }
@@ -84,6 +86,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         m_capacity(other.m_capacity),
         m_bufferOffset(other.m_bufferOffset),
         m_closed(std::exchange(other.m_closed, true)),
+        m_flushed(other.m_flushed),
         m_buffer(std::move(other.m_buffer))
     {
     }
@@ -100,6 +103,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         m_capacity = other.m_capacity;
         m_bufferOffset = other.m_bufferOffset;
         m_closed = std::exchange(other.m_closed, true);
+        m_flushed = other.m_flushed;
         m_buffer = std::move(other.m_buffer);
         return *this;
     }
@@ -134,12 +138,19 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             m_bufferOffset += bytesToCopy;
             dataPos += bytesToCopy;
             m_size += bytesToCopy;
+            m_flushed = false;  // Mark as not flushed since we added new data
         }
     }
 
     void WriteableFileImpl::Flush()
     {
         if (m_bufferOffset == 0)
+        {
+            return;
+        }
+
+        // If already flushed and no new data, don't flush again
+        if (m_flushed)
         {
             return;
         }
@@ -162,9 +173,10 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             // TODO: Set target offset appropriately for next flush.
         }
 
-        BOOST_LOG_SEV(*m_logger, debug) << "Flushed " << bytesToWrite << " bytes to writeable file '" << m_name << "'.";
-        m_bufferOffset = remaining;
+        BOOST_LOG_SEV(*m_logger, debug) << "Flushed " << bytesToWrite << " bytes to writeable file '" << m_name << "'.",
+            m_bufferOffset = remaining;
         m_lastPageOffset = (m_size / Configuration::PageBlob::PageSize) * Configuration::PageBlob::PageSize;
+        m_flushed = true;
     }
 
     void WriteableFileImpl::Sync()
@@ -194,6 +206,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         const auto [partialPageSize, totalPageOffset] = BlobHelpers::RoundToBeginningOfNearestPage(size);
         m_bufferOffset = 0;
         m_lastPageOffset = totalPageOffset;
+        m_flushed = true;  // Buffer is empty after truncate
 
         if (partialPageSize != 0)
         {
@@ -201,6 +214,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             const auto bytesDownloaded = m_blobClient->DownloadTo(m_buffer, static_cast<int64_t>(totalPageOffset), static_cast<int64_t>(partialPageSize));
             assert(bytesDownloaded == static_cast<int64_t>(partialPageSize));
             m_bufferOffset = partialPageSize;
+            m_flushed = false;  // We have data in buffer now
         }
 
         m_size = size;
