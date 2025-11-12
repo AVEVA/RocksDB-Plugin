@@ -43,7 +43,7 @@ TEST_F(BufferChunkInfoTests, ChunkSize_WithOnlyPostPadding) {
     // Arrange
     BufferChunkInfo chunk(0, 0, 256, 0, 256);
 
- // Act
+    // Act
     auto size = chunk.ChunkSize();
 
     // Assert

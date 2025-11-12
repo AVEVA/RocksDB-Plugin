@@ -99,7 +99,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     void ReadWriteFileImpl::Flush()
     {
         m_capacity = static_cast<int64_t>(m_blobClient->GetCapacity());
-        auto roundSize = m_size + Configuration::PageBlob::DefaultBufferSize;
+        auto roundSize = m_size + static_cast<int64_t>(m_buffer.size());
         if (m_size % Configuration::PageBlob::PageSize != 0)
         {
             roundSize += Configuration::PageBlob::PageSize;
@@ -189,11 +189,11 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             : m_bufferStats.back().bufferOffset + m_bufferStats.back().ChunkSize();
         while (size > 0)
         {
-            const auto space = Configuration::PageBlob::DefaultBufferSize - bufferOffset;
+            const auto space = static_cast<int64_t>(m_buffer.size()) - bufferOffset;
             auto numBytes = std::min(size, space);
 
             // calculate the relevant padding to leave space to merge
-     // existing page data when flushing
+            // existing page data when flushing
             const auto startPaddingFirstPage = targetOffset % Configuration::PageBlob::PageSize;
 
             int64_t endPaddingLastPage;
@@ -217,7 +217,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 endPaddingLastPage = 0;
             }
 
-            assert((bufferOffset + startPaddingFirstPage + numBytes) <= Configuration::PageBlob::DefaultBufferSize && "calculated total offset must be less than buffer size");
+            assert((bufferOffset + startPaddingFirstPage + numBytes) <= static_cast<int64_t>(m_buffer.size()) && "calculated total offset must be less than buffer size");
             auto* bufPos = m_buffer.data() + bufferOffset + startPaddingFirstPage;
             std::copy(dataPos, dataPos + numBytes, bufPos);
 

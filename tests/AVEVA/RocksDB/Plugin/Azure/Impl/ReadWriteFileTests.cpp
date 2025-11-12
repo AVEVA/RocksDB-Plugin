@@ -17,65 +17,94 @@ using ::testing::SetArgPointee;
 using ::testing::NiceMock;
 using ::testing::StrictMock;
 
-// Helper class for blob simulation
+/// <summary>
+/// Helper class for blob simulation
+/// </summary>
 class BlobSimulator
 {
+    uint64_t m_fileSize;
+    uint64_t m_capacity;
+    std::vector<uint8_t> m_data;
+
 public:
     explicit BlobSimulator(uint64_t initialCapacity = Configuration::PageBlob::DefaultSize)
-        : m_fileSize(0), m_capacity(initialCapacity) {
+        : m_fileSize(0), m_capacity(initialCapacity)
+    {
         m_data.resize(static_cast<size_t>(initialCapacity), 0);
     }
 
-    uint64_t GetSize() const { return m_fileSize; }
-    void SetSize(int64_t size) { m_fileSize = static_cast<uint64_t>(size); }
-    uint64_t GetCapacity() const { return m_capacity; }
-    void SetCapacity(int64_t capacity) {
+    uint64_t GetSize() const
+    {
+        return m_fileSize;
+    }
+
+    void SetSize(int64_t size)
+    {
+        m_fileSize = static_cast<uint64_t>(size);
+    }
+
+    uint64_t GetCapacity() const
+    {
+        return m_capacity;
+    }
+
+    void SetCapacity(int64_t capacity)
+    {
         m_capacity = static_cast<uint64_t>(capacity);
-        if (static_cast<size_t>(capacity) > m_data.size()) {
+        if (static_cast<size_t>(capacity) > m_data.size())
+        {
             m_data.resize(static_cast<size_t>(capacity), 0);
         }
     }
 
-    void UploadPages(const std::span<char> buffer, int64_t offset) {
-        if (static_cast<size_t>(offset + buffer.size()) > m_data.size()) {
+    void UploadPages(const std::span<char> buffer, int64_t offset)
+    {
+        if (static_cast<size_t>(offset + buffer.size()) > m_data.size())
+        {
             m_data.resize(static_cast<size_t>(offset + buffer.size()), 0);
         }
+
         std::copy(buffer.begin(), buffer.end(), reinterpret_cast<char*>(m_data.data()) + offset);
     }
 
-    int64_t DownloadTo(std::span<char> buffer, int64_t offset, int64_t length) {
-        if (static_cast<size_t>(offset) < m_data.size()) {
+    int64_t DownloadTo(std::span<char> buffer, int64_t offset, int64_t length)
+    {
+        if (static_cast<size_t>(offset) < m_data.size())
+        {
             size_t available = std::min(static_cast<size_t>(length), m_data.size() - static_cast<size_t>(offset));
             std::copy_n(reinterpret_cast<char*>(m_data.data()) + offset, available, buffer.data());
             // Zero out any remaining bytes
-            if (available < buffer.size()) {
+            if (available < buffer.size())
+            {
                 std::fill_n(buffer.data() + available, buffer.size() - available, static_cast<char>(0));
             }
+
             return static_cast<int64_t>(available);
         }
-        else {
+        else
+        {
             std::fill_n(buffer.data(), buffer.size(), static_cast<char>(0));
             return 0;
         }
     }
 
-    const std::vector<uint8_t>& GetData() const { return m_data; }
-
-private:
-    uint64_t m_fileSize;
-    uint64_t m_capacity;
-    std::vector<uint8_t> m_data;
+    const std::vector<uint8_t>& GetData() const
+    {
+        return m_data;
+    }
 };
 
-class ReadWriteFileImplTests : public ::testing::Test {
+class ReadWriteFileImplTests : public ::testing::Test
+{
 protected:
-    std::shared_ptr<NiceMock<BlobClientMock>> m_mockBlobClient;
+    std::shared_ptr<::testing::StrictMock<BlobClientMock>> m_mockBlobClient;
     std::shared_ptr<BlobSimulator> m_blobSim;
     std::shared_ptr<boost::log::sources::logger_mt> m_logger;
     std::string m_testFileName = "test.blob";
 
-    void SetUp() override {
-        m_mockBlobClient = std::make_shared<NiceMock<BlobClientMock>>();
+    void SetUp() override
+    {
+        m_mockBlobClient = std::make_shared<::testing::StrictMock<BlobClientMock>>();
         m_blobSim = std::make_shared<BlobSimulator>();
         m_logger = std::make_shared<boost::log::sources::logger_mt>();
 
@@ -105,7 +134,8 @@ protected:
                 }));
     }
 
-    std::unique_ptr<ReadWriteFileImpl> CreateFile() {
+    std::unique_ptr<ReadWriteFileImpl> CreateFile()
+    {
         return std::make_unique<ReadWriteFileImpl>(
             m_testFileName, m_mockBlobClient, nullptr, m_logger);
     }
@@ -116,7 +146,7 @@ TEST_F(ReadWriteFileImplTests, Constructor_InitializesCorrectly) {
     m_blobSim->SetSize(1024);
 
     // Act
-    auto file = CreateFile();
+    const auto file = CreateFile();
 
     // Assert - file should be constructed successfully
     // Internal state is verified through subsequent operations
@@ -135,7 +165,6 @@ TEST_F(ReadWriteFileImplTests, Constructor_InitializesFromEmptyBlob) {
     EXPECT_EQ(0, bytesRead); // Nothing to read from empty file
 }
 
-// Test Write with page-aligned data
 TEST_F(ReadWriteFileImplTests, Write_PageAlignedData_BuffersCorrectly) {
     // Arrange
     auto file = CreateFile();
@@ -144,20 +173,15 @@ TEST_F(ReadWriteFileImplTests, Write_PageAlignedData_BuffersCorrectly) {
 
     // Act
     file->Write(0, data.data(), dataSize);
-    file->Flush();
+    file->Sync();
 
     // Assert
-    EXPECT_CALL(*m_mockBlobClient, UploadPages(_, 0)).Times(1);
-
-    // Verify data was written
     std::vector<char> readBuffer(dataSize);
-    file->Sync();
     auto bytesRead = file->Read(0, dataSize, readBuffer.data());
     EXPECT_EQ(dataSize, bytesRead);
     EXPECT_EQ(data, readBuffer);
 }
 
-// Test Write with non-page-aligned data
 TEST_F(ReadWriteFileImplTests, Write_NonPageAlignedOffset_HandlesPrePadding) {
     // Arrange
     auto file = CreateFile();
@@ -167,12 +191,11 @@ TEST_F(ReadWriteFileImplTests, Write_NonPageAlignedOffset_HandlesPrePadding) {
 
     // Act
     file->Write(offset, data.data(), dataSize);
-    file->Flush();
     file->Sync();
 
-    // Assert - verify data can be read back
+    // Assert
     std::vector<char> readBuffer(dataSize);
-    auto bytesRead = file->Read(offset, dataSize, readBuffer.data());
+    const auto bytesRead = file->Read(offset, dataSize, readBuffer.data());
     EXPECT_EQ(dataSize, bytesRead);
     EXPECT_EQ(data, readBuffer);
 }
@@ -186,7 +209,6 @@ TEST_F(ReadWriteFileImplTests, Write_NonPageAlignedEnd_HandlesPostPadding) {
 
     // Act
     file->Write(offset, data.data(), dataSize);
-    file->Flush();
     file->Sync();
 
     // Assert - verify data can be read back
@@ -196,9 +218,11 @@ TEST_F(ReadWriteFileImplTests, Write_NonPageAlignedEnd_HandlesPostPadding) {
     EXPECT_EQ(data, readBuffer);
 }
 
-// Test Write that fills buffer and triggers Flush
 TEST_F(ReadWriteFileImplTests, Write_BufferFull_TriggersAutoFlush) {
     // Arrange
+    EXPECT_CALL(*m_mockBlobClient, UploadPages(_, _))
+        .Times(2);
+
     auto file = CreateFile();
     const int64_t dataSize = Configuration::PageBlob::DefaultBufferSize + Configuration::PageBlob::PageSize;
     std::vector<char> data(dataSize, 'D');
@@ -216,7 +240,6 @@ TEST_F(ReadWriteFileImplTests, Write_BufferFull_TriggersAutoFlush) {
     EXPECT_EQ(data, readBuffer);
 }
 
-// Test Flush merges partial pages correctly
 TEST_F(ReadWriteFileImplTests, Flush_PartialFirstPage_MergesExistingData) {
     // Arrange
     auto file = CreateFile();
@@ -224,7 +247,7 @@ TEST_F(ReadWriteFileImplTests, Flush_PartialFirstPage_MergesExistingData) {
     // Pre-populate blob with some data at page start
     const int64_t offset = 100; // Within first page
     std::vector<char> existingData(offset, 'X');
-    m_blobSim->UploadPages(std::span<char>(existingData.data(), existingData.size()), 0);
+    m_blobSim->UploadPages(existingData, 0);
     m_blobSim->SetSize(offset);
 
     // Write data at offset
@@ -233,7 +256,6 @@ TEST_F(ReadWriteFileImplTests, Flush_PartialFirstPage_MergesExistingData) {
 
     // Act
     file->Write(offset, newData.data(), dataSize);
-    file->Flush();
     file->Sync();
 
     // Assert - existing data should still be there
@@ -248,14 +270,12 @@ TEST_F(ReadWriteFileImplTests, Flush_PartialFirstPage_MergesExistingData) {
     EXPECT_EQ(newData, newDataBuffer);
 }
 
-// Test Sync updates metadata
 TEST_F(ReadWriteFileImplTests, Sync_UpdatesFileSizeMetadata) {
     // Arrange
-    auto file = CreateFile();
     const int64_t dataSize = 500;
+    EXPECT_CALL(*m_mockBlobClient, SetSize(dataSize)).Times(2);
+    auto file = CreateFile();
     std::vector<char> data(dataSize, 'E');
-
-    EXPECT_CALL(*m_mockBlobClient, SetSize(dataSize)).Times(1);
 
     // Act
     file->Write(0, data.data(), dataSize);
