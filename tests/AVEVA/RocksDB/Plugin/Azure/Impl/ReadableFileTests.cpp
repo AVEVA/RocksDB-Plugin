@@ -17,7 +17,7 @@ using ::testing::SetArrayArgument;
 class ReadableFileTests : public ::testing::Test
 {
 protected:
-  std::shared_ptr<BlobClientMock> m_blobClient;
+    std::shared_ptr<BlobClientMock> m_blobClient;
     static const constexpr uint64_t DefaultBlobSize = Configuration::PageBlob::PageSize * 2;
 
     void TearDown() override
@@ -30,7 +30,7 @@ protected:
         m_blobClient = std::make_shared<BlobClientMock>();
 
         // Default behavior: return a blob size
-      ON_CALL(*m_blobClient, GetSize())
+        ON_CALL(*m_blobClient, GetSize())
             .WillByDefault(Return(DefaultBlobSize));
     }
 };
@@ -59,10 +59,10 @@ TEST_F(ReadableFileTests, SequentialRead_WithoutCache_ReadsFromBlob)
 
     EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), 0, bytesToRead))
         .WillOnce([&expectedData](std::span<char> buffer, int64_t /*offset*/, int64_t /*length*/)
-       {
+            {
                 std::copy(expectedData.begin(), expectedData.end(), buffer.begin());
-              return static_cast<int64_t>(expectedData.size());
-   });
+                return static_cast<int64_t>(expectedData.size());
+            });
 
     ReadableFileImpl file{ "test.sst", m_blobClient, nullptr };
 
@@ -86,16 +86,16 @@ TEST_F(ReadableFileTests, SequentialRead_MultipleReads_IncrementsOffset)
     EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), 0, firstRead))
         .WillOnce([firstRead](std::span<char> buffer, int64_t /*offset*/, int64_t /*length*/)
             {
-      std::fill_n(buffer.begin(), firstRead, 'X');
-       return static_cast<int64_t>(firstRead);
-       });
+                std::fill_n(buffer.begin(), firstRead, 'X');
+                return static_cast<int64_t>(firstRead);
+            });
 
     EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), firstRead, secondRead))
         .WillOnce([secondRead](std::span<char> buffer, int64_t /*offset*/, int64_t /*length*/)
             {
-  std::fill_n(buffer.begin(), secondRead, 'Y');
-     return static_cast<int64_t>(secondRead);
-          });
+                std::fill_n(buffer.begin(), secondRead, 'Y');
+                return static_cast<int64_t>(secondRead);
+            });
 
     ReadableFileImpl file{ "test.sst", m_blobClient, nullptr };
 
@@ -111,19 +111,19 @@ TEST_F(ReadableFileTests, SequentialRead_MultipleReads_IncrementsOffset)
 
 TEST_F(ReadableFileTests, SequentialRead_RequestMoreThanAvailable_ReadsOnlyAvailableBytes)
 {
- // Arrange
+    // Arrange
     constexpr uint64_t blobSize = 100;
     constexpr int64_t bytesToRead = 150;
     std::vector<char> buffer(bytesToRead);
 
     EXPECT_CALL(*m_blobClient, GetSize())
-   .WillOnce(Return(blobSize));
+        .WillOnce(Return(blobSize));
 
     EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), 0, static_cast<int64_t>(blobSize)))
         .WillOnce([blobSize](std::span<char> /*buffer*/, int64_t /*offset*/, int64_t /*length*/)
             {
-           return static_cast<int64_t>(blobSize);
-       });
+                return static_cast<int64_t>(blobSize);
+            });
 
     ReadableFileImpl file{ "test.sst", m_blobClient, nullptr };
 
@@ -145,13 +145,13 @@ TEST_F(ReadableFileTests, SequentialRead_AtEndOfFile_ReturnsZero)
         .WillOnce(Return(blobSize));
 
     ReadableFileImpl file{ "test.sst", m_blobClient, nullptr };
-file.Skip(static_cast<int64_t>(blobSize)); // Move to end of file
+    file.Skip(static_cast<int64_t>(blobSize)); // Move to end of file
 
     // Act
     const auto bytesRead = file.SequentialRead(50, buffer.data());
 
     // Assert
-  EXPECT_EQ(0, bytesRead);
+    EXPECT_EQ(0, bytesRead);
     EXPECT_EQ(static_cast<int64_t>(blobSize), file.GetOffset());
 }
 
@@ -164,10 +164,10 @@ TEST_F(ReadableFileTests, RandomRead_WithoutCache_ReadsFromBlob)
     std::vector<char> expectedData(bytesToRead, 'B');
 
     EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), offset, bytesToRead))
-   .WillOnce([&expectedData](std::span<char> buffer, int64_t /*offset*/, int64_t /*length*/)
+        .WillOnce([&expectedData](std::span<char> buffer, int64_t /*offset*/, int64_t /*length*/)
             {
                 std::copy(expectedData.begin(), expectedData.end(), buffer.begin());
-      return static_cast<int64_t>(expectedData.size());
+                return static_cast<int64_t>(expectedData.size());
             });
 
     ReadableFileImpl file{ "test.sst", m_blobClient, nullptr };
@@ -178,7 +178,7 @@ TEST_F(ReadableFileTests, RandomRead_WithoutCache_ReadsFromBlob)
     // Assert
     EXPECT_EQ(bytesToRead, bytesRead);
     EXPECT_EQ(expectedData, buffer);
-  EXPECT_EQ(0, file.GetOffset()); // Random read shouldn't affect sequential offset
+    EXPECT_EQ(0, file.GetOffset()); // Random read shouldn't affect sequential offset
 }
 
 TEST_F(ReadableFileTests, RandomRead_DoesNotAffectSequentialOffset)
@@ -197,14 +197,14 @@ TEST_F(ReadableFileTests, RandomRead_DoesNotAffectSequentialOffset)
         .WillOnce(Return(static_cast<int64_t>(randomBytes)));
 
     EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), sequentialBytes, sequentialBytes))
- .WillOnce(Return(static_cast<int64_t>(sequentialBytes)));
+        .WillOnce(Return(static_cast<int64_t>(sequentialBytes)));
 
-  ReadableFileImpl file{ "test.sst", m_blobClient, nullptr };
+    ReadableFileImpl file{ "test.sst", m_blobClient, nullptr };
 
     // Act
     [[maybe_unused]] const auto bytesRead1 = file.SequentialRead(sequentialBytes, seqBuffer.data());
     [[maybe_unused]] const auto bytesRead2 = file.RandomRead(randomOffset, randomBytes, randomBuffer.data());
-[[maybe_unused]] const auto bytesRead3 = file.SequentialRead(sequentialBytes, seqBuffer.data());
+    [[maybe_unused]] const auto bytesRead3 = file.SequentialRead(sequentialBytes, seqBuffer.data());
 
     // Assert
     EXPECT_EQ(sequentialBytes * 2, file.GetOffset());
@@ -220,14 +220,14 @@ TEST_F(ReadableFileTests, RandomRead_RequestMoreThanAvailable_ReadsOnlyAvailable
     std::vector<char> buffer(bytesToRead);
 
     EXPECT_CALL(*m_blobClient, GetSize())
-  .WillOnce(Return(blobSize));
+        .WillOnce(Return(blobSize));
 
     EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), offset, expectedBytes))
-   .WillOnce([expectedBytes](std::span<char> buffer, int64_t /*offset*/, int64_t /*length*/)
-       {
-         std::fill_n(buffer.begin(), expectedBytes, 'C');
-           return static_cast<int64_t>(expectedBytes);
-});
+        .WillOnce([expectedBytes](std::span<char> buffer, int64_t /*offset*/, int64_t /*length*/)
+            {
+                std::fill_n(buffer.begin(), expectedBytes, 'C');
+                return static_cast<int64_t>(expectedBytes);
+            });
 
     ReadableFileImpl file{ "test.sst", m_blobClient, nullptr };
 
@@ -272,14 +272,14 @@ TEST_F(ReadableFileTests, Skip_IncrementsOffset)
 TEST_F(ReadableFileTests, Skip_Multiple_AccumulatesOffset)
 {
     // Arrange
-  constexpr int64_t skip1 = 50;
+    constexpr int64_t skip1 = 50;
     constexpr int64_t skip2 = 75;
     constexpr int64_t skip3 = 25;
     ReadableFileImpl file{ "test.sst", m_blobClient, nullptr };
 
     // Act
-  file.Skip(skip1);
-  file.Skip(skip2);
+    file.Skip(skip1);
+    file.Skip(skip2);
     file.Skip(skip3);
 
     // Assert
@@ -297,7 +297,7 @@ TEST_F(ReadableFileTests, GetOffset_InitiallyZero)
 
 TEST_F(ReadableFileTests, GetSize_ReturnsCorrectSize)
 {
-  // Arrange
+    // Arrange
     constexpr uint64_t expectedSize = 5000;
     EXPECT_CALL(*m_blobClient, GetSize())
         .WillOnce(Return(expectedSize));
@@ -336,25 +336,25 @@ TEST_F(ReadableFileTests, RandomRead_DownloadReturnsNegative_ReturnsZero)
     std::vector<char> buffer(bytesToRead);
 
     EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), offset, bytesToRead))
-      .WillOnce(Return(-1)); // Simulate error
+        .WillOnce(Return(-1)); // Simulate error
 
     ReadableFileImpl file{ "test.sst", m_blobClient, nullptr };
 
- // Act
-  const auto bytesRead = file.RandomRead(offset, bytesToRead, buffer.data());
+    // Act
+    const auto bytesRead = file.RandomRead(offset, bytesToRead, buffer.data());
 
-  // Assert
+    // Assert
     EXPECT_EQ(0, bytesRead);
 }
 
 TEST_F(ReadableFileTests, SequentialRead_EmptyBlob_ReturnsZero)
 {
     // Arrange
- constexpr uint64_t blobSize = 0;
-  std::vector<char> buffer(100);
+    constexpr uint64_t blobSize = 0;
+    std::vector<char> buffer(100);
 
     EXPECT_CALL(*m_blobClient, GetSize())
-      .WillOnce(Return(blobSize));
+        .WillOnce(Return(blobSize));
 
     ReadableFileImpl file{ "test.sst", m_blobClient, nullptr };
 
@@ -372,7 +372,7 @@ TEST_F(ReadableFileTests, RandomRead_EmptyBlob_ReturnsZero)
     std::vector<char> buffer(100);
 
     EXPECT_CALL(*m_blobClient, GetSize())
-  .WillOnce(Return(blobSize));
+        .WillOnce(Return(blobSize));
 
     ReadableFileImpl file{ "test.sst", m_blobClient, nullptr };
 
@@ -385,7 +385,7 @@ TEST_F(ReadableFileTests, RandomRead_EmptyBlob_ReturnsZero)
 
 TEST_F(ReadableFileTests, SequentialRead_InterleavedWithSkip_MaintainsCorrectOffset)
 {
-  // Arrange
+    // Arrange
     constexpr int64_t readSize = 50;
     constexpr int64_t skipAmount = 25;
     std::vector<char> buffer(readSize);
@@ -394,13 +394,13 @@ TEST_F(ReadableFileTests, SequentialRead_InterleavedWithSkip_MaintainsCorrectOff
         .WillOnce(Return(static_cast<int64_t>(readSize)));
 
     EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), readSize + skipAmount, readSize))
-  .WillOnce(Return(static_cast<int64_t>(readSize)));
+        .WillOnce(Return(static_cast<int64_t>(readSize)));
 
     ReadableFileImpl file{ "test.sst", m_blobClient, nullptr };
 
     // Act
     [[maybe_unused]] const auto bytesRead1 = file.SequentialRead(readSize, buffer.data());
-  file.Skip(skipAmount);
+    file.Skip(skipAmount);
     [[maybe_unused]] const auto bytesRead2 = file.SequentialRead(readSize, buffer.data());
 
     // Assert
