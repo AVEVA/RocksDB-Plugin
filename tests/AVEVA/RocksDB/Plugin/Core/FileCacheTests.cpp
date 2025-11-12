@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Mocks/FilesystemMock.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Mocks/ContainerClientMock.hpp"

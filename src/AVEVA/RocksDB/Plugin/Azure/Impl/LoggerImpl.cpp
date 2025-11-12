@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LoggerImpl.hpp"
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
