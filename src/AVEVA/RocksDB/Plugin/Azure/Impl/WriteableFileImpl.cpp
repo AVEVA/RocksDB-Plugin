@@ -16,7 +16,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::shared_ptr<Core::BlobClient> blobClient,
         std::shared_ptr<Core::FileCache> fileCache,
         std::shared_ptr<boost::log::sources::logger_mt> logger,
-        const size_t bufferSize)
+        const int64_t bufferSize)
         : m_name(name),
         m_bufferSize(bufferSize),
         m_blobClient(std::move(blobClient)),
@@ -38,12 +38,14 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         m_buffer.resize(static_cast<size_t>(m_bufferSize));
         if (m_size > 0) // Existing file with data
         {
-            uint64_t lastPageBytes;
-            std::tie(lastPageBytes, m_lastPageOffset) = BlobHelpers::RoundToBeginningOfNearestPage(m_size);
+            int64_t lastPageBytes;
+            int64_t lastPageOffset;
+            std::tie(lastPageBytes, lastPageOffset) = BlobHelpers::RoundToBeginningOfNearestPage(m_size);
+            m_lastPageOffset = lastPageOffset;
             if (lastPageBytes > 0) // There is a partially filled page
             {
                 const auto bytesDownoaded = m_blobClient->DownloadTo(m_buffer, m_lastPageOffset, lastPageBytes);
-                assert(bytesDownoaded == static_cast<int64_t>(lastPageBytes));
+                assert(bytesDownoaded == lastPageBytes);
                 m_bufferOffset = lastPageBytes;
                 m_flushed = false;  // We have existing partial page data in buffer
             }
@@ -120,7 +122,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     void WriteableFileImpl::Append(const std::span<const char> data)
     {
         const char* dataPos = data.data();
-        auto dataSize = data.size();
+        auto dataSize = static_cast<int64_t>(data.size());
         while (dataSize > 0)
         {
             const auto spaceLeft = m_bufferSize - m_bufferOffset;
@@ -161,7 +163,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             Expand();
         }
 
-        m_blobClient->UploadPages(std::span(m_buffer.begin(), m_buffer.begin() + bytesToWrite), static_cast<int64_t>(m_lastPageOffset));
+        m_blobClient->UploadPages(std::span(m_buffer.begin(), m_buffer.begin() + bytesToWrite), m_lastPageOffset);
         if (remaining != 0)
         {
             const auto residualOffsetBegin = m_bufferOffset - remaining;
@@ -187,11 +189,11 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         }
 
         Flush();
-        m_blobClient->SetSize(static_cast<int64_t>(m_size));
+        m_blobClient->SetSize(m_size);
         BOOST_LOG_SEV(*m_logger, debug) << "Synced writeable file '" << m_name << "' to " << m_size << " bytes";
     }
 
-    void WriteableFileImpl::Truncate(uint64_t size)
+    void WriteableFileImpl::Truncate(int64_t size)
     {
         // Truncate only allows shrinking, not expanding
         if (size > m_size)
@@ -211,29 +213,29 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         if (partialPageSize != 0)
         {
             // Read the partial page into memory for further appends
-            const auto bytesDownloaded = m_blobClient->DownloadTo(m_buffer, static_cast<int64_t>(totalPageOffset), static_cast<int64_t>(partialPageSize));
-            assert(bytesDownloaded == static_cast<int64_t>(partialPageSize));
+            const auto bytesDownloaded = m_blobClient->DownloadTo(m_buffer, totalPageOffset, partialPageSize);
+            assert(bytesDownloaded == partialPageSize);
             m_bufferOffset = partialPageSize;
             m_flushed = false;  // We have data in buffer now
         }
 
         m_size = size;
-        m_blobClient->SetSize(static_cast<int64_t>(m_size));
+        m_blobClient->SetSize(m_size);
 
         // Calculate new capacity rounded up to page size
         const auto [_, newCapacity] = BlobHelpers::RoundToEndOfNearestPage(size);
         m_capacity = newCapacity;
-        m_blobClient->SetCapacity(static_cast<int64_t>(newCapacity));
+        m_blobClient->SetCapacity(newCapacity);
     }
 
-    uint64_t WriteableFileImpl::GetFileSize() const noexcept
+    int64_t WriteableFileImpl::GetFileSize() const noexcept
     {
         return m_size;
     }
 
-    uint64_t WriteableFileImpl::GetUniqueId(char* id, const size_t maxIdSize) const noexcept
+    int64_t WriteableFileImpl::GetUniqueId(char* id, const int64_t maxIdSize) const noexcept
     {
-        const auto length = std::min(maxIdSize, m_name.size());
+        const auto length = std::min(static_cast<int64_t>(m_name.size()), maxIdSize);
         std::copy_n(m_name.begin(), length, id);
         return length;
     }
@@ -246,7 +248,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
         BOOST_LOG_SEV(*m_logger, debug) << "Expanding writeable file '" << m_name << "' to " << desiredSize << " bytes";
 
-        m_blobClient->SetCapacity(static_cast<int64_t>(desiredSize));
+        m_blobClient->SetCapacity(desiredSize);
         m_capacity = desiredSize;
     }
 }

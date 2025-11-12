@@ -14,15 +14,15 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     class WriteableFileImpl
     {
         std::string m_name;
-        size_t m_bufferSize;
+        int64_t m_bufferSize;
         std::shared_ptr<Core::BlobClient> m_blobClient;
         std::shared_ptr<Core::FileCache> m_fileCache;
         std::shared_ptr<boost::log::sources::logger_mt> m_logger;
 
-        size_t m_lastPageOffset;
-        size_t m_size;
-        size_t m_capacity;
-        size_t m_bufferOffset;
+        int64_t m_lastPageOffset;
+        int64_t m_size;
+        int64_t m_capacity;
+        int64_t m_bufferOffset;
         bool m_closed;
         bool m_flushed;
 
@@ -33,7 +33,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             std::shared_ptr<Core::BlobClient> blobClient,
             std::shared_ptr<Core::FileCache> fileCache,
             std::shared_ptr<boost::log::sources::logger_mt> logger,
-            size_t bufferSize = Configuration::PageBlob::DefaultBufferSize);
+            int64_t bufferSize = Configuration::PageBlob::DefaultBufferSize);
         ~WriteableFileImpl();
         WriteableFileImpl(const WriteableFileImpl&) = delete;
         WriteableFileImpl& operator=(const WriteableFileImpl&) = delete;
@@ -44,9 +44,9 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         void Append(const std::span<const char> data);
         void Flush();
         void Sync();
-        void Truncate(uint64_t size);
-        [[nodiscard]] uint64_t GetFileSize() const noexcept;
-        [[nodiscard]] uint64_t GetUniqueId(char* id, size_t maxIdSize) const noexcept;
+        void Truncate(int64_t size);
+        [[nodiscard]] int64_t GetFileSize() const noexcept;
+        [[nodiscard]] int64_t GetUniqueId(char* id, int64_t maxIdSize) const noexcept;
 
     private:
         void Expand();
