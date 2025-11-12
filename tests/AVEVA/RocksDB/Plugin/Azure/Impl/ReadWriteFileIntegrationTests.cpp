@@ -22,33 +22,33 @@ namespace
     struct AzureTestCredentials
     {
         std::string servicePrincipalId;
-     std::string servicePrincipalSecret;
-        std::string tenantId;
-      std::string storageAccountUrl;
-        std::string containerName;
+        std::string servicePrincipalSecret;
+      std::string tenantId;
+     std::string storageAccountUrl;
+     std::string containerName;
 
         static std::optional<AzureTestCredentials> FromEnvironment()
         {
-            const char* spId = std::getenv("AZURE_SERVICE_PRINCIPAL_ID");
-            const char* spSecret = std::getenv("AZURE_SERVICE_PRINCIPAL_SECRET");
-        const char* tenant = std::getenv("AZURE_TENANT_ID");
-  const char* storageUrl = std::getenv("AZURE_STORAGE_ACCOUNT_URL");
-        const char* container = std::getenv("AZURE_TEST_CONTAINER");
+  const char* spId = std::getenv("AZURE_SERVICE_PRINCIPAL_ID");
+     const char* spSecret = std::getenv("AZURE_SERVICE_PRINCIPAL_SECRET");
+            const char* tenant = std::getenv("AZURE_TENANT_ID");
+     const char* storageAccountName = std::getenv("AZURE_STORAGE_ACCOUNT_NAME");
+      const char* container = std::getenv("AZURE_TEST_CONTAINER");
 
-      if (!spId || !spSecret)
+     if (!spId || !spSecret || !storageAccountName)
             {
-return std::nullopt;
+      return std::nullopt;
             }
 
-            AzureTestCredentials creds;
-            creds.servicePrincipalId = spId;
-            creds.servicePrincipalSecret = spSecret;
-        creds.tenantId = tenant ? tenant : "";
-         creds.storageAccountUrl = storageUrl ? storageUrl : "https://teststorageaccount.blob.core.windows.net";
-            creds.containerName = container ? container : "rocksdb-integration-tests";
+      AzureTestCredentials creds;
+         creds.servicePrincipalId = spId;
+     creds.servicePrincipalSecret = spSecret;
+            creds.tenantId = tenant ? tenant : ""; // Optional
+   creds.storageAccountUrl = "https://" + std::string(storageAccountName) + ".blob.core.windows.net/";
+         creds.containerName = container ? container : "aveva-rocksdb-plugin-integration-tests";
 
-         return creds;
-   }
+   return creds;
+        }
     };
 
     std::string GenerateRandomBlobName()
@@ -213,15 +213,21 @@ std::shared_ptr<AVEVA::RocksDB::Plugin::Core::BlobClient> CreateEmptyBlob()
     std::vector<char> DownloadBlobData(size_t maxSize)
     {
         auto pageBlobClient = m_containerClient->GetPageBlobClient(m_blobName);
-   uint64_t actualSize = BlobHelpers::GetFileSize(pageBlobClient);
+        uint64_t actualSize = BlobHelpers::GetFileSize(pageBlobClient);
  
-        std::vector<char> data(std::min(actualSize, static_cast<uint64_t>(maxSize)));
-  if (!data.empty())
-  {
+  std::vector<char> data(std::min(actualSize, static_cast<uint64_t>(maxSize)));
+        if (!data.empty())
+        {
+    Azure::Storage::Blobs::DownloadBlobToOptions options;
+       options.Range = Azure::Core::Http::HttpRange();
+          options.Range.Value().Offset = 0;
+         options.Range.Value().Length = static_cast<int64_t>(data.size());
+            
             auto result = pageBlobClient.DownloadTo(
-         reinterpret_cast<uint8_t*>(data.data()),
-         data.size()
-        );
+     reinterpret_cast<uint8_t*>(data.data()),
+      data.size(),
+     options
+     );
   }
         return data;
     }
@@ -347,9 +353,29 @@ TEST_F(ReadWriteFileIntegrationTests, Flush_PersistsChangesToBlob)
     file.Write(0, testData.data(), testData.size());
     file.Flush();
 
-    // Assert - Data should be persisted
-    auto downloadedData = DownloadBlobData(testData.size());
-    EXPECT_EQ(testData, downloadedData);
+    // Assert - Data should be persisted, but size metadata may not be updated yet
+    // Download the actual uploaded data (rounded to page size)
+    auto pageBlobClient = m_containerClient->GetPageBlobClient(m_blobName);
+    size_t downloadSize = testData.size();
+    if (downloadSize % Configuration::PageBlob::PageSize != 0)
+    {
+     downloadSize = ((downloadSize / Configuration::PageBlob::PageSize) + 1) * Configuration::PageBlob::PageSize;
+    }
+    
+ std::vector<char> downloadedData(downloadSize);
+    Azure::Storage::Blobs::DownloadBlobToOptions options;
+    options.Range = Azure::Core::Http::HttpRange();
+    options.Range.Value().Offset = 0;
+    options.Range.Value().Length = static_cast<int64_t>(downloadSize);
+    
+    pageBlobClient.DownloadTo(
+        reinterpret_cast<uint8_t*>(downloadedData.data()),
+  downloadedData.size(),
+ options
+    );
+    
+    // Verify the test data is at the beginning
+    EXPECT_TRUE(std::equal(testData.begin(), testData.end(), downloadedData.begin()));
 }
 
 TEST_F(ReadWriteFileIntegrationTests, Sync_UpdatesFileSizeInBlob)
