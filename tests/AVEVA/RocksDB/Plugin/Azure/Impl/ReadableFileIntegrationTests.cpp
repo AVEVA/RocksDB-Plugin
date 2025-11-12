@@ -11,9 +11,9 @@
 
 #include <string>
 
-using namespace AVEVA::RocksDB::Plugin::Azure::Impl;
-using namespace AVEVA::RocksDB::Plugin::Azure::Impl::Testing;
-using namespace Azure::Storage::Blobs;
+using AVEVA::RocksDB::Plugin::Azure::Impl::ReadableFileImpl;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Configuration;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Testing::AzureIntegrationTestBase;
 
 class ReadableFileIntegrationTests : public AzureIntegrationTestBase
 {
