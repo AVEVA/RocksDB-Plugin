@@ -261,7 +261,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     void ReadWriteFileImpl::Expand()
     {
-        const auto [_, rounded] = BlobHelpers::RoundToEndOfNearestPage((m_size + static_cast<int64_t>(m_buffer.size())) * 2);
+        const auto [_, rounded] = BlobHelpers::RoundToEndOfNearestPage((m_size + m_capacity) * 2);
         const auto desiredSize = rounded;
         m_blobClient->SetCapacity(desiredSize);
         m_capacity = desiredSize;
