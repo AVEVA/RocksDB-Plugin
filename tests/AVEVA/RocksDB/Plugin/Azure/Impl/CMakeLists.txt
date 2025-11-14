@@ -13,4 +13,4 @@ add_executable(aveva-rocksdb-plugin-azure-impl-tests
 
 target_link_libraries(aveva-rocksdb-plugin-azure-impl-tests PRIVATE GTest::gtest GTest::gmock aveva-rocksdb-plugin-azure-impl aveva-rocksdb-plugin-core-mocks)
 include(GoogleTest)
-gtest_discover_tests(aveva-rocksdb-plugin-azure-impl-tests)
+gtest_discover_tests(aveva-rocksdb-plugin-azure-impl-tests DISCOVERY_TIMEOUT 60)

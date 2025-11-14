@@ -42,16 +42,16 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         ::Azure::Storage::Blobs::DownloadBlobToOptions options
         {
           .Range = ::Azure::Core::Http::HttpRange { offset, length }
-     };
+        };
 
         const auto result = m_client.DownloadTo(reinterpret_cast<uint8_t*>(buffer.data()), buffer.size(), options);
-  const auto& downloadedLength = result.Value.ContentRange.Length;
-   return downloadedLength.ValueOr(-1);
+        const auto& downloadedLength = result.Value.ContentRange.Length;
+        return downloadedLength.ValueOr(-1);
     }
 
     void PageBlob::UploadPages(const std::span<char> buffer, const int64_t blobOffset)
     {
-     ::Azure::Core::IO::MemoryBodyStream dataStream(reinterpret_cast<uint8_t*>(buffer.data()), buffer.size());
+        ::Azure::Core::IO::MemoryBodyStream dataStream(reinterpret_cast<uint8_t*>(buffer.data()), buffer.size());
         m_client.UploadPages(blobOffset, dataStream);
     }
 }
