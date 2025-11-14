@@ -178,8 +178,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             // TODO: Set target offset appropriately for next flush.
         }
 
-        BOOST_LOG_SEV(*m_logger, debug) << "Flushed " << bytesToWrite << " bytes to writeable file '" << m_name << "'.",
-            m_bufferOffset = remaining;
+        BOOST_LOG_SEV(*m_logger, debug) << "Flushed " << bytesToWrite << " bytes to writeable file '" << m_name << "'.";
+        m_bufferOffset = remaining;
         m_lastPageOffset = (m_size / Configuration::PageBlob::PageSize) * Configuration::PageBlob::PageSize;
         m_flushed = true;
     }

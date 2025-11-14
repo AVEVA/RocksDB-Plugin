@@ -102,14 +102,9 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     void ReadWriteFileImpl::Flush()
     {
 		m_capacity = m_blobClient->GetCapacity();
-		auto roundSize = m_size + static_cast<int64_t>(m_buffer.size());
-        if (m_size % Configuration::PageBlob::PageSize != 0)
-        {
-            roundSize += Configuration::PageBlob::PageSize;
-        }
 
         // Pre-calculate the maximum size we'll need and expand if necessary
-        int64_t maxSizeNeeded = m_size;
+        auto maxSizeNeeded = m_size;
         for (const auto& chunk : m_bufferStats)
         {
             const auto chunkEnd = chunk.targetOffset + chunk.dataLength;
