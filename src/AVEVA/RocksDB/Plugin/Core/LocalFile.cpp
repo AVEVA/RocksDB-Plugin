@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #include "AVEVA/RocksDB/Plugin/Core/LocalFile.hpp"
 namespace AVEVA::RocksDB::Plugin::Core
 {
@@ -6,7 +9,7 @@ namespace AVEVA::RocksDB::Plugin::Core
     {
     }
 
-    uint64_t LocalFile::Read(char* buffer, uint64_t offset, uint64_t length)
+    int64_t LocalFile::Read(char* buffer, int64_t offset, int64_t length)
     {
         m_file.seekg(static_cast<std::streamoff>(offset));
         m_file.read(buffer, static_cast<std::streamsize>(length));
@@ -17,6 +20,6 @@ namespace AVEVA::RocksDB::Plugin::Core
             throw std::runtime_error("Invalid file read request. Received negative number of bytes read.");
         }
 
-        return static_cast<uint64_t>(bytesRead);
+        return static_cast<int64_t>(bytesRead);
     }
 }

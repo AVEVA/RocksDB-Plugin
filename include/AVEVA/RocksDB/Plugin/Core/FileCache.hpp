@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Core/FileCacheEntry.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/ContainerClient.hpp"
@@ -15,18 +18,20 @@
 #include <thread>
 #include <unordered_map>
 #include <queue>
+#include <condition_variable>
+#include <stop_token>
 namespace AVEVA::RocksDB::Plugin::Core
 {
     class FileCache
     {
         std::filesystem::path m_cachePath;
-        std::size_t m_maxSize;
+        int64_t m_maxSize;
         std::shared_ptr<ContainerClient> m_containerClient;
         std::shared_ptr<Filesystem> m_filesystem;
         std::shared_ptr<boost::log::sources::logger_mt> m_logger;
-        bool m_shouldClose;
 
         std::mutex m_mutex;
+        std::stop_source m_stopSource;
         std::condition_variable m_cv;
         std::unordered_map<std::string, FileCacheEntry, StringHash, StringEqual> m_cache;
         std::queue<std::string> m_fileDownloadQueue;
@@ -34,7 +39,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         std::jthread m_backgroundDownloader;
     public:
         FileCache(std::filesystem::path cachePath,
-            std::size_t maxCacheSize,
+            int64_t maxCacheSize,
             std::shared_ptr<ContainerClient> containerClient,
             std::shared_ptr<Filesystem> filesystem,
             std::shared_ptr<boost::log::sources::logger_mt> logger);
@@ -44,16 +49,17 @@ namespace AVEVA::RocksDB::Plugin::Core
         FileCache(FileCache&&) = delete;
         FileCache& operator=(FileCache&&) = delete;
 
+        [[nodiscard]] bool HasFile(std::string_view filePath);
         void MarkFileAsStaleIfExists(const std::string& filePath);
-        [[nodiscard]] std::optional<std::size_t> ReadFile(const std::string& filePath, uint64_t offset, std::size_t bytesToRead, char* buffer);
+        [[nodiscard]] std::optional<int64_t> ReadFile(std::string_view filePath, int64_t offset, int64_t bytesToRead, char* buffer);
         void RemoveFile(std::string_view filePath);
-        [[nodiscard]] size_t CacheSize();
-        void SetCacheSize(std::size_t size);
+        [[nodiscard]] int64_t CacheSize();
+        void SetCacheSize(int64_t size);
     private:
-        void BackgroundDownload();
+        void BackgroundDownload(std::stop_token stopToken);
         void EntryAccessedUnsafe(FileCacheEntry& file);
-        bool EvictAtLeast(std::size_t bytes);
+        bool EvictAtLeast(int64_t bytes);
         void RemoveFileUnsafe(std::string_view filePath);
-        std::size_t GetCurrentSizeUnsafe() const noexcept;
+        int64_t GetCurrentSizeUnsafe() const noexcept;
     };
 }

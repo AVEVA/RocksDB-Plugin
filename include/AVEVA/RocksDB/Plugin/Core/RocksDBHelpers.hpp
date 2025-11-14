@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #pragma once
 #include <string_view>
 #include <string>
@@ -21,9 +24,9 @@ namespace AVEVA::RocksDB::Plugin::Core
             Identity = 4,
         };
 
-        [[nodiscard]] static bool IsManifestFile(const std::string& pathname);
-        [[nodiscard]] static bool IsIdentityFile(const std::string& pathname);
+        [[nodiscard]] static bool IsManifestFile(std::string_view pathname);
+        [[nodiscard]] static bool IsIdentityFile(std::string_view pathname);
         [[nodiscard]] static bool IsLogFile(const FileClass fileType);
-        [[nodiscard]] static FileClass GetFileType(const std::string& pathname);
+        [[nodiscard]] static FileClass GetFileType(std::string_view pathname);
     };
 }

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/RocksDBHelpers.hpp"
 #include <boost/log/trivial.hpp>
@@ -5,7 +8,7 @@ using namespace boost::log::trivial;
 namespace AVEVA::RocksDB::Plugin::Core
 {
     FileCache::FileCache(std::filesystem::path cachePath,
-        std::size_t maxCacheSize,
+        int64_t maxCacheSize,
         std::shared_ptr<ContainerClient> containerClient,
         std::shared_ptr<Filesystem> filesystem,
         std::shared_ptr<boost::log::sources::logger_mt> logger)
@@ -13,20 +16,38 @@ namespace AVEVA::RocksDB::Plugin::Core
         m_maxSize(maxCacheSize),
         m_containerClient(std::move(containerClient)),
         m_filesystem(std::move(filesystem)),
-        m_logger(std::move(logger)),
-        m_shouldClose(false)
+        m_logger(std::move(logger))
     {
+        // Start the background thread after all members are initialized
+        m_backgroundDownloader = std::jthread(&FileCache::BackgroundDownload, this, m_stopSource.get_token());
     }
 
     FileCache::~FileCache()
     {
         {
             std::scoped_lock lock(m_mutex);
-            m_shouldClose = true;
+            m_stopSource.request_stop();
         }
 
         m_cv.notify_all();
         m_backgroundDownloader.join();
+    }
+
+    bool FileCache::HasFile(std::string_view filePath)
+    {
+        std::scoped_lock lock(m_mutex);
+        auto it = m_cache.find(filePath);
+#if _DEBUG
+        auto result = std::find_if(m_entryList.begin(), m_entryList.end(), [&filePath](FileCacheEntry& entry)
+            {
+                return entry.GetFilePath() == filePath;
+            });
+        if (it != m_cache.end())
+        {
+            assert(result != m_entryList.end() && "FileCacheEntry should also be in the entry list");
+        }
+#endif
+        return it != m_cache.end();
     }
 
     void FileCache::MarkFileAsStaleIfExists(const std::string& filePath)
@@ -49,7 +70,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
     }
 
-    std::optional<std::size_t> FileCache::ReadFile(const std::string& filePath, uint64_t offset, std::size_t bytesToRead, char* buffer)
+    std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int64_t offset, int64_t bytesToRead, char* buffer)
     {
         // If there are extensions that should be filtered on then we need to process that first.
         const auto fileType = RocksDBHelpers::GetFileType(filePath);
@@ -67,12 +88,12 @@ namespace AVEVA::RocksDB::Plugin::Core
 
             auto [inserted, _] = m_cache.emplace(
                 std::piecewise_construct,
-                std::forward_as_tuple(filePath),
+                std::forward_as_tuple(std::string(filePath)),
                 std::forward_as_tuple(filePath, 0));
             m_entryList.push_front(inserted->second);
 
             BOOST_LOG_SEV(*m_logger, info) << "Queueing for download: '" << filePath << "'";
-            m_fileDownloadQueue.push(filePath);
+            m_fileDownloadQueue.emplace(filePath);
 
             lock.unlock();
             m_cv.notify_one();
@@ -88,7 +109,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                 if (state == FileCacheEntry::State::Stale)
                 {
                     BOOST_LOG_SEV(*m_logger, info) << "File is stale. Queueing for redownload: '" << filePath << "'";
-                    m_fileDownloadQueue.push(filePath);
+                    m_fileDownloadQueue.emplace(filePath);
 
                     // Mark as downloading now so we don't queue it again.
                     fileEntry.SetState(FileCacheEntry::State::QueuedForDownload);
@@ -104,8 +125,15 @@ namespace AVEVA::RocksDB::Plugin::Core
 
             auto cachedFilePath = m_cachePath / fileEntry.GetFilePath();
             auto file = m_filesystem->Open(cachedFilePath);
-            const auto bytesRead = file->Read(buffer, offset, bytesToRead);
-            return bytesRead;
+            if (buffer != nullptr)
+            {
+                const auto bytesRead = file->Read(buffer, offset, bytesToRead);
+                return bytesRead;
+            }
+            else
+            {
+                return 0;
+            }
         }
     }
 
@@ -115,13 +143,13 @@ namespace AVEVA::RocksDB::Plugin::Core
         RemoveFileUnsafe(filePath);
     }
 
-    size_t FileCache::CacheSize()
+    int64_t FileCache::CacheSize()
     {
         std::scoped_lock lock(m_mutex);
         const auto size = GetCurrentSizeUnsafe();
 #if _DEBUG
         // Validate that size matches what is in our map
-        size_t validatedSize = 0;
+        int64_t validatedSize = 0;
         for (const auto& [_, value] : m_cache)
         {
             validatedSize += value.GetSize();
@@ -132,21 +160,26 @@ namespace AVEVA::RocksDB::Plugin::Core
         return size;
     }
 
-    void FileCache::SetCacheSize(std::size_t size)
+    void FileCache::SetCacheSize(int64_t size)
     {
+        if (size < 0)
+        {
+            throw std::invalid_argument("Cache size cannot be negative");
+        }
+
         std::scoped_lock lock(m_mutex);
         const auto currentSize = GetCurrentSizeUnsafe();
         if (currentSize > size)
         {
             // Evict files until we are under the new size.
-            const auto bytesToEvict = currentSize % size;
+            const auto bytesToEvict = currentSize - size;
             EvictAtLeast(bytesToEvict);
         }
 
         m_maxSize = size;
     }
 
-    void FileCache::BackgroundDownload()
+    void FileCache::BackgroundDownload(std::stop_token stopToken)
     {
         while (true)
         {
@@ -155,7 +188,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                 std::string filePath;
                 {
                     std::unique_lock lock(m_mutex);
-                    if (m_shouldClose)
+                    if (stopToken.stop_requested())
                     {
                         BOOST_LOG_SEV(*m_logger, info) << "File cache should close. Exiting thread.";
                         lock.unlock();
@@ -165,18 +198,18 @@ namespace AVEVA::RocksDB::Plugin::Core
                     if (m_fileDownloadQueue.empty())
                     {
                         BOOST_LOG_SEV(*m_logger, debug) << "File cache queue is empty. Waiting for condition variable.";
-                        m_cv.wait(lock, [this]() { return !m_fileDownloadQueue.empty() || m_shouldClose; });
+                        m_cv.wait(lock, [this, &stopToken]() { return !m_fileDownloadQueue.empty() || stopToken.stop_requested(); });
                     }
 
                     // We could have been woken up because it's time to close.
-                    if (m_shouldClose)
+                    if (stopToken.stop_requested())
                     {
                         BOOST_LOG_SEV(*m_logger, info) << "File cache should close. Exiting thread.";
                         lock.unlock();
                         return; // Exit the thread if we are closing
                     }
 
-                    filePath = std::move(m_fileDownloadQueue.front());
+                    filePath = m_fileDownloadQueue.front();
                     m_fileDownloadQueue.pop();
 
                     auto it = m_cache.find(filePath);
@@ -199,7 +232,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                     }
                 }
 
-                size_t fileSize = 0;
+                int64_t fileSize = 0;
                 try
                 {
                     auto blobClient = m_containerClient->GetBlobClient(filePath);
@@ -240,7 +273,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                                 << fileSize
                                 << " (bytes)";
 
-                            const auto bytesToEvict = (currentSize + fileSize) % m_maxSize;
+                            const auto bytesToEvict = (currentSize + fileSize) - m_maxSize;
                             if (!EvictAtLeast(bytesToEvict))
                             {
                                 BOOST_LOG_SEV(*m_logger, error) << "Couldn't evict enough space to fit new file '" << filePath << "'";
@@ -311,11 +344,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                     BOOST_LOG_SEV(*m_logger, info) << "File '" << filePath << "' was deleted. Removing file from cache";
                     std::error_code ec;
                     auto cachedFilePath = m_cachePath / filePath;
-                    std::filesystem::remove(cachedFilePath, ec);
-                    if (ec)
-                    {
-                        BOOST_LOG_SEV(*m_logger, error) << "Failed to remove file '" << cachedFilePath.string() << "' from cache. Error: " << ec.message();
-                    }
+                    m_filesystem->DeleteFile(cachedFilePath);
                 }
             }
             catch (const std::exception& e)
@@ -332,7 +361,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         m_entryList.push_front(file);
     }
 
-    bool FileCache::EvictAtLeast(std::size_t bytes)
+    bool FileCache::EvictAtLeast(const int64_t bytes)
     {
         if (bytes > m_maxSize)
         {
@@ -345,7 +374,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
 
         BOOST_LOG_SEV(*m_logger, info) << "Attempting to evict " << bytes << " (bytes) from the file cache.";
-        size_t bytesEvicted = 0;
+        int64_t bytesEvicted = 0;
         auto tail = m_entryList.s_iterator_to(m_entryList.back());
         while (bytesEvicted < bytes && tail != m_entryList.begin())
         {
@@ -358,7 +387,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                 continue;
             }
 
-            const auto& filePath = tail->GetFilePath();
+            const std::string filePath = tail->GetFilePath();
             const auto fileSize = tail->GetSize();
 
             BOOST_LOG_SEV(*m_logger, info) << "Evicting '" << filePath << "' of size " << fileSize << "'bytes' from file cache";
@@ -384,22 +413,13 @@ namespace AVEVA::RocksDB::Plugin::Core
             const auto cachedFilePath = m_cachePath / filePath;
 
             m_cache.erase(it);
-
-            std::error_code ec;
-            std::filesystem::remove(cachedFilePath, ec);
-            if (ec)
-            {
-                // We could be downloading the file right now...
-                // This is most likely okay, we'll remove it when the background downloader
-                // recognizes what happened.
-                BOOST_LOG_SEV(*m_logger, error) << "Failed to remove file '" << cachedFilePath.string() << "' from cache. Error: " << ec.message();
-            }
+            m_filesystem->DeleteFile(cachedFilePath);
         }
     }
 
-    std::size_t FileCache::GetCurrentSizeUnsafe() const noexcept
+    int64_t FileCache::GetCurrentSizeUnsafe() const noexcept
     {
-        size_t size = 0;
+        int64_t size = 0;
         for (const auto& entry : m_entryList)
         {
             const auto state = entry.GetState();
@@ -412,3 +432,4 @@ namespace AVEVA::RocksDB::Plugin::Core
         return size;
     }
 }
+

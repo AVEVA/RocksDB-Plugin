@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #include "AVEVA/RocksDB/Plugin/Core/RocksDBHelpers.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp"
@@ -5,7 +8,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AzureContainerClient.hpp"
-
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.hpp"
 
 #include <azure/storage/blobs.hpp>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
@@ -18,7 +21,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::shared_ptr<boost::log::sources::logger_mt> logger,
         std::optional<std::string_view> cachePath,
         size_t maxCacheSize)
-        : BlobFilesystemImpl(dataFileInitialSize, dataFileBufferSize)
+        : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize)
     {
         ::Azure::Storage::Blobs::BlobServiceClient serviceClient
         {
@@ -35,7 +38,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 std::make_shared<Core::FileCache>(*cachePath,
                     maxCacheSize,
                     std::make_shared<AzureContainerClient>(containerClient),
-                    std::make_shared<Core::LocalFilesystem>(),
+                    std::make_shared<Core::LocalFilesystem>(logger),
                     logger));
         }
 
@@ -52,7 +55,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::shared_ptr<boost::log::sources::logger_mt> logger,
         std::optional<std::string_view> cachePath,
         size_t maxCacheSize)
-        : BlobFilesystemImpl(dataFileInitialSize, dataFileBufferSize)
+        : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize)
     {
         ::Azure::Storage::Blobs::BlobServiceClient serviceClient
         {
@@ -69,7 +72,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 std::make_shared<Core::FileCache>(*cachePath,
                     maxCacheSize,
                     std::make_shared<AzureContainerClient>(containerClient),
-                    std::make_shared<Core::LocalFilesystem>(),
+                    std::make_shared<Core::LocalFilesystem>(logger),
                     logger));
         }
 
@@ -86,7 +89,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         int64_t dataFileBufferSize,
         std::shared_ptr<boost::log::sources::logger_mt> logger,
         std::optional<std::string_view> cachePath, size_t maxCacheSize)
-        : BlobFilesystemImpl(dataFileInitialSize, dataFileBufferSize)
+        : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize)
     {
         ::Azure::Storage::Blobs::BlobServiceClient serviceClient
         {
@@ -103,7 +106,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 std::make_shared<Core::FileCache>(*cachePath,
                     maxCacheSize,
                     std::make_shared<AzureContainerClient>(containerClient),
-                    std::make_shared<Core::LocalFilesystem>(),
+                    std::make_shared<Core::LocalFilesystem>(logger),
                     logger));
         }
 
@@ -117,7 +120,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::shared_ptr<boost::log::sources::logger_mt> logger,
         std::optional<std::string_view> cachePath,
         size_t maxCacheSize)
-        : BlobFilesystemImpl(dataFileInitialSize, dataFileBufferSize)
+        : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize)
     {
         auto serviceClient = BlobHelpers::CreateServiceClient(primary);
         auto containerClient = BlobHelpers::GetContainerClient(serviceClient, primary.GetDbName());
@@ -128,7 +131,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 std::make_shared<Core::FileCache>(*cachePath,
                     maxCacheSize,
                     std::make_shared<AzureContainerClient>(containerClient),
-                    std::make_shared<Core::LocalFilesystem>(),
+                    std::make_shared<Core::LocalFilesystem>(logger),
                     logger));
         }
 
@@ -154,7 +157,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::shared_ptr<boost::log::sources::logger_mt> logger,
         std::optional<std::string_view> cachePath,
         size_t maxCacheSize)
-        : BlobFilesystemImpl(dataFileInitialSize, dataFileBufferSize)
+        : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize)
     {
         auto serviceClient = BlobHelpers::CreateServiceClient(primary);
         auto containerClient = BlobHelpers::GetContainerClient(serviceClient, primary.GetDbName());
@@ -165,7 +168,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 std::make_shared<Core::FileCache>(*cachePath,
                     maxCacheSize,
                     std::make_shared<AzureContainerClient>(containerClient),
-                    std::make_shared<Core::LocalFilesystem>(),
+                    std::make_shared<Core::LocalFilesystem>(logger),
                     logger));
         }
 
@@ -188,15 +191,16 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     {
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
         const auto& container = GetContainer(prefix);
-        auto pageBlobClient = std::make_shared<::Azure::Storage::Blobs::PageBlobClient>(container.GetPageBlobClient(std::string(realPath)));
+        auto pageBlobClient = container.GetPageBlobClient(std::string(realPath));
+        auto blobClient = std::make_shared<PageBlob>(std::move(pageBlobClient));
         auto cache = m_fileCaches.find(prefix);
         if (cache != m_fileCaches.end())
         {
-            return ReadableFileImpl{ realPath, std::move(pageBlobClient), cache->second };
+            return ReadableFileImpl{ realPath, std::move(blobClient), cache->second };
         }
         else
         {
-            return ReadableFileImpl{ realPath, std::move(pageBlobClient), nullptr };
+            return ReadableFileImpl{ realPath, std::move(blobClient), nullptr };
         }
     }
 
@@ -213,29 +217,30 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
         const auto& container = GetContainer(prefix);
 
-        auto client = std::make_shared<::Azure::Storage::Blobs::PageBlobClient>(container.GetPageBlobClient(std::string(realPath)));
-        auto res = client->CreateIfNotExists(initialSize);
+        auto client = container.GetPageBlobClient(std::string(realPath));
+        auto res = client.CreateIfNotExists(initialSize);
 
         // Creating a writeable file is intended to always provide a "new" file.
-        // If the file previosuly existed, efficiently truncate it so that for
+        // If the file previosly existed, efficiently truncate it so that for
         // all intents and purposes, it's a new file.
         if (!res.Value.Created)
         {
-            BlobHelpers::SetFileSize(*client, 0);
-            if (client->GetProperties().Value.BlobSize > initialSize)
+            BlobHelpers::SetFileSize(client, 0);
+            if (client.GetProperties().Value.BlobSize > initialSize)
             {
-                client->Resize(initialSize);
+                client.Resize(initialSize);
             }
         }
 
         auto cache = m_fileCaches.find(prefix);
+        auto blobClient = std::make_unique<PageBlob>(std::move(client));
         if (cache != m_fileCaches.end())
         {
-            return WriteableFileImpl{ realPath, static_cast<size_t>(bufferSize), std::move(client), cache->second, m_logger };
+            return WriteableFileImpl{ realPath, std::move(blobClient), cache->second, m_logger, bufferSize };
         }
         else
         {
-            return WriteableFileImpl{ realPath, static_cast<size_t>(bufferSize), std::move(client), nullptr, m_logger };
+            return WriteableFileImpl{ realPath, std::move(blobClient), nullptr, m_logger, bufferSize };
         }
     }
 
@@ -247,14 +252,16 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         auto client = std::make_shared<::Azure::Storage::Blobs::PageBlobClient>(container.GetPageBlobClient(std::string(realPath)));
         auto response = client->CreateIfNotExists(Configuration::PageBlob::DefaultSize);
 
+        auto blobClient = std::make_shared<PageBlob>(std::move(*client));
+
         auto cache = m_fileCaches.find(prefix);
         if (cache != m_fileCaches.end())
         {
-            return ReadWriteFileImpl{ realPath, std::move(client), cache->second, m_logger };
+            return ReadWriteFileImpl{ realPath, std::move(blobClient), cache->second, m_logger };
         }
         else
         {
-            return ReadWriteFileImpl{ realPath, std::move(client), nullptr, m_logger };
+            return ReadWriteFileImpl{ realPath, std::move(blobClient), nullptr, m_logger };
         }
     }
 
@@ -268,16 +275,15 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         const auto bufferSize =
             isData ? m_dataFileBufferSize : Configuration::PageBlob::DefaultBufferSize;
 
-        auto client = std::make_shared<::Azure::Storage::Blobs::PageBlobClient>(container.GetPageBlobClient(std::string(realPath)));
-
+        auto client = std::make_shared<PageBlob>(container.GetPageBlobClient(std::string(realPath)));
         auto cache = m_fileCaches.find(prefix);
         if (cache != m_fileCaches.end())
         {
-            return WriteableFileImpl{ realPath, static_cast<size_t>(bufferSize), std::move(client), cache->second, m_logger };
+            return WriteableFileImpl{ realPath, std::move(client), cache->second, m_logger, static_cast<int64_t>(bufferSize) };
         }
         else
         {
-            return WriteableFileImpl{ realPath, static_cast<size_t>(bufferSize), std::move(client), nullptr, m_logger };
+            return WriteableFileImpl{ realPath, std::move(client), nullptr, m_logger, static_cast<int64_t>(bufferSize) };
         }
     }
 
@@ -292,18 +298,19 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         const auto bufferSize = isData ? m_dataFileBufferSize : Configuration::PageBlob::DefaultBufferSize;
 
         // TODO: figure out what the intent here is for now just delete and recreate
-        auto client = std::make_shared<::Azure::Storage::Blobs::PageBlobClient>(container.GetPageBlobClient(std::string(realPath)));
-        client->DeleteIfExists();
-        client->CreateIfNotExists(initialSize);
+        auto client = container.GetPageBlobClient(std::string(realPath));
+        client.DeleteIfExists();
+        client.CreateIfNotExists(initialSize);
 
         auto cache = m_fileCaches.find(prefix);
+        auto blobClient = std::make_shared<PageBlob>(std::move(client));
         if (cache != m_fileCaches.end())
         {
-            return WriteableFileImpl{ realPath, static_cast<size_t>(bufferSize), std::move(client), cache->second, m_logger };
+            return WriteableFileImpl{ realPath, std::move(blobClient), cache->second, m_logger, static_cast<int64_t>(bufferSize) };
         }
         else
         {
-            return WriteableFileImpl{ realPath, static_cast<size_t>(bufferSize), std::move(client), nullptr, m_logger };
+            return WriteableFileImpl{ realPath, std::move(blobClient), nullptr, m_logger, static_cast<int64_t>(bufferSize) };
         }
     }
 
@@ -312,9 +319,11 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
         const auto& container = GetContainer(prefix);
 
-        auto client = std::make_shared<::Azure::Storage::Blobs::PageBlobClient>(container.GetPageBlobClient(std::string(realPath)));
-        client->CreateIfNotExists(Configuration::PageBlob::DefaultSize);
-        auto impl = std::make_unique<WriteableFileImpl>(realPath, Configuration::PageBlob::DefaultSize, std::move(client), nullptr, m_logger);
+        auto client = container.GetPageBlobClient(std::string(realPath));
+        client.CreateIfNotExists(Configuration::PageBlob::DefaultSize);
+
+        auto blobClient = std::make_shared<PageBlob>(std::move(client));
+        auto impl = std::make_unique<WriteableFileImpl>(realPath, std::move(blobClient), nullptr, m_logger, Configuration::PageBlob::DefaultSize);
         return LoggerImpl{ std::move(impl), logLevel };
     }
 
@@ -408,26 +417,44 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         ::Azure::Storage::Blobs::ListBlobsOptions opts;
         opts.Prefix = realPath;
         opts.PageSizeHint = sizeHint;
-
-        // TODO: loop through checking for more results 
-        auto blobs = container.ListBlobs(opts);
-        for (const auto& blob : blobs.Blobs)
-        {
-            // TODO: more elegant / foolproof substring
-            size_t startPos = blob.Name.find(realPath);
-            if (startPos != std::string::npos)
+        auto extractChildName = [&realPath](const auto& blob) -> std::string
             {
-                auto index = startPos + realPath.length();
-                assert(index < blob.Name.size());
-
-                if (blob.Name[index] == '/')
+                size_t startPos = blob.Name.find(realPath);
+                if (startPos != std::string::npos)
                 {
-                    index++;
-                }
+                    auto index = startPos + realPath.length();
+                    assert(index < blob.Name.size());
 
-                children.emplace_back(blob.Name.substr(index));
+                    if (blob.Name[index] == '/')
+                    {
+                        index++;
+                    }
+
+                    return blob.Name.substr(index);
+                }
+                return {};
+            };
+
+        // Process all pages of results
+        auto blobs = container.ListBlobs(opts);
+        do
+        {
+            for (const auto& blob : blobs.Blobs)
+            {
+                if (auto childName = extractChildName(blob); !childName.empty())
+                {
+                    children.emplace_back(std::move(childName));
+                }
             }
-        }
+
+            if (!blobs.NextPageToken.HasValue())
+            {
+                break;
+            }
+
+            opts.ContinuationToken = blobs.NextPageToken;
+            blobs = container.ListBlobs(opts);
+        } while (true);
 
         return children;
     }
@@ -442,13 +469,24 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         opts.Prefix = realPath;
         opts.PageSizeHint = 10000;  // hopefully plenty for now
 
-        // TODO: loop through checking for more results
+        // Process all pages of results
         auto blobs = container.ListBlobs(opts);
-        for (const auto& blob : blobs.Blobs)
+        do
         {
-            const auto client = container.GetPageBlobClient(blob.Name);
-            attributes.emplace_back(BlobHelpers::GetFileSize(client), blob.Name.substr(realPath.length()));
-        }
+            for (const auto& blob : blobs.Blobs)
+            {
+                const auto client = container.GetPageBlobClient(blob.Name);
+                attributes.emplace_back(BlobHelpers::GetFileSize(client), blob.Name.substr(realPath.length()));
+            }
+
+            if (!blobs.NextPageToken.HasValue())
+            {
+                break;
+            }
+
+            opts.ContinuationToken = blobs.NextPageToken;
+            blobs = container.ListBlobs(opts);
+        } while (true);
 
         return attributes;
     }
@@ -519,7 +557,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         return blobsInDirectory.Blobs.size();
     }
 
-    void BlobFilesystemImpl::Truncate(const std::string& filePath, size_t size) const
+    void BlobFilesystemImpl::Truncate(const std::string& filePath, int64_t size) const
     {
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
         const auto& container = GetContainer(prefix);
@@ -529,11 +567,11 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         if (fileSize > size)
         {
             BlobHelpers::SetFileSize(client, size);
-            client.Resize(static_cast<int64_t>(size));
+            client.Resize(size);
         }
     }
 
-    uint64_t BlobFilesystemImpl::GetFileSize(const std::string& filePath) const
+    int64_t BlobFilesystemImpl::GetFileSize(const std::string& filePath) const
     {
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
         const auto& container = GetContainer(prefix);
@@ -568,6 +606,12 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             throw std::runtime_error("Attempting to rename file into another storage account");
         }
 
+        if (realPathFrom == realPathTo)
+        {
+            // Nothing to do - file is already at the destination
+            return;
+        }
+
         const auto& container = GetContainer(prefixAccountTo);
 
         const auto srcClient = container.GetPageBlobClient(std::string(realPathFrom));
@@ -582,17 +626,17 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         const auto downloadResponse = srcClient.Download(opt);
         const auto& content = downloadResponse.Value;
 
-        static const constexpr auto maxUploadSize = static_cast<size_t>(4) * 1024 * 1024;
+        static const constexpr auto maxUploadSize = static_cast<int64_t>(4) * 1024 * 1024;
         if (size > maxUploadSize)
         {
-            size_t uploadOffset = 0;
-            std::vector<uint8_t> buffer(maxUploadSize);
+            int64_t uploadOffset = 0;
+            std::vector<uint8_t> buffer(static_cast<size_t>(maxUploadSize));
 
             while (uploadOffset != size)
             {
                 assert(size > uploadOffset);
                 const auto readSize = std::min(size - uploadOffset, maxUploadSize);
-                const auto bytesRead = content.BodyStream->ReadToCount(buffer.data(), readSize);
+                const auto bytesRead = content.BodyStream->ReadToCount(buffer.data(), static_cast<size_t>(readSize));
                 const auto bytesRemaining = bytesRead % Configuration::PageBlob::PageSize;
 
                 if (bytesRemaining != 0)
@@ -604,15 +648,15 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                     std::fill(buffer.data() + endOfRealData, buffer.data() + endOfUpload, static_cast<uint8_t>(0));
 
                     ::Azure::Core::IO::MemoryBodyStream sendStream(buffer.data(), endOfUpload);
-                    destClient.UploadPages(static_cast<int64_t>(uploadOffset), sendStream);
+                    destClient.UploadPages(uploadOffset, sendStream);
                 }
                 else
                 {
                     ::Azure::Core::IO::MemoryBodyStream sendStream(buffer.data(), bytesRead);
-                    destClient.UploadPages(static_cast<int64_t>(uploadOffset), sendStream);
+                    destClient.UploadPages(uploadOffset, sendStream);
                 }
 
-                uploadOffset += bytesRead;
+                uploadOffset += static_cast<int64_t>(bytesRead);
             }
         }
         else
@@ -638,10 +682,11 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         srcClient.DeleteIfExists();
     }
 
-    BlobFilesystemImpl::BlobFilesystemImpl(int64_t dataFileInitialSize, int64_t dataFileBufferSize)
-        : m_dataFileInitialSize(dataFileInitialSize),
+    BlobFilesystemImpl::BlobFilesystemImpl(std::shared_ptr<boost::log::sources::logger_mt>&& logger, int64_t dataFileInitialSize, int64_t dataFileBufferSize)
+        : m_logger(std::move(logger)),
+        m_dataFileInitialSize(dataFileInitialSize),
         m_dataFileBufferSize(dataFileBufferSize),
-        m_lockRenewalThread(&BlobFilesystemImpl::RenewLease, this, m_lockRenewalStopSource.get_token())
+        m_lockRenewalThread{ [this](std::stop_token stopToken) { RenewLease(stopToken); } }
     {
     }
 
@@ -665,14 +710,22 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     {
         while (!stopToken.stop_requested())
         {
-            std::this_thread::sleep_for(Configuration::RenewalDelay);
             {
                 std::scoped_lock lock(m_lockFilesMutex);
+                if (stopToken.stop_requested())
+                {
+                    break;
+                }
+
                 std::vector<LockFileImpl*> needsRetry;
                 needsRetry.reserve(m_locks.size());
-                std::transform(m_locks.begin(), m_locks.end(), needsRetry.begin(), [](auto& val) { return val.get(); });
+                for (const auto& lockPtr : m_locks)
+                {
+                    needsRetry.push_back(lockPtr.get());
+                }
+
                 int retries = 0;
-                while (needsRetry.size() > 0 && retries < 5)
+                while (needsRetry.size() > 0 && retries < 5 && !stopToken.stop_requested())
                 {
                     std::erase_if(needsRetry, [](const auto* client) -> bool
                         {
@@ -689,6 +742,13 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
                     retries++;
                 }
+            }
+
+            // Sleep AFTER doing work - use VERY small increments for testing
+            // 10000 iterations * 1ms = 10 seconds total
+            for (int i = 0; i < 10000 && !stopToken.stop_requested(); ++i)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
         }
     }

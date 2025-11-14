@@ -1,6 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/ReadWriteFile.hpp"
+#include <azure/core/exception.hpp>
 #include <boost/log/trivial.hpp>
+#include <cassert>
+#include <limits>
 namespace AVEVA::RocksDB::Plugin::Azure
 {
     using namespace boost::log::trivial;
@@ -14,7 +20,10 @@ namespace AVEVA::RocksDB::Plugin::Azure
     {
         try
         {
-            m_file.Write(offset, data.data(), data.size());
+            assert(offset <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) && "Offset must fit in int64_t");
+            assert(data.size() <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) && "Data size must fit in int64_t");
+
+            m_file.Write(static_cast<int64_t>(offset), data.data(), static_cast<int64_t>(data.size()));
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
@@ -30,7 +39,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         {
             return rocksdb::IOStatus::IOError("Unknown error when writing to file");
         }
-        
+
         return rocksdb::IOStatus::OK();
     }
 
@@ -38,9 +47,16 @@ namespace AVEVA::RocksDB::Plugin::Azure
     {
         try
         {
-            const auto bytesRead = m_file.Read(offset, n, scratch);
+            assert(offset <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) && "Offset must fit in int64_t");
+            assert(n <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) && "Bytes requested must fit in int64_t");
+
+            const auto bytesRead = m_file.Read(static_cast<int64_t>(offset), static_cast<int64_t>(n), scratch);
+
+            assert(bytesRead >= 0 && "Bytes read should not be negative");
+            assert(bytesRead <= static_cast<int64_t>(n) && "Bytes read should not exceed requested amount");
+
             result->data_ = scratch;
-            result->size_ = bytesRead;
+            result->size_ = static_cast<size_t>(bytesRead);
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {

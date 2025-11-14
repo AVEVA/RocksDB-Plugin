@@ -1,6 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/BlobClient.hpp"
 
 #include <boost/log/trivial.hpp>
 
@@ -11,44 +15,42 @@ using namespace ::Azure::Core::IO;
 using namespace boost::log::trivial;
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
-    WriteableFileImpl::WriteableFileImpl(const std::string_view name,
-        const size_t bufferSize,
-        std::shared_ptr<::Azure::Storage::Blobs::PageBlobClient> blobClient,
+    AVEVA::RocksDB::Plugin::Azure::Impl::WriteableFileImpl::WriteableFileImpl(const std::string_view name,
+        std::shared_ptr<Core::BlobClient> blobClient,
         std::shared_ptr<Core::FileCache> fileCache,
-        std::shared_ptr<boost::log::sources::logger_mt> logger)
+        std::shared_ptr<boost::log::sources::logger_mt> logger,
+        const int64_t bufferSize)
         : m_name(name),
         m_bufferSize(bufferSize),
         m_blobClient(std::move(blobClient)),
         m_fileCache(std::move(fileCache)),
         m_logger(std::move(logger)),
         m_lastPageOffset(0),
-        m_size(BlobHelpers::GetFileSize(*m_blobClient)),
-        m_capacity(BlobHelpers::GetBlobCapacity(*m_blobClient)),
+        m_size(m_blobClient->GetSize()),
+        m_capacity(m_blobClient->GetCapacity()),
         m_bufferOffset(0),
-        m_closed(false)
+        m_closed(false),
+        m_flushed(true)
     {
-        if (m_bufferSize < Configuration::PageBlob::DefaultBufferSize)
+        if (m_bufferSize < Configuration::PageBlob::PageSize)
         {
-            m_bufferSize = Configuration::PageBlob::DefaultBufferSize;
+            throw std::invalid_argument("Buffer size cannot be smaller than a page");
         }
 
         assert(m_bufferSize > 0);
         m_buffer.resize(static_cast<size_t>(m_bufferSize));
         if (m_size > 0) // Existing file with data
         {
-            m_lastPageOffset = m_size / Configuration::PageBlob::PageSize;;
-            const auto lastPageBytes = m_size % Configuration::PageBlob::PageSize;
+            int64_t lastPageBytes;
+            int64_t lastPageOffset;
+            std::tie(lastPageBytes, lastPageOffset) = BlobHelpers::RoundToBeginningOfNearestPage(m_size);
+            m_lastPageOffset = lastPageOffset;
             if (lastPageBytes > 0) // There is a partially filled page
             {
-                DownloadBlobToOptions opt;
-                opt.Range.Emplace(m_lastPageOffset, static_cast<size_t>(lastPageBytes));
-                const auto res =
-                    m_blobClient->DownloadTo(reinterpret_cast<uint8_t*>(m_buffer.data()), static_cast<size_t>(lastPageBytes), opt);
-                assert((res.Value.ContentRange.Length.HasValue()
-                    ? res.Value.ContentRange.Length.Value()
-                    : 0) == static_cast<int64_t>(lastPageBytes));
-
+                const auto bytesDownoaded = m_blobClient->DownloadTo(m_buffer, m_lastPageOffset, lastPageBytes);
+                assert(bytesDownoaded == lastPageBytes);
                 m_bufferOffset = lastPageBytes;
+                m_flushed = false;  // We have existing partial page data in buffer
             }
         }
     }
@@ -88,7 +90,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         m_size(other.m_size),
         m_capacity(other.m_capacity),
         m_bufferOffset(other.m_bufferOffset),
-        m_closed(std::exchange(other.m_closed, false)),
+        m_closed(std::exchange(other.m_closed, true)),
+        m_flushed(other.m_flushed),
         m_buffer(std::move(other.m_buffer))
     {
     }
@@ -104,7 +107,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         m_size = other.m_size;
         m_capacity = other.m_capacity;
         m_bufferOffset = other.m_bufferOffset;
-        m_closed = std::exchange(other.m_closed, false);
+        m_closed = std::exchange(other.m_closed, true);
+        m_flushed = other.m_flushed;
         m_buffer = std::move(other.m_buffer);
         return *this;
     }
@@ -118,26 +122,28 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         }
     }
 
-    void WriteableFileImpl::Append(const char* data, size_t size)
+    void WriteableFileImpl::Append(const std::span<const char> data)
     {
-        auto dataPos = data;
-        while (size > 0)
+        const char* dataPos = data.data();
+        auto dataSize = static_cast<int64_t>(data.size());
+        while (dataSize > 0)
         {
-            auto space = m_bufferSize - m_bufferOffset;
-            auto bufPos = &m_buffer[m_bufferOffset];
-            const auto numBytes = size > space ? space : size;
-
-            std::copy(dataPos, dataPos + numBytes, bufPos);
-
-            size -= numBytes;
-            m_bufferOffset += numBytes;
-            dataPos += numBytes;
-            m_size += numBytes;
-            space -= numBytes;
-            if (space < Configuration::PageBlob::PageSize)
+            const auto spaceLeft = m_bufferSize - m_bufferOffset;
+            if (spaceLeft < Configuration::PageBlob::PageSize)
             {
                 Flush();
+                continue;
             }
+
+            auto bufPos = &m_buffer[static_cast<size_t>(m_bufferOffset)];
+            const auto bytesToCopy = std::min(spaceLeft, dataSize);
+            std::copy(dataPos, dataPos + bytesToCopy, bufPos);
+
+            dataSize -= bytesToCopy;
+            m_bufferOffset += bytesToCopy;
+            dataPos += bytesToCopy;
+            m_size += bytesToCopy;
+            m_flushed = false;  // Mark as not flushed since we added new data
         }
     }
 
@@ -148,15 +154,19 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             return;
         }
 
-        const auto [remaining, numToWrite] = BlobHelpers::RoundToNearestPage(m_bufferOffset);
-        if ((m_size + m_bufferSize) > m_capacity)
+        // If already flushed and no new data, don't flush again
+        if (m_flushed)
+        {
+            return;
+        }
+
+        const auto [remaining, bytesToWrite] = BlobHelpers::RoundToEndOfNearestPage(m_bufferOffset);
+        if ((m_lastPageOffset + bytesToWrite) > m_capacity)
         {
             Expand();
         }
 
-        MemoryBodyStream dataStream(reinterpret_cast<uint8_t*>(m_buffer.data()), numToWrite);
-        auto resp = m_blobClient->UploadPages(static_cast<int64_t>(m_lastPageOffset), dataStream);
-        auto code = resp.RawResponse->GetStatusCode();
+        m_blobClient->UploadPages(std::span(m_buffer.begin(), m_buffer.begin() + bytesToWrite), m_lastPageOffset);
         if (remaining != 0)
         {
             const auto residualOffsetBegin = m_bufferOffset - remaining;
@@ -168,10 +178,10 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             // TODO: Set target offset appropriately for next flush.
         }
 
-        BOOST_LOG_SEV(*m_logger, debug) << "Flushed " << numToWrite << " bytes to writeable file '" << m_name << "'. HttpStatus(" << static_cast<int>(code) << ")";
-
-        m_bufferOffset = remaining;
+        BOOST_LOG_SEV(*m_logger, debug) << "Flushed " << bytesToWrite << " bytes to writeable file '" << m_name << "'.",
+            m_bufferOffset = remaining;
         m_lastPageOffset = (m_size / Configuration::PageBlob::PageSize) * Configuration::PageBlob::PageSize;
+        m_flushed = true;
     }
 
     void WriteableFileImpl::Sync()
@@ -182,35 +192,53 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         }
 
         Flush();
-        BlobHelpers::SetFileSize(*m_blobClient, m_size);
+        m_blobClient->SetSize(m_size);
         BOOST_LOG_SEV(*m_logger, debug) << "Synced writeable file '" << m_name << "' to " << m_size << " bytes";
     }
 
-    void WriteableFileImpl::Truncate(uint64_t size)
+    void WriteableFileImpl::Truncate(int64_t size)
     {
+        // Truncate only allows shrinking, not expanding
+        if (size > m_size)
+        {
+            throw std::invalid_argument("Truncate can only shrink the file. Cannot expand from " +
+                std::to_string(m_size) + " to " + std::to_string(size) + " bytes.");
+        }
+
+        // Ensure all data is written to blob before modifications are made
         Sync();
 
-        // TODO: This is a workaround. Find a more comprehensive solution.
-        if (size == 0)
+        const auto [partialPageSize, totalPageOffset] = BlobHelpers::RoundToBeginningOfNearestPage(size);
+        m_bufferOffset = 0;
+        m_lastPageOffset = totalPageOffset;
+        m_flushed = true;  // Buffer is empty after truncate
+
+        if (partialPageSize != 0)
         {
-            m_bufferOffset = 0;
+            // Read the partial page into memory for further appends
+            const auto bytesDownloaded = m_blobClient->DownloadTo(m_buffer, totalPageOffset, partialPageSize);
+            assert(bytesDownloaded == partialPageSize);
+            m_bufferOffset = partialPageSize;
+            m_flushed = false;  // We have data in buffer now
         }
 
         m_size = size;
-        const auto [_, totalPageOffset] = BlobHelpers::RoundToNearestPage(size);
-        m_blobClient->Resize(static_cast<int64_t>(totalPageOffset));
-        m_capacity = totalPageOffset;
-        BlobHelpers::SetFileSize(*m_blobClient, m_size);
+        m_blobClient->SetSize(m_size);
+
+        // Calculate new capacity rounded up to page size
+        const auto [_, newCapacity] = BlobHelpers::RoundToEndOfNearestPage(size);
+        m_capacity = newCapacity;
+        m_blobClient->SetCapacity(newCapacity);
     }
 
-    uint64_t WriteableFileImpl::GetFileSize() const noexcept
+    int64_t WriteableFileImpl::GetFileSize() const noexcept
     {
         return m_size;
     }
 
-    uint64_t WriteableFileImpl::GetUniqueId(char* id, const size_t maxIdSize) const noexcept
+    int64_t WriteableFileImpl::GetUniqueId(char* id, const int64_t maxIdSize) const noexcept
     {
-        const auto length = std::min(maxIdSize, m_name.size());
+        const auto length = std::min(static_cast<int64_t>(m_name.size()), maxIdSize);
         std::copy_n(m_name.begin(), length, id);
         return length;
     }
@@ -218,12 +246,12 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     void WriteableFileImpl::Expand()
     {
         // TODO: Consider expanding by less for large files.
-        const auto [_, rounded] = BlobHelpers::RoundToNearestPage(m_capacity * 2);
+        const auto [_, rounded] = BlobHelpers::RoundToEndOfNearestPage(m_capacity * 2);
         const auto desiredSize = rounded;
 
         BOOST_LOG_SEV(*m_logger, debug) << "Expanding writeable file '" << m_name << "' to " << desiredSize << " bytes";
 
-        m_blobClient->Resize(static_cast<int64_t>(desiredSize));
+        m_blobClient->SetCapacity(desiredSize);
         m_capacity = desiredSize;
     }
 }

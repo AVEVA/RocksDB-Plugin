@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #pragma once
 // #include "AVEVA/RocksDB/Plugin/Azure/Impl/AzureContainerClient.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ServicePrincipalStorageInfo.hpp"
@@ -16,10 +19,11 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
     struct BlobHelpers
     {
-        static void SetFileSize(const ::Azure::Storage::Blobs::PageBlobClient& client, uint64_t size);
-        static uint64_t GetFileSize(const ::Azure::Storage::Blobs::PageBlobClient& client);
-        static uint64_t GetBlobCapacity(const ::Azure::Storage::Blobs::PageBlobClient& client);
-        static std::pair<uint64_t, uint64_t> RoundToNearestPage(uint64_t size);
+        static void SetFileSize(const ::Azure::Storage::Blobs::PageBlobClient& client, int64_t size);
+        static int64_t GetFileSize(const ::Azure::Storage::Blobs::PageBlobClient& client);
+        static int64_t GetBlobCapacity(const ::Azure::Storage::Blobs::PageBlobClient& client);
+        static std::pair<int64_t, int64_t> RoundToEndOfNearestPage(int64_t size);
+        static std::pair<int64_t, int64_t> RoundToBeginningOfNearestPage(int64_t size);
         static ::Azure::Storage::Blobs::BlobClientOptions CreateBlobClientOptions();
         static ::Azure::Identity::ClientSecretCredentialOptions CreateClientSecretCredentialOptions();
         static ::Azure::Identity::AzurePipelinesCredentialOptions CreatePipelinesCredentialOptions();

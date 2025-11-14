@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #pragma once
 #include <rocksdb/io_status.h>
 #include <azure/core/http/http_status_code.hpp>

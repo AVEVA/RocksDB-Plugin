@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Core/File.hpp"
 #include <fstream>
@@ -9,6 +12,6 @@ namespace AVEVA::RocksDB::Plugin::Core
         std::fstream m_file;
     public:
         explicit LocalFile(const std::filesystem::path& path);
-        virtual uint64_t Read(char* buffer, uint64_t offset, uint64_t length) override;
+        virtual int64_t Read(char* buffer, int64_t offset, int64_t length) override;
     };
 }

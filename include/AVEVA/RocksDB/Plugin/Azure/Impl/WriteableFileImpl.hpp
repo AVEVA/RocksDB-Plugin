@@ -1,4 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #pragma once
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 
 #include <azure/storage/blobs/page_blob_client.hpp>
@@ -13,25 +17,26 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     class WriteableFileImpl
     {
         std::string m_name;
-        size_t m_bufferSize;
-        std::shared_ptr<::Azure::Storage::Blobs::PageBlobClient> m_blobClient;
+        int64_t m_bufferSize;
+        std::shared_ptr<Core::BlobClient> m_blobClient;
         std::shared_ptr<Core::FileCache> m_fileCache;
         std::shared_ptr<boost::log::sources::logger_mt> m_logger;
 
-        size_t m_lastPageOffset;
-        size_t m_size;
-        size_t m_capacity;
-        size_t m_bufferOffset;
+        int64_t m_lastPageOffset;
+        int64_t m_size;
+        int64_t m_capacity;
+        int64_t m_bufferOffset;
         bool m_closed;
+        bool m_flushed;
 
         std::vector<char> m_buffer;
 
     public:
         WriteableFileImpl(std::string_view name,
-            size_t bufferSize,
-            std::shared_ptr<::Azure::Storage::Blobs::PageBlobClient> blobClient,
+            std::shared_ptr<Core::BlobClient> blobClient,
             std::shared_ptr<Core::FileCache> fileCache,
-            std::shared_ptr<boost::log::sources::logger_mt> logger);
+            std::shared_ptr<boost::log::sources::logger_mt> logger,
+            int64_t bufferSize = Configuration::PageBlob::DefaultBufferSize);
         ~WriteableFileImpl();
         WriteableFileImpl(const WriteableFileImpl&) = delete;
         WriteableFileImpl& operator=(const WriteableFileImpl&) = delete;
@@ -39,12 +44,12 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         WriteableFileImpl& operator=(WriteableFileImpl&&) noexcept;
 
         void Close();
-        void Append(const char* data, size_t size);
+        void Append(const std::span<const char> data);
         void Flush();
         void Sync();
-        void Truncate(uint64_t size);
-        [[nodiscard]] uint64_t GetFileSize() const noexcept;
-        [[nodiscard]] uint64_t GetUniqueId(char* id, size_t maxIdSize) const noexcept;
+        void Truncate(int64_t size);
+        [[nodiscard]] int64_t GetFileSize() const noexcept;
+        [[nodiscard]] int64_t GetUniqueId(char* id, int64_t maxIdSize) const noexcept;
 
     private:
         void Expand();

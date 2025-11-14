@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #pragma once
 #include <azure/storage/blobs/page_blob_client.hpp>
 #include <azure/storage/blobs/blob_lease_client.hpp>
