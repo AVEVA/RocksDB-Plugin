@@ -221,7 +221,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         auto res = client.CreateIfNotExists(initialSize);
 
         // Creating a writeable file is intended to always provide a "new" file.
-        // If the file previosly existed, efficiently truncate it so that for
+        // If the file previously existed, efficiently truncate it so that for
         // all intents and purposes, it's a new file.
         if (!res.Value.Created)
         {
