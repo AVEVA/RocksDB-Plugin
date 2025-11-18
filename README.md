@@ -1,5 +1,11 @@
 # AVEVA RocksDB Plugins
 
+This project contains AVEVA's plugins for the [RocksDB](https://rocksdb.org/) database. Plugins
+are compiled with RocksDB and can be optionally enabled at runtime. To learn more about RocksDB
+plugins, please check out RocksDB's documentation on [building plugins](https://github.com/facebook/rocksdb/blob/main/plugin/README.md)
+and the list of [known plugins](https://github.com/facebook/rocksdb/blob/main/PLUGINS.md) that are being developed. Below is the list
+of plugins that exist in this repository and are actively being developed and maintained by AVEVA.
+
 ## Plugin List
 
 ### [Azure Page Blob Filesystem](src/AVEVA/RocksDB/Plugin/Azure)
