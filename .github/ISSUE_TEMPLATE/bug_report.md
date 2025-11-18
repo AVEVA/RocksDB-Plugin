@@ -23,6 +23,7 @@ If applicable, add screenshots to help explain the problem.
 
 ## Environment
 - OS: [e.g., Windows, macOS, Linux]
+- Compiler Version
 - Release Version: [e.g., 1.0.0]
 
 ## Additional Context
