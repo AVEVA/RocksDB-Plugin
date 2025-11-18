@@ -18,3 +18,8 @@
 3. Configure the project (e.g., `cmake -S <rocksdb-plugin-path> -B <rocksdb-plugin-build-path> --preset [Windows/Linux][Debug/Release]`)
     * Presets can be found in [CMakePresets.json](CMakePresets.json)
 4. Build the project (e.g., `cmake --build <rocksdb-plugin-build-path>`)
+
+## Contributing
+
+We are not accepting PRs from anyone outside of the AVEVA organization currently.
+Please create an issue for proposed changes.
