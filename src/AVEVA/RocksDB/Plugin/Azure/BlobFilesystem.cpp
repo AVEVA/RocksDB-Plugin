@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
@@ -349,7 +352,8 @@ namespace AVEVA::RocksDB::Plugin::Azure
     {
         try
         {
-            m_filesystem->Truncate(fname, size);
+            assert(size < static_cast<size_t>(std::numeric_limits<int64_t>::max()));
+            m_filesystem->Truncate(fname, static_cast<int64_t>(size));
             return rocksdb::IOStatus::OK();
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
@@ -422,7 +426,9 @@ namespace AVEVA::RocksDB::Plugin::Azure
     {
         try
         {
-            *s = m_filesystem->GetFileSize(f);
+            const auto fileSize = m_filesystem->GetFileSize(f);
+            assert(fileSize >= 0);
+            *s = static_cast<uint64_t>(fileSize);
             return rocksdb::IOStatus::OK();
         }
         catch (const ::Azure::Core::RequestFailedException& ex)

@@ -1,7 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #pragma once
 #include <boost/intrusive/list.hpp>
 #include <chrono>
 #include <string>
+#include <cstdint>
 namespace AVEVA::RocksDB::Plugin::Core
 {
     class FileCacheEntry : public boost::intrusive::list_base_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>>
@@ -18,18 +22,18 @@ namespace AVEVA::RocksDB::Plugin::Core
     private:
         State m_state;
         std::string m_filePath;
-        std::size_t m_size;
+        int64_t m_size;
         std::chrono::time_point<std::chrono::system_clock> m_lastAccessTime;
 
     public:
-        FileCacheEntry(std::string filePath, std::size_t size);
+        FileCacheEntry(std::string_view filePath, int64_t size);
         void Accessed();
 
-        std::size_t GetSize() const noexcept;
+        int64_t GetSize() const noexcept;
         const std::string& GetFilePath() const noexcept;
         State GetState() const noexcept;
 
-        void SetSize(std::size_t size) noexcept;
+        void SetSize(int64_t size) noexcept;
         void SetState(State state) noexcept;
 
         void unlink();

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #pragma once
 #include <string>
 #include <string_view>
@@ -7,7 +10,9 @@ namespace AVEVA::RocksDB::Plugin::Core
     {
         using is_transparent = void;
         bool operator()(const std::string& lhs, const std::string& rhs) const;
-        bool operator()(std::string_view lhs, std::string rhs) const;
+        bool operator()(std::string_view lhs, const std::string& rhs) const;
+        bool operator()(const std::string& lhs, std::string_view rhs) const;
+        bool operator()(std::string_view lhs, std::string_view rhs) const;
     };
 
     struct StringHash

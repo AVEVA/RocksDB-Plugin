@@ -5,5 +5,6 @@ list(APPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/infrastructure/cmake"
 add_subdirectory(src)
 if (${AVEVA_ROCKSDB_TESTS})
     include(CTest)
+    enable_testing()
     add_subdirectory(tests)
 endif()

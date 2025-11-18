@@ -1,7 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #include "AVEVA/RocksDB/Plugin/Azure/WriteableFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 
 #include <boost/log/trivial.hpp>
+#include <cassert>
+#include <limits>
 namespace AVEVA::RocksDB::Plugin::Azure
 {
     using namespace boost::log::trivial;
@@ -15,8 +20,8 @@ namespace AVEVA::RocksDB::Plugin::Azure
     rocksdb::IOStatus WriteableFile::Append(const rocksdb::Slice& data, const rocksdb::IOOptions&, rocksdb::IODebugContext*)
     {
         try
-        {
-            m_file.Append(data.data(), data.size());
+        {            
+            m_file.Append(std::span(data.data(), data.size()));
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
@@ -112,7 +117,12 @@ namespace AVEVA::RocksDB::Plugin::Azure
     {
         try
         {
-            return m_file.GetFileSize();
+            const auto fileSize = m_file.GetFileSize();
+            
+            assert(fileSize >= 0 && "File size should not be negative");
+            assert(fileSize <= std::numeric_limits<int64_t>::max() && "File size must fit in int64_t");
+            
+            return static_cast<uint64_t>(fileSize);
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {

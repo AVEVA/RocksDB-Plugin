@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #pragma once
 #include <cstdint>
 namespace AVEVA::RocksDB::Plugin::Core
@@ -7,6 +10,6 @@ namespace AVEVA::RocksDB::Plugin::Core
     public:
         virtual ~File() = default;
 
-        virtual uint64_t Read(char* buffer, uint64_t offset, uint64_t length) = 0;
+        virtual int64_t Read(char* buffer, int64_t offset, int64_t length) = 0;
     };
 }

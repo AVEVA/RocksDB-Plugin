@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Core/Util.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
@@ -44,7 +47,6 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::unordered_map<std::string, std::shared_ptr<Core::FileCache>, Core::StringHash, Core::StringEqual> m_fileCaches;
         std::mutex m_lockFilesMutex;
         std::vector<std::shared_ptr<LockFileImpl>> m_locks;
-        std::stop_source m_lockRenewalStopSource;
         std::jthread m_lockRenewalThread;
 
     public:
@@ -107,13 +109,13 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::vector<BlobAttributes> GetChildrenFileAttributes(const std::string& directoryPath);
         [[nodiscard]] bool DeleteFile(const std::string& filePath) const;
         [[nodiscard]] size_t DeleteDir(const std::string& directoryPath) const;
-        void Truncate(const std::string& filePath, size_t size) const;
-        [[nodiscard]] uint64_t GetFileSize(const std::string& filePath) const;
+        void Truncate(const std::string& filePath, int64_t size) const;
+        [[nodiscard]] int64_t GetFileSize(const std::string& filePath) const;
         [[nodiscard]] uint64_t GetFileModificationTime(const std::string& filePath) const;
         size_t GetLeaseClientCount();
         void RenameFile(const std::string& fromFilePath, const std::string& toFilePath) const;
     private:
-        BlobFilesystemImpl(int64_t dataFileInitialSize = 0, int64_t dataFileBufferSize = 0);
+        BlobFilesystemImpl(std::shared_ptr<boost::log::sources::logger_mt>&& logger, int64_t dataFileInitialSize = 0, int64_t dataFileBufferSize = 0);
         [[nodiscard]] const ::Azure::Storage::Blobs::BlobContainerClient& GetContainer(std::string_view prefix) const;
         void RenewLease(std::stop_token stopToken);
     };

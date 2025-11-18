@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LoggerImpl.hpp"
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
@@ -57,7 +60,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             }
         }
 
-        m_file->Append(m_buffer.data(), totalBufferOffset);
+        m_file->Append(std::span(m_buffer.data(), m_buffer.data() + totalBufferOffset));
         va_end(ap);
     }
 

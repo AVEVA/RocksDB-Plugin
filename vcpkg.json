@@ -1,9 +1,17 @@
 {
-  "dependencies": [
-    "azure-identity-cpp",
-    "azure-storage-blobs-cpp",
-    "boost-intrusive",
-    "boost-log",
-    "rocksdb"
-  ]
+    "dependencies": [
+        "azure-identity-cpp",
+        "azure-storage-blobs-cpp",
+        "boost-intrusive",
+        "boost-log",
+        "rocksdb"
+    ],
+    "features": {
+        "testing": {
+            "description": "Dependencies needed for tests.",
+            "dependencies": [
+                "gtest"
+            ]
+        }
+    }
 }
