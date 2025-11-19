@@ -10,7 +10,13 @@ of plugins that exist in this repository and are actively being developed and ma
 
 ### [Azure Page Blob Filesystem](src/AVEVA/RocksDB/Plugin/Azure)
 
-* Uses the [Azure SDK for C++](https://github.com/Azure/azure-sdk-for-cpp) for interacting with page blobs in place of a local fileystem.
+This plugin uses the [Azure SDK for C++](https://github.com/Azure/azure-sdk-for-cpp) for interacting with page blobs
+in place of a local filesystem. This allows a service using RocksDB to be deployed in a "stateless" manner
+(e.g., Kubernetes Pod, Service Fabric stateless service, etc.) and connect to an Azure blob container
+for all of its storage needs. This is similar to using
+[SMB network shares](https://learn.microsoft.com/en-us/windows-server/storage/file-server/file-server-smb-overview)
+or a FUSE filesystem (if deploying on Linux where [FUSE](https://en.wikipedia.org/wiki/Filesystem_in_Userspace) is supported).
+However, a fully integrated solution allows for purpose tuned performance for RocksDB, self-contained deployments (as opposed to having to configure SMB shares or FUSE on the host system), and a whole host of other useful things.
 
 ## Building
 
