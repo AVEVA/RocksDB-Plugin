@@ -1,10 +1,69 @@
 # AVEVA RocksDB Plugins
 
-This project contains AVEVA's plugins for the [RocksDB](https://rocksdb.org/) database. Plugins
-are compiled with RocksDB and can be optionally enabled at runtime. To learn more about RocksDB
+This project contains AVEVA's plugins for the [RocksDB](https://rocksdb.org/) database that bring RocksDB to Azure Cloud infrastructure. This plugin leverages the [Azure SDK for C++](https://github.com/Azure/azure-sdk-for-cpp) and Azure Blob Storage to provide a seamless, cloud-native storage solution for RocksDB applications.
+
+## Why Use AVEVA RocksDB Plugins?
+
+The AVEVA RocksDB Azure Plugin enables modern cloud-native deployments by addressing key challenges faced when running RocksDB in containerized and stateless environments:
+
+- **Stateless Deployment**: Deploy RocksDB applications in containerized environments (Kubernetes Pods, Service Fabric stateless services) without depending on persistent local storage
+- **Cloud-Native Storage**: Utilize Azure Blob Storage as the primary storage backend, eliminating the need for complex storage provisioning and management
+- **High Availability**: Built-in data durability and redundancy through Azure's globally distributed storage infrastructure
+- **Cost Optimization**: Leverage Azure's tiered storage options and pay-per-use model instead of pre-provisioning expensive local SSDs
+- **Performance Optimized**: Purpose-built integration with RocksDB internals provides better performance than generic network filesystem solutions like SMB or FUSE
+- **Self-Contained**: No host-level configuration required - everything needed is packaged within your application
+
+This is particularly valuable for enterprise applications that need the performance of RocksDB with the operational benefits of cloud storage, enabling truly stateless microservices architectures.
+
+## How to Use
+
+### Prerequisites
+
+Before using the AVEVA RocksDB Azure Plugin, ensure you have:
+
+1. **Azure Storage Account**: Create an Azure Storage Account with blob storage enabled
+2. **Authentication**: Configure authentication using one of the following methods:
+   - **Service Principal**: Recommended for production deployments
+   - **Managed Identity**: For Azure-hosted applications
+   - **Connection String**: For development and testing
+3. **RocksDB**: Build RocksDB with plugin support enabled
+
+### Basic Usage
+
+1. **Configure the Plugin**: Initialize the Azure filesystem plugin in your application:
+   ```cpp
+   #include "AVEVA/RocksDB/Plugin/Azure/Plugin.hpp"
+   
+   // Configure Azure credentials and storage settings
+   AVEVA::RocksDB::Plugin::Azure::Configuration config;
+   config.storage_account = "your_storage_account";
+   config.container_name = "your_container";
+   config.credential_type = AVEVA::RocksDB::Plugin::Azure::CredentialType::ServicePrincipal;
+   ```
+
+2. **Open RocksDB with Azure Storage**: 
+   ```cpp
+   rocksdb::Options options;
+   options.env = AVEVA::RocksDB::Plugin::Azure::CreateAzureEnv(config);
+   
+   rocksdb::DB* db;
+   rocksdb::Status status = rocksdb::DB::Open(options, "azure://your-db-path", &db);
+   ```
+
+3. **Use RocksDB Normally**: Once configured, use RocksDB APIs as you normally would - all data will be transparently stored in Azure Blob Storage.
+
+### Configuration Options
+
+- **Storage Tiers**: Configure which Azure storage tier to use (Hot, Cool, Archive)
+- **Caching**: Enable local caching for frequently accessed data
+- **Compression**: Leverage Azure's built-in compression options
+- **Encryption**: Use Azure's encryption at rest features
+
+For detailed configuration examples and advanced usage patterns, see the [Azure Plugin Documentation](src/AVEVA/RocksDB/Plugin/Azure/README.md).
+
+Plugins are compiled with RocksDB and can be optionally enabled at runtime. To learn more about RocksDB
 plugins, please check out RocksDB's documentation on [building plugins](https://github.com/facebook/rocksdb/blob/main/plugin/README.md)
-and the list of [known plugins](https://github.com/facebook/rocksdb/blob/main/PLUGINS.md) that are being developed. Below is the list
-of plugins that exist in this repository and are actively being developed and maintained by AVEVA.
+and the list of [known plugins](https://github.com/facebook/rocksdb/blob/main/PLUGINS.md) that are being developed. Below is the list of plugins that exist in this repository and are actively being developed and maintained by AVEVA.
 
 ## Plugin List
 
