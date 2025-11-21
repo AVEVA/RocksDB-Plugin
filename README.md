@@ -35,7 +35,7 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
 
 1. **Azure Storage Account**: Create an Azure Storage Account with blob storage enabled
 2. **Authentication**: Configure authentication using one of the following methods:
-   - **Service Principal**: See [Micrososft's documentation on accessing Storage Accounts with Service Principals](https://learn.microsoft.com/en-us/azure/databricks/connect/storage/aad-storage-service-principal)
+   - **Service Principal**: See [Microsoft's documentation on accessing Storage Accounts with Service Principals](https://learn.microsoft.com/en-us/azure/databricks/connect/storage/aad-storage-service-principal)
    - **Managed Identity**: See [Microsoft's documentation on accessing Storage Accounts with Managed Identity](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/azure-managed-identities)
    - **Connection String**: For development and testing
 3. **RocksDB**: Build RocksDB with plugin support enabled
@@ -69,7 +69,7 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
         storageCredentials,
         std::nullopt, /* backup credentials */
         std::make_shared<boost::log::sources::logger_mt>(),
-        MBToBytes(2), /* dataFileBufferSize */
+        MbToBytes(2), /* dataFileBufferSize */
         MbToBytes(4), /* dataFileInitialSize */
         std::optional<std::string_view>(cachePath),
         MbToBytes(1024) /* Cache Size */);
