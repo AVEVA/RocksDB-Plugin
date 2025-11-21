@@ -23,31 +23,57 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
 
 1. **Azure Storage Account**: Create an Azure Storage Account with blob storage enabled
 2. **Authentication**: Configure authentication using one of the following methods:
-   - **Service Principal**: Recommended for production deployments
-   - **Managed Identity**: For Azure-hosted applications
+   - **Service Principal**: See [Micrososft's documentation on accessing Storage Accounts with  Service Principals](https://learn.microsoft.com/en-us/azure/databricks/connect/storage/aad-storage-service-principal)
+   - **Managed Identity**: See [Microsoft's documentation on accessing Storage Accounts with Managed Identity](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/azure-managed-identities)
    - **Connection String**: For development and testing
 3. **RocksDB**: Build RocksDB with plugin support enabled
 
 ### Basic Usage
 
-1. **Configure the Plugin**: Initialize the Azure filesystem plugin in your application:
-   ```cpp
-   #include "AVEVA/RocksDB/Plugin/Azure/Plugin.hpp"
-   
-   // Configure Azure credentials and storage settings
-   AVEVA::RocksDB::Plugin::Azure::Configuration config;
-   config.storage_account = "your_storage_account";
-   config.container_name = "your_container";
-   config.credential_type = AVEVA::RocksDB::Plugin::Azure::CredentialType::ServicePrincipal;
-   ```
+1. **Register the Plugin**: Initialize the Azure filesystem plugin in your application:
+    ```cpp
+    #include <AVEVA/RocksDB/Plugin/Azure/Plugin.hpp>
+    #include <AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp>
+    #include <boost/log/sources/logger.hpp>
+    #include <memory>
+
+    using AVEVA::RocksDB::Plugin::Azure::Plugin;
+    using AVEVA::RocksDB::Plugin::Azure::Models::ServicePrincipalStorageInfo;
+
+    rocksdb::Env* env = nullptr;
+    std::shared_ptr<rocksdb::Env> guard = nullptr;
+    ServicePrincipalStorageInfo storageCredentials
+    {
+        "blobContainerPath",
+        "azureAccountURL",
+        "servicePrincipalID",
+        "servicePrincipalSecret",
+        "tenantID"
+    };
+    
+    rocksdb::Status status = Plugin::Register(primaryDbOptions,
+        &env,
+        &guard,
+        storageCredentials,
+        std::nullopt, /* backup credentials */
+        std::make_shared<boost::log::sources::logger_mt>(),
+        MBToBytes(2), /* dataFileBufferSize */
+        MbToBytes(4), /* dataFileInitialSize */
+        std::optional<std::string_view>(cachePath),
+        MbToBytes(1024) /* Cache Size */);
+    ```
 
 2. **Open RocksDB with Azure Storage**: 
-   ```cpp
-   rocksdb::Options options;
-   options.env = AVEVA::RocksDB::Plugin::Azure::CreateAzureEnv(config);
+    ```cpp
+    using AVEVA::RocksDB::Plugin::Azure::Impl::StorageAccount;
+
+    rocksdb::Options options;
+    options.env = env; /* From step 1. */
    
-   rocksdb::DB* db;
-   rocksdb::Status status = rocksdb::DB::Open(options, "azure://your-db-path", &db);
+    std::unique_ptr<rocksdb::DB> db;
+    rocksdb::Status status = rocksdb::DB::Open(options,
+        StorageAccount::UniquePrefix("azureAccountURL", "blobContainerName"),
+        &db);
    ```
 
 3. **Use RocksDB Normally**: Once configured, use RocksDB APIs as you normally would - all data will be transparently stored in Azure Blob Storage.
