@@ -13,11 +13,23 @@ The AVEVA RocksDB Azure Plugin enables modern cloud-native deployments by addres
 - **Performance Optimized**: Purpose-built integration with RocksDB internals provides better performance than generic network filesystem solutions like SMB or FUSE
 - **Self-Contained**: No host-level configuration required - everything needed is packaged within your application
 
-This is particularly valuable for enterprise applications that need the performance of RocksDB with the operational benefits of cloud storage, enabling truly stateless microservices architectures.
+This is particularly valuable for enterprise applications that need the performance of RocksDB with the operational benefits of cloud storage, enabling stateless microservices architectures.
 
-## How to Use
+## Plugin List
 
-### Prerequisites
+### [Azure Page Blob Filesystem](src/AVEVA/RocksDB/Plugin/Azure)
+
+This plugin uses the [Azure SDK for C++](https://github.com/Azure/azure-sdk-for-cpp) for interacting with page blobs
+in place of a local filesystem. This allows a service using RocksDB to be deployed in a "stateless" manner
+(e.g., Kubernetes Pod, Service Fabric stateless service, etc.) and connect to an Azure blob container
+for all of its storage needs. This is similar to using
+[SMB network shares](https://learn.microsoft.com/en-us/windows-server/storage/file-server/file-server-smb-overview)
+or a FUSE filesystem (if deploying on Linux where [FUSE](https://en.wikipedia.org/wiki/Filesystem_in_Userspace) is supported).
+However, a fully integrated solution allows for purpose tuned performance for RocksDB, self-contained deployments (as opposed to having to configure SMB shares or FUSE on the host system), and a whole host of other useful things.
+
+#### How to Use
+
+##### Prerequisites
 
 Before using the AVEVA RocksDB Azure Plugin, ensure you have:
 
@@ -28,7 +40,7 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
    - **Connection String**: For development and testing
 3. **RocksDB**: Build RocksDB with plugin support enabled
 
-### Basic Usage
+###### Basic Usage
 
 1. **Register the Plugin**: Initialize the Azure filesystem plugin in your application:
     ```cpp
@@ -78,30 +90,15 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
 
 3. **Use RocksDB Normally**: Once configured, use RocksDB APIs as you normally would - all data will be transparently stored in Azure Blob Storage.
 
-### Configuration Options
+###### Configuration Options
 
-- **Storage Tiers**: Configure which Azure storage tier to use (Hot, Cool, Archive)
 - **Caching**: Enable local caching for frequently accessed data
-- **Compression**: Leverage Azure's built-in compression options
-- **Encryption**: Use Azure's encryption at rest features
 
 For detailed configuration examples and advanced usage patterns, see the [Azure Plugin Documentation](src/AVEVA/RocksDB/Plugin/Azure/README.md).
 
 Plugins are compiled with RocksDB and can be optionally enabled at runtime. To learn more about RocksDB
 plugins, please check out RocksDB's documentation on [building plugins](https://github.com/facebook/rocksdb/blob/main/plugin/README.md)
 and the list of [known plugins](https://github.com/facebook/rocksdb/blob/main/PLUGINS.md) that are being developed. Below is the list of plugins that exist in this repository and are actively being developed and maintained by AVEVA.
-
-## Plugin List
-
-### [Azure Page Blob Filesystem](src/AVEVA/RocksDB/Plugin/Azure)
-
-This plugin uses the [Azure SDK for C++](https://github.com/Azure/azure-sdk-for-cpp) for interacting with page blobs
-in place of a local filesystem. This allows a service using RocksDB to be deployed in a "stateless" manner
-(e.g., Kubernetes Pod, Service Fabric stateless service, etc.) and connect to an Azure blob container
-for all of its storage needs. This is similar to using
-[SMB network shares](https://learn.microsoft.com/en-us/windows-server/storage/file-server/file-server-smb-overview)
-or a FUSE filesystem (if deploying on Linux where [FUSE](https://en.wikipedia.org/wiki/Filesystem_in_Userspace) is supported).
-However, a fully integrated solution allows for purpose tuned performance for RocksDB, self-contained deployments (as opposed to having to configure SMB shares or FUSE on the host system), and a whole host of other useful things.
 
 ## Building
 
