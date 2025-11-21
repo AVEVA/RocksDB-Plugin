@@ -43,7 +43,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
                             maxCacheSize
                         );
 
-                    *f = std::unique_ptr<rocksdb::FileSystem>(new BlobFilesystem(rocksdb::FileSystem::Default(), std::move(impl), std::move(logger)));
+                    *f = std::unique_ptr<rocksdb::FileSystem>(new BlobFilesystem(rocksdb::FileSystem::Default(), std::move(impl), logger));
                     return f->get();
                 });
         }
