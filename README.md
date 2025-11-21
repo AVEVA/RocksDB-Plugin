@@ -2,19 +2,6 @@
 
 This project contains AVEVA's plugins for the [RocksDB](https://rocksdb.org/) database that bring RocksDB to Azure Cloud infrastructure. This plugin leverages the [Azure SDK for C++](https://github.com/Azure/azure-sdk-for-cpp) and Azure Blob Storage to provide a seamless, cloud-native storage solution for RocksDB applications.
 
-## Why Use AVEVA RocksDB Plugins?
-
-The AVEVA RocksDB Azure Plugin enables modern cloud-native deployments by addressing key challenges faced when running RocksDB in containerized and stateless environments:
-
-- **Stateless Deployment**: Deploy RocksDB applications in containerized environments (Kubernetes Pods, Service Fabric stateless services) without depending on persistent local storage
-- **Cloud-Native Storage**: Utilize Azure Blob Storage as the primary storage backend, eliminating the need for complex storage provisioning and management
-- **High Availability**: Built-in data durability and redundancy through Azure's globally distributed storage infrastructure
-- **Cost Optimization**: Leverage Azure's tiered storage options and pay-per-use model instead of pre-provisioning expensive local SSDs
-- **Performance Optimized**: Purpose-built integration with RocksDB internals provides better performance than generic network filesystem solutions like SMB or FUSE
-- **Self-Contained**: No host-level configuration required - everything needed is packaged within your application
-
-This is particularly valuable for enterprise applications that need the performance of RocksDB with the operational benefits of cloud storage, enabling stateless microservices architectures.
-
 ## Plugin List
 
 ### [Azure Page Blob Filesystem](src/AVEVA/RocksDB/Plugin/Azure)
@@ -26,6 +13,19 @@ for all of its storage needs. This is similar to using
 [SMB network shares](https://learn.microsoft.com/en-us/windows-server/storage/file-server/file-server-smb-overview)
 or a FUSE filesystem (if deploying on Linux where [FUSE](https://en.wikipedia.org/wiki/Filesystem_in_Userspace) is supported).
 However, a fully integrated solution allows for purpose tuned performance for RocksDB, self-contained deployments (as opposed to having to configure SMB shares or FUSE on the host system), and a whole host of other useful things.
+
+#### Why Use The Blob Storage Filesystem?
+
+Using a blob container instead of a local filesystem enables modern cloud-native deployments by addressing key challenges faced when running RocksDB in containerized and stateless environments:
+
+- **Stateless Deployment**: Deploy RocksDB applications in containerized environments (Kubernetes Pods, Service Fabric stateless services) without depending on persistent local storage
+- **Cloud-Native Storage**: Utilize Azure Blob Storage as the primary storage backend, eliminating the need for complex storage provisioning and management
+- **High Availability**: Built-in data durability and redundancy through Azure's globally distributed storage infrastructure
+- **Cost Optimization**: Leverage Azure's tiered storage options and pay-per-use model instead of pre-provisioning expensive local SSDs
+- **Performance Optimized**: Purpose-built integration with RocksDB internals provides better performance than generic network filesystem solutions like SMB or FUSE
+- **Self-Contained**: No host-level configuration required - everything needed is packaged within your application
+
+This is particularly valuable for enterprise applications that need the performance of RocksDB with the operational benefits of cloud storage, enabling stateless microservices architectures.
 
 #### How to Use
 
