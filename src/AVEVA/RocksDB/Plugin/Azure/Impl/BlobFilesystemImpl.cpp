@@ -38,8 +38,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 std::make_shared<Core::FileCache>(*cachePath,
                     maxCacheSize,
                     std::make_shared<AzureContainerClient>(containerClient),
-                    std::make_shared<Core::LocalFilesystem>(logger),
-                    logger));
+                    std::make_shared<Core::LocalFilesystem>(m_logger),
+                    m_logger));
         }
 
         m_clients.emplace(uniquePrefix, ServiceContainer{ std::move(serviceClient), std::move(containerClient) });
@@ -72,8 +72,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 std::make_shared<Core::FileCache>(*cachePath,
                     maxCacheSize,
                     std::make_shared<AzureContainerClient>(containerClient),
-                    std::make_shared<Core::LocalFilesystem>(logger),
-                    logger));
+                    std::make_shared<Core::LocalFilesystem>(m_logger),
+                    m_logger));
         }
 
         m_clients.emplace(uniquePrefix, ServiceContainer{ std::move(serviceClient), std::move(containerClient) });
@@ -106,8 +106,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 std::make_shared<Core::FileCache>(*cachePath,
                     maxCacheSize,
                     std::make_shared<AzureContainerClient>(containerClient),
-                    std::make_shared<Core::LocalFilesystem>(logger),
-                    logger));
+                    std::make_shared<Core::LocalFilesystem>(m_logger),
+                    m_logger));
         }
 
         m_clients.emplace(uniquePrefix, ServiceContainer{ std::move(serviceClient), std::move(containerClient) });
@@ -131,8 +131,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 std::make_shared<Core::FileCache>(*cachePath,
                     maxCacheSize,
                     std::make_shared<AzureContainerClient>(containerClient),
-                    std::make_shared<Core::LocalFilesystem>(logger),
-                    logger));
+                    std::make_shared<Core::LocalFilesystem>(m_logger),
+                    m_logger));
         }
 
         m_clients.emplace(uniquePrefix, ServiceContainer{ std::move(serviceClient), std::move(containerClient) });
@@ -168,8 +168,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 std::make_shared<Core::FileCache>(*cachePath,
                     maxCacheSize,
                     std::make_shared<AzureContainerClient>(containerClient),
-                    std::make_shared<Core::LocalFilesystem>(logger),
-                    logger));
+                    std::make_shared<Core::LocalFilesystem>(m_logger),
+                    m_logger));
         }
 
         m_clients.emplace(uniquePrefix, ServiceContainer{ std::move(serviceClient), std::move(containerClient) });
