@@ -568,17 +568,34 @@ namespace AVEVA::RocksDB::Plugin::Azure
         const rocksdb::IOOptions&,
         rocksdb::IODebugContext*)
     {
-        auto lockFile = dynamic_cast<Plugin::Azure::LockFile*>(l);
-        if (lockFile != nullptr)
+        try
         {
-            lockFile->Unlock();
-            delete lockFile;
-            return rocksdb::IOStatus::OK();
+            auto lockFile = dynamic_cast<Plugin::Azure::LockFile*>(l);
+            if (lockFile != nullptr)
+            {
+                lockFile->Unlock();
+                delete lockFile;
+                return rocksdb::IOStatus::OK();
+            }
+            else
+            {
+                BOOST_LOG_SEV(*m_logger, error) << "Unable to case file lock to Azure::LockFile";
+                return rocksdb::IOStatus::InvalidArgument();
+            }
         }
-        else
+        catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            BOOST_LOG_SEV(*m_logger, error) << "Unable to case file lock to Azure::LockFile";
-            return rocksdb::IOStatus::InvalidArgument();
+            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        }
+        catch (const std::exception& ex)
+        {
+            BOOST_LOG_SEV(*m_logger, error) << ex.what();
+            return rocksdb::IOStatus::IOError(ex.what());
+        }
+        catch (...)
+        {
+            return rocksdb::IOStatus::IOError("Unknown error when calling UnlockFile");
         }
     }
 
