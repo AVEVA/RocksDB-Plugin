@@ -27,7 +27,8 @@ target_sources(aveva-rocksdb-plugin-core
 install(TARGETS aveva-rocksdb-plugin-core
     EXPORT
 )
-find_package(Boost CONFIG REQUIRED COMPONENTS log intrusive)
+find_package(boost_log CONFIG REQUIRED)
+find_package(boost_intrusive CONFIG REQUIRED)
 find_package(aveva-install-library CONFIG REQUIRED)
 target_link_libraries(aveva-rocksdb-plugin-core PUBLIC
     Boost::log

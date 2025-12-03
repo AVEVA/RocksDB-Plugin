@@ -3,7 +3,8 @@ set(AVEVA_ROCKSDB_PLUGIN_CORE_VERSION @PROJECT_VERSION@)
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
-find_dependency(Boost REQUIRED COMPONENTS log)
+find_dependency(boost_log REQUIRED)
+find_dependency(boost_intrusive REQUIRED)
 
 include(${CMAKE_CURRENT_LIST_DIR}/aveva-rocksdb-plugin-core-targets.cmake)
 

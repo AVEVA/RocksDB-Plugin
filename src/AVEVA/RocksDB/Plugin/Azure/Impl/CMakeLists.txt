@@ -39,7 +39,7 @@ install(TARGETS aveva-rocksdb-plugin-azure-impl
 )
 find_package(azure-identity-cpp CONFIG REQUIRED)
 find_package(azure-storage-blobs-cpp CONFIG REQUIRED)
-find_package(Boost CONFIG REQUIRED COMPONENTS log)
+find_package(boost_log CONFIG REQUIRED)
 find_package(aveva-install-library CONFIG REQUIRED)
 target_link_libraries(aveva-rocksdb-plugin-azure-impl PUBLIC
     aveva-rocksdb-plugin-core
