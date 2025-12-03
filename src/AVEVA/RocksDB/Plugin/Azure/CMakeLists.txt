@@ -33,7 +33,7 @@ find_package(azure-storage-blobs-cpp CONFIG REQUIRED)
 find_package(RocksDB CONFIG REQUIRED)
 find_package(aveva-install-library CONFIG REQUIRED)
 target_link_libraries(aveva-rocksdb-plugin-azure PUBLIC
-    aveva-rocksdb-plugin-core
+    aveva::rocksdb-plugin-core
     aveva::rocksdb-plugin-azure-impl
     Azure::azure-storage-blobs
     Azure::azure-identity
