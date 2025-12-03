@@ -5,7 +5,7 @@ set(AVEVA_ROCKSDB_PLUGIN_AZURE_IMPL_VERSION @PROJECT_VERSION@)
 include(CMakeFindDependencyMacro)
 find_dependency(azure-identity-cpp REQUIRED)
 find_dependency(azure-storage-blobs-cpp REQUIRED)
-find_dependency(boost-log REQUIRED)
+find_dependency(boost_log REQUIRED)
 
 include(${CMAKE_CURRENT_LIST_DIR}/aveva-rocksdb-plugin-azure-impl-targets.cmake)
 
