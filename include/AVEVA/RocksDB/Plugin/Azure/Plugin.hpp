@@ -6,7 +6,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ServicePrincipalStorageInfo.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ChainedCredentialInfo.hpp"
 
-#include <boost/log/sources/logger.hpp>
+#include <boost/log/trivial.hpp>
 #include <rocksdb/env.h>
 
 #include <memory>
@@ -21,7 +21,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
             std::shared_ptr<rocksdb::Env>* guard,
             Models::ServicePrincipalStorageInfo primary,
             std::optional<Models::ServicePrincipalStorageInfo> backup,
-            std::shared_ptr<boost::log::sources::logger_mt> logger,
+            std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
             int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
             std::optional<std::string_view> cachePath = {},
@@ -31,7 +31,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
             std::shared_ptr<rocksdb::Env>* guard,
             Models::ChainedCredentialInfo primary,
             std::optional<Models::ChainedCredentialInfo> backup,
-            std::shared_ptr<boost::log::sources::logger_mt> logger,
+            std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
             int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
             std::optional<std::string_view> cachePath = {},

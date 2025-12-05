@@ -67,7 +67,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl::Testing
 
         m_blobName = GenerateRandomBlobName(GetBlobNamePrefix());
         m_containerPrefix = StorageAccount::UniquePrefix(m_credentials->GetStorageAccountUrl(), m_credentials->GetDbName());
-        m_logger = std::make_shared<boost::log::sources::logger_mt>();
+        m_logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
 
         CreateContainerClient();
     }

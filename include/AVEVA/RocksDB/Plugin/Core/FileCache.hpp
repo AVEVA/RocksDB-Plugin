@@ -8,7 +8,7 @@
 #include "AVEVA/RocksDB/Plugin/Core/Util.hpp"
 
 #include <boost/intrusive/list.hpp>
-#include <boost/log/sources/logger.hpp>
+#include <boost/log/trivial.hpp>
 
 #include <cstdint>
 #include <filesystem>
@@ -28,7 +28,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         int64_t m_maxSize;
         std::shared_ptr<ContainerClient> m_containerClient;
         std::shared_ptr<Filesystem> m_filesystem;
-        std::shared_ptr<boost::log::sources::logger_mt> m_logger;
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
 
         std::mutex m_mutex;
         std::stop_source m_stopSource;
@@ -42,7 +42,7 @@ namespace AVEVA::RocksDB::Plugin::Core
             int64_t maxCacheSize,
             std::shared_ptr<ContainerClient> containerClient,
             std::shared_ptr<Filesystem> filesystem,
-            std::shared_ptr<boost::log::sources::logger_mt> logger);
+            std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
         ~FileCache();
         FileCache(const FileCache&) = delete;
         FileCache& operator=(const FileCache&) = delete;

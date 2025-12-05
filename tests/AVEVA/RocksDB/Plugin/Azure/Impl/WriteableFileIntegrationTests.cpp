@@ -11,7 +11,7 @@
 #include <azure/storage/blobs.hpp>
 #include <azure/identity.hpp>
 #include <azure/core/http/http.hpp>
-#include <boost/log/sources/logger.hpp>
+#include <boost/log/trivial.hpp>
 
 #include <random>
 #include <string>

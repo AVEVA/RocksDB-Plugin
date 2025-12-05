@@ -10,7 +10,8 @@
 #include <gtest/gtest.h>
 
 #include <unordered_set>
-using boost::log::sources::logger_mt;
+using boost::log::trivial::severity_level;
+using boost::log::sources::severity_logger_mt;
 using ::testing::_;
 using ::testing::Invoke;
 using ::testing::Return;
@@ -26,7 +27,7 @@ protected:
     static const constexpr std::string_view m_folderName = "tmp";
     std::shared_ptr<FilesystemMock> m_filesystem;
     std::shared_ptr<ContainerClientMock> m_containerClient;
-    std::shared_ptr<logger_mt> m_logger;
+    std::shared_ptr<severity_logger_mt<severity_level>> m_logger;
     std::vector<std::filesystem::path> m_removedFiles;
     FileCache m_cache;
 
@@ -34,7 +35,7 @@ public:
     FileCacheTests()
         : m_filesystem(std::make_shared<FilesystemMock>()),
         m_containerClient(std::make_shared<ContainerClientMock>()),
-        m_logger(std::make_shared<logger_mt>()),
+        m_logger(std::make_shared<severity_logger_mt<severity_level>>()),
         m_cache(m_folderName, static_cast<size_t>(1073741824), m_containerClient, m_filesystem, m_logger)
     {
         ON_CALL(*m_filesystem, DeleteFile(_))

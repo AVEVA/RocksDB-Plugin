@@ -9,7 +9,7 @@
 #include <azure/storage/blobs.hpp>
 #include <azure/identity.hpp>
 #include <azure/core/http/http.hpp>
-#include <boost/log/sources/logger.hpp>
+#include <boost/log/trivial.hpp>
 
 #include <cstdlib>
 #include <random>
@@ -47,7 +47,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl::Testing
         std::unique_ptr<::Azure::Storage::Blobs::BlobContainerClient> m_containerClient;
         std::string m_blobName;
         std::string m_containerPrefix;
-        std::shared_ptr<boost::log::sources::logger_mt> m_logger;
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
 
         /// <summary>
         /// Override this to provide a custom blob name prefix.

@@ -5,7 +5,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/LockFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
 
-#include <boost/log/sources/logger.hpp>
+#include <boost/log/trivial.hpp>
 #include <boost/intrusive/list.hpp>
 
 #include <rocksdb/file_system.h>
@@ -18,13 +18,13 @@ namespace AVEVA::RocksDB::Plugin::Azure
     class BlobFilesystem final : public rocksdb::FileSystemWrapper
     {
         std::unique_ptr<Impl::BlobFilesystemImpl> m_filesystem;
-        std::shared_ptr<boost::log::sources::logger_mt> m_logger;
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
         boost::intrusive::list<Azure::LockFile, boost::intrusive::constant_time_size<false>> m_lockFiles;
 
     public:
         BlobFilesystem(std::shared_ptr<rocksdb::FileSystem> rocksdbFs,
             std::unique_ptr<Impl::BlobFilesystemImpl> filesystem,
-            std::shared_ptr<boost::log::sources::logger_mt> logger);
+            std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
         virtual ~BlobFilesystem() override;
         BlobFilesystem(const BlobFilesystem&) = delete;
         BlobFilesystem& operator=(const BlobFilesystem&) = delete;

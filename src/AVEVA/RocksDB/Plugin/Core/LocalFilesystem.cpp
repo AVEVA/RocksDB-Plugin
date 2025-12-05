@@ -7,7 +7,7 @@
 namespace AVEVA::RocksDB::Plugin::Core
 {
     using namespace boost::log::trivial;
-    LocalFilesystem::LocalFilesystem(std::shared_ptr<boost::log::sources::logger_mt> logger)
+    LocalFilesystem::LocalFilesystem(std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
         : m_logger(std::move(logger))
     {
     }
