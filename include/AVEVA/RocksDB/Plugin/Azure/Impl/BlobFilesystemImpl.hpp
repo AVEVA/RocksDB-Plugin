@@ -16,7 +16,7 @@
 
 #include <azure/storage/blobs/blob_service_client.hpp>
 #include <azure/storage/blobs/blob_container_client.hpp>
-#include <boost/log/sources/logger.hpp>
+#include <boost/log/trivial.hpp>
 
 #include <cstdint>
 #include <memory>
@@ -40,7 +40,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             ::Azure::Storage::Blobs::BlobContainerClient ContainerClient;
         };
 
-        std::shared_ptr<boost::log::sources::logger_mt> m_logger;
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
         int64_t m_dataFileInitialSize;
         int64_t m_dataFileBufferSize;
         std::unordered_map<std::string, ServiceContainer, Core::StringHash, Core::StringEqual> m_clients;
@@ -55,7 +55,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             const std::string& storageAccountKey,
             int64_t dataFileInitialSize,
             int64_t dataFileBufferSize,
-            std::shared_ptr<boost::log::sources::logger_mt> logger,
+            std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             std::optional<std::string_view> cachePath = {},
             size_t maxCacheSize = Configuration::MaxCacheSize);
         BlobFilesystemImpl(const std::string& name,
@@ -65,7 +65,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             const std::string& tenantId,
             int64_t dataFileInitialSize,
             int64_t dataFileBufferSize,
-            std::shared_ptr<boost::log::sources::logger_mt> logger,
+            std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             std::optional<std::string_view> cachePath = {},
             size_t maxCacheSize = Configuration::MaxCacheSize);
         BlobFilesystemImpl(const std::string& name,
@@ -76,21 +76,21 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             const std::string& accessToken,
             int64_t dataFileInitialSize,
             int64_t dataFileBufferSize,
-            std::shared_ptr<boost::log::sources::logger_mt> logger,
+            std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             std::optional<std::string_view> cachePath = {},
             size_t maxCacheSize = Configuration::MaxCacheSize);
         BlobFilesystemImpl(Models::ChainedCredentialInfo primary,
             std::optional<Models::ChainedCredentialInfo> backup,
             int64_t dataFileInitialSize,
             int64_t dataFileBufferSize,
-            std::shared_ptr<boost::log::sources::logger_mt> logger,
+            std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             std::optional<std::string_view> cachePath = {},
             size_t maxCacheSize = Configuration::MaxCacheSize);
         BlobFilesystemImpl(Models::ServicePrincipalStorageInfo primary,
             std::optional<Models::ServicePrincipalStorageInfo> backup,
             int64_t dataFileInitialSize,
             int64_t dataFileBufferSize,
-            std::shared_ptr<boost::log::sources::logger_mt> logger,
+            std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             std::optional<std::string_view> cachePath = {},
             size_t maxCacheSize = Configuration::MaxCacheSize);
 
@@ -115,7 +115,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         size_t GetLeaseClientCount();
         void RenameFile(const std::string& fromFilePath, const std::string& toFilePath) const;
     private:
-        BlobFilesystemImpl(std::shared_ptr<boost::log::sources::logger_mt>&& logger, int64_t dataFileInitialSize = 0, int64_t dataFileBufferSize = 0);
+        BlobFilesystemImpl(std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>&& logger, int64_t dataFileInitialSize = 0, int64_t dataFileBufferSize = 0);
         [[nodiscard]] const ::Azure::Storage::Blobs::BlobContainerClient& GetContainer(std::string_view prefix) const;
         void RenewLease(std::stop_token stopToken);
     };

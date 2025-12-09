@@ -11,7 +11,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         int64_t maxCacheSize,
         std::shared_ptr<ContainerClient> containerClient,
         std::shared_ptr<Filesystem> filesystem,
-        std::shared_ptr<boost::log::sources::logger_mt> logger)
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
         : m_cachePath(std::move(cachePath)),
         m_maxSize(maxCacheSize),
         m_containerClient(std::move(containerClient)),

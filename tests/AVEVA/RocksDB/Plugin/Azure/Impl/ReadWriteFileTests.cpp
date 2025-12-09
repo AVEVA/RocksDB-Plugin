@@ -102,7 +102,7 @@ class ReadWriteFileImplTests : public ::testing::Test
 protected:
     std::shared_ptr<BlobClientMock> m_mockBlobClient;
     std::shared_ptr<BlobSimulator> m_blobSim;
-    std::shared_ptr<boost::log::sources::logger_mt> m_logger;
+    std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
     std::string m_testFileName = "test.blob";
 
     void TearDown() override
@@ -114,7 +114,7 @@ protected:
     {
         m_mockBlobClient = std::make_shared<BlobClientMock>();
         m_blobSim = std::make_shared<BlobSimulator>();
-        m_logger = std::make_shared<boost::log::sources::logger_mt>();
+        m_logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
 
         // Setup default mock behavior using the simulator
         ON_CALL(*m_mockBlobClient, GetSize())

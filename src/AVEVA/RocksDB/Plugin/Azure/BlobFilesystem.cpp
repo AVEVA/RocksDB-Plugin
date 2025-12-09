@@ -14,7 +14,7 @@
 namespace AVEVA::RocksDB::Plugin::Azure
 {
     using namespace boost::log::trivial;
-    BlobFilesystem::BlobFilesystem(std::shared_ptr<rocksdb::FileSystem> rocksdbFs, std::unique_ptr<Impl::BlobFilesystemImpl> filesystem, std::shared_ptr<boost::log::sources::logger_mt> logger)
+    BlobFilesystem::BlobFilesystem(std::shared_ptr<rocksdb::FileSystem> rocksdbFs, std::unique_ptr<Impl::BlobFilesystemImpl> filesystem, std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
         : rocksdb::FileSystemWrapper(std::move(rocksdbFs)),
         m_filesystem(std::move(filesystem)),
         m_logger(std::move(logger))

@@ -6,7 +6,7 @@
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 
 #include <azure/storage/blobs/page_blob_client.hpp>
-#include <boost/log/sources/logger.hpp>
+#include <boost/log/trivial.hpp>
 
 #include <cstdint>
 #include <string>
@@ -20,7 +20,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         int64_t m_bufferSize;
         std::shared_ptr<Core::BlobClient> m_blobClient;
         std::shared_ptr<Core::FileCache> m_fileCache;
-        std::shared_ptr<boost::log::sources::logger_mt> m_logger;
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
 
         int64_t m_lastPageOffset;
         int64_t m_size;
@@ -35,7 +35,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         WriteableFileImpl(std::string_view name,
             std::shared_ptr<Core::BlobClient> blobClient,
             std::shared_ptr<Core::FileCache> fileCache,
-            std::shared_ptr<boost::log::sources::logger_mt> logger,
+            std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             int64_t bufferSize = Configuration::PageBlob::DefaultBufferSize);
         ~WriteableFileImpl();
         WriteableFileImpl(const WriteableFileImpl&) = delete;

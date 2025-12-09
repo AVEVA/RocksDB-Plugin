@@ -11,7 +11,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
 {
     using namespace boost::log::trivial;
 
-    WriteableFile::WriteableFile(Impl::WriteableFileImpl file, std::shared_ptr<boost::log::sources::logger_mt> logger)
+    WriteableFile::WriteableFile(Impl::WriteableFileImpl file, std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
         : m_file(std::move(file)),
         m_logger(std::move(logger))
     {

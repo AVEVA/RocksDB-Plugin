@@ -18,7 +18,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         const std::string& storageAccountKey,
         int64_t dataFileInitialSize,
         int64_t dataFileBufferSize,
-        std::shared_ptr<boost::log::sources::logger_mt> logger,
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::optional<std::string_view> cachePath,
         size_t maxCacheSize)
         : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize)
@@ -52,7 +52,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         const std::string& tenantId,
         int64_t dataFileInitialSize,
         int64_t dataFileBufferSize,
-        std::shared_ptr<boost::log::sources::logger_mt> logger,
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::optional<std::string_view> cachePath,
         size_t maxCacheSize)
         : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize)
@@ -87,7 +87,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         const std::string& accessToken,
         int64_t dataFileInitialSize,
         int64_t dataFileBufferSize,
-        std::shared_ptr<boost::log::sources::logger_mt> logger,
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::optional<std::string_view> cachePath, size_t maxCacheSize)
         : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize)
     {
@@ -117,7 +117,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::optional<Models::ChainedCredentialInfo> backup,
         int64_t dataFileInitialSize,
         int64_t dataFileBufferSize,
-        std::shared_ptr<boost::log::sources::logger_mt> logger,
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::optional<std::string_view> cachePath,
         size_t maxCacheSize)
         : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize)
@@ -154,7 +154,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::optional<Models::ServicePrincipalStorageInfo> backup,
         int64_t dataFileInitialSize,
         int64_t dataFileBufferSize,
-        std::shared_ptr<boost::log::sources::logger_mt> logger,
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::optional<std::string_view> cachePath,
         size_t maxCacheSize)
         : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize)
@@ -682,7 +682,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         srcClient.DeleteIfExists();
     }
 
-    BlobFilesystemImpl::BlobFilesystemImpl(std::shared_ptr<boost::log::sources::logger_mt>&& logger, int64_t dataFileInitialSize, int64_t dataFileBufferSize)
+    BlobFilesystemImpl::BlobFilesystemImpl(std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>&& logger, int64_t dataFileInitialSize, int64_t dataFileBufferSize)
         : m_logger(std::move(logger)),
         m_dataFileInitialSize(dataFileInitialSize),
         m_dataFileBufferSize(dataFileBufferSize),

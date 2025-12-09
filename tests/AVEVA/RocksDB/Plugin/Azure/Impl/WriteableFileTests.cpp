@@ -10,14 +10,15 @@
 using AVEVA::RocksDB::Plugin::Azure::Impl::WriteableFileImpl;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Configuration;
 using AVEVA::RocksDB::Plugin::Core::Mocks::BlobClientMock;
-using boost::log::sources::logger_mt;
+using boost::log::sources::severity_logger_mt;
+using boost::log::trivial::severity_level;
 using ::testing::_;
 
 class WriteableFileTests : public ::testing::Test
 {
 protected:
     std::shared_ptr<BlobClientMock> m_blobClient;
-    std::shared_ptr<logger_mt> m_logger;
+    std::shared_ptr<severity_logger_mt<severity_level>> m_logger;
 
     void TearDown() override
     {
@@ -27,7 +28,7 @@ protected:
     void SetUp() override
     {
         m_blobClient = std::make_shared<BlobClientMock>();
-        m_logger = std::make_shared<logger_mt>();
+        m_logger = std::make_shared<severity_logger_mt<severity_level>>();
     }
 };
 
@@ -627,8 +628,8 @@ TEST_F(WriteableFileTests, MoveAssignment_TransfersState_Correctly)
     // Arrange
     const auto blobClient1 = std::make_shared<BlobClientMock>();
     const auto blobClient2 = std::make_shared<BlobClientMock>();
-    const auto logger1 = std::make_shared<logger_mt>();
-    const auto logger2 = std::make_shared<logger_mt>();
+    const auto logger1 = std::make_shared<severity_logger_mt<severity_level>>();
+    const auto logger2 = std::make_shared<severity_logger_mt<severity_level>>();
 
     EXPECT_CALL(*blobClient1, GetSize())
         .WillRepeatedly(::testing::Return(0));

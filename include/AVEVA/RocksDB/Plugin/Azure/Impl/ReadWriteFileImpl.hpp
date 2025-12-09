@@ -7,7 +7,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BufferChunkInfo.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 
-#include <boost/log/sources/logger.hpp>
+#include <boost/log/trivial.hpp>
 
 #include <cstdint>
 #include <string_view>
@@ -21,7 +21,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::string m_name;
         std::shared_ptr<Core::BlobClient> m_blobClient;
         std::shared_ptr<Core::FileCache> m_fileCache;
-        std::shared_ptr<boost::log::sources::logger_mt> m_logger;
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
 
         int64_t m_size;
         int64_t m_syncSize;
@@ -34,7 +34,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         ReadWriteFileImpl(std::string_view name,
             std::shared_ptr<Core::BlobClient> blobClient,
             std::shared_ptr<Core::FileCache> fileCache,
-            std::shared_ptr<boost::log::sources::logger_mt> logger);
+            std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
         ~ReadWriteFileImpl();
         ReadWriteFileImpl(const ReadWriteFileImpl&) = delete;
         ReadWriteFileImpl& operator=(const ReadWriteFileImpl&) = delete;

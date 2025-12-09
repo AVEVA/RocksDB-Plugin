@@ -13,7 +13,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     ReadWriteFileImpl::ReadWriteFileImpl(std::string_view name,
         std::shared_ptr<Core::BlobClient> blobClient,
         std::shared_ptr<Core::FileCache> fileCache,
-        std::shared_ptr<boost::log::sources::logger_mt> logger)
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
         : m_name(name),
         m_blobClient(std::move(blobClient)),
         m_fileCache(std::move(fileCache)),
