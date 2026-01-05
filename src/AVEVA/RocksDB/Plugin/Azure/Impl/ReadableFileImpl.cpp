@@ -32,6 +32,20 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 return static_cast<int64_t>(*bytesRead);
             }
         }
+        
+        if (m_offset >= m_size)
+        {
+            if (IsLogFile(GetFileType(m_name)))
+            {
+                m_size = GetFileSize(*m_pbClient);
+            }
+
+            if (m_offset >= m_size)
+            {
+                m_offset = m_size;
+                return 0;
+            }
+        }
 
         int64_t bytesRead = 0;
         assert(m_size >= m_offset && "m_size needs to be bigger than m_offset or else we will overflow");
