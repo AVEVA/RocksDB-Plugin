@@ -20,7 +20,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         int64_t dataFileBufferSize,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::optional<std::string_view> cachePath,
-        size_t maxCacheSize)
+        size_t maxCacheSize,
+        GraphDb::Storage::OpenMode openMode)
         : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize)
     {
         ::Azure::Storage::Blobs::BlobServiceClient serviceClient
@@ -43,6 +44,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         }
 
         m_clients.emplace(uniquePrefix, ServiceContainer{ std::move(serviceClient), std::move(containerClient) });
+        m_openMode = openMode;
     }
 
     BlobFilesystemImpl::BlobFilesystemImpl(const std::string& name,
@@ -54,7 +56,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         int64_t dataFileBufferSize,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::optional<std::string_view> cachePath,
-        size_t maxCacheSize)
+        size_t maxCacheSize,
+        GraphDb::Storage::OpenMode openMode)
         : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize)
     {
         ::Azure::Storage::Blobs::BlobServiceClient serviceClient
@@ -77,6 +80,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         }
 
         m_clients.emplace(uniquePrefix, ServiceContainer{ std::move(serviceClient), std::move(containerClient) });
+        m_openMode = openMode;
     }
 
     BlobFilesystemImpl::BlobFilesystemImpl(const std::string& name,
@@ -88,7 +92,9 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         int64_t dataFileInitialSize,
         int64_t dataFileBufferSize,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-        std::optional<std::string_view> cachePath, size_t maxCacheSize)
+        std::optional<std::string_view> cachePath,
+        size_t maxCacheSize,
+        GraphDb::Storage::OpenMode openMode)
         : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize)
     {
         ::Azure::Storage::Blobs::BlobServiceClient serviceClient
@@ -111,6 +117,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         }
 
         m_clients.emplace(uniquePrefix, ServiceContainer{ std::move(serviceClient), std::move(containerClient) });
+        m_openMode = openMode;
     }
 
     BlobFilesystemImpl::BlobFilesystemImpl(Models::ChainedCredentialInfo primary,
@@ -119,7 +126,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         int64_t dataFileBufferSize,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::optional<std::string_view> cachePath,
-        size_t maxCacheSize)
+        size_t maxCacheSize,
+        GraphDb::Storage::OpenMode openMode)
         : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize)
     {
         auto serviceClient = BlobHelpers::CreateServiceClient(primary);
@@ -148,6 +156,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                     std::move(backupContainerClient)
                 });
         }
+        m_openMode = openMode;
     }
 
     BlobFilesystemImpl::BlobFilesystemImpl(Models::ServicePrincipalStorageInfo primary,
@@ -156,7 +165,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         int64_t dataFileBufferSize,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::optional<std::string_view> cachePath,
-        size_t maxCacheSize)
+        size_t maxCacheSize,
+        GraphDb::Storage::OpenMode openMode)
         : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize)
     {
         auto serviceClient = BlobHelpers::CreateServiceClient(primary);
@@ -185,6 +195,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                     std::move(backupContainerClient)
                 });
         }
+        m_openMode = openMode;
     }
 
     ReadableFileImpl BlobFilesystemImpl::CreateReadableFile(const std::string& filePath)
@@ -196,11 +207,11 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         auto cache = m_fileCaches.find(prefix);
         if (cache != m_fileCaches.end())
         {
-            return ReadableFileImpl{ realPath, std::move(blobClient), cache->second };
+            return ReadableFileImpl{ realPath, std::move(blobClient), cache->second , m_openMode };
         }
         else
         {
-            return ReadableFileImpl{ realPath, std::move(blobClient), nullptr };
+            return ReadableFileImpl{ realPath, std::move(blobClient), nullptr, m_openMode };
         }
     }
 

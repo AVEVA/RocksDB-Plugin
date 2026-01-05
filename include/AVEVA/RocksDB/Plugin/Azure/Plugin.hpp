@@ -6,6 +6,8 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ServicePrincipalStorageInfo.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ChainedCredentialInfo.hpp"
 
+#include <Models/Common/OpenMode.pb.h>
+
 #include <boost/log/trivial.hpp>
 #include <rocksdb/env.h>
 
@@ -25,7 +27,8 @@ namespace AVEVA::RocksDB::Plugin::Azure
             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
             int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
             std::optional<std::string_view> cachePath = {},
-            size_t maxCacheSize = Impl::Configuration::MaxCacheSize);
+            size_t maxCacheSize = Impl::Configuration::MaxCacheSize,
+            GraphDb::Storage::OpenMode openMode = GraphDb::Storage::OpenMode::Unknown);
         static rocksdb::Status Register(rocksdb::ConfigOptions& configOptions,
             rocksdb::Env** env,
             std::shared_ptr<rocksdb::Env>* guard,
@@ -35,6 +38,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
             int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
             std::optional<std::string_view> cachePath = {},
-            size_t maxCacheSize = Impl::Configuration::MaxCacheSize);
+            size_t maxCacheSize = Impl::Configuration::MaxCacheSize,
+            GraphDb::Storage::OpenMode openMode = GraphDb::Storage::OpenMode::Unknown);
     };
 }
