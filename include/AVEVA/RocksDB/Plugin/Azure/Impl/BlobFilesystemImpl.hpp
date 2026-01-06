@@ -14,8 +14,6 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobAttributes.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/DirectoryImpl.hpp"
 
-#include <Models/Common/OpenMode.pb.h>
-
 #include <azure/storage/blobs/blob_service_client.hpp>
 #include <azure/storage/blobs/blob_container_client.hpp>
 #include <boost/log/trivial.hpp>
@@ -50,7 +48,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::mutex m_lockFilesMutex;
         std::vector<std::shared_ptr<LockFileImpl>> m_locks;
         std::jthread m_lockRenewalThread;
-        GraphDb::Storage::OpenMode openMode m_openMode;
+        bool m_isSecondary;
         
     public:
         BlobFilesystemImpl(const std::string& name,
@@ -61,7 +59,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             std::optional<std::string_view> cachePath = {},
             size_t maxCacheSize = Configuration::MaxCacheSize,
-            GraphDb::Storage::OpenMode openMode = GraphDb::Storage::OpenMode::Unknown);
+            bool isSecondary = false);
         BlobFilesystemImpl(const std::string& name,
             const std::string& storageAccountUrl,
             const std::string& servicePrincipalId,
@@ -72,7 +70,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             std::optional<std::string_view> cachePath = {},
             size_t maxCacheSize = Configuration::MaxCacheSize,
-            GraphDb::Storage::OpenMode openMode = GraphDb::Storage::OpenMode::Unknown);
+            bool isSecondary = false);
         BlobFilesystemImpl(const std::string& name,
             const std::string& storageAccountUrl,
             const std::string& tenantId,
@@ -84,7 +82,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             std::optional<std::string_view> cachePath = {},
             size_t maxCacheSize = Configuration::MaxCacheSize,
-            GraphDb::Storage::OpenMode openMode = GraphDb::Storage::OpenMode::Unknown);
+            bool isSecondary = false);
         BlobFilesystemImpl(Models::ChainedCredentialInfo primary,
             std::optional<Models::ChainedCredentialInfo> backup,
             int64_t dataFileInitialSize,
@@ -92,7 +90,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             std::optional<std::string_view> cachePath = {},
             size_t maxCacheSize = Configuration::MaxCacheSize,
-            GraphDb::Storage::OpenMode openMode = GraphDb::Storage::OpenMode::Unknown);
+            bool isSecondary = false);
         BlobFilesystemImpl(Models::ServicePrincipalStorageInfo primary,
             std::optional<Models::ServicePrincipalStorageInfo> backup,
             int64_t dataFileInitialSize,
@@ -100,7 +98,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             std::optional<std::string_view> cachePath = {},
             size_t maxCacheSize = Configuration::MaxCacheSize,
-            GraphDb::Storage::OpenMode openMode = GraphDb::Storage::OpenMode::Unknown);
+            bool isSecondary = false);
 
         [[nodiscard]] ReadableFileImpl CreateReadableFile(const std::string& filePath);
         [[nodiscard]] WriteableFileImpl CreateWriteableFile(const std::string& filePath);

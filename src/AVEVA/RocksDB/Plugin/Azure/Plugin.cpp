@@ -20,7 +20,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         int64_t dataFileInitialSize,
         std::optional<std::string_view> cachePath,
         size_t maxCacheSize,
-        GraphDb::Storage::OpenMode openMode)
+        bool isSecondary)
     {
         auto pluginName = std::string(Name) + primary.GetDbName();
         if (backup)
@@ -42,7 +42,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
                             logger,
                             cachePath,
                             maxCacheSize,
-                            openMode
+                            isSecondary
                         );
 
                     *f = std::unique_ptr<rocksdb::FileSystem>(new BlobFilesystem(rocksdb::FileSystem::Default(), std::move(impl), logger));
@@ -63,7 +63,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         int64_t dataFileInitialSize,
         std::optional<std::string_view> cachePath,
         size_t maxCacheSize,
-        GraphDb::Storage::OpenMode openMode)
+        bool isSecondary)
     {
         auto pluginName = std::string(Name) + primary.GetDbName();
         if (backup)
@@ -85,7 +85,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
                             logger,
                             cachePath,
                             maxCacheSize,
-                            openMode
+                            isSecondary
                         );
 
                     *f = std::unique_ptr<rocksdb::FileSystem>(new BlobFilesystem(rocksdb::FileSystem::Default(), std::move(impl), std::move(logger)));

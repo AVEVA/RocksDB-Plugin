@@ -5,7 +5,6 @@
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/BlobClient.hpp"
 
-#include <Models/Common/OpenMode.pb.h>
 
 #include <cstdint>
 #include <string>
@@ -20,13 +19,12 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::shared_ptr<Core::FileCache> m_fileCache;
         int64_t m_offset;
         int64_t m_size;
-        GraphDb::Storage::OpenMode openMode m_openMode;        
+        bool m_isSecondary;        
 
     public:
         ReadableFileImpl(std::string_view name,
-            std::shared_ptr<Core::BlobClient> blobClient,
             std::shared_ptr<Core::FileCache> fileCache,
-            GraphDb::Storage::OpenMode openMode);
+            bool isSecondary);
 
         // NOTE: Increments m_offset
         [[nodiscard]] int64_t SequentialRead(int64_t bytesToRead, char* buffer);
