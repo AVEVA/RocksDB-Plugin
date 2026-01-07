@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/RocksDBHelpers.hpp"
+
 #include <cassert>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
@@ -37,9 +39,9 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         
         if (m_offset >= m_size)
         {
-            if (IsLogFile(GetFileType(m_name)) && m_isSecondary)
+            if (AVEVA::RocksDB::Plugin::Core::RocksDBHelpers::IsLogFile(AVEVA::RocksDB::Plugin::Core::RocksDBHelpers::GetFileType(m_name)) && m_isSecondary)
             {
-                m_size = GetFileSize(*m_pbClient);
+                m_size = m_blobClient->GetSize();
             }
 
             if (m_offset >= m_size)

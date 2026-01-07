@@ -207,11 +207,11 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         auto cache = m_fileCaches.find(prefix);
         if (cache != m_fileCaches.end())
         {
-            return ReadableFileImpl{ realPath, std::move(blobClient), cache->second , m_isWritable };
+            return ReadableFileImpl{ realPath, std::move(blobClient), cache->second , m_isSecondary };
         }
         else
         {
-            return ReadableFileImpl{ realPath, std::move(blobClient), nullptr, m_isWritable };
+            return ReadableFileImpl{ realPath, std::move(blobClient), nullptr, m_isSecondary };
         }
     }
 
