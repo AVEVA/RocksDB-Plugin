@@ -48,7 +48,6 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::mutex m_lockFilesMutex;
         std::vector<std::shared_ptr<LockFileImpl>> m_locks;
         std::jthread m_lockRenewalThread;
-        bool m_isSecondary;
         
     public:
         BlobFilesystemImpl(const std::string& name,
@@ -58,8 +57,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             int64_t dataFileBufferSize,
             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             std::optional<std::string_view> cachePath = {},
-            size_t maxCacheSize = Configuration::MaxCacheSize,
-            bool isSecondary = false);
+            size_t maxCacheSize = Configuration::MaxCacheSize);
         BlobFilesystemImpl(const std::string& name,
             const std::string& storageAccountUrl,
             const std::string& servicePrincipalId,
@@ -69,8 +67,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             int64_t dataFileBufferSize,
             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             std::optional<std::string_view> cachePath = {},
-            size_t maxCacheSize = Configuration::MaxCacheSize,
-            bool isSecondary = false);
+            size_t maxCacheSize = Configuration::MaxCacheSize);
         BlobFilesystemImpl(const std::string& name,
             const std::string& storageAccountUrl,
             const std::string& tenantId,
@@ -81,24 +78,21 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             int64_t dataFileBufferSize,
             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             std::optional<std::string_view> cachePath = {},
-            size_t maxCacheSize = Configuration::MaxCacheSize,
-            bool isSecondary = false);
+            size_t maxCacheSize = Configuration::MaxCacheSize);
         BlobFilesystemImpl(Models::ChainedCredentialInfo primary,
             std::optional<Models::ChainedCredentialInfo> backup,
             int64_t dataFileInitialSize,
             int64_t dataFileBufferSize,
             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             std::optional<std::string_view> cachePath = {},
-            size_t maxCacheSize = Configuration::MaxCacheSize,
-            bool isSecondary = false);
+            size_t maxCacheSize = Configuration::MaxCacheSize);
         BlobFilesystemImpl(Models::ServicePrincipalStorageInfo primary,
             std::optional<Models::ServicePrincipalStorageInfo> backup,
             int64_t dataFileInitialSize,
             int64_t dataFileBufferSize,
             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             std::optional<std::string_view> cachePath = {},
-            size_t maxCacheSize = Configuration::MaxCacheSize,
-            bool isSecondary = false);
+            size_t maxCacheSize = Configuration::MaxCacheSize);
 
         [[nodiscard]] ReadableFileImpl CreateReadableFile(const std::string& filePath);
         [[nodiscard]] WriteableFileImpl CreateWriteableFile(const std::string& filePath);

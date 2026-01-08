@@ -9,14 +9,12 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
     ReadableFileImpl::ReadableFileImpl(std::string_view name,
         std::shared_ptr<Core::BlobClient> blobClient,
-        std::shared_ptr<Core::FileCache> fileCache,
-        bool isSecondary)
+        std::shared_ptr<Core::FileCache> fileCache)
         : m_name(name),
         m_blobClient(std::move(blobClient)),
         m_fileCache(std::move(fileCache)),
         m_offset(0),
-        m_size(m_blobClient ? m_blobClient->GetSize() : 0LL),
-        m_isSecondary(isSecondary)
+        m_size(m_blobClient ? m_blobClient->GetSize() : 0LL)
     {
     }
 
@@ -39,7 +37,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         
         if (m_offset >= m_size)
         {
-            if (AVEVA::RocksDB::Plugin::Core::RocksDBHelpers::IsLogFile(AVEVA::RocksDB::Plugin::Core::RocksDBHelpers::GetFileType(m_name)) && m_isSecondary)
+            if (AVEVA::RocksDB::Plugin::Core::RocksDBHelpers::IsLogFile(AVEVA::RocksDB::Plugin::Core::RocksDBHelpers::GetFileType(m_name)))
             {
                 m_size = m_blobClient->GetSize();
             }

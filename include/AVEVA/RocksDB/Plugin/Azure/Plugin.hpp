@@ -25,8 +25,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
             int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
             std::optional<std::string_view> cachePath = {},
-            size_t maxCacheSize = Impl::Configuration::MaxCacheSize,
-            bool isSecondary = false);
+            size_t maxCacheSize = Impl::Configuration::MaxCacheSize);
         static rocksdb::Status Register(rocksdb::ConfigOptions& configOptions,
             rocksdb::Env** env,
             std::shared_ptr<rocksdb::Env>* guard,
@@ -36,7 +35,6 @@ namespace AVEVA::RocksDB::Plugin::Azure
             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
             int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
             std::optional<std::string_view> cachePath = {},
-            size_t maxCacheSize = Impl::Configuration::MaxCacheSize,
-            bool isSecondary = false);
+            size_t maxCacheSize = Impl::Configuration::MaxCacheSize);
     };
 }

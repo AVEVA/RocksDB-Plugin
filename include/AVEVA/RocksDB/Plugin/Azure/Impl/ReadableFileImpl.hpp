@@ -19,13 +19,11 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::shared_ptr<Core::FileCache> m_fileCache;
         int64_t m_offset;
         int64_t m_size;
-        bool m_isSecondary;        
 
     public:
         ReadableFileImpl(std::string_view name,
             std::shared_ptr<Core::BlobClient> blobClient,
-            std::shared_ptr<Core::FileCache> fileCache,
-            bool isSecondary = false);
+            std::shared_ptr<Core::FileCache> fileCache);
 
         // NOTE: Increments m_offset
         [[nodiscard]] int64_t SequentialRead(int64_t bytesToRead, char* buffer);
