@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/RocksDBHelpers.hpp"
 #include <cassert>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
@@ -30,6 +31,28 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             {
                 m_offset += static_cast<int64_t>(*bytesRead);
                 return static_cast<int64_t>(*bytesRead);
+            }
+        }
+        
+        // EOF handling
+        // For files that may grow, update the size to include any newly added data.
+        // For immutable files, set the read position to the end and return 0 to indicate EOF.
+        if (m_offset >= m_size)
+        {
+            if (AVEVA::RocksDB::Plugin::Core::RocksDBHelpers::IsLogFile(AVEVA::RocksDB::Plugin::Core::RocksDBHelpers::GetFileType(m_name)))
+            {
+                m_size = m_blobClient->GetSize();
+
+                if (m_offset >= m_size)
+                {
+                    m_offset = m_size;
+                    return 0;
+                }
+            }
+            else 
+            {
+                m_offset = m_size;
+                return 0;
             }
         }
 
