@@ -88,8 +88,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         int64_t dataFileInitialSize,
         int64_t dataFileBufferSize,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-        std::optional<std::string_view> cachePath,
-        size_t maxCacheSize)
+        std::optional<std::string_view> cachePath, size_t maxCacheSize)
         : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize)
     {
         ::Azure::Storage::Blobs::BlobServiceClient serviceClient

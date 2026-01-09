@@ -5,7 +5,6 @@
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/BlobClient.hpp"
 
-
 #include <cstdint>
 #include <string>
 #include <string_view>
