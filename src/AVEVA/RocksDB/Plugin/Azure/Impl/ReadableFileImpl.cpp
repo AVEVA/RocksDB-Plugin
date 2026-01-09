@@ -3,7 +3,6 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/RocksDBHelpers.hpp"
-
 #include <cassert>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
