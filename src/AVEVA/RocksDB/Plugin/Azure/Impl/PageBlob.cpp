@@ -5,6 +5,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
 #include <azure/core/etag.hpp>
 #include <azure/core/context.hpp>
+#include <cassert>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
     PageBlob::PageBlob(::Azure::Storage::Blobs::PageBlobClient client)
