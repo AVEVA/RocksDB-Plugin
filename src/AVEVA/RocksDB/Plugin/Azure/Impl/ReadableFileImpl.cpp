@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
-#include "AVEVA/RocksDB/Plugin/Core/RocksDBHelpers.hpp"
 #include <cassert>
+#include <azure/core/exception.hpp>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
     ReadableFileImpl::ReadableFileImpl(std::string_view name,
@@ -15,6 +15,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         m_offset(0),
         m_size(m_blobClient ? m_blobClient->GetSize() : 0LL)
     {
+        m_etag = m_blobClient->GetEtag();
     }
 
     int64_t ReadableFileImpl::SequentialRead(const int64_t bytesToRead, char* buffer)
@@ -34,28 +35,6 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             }
         }
         
-        // EOF handling
-        // For files that may grow, update the size to include any newly added data.
-        // For immutable files, set the read position to the end and return 0 to indicate EOF.
-        if (m_offset >= m_size)
-        {
-            if (AVEVA::RocksDB::Plugin::Core::RocksDBHelpers::IsLogFile(AVEVA::RocksDB::Plugin::Core::RocksDBHelpers::GetFileType(m_name)))
-            {
-                m_size = m_blobClient->GetSize();
-
-                if (m_offset >= m_size)
-                {
-                    m_offset = m_size;
-                    return 0;
-                }
-            }
-            else 
-            {
-                m_offset = m_size;
-                return 0;
-            }
-        }
-
         int64_t bytesRead = 0;
         assert(m_size >= m_offset && "m_size needs to be bigger than m_offset or else we will overflow");
         int64_t bytesRequested = m_size - m_offset;
@@ -65,9 +44,24 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             return 0;
         }
 
-        const auto result = m_blobClient->DownloadTo(std::span<char>(buffer, static_cast<std::size_t>(bytesRequested)), m_offset, bytesRequested);
-        bytesRead = result > 0 ? result : 0;
-
+        bool success = false;
+        do
+        {
+            try 
+            {
+                bytesRead = m_blobClient->Download(std::span<char>(buffer, static_cast<size_t>(bytesRequested)), m_offset, bytesRequested, m_etag);
+                success = true;
+            }
+            catch (const ::Azure::Core::RequestFailedException& ex)
+            {
+                if (static_cast<int>(ex.StatusCode) == 412)
+                {
+                    m_etag = m_blobClient->GetEtag();
+                    m_size = m_blobClient->GetSize();                    
+                }
+            }
+        } while (!success);
+        
         m_offset += bytesRead;
         return bytesRead;
     }

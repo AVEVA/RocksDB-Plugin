@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
+#include <azure/core/etag.hpp>
 #include <cstdint>
 #include <string>
 #include <span>
@@ -59,5 +60,21 @@ namespace AVEVA::RocksDB::Plugin::Core
         /// <param name="buffer">A span containing the page data to upload.</param>
         /// <param name="blobOffset">The offset within the blob where the data should be uploaded.</param>
         virtual void UploadPages(const std::span<char> buffer, int64_t blobOffset) = 0;
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <returns></returns>
+        virtual ::Azure::ETag GetEtag() = 0;
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="buffer"></param>
+        /// <param name="blobOffset"></param>
+        /// <param name="readLength"></param>
+        /// <param name="ifMatch"></param>
+        /// <returns></returns>
+        virtual int64_t Download(std::span<char> buffer, int64_t blobOffset, int64_t readLength, const ::Azure::ETag& ifMatch) = 0;
     };
 }

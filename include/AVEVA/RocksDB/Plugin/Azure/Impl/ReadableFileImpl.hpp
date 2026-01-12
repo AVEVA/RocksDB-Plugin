@@ -18,6 +18,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::shared_ptr<Core::FileCache> m_fileCache;
         int64_t m_offset;
         int64_t m_size;
+        ::Azure::ETag m_etag;
 
     public:
         ReadableFileImpl(std::string_view name,

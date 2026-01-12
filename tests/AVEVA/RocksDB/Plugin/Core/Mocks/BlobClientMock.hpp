@@ -19,5 +19,7 @@ namespace AVEVA::RocksDB::Plugin::Core::Mocks
         MOCK_METHOD(void, DownloadTo, (const std::string& path, int64_t offset, int64_t length), (override));
         MOCK_METHOD(int64_t, DownloadTo, (std::span<char> buffer, int64_t blobOffset, int64_t length), (override));
         MOCK_METHOD(void, UploadPages, (const std::span<char> buffer, int64_t blobOffset), (override));
+        MOCK_METHOD(::Azure::ETag, GetEtag, (), (override));
+        MOCK_METHOD(int64_t, Download, (std::span<char> buffer, int64_t blobOffset, int64_t length, const ::Azure::ETag& ifMatch), (override));
     };
 }
