@@ -50,6 +50,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             try 
             {
                 bytesRead = m_blobClient->Download(std::span<char>(buffer, static_cast<size_t>(bytesToRead)), m_offset, bytesToRead, m_etag);
+                bytesRead = std::min(bytesRead, m_size);
                 success = true;
             }
             catch (const ::Azure::Core::RequestFailedException& ex)
