@@ -36,20 +36,20 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         }
         
         int64_t bytesRead = 0;
-        assert(m_size >= m_offset && "m_size needs to be bigger than m_offset or else we will overflow");
-        int64_t bytesRequested = m_size - m_offset;
-        if (bytesRequested > bytesToRead) bytesRequested = bytesToRead;
-        if (bytesRequested <= 0)
-        {
-            return 0;
-        }
+        //assert(m_size >= m_offset && "m_size needs to be bigger than m_offset or else we will overflow");
+        //int64_t bytesRequested = m_size - m_offset;
+        //if (bytesRequested > bytesToRead) bytesRequested = bytesToRead;
+        //if (bytesRequested <= 0)
+        //{
+        //    return 0;
+        //}
 
         bool success = false;
         do
         {
             try 
             {
-                bytesRead = m_blobClient->Download(std::span<char>(buffer, static_cast<size_t>(bytesRequested)), m_offset, bytesRequested, m_etag);
+                bytesRead = m_blobClient->Download(std::span<char>(buffer, static_cast<size_t>(bytesToRead)), m_offset, bytesToRead, m_etag);
                 success = true;
             }
             catch (const ::Azure::Core::RequestFailedException& ex)
@@ -58,6 +58,10 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 {
                     m_etag = m_blobClient->GetEtag();
                     m_size = m_blobClient->GetSize();                    
+                }
+                else 
+                {
+                    throw;
                 }
             }
         } while (!success);
