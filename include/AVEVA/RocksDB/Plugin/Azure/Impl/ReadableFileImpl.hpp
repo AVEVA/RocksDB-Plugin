@@ -17,8 +17,11 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::shared_ptr<Core::BlobClient> m_blobClient;
         std::shared_ptr<Core::FileCache> m_fileCache;
         int64_t m_offset;
-        int64_t m_size;
-        ::Azure::ETag m_etag;
+        mutable int64_t m_size;
+        mutable ::Azure::ETag m_etag;
+
+        void RefreshBlobMetadata() const;
+        int64_t DownloadWithRetry(const int64_t offset, const int64_t bytesToRead, char* buffer) const;
 
     public:
         ReadableFileImpl(std::string_view name,
@@ -33,6 +36,6 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
         int64_t GetOffset() const;
         void Skip(int64_t n);
-        int64_t GetSize() const;
+        int64_t GetSize() const;        
     };
 }
