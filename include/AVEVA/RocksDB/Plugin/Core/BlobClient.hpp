@@ -62,19 +62,19 @@ namespace AVEVA::RocksDB::Plugin::Core
         virtual void UploadPages(const std::span<char> buffer, int64_t blobOffset) = 0;
 
         /// <summary>
-        /// 
+        /// Retrieve the current ETag of the blob.
         /// </summary>
-        /// <returns></returns>
+        /// <returns>The current ETag of the blob.</returns>
         virtual ::Azure::ETag GetEtag() = 0;
 
         /// <summary>
-        /// 
+        /// Downloads a portion of the blob into the provided buffer, performing an ETag match check.
         /// </summary>
-        /// <param name="buffer"></param>
-        /// <param name="blobOffset"></param>
-        /// <param name="readLength"></param>
-        /// <param name="ifMatch"></param>
-        /// <returns></returns>
+        /// <param name="buffer">A span of bytes where the downloaded data will be stored.</param>
+        /// <param name="blobOffset">The starting position (in bytes) in the blob from which to begin downloading.</param>
+        /// <param name="readLength">The number of bytes to download from the offset.</param>
+        /// <param name="ifMatch">The ETag to check against.</param>
+        /// <returns>The number of bytes actually downloaded.</returns>
         virtual int64_t Download(std::span<char> buffer, int64_t blobOffset, int64_t readLength, const ::Azure::ETag& ifMatch) = 0;
     };
 }
