@@ -60,8 +60,8 @@ TEST_F(ReadableFileTests, SequentialRead_WithoutCache_ReadsFromBlob)
     std::vector<char> buffer(bytesToRead);
     std::vector<char> expectedData(bytesToRead, 'A');
 
-    EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), 0, bytesToRead))
-        .WillOnce([&expectedData](std::span<char> downloadBuffer, int64_t /*offset*/, int64_t /*length*/)
+    EXPECT_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), 0, bytesToRead, ::testing::_))
+        .WillOnce([&expectedData](std::span<char> downloadBuffer, int64_t /*offset*/, int64_t /*length*/, const ::Azure::ETag& /*ifMatch*/)
             {
                 std::copy(expectedData.begin(), expectedData.end(), downloadBuffer.begin());
                 return static_cast<int64_t>(expectedData.size());
@@ -86,15 +86,15 @@ TEST_F(ReadableFileTests, SequentialRead_MultipleReads_IncrementsOffset)
     std::vector<char> buffer1(firstRead);
     std::vector<char> buffer2(secondRead);
 
-    EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), 0, firstRead))
-        .WillOnce([firstRead](std::span<char> buffer, int64_t /*offset*/, int64_t /*length*/)
+    EXPECT_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), 0, firstRead, ::testing::_))
+        .WillOnce([firstRead](std::span<char> buffer, int64_t /*offset*/, int64_t /*length*/, const ::Azure::ETag& /*ifMatch*/)
             {
                 std::fill_n(buffer.begin(), firstRead, 'X');
                 return static_cast<int64_t>(firstRead);
             });
 
-    EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), firstRead, secondRead))
-        .WillOnce([secondRead](std::span<char> buffer, int64_t /*offset*/, int64_t /*length*/)
+    EXPECT_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), firstRead, secondRead, ::testing::_))
+        .WillOnce([secondRead](std::span<char> buffer, int64_t /*offset*/, int64_t /*length*/, const ::Azure::ETag& /*ifMatch*/)
             {
                 std::fill_n(buffer.begin(), secondRead, 'Y');
                 return static_cast<int64_t>(secondRead);
@@ -122,8 +122,8 @@ TEST_F(ReadableFileTests, SequentialRead_RequestMoreThanAvailable_ReadsOnlyAvail
     EXPECT_CALL(*m_blobClient, GetSize())
         .WillOnce(Return(blobSize));
 
-    EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), 0, static_cast<int64_t>(blobSize)))
-        .WillOnce([blobSize](std::span<char> /*buffer*/, int64_t /*offset*/, int64_t /*length*/)
+    EXPECT_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), 0, static_cast<int64_t>(blobSize), ::testing::_))
+        .WillOnce([blobSize](std::span<char> /*buffer*/, int64_t /*offset*/, int64_t /*length*/, const ::Azure::ETag& /*ifMatch*/)
             {
                 return static_cast<int64_t>(blobSize);
             });
@@ -166,8 +166,8 @@ TEST_F(ReadableFileTests, RandomRead_WithoutCache_ReadsFromBlob)
     std::vector<char> buffer(bytesToRead);
     std::vector<char> expectedData(bytesToRead, 'B');
 
-    EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), offset, bytesToRead))
-        .WillOnce([&expectedData](std::span<char> downloadBuffer, int64_t /*offset*/, int64_t /*length*/)
+    EXPECT_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), offset, bytesToRead, ::testing::_))
+        .WillOnce([&expectedData](std::span<char> downloadBuffer, int64_t /*offset*/, int64_t /*length*/, const ::Azure::ETag& /*ifMatch*/)
             {
                 std::copy(expectedData.begin(), expectedData.end(), downloadBuffer.begin());
                 return static_cast<int64_t>(expectedData.size());
@@ -193,13 +193,13 @@ TEST_F(ReadableFileTests, RandomRead_DoesNotAffectSequentialOffset)
     std::vector<char> seqBuffer(sequentialBytes);
     std::vector<char> randomBuffer(randomBytes);
 
-    EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), 0, sequentialBytes))
+    EXPECT_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), 0, sequentialBytes, ::testing::_))
         .WillOnce(Return(static_cast<int64_t>(sequentialBytes)));
 
-    EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), randomOffset, randomBytes))
+    EXPECT_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), randomOffset, randomBytes, ::testing::_))
         .WillOnce(Return(static_cast<int64_t>(randomBytes)));
 
-    EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), sequentialBytes, sequentialBytes))
+    EXPECT_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), sequentialBytes, sequentialBytes, ::testing::_))
         .WillOnce(Return(static_cast<int64_t>(sequentialBytes)));
 
     ReadableFileImpl file{ "test.sst", m_blobClient, nullptr };
@@ -225,8 +225,8 @@ TEST_F(ReadableFileTests, RandomRead_RequestMoreThanAvailable_ReadsOnlyAvailable
     EXPECT_CALL(*m_blobClient, GetSize())
         .WillOnce(Return(blobSize));
 
-    EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), offset, expectedBytes))
-        .WillOnce([expectedBytes](std::span<char> downloadBuffer, int64_t /*offset*/, int64_t /*length*/)
+    EXPECT_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), offset, expectedBytes, ::testing::_))
+        .WillOnce([expectedBytes](std::span<char> downloadBuffer, int64_t /*offset*/, int64_t /*length*/, const ::Azure::ETag& /*ifMatch*/)
             {
                 std::fill_n(downloadBuffer.begin(), expectedBytes, 'C');
                 return static_cast<int64_t>(expectedBytes);
@@ -318,7 +318,7 @@ TEST_F(ReadableFileTests, SequentialRead_DownloadReturnsNegative_ReturnsZero)
     constexpr int64_t bytesToRead = 100;
     std::vector<char> buffer(bytesToRead);
 
-    EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), 0, bytesToRead))
+    EXPECT_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), 0, bytesToRead, ::testing::_))
         .WillOnce(Return(-1)); // Simulate error
 
     ReadableFileImpl file{ "test.sst", m_blobClient, nullptr };
@@ -338,7 +338,7 @@ TEST_F(ReadableFileTests, RandomRead_DownloadReturnsNegative_ReturnsZero)
     constexpr int64_t bytesToRead = 100;
     std::vector<char> buffer(bytesToRead);
 
-    EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), offset, bytesToRead))
+    EXPECT_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), offset, bytesToRead, ::testing::_))
         .WillOnce(Return(-1)); // Simulate error
 
     ReadableFileImpl file{ "test.sst", m_blobClient, nullptr };
@@ -393,10 +393,10 @@ TEST_F(ReadableFileTests, SequentialRead_InterleavedWithSkip_MaintainsCorrectOff
     constexpr int64_t skipAmount = 25;
     std::vector<char> buffer(readSize);
 
-    EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), 0, readSize))
+    EXPECT_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), 0, readSize, ::testing::_))
         .WillOnce(Return(static_cast<int64_t>(readSize)));
 
-    EXPECT_CALL(*m_blobClient, DownloadTo(::testing::A<std::span<char>>(), readSize + skipAmount, readSize))
+    EXPECT_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), readSize + skipAmount, readSize, ::testing::_))
         .WillOnce(Return(static_cast<int64_t>(readSize)));
 
     ReadableFileImpl file{ "test.sst", m_blobClient, nullptr };

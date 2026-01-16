@@ -36,6 +36,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         }       
 
         auto bytesRead = DownloadWithRetry(m_offset, bytesToRead, buffer);
+        bytesRead = bytesRead > 0 ? bytesRead : 0;
 
         m_offset += bytesRead;
         return bytesRead;
@@ -57,9 +58,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             }
         }
 
-        auto result = DownloadWithRetry(offset, bytesToRead, buffer);
-
-        auto bytesRead = result > 0 ? result : 0;
+        auto bytesRead = DownloadWithRetry(offset, bytesToRead, buffer);
+        bytesRead = bytesRead > 0 ? bytesRead : 0;
 
         return bytesRead;
     }
@@ -86,7 +86,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         bool success = false;
         do
         {
-            assert(m_size >= m_offset && "m_size needs to be bigger than m_offset or else we will overflow");
+            assert(m_size >= offset && "m_size needs to be bigger than m_offset or else we will overflow");
             auto remaining = std::max<int64_t>(0, m_size - offset);
             if (remaining == 0)
             {
