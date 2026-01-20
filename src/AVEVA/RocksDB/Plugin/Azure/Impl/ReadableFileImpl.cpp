@@ -35,6 +35,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             }
         }       
 
+        assert(m_size >= m_offset && "m_size needs to be bigger than m_offset or else we will overflow");
+
         auto bytesRead = DownloadWithRetry(m_offset, bytesToRead, buffer);
         bytesRead = bytesRead > 0 ? bytesRead : 0;
 
@@ -86,7 +88,6 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         bool success = false;
         do
         {
-            assert(m_size >= offset && "m_size needs to be bigger than m_offset or else we will overflow");
             auto remaining = std::max<int64_t>(0, m_size - offset);
             if (remaining == 0)
             {
@@ -109,7 +110,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             }
             catch (const ::Azure::Core::RequestFailedException& ex)
             {
-                if (static_cast<int>(ex.StatusCode) == 412)
+                if (ex.StatusCode == ::Azure::Core::Http::HttpStatusCode::PreconditionFailed)
                 {
                     RefreshBlobMetadata();
                 }

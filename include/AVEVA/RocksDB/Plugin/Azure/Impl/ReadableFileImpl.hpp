@@ -36,6 +36,6 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
         int64_t GetOffset() const;
         void Skip(int64_t n);
-        int64_t GetSize() const;        
+        int64_t GetSize() const;
     };
 }
