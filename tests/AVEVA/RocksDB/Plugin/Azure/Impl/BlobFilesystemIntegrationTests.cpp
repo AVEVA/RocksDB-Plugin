@@ -1240,7 +1240,7 @@ TEST_F(BlobFilesystemIntegrationTests, SequentialRead_ETagMismatch_RefreshesAndR
     EXPECT_TRUE(m_filesystem->DeleteFile(blobName));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, RandomRead_ETagMismatch_RefreshesAndRetriess)
+TEST_F(BlobFilesystemIntegrationTests, RandomRead_ETagMismatch_RefreshesAndRetries)
 {
     // Arrange
     std::string blobName = m_containerPrefix + "/original-" + m_blobName;
