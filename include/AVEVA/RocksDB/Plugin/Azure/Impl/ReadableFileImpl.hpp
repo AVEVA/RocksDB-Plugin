@@ -5,6 +5,8 @@
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/BlobClient.hpp"
 
+#include <boost/log/trivial.hpp>
+
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -19,14 +21,15 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         int64_t m_offset;
         mutable int64_t m_size;
         mutable ::Azure::ETag m_etag;
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
 
-        void RefreshBlobMetadata() const;
         int64_t DownloadWithRetry(const int64_t offset, const int64_t bytesToRead, char* buffer) const;
 
     public:
         ReadableFileImpl(std::string_view name,
             std::shared_ptr<Core::BlobClient> blobClient,
-            std::shared_ptr<Core::FileCache> fileCache);
+            std::shared_ptr<Core::FileCache> fileCache,
+            std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
 
         // NOTE: Increments m_offset
         [[nodiscard]] int64_t SequentialRead(int64_t bytesToRead, char* buffer);
@@ -36,6 +39,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
         int64_t GetOffset() const;
         void Skip(int64_t n);
-        int64_t GetSize() const;
+        int64_t GetSize(bool refresh = false) const;
+        void RefreshBlobMetadata() const;
     };
 }

@@ -2,18 +2,25 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
+
+#include <boost/log/trivial.hpp>
+
 #include <cassert>
 #include <azure/core/exception.hpp>
+
+using namespace boost::log::trivial;
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
     ReadableFileImpl::ReadableFileImpl(std::string_view name,
         std::shared_ptr<Core::BlobClient> blobClient,
-        std::shared_ptr<Core::FileCache> fileCache)
+        std::shared_ptr<Core::FileCache> fileCache,
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
         : m_name(name),
         m_blobClient(std::move(blobClient)),
         m_fileCache(std::move(fileCache)),
         m_offset(0),
-        m_size(m_blobClient ? m_blobClient->GetSize() : 0LL)
+        m_size(m_blobClient ? m_blobClient->GetSize() : 0LL),
+        m_logger(std::move(logger))
     {
         m_etag = m_blobClient->GetEtag();
     }
@@ -38,7 +45,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         assert(m_size >= m_offset && "m_size needs to be bigger than m_offset or else we will overflow");
 
         auto bytesRead = DownloadWithRetry(m_offset, bytesToRead, buffer);
-        bytesRead = bytesRead > 0 ? bytesRead : 0;
+        bytesRead = std::max<int64_t>(bytesRead, 0);
 
         m_offset += bytesRead;
         return bytesRead;
@@ -61,7 +68,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         }
 
         auto bytesRead = DownloadWithRetry(offset, bytesToRead, buffer);
-        bytesRead = bytesRead > 0 ? bytesRead : 0;
+        bytesRead = std::max<int64_t>(bytesRead, 0);
 
         return bytesRead;
     }
@@ -76,8 +83,13 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         m_offset += n;
     }
 
-    int64_t ReadableFileImpl::GetSize() const
+    int64_t ReadableFileImpl::GetSize(bool refresh) const
     {
+        if (refresh)
+        {
+            RefreshBlobMetadata();
+        }
+
         return m_size;
     }
 
@@ -128,5 +140,6 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     {
         m_size = m_blobClient->GetSize();
         m_etag = m_blobClient->GetEtag();
+        BOOST_LOG_SEV(*m_logger, debug) << "Blob metadata refreshed for file '" << m_name << "' :size = " << m_size << " bytes, etag = " << m_etag.ToString();
     }
 }

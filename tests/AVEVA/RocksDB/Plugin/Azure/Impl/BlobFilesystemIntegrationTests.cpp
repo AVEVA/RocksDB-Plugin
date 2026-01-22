@@ -1302,3 +1302,29 @@ TEST_F(BlobFilesystemIntegrationTests, RandomRead_AfterBlobGrows_UpdatesSize)
     // Cleanup
     EXPECT_TRUE(m_filesystem->DeleteFile(blobName));
 }
+
+TEST_F(BlobFilesystemIntegrationTests, RefreshBlobMetadata_UpdatesSizeAfterForceRefresh)
+{
+    // Arrange
+    std::string blobName = m_containerPrefix + "/original-" + m_blobName;
+    std::vector<char> initialData(256, 'Z');
+    auto writeFile = m_filesystem->CreateWriteableFile(blobName);
+    writeFile.Append(initialData);
+    writeFile.Sync();
+
+    auto readFile = m_filesystem->CreateReadableFile(blobName);
+    EXPECT_EQ(256, readFile.GetSize());
+
+    // Act
+    std::vector<char> appendData(512, 'Y');
+    auto reopenFile = m_filesystem->ReopenWriteableFile(blobName);
+    reopenFile.Append(appendData);
+    reopenFile.Sync();
+
+    // Assert
+    EXPECT_EQ(256, readFile.GetSize());
+    EXPECT_EQ(768, readFile.GetSize(true)); // refresh size
+
+    // Cleanup
+    EXPECT_TRUE(m_filesystem->DeleteFile(blobName));
+}
