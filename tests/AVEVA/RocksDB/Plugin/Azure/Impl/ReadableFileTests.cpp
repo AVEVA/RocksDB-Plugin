@@ -47,8 +47,12 @@ TEST_F(ReadableFileTests, Constructor_InitializesWithBlobSize)
 {
     // Arrange
     static constexpr uint64_t expectedSize = Configuration::PageBlob::PageSize;
+    
+    ON_CALL(*m_blobClient, GetEtag())
+        .WillByDefault(Return(::Azure::ETag{ "etag" }));
+
     EXPECT_CALL(*m_blobClient, GetSize())
-        .WillOnce(Return(expectedSize));
+        .WillRepeatedly(Return(expectedSize));
 
     // Act
     ReadableFileImpl file{ "test.sst", m_blobClient, nullptr, m_logger };
@@ -307,8 +311,11 @@ TEST_F(ReadableFileTests, GetSize_ReturnsCorrectSize)
 {
     // Arrange
     constexpr uint64_t expectedSize = 5000;
+
     EXPECT_CALL(*m_blobClient, GetSize())
-        .WillOnce(Return(expectedSize));
+        .WillRepeatedly(Return(expectedSize));
+    ON_CALL(*m_blobClient, GetEtag())
+        .WillByDefault(Return(::Azure::ETag{ "etag" }));
 
     // Act
     ReadableFileImpl file{ "test.sst", m_blobClient, nullptr, m_logger };

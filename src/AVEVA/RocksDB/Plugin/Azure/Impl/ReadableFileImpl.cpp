@@ -83,13 +83,10 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         m_offset += n;
     }
 
-    int64_t ReadableFileImpl::GetSize(bool refresh) const
+    int64_t ReadableFileImpl::GetSize() const
     {
-        if (refresh)
-        {
-            RefreshBlobMetadata();
-        }
-
+        RefreshBlobMetadata();
+        
         return m_size;
     }
 
