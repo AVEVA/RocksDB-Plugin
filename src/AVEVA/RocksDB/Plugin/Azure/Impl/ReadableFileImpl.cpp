@@ -2,18 +2,27 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
+
+#include <boost/log/trivial.hpp>
+
 #include <cassert>
+#include <azure/core/exception.hpp>
+
+using namespace boost::log::trivial;
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
     ReadableFileImpl::ReadableFileImpl(std::string_view name,
         std::shared_ptr<Core::BlobClient> blobClient,
-        std::shared_ptr<Core::FileCache> fileCache)
+        std::shared_ptr<Core::FileCache> fileCache,
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
         : m_name(name),
         m_blobClient(std::move(blobClient)),
         m_fileCache(std::move(fileCache)),
         m_offset(0),
-        m_size(m_blobClient ? m_blobClient->GetSize() : 0LL)
+        m_size(m_blobClient ? m_blobClient->GetSize() : 0LL),
+        m_logger(std::move(logger))
     {
+        m_etag = m_blobClient->GetEtag();
     }
 
     int64_t ReadableFileImpl::SequentialRead(const int64_t bytesToRead, char* buffer)
@@ -31,19 +40,12 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 m_offset += static_cast<int64_t>(*bytesRead);
                 return static_cast<int64_t>(*bytesRead);
             }
-        }
+        }       
 
-        int64_t bytesRead = 0;
         assert(m_size >= m_offset && "m_size needs to be bigger than m_offset or else we will overflow");
-        int64_t bytesRequested = m_size - m_offset;
-        if (bytesRequested > bytesToRead) bytesRequested = bytesToRead;
-        if (bytesRequested <= 0)
-        {
-            return 0;
-        }
 
-        const auto result = m_blobClient->DownloadTo(std::span<char>(buffer, static_cast<std::size_t>(bytesRequested)), m_offset, bytesRequested);
-        bytesRead = result > 0 ? result : 0;
+        auto bytesRead = DownloadWithRetry(m_offset, bytesToRead, buffer);
+        bytesRead = std::max<int64_t>(bytesRead, 0);
 
         m_offset += bytesRead;
         return bytesRead;
@@ -65,18 +67,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             }
         }
 
-        int64_t bytesRead = 0;
-
-        assert(m_size >= offset && "m_size needs to be bigger than or equal to offset or else we will overflow");
-        int64_t bytesRequested = m_size - offset;
-        if (bytesRequested > bytesToRead) bytesRequested = bytesToRead;
-        if (bytesRequested <= 0)
-        {
-            return 0;
-        }
-
-        const auto result = m_blobClient->DownloadTo(std::span<char>(buffer, static_cast<std::size_t>(bytesRequested)), offset, bytesRequested);
-        bytesRead = result > 0 ? result : 0;
+        auto bytesRead = DownloadWithRetry(offset, bytesToRead, buffer);
+        bytesRead = std::max<int64_t>(bytesRead, 0);
 
         return bytesRead;
     }
@@ -93,6 +85,58 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     int64_t ReadableFileImpl::GetSize() const
     {
+        RefreshBlobMetadata();
+        
         return m_size;
+    }
+
+    int64_t ReadableFileImpl::DownloadWithRetry(const int64_t offset, const int64_t bytesToRead, char* buffer) const
+    {
+        int64_t bytesRead = 0;
+
+        bool success = false;
+        do
+        {
+            auto remaining = std::max<int64_t>(0, m_size - offset);
+            if (remaining == 0)
+            {
+                auto latestEtag = m_blobClient->GetEtag();
+                if (latestEtag != m_etag)
+                {
+                    RefreshBlobMetadata();
+                    continue;
+                }
+
+                return 0;
+            }
+
+            auto toRead = std::min(bytesToRead, remaining);
+            try
+            {
+                bytesRead = m_blobClient->Download(std::span<char>(buffer, static_cast<size_t>(toRead)), offset, toRead, m_etag);
+                bytesRead = std::min(bytesRead, remaining);
+                success = true;
+            }
+            catch (const ::Azure::Core::RequestFailedException& ex)
+            {
+                if (ex.StatusCode == ::Azure::Core::Http::HttpStatusCode::PreconditionFailed)
+                {
+                    RefreshBlobMetadata();
+                }
+                else
+                {
+                    throw;
+                }
+            }
+        } while (!success);
+
+        return bytesRead;
+    }
+
+    void ReadableFileImpl::RefreshBlobMetadata() const
+    {
+        m_size = m_blobClient->GetSize();
+        m_etag = m_blobClient->GetEtag();
+        BOOST_LOG_SEV(*m_logger, debug) << "Blob metadata refreshed for file '" << m_name << "' :size = " << m_size << " bytes, etag = " << m_etag.ToString();
     }
 }

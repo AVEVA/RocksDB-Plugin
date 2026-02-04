@@ -3,6 +3,9 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
+#include <azure/core/etag.hpp>
+#include <azure/core/context.hpp>
+#include <cassert>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
     PageBlob::PageBlob(::Azure::Storage::Blobs::PageBlobClient client)
@@ -53,5 +56,27 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     {
         ::Azure::Core::IO::MemoryBodyStream dataStream(reinterpret_cast<uint8_t*>(buffer.data()), buffer.size());
         m_client.UploadPages(blobOffset, dataStream);
+    }
+
+    ::Azure::ETag PageBlob::GetEtag()
+    {
+        const auto properties = m_client.GetProperties();
+        return properties.Value.ETag;
+    }
+
+    int64_t PageBlob::Download(std::span<char> buffer, int64_t offset, int64_t length, const ::Azure::ETag& ifMatch)
+    {
+        ::Azure::Storage::Blobs::DownloadBlobOptions options
+        {
+          .Range = ::Azure::Core::Http::HttpRange { offset, length }
+        };
+        options.AccessConditions.IfMatch = ifMatch;
+        const auto result = m_client.Download(options, ::Azure::Core::Context{});
+        const auto& content = result.Value;
+
+        auto bytesRead = content.BodyStream->ReadToCount(reinterpret_cast<uint8_t*>(buffer.data()), buffer.size());
+
+        assert(static_cast<int>(content.ContentRange.Length.ValueOr(-1)) == bytesRead && "Bytes read differ from server ContentRange");
+        return bytesRead;
     }
 }
