@@ -837,8 +837,10 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         }
     }
 
+#ifdef AVEVA_ROCKSDB_TESTING
     void BlobFilesystemImpl::TriggerFilesystemStop()
     {
         m_filesystemStopSource.request_stop();
     }
+#endif
 }

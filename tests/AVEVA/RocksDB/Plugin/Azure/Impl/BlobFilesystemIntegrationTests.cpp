@@ -1307,14 +1307,15 @@ TEST_F(BlobFilesystemIntegrationTests, RandomRead_AfterBlobGrows_UpdatesSize)
 
 TEST_F(BlobFilesystemIntegrationTests, EnsureLiveness_AfterFilesystemStop_OperationsThrow)
 {
-    // Arrange
+    // Arrange - Create a test file for operations that need an existing file
     std::string testBlobName = m_containerPrefix + "/liveness-test-" + m_blobName;
-    std::vector<char> testData(512, 'T');
-    
-    // Create a test file first
-    auto writeFile = m_filesystem->CreateWriteableFile(testBlobName);
-    writeFile.Append(testData);
-    writeFile.Sync();
+    {
+        std::vector<char> testData(512, 'T');
+        auto writeFile = m_filesystem->CreateWriteableFile(testBlobName);
+        writeFile.Append(testData);
+        writeFile.Sync();
+        writeFile.Close();
+    }
     
     // Act - Trigger the filesystem stop condition
     m_filesystem->TriggerFilesystemStop();
