@@ -7,6 +7,9 @@
 #include <azure/storage/blobs.hpp>
 
 #include <cassert>
+#include <optional>
+#include <stdexcept>
+#include <string>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
     LockFileImpl::LockFileImpl(std::unique_ptr<::Azure::Storage::Blobs::PageBlobClient> file, std::chrono::seconds leaseLength)
