@@ -763,7 +763,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 const auto timeElapsed = std::chrono::system_clock::now() - startTime;
                 if (timeElapsed >= Configuration::LeaseLength)
                 {
-                    throw std::exception("Lease length time exceeded. Unsafe to continue");
+                    throw std::runtime_error("Lease length time exceeded. Unsafe to continue");
                 }
 
                 // Pessimistic setting of new start time.
