@@ -836,4 +836,9 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             throw std::runtime_error("Unable to ensure safe database access");
         }
     }
+
+    void BlobFilesystemImpl::TriggerFilesystemStop()
+    {
+        m_filesystemStopSource.request_stop();
+    }
 }

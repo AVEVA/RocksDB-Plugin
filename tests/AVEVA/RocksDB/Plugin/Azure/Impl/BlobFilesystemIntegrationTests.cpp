@@ -1304,3 +1304,71 @@ TEST_F(BlobFilesystemIntegrationTests, RandomRead_AfterBlobGrows_UpdatesSize)
     // Cleanup
     EXPECT_TRUE(m_filesystem->DeleteFile(blobName));
 }
+
+TEST_F(BlobFilesystemIntegrationTests, EnsureLiveness_AfterFilesystemStop_OperationsThrow)
+{
+    // Arrange
+    std::string testBlobName = m_containerPrefix + "/liveness-test-" + m_blobName;
+    std::vector<char> testData(512, 'T');
+    
+    // Create a test file first
+    auto writeFile = m_filesystem->CreateWriteableFile(testBlobName);
+    writeFile.Append(testData);
+    writeFile.Sync();
+    
+    // Act - Trigger the filesystem stop condition
+    m_filesystem->TriggerFilesystemStop();
+    
+    // Assert - All filesystem operations should throw after stop is triggered
+    
+    // Test FileExists
+    EXPECT_THROW(m_filesystem->FileExists(testBlobName), std::runtime_error);
+    
+    // Test CreateWriteableFile
+    EXPECT_THROW(m_filesystem->CreateWriteableFile(m_containerPrefix + "/new-file"), std::runtime_error);
+    
+    // Test CreateReadableFile
+    EXPECT_THROW(m_filesystem->CreateReadableFile(testBlobName), std::runtime_error);
+    
+    // Test CreateReadWriteFile
+    EXPECT_THROW(m_filesystem->CreateReadWriteFile(m_containerPrefix + "/rw-file"), std::runtime_error);
+    
+    // Test ReopenWriteableFile
+    EXPECT_THROW(m_filesystem->ReopenWriteableFile(testBlobName), std::runtime_error);
+    
+    // Test ReuseWritableFile
+    EXPECT_THROW(m_filesystem->ReuseWritableFile(testBlobName), std::runtime_error);
+    
+    // Test GetFileSize
+    EXPECT_THROW(m_filesystem->GetFileSize(testBlobName), std::runtime_error);
+    
+    // Test GetFileModificationTime
+    EXPECT_THROW(m_filesystem->GetFileModificationTime(testBlobName), std::runtime_error);
+    
+    // Test GetChildren
+    EXPECT_THROW(m_filesystem->GetChildren(m_containerPrefix), std::runtime_error);
+    
+    // Test GetChildrenFileAttributes
+    EXPECT_THROW(m_filesystem->GetChildrenFileAttributes(m_containerPrefix), std::runtime_error);
+    
+    // Test DeleteFile
+    EXPECT_THROW(m_filesystem->DeleteFile(testBlobName), std::runtime_error);
+    
+    // Test DeleteDir
+    EXPECT_THROW(m_filesystem->DeleteDir(m_containerPrefix), std::runtime_error);
+    
+    // Test Truncate
+    EXPECT_THROW(m_filesystem->Truncate(testBlobName, 256), std::runtime_error);
+    
+    // Test RenameFile
+    EXPECT_THROW(m_filesystem->RenameFile(testBlobName, m_containerPrefix + "/renamed-file"), std::runtime_error);
+    
+    // Test LockFile
+    EXPECT_THROW(m_filesystem->LockFile(m_containerPrefix + "/lock-file"), std::runtime_error);
+    
+    // Test CreateLogger
+    EXPECT_THROW(m_filesystem->CreateLogger(m_containerPrefix + "/log-file", 0), std::runtime_error);
+    
+    // Test CreateDirectory
+    EXPECT_THROW(m_filesystem->CreateDirectory(m_containerPrefix + "/test-dir"), std::runtime_error);
+}
