@@ -773,36 +773,47 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                     break;
                 }
 
-                // Copy shared_ptr locks to keep them alive during renewal, even if removed from m_locks
-                std::vector<std::shared_ptr<LockFileImpl>> needsRetry;
                 {
                     std::scoped_lock lock(m_lockFilesMutex);
-                    needsRetry.assign(m_locks.begin(), m_locks.end());
-                }
-
-                // Attempt to renew all locks with retries
-                int retries = 0;
-                while (needsRetry.size() > 0 && retries < 5 && !stopToken.stop_requested())
-                {
-                    std::erase_if(needsRetry, [this](const auto& client) -> bool
-                        {
-                            try
-                            {
-                                client->Renew();
-                                return true;
-                            }
-                            catch (const ::Azure::Core::RequestFailedException& e)
-                            {
-                                BOOST_LOG_SEV(*m_logger, severity_level::error) << "Failed to renew lease: " << e.what();
-                            }
-
-                            return false;
-                        });
-
-                    retries++;
-                    if (needsRetry.size() > 0)
+                    std::vector<LockFileImpl*> needsRetry;
+                    needsRetry.reserve(m_locks.size());
+                    for (const auto& l : m_locks)
                     {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        needsRetry.push_back(l.get());
+                    }
+
+                    // Attempt to renew all locks with retries
+                    int retries = 0;
+                    while (needsRetry.size() > 0 && retries < 5 && !stopToken.stop_requested())
+                    {
+                        std::erase_if(needsRetry, [this](const auto& client) -> bool
+                            {
+                                try
+                                {
+                                    client->Renew();
+                                    return true;
+                                }
+                                catch (const ::Azure::Core::RequestFailedException& e)
+                                {
+                                    if (e.StatusCode == ::Azure::Core::Http::HttpStatusCode::Conflict)
+                                    {
+                                        BOOST_LOG_SEV(*m_logger, severity_level::error) << "Failed to renew lease due to conflict, lease might be expired: " << e.what();
+                                        throw;
+                                    }
+                                    else
+                                    {
+                                        BOOST_LOG_SEV(*m_logger, severity_level::error) << "Failed to renew lease: " << e.what();
+                                    }
+                                }
+
+                                return false;
+                            });
+
+                        retries++;
+                        if (needsRetry.size() > 0)
+                        {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        }
                     }
                 }
             }
