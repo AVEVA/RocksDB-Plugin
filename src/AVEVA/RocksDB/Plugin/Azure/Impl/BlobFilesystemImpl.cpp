@@ -798,7 +798,10 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                             });
 
                         retries++;
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        if (needsRetry.size() > 0)
+                        {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        }
                     }
                 }
 
