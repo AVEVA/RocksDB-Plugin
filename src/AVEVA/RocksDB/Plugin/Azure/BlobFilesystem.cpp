@@ -580,6 +580,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
 
             m_filesystem->UnlockFile(lockFile->GetImpl());
             std::erase_if(m_lockFiles, [lockFile](const auto& l) { return l == lockFile; });
+            delete l;
             return rocksdb::IOStatus::OK();
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
