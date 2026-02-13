@@ -574,7 +574,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
             auto lockFile = dynamic_cast<Plugin::Azure::LockFile*>(l);
             if (lockFile == nullptr)
             {
-                BOOST_LOG_SEV(*m_logger, error) << "Unable to case file lock to Azure::LockFile";
+                BOOST_LOG_SEV(*m_logger, error) << "Unable to cast file lock to Azure::LockFile";
                 return rocksdb::IOStatus::InvalidArgument();
             }
 
