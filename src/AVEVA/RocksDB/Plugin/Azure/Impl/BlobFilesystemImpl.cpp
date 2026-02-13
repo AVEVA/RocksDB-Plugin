@@ -789,7 +789,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                                     client->Renew();
                                     return true;
                                 }
-                                catch (std::exception& e)
+                                catch (const std::exception& e)
                                 {
                                     BOOST_LOG_SEV(*m_logger, severity_level::error) << "Failed to renew lease for blob " << e.what();
                                 }
@@ -814,7 +814,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 }
             }
         }
-        catch (std::exception &e)
+        catch (const std::exception &e)
         {
             BOOST_LOG_SEV(*m_logger, severity_level::fatal) << "Stopping renewal thread " << e.what();
             m_filesystemStopSource.request_stop();
