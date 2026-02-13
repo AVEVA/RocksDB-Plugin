@@ -23,10 +23,11 @@ namespace AVEVA::RocksDB::Plugin::Azure
 
     BlobFilesystem::~BlobFilesystem()
     {
-        m_lockFiles.clear_and_dispose([](Azure::LockFile* lock) static
+        for (auto lock : m_lockFiles)
         {
+            m_filesystem->UnlockFile(lock->GetImpl());
             delete lock;
-        });
+        }
     }
 
     const char* BlobFilesystem::Name() const
@@ -544,8 +545,8 @@ namespace AVEVA::RocksDB::Plugin::Azure
             *l = nullptr;
             auto lock = m_filesystem->LockFile(f);
             auto lockFileWrapper = new Plugin::Azure::LockFile(lock);
+            m_lockFiles.push_back(lockFileWrapper);
             *l = lockFileWrapper;
-            m_lockFiles.push_back(*lockFileWrapper);
             return rocksdb::IOStatus::OK();
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
@@ -571,17 +572,16 @@ namespace AVEVA::RocksDB::Plugin::Azure
         try
         {
             auto lockFile = dynamic_cast<Plugin::Azure::LockFile*>(l);
-            if (lockFile != nullptr)
+            if (lockFile == nullptr)
             {
-                lockFile->Unlock();
-                delete lockFile;
-                return rocksdb::IOStatus::OK();
-            }
-            else
-            {
-                BOOST_LOG_SEV(*m_logger, error) << "Unable to case file lock to Azure::LockFile";
+                BOOST_LOG_SEV(*m_logger, error) << "Unable to cast file lock to Azure::LockFile";
                 return rocksdb::IOStatus::InvalidArgument();
             }
+
+            m_filesystem->UnlockFile(lockFile->GetImpl());
+            std::erase_if(m_lockFiles, [lockFile](const auto& l) { return l == lockFile; });
+            delete lockFile;
+            return rocksdb::IOStatus::OK();
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {

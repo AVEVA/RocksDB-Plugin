@@ -19,8 +19,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
     {
         std::unique_ptr<Impl::BlobFilesystemImpl> m_filesystem;
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
-        boost::intrusive::list<Azure::LockFile, boost::intrusive::constant_time_size<false>> m_lockFiles;
-
+        std::vector<Azure::LockFile*> m_lockFiles;
     public:
         BlobFilesystem(std::shared_ptr<rocksdb::FileSystem> rocksdbFs,
             std::unique_ptr<Impl::BlobFilesystemImpl> filesystem,

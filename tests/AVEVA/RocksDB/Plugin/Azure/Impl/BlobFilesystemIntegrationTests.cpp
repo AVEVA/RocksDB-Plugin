@@ -638,10 +638,9 @@ TEST_F(BlobFilesystemIntegrationTests, UnlockFile_ReleasesLock)
     EXPECT_EQ(1, m_filesystem->GetLeaseClientCount());
 
     // Act
-    bool unlocked = m_filesystem->UnlockFile(*lock);
+    m_filesystem->UnlockFile(*lock);
 
     // Assert
-    EXPECT_TRUE(unlocked);
     EXPECT_EQ(0, m_filesystem->GetLeaseClientCount());
 
     // Cleanup
@@ -661,10 +660,7 @@ TEST_F(BlobFilesystemIntegrationTests, UnlockFile_InvalidLock_ReturnsFalse)
     m_filesystem->UnlockFile(*lock1);
 
     // Act - try to unlock lock1 again
-    bool unlocked = m_filesystem->UnlockFile(*lock1);
-
-    // Assert
-    EXPECT_FALSE(unlocked);
+    EXPECT_THROW(m_filesystem->UnlockFile(*lock1), std::runtime_error);
 
     // Cleanup
     m_filesystem->UnlockFile(*lock2);

@@ -356,7 +356,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         auto lockFile = std::make_shared<LockFileImpl>(std::move(client), Configuration::LeaseLength);
         if (lockFile->Lock())
         {
-            m_locks.push_back(lockFile);
+            m_locks.push_back(*lockFile);
+            assert(lockFile->is_linked());
             return lockFile;
         }
         else
@@ -365,28 +366,13 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         }
     }
 
-    bool BlobFilesystemImpl::UnlockFile(const LockFileImpl& lock)
+    void BlobFilesystemImpl::UnlockFile(LockFileImpl& lock)
     {
         EnsureLiveness();
 
         std::scoped_lock _(m_lockFilesMutex);
-        const auto it = std::find_if(m_locks.cbegin(),
-            m_locks.cend(),
-            [&lock](const auto& f)
-            {
-                return f.get() == &lock;
-            });
-
-        if (it != m_locks.cend())
-        {
-            (*it)->Unlock();
-            m_locks.erase(it);
-            return true;
-        }
-        else
-        {
-            return false;
-        }
+        lock.Unlock();
+        lock.unlink();
     }
 
     DirectoryImpl BlobFilesystemImpl::CreateDirectory(const std::string& directoryPath)
@@ -775,11 +761,11 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
                 {
                     std::scoped_lock lock(m_lockFilesMutex);
-                    std::vector<LockFileImpl*> needsRetry;
+                    std::vector<const LockFileImpl*> needsRetry;
                     needsRetry.reserve(m_locks.size());
                     for (const auto& l : m_locks)
                     {
-                        needsRetry.push_back(l.get());
+                        needsRetry.push_back(&l);
                     }
 
                     // Attempt to renew all locks with retries

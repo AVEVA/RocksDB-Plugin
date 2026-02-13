@@ -47,7 +47,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::unordered_map<std::string, ServiceContainer, Core::StringHash, Core::StringEqual> m_clients;
         std::unordered_map<std::string, std::shared_ptr<Core::FileCache>, Core::StringHash, Core::StringEqual> m_fileCaches;
         std::mutex m_lockFilesMutex;
-        std::vector<std::shared_ptr<LockFileImpl>> m_locks;
+        boost::intrusive::list<LockFileImpl, boost::intrusive::constant_time_size<false>> m_locks;
         std::stop_source m_filesystemStopSource;
         std::jthread m_lockRenewalThread;
 
@@ -103,7 +103,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         [[nodiscard]] WriteableFileImpl ReuseWritableFile(const std::string& filePath);
         LoggerImpl CreateLogger(const std::string& filePath, int logLevel);
         std::shared_ptr<LockFileImpl> LockFile(const std::string& filePath);
-        bool UnlockFile(const LockFileImpl& lock);
+        void UnlockFile(LockFileImpl& lock);
         DirectoryImpl CreateDirectory(const std::string& directoryPath);
 
         [[nodiscard]] bool FileExists(const std::string& name);

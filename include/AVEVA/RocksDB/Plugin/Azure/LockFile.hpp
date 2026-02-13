@@ -4,13 +4,12 @@
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 
-#include <boost/intrusive/list.hpp>
 #include <rocksdb/db.h>
 
 #include <memory>
 namespace AVEVA::RocksDB::Plugin::Azure
 {
-    class LockFile : public rocksdb::FileLock, public boost::intrusive::list_base_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>>
+    class LockFile : public rocksdb::FileLock
     {
         std::shared_ptr<Impl::LockFileImpl> m_lock;
     public:
@@ -19,7 +18,6 @@ namespace AVEVA::RocksDB::Plugin::Azure
         void Renew() const;
         void Unlock();
 
-        void unlink();
-        bool is_linked();
+        Impl::LockFileImpl& GetImpl() const;
     };
 }

@@ -109,4 +109,14 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     {
         return TimeSinceLastRenewal() >= m_leaseLength;
     }
+
+    void LockFileImpl::unlink()
+    {
+        boost::intrusive::list_base_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>>::unlink();
+    }
+
+    bool LockFileImpl::is_linked()
+    {
+        return boost::intrusive::list_base_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>>::is_linked();
+    }
 }
