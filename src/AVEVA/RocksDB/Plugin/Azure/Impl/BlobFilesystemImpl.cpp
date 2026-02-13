@@ -353,7 +353,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
         auto client = std::make_unique<::Azure::Storage::Blobs::PageBlobClient>(container.GetPageBlobClient(std::string(realPath)));
         client->CreateIfNotExists(Configuration::PageBlob::DefaultSize);
-        auto lockFile = std::make_shared<LockFileImpl>(std::move(client));
+        auto lockFile = std::make_shared<LockFileImpl>(std::move(client), Configuration::LeaseLength);
         if (lockFile->Lock())
         {
             m_locks.push_back(lockFile);
@@ -750,7 +750,6 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     void BlobFilesystemImpl::RenewLease(std::stop_token stopToken)
     {
         BOOST_LOG_SEV(*m_logger, severity_level::info) << "Starting blob lease renewal thread";
-        auto startTime = std::chrono::steady_clock::now();
         try
         {
             while (!stopToken.stop_requested())
@@ -760,38 +759,51 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                     break;
                 }
 
+                // Sleep before attempting renewal
+                static const constexpr auto sleepInterval = std::chrono::milliseconds(100);
+                static const constexpr auto maxSleepIterations = 50;
+                static_assert(sleepInterval * maxSleepIterations == Configuration::RenewalDelay);
+                for (int i = 0; i < maxSleepIterations && !stopToken.stop_requested(); ++i)
                 {
-                    std::vector<LockFileImpl*> needsRetry;
+                    std::this_thread::sleep_for(sleepInterval);
+                }
+
+                if (stopToken.stop_requested())
+                {
+                    break;
+                }
+
+                {
                     std::scoped_lock lock(m_lockFilesMutex);
+                    std::vector<LockFileImpl*> needsRetry;
                     needsRetry.reserve(m_locks.size());
-                    for (const auto& lockPtr : m_locks)
+                    for (const auto& l : m_locks)
                     {
-                        needsRetry.push_back(lockPtr.get());
+                        needsRetry.push_back(l.get());
                     }
 
+                    // Attempt to renew all locks with retries
                     int retries = 0;
                     while (needsRetry.size() > 0 && retries < 5 && !stopToken.stop_requested())
                     {
-                        const auto timeElapsed = std::chrono::steady_clock::now() - startTime;
-                        if (timeElapsed >= Configuration::LeaseLength)
-                        {
-                            throw std::runtime_error("Lease length time exceeded. Unsafe to continue");
-                        }
-
-                        std::erase_if(needsRetry, [this](const auto* client) -> bool
+                        std::erase_if(needsRetry, [this](const auto& client) -> bool
                             {
                                 try
                                 {
                                     client->Renew();
                                     return true;
                                 }
-                                catch (const std::exception& e)
+                                catch (const ::Azure::Core::RequestFailedException& e)
                                 {
-                                    BOOST_LOG_SEV(*m_logger, severity_level::error) << "Failed to renew lease for blob " << e.what();
-                                }
-                                catch (...)
-                                {
-                                    BOOST_LOG_SEV(*m_logger, severity_level::error) << "Failed to renew lease for blob ";
+                                    if (e.StatusCode == ::Azure::Core::Http::HttpStatusCode::Conflict)
+                                    {
+                                        BOOST_LOG_SEV(*m_logger, severity_level::error) << "Failed to renew lease due to conflict, lease might be expired: " << e.what();
+                                        throw;
+                                    }
+                                    else
+                                    {
+                                        BOOST_LOG_SEV(*m_logger, severity_level::error) << "Failed to renew lease: " << e.what();
+                                    }
                                 }
 
                                 return false;
@@ -803,15 +815,6 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                             std::this_thread::sleep_for(std::chrono::milliseconds(100));
                         }
                     }
-                }
-
-                startTime = std::chrono::steady_clock::now();
-                static const constexpr auto sleepInterval = std::chrono::milliseconds(100);
-                static const constexpr auto maxSleepIterations = 100;
-                static_assert(sleepInterval * maxSleepIterations == Configuration::RenewalDelay);
-                for (int i = 0; i < maxSleepIterations && !stopToken.stop_requested(); ++i)
-                {
-                    std::this_thread::sleep_for(sleepInterval);
                 }
             }
         }
