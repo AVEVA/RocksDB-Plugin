@@ -760,17 +760,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                     break;
                 }
 
-                const auto timeElapsed = std::chrono::steady_clock::now() - startTime;
-                if (timeElapsed >= Configuration::LeaseLength)
                 {
-                    throw std::runtime_error("Lease length time exceeded. Unsafe to continue");
-                }
-
-                // Pessimistic setting of new start time.
-                startTime = std::chrono::steady_clock::now();
-                std::vector<LockFileImpl*> needsRetry;
-
-                {
+                    std::vector<LockFileImpl*> needsRetry;
                     std::scoped_lock lock(m_lockFilesMutex);
                     needsRetry.reserve(m_locks.size());
                     for (const auto& lockPtr : m_locks)
@@ -778,10 +769,15 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                         needsRetry.push_back(lockPtr.get());
                     }
 
-
                     int retries = 0;
                     while (needsRetry.size() > 0 && retries < 5 && !stopToken.stop_requested())
                     {
+                        const auto timeElapsed = std::chrono::steady_clock::now() - startTime;
+                        if (timeElapsed >= Configuration::LeaseLength)
+                        {
+                            throw std::runtime_error("Lease length time exceeded. Unsafe to continue");
+                        }
+
                         std::erase_if(needsRetry, [this](const auto* client) -> bool
                             {
                                 try
@@ -802,9 +798,11 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                             });
 
                         retries++;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     }
                 }
 
+                startTime = std::chrono::steady_clock::now();
                 static const constexpr auto sleepInterval = std::chrono::milliseconds(100);
                 static const constexpr auto maxSleepIterations = 100;
                 static_assert(sleepInterval * maxSleepIterations == Configuration::RenewalDelay);
