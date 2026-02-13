@@ -17,7 +17,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         };
 
         static const constexpr std::chrono::seconds LeaseLength = std::chrono::seconds(20);
-        static const constexpr std::chrono::seconds RenewalDelay = std::chrono::seconds(10);
+        static const constexpr std::chrono::seconds RenewalDelay = std::chrono::seconds(5);
         static const constexpr size_t MaxCacheSize = static_cast<size_t>(1024) * 1024 * 1024; // 1GB
         static const constexpr int MaxClientRetries = 8;
     };

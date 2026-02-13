@@ -24,13 +24,8 @@ namespace AVEVA::RocksDB::Plugin::Azure
         m_lock->Unlock();
     }
 
-    void LockFile::unlink()
+    Impl::LockFileImpl& LockFile::GetImpl() const
     {
-        boost::intrusive::list_base_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>>::unlink();
-    }
-
-    bool LockFile::is_linked()
-    {
-        return boost::intrusive::list_base_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>>::is_linked();
+        return *m_lock;
     }
 }
