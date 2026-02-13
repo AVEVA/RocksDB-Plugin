@@ -11,6 +11,9 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.hpp"
 
 #include <azure/storage/blobs.hpp>
+
+using boost::log::trivial::severity_level;
+
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
     BlobFilesystemImpl::BlobFilesystemImpl(const std::string& name,
@@ -189,6 +192,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     ReadableFileImpl BlobFilesystemImpl::CreateReadableFile(const std::string& filePath)
     {
+        EnsureLiveness();
+
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
         const auto& container = GetContainer(prefix);
         auto pageBlobClient = container.GetPageBlobClient(std::string(realPath));
@@ -206,6 +211,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     WriteableFileImpl BlobFilesystemImpl::CreateWriteableFile(const std::string& filePath)
     {
+        EnsureLiveness();
+
         const auto fileType = Core::RocksDBHelpers::GetFileType(filePath);
         const auto isData = fileType == Core::RocksDBHelpers::FileClass::WAL ||
             fileType == Core::RocksDBHelpers::FileClass::SST;
@@ -246,6 +253,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     ReadWriteFileImpl BlobFilesystemImpl::CreateReadWriteFile(const std::string& filePath)
     {
+        EnsureLiveness();
+
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
         const auto& container = GetContainer(prefix);
 
@@ -267,6 +276,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     WriteableFileImpl BlobFilesystemImpl::ReopenWriteableFile(const std::string& filePath)
     {
+        EnsureLiveness();
+
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
         const auto& container = GetContainer(prefix);
         const auto fileType = Core::RocksDBHelpers::GetFileType(filePath);
@@ -289,6 +300,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     WriteableFileImpl BlobFilesystemImpl::ReuseWritableFile(const std::string& filePath)
     {
+        EnsureLiveness();
+
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
         const auto& container = GetContainer(prefix);
         const auto fileType = Core::RocksDBHelpers::GetFileType(filePath);
@@ -316,6 +329,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     LoggerImpl BlobFilesystemImpl::CreateLogger(const std::string& filePath, const int logLevel)
     {
+        EnsureLiveness();
+
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
         const auto& container = GetContainer(prefix);
 
@@ -329,6 +344,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     std::shared_ptr<LockFileImpl> BlobFilesystemImpl::LockFile(const std::string& filePath)
     {
+        EnsureLiveness();
+
         std::scoped_lock _(m_lockFilesMutex);
 
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
@@ -337,9 +354,9 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         auto client = std::make_unique<::Azure::Storage::Blobs::PageBlobClient>(container.GetPageBlobClient(std::string(realPath)));
         client->CreateIfNotExists(Configuration::PageBlob::DefaultSize);
         auto lockFile = std::make_shared<LockFileImpl>(std::move(client));
-        m_locks.push_back(lockFile);
         if (lockFile->Lock())
         {
+            m_locks.push_back(lockFile);
             return lockFile;
         }
         else
@@ -350,6 +367,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     bool BlobFilesystemImpl::UnlockFile(const LockFileImpl& lock)
     {
+        EnsureLiveness();
+
         std::scoped_lock _(m_lockFilesMutex);
         const auto it = std::find_if(m_locks.cbegin(),
             m_locks.cend(),
@@ -372,12 +391,16 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     DirectoryImpl BlobFilesystemImpl::CreateDirectory(const std::string& directoryPath)
     {
+        EnsureLiveness();
+
         const auto [prefix, realPath] = StorageAccount::StripPrefix(directoryPath);
         return DirectoryImpl{ GetContainer(prefix), realPath };
     }
 
     bool BlobFilesystemImpl::FileExists(const std::string& name)
     {
+        EnsureLiveness();
+
         const auto [prefix, realPath] = StorageAccount::StripPrefix(name);
         const auto& container = GetContainer(prefix);
 
@@ -410,6 +433,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     std::vector<std::string> BlobFilesystemImpl::GetChildren(const std::string& directoryPath, int32_t sizeHint)
     {
+        EnsureLiveness();
+
         const auto [prefix, realPath] = StorageAccount::StripPrefix(directoryPath);
         const auto& container = GetContainer(prefix);
 
@@ -461,6 +486,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     std::vector<BlobAttributes> BlobFilesystemImpl::GetChildrenFileAttributes(const std::string& directoryPath)
     {
+        EnsureLiveness();
+
         const auto [prefix, realPath] = StorageAccount::StripPrefix(directoryPath);
         const auto& container = GetContainer(prefix);
         std::vector<BlobAttributes> attributes;
@@ -493,6 +520,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     bool BlobFilesystemImpl::DeleteFile(const std::string& filePath) const
     {
+        EnsureLiveness();
+
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
         const auto& container = GetContainer(prefix);
         const auto client = container.GetPageBlobClient(std::string(realPath));
@@ -509,6 +538,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     size_t BlobFilesystemImpl::DeleteDir(const std::string& directoryPath) const
     {
+        EnsureLiveness();
+
         const auto [prefix, realPath] = StorageAccount::StripPrefix(directoryPath);
         const auto& container = GetContainer(prefix);
 
@@ -559,6 +590,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     void BlobFilesystemImpl::Truncate(const std::string& filePath, int64_t size) const
     {
+        EnsureLiveness();
+
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
         const auto& container = GetContainer(prefix);
 
@@ -573,6 +606,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     int64_t BlobFilesystemImpl::GetFileSize(const std::string& filePath) const
     {
+        EnsureLiveness();
+
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
         const auto& container = GetContainer(prefix);
 
@@ -582,6 +617,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     uint64_t BlobFilesystemImpl::GetFileModificationTime(const std::string& filePath) const
     {
+        EnsureLiveness();
+
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
         const auto& container = GetContainer(prefix);
 
@@ -593,12 +630,16 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     size_t BlobFilesystemImpl::GetLeaseClientCount()
     {
+        EnsureLiveness();
+
         std::scoped_lock _(m_lockFilesMutex);
         return m_locks.size();
     }
 
     void BlobFilesystemImpl::RenameFile(const std::string& fromFilePath, const std::string& toFilePath) const
     {
+        EnsureLiveness();
+
         const auto [prefixAccountFrom, realPathFrom] = StorageAccount::StripPrefix(fromFilePath);
         const auto [prefixAccountTo, realPathTo] = StorageAccount::StripPrefix(toFilePath);
         if (prefixAccountFrom != prefixAccountTo)
@@ -708,48 +749,92 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     void BlobFilesystemImpl::RenewLease(std::stop_token stopToken)
     {
-        while (!stopToken.stop_requested())
+        BOOST_LOG_SEV(*m_logger, severity_level::info) << "Starting blob lease renewal thread";
+        auto startTime = std::chrono::steady_clock::now();
+        try
         {
+            while (!stopToken.stop_requested())
             {
-                std::scoped_lock lock(m_lockFilesMutex);
                 if (stopToken.stop_requested())
                 {
                     break;
                 }
 
-                std::vector<LockFileImpl*> needsRetry;
-                needsRetry.reserve(m_locks.size());
-                for (const auto& lockPtr : m_locks)
                 {
-                    needsRetry.push_back(lockPtr.get());
-                }
+                    std::vector<LockFileImpl*> needsRetry;
+                    std::scoped_lock lock(m_lockFilesMutex);
+                    needsRetry.reserve(m_locks.size());
+                    for (const auto& lockPtr : m_locks)
+                    {
+                        needsRetry.push_back(lockPtr.get());
+                    }
 
-                int retries = 0;
-                while (needsRetry.size() > 0 && retries < 5 && !stopToken.stop_requested())
-                {
-                    std::erase_if(needsRetry, [](const auto* client) -> bool
+                    int retries = 0;
+                    while (needsRetry.size() > 0 && retries < 5 && !stopToken.stop_requested())
+                    {
+                        const auto timeElapsed = std::chrono::steady_clock::now() - startTime;
+                        if (timeElapsed >= Configuration::LeaseLength)
                         {
-                            try
-                            {
-                                client->Renew();
-                                return true;
-                            }
-                            catch (...)
-                            {
-                                return false;
-                            }
-                        });
+                            throw std::runtime_error("Lease length time exceeded. Unsafe to continue");
+                        }
 
-                    retries++;
+                        std::erase_if(needsRetry, [this](const auto* client) -> bool
+                            {
+                                try
+                                {
+                                    client->Renew();
+                                    return true;
+                                }
+                                catch (const std::exception& e)
+                                {
+                                    BOOST_LOG_SEV(*m_logger, severity_level::error) << "Failed to renew lease for blob " << e.what();
+                                }
+                                catch (...)
+                                {
+                                    BOOST_LOG_SEV(*m_logger, severity_level::error) << "Failed to renew lease for blob ";
+                                }
+
+                                return false;
+                            });
+
+                        retries++;
+                        if (needsRetry.size() > 0)
+                        {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        }
+                    }
+                }
+
+                startTime = std::chrono::steady_clock::now();
+                static const constexpr auto sleepInterval = std::chrono::milliseconds(100);
+                static const constexpr auto maxSleepIterations = 100;
+                static_assert(sleepInterval * maxSleepIterations == Configuration::RenewalDelay);
+                for (int i = 0; i < maxSleepIterations && !stopToken.stop_requested(); ++i)
+                {
+                    std::this_thread::sleep_for(sleepInterval);
                 }
             }
+        }
+        catch (const std::exception &e)
+        {
+            BOOST_LOG_SEV(*m_logger, severity_level::fatal) << "Stopping renewal thread " << e.what();
+            m_filesystemStopSource.request_stop();
+        }
+        catch (...)
+        {
+            BOOST_LOG_SEV(*m_logger, severity_level::fatal) << "Stopping renewal thread";
+            m_filesystemStopSource.request_stop();
+        }
 
-            // Sleep AFTER doing work - use VERY small increments for testing
-            // 10000 iterations * 1ms = 10 seconds total
-            for (int i = 0; i < 10000 && !stopToken.stop_requested(); ++i)
-            {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
+        BOOST_LOG_SEV(*m_logger, severity_level::info) << "Exiting blob lease renewal thread";
+    }
+
+    void BlobFilesystemImpl::EnsureLiveness(const std::source_location location) const
+    {
+        if (m_filesystemStopSource.stop_requested())
+        {
+            BOOST_LOG_SEV(*m_logger, severity_level::fatal) << "Unable to ensure safe database access when attempting to call " << location.function_name();
+            throw std::runtime_error("Unable to ensure safe database access");
         }
     }
 }

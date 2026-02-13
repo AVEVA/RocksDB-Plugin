@@ -24,6 +24,7 @@
 #include <mutex>
 #include <vector>
 #include <optional>
+#include <source_location>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
     class BlobFilesystemImpl
@@ -47,6 +48,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::unordered_map<std::string, std::shared_ptr<Core::FileCache>, Core::StringHash, Core::StringEqual> m_fileCaches;
         std::mutex m_lockFilesMutex;
         std::vector<std::shared_ptr<LockFileImpl>> m_locks;
+        std::stop_source m_filesystemStopSource;
         std::jthread m_lockRenewalThread;
 
     public:
@@ -118,5 +120,6 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         BlobFilesystemImpl(std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>&& logger, int64_t dataFileInitialSize = 0, int64_t dataFileBufferSize = 0);
         [[nodiscard]] const ::Azure::Storage::Blobs::BlobContainerClient& GetContainer(std::string_view prefix) const;
         void RenewLease(std::stop_token stopToken);
+        void EnsureLiveness(std::source_location location = std::source_location::current()) const;
     };
 }
