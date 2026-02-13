@@ -116,10 +116,10 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         [[nodiscard]] uint64_t GetFileModificationTime(const std::string& filePath) const;
         size_t GetLeaseClientCount();
         void RenameFile(const std::string& fromFilePath, const std::string& toFilePath) const;
-        void EnsureLiveness(std::source_location location = std::source_location::current()) const;
     private:
         BlobFilesystemImpl(std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>&& logger, int64_t dataFileInitialSize = 0, int64_t dataFileBufferSize = 0);
         [[nodiscard]] const ::Azure::Storage::Blobs::BlobContainerClient& GetContainer(std::string_view prefix) const;
         void RenewLease(std::stop_token stopToken);
+        void EnsureLiveness(std::source_location location = std::source_location::current()) const;
     };
 }
