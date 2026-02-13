@@ -11,6 +11,9 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.hpp"
 
 #include <azure/storage/blobs.hpp>
+
+using boost::log::trivial::severity_level;
+
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
     BlobFilesystemImpl::BlobFilesystemImpl(const std::string& name,
@@ -746,7 +749,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
     void BlobFilesystemImpl::RenewLease(std::stop_token stopToken)
     {
-        BOOST_LOG_INFO(*m_logger, severity_level::info) << "Starting blob lease renewal thread";
+        BOOST_LOG_SEV(*m_logger, severity_level::info) << "Starting blob lease renewal thread";
         auto startTime = std::chrono::system_clock::now();
         try
         {
@@ -776,7 +779,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 int retries = 0;
                 while (needsRetry.size() > 0 && retries < 5 && !stopToken.stop_requested())
                 {
-                    std::erase_if(needsRetry, [](const auto* client) -> bool
+                    std::erase_if(needsRetry, [this](const auto* client) -> bool
                         {
                             try
                             {
@@ -807,21 +810,23 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         }
         catch (std::exception &e)
         {
-            BOOST_LOG_SEV(*m_logger, severity_level::critical) << "Stopping renewal thread " << e.what();
+            BOOST_LOG_SEV(*m_logger, severity_level::fatal) << "Stopping renewal thread " << e.what();
             m_filesystemStopSource.request_stop();
         }
         catch (...)
         {
-            BOOST_LOG_SEV(*m_logger, severity_level::critical) << "Stopping renewal thread";
+            BOOST_LOG_SEV(*m_logger, severity_level::fatal) << "Stopping renewal thread";
             m_filesystemStopSource.request_stop();
         }
+
+        BOOST_LOG_SEV(*m_logger, severity_level::info) << "Exiting blob lease renewal thread";
     }
 
-    void BlobFilesystemImpl::EnsureLiveness(const std::source_location location)
+    void BlobFilesystemImpl::EnsureLiveness(const std::source_location location) const
     {
         if (m_filesystemStopSource.stop_requested())
         {
-            BOOST_LOG_SEV(*m_logger, severity_level::critical) << "Unable to ensure safe database access when attempting to call " << location.function_name();
+            BOOST_LOG_SEV(*m_logger, severity_level::fatal) << "Unable to ensure safe database access when attempting to call " << location.function_name();
             throw std::runtime_error("Unable to ensure safe database access");
         }
     }
