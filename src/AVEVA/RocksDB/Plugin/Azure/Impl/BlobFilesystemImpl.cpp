@@ -807,7 +807,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
                 static const constexpr auto sleepInterval = std::chrono::milliseconds(100);
                 static const constexpr auto maxSleepIterations = 100;
-                static_assert(sleepInterval * maxSleepIterations == Configuration::RenewalDelay, "Total sleep time exceeds 10 seconds");
+                static_assert(sleepInterval * maxSleepIterations == Configuration::RenewalDelay);
                 for (int i = 0; i < maxSleepIterations && !stopToken.stop_requested(); ++i)
                 {
                     std::this_thread::sleep_for(sleepInterval);

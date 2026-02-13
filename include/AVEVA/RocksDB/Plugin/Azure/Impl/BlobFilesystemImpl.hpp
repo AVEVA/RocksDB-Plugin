@@ -48,8 +48,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::unordered_map<std::string, std::shared_ptr<Core::FileCache>, Core::StringHash, Core::StringEqual> m_fileCaches;
         std::mutex m_lockFilesMutex;
         std::vector<std::shared_ptr<LockFileImpl>> m_locks;
-        std::jthread m_lockRenewalThread;
         std::stop_source m_filesystemStopSource;
+        std::jthread m_lockRenewalThread;
 
     public:
         BlobFilesystemImpl(const std::string& name,
