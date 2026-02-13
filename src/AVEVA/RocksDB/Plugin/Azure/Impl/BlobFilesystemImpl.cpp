@@ -750,7 +750,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     void BlobFilesystemImpl::RenewLease(std::stop_token stopToken)
     {
         BOOST_LOG_SEV(*m_logger, severity_level::info) << "Starting blob lease renewal thread";
-        auto startTime = std::chrono::system_clock::now();
+        auto startTime = std::chrono::steady_clock::now();
         try
         {
             while (!stopToken.stop_requested())
@@ -760,14 +760,14 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                     break;
                 }
 
-                const auto timeElapsed = std::chrono::system_clock::now() - startTime;
+                const auto timeElapsed = std::chrono::steady_clock::now() - startTime;
                 if (timeElapsed >= Configuration::LeaseLength)
                 {
                     throw std::runtime_error("Lease length time exceeded. Unsafe to continue");
                 }
 
                 // Pessimistic setting of new start time.
-                startTime = std::chrono::system_clock::now();
+                startTime = std::chrono::steady_clock::now();
                 std::vector<LockFileImpl*> needsRetry;
 
                 {
