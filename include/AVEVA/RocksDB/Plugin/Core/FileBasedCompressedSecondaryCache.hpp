@@ -18,6 +18,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Core
@@ -177,18 +178,20 @@ namespace AVEVA::RocksDB::Plugin::Core
                                    bool force_insert = true) noexcept;
 
         /// <summary>Evicts LRU entries from the back of the list until <c>m_currentSize &lt;= targetSize</c>.
-        /// Each evicted file is renamed to a unique <c>.del</c> path under the lock and appended to
-        /// <paramref name="pathsToDelete"/>; the caller must delete those files after releasing the lock.</summary>
+        /// Updates the in-memory index under the lock and appends <c>{origPath, graveyardPath}</c> pairs to
+        /// <paramref name="evictPairs"/>; the caller must rename and delete those files after releasing
+        /// the lock via <c>FileUtil::CommitEvictions</c>.</summary>
         /// <remarks>Must be called with m_mutex held.</remarks>
-        void EvictUntilSizeLocked(size_t targetSize, std::vector<std::filesystem::path>& pathsToDelete);
+        void EvictUntilSizeLocked(size_t targetSize, std::vector<std::pair<std::string, std::string>>& evictPairs);
 
-        /// <summary>Removes a single entry from the in-memory index and renames its on-disk file to a
-        /// unique <c>.del</c> path. Returns the renamed path, which the caller must delete after releasing
-        /// the lock. Returns an empty path if the rename fails (e.g. file already missing).</summary>
+        /// <summary>Removes a single entry from the in-memory index and returns <c>{origPath, graveyardPath}</c>.
+        /// No filesystem rename is performed; the caller must call <c>FileUtil::CommitEviction</c> on the
+        /// returned pair after releasing the lock.</summary>
         /// <remarks>Must be called with m_mutex held.</remarks>
-        [[nodiscard]] std::filesystem::path RemoveEntryLocked(LruIterator it);
+        [[nodiscard]] std::pair<std::string, std::string> RemoveEntryLocked(LruIterator it);
 
         std::filesystem::path m_cacheDir;
+        std::string m_cacheDirStr;
         size_t m_capacity;
         int    m_zstdLevel;
         size_t m_currentSize{0};
