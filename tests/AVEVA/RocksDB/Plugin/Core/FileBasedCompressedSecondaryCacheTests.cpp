@@ -1380,3 +1380,310 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, CustomZstdLevel_RoundTrips)
     delete result;
 }
 
+// --------------------------------------------------------------------------
+// Corrupting the magic bytes in the file header causes Lookup to return
+// nullptr and removes the entry from the index
+// --------------------------------------------------------------------------
+TEST_F(FileBasedCompressedSecondaryCacheTests, CorruptMagicNumber_RejectedOnLookup)
+{
+    const std::string keyStr = "corrupt_magic_key";
+    TestPayload payload{"data for magic corruption test"};
+
+    ASSERT_TRUE(m_cache->Insert(MakeKey(keyStr), &payload, &m_helper, true).ok());
+
+    std::string hex;
+    boost::algorithm::hex_lower(keyStr.begin(), keyStr.end(), std::back_inserter(hex));
+    const auto filePath = m_cacheDir / hex.substr(0, 2) / hex;
+
+    // Flip a byte in the magic field (offset 0).
+    {
+        std::fstream f(filePath, std::ios::binary | std::ios::in | std::ios::out);
+        ASSERT_TRUE(f.is_open()) << "Cache file not found: " << filePath;
+        f.seekg(0);
+        char b = 0;
+        f.read(&b, 1);
+        f.seekp(0);
+        f.put(static_cast<char>(~static_cast<unsigned char>(b)));
+    }
+
+    bool kept = false;
+    auto handle = m_cache->Lookup(MakeKey(keyStr), &m_helper,
+                                  nullptr, true, false, nullptr, kept);
+    EXPECT_EQ(handle, nullptr) << "Corrupt magic must cause Lookup to return nullptr";
+    EXPECT_FALSE(kept);
+
+    // Entry must have been removed from the index.
+    auto handle2 = m_cache->Lookup(MakeKey(keyStr), &m_helper,
+                                   nullptr, true, false, nullptr, kept);
+    EXPECT_EQ(handle2, nullptr);
+}
+
+// --------------------------------------------------------------------------
+// Corrupting the version byte in the file header causes Lookup to return
+// nullptr and removes the entry from the index
+// --------------------------------------------------------------------------
+TEST_F(FileBasedCompressedSecondaryCacheTests, CorruptVersionByte_RejectedOnLookup)
+{
+    const std::string keyStr = "corrupt_version_key";
+    TestPayload payload{"data for version corruption test"};
+
+    ASSERT_TRUE(m_cache->Insert(MakeKey(keyStr), &payload, &m_helper, true).ok());
+
+    std::string hex;
+    boost::algorithm::hex_lower(keyStr.begin(), keyStr.end(), std::back_inserter(hex));
+    const auto filePath = m_cacheDir / hex.substr(0, 2) / hex;
+
+    // The version byte is at offset 8 (after the 8-byte magic).
+    constexpr std::streamoff kVersionOffset = 8;
+    {
+        std::fstream f(filePath, std::ios::binary | std::ios::in | std::ios::out);
+        ASSERT_TRUE(f.is_open()) << "Cache file not found: " << filePath;
+        f.seekp(kVersionOffset);
+        // Write an invalid version (0xFF) instead of the expected version (1).
+        f.put(static_cast<char>(0xFF));
+    }
+
+    bool kept = false;
+    auto handle = m_cache->Lookup(MakeKey(keyStr), &m_helper,
+                                  nullptr, true, false, nullptr, kept);
+    EXPECT_EQ(handle, nullptr) << "Corrupt version must cause Lookup to return nullptr";
+    EXPECT_FALSE(kept);
+
+    // Entry must have been removed from the index.
+    auto handle2 = m_cache->Lookup(MakeKey(keyStr), &m_helper,
+                                   nullptr, true, false, nullptr, kept);
+    EXPECT_EQ(handle2, nullptr);
+}
+
+// --------------------------------------------------------------------------
+// A truncated file (contains only the header, no payload data) causes
+// Lookup to return nullptr and removes the entry from the index
+// --------------------------------------------------------------------------
+TEST_F(FileBasedCompressedSecondaryCacheTests, TruncatedFile_RejectedOnLookup)
+{
+    const std::string keyStr = "truncated_file_key";
+    TestPayload payload{"data that will be truncated on disk"};
+
+    ASSERT_TRUE(m_cache->Insert(MakeKey(keyStr), &payload, &m_helper, true).ok());
+
+    std::string hex;
+    boost::algorithm::hex_lower(keyStr.begin(), keyStr.end(), std::back_inserter(hex));
+    const auto filePath = m_cacheDir / hex.substr(0, 2) / hex;
+
+    // Read the original 22-byte header from the valid file.
+    constexpr std::uintmax_t kHeaderSize = 22;
+    std::array<char, kHeaderSize> headerBuf{};
+    {
+        std::ifstream f(filePath, std::ios::binary);
+        ASSERT_TRUE(f.is_open());
+        f.read(headerBuf.data(), kHeaderSize);
+        ASSERT_TRUE(f.good());
+    }
+
+    // Rewrite the file with only the header (no payload).
+    // The header's dataSize field still claims a non-zero payload, which will
+    // fail the (dataSize + headerSize > mappedSize) validation in Lookup.
+    {
+        std::ofstream f(filePath, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(f.is_open());
+        f.write(headerBuf.data(), kHeaderSize);
+    }
+
+    bool kept = false;
+    auto handle = m_cache->Lookup(MakeKey(keyStr), &m_helper,
+                                  nullptr, true, false, nullptr, kept);
+    EXPECT_EQ(handle, nullptr) << "Truncated file must cause Lookup to return nullptr";
+    EXPECT_FALSE(kept);
+
+    // Entry must have been removed from the index.
+    auto handle2 = m_cache->Lookup(MakeKey(keyStr), &m_helper,
+                                   nullptr, true, false, nullptr, kept);
+    EXPECT_EQ(handle2, nullptr);
+}
+
+// --------------------------------------------------------------------------
+// A single large insert evicts multiple smaller entries at once
+// --------------------------------------------------------------------------
+TEST_F(FileBasedCompressedSecondaryCacheTests, SingleInsertEvictsMultipleEntries)
+{
+    // Each small entry: 10-byte payload -> stored size = kFileHeaderSize + 10 = 32 bytes.
+    constexpr size_t kSmallPayloadSize = 10;
+    constexpr size_t kSmallEntrySize = FileBasedCompressedSecondaryCache::kFileHeaderSize + kSmallPayloadSize;
+
+    // Large entry: 30-byte payload -> stored size = kFileHeaderSize + 30 = 52 bytes.
+    constexpr size_t kLargePayloadSize = 30;
+
+    // Capacity fits 3 small entries (96 bytes) but NOT 3 small + 1 large.
+    // Inserting the large entry must evict at least 2 of the 3 small entries.
+    const size_t capacity = 3 * kSmallEntrySize;
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, capacity);
+
+    const std::string key1 = "multi_evict_k1";
+    const std::string key2 = "multi_evict_k2";
+    const std::string key3 = "multi_evict_k3";
+    const std::string keyLarge = "multi_evict_large";
+
+    TestPayload p1{std::string(kSmallPayloadSize, '1')};
+    TestPayload p2{std::string(kSmallPayloadSize, '2')};
+    TestPayload p3{std::string(kSmallPayloadSize, '3')};
+    TestPayload pLarge{std::string(kLargePayloadSize, 'L')};
+
+    ASSERT_TRUE(m_cache->Insert(MakeKey(key1), &p1, &m_helper, true).ok());
+    ASSERT_TRUE(m_cache->Insert(MakeKey(key2), &p2, &m_helper, true).ok());
+    ASSERT_TRUE(m_cache->Insert(MakeKey(key3), &p3, &m_helper, true).ok());
+
+    // The large entry (52 B) needs to displace at least 2 small entries (32 B each)
+    // to fit within the 96-byte capacity.
+    ASSERT_TRUE(m_cache->Insert(MakeKey(keyLarge), &pLarge, &m_helper, true).ok());
+
+    // At least 2 evictions must have occurred.
+    EXPECT_GE(m_cache->GetEvictedCount(), 2u)
+        << "A single large insert must evict multiple smaller LRU entries";
+
+    // The large entry itself must be present.
+    bool kept = false;
+    auto hLarge = m_cache->Lookup(MakeKey(keyLarge), &m_helper,
+                                  nullptr, true, false, nullptr, kept);
+    ASSERT_NE(hLarge, nullptr);
+    auto* resultLarge = static_cast<TestPayload*>(hLarge->Value());
+    ASSERT_NE(resultLarge, nullptr);
+    EXPECT_EQ(resultLarge->data, pLarge.data);
+    delete resultLarge;
+
+    // key1 and key2 (LRU) must have been evicted; key3 (MRU) may still be present.
+    auto h1 = m_cache->Lookup(MakeKey(key1), &m_helper, nullptr, true, false, nullptr, kept);
+    EXPECT_EQ(h1, nullptr) << "key1 (LRU) must be evicted";
+
+    auto h2 = m_cache->Lookup(MakeKey(key2), &m_helper, nullptr, true, false, nullptr, kept);
+    EXPECT_EQ(h2, nullptr) << "key2 must be evicted to make room for the large entry";
+
+    // Usage must be within capacity.
+    size_t usage = 0;
+    ASSERT_TRUE(m_cache->GetUsage(usage).ok());
+    EXPECT_LE(usage, capacity);
+}
+
+// --------------------------------------------------------------------------
+// Concurrent mixed Insert + Erase + Lookup on overlapping keys must not
+// crash, deadlock, or corrupt internal state
+// --------------------------------------------------------------------------
+TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentMixedInsertEraseLookup)
+{
+    constexpr int kKeyCount = 8;
+    constexpr int kThreadsPerOp = 4;
+
+    // Pre-populate half the keys so Erase and Lookup have something to hit.
+    for (int i = 0; i < kKeyCount / 2; ++i)
+    {
+        TestPayload p{"prepop_" + std::to_string(i)};
+        ASSERT_TRUE(m_cache->Insert(MakeKey("mixed_k" + std::to_string(i)),
+                                     &p, &m_helper, true).ok());
+    }
+
+    std::vector<std::thread> threads;
+    threads.reserve(kKeyCount * kThreadsPerOp * 2 + kKeyCount);
+
+    // Insert threads.
+    for (int i = 0; i < kKeyCount; ++i)
+    {
+        for (int t = 0; t < kThreadsPerOp; ++t)
+        {
+            threads.emplace_back([&, i] {
+                TestPayload p{"insert_" + std::to_string(i)};
+                m_cache->Insert(MakeKey("mixed_k" + std::to_string(i)),
+                                &p, &m_helper, true);
+            });
+        }
+    }
+
+    // Erase threads.
+    for (int i = 0; i < kKeyCount; ++i)
+    {
+        threads.emplace_back([&, i] {
+            m_cache->Erase(MakeKey("mixed_k" + std::to_string(i)));
+        });
+    }
+
+    // Lookup threads.
+    for (int i = 0; i < kKeyCount; ++i)
+    {
+        for (int t = 0; t < kThreadsPerOp; ++t)
+        {
+            threads.emplace_back([&, i] {
+                bool kept = false;
+                auto handle = m_cache->Lookup(
+                    MakeKey("mixed_k" + std::to_string(i)),
+                    &m_helper, nullptr, true, false, nullptr, kept);
+                if (handle)
+                {
+                    auto* result = static_cast<TestPayload*>(handle->Value());
+                    delete result;
+                }
+            });
+        }
+    }
+
+    for (auto& t : threads)
+        t.join();
+
+    // The cache must remain internally consistent: usage <= capacity.
+    size_t usage = 0, cap = 0;
+    ASSERT_TRUE(m_cache->GetUsage(usage).ok());
+    ASSERT_TRUE(m_cache->GetCapacity(cap).ok());
+    EXPECT_LE(usage, cap)
+        << "Internal state must remain consistent after concurrent mixed operations";
+
+    // The cache must remain fully operational after the concurrent stress.
+    TestPayload postStress{"post-stress data"};
+    ASSERT_TRUE(m_cache->Insert(MakeKey("post_stress_key"), &postStress, &m_helper, true).ok());
+    bool kept = false;
+    auto handle = m_cache->Lookup(MakeKey("post_stress_key"), &m_helper,
+                                  nullptr, true, false, nullptr, kept);
+    ASSERT_NE(handle, nullptr);
+    delete static_cast<TestPayload*>(handle->Value());
+}
+
+// --------------------------------------------------------------------------
+// Constructing a new cache over an existing directory with stale files
+// removes them and starts fresh
+// --------------------------------------------------------------------------
+TEST_F(FileBasedCompressedSecondaryCacheTests, ConstructorCleansStaleDirectory)
+{
+    const std::string keyStr = "stale_dir_key";
+    TestPayload payload{"stale data"};
+
+    ASSERT_TRUE(m_cache->Insert(MakeKey(keyStr), &payload, &m_helper, true).ok());
+
+    // Verify the file exists on disk.
+    std::string hex;
+    boost::algorithm::hex_lower(keyStr.begin(), keyStr.end(), std::back_inserter(hex));
+    const auto filePath = m_cacheDir / hex.substr(0, 2) / hex;
+    ASSERT_TRUE(std::filesystem::exists(filePath)) << "Entry file must exist before re-creation";
+
+    // Re-construct the cache over the same directory.
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir);
+
+    // The stale file must have been removed by the constructor.
+    EXPECT_FALSE(std::filesystem::exists(filePath))
+        << "Constructor must remove stale files from a previous cache instance";
+
+    // The new cache must be empty.
+    size_t usage = 0;
+    ASSERT_TRUE(m_cache->GetUsage(usage).ok());
+    EXPECT_EQ(usage, 0u);
+
+    // Lookup for the old key must miss.
+    bool kept = false;
+    auto handle = m_cache->Lookup(MakeKey(keyStr), &m_helper,
+                                  nullptr, true, false, nullptr, kept);
+    EXPECT_EQ(handle, nullptr);
+
+    // The new cache must be fully operational.
+    TestPayload p2{"fresh data"};
+    ASSERT_TRUE(m_cache->Insert(MakeKey("fresh_key"), &p2, &m_helper, true).ok());
+    auto handle2 = m_cache->Lookup(MakeKey("fresh_key"), &m_helper,
+                                   nullptr, true, false, nullptr, kept);
+    ASSERT_NE(handle2, nullptr);
+    delete static_cast<TestPayload*>(handle2->Value());
+}
+
