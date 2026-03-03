@@ -10,8 +10,6 @@
 #include <boost/algorithm/hex.hpp>
 #include <boost/crc.hpp>
 #include <boost/endian/buffers.hpp>
-#include <boost/interprocess/file_mapping.hpp>
-#include <boost/interprocess/mapped_region.hpp>
 #include <boost/scope/scope_exit.hpp>
 
 // SSE4.2 CRC32C intrinsics (x64 only; boost::crc_32_type used as fallback).
@@ -29,7 +27,6 @@
 #include <atomic>
 #include <array>
 #include <cstring>
-#include <fstream>
 #include <iterator>
 #include <limits>
 #include <list>
@@ -213,21 +210,6 @@ namespace AVEVA::RocksDB::Plugin::Core
             return result;
         }
 
-        /// <summary>Deletes a single path (no-op for empty paths).  Errors are silently ignored because this is a best-effort cache; the file may already be absent.</summary>
-        static void DeleteFilePath(const std::string& path) noexcept
-        {
-            if (path.empty()) return;
-            std::error_code ec;
-            std::filesystem::remove(std::filesystem::path(path), ec);
-        }
-
-        /// <summary>Deletes every path in the vector; see DeleteFilePath for error semantics.</summary>
-        static void DeleteFilePaths(const std::vector<std::string>& paths) noexcept
-        {
-            for (const auto& p : paths)
-                DeleteFilePath(p);
-        }
-
         /// <summary>
         /// Renames origPath to graveyardPath then deletes the graveyard file.
         /// Both operations are best-effort; errors are silently ignored.
@@ -237,22 +219,18 @@ namespace AVEVA::RocksDB::Plugin::Core
         /// causing one cache miss on its next Lookup; Lookup's corruption-cleanup code
         /// then removes the phantom index entry.  This is acceptable for a best-effort cache.
         /// </summary>
-        static void CommitEviction(const std::pair<std::string, std::string>& p) noexcept
+        static void CommitEviction(Filesystem& fs, const std::pair<std::string, std::string>& p) noexcept
         {
             if (p.first.empty()) return;
-            std::error_code ec;
-            std::filesystem::rename(
-                std::filesystem::path(p.first),
-                std::filesystem::path(p.second), ec);
-            if (!ec)
-                DeleteFilePath(p.second);
+            if (fs.RenameFile(p.first, p.second))
+                fs.DeleteFile(p.second);
         }
 
         /// <summary>Commits all rename+delete pairs produced by EvictUntilSizeLocked.</summary>
-        static void CommitEvictions(const std::vector<std::pair<std::string, std::string>>& pairs) noexcept
+        static void CommitEvictions(Filesystem& fs, const std::vector<std::pair<std::string, std::string>>& pairs) noexcept
         {
             for (const auto& p : pairs)
-                CommitEviction(p);
+                CommitEviction(fs, p);
         }
     };
 
@@ -273,20 +251,20 @@ namespace AVEVA::RocksDB::Plugin::Core
     };
 
     FileBasedCompressedSecondaryCache::FileBasedCompressedSecondaryCache(
-        std::filesystem::path cacheDir, size_t capacity, int zstdLevel)
+        std::filesystem::path cacheDir, std::shared_ptr<Filesystem> fs, size_t capacity, int zstdLevel)
         : m_cacheDir(std::move(cacheDir)), m_cacheDirStr(m_cacheDir.string()),
-          m_capacity(capacity), m_zstdLevel(zstdLevel)
+          m_fs(std::move(fs)), m_capacity(capacity), m_zstdLevel(zstdLevel)
     {
-        std::filesystem::remove_all(m_cacheDir);
-        std::filesystem::create_directories(m_cacheDir);
+        m_fs->DeleteDir(m_cacheDir);
+        m_fs->CreateDir(m_cacheDir);
 
         // Pre-create all 256 shard subdirectories so WriteEntry never calls
-        // create_directories on the hot write path.
+        // CreateDir on the hot write path.
         const char* kHex = "0123456789abcdef";
         for (int i = 0; i < 256; ++i)
         {
             const char shard[3] = { kHex[i >> 4], kHex[i & 0xf], '\0' };
-            std::filesystem::create_directories(m_cacheDir / shard);
+            m_fs->CreateDir(m_cacheDir / shard);
         }
     }
 
@@ -440,64 +418,27 @@ namespace AVEVA::RocksDB::Plugin::Core
                 m_currentSize += existingSize;
             }
             // Rename + delete evicted files outside the lock so concurrent readers are not blocked.
-            FileUtil::CommitEvictions(evictPairs1);
+            FileUtil::CommitEvictions(*m_fs, evictPairs1);
 
-            // Phase 2 (unlocked): write the entry atomically via a staging file.
-            // Each call gets a unique staging path (via m_seq) so concurrent
-            // writes for the same key cannot truncate each other's in-progress file.
+            // Phase 2 (unlocked): write the entry atomically via WriteFileAtomic.
+            // Staging and rename are handled internally by the filesystem implementation.
             // Shard subdirectories are pre-created in the constructor.
-            const std::string stagingPathStr =
-                pathStr + "."
-                    + std::to_string(m_seq.fetch_add(1, std::memory_order_relaxed)) + ".tmp";
-            auto stagingCleanup = boost::scope::make_scope_exit([&] {
-                std::error_code ec;
-                std::filesystem::remove(std::filesystem::path(stagingPathStr), ec);
-                });
+            FileFormat::Header header{};
+            header.magic = FileFormat::magicFilePrefix;
+            header.version = FileFormat::kFileVersion;
+            header.compressionType = static_cast<uint8_t>(type);
+            header.dataSize = static_cast<uint64_t>(dataSize);
+            header.checksum = CrcUtil::Compute(data, dataSize);
+
+            // Combine header + payload into a single buffer for one write call.
+            boost::container::small_vector<char, sizeof(FileFormat::Header) + 4096> writeBuf(storedSize);
+            std::memcpy(writeBuf.data(), &header, sizeof(header));
+            std::memcpy(writeBuf.data() + sizeof(header), data, dataSize);
+
+            if (!m_fs->WriteFileAtomic(pathStr, writeBuf.data(), writeBuf.size()))
             {
-                std::ofstream ofs(stagingPathStr, std::ios::binary | std::ios::trunc);
-                if (!ofs)
-                {
-                    return rocksdb::Status::IOError("Failed to open cache file for writing",
-                        stagingPathStr);
-                }
-                // Disable the iostream internal copy buffer: our single write call goes
-                // directly to the OS without an extra memcpy through the stream layer.
-                ofs.rdbuf()->pubsetbuf(nullptr, 0);
-
-                FileFormat::Header header{};
-                header.magic = FileFormat::magicFilePrefix;
-                header.version = FileFormat::kFileVersion;
-                header.compressionType = static_cast<uint8_t>(type);
-                header.dataSize = static_cast<uint64_t>(dataSize);
-                header.checksum = CrcUtil::Compute(data, dataSize);
-
-                // Combine header + payload into a single buffer for one write syscall.
-                boost::container::small_vector<char, sizeof(FileFormat::Header) + 4096> writeBuf(storedSize);
-                std::memcpy(writeBuf.data(), &header, sizeof(header));
-                std::memcpy(writeBuf.data() + sizeof(header), data, dataSize);
-                ofs.write(writeBuf.data(), static_cast<std::streamsize>(writeBuf.size()));
-                if (!ofs)
-                {
-                    return rocksdb::Status::IOError("Failed to write cache entry data",
-                        stagingPathStr);
-                }
-                ofs.close();
-                if (!ofs)
-                {
-                    return rocksdb::Status::IOError("Failed to close cache entry staging file",
-                        stagingPathStr);
-                }
+                return rocksdb::Status::IOError("Failed to write cache entry file", pathStr);
             }
-
-            std::error_code ec;
-            std::filesystem::rename(
-                std::filesystem::path(stagingPathStr),
-                std::filesystem::path(pathStr), ec);
-            if (ec)
-            {
-                return rocksdb::Status::IOError("Failed to finalise cache entry file", pathStr);
-            }
-            stagingCleanup.set_active(false);
 
             // Phase 3 (locked): register the new entry at the MRU front.
             // Removes any existing entry for this key (the original entry preserved by
@@ -525,7 +466,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                 m_currentSize += storedSize;
                 EvictUntilSizeLocked(m_capacity, evictPairs3);
             }
-            FileUtil::CommitEvictions(evictPairs3);
+            FileUtil::CommitEvictions(*m_fs, evictPairs3);
 
             return rocksdb::Status::OK();
         }
@@ -560,9 +501,7 @@ namespace AVEVA::RocksDB::Plugin::Core
             const std::string_view filename = KeyToFilenameView(key, filenameBuf);
             const std::string pathStr = FileUtil::ShardedPathStr(m_cacheDirStr, filename);
 
-            namespace bip = boost::interprocess;
-
-            bip::mapped_region region;
+            std::unique_ptr<MappedFileView> view;
 
             // Two-phase locking: Phase 1 uses shared_lock so concurrent Lookup calls
             // can map their files simultaneously.  Only the brief MRU splice in Phase 2
@@ -581,17 +520,9 @@ namespace AVEVA::RocksDB::Plugin::Core
 
                 // Map the file while holding the shared lock so the mapping is
                 // established before any concurrent writer can evict and delete it.
-                // file_mapping can be destroyed immediately after creating the region;
-                // mapped_region retains its own OS-level view handle independently.
-                try
-                {
-                    bip::file_mapping fm(pathStr.c_str(), bip::read_only);
-                    region = bip::mapped_region(fm, bip::read_only);
-                }
-                catch (const bip::interprocess_exception&)
-                {
+                view = m_fs->MapReadOnly(pathStr);
+                if (!view)
                     mappingFailed = true;
-                }
             } // shared_lock always released here
 
             // Remove corrupt/missing entry under exclusive lock before returning.
@@ -604,7 +535,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                     if (reIt != m_index.end())
                         evictPair = RemoveEntryLocked(*reIt);
                 }
-                FileUtil::CommitEviction(evictPair);
+                FileUtil::CommitEviction(*m_fs, evictPair);
                 return nullptr;
             }
 
@@ -631,7 +562,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                     entryRemovedByAdvise = true;
                 }
             }
-            FileUtil::CommitEviction(advisedPair);
+            FileUtil::CommitEviction(*m_fs, advisedPair);
 
             // Remove the index entry on any validation failure below
             // file is not repeatedly re-mapped and re-validated on future lookups.
@@ -649,14 +580,14 @@ namespace AVEVA::RocksDB::Plugin::Core
                             if (it != m_index.end())
                                 evictPair = RemoveEntryLocked(*it);
                         }
-                        FileUtil::CommitEviction(evictPair);
+                        FileUtil::CommitEviction(*m_fs, evictPair);
                     }
                     catch (...) {}
                 }
                 });
 
-            const auto* mapped = static_cast<const char*>(region.get_address());
-            const size_t mappedSize = region.get_size();
+            const char* mapped = view->Data();
+            const size_t mappedSize = view->Size();
 
             // Validate header.
             if (mappedSize < sizeof(FileFormat::Header))
@@ -779,7 +710,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                 if (indexIt != m_index.end())
                     evictPair = RemoveEntryLocked(*indexIt);
             }
-            FileUtil::CommitEviction(evictPair);
+            FileUtil::CommitEviction(*m_fs, evictPair);
         }
         catch (...) {}
     }
@@ -800,7 +731,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                 m_capacity = capacity;
                 EvictUntilSizeLocked(m_capacity, evictPairs);
             }
-            FileUtil::CommitEvictions(evictPairs);
+            FileUtil::CommitEvictions(*m_fs, evictPairs);
             return rocksdb::Status::OK();
         }
         catch (...)
@@ -847,7 +778,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                 m_capacity -= std::min(decrease, m_capacity);
                 EvictUntilSizeLocked(m_capacity, evictPairs);
             }
-            FileUtil::CommitEvictions(evictPairs);
+            FileUtil::CommitEvictions(*m_fs, evictPairs);
             return rocksdb::Status::OK();
         }
         catch (...)

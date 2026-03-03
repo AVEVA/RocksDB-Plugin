@@ -4,6 +4,7 @@
 #pragma once
 
 #include "AVEVA/RocksDB/Plugin/Core/Util.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/Filesystem.hpp"
 
 #include <rocksdb/secondary_cache.h>
 
@@ -35,7 +36,7 @@ namespace AVEVA::RocksDB::Plugin::Core
     ///   [1 byte:  version]
     ///   [1 byte:  CompressionType]
     ///   [8 bytes: data length]
-    ///   [4 bytes: CRC32 checksum]
+    ///   [4 bytes: CRC32C checksum]
     ///   [N bytes: data]
     /// </remarks>
     class FileBasedCompressedSecondaryCache final : public rocksdb::SecondaryCache
@@ -49,9 +50,12 @@ namespace AVEVA::RocksDB::Plugin::Core
 
         /// <summary>Constructs the cache.</summary>
         /// <param name="cacheDir">Cache directory; will be created if it does not already exist.</param>
+        /// <param name="fs">Filesystem implementation used for all I/O.  Pass a
+        /// <c>LocalFilesystem</c> for production use or a mock for testing.</param>
         /// <param name="capacity">Maximum number of bytes of entry data stored on disk.</param>
         /// <param name="zstdLevel">zstd compression level (1–22); 1 is fastest, higher values trade CPU for ratio.</param>
         explicit FileBasedCompressedSecondaryCache(std::filesystem::path cacheDir,
+                                                   std::shared_ptr<Filesystem> fs,
                                                    size_t capacity  = kDefaultCapacity,
                                                    int    zstdLevel = kDefaultZstdLevel);
 
@@ -192,6 +196,7 @@ namespace AVEVA::RocksDB::Plugin::Core
 
         std::filesystem::path m_cacheDir;
         std::string m_cacheDirStr;
+        std::shared_ptr<Filesystem> m_fs;
         size_t m_capacity;
         int    m_zstdLevel;
         size_t m_currentSize{0};

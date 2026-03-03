@@ -6,6 +6,7 @@ add_library(aveva-rocksdb-plugin-core
     Util.cpp
     LocalFilesystem.cpp
     LocalFile.cpp
+    LocalIoUtil.cpp
 )
 add_library(aveva::rocksdb-plugin-core ALIAS aveva-rocksdb-plugin-core)
 set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../include")

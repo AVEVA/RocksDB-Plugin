@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp"
 
 #include <rocksdb/advanced_options.h>
 #include <rocksdb/slice.h>
@@ -96,6 +97,7 @@ class FileBasedCompressedSecondaryCacheTests : public ::testing::Test
 {
 protected:
     std::filesystem::path m_cacheDir;
+    std::shared_ptr<AVEVA::RocksDB::Plugin::Core::LocalFilesystem> m_fs;
     std::unique_ptr<FileBasedCompressedSecondaryCache> m_cache;
 
     // A helper without secondary-cache support, required as the
@@ -116,7 +118,8 @@ protected:
     void SetUp() override
     {
         m_cacheDir = MakeTempDir(::testing::UnitTest::GetInstance()->current_test_info()->name());
-        m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir);
+        m_fs = std::make_shared<AVEVA::RocksDB::Plugin::Core::LocalFilesystem>();
+        m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs);
     }
 
     void TearDown() override
@@ -226,7 +229,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, CapacityEvictsLruEntry)
 {
     // Capacity = 2 × (kFileHeaderSize + 10) bytes; holds exactly two 10-byte entries.
     const size_t capacity = 2 * (FileBasedCompressedSecondaryCache::kFileHeaderSize + 10);
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, capacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity);
 
     const std::string key1 = "key_lru_1";
     const std::string key2 = "key_lru_2";
@@ -358,7 +361,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertFalse_WhenCacheFull_Sk
 {
     // Fill the cache exactly with two 10-byte entries.
     const size_t capacity = 2 * (FileBasedCompressedSecondaryCache::kFileHeaderSize + 10);
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, capacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity);
 
     const std::string key1 = "fi_false_key1";
     const std::string key2 = "fi_false_key2";
@@ -396,7 +399,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertFalse_WhenCacheFull_Sk
 TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertTrue_WhenCacheFull_Evicts)
 {
     const size_t capacity = 2 * (FileBasedCompressedSecondaryCache::kFileHeaderSize + 10);
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, capacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity);
 
     const std::string key1 = "fi_true_key1";
     const std::string key2 = "fi_true_key2";
@@ -464,7 +467,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, LookupPromotesToMru)
 {
     // capacity = 2 × (kFileHeaderSize + 10) bytes; each payload is 10 bytes.
     const size_t capacity = 2 * (FileBasedCompressedSecondaryCache::kFileHeaderSize + 10);
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, capacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity);
 
     const std::string key1 = "promo_key1";
     const std::string key2 = "promo_key2";
@@ -527,7 +530,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertFalse_SameKey_WhenFull
 {
     // Capacity exactly fits one 10-byte entry.
     const size_t capacity = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, capacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity);
 
     const std::string keyStr = "same_key_full";
     TestPayload original{"0123456789"}; // 10 bytes — fills capacity exactly
@@ -666,7 +669,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, CorruptedEntryRemovedFromIndexAft
 TEST_F(FileBasedCompressedSecondaryCacheTests, EvictedEntryFileIsDeletedFromDisk)
 {
     const size_t capacity = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, capacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity);
 
     const std::string key1 = "evict_disk_k1";
     const std::string key2 = "evict_disk_k2";
@@ -912,7 +915,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentDifferentKeyInserts_Usa
 
     // Capacity allows exactly 3 entries; the remaining 13 must be evicted.
     const size_t capacity = 3 * (FileBasedCompressedSecondaryCache::kFileHeaderSize + kEntrySize);
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, capacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity);
 
     std::vector<std::thread> threads;
     threads.reserve(kThreadCount);
@@ -1105,7 +1108,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, DeflateAndInflateCapacity)
     // Fill with two entries of 10 bytes each (stored size = kFileHeaderSize + 10 = 32).
     constexpr size_t kEntryStoredSize = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
     const size_t initialCapacity = 2 * kEntryStoredSize; // 64 B: holds both
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, initialCapacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, initialCapacity);
 
     const std::string key1 = "deflate_key1";
     const std::string key2 = "deflate_key2";
@@ -1171,7 +1174,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, InsertSavedZeroSize_ReturnsOkWith
 TEST_F(FileBasedCompressedSecondaryCacheTests, Inflate_SaturationAtSizeMax)
 {
     constexpr size_t kInitialCapacity = 1024;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, kInitialCapacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, kInitialCapacity);
 
     ASSERT_TRUE(m_cache->Inflate(std::numeric_limits<size_t>::max()).ok());
 
@@ -1205,7 +1208,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, DeflateByMoreThanCapacity_ClampsT
 TEST_F(FileBasedCompressedSecondaryCacheTests, EvictedEntryLeavesNoGraveyardFile)
 {
     const size_t capacity = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, capacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity);
 
     TestPayload p1{"0123456789"}; // fills capacity exactly
     TestPayload p2{"abcdefghij"}; // evicts p1 via RemoveEntryLocked → rename → delete
@@ -1283,7 +1286,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, GetEvictedCount_IncrementsOnCapac
 {
     // Capacity holds exactly one 10-byte entry.
     constexpr size_t kEntryStoredSize = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, kEntryStoredSize);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, kEntryStoredSize);
 
     TestPayload p1{"0123456789"};
     TestPayload p2{"abcdefghij"};
@@ -1306,7 +1309,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, GetEvictedCount_IncrementsOnCapac
 TEST_F(FileBasedCompressedSecondaryCacheTests, GetEvictedCount_IncrementsOnDeflate)
 {
     constexpr size_t kEntryStoredSize = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, 2 * kEntryStoredSize);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, 2 * kEntryStoredSize);
 
     TestPayload p1{"0123456789"};
     TestPayload p2{"abcdefghij"};
@@ -1359,6 +1362,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, CustomZstdLevel_RoundTrips)
     // Use level 9 (high compression) instead of the default level 1.
     m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(
         m_cacheDir,
+        m_fs,
         FileBasedCompressedSecondaryCache::kDefaultCapacity,
         /*zstdLevel=*/9);
 
@@ -1516,7 +1520,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, SingleInsertEvictsMultipleEntries
     // Capacity fits 3 small entries (96 bytes) but NOT 3 small + 1 large.
     // Inserting the large entry must evict at least 2 of the 3 small entries.
     const size_t capacity = 3 * kSmallEntrySize;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, capacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity);
 
     const std::string key1 = "multi_evict_k1";
     const std::string key2 = "multi_evict_k2";
@@ -1661,7 +1665,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConstructorCleansStaleDirectory)
     ASSERT_TRUE(std::filesystem::exists(filePath)) << "Entry file must exist before re-creation";
 
     // Re-construct the cache over the same directory.
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs);
 
     // The stale file must have been removed by the constructor.
     EXPECT_FALSE(std::filesystem::exists(filePath))
