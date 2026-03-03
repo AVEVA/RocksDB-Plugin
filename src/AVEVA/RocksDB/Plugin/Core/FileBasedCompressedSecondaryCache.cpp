@@ -32,32 +32,37 @@
 
 namespace AVEVA::RocksDB::Plugin::Core
 {
-    namespace
+    /// <summary>On-disk layout constants and binary header structure.</summary>
+    struct FileFormat
     {
-        // Magic bytes written at the start of every cache entry file.
-        constexpr uint64_t magicFilePrefix = 0xFAB1C0DEBAD0C0DEULL;
+        /// <summary>Magic bytes written at the start of every cache entry file.</summary>
+        static constexpr uint64_t magicFilePrefix = 0xFAB1C0DEBAD0C0DEULL;
 
-        // Sentinel stored in FileHeader::compressionType when the payload was
-        // compressed by this cache using zstd.  Chosen from RocksDB's reserved
-        // custom-compression range (kFirstCustomCompression–kLastCustomCompression).
-        constexpr uint8_t zstdCompression = 0x80;
-        static_assert(
-            zstdCompression >= static_cast<uint8_t>(rocksdb::kFirstCustomCompression) &&
-            zstdCompression <= static_cast<uint8_t>(rocksdb::kLastCustomCompression),
-            "kZstdCompression must lie within RocksDB's custom compression range");
+        /// <summary>
+        /// Sentinel stored in Header::compressionType when the payload was compressed by this
+        /// cache using zstd.  Chosen from RocksDB's reserved custom-compression range
+        /// (kFirstCustomCompression–kLastCustomCompression).
+        /// </summary>
+        static constexpr uint8_t zstdCompression = 0x80;
 
-        // Current on-disk format version.  The version byte in every file header
-        // must match this value; mismatches are treated as corrupt/stale entries.
-        constexpr uint8_t kFileVersion = 1;
+        /// <summary>
+        /// Current on-disk format version.  The version byte in every file header must match this
+        /// value; mismatches are treated as corrupt/stale entries.
+        /// </summary>
+        static constexpr uint8_t kFileVersion = 1;
 
-        // Minimum payload size to attempt zstd compression.  Below this threshold
-        // zstd's per-frame overhead reliably produces output larger than the input,
-        // so the compression step is skipped entirely.
-        constexpr size_t kMinCompressibleSize = 64;
+        /// <summary>
+        /// Minimum payload size to attempt zstd compression.  Below this threshold zstd's
+        /// per-frame overhead reliably produces output larger than the input, so the compression
+        /// step is skipped entirely.
+        /// </summary>
+        static constexpr size_t kMinCompressibleSize = 64;
 
-        // On-disk header layout.  boost::endian align::no buffers have alignof==1,
-        // so the struct packs to exactly 22 bytes with no compiler padding.
-        struct FileHeader
+        /// <summary>
+        /// On-disk header layout.  boost::endian align::no buffers have alignof==1, so the struct
+        /// packs to exactly 22 bytes with no compiler padding.
+        /// </summary>
+        struct Header
         {
             boost::endian::little_uint64_buf_t magic;
             boost::endian::little_uint8_buf_t  version;
@@ -65,43 +70,40 @@ namespace AVEVA::RocksDB::Plugin::Core
             boost::endian::little_uint64_buf_t dataSize;
             boost::endian::little_uint32_buf_t checksum;
         };
-        static_assert(sizeof(FileHeader) == sizeof(uint64_t) + 2 * sizeof(uint8_t) + sizeof(uint64_t) + sizeof(uint32_t),
-            "FileHeader must be exactly 22 bytes with no padding");
-        static_assert(sizeof(FileHeader) == FileBasedCompressedSecondaryCache::kFileHeaderSize,
-            "FileHeader size must match the public kFileHeaderSize constant");
+    };
 
-        // Returns the sharded path for a cache entry file.  Entries are bucketed
-        // into one of 256 subdirectories (named by the first two hex digits of the
-        // filename) so that no single directory accumulates an unbounded number of
-        // entries, which degrades readdir performance on many filesystems.
-        std::filesystem::path ShardedPath(
-            const std::filesystem::path& cacheDir, std::string_view filename)
+    static_assert(
+        FileFormat::zstdCompression >= static_cast<uint8_t>(rocksdb::kFirstCustomCompression) &&
+        FileFormat::zstdCompression <= static_cast<uint8_t>(rocksdb::kLastCustomCompression),
+        "FileFormat::zstdCompression must lie within RocksDB's custom compression range");
+    static_assert(sizeof(FileFormat::Header) == sizeof(uint64_t) + 2 * sizeof(uint8_t) + sizeof(uint64_t) + sizeof(uint32_t),
+        "FileFormat::Header must be exactly 22 bytes with no padding");
+    static_assert(sizeof(FileFormat::Header) == FileBasedCompressedSecondaryCache::kFileHeaderSize,
+        "FileFormat::Header size must match the public kFileHeaderSize constant");
+
+    /// <summary>Thread-local context management, compression, and decompression.</summary>
+    struct ZstdCodec
+    {
+        struct CCtxDeleter { void operator()(ZSTD_CCtx* p) const noexcept { ZSTD_freeCCtx(p); } };
+        struct DCtxDeleter { void operator()(ZSTD_DCtx* p) const noexcept { ZSTD_freeDCtx(p); } };
+
+        /// <summary>Returns the thread-local compression context, reusing it to avoid per-call allocation overhead.</summary>
+        static ZSTD_CCtx& GetCCtx()
         {
-            if (filename.size() >= 2)
-                return cacheDir / std::string(filename.substr(0, 2)) / std::string(filename);
-            return cacheDir / std::string(filename);
-        }
-
-        // Thread-local ZSTD contexts: reusing a context avoids the per-call
-        // allocation/free overhead of ZSTD_compress / ZSTD_decompress.
-        struct ZstdCCtxDeleter { void operator()(ZSTD_CCtx* p) const noexcept { ZSTD_freeCCtx(p); } };
-        struct ZstdDCtxDeleter { void operator()(ZSTD_DCtx* p) const noexcept { ZSTD_freeDCtx(p); } };
-
-        ZSTD_CCtx& GetCCtx()
-        {
-            thread_local std::unique_ptr<ZSTD_CCtx, ZstdCCtxDeleter> ctx{ ZSTD_createCCtx() };
+            thread_local std::unique_ptr<ZSTD_CCtx, CCtxDeleter> ctx{ ZSTD_createCCtx() };
             if (!ctx) throw std::runtime_error("zstd: failed to create CCtx");
             return *ctx;
         }
 
-        ZSTD_DCtx& GetDCtx()
+        /// <summary>Returns the thread-local decompression context, reusing it to avoid per-call allocation overhead.</summary>
+        static ZSTD_DCtx& GetDCtx()
         {
-            thread_local std::unique_ptr<ZSTD_DCtx, ZstdDCtxDeleter> ctx{ ZSTD_createDCtx() };
+            thread_local std::unique_ptr<ZSTD_DCtx, DCtxDeleter> ctx{ ZSTD_createDCtx() };
             if (!ctx) throw std::runtime_error("zstd: failed to create DCtx");
             return *ctx;
         }
 
-        std::string Compress(const char* data, size_t size, int level)
+        static std::string Compress(const char* data, size_t size, int level)
         {
             const size_t bound = ZSTD_compressBound(size);
             std::string out(bound, '\0');
@@ -114,7 +116,7 @@ namespace AVEVA::RocksDB::Plugin::Core
             return out;
         }
 
-        std::string Decompress(const char* data, size_t size)
+        static std::string Decompress(const char* data, size_t size)
         {
             const unsigned long long contentSize = ZSTD_getFrameContentSize(data, size);
             if (contentSize == ZSTD_CONTENTSIZE_ERROR || contentSize == ZSTD_CONTENTSIZE_UNKNOWN)
@@ -130,33 +132,56 @@ namespace AVEVA::RocksDB::Plugin::Core
             out.resize(written);
             return out;
         }
+    };
 
-        // Converts the currently-active exception to a rocksdb::Status.
-        // Must only be called from within a catch block.
-        rocksdb::Status CurrentExceptionToStatus() noexcept
+    /// <summary>Filesystem path helpers and best-effort file deletion.</summary>
+    struct FileUtil
+    {
+        /// <summary>
+        /// Returns the sharded path for a cache entry file.  Entries are bucketed into one of 256
+        /// subdirectories (named by the first two hex digits of the filename) so that no single
+        /// directory accumulates an unbounded number of entries, which degrades readdir performance
+        /// on many filesystems.
+        /// </summary>
+        static std::filesystem::path ShardedPath(
+            const std::filesystem::path& cacheDir, std::string_view filename)
         {
-            try { throw; }
-            catch (const std::bad_alloc&) { return rocksdb::Status::MemoryLimit("out of memory"); }
-            catch (const std::exception& e) { return rocksdb::Status::Aborted(e.what()); }
-            catch (...) { return rocksdb::Status::Aborted("unknown exception in secondary cache"); }
+            if (filename.size() >= 2)
+                return cacheDir / std::string(filename.substr(0, 2)) / std::string(filename);
+            return cacheDir / std::string(filename);
         }
 
-        // Deletes a single path (no-op for empty paths).  Errors are silently ignored
-        // because this is a best-effort cache; the file may already be absent.
-        void DeleteFilePath(const std::filesystem::path& path) noexcept
+        /// <summary>Deletes a single path (no-op for empty paths).  Errors are silently ignored because this is a best-effort cache; the file may already be absent.</summary>
+        static void DeleteFilePath(const std::filesystem::path& path) noexcept
         {
             if (path.empty()) return;
             std::error_code ec;
             std::filesystem::remove(path, ec);
         }
 
-        // Deletes every path in the vector; see DeleteFilePath for error semantics.
-        void DeleteFilePaths(const std::vector<std::filesystem::path>& paths) noexcept
+        /// <summary>Deletes every path in the vector; see DeleteFilePath for error semantics.</summary>
+        static void DeleteFilePaths(const std::vector<std::filesystem::path>& paths) noexcept
         {
             for (const auto& p : paths)
                 DeleteFilePath(p);
         }
-    }
+    };
+
+    /// <summary>Exception-to-rocksdb::Status conversion.</summary>
+    struct StatusUtil
+    {
+        /// <summary>
+        /// Converts the currently-active exception to a rocksdb::Status.  Must only be called
+        /// from within a catch block.
+        /// </summary>
+        static rocksdb::Status CurrentExceptionToStatus() noexcept
+        {
+            try { throw; }
+            catch (const std::bad_alloc&) { return rocksdb::Status::MemoryLimit("out of memory"); }
+            catch (const std::exception& e) { return rocksdb::Status::Aborted(e.what()); }
+            catch (...) { return rocksdb::Status::Aborted("unknown exception in secondary cache"); }
+        }
+    };
 
     FileBasedCompressedSecondaryCache::FileBasedCompressedSecondaryCache(
         std::filesystem::path cacheDir, size_t capacity, int zstdLevel)
@@ -216,22 +241,25 @@ namespace AVEVA::RocksDB::Plugin::Core
                 return s;
             }
 
-            std::string compressed = (dataSize >= kMinCompressibleSize)
-                ? Compress(buf.data(), dataSize, m_zstdLevel)
-                : std::string{};
-            const bool useCompression = !compressed.empty() && compressed.size() < dataSize;
+            std::string compressed;
+            if (dataSize >= FileFormat::kMinCompressibleSize)
+                compressed = ZstdCodec::Compress(buf.data(), dataSize, m_zstdLevel);
 
-            return WriteEntry(key,
-                useCompression
-                ? static_cast<rocksdb::CompressionType>(zstdCompression)
-                : rocksdb::CompressionType::kNoCompression,
-                useCompression ? compressed.data() : buf.data(),
-                useCompression ? compressed.size() : dataSize,
-                force_insert);
+            rocksdb::CompressionType compressionType = rocksdb::CompressionType::kNoCompression;
+            const char* writeData = buf.data();
+            size_t writeSize = dataSize;
+            if (!compressed.empty() && compressed.size() < dataSize)
+            {
+                compressionType = static_cast<rocksdb::CompressionType>(FileFormat::zstdCompression);
+                writeData = compressed.data();
+                writeSize = compressed.size();
+            }
+
+            return WriteEntry(key, compressionType, writeData, writeSize, force_insert);
         }
         catch (...)
         {
-            return CurrentExceptionToStatus();
+            return StatusUtil::CurrentExceptionToStatus();
         }
     }
     rocksdb::Status FileBasedCompressedSecondaryCache::InsertSaved(
@@ -250,13 +278,13 @@ namespace AVEVA::RocksDB::Plugin::Core
 
             if (type == rocksdb::CompressionType::kNoCompression)
             {
-                std::string compressed = (saved.size() >= kMinCompressibleSize)
-                    ? Compress(saved.data(), saved.size(), m_zstdLevel)
+                std::string compressed = (saved.size() >= FileFormat::kMinCompressibleSize)
+                    ? ZstdCodec::Compress(saved.data(), saved.size(), m_zstdLevel)
                     : std::string{};
                 const bool useCompression = !compressed.empty() && compressed.size() < saved.size();
                 return WriteEntry(key,
                     useCompression
-                    ? static_cast<rocksdb::CompressionType>(zstdCompression)
+                    ? static_cast<rocksdb::CompressionType>(FileFormat::zstdCompression)
                     : rocksdb::CompressionType::kNoCompression,
                     useCompression ? compressed.data() : saved.data(),
                     useCompression ? compressed.size() : saved.size());
@@ -265,7 +293,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
         catch (...)
         {
-            return CurrentExceptionToStatus();
+            return StatusUtil::CurrentExceptionToStatus();
         }
     }
 
@@ -282,10 +310,10 @@ namespace AVEVA::RocksDB::Plugin::Core
                 return rocksdb::Status::InvalidArgument("cache key hex exceeds maximum inline buffer");
             std::array<char, Entry::kMaxFilenameLen> filenameBuf;
             const std::string_view filename = KeyToFilenameView(key, filenameBuf);
-            const std::filesystem::path path = ShardedPath(m_cacheDir, filename);
+            const std::filesystem::path path = FileUtil::ShardedPath(m_cacheDir, filename);
 
-            // Total bytes this entry will occupy on disk (compressed/raw payload + fixed header).
-            const size_t storedSize = dataSize + sizeof(FileHeader);
+            // Total bytes this entry will occupy on disk
+            const size_t storedSize = dataSize + sizeof(FileFormat::Header);
 
             // Phase 1 (locked): capacity gate, MRU-protection of the existing entry,
             // and eviction.  The existing entry is intentionally kept in the index so
@@ -322,7 +350,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                 m_currentSize += existingSize;
             }
             // Delete evicted files outside the lock so concurrent readers are not blocked.
-            DeleteFilePaths(evictPaths1);
+            FileUtil::DeleteFilePaths(evictPaths1);
 
             // Phase 2 (unlocked): write the entry atomically via a staging file.
             // Each call gets a unique staging path (via sStagingSeq) so concurrent
@@ -343,9 +371,9 @@ namespace AVEVA::RocksDB::Plugin::Core
                         stagingPath.string());
                 }
 
-                FileHeader header{};
-                header.magic = magicFilePrefix;
-                header.version = kFileVersion;
+                FileFormat::Header header{};
+                header.magic = FileFormat::magicFilePrefix;
+                header.version = FileFormat::kFileVersion;
                 header.compressionType = static_cast<uint8_t>(type);
                 header.dataSize = static_cast<uint64_t>(dataSize);
 
@@ -353,7 +381,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                 crc.process_bytes(data, dataSize);
                 header.checksum = static_cast<uint32_t>(crc.checksum());
 
-                std::array<char, sizeof(FileHeader)> headerBytes{};
+                std::array<char, sizeof(FileFormat::Header)> headerBytes{};
                 std::memcpy(headerBytes.data(), &header, sizeof(header));
                 ofs.write(headerBytes.data(), static_cast<std::streamsize>(headerBytes.size()));
                 ofs.write(data, static_cast<std::streamsize>(dataSize));
@@ -404,13 +432,13 @@ namespace AVEVA::RocksDB::Plugin::Core
                 m_currentSize += storedSize;
                 EvictUntilSizeLocked(m_capacity, evictPaths3);
             }
-            DeleteFilePaths(evictPaths3);
+            FileUtil::DeleteFilePaths(evictPaths3);
 
             return rocksdb::Status::OK();
         }
         catch (...)
         {
-            return CurrentExceptionToStatus();
+            return StatusUtil::CurrentExceptionToStatus();
         }
     }
 
@@ -437,7 +465,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                 return nullptr;
             std::array<char, Entry::kMaxFilenameLen> filenameBuf;
             const std::string_view filename = KeyToFilenameView(key, filenameBuf);
-            const std::filesystem::path path = ShardedPath(m_cacheDir, filename);
+            const std::filesystem::path path = FileUtil::ShardedPath(m_cacheDir, filename);
 
             namespace bip = boost::interprocess;
 
@@ -483,7 +511,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                     if (reIt != m_index.end())
                         pathToDelete = RemoveEntryLocked(*reIt);
                 }
-                DeleteFilePath(pathToDelete);
+                FileUtil::DeleteFilePath(pathToDelete);
                 return nullptr;
             }
 
@@ -510,9 +538,9 @@ namespace AVEVA::RocksDB::Plugin::Core
                     entryRemovedByAdvise = true;
                 }
             }
-            DeleteFilePath(advisedPath);
+            FileUtil::DeleteFilePath(advisedPath);
 
-            // Remove the index entry on any validation failure below so the corrupt
+            // Remove the index entry on any validation failure below
             // file is not repeatedly re-mapped and re-validated on future lookups.
             // Skip when advise_erase already removed the entry from the index.
             bool entryIsValid = false;
@@ -528,7 +556,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                             if (it != m_index.end())
                                 pathToDelete = RemoveEntryLocked(*it);
                         }
-                        DeleteFilePath(pathToDelete);
+                        FileUtil::DeleteFilePath(pathToDelete);
                     }
                     catch (...) {}
                 }
@@ -538,20 +566,20 @@ namespace AVEVA::RocksDB::Plugin::Core
             const size_t mappedSize = region.get_size();
 
             // Validate header.
-            if (mappedSize < sizeof(FileHeader))
+            if (mappedSize < sizeof(FileFormat::Header))
             {
                 return nullptr;
             }
 
-            FileHeader header;
+            FileFormat::Header header;
             std::memcpy(&header, mapped, sizeof(header));
 
-            if (header.magic.value() != magicFilePrefix)
+            if (header.magic.value() != FileFormat::magicFilePrefix)
             {
                 return nullptr;
             }
 
-            if (header.version.value() != kFileVersion)
+            if (header.version.value() != FileFormat::kFileVersion)
             {
                 return nullptr;
             }
@@ -559,12 +587,12 @@ namespace AVEVA::RocksDB::Plugin::Core
             const auto compressionType = static_cast<rocksdb::CompressionType>(header.compressionType.value());
             const size_t dataSize = static_cast<size_t>(header.dataSize.value());
 
-            if (dataSize + sizeof(FileHeader) > mappedSize)
+            if (dataSize + sizeof(FileFormat::Header) > mappedSize)
             {
                 return nullptr;
             }
 
-            const char* dataPtr = mapped + sizeof(FileHeader);
+            const char* dataPtr = mapped + sizeof(FileFormat::Header);
 
             boost::crc_32_type crc;
             crc.process_bytes(dataPtr, dataSize);
@@ -577,11 +605,11 @@ namespace AVEVA::RocksDB::Plugin::Core
             rocksdb::Slice dataSlice;
             rocksdb::CompressionType effectiveCompressionType;
 
-            if (static_cast<uint8_t>(compressionType) == zstdCompression)
+            if (static_cast<uint8_t>(compressionType) == FileFormat::zstdCompression)
             {
                 try
                 {
-                    decompressed = Decompress(dataPtr, dataSize);
+                    decompressed = ZstdCodec::Decompress(dataPtr, dataSize);
                 }
                 catch (const std::runtime_error&)
                 {
@@ -660,7 +688,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                 if (indexIt != m_index.end())
                     pathToDelete = RemoveEntryLocked(*indexIt);
             }
-            DeleteFilePath(pathToDelete);
+            FileUtil::DeleteFilePath(pathToDelete);
         }
         catch (...) {}
     }
@@ -681,12 +709,12 @@ namespace AVEVA::RocksDB::Plugin::Core
                 m_capacity = capacity;
                 EvictUntilSizeLocked(m_capacity, evictPaths);
             }
-            DeleteFilePaths(evictPaths);
+            FileUtil::DeleteFilePaths(evictPaths);
             return rocksdb::Status::OK();
         }
         catch (...)
         {
-            return CurrentExceptionToStatus();
+            return StatusUtil::CurrentExceptionToStatus();
         }
     }
 
@@ -700,7 +728,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
         catch (...)
         {
-            return CurrentExceptionToStatus();
+            return StatusUtil::CurrentExceptionToStatus();
         }
     }
 
@@ -714,7 +742,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
         catch (...)
         {
-            return CurrentExceptionToStatus();
+            return StatusUtil::CurrentExceptionToStatus();
         }
     }
 
@@ -728,12 +756,12 @@ namespace AVEVA::RocksDB::Plugin::Core
                 m_capacity -= std::min(decrease, m_capacity);
                 EvictUntilSizeLocked(m_capacity, evictPaths);
             }
-            DeleteFilePaths(evictPaths);
+            FileUtil::DeleteFilePaths(evictPaths);
             return rocksdb::Status::OK();
         }
         catch (...)
         {
-            return CurrentExceptionToStatus();
+            return StatusUtil::CurrentExceptionToStatus();
         }
     }
 
@@ -749,7 +777,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
         catch (...)
         {
-            return CurrentExceptionToStatus();
+            return StatusUtil::CurrentExceptionToStatus();
         }
     }
 
@@ -774,7 +802,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         // The caller is responsible for deleting the returned graveyard path after
         // releasing the lock.  An empty path is returned if the rename fails (e.g.
         // the file is already missing), which DeleteFilePath treats as a no-op.
-        const auto origPath = ShardedPath(m_cacheDir, it->FilenameView());
+        const auto origPath = FileUtil::ShardedPath(m_cacheDir, it->FilenameView());
         const auto graveyardPath = origPath.parent_path() /
             (origPath.filename().string() + "." +
                 std::to_string(m_seq.fetch_add(1, std::memory_order_relaxed)) + ".del");
