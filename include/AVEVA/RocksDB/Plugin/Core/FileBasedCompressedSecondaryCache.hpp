@@ -229,6 +229,31 @@ namespace AVEVA::RocksDB::Plugin::Core
         /// <remarks>Must be called with m_mutex held.</remarks>
         [[nodiscard]] std::pair<std::string, std::string> RemoveEntryLocked(LruIterator it);
 
+        /// <summary>Phase 1 of Lookup — acquires shared_lock, checks the index, and maps the file.
+        /// Returns <c>std::nullopt</c> on a definite miss; <c>optional(nullptr)</c> when the entry is in
+        /// the index but the file could not be mapped (corruption); <c>optional(view)</c> on success.</summary>
+        [[nodiscard]] std::optional<std::unique_ptr<MappedFileView>>
+            MapEntryForRead(std::string_view filename, const std::string& pathStr);
+
+        /// <summary>Phase 2 of Lookup — acquires exclusive_lock, re-validates the index entry, then either
+        /// splices it to MRU or removes it when <paramref name="advise_erase"/> is set.
+        /// Returns <c>false</c> when the entry disappeared between Phase 1 and Phase 2 (treat as a miss).</summary>
+        [[nodiscard]] bool SpliceOrEraseEntry(std::string_view filename, bool advise_erase,
+            std::pair<std::string, std::string>& advisedPair, bool& erased);
+
+        /// <summary>Removes a corrupt or missing entry from the in-memory index and commits the eviction.
+        /// Best-effort; never throws.</summary>
+        void CleanupCorruptEntry(std::string_view filename) noexcept;
+
+        /// <summary>Validates the on-disk header of a mapped cache entry and populates output fields.
+        /// Returns <c>false</c> on any mismatch (magic, version, bounds, or checksum).</summary>
+        [[nodiscard]] static bool ValidateHeader(const char* mapped, size_t mappedSize,
+            rocksdb::CompressionType& compressionType,
+            size_t& dataSize, const char*& dataPtr) noexcept;
+
+        /// <summary>Records a secondary cache hit to RocksDB's statistics subsystem.</summary>
+        static void RecordHitStats(rocksdb::Statistics* stats, rocksdb::CacheEntryRole role) noexcept;
+
         std::filesystem::path m_cacheDir;
         std::string m_cacheDirStr;
         std::shared_ptr<Filesystem> m_fs;

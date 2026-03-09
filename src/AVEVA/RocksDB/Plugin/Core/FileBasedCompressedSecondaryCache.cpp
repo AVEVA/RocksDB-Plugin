@@ -554,6 +554,98 @@ namespace AVEVA::RocksDB::Plugin::Core
         return evictPairs;
     }
 
+    std::optional<std::unique_ptr<MappedFileView>>
+        FileBasedCompressedSecondaryCache::MapEntryForRead(
+            std::string_view filename, const std::string& pathStr)
+    {
+        std::shared_lock rdLock(m_mutex);
+        if (m_index.find(filename) == m_index.end())
+            return std::nullopt;
+        auto view = m_fs->MapReadOnly(pathStr);
+        if (!view)
+            return std::unique_ptr<MappedFileView>{};
+        return view;
+    }
+
+    bool FileBasedCompressedSecondaryCache::SpliceOrEraseEntry(
+        std::string_view filename, bool advise_erase,
+        std::pair<std::string, std::string>& advisedPair, bool& erased)
+    {
+        std::lock_guard lock(m_mutex);
+        auto indexIt = m_index.find(filename);
+        if (indexIt == m_index.end())
+            return false;
+        if (advise_erase && SupportForceErase())
+        {
+            advisedPair = RemoveEntryLocked(*indexIt);
+            erased = true;
+        }
+        else
+        {
+            m_lruList.splice(m_lruList.begin(), m_lruList, *indexIt);
+            erased = false;
+        }
+        return true;
+    }
+
+    void FileBasedCompressedSecondaryCache::CleanupCorruptEntry(
+        std::string_view filename) noexcept
+    {
+        try
+        {
+            std::pair<std::string, std::string> evictPair;
+            {
+                std::lock_guard lock(m_mutex);
+                auto it = m_index.find(filename);
+                if (it != m_index.end())
+                    evictPair = RemoveEntryLocked(*it);
+            }
+            FileUtil::CommitEviction(*m_fs, evictPair);
+        }
+        catch (...) {}
+    }
+
+    bool FileBasedCompressedSecondaryCache::ValidateHeader(
+        const char* mapped, size_t mappedSize,
+        rocksdb::CompressionType& compressionType,
+        size_t& dataSize, const char*& dataPtr) noexcept
+    {
+        if (mappedSize < sizeof(FileFormat::Header))
+            return false;
+        FileFormat::Header header;
+        std::memcpy(&header, mapped, sizeof(header));
+        if (header.magic.value() != FileFormat::magicFilePrefix)
+            return false;
+        if (header.version.value() != FileFormat::kFileVersion)
+            return false;
+        dataSize = static_cast<size_t>(header.dataSize.value());
+        if (dataSize + sizeof(FileFormat::Header) > mappedSize)
+            return false;
+        dataPtr = mapped + sizeof(FileFormat::Header);
+        compressionType = static_cast<rocksdb::CompressionType>(header.compressionType.value());
+        return CrcUtil::Compute(
+            reinterpret_cast<const char*>(&header.compressionType),
+            sizeof(header.compressionType) + sizeof(header.dataSize),
+            dataPtr, dataSize) == header.checksum.value();
+    }
+
+    void FileBasedCompressedSecondaryCache::RecordHitStats(
+        rocksdb::Statistics* stats, rocksdb::CacheEntryRole role) noexcept
+    {
+        if (!stats) return;
+        stats->recordTick(rocksdb::SECONDARY_CACHE_HITS);
+        switch (role)
+        {
+        case rocksdb::CacheEntryRole::kFilterBlock:
+            stats->recordTick(rocksdb::SECONDARY_CACHE_FILTER_HITS); break;
+        case rocksdb::CacheEntryRole::kIndexBlock:
+            stats->recordTick(rocksdb::SECONDARY_CACHE_INDEX_HITS); break;
+        case rocksdb::CacheEntryRole::kDataBlock:
+            stats->recordTick(rocksdb::SECONDARY_CACHE_DATA_HITS); break;
+        default: break;
+        }
+    }
+
     std::unique_ptr<rocksdb::SecondaryCacheResultHandle>
         FileBasedCompressedSecondaryCache::Lookup(
             const rocksdb::Slice& key,
@@ -567,209 +659,80 @@ namespace AVEVA::RocksDB::Plugin::Core
         try
         {
             kept_in_sec_cache = false;
-
             if (!helper || !helper->IsSecondaryCacheCompatible())
-            {
                 return nullptr;
-            }
-
             if (key.size() * 2 > Entry::kMaxFilenameLen)
                 return nullptr;
+
             const auto filename = KeyToFilename(key);
             const std::string pathStr = FileUtil::ShardedPathStr(m_cacheDirStr, filename);
 
-            std::unique_ptr<MappedFileView> view;
-
-            // Two-phase locking: Phase 1 uses shared_lock so concurrent Lookup calls
-            // can map their files simultaneously.  Only the brief MRU splice in Phase 2
-            // requires exclusive access.
-            bool entryRemovedByAdvise = false;
-            bool mappingFailed = false;
-
-            // Phase 1 (shared_lock): index presence check + file mapping.
+            // Phase 1 (shared_lock): index check + file mapping.
+            auto mapped = MapEntryForRead(filename, pathStr);
+            if (!mapped)
+                return nullptr;
+            if (!*mapped)
             {
-                std::shared_lock<std::shared_mutex> rdLock(m_mutex);
-
-                if (m_index.find(filename) == m_index.end())
-                {
-                    return nullptr;
-                }
-
-                // Map the file while holding the shared lock so the mapping is
-                // established before any concurrent writer can evict and delete it.
-                view = m_fs->MapReadOnly(pathStr);
-                if (!view)
-                    mappingFailed = true;
-            } // shared_lock always released here
-
-            // Remove corrupt/missing entry under exclusive lock before returning.
-            if (mappingFailed)
-            {
-                std::pair<std::string, std::string> evictPair;
-                {
-                    std::lock_guard exLock(m_mutex);
-                    auto reIt = m_index.find(filename);
-                    if (reIt != m_index.end())
-                        evictPair = RemoveEntryLocked(*reIt);
-                }
-                FileUtil::CommitEviction(*m_fs, evictPair);
+                CleanupCorruptEntry(filename);
                 return nullptr;
             }
+            auto view = std::move(*mapped);
 
-            // Phase 2 (unique_lock): MRU splice + optional erase.
-            // Re-validate: a concurrent eviction may have removed the entry between
-            // Phase 1 and here.  Treat as a miss rather than returning data from the
-            // now-orphaned mapping.
+            // Phase 2 (exclusive_lock): splice to MRU or remove on advise_erase.
+            bool entryRemovedByAdvise = false;
             std::pair<std::string, std::string> advisedPair;
-            {
-                std::lock_guard exLock(m_mutex);
-
-                auto indexIt = m_index.find(filename);
-                if (indexIt == m_index.end())
-                {
-                    return nullptr;
-                }
-
-                if (advise_erase && SupportForceErase())
-                {
-                    // Entry is about to be removed entirely; skip the MRU splice.
-                    advisedPair = RemoveEntryLocked(*indexIt);
-                    entryRemovedByAdvise = true;
-                }
-                else
-                {
-                    // Splice the entry to the MRU front of the list in O(1).
-                    m_lruList.splice(m_lruList.begin(), m_lruList, *indexIt);
-                }
-            }
+            if (!SpliceOrEraseEntry(filename, advise_erase, advisedPair, entryRemovedByAdvise))
+                return nullptr;
             FileUtil::CommitEviction(*m_fs, advisedPair);
 
-            // Remove the index entry on any validation failure below
-            // file is not repeatedly re-mapped and re-validated on future lookups.
-            // Skip when advise_erase already removed the entry from the index.
+            // On any validation failure, remove the corrupt entry from the index.
             bool entryIsValid = false;
             auto corruptionCleanup = boost::scope::make_scope_exit([&] noexcept {
                 if (!entryIsValid && !entryRemovedByAdvise)
-                {
-                    try
-                    {
-                        std::pair<std::string, std::string> evictPair;
-                        {
-                            std::lock_guard cleanupLock(m_mutex);
-                            auto it = m_index.find(filename);
-                            if (it != m_index.end())
-                                evictPair = RemoveEntryLocked(*it);
-                        }
-                        FileUtil::CommitEviction(*m_fs, evictPair);
-                    }
-                    catch (...) {}
-                }
+                    CleanupCorruptEntry(filename);
                 });
 
-            const char* mapped = view->Data();
-            const size_t mappedSize = view->Size();
-
-            // Validate header.
-            if (mappedSize < sizeof(FileFormat::Header))
-            {
+            rocksdb::CompressionType compressionType{};
+            size_t dataSize{};
+            const char* dataPtr{};
+            if (!ValidateHeader(view->Data(), view->Size(), compressionType, dataSize, dataPtr))
                 return nullptr;
-            }
-
-            FileFormat::Header header;
-            std::memcpy(&header, mapped, sizeof(header));
-
-            if (header.magic.value() != FileFormat::magicFilePrefix)
-            {
-                return nullptr;
-            }
-
-            if (header.version.value() != FileFormat::kFileVersion)
-            {
-                return nullptr;
-            }
-
-            const auto compressionType = static_cast<rocksdb::CompressionType>(header.compressionType.value());
-            const size_t dataSize = static_cast<size_t>(header.dataSize.value());
-
-            if (dataSize + sizeof(FileFormat::Header) > mappedSize)
-            {
-                return nullptr;
-            }
-
-            const char* dataPtr = mapped + sizeof(FileFormat::Header);
-
-            if (CrcUtil::Compute(
-                reinterpret_cast<const char*>(&header.compressionType),
-                sizeof(header.compressionType) + sizeof(header.dataSize),
-                dataPtr, dataSize) != header.checksum.value())
-            {
-                return nullptr;
-            }
 
             std::string decompressed;
             rocksdb::Slice dataSlice;
-            rocksdb::CompressionType effectiveCompressionType;
-
+            rocksdb::CompressionType effectiveType;
             if (static_cast<uint8_t>(compressionType) == FileFormat::zstdCompression)
             {
-                try
-                {
-                    decompressed = ZstdCodec::Decompress(dataPtr, dataSize);
-                }
-                catch (const std::runtime_error&)
-                {
-                    return nullptr;
-                }
-                dataSlice = rocksdb::Slice(decompressed.data(), decompressed.size());
-                effectiveCompressionType = rocksdb::CompressionType::kNoCompression;
+                try { decompressed = ZstdCodec::Decompress(dataPtr, dataSize); }
+                catch (const std::runtime_error&) { return nullptr; }
+                dataSlice = { decompressed.data(), decompressed.size() };
+                effectiveType = rocksdb::CompressionType::kNoCompression;
             }
             else
             {
-                dataSlice = rocksdb::Slice(dataPtr, dataSize);
-                effectiveCompressionType = compressionType;
+                dataSlice = { dataPtr, dataSize };
+                effectiveType = compressionType;
             }
 
             rocksdb::Cache::ObjectPtr outObj = nullptr;
             size_t outCharge = 0;
-            auto s = helper->create_cb(dataSlice, effectiveCompressionType,
+            auto s = helper->create_cb(dataSlice, effectiveType,
                 rocksdb::CacheTier::kNonVolatileBlockTier,
                 create_context, /*allocator=*/nullptr,
                 &outObj, &outCharge);
             if (!s.ok() || outObj == nullptr)
-            {
                 return nullptr;
-            }
 
-            // Guard outObj so it is freed if ResultHandle allocation (heap) throws.
             auto objCleanup = boost::scope::make_scope_exit([&] noexcept {
-                if (outObj)
-                    helper->del_cb(outObj, /*allocator=*/nullptr);
+                if (outObj) helper->del_cb(outObj, /*allocator=*/nullptr);
                 });
 
-            // Report the hit to RocksDB's statistics subsystem.
-            if (stats)
-            {
-                stats->recordTick(rocksdb::SECONDARY_CACHE_HITS);
-                switch (helper->role)
-                {
-                case rocksdb::CacheEntryRole::kFilterBlock:
-                    stats->recordTick(rocksdb::SECONDARY_CACHE_FILTER_HITS);
-                    break;
-                case rocksdb::CacheEntryRole::kIndexBlock:
-                    stats->recordTick(rocksdb::SECONDARY_CACHE_INDEX_HITS);
-                    break;
-                case rocksdb::CacheEntryRole::kDataBlock:
-                    stats->recordTick(rocksdb::SECONDARY_CACHE_DATA_HITS);
-                    break;
-                default:
-                    break;
-                }
-            }
+            RecordHitStats(stats, helper->role);
 
             entryIsValid = true;
             kept_in_sec_cache = !entryRemovedByAdvise;
             auto result = std::make_unique<ResultHandle>(outObj, outCharge);
-            objCleanup.set_active(false); // ResultHandle now owns outObj
+            objCleanup.set_active(false);
             return result;
         }
         catch (...)
