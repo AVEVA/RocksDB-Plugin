@@ -4,6 +4,7 @@
     "azure-storage-blobs-cpp",
     "boost-intrusive",
     "boost-log",
+    "boost-static-string",
     "rocksdb",
     "boost-crc",
     {

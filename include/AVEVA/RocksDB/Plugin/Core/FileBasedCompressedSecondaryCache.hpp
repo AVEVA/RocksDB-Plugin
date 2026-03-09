@@ -10,13 +10,14 @@
 
 #include <boost/unordered/unordered_flat_map.hpp>
 #include <boost/unordered/unordered_flat_set.hpp>
+#include <boost/static_string.hpp>
 
-#include <array>
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <list>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <utility>
@@ -113,15 +114,13 @@ namespace AVEVA::RocksDB::Plugin::Core
         /// <summary>Single data record held by both the hash index and the sequenced LRU index.</summary>
         struct Entry
         {
-            /// <summary>Maximum hex-encoded key length supported inline (covers 32-byte / 256-bit keys).</summary>
+            /// <summary>
+            /// Maximum hex-encoded key length supported inline (covers 32-byte / 256-bit keys).
+            /// </summary>
             static constexpr size_t kMaxFilenameLen = 64;
-            std::array<char, kMaxFilenameLen> filenameBuf{};
-            uint8_t filenameLen{0};
+            boost::static_string<kMaxFilenameLen> filename{};
             size_t size{0};
-            std::string_view FilenameView() const noexcept
-            {
-                return {filenameBuf.data(), filenameLen};
-            }
+            std::string_view FilenameView() const noexcept { return filename; }
         };
 
         using LruList = std::list<Entry>;
@@ -144,6 +143,11 @@ namespace AVEVA::RocksDB::Plugin::Core
 
         using Index       = boost::unordered::unordered_flat_set<LruList::iterator, IteratorHash, IteratorEqual>;
         using LruIterator = LruList::iterator;
+
+        /// <summary>Pending file-rename+delete pairs produced by locked helpers.
+        /// Each element is {originalPath, graveyardPath}; callers must commit
+        /// them after releasing the lock via FileUtil::CommitEvictions.</summary>
+        using EvictList   = std::vector<std::pair<std::string, std::string>>;
 
         /// <summary>Immediately-ready result handle returned by Lookup().</summary>
         class ResultHandle final : public rocksdb::SecondaryCacheResultHandle
@@ -168,10 +172,10 @@ namespace AVEVA::RocksDB::Plugin::Core
             size_t m_charge;
         };
 
-        /// <summary>Hex-encodes <paramref name="key"/> into <paramref name="buf"/> and returns a view of the result.
-        /// Returns an empty view when the key is too long to encode inline.</summary>
-        [[nodiscard]] static std::string_view KeyToFilenameView(
-            const rocksdb::Slice& key, std::array<char, Entry::kMaxFilenameLen>& buf) noexcept;
+        /// <summary>Hex-encodes <paramref name="key"/> and returns the result.
+        /// Returns an empty string when the key is too long to encode inline.</summary>
+        [[nodiscard]] static boost::static_string<Entry::kMaxFilenameLen> KeyToFilename(
+            const rocksdb::Slice& key) noexcept;
 
         /// <summary>Writes bytes to disk and updates the in-memory index.</summary>
         /// <param name="force_insert">When false, the write is skipped rather than evicting an existing entry to make room.</param>
@@ -180,6 +184,38 @@ namespace AVEVA::RocksDB::Plugin::Core
                                    const char* data,
                                    size_t dataSize,
                                    bool force_insert = true) noexcept;
+
+        /// <summary>
+        /// Phase 1 of WriteEntry — called with no lock held.
+        /// Acquires m_mutex, checks admission control, pins the existing entry at MRU
+        /// so it cannot be accidentally evicted, then evicts enough LRU entries to
+        /// make room for the incoming write.
+        /// Returns std::nullopt when force_insert is false and the cache is over capacity,
+        /// signalling that the write should be skipped.  Otherwise returns the eviction
+        /// pairs the caller must commit outside the lock via FileUtil::CommitEvictions.
+        /// </summary>
+        [[nodiscard]] std::optional<EvictList>
+            ReserveCapacity(std::string_view filename, size_t storedSize, bool force_insert);
+
+        /// <summary>
+        /// Phase 2 of WriteEntry — called with no lock held.
+        /// Builds the on-disk header, computes the CRC32C checksum, concatenates header
+        /// and payload into a single buffer, and writes it atomically to pathStr.
+        /// </summary>
+        [[nodiscard]] rocksdb::Status WriteToDisk(const std::string& pathStr,
+                                                  rocksdb::CompressionType type,
+                                                  const char* data,
+                                                  size_t dataSize,
+                                                  size_t storedSize);
+
+        /// <summary>
+        /// Phase 3 of WriteEntry — called with no lock held.
+        /// Acquires m_mutex, removes any pre-existing or concurrently-written entry for
+        /// filename, registers the new entry at the MRU front, and corrects any capacity
+        /// overshoot from concurrent writes that each independently passed Phase 1.
+        /// Returns the eviction pairs the caller must commit outside the lock.
+        /// </summary>
+        [[nodiscard]] EvictList RegisterEntry(std::string_view filename, size_t storedSize);
 
         /// <summary>Evicts LRU entries from the back of the list until <c>m_currentSize &lt;= targetSize</c>.
         /// Updates the in-memory index under the lock and appends <c>{origPath, graveyardPath}</c> pairs to
