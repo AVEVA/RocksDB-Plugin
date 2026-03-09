@@ -906,7 +906,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         // the mutex sooner, at the cost of a narrow TOCTOU window where a concurrent
         // insert for the same key could have its file moved to the graveyard (causing
         // one cache miss; the phantom index entry is then cleaned up by Lookup).
-        const std::string origPathStr = FileUtil::ShardedPathStr(m_cacheDirStr, it->FilenameView());
+        const std::string origPathStr = FileUtil::ShardedPathStr(m_cacheDirStr, it->filename);
         const std::string graveyardPathStr =
             origPathStr + "." +
             std::to_string(m_seq.fetch_add(1, std::memory_order_relaxed)) + ".del";

@@ -120,25 +120,24 @@ namespace AVEVA::RocksDB::Plugin::Core
             static constexpr size_t kMaxFilenameLen = 64;
             boost::static_string<kMaxFilenameLen> filename{};
             size_t size{0};
-            std::string_view FilenameView() const noexcept { return filename; }
         };
 
         using LruList = std::list<Entry>;
 
-        /// <summary>Hashes and compares LruList iterators by their FilenameView(), enabling
+        /// <summary>Hashes and compares LruList iterators by their filename, enabling
         /// heterogeneous lookup from a plain std::string_view without constructing a std::string.</summary>
         struct IteratorHash
         {
             using is_transparent = void;
-            size_t operator()(LruList::iterator it) const noexcept { return StringHash{}(it->FilenameView()); }
+            size_t operator()(LruList::iterator it) const noexcept { return StringHash{}(it->filename); }
             size_t operator()(std::string_view sv) const noexcept  { return StringHash{}(sv); }
         };
         struct IteratorEqual
         {
             using is_transparent = void;
-            bool operator()(LruList::iterator a, LruList::iterator b) const noexcept { return a->FilenameView() == b->FilenameView(); }
-            bool operator()(std::string_view sv, LruList::iterator it) const noexcept { return sv == it->FilenameView(); }
-            bool operator()(LruList::iterator it, std::string_view sv) const noexcept { return it->FilenameView() == sv; }
+            bool operator()(LruList::iterator a, LruList::iterator b) const noexcept { return a->filename == b->filename; }
+            bool operator()(std::string_view sv, LruList::iterator it) const noexcept { return sv == it->filename; }
+            bool operator()(LruList::iterator it, std::string_view sv) const noexcept { return it->filename == sv; }
         };
 
         using Index       = boost::unordered::unordered_flat_set<LruList::iterator, IteratorHash, IteratorEqual>;
