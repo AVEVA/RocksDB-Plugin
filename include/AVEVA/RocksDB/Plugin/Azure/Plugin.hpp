@@ -16,6 +16,14 @@ namespace AVEVA::RocksDB::Plugin::Azure
     struct Plugin
     {
         static const constexpr std::string_view Name = "azblobfs";
+
+        /// <summary>
+        /// Registers the Azure blob filesystem plugin.
+        /// When <paramref name="cachePath"/> is provided, a
+        /// <c>FileBasedCompressedSecondaryCache</c> is created and written to
+        /// <paramref name="secondaryCache"/> (if non-null) so that the caller can
+        /// configure it via <c>BlockBasedTableOptions::secondary_cache</c>.
+        /// </summary>
         static rocksdb::Status Register(rocksdb::ConfigOptions& configOptions,
             rocksdb::Env** env,
             std::shared_ptr<rocksdb::Env>* guard,
@@ -26,6 +34,14 @@ namespace AVEVA::RocksDB::Plugin::Azure
             int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
             std::optional<std::string_view> cachePath = {},
             size_t maxCacheSize = Impl::Configuration::MaxCacheSize);
+
+        /// <summary>
+        /// Registers the Azure blob filesystem plugin.
+        /// When <paramref name="cachePath"/> is provided, a
+        /// <c>FileBasedCompressedSecondaryCache</c> is created and written to
+        /// <paramref name="secondaryCache"/> (if non-null) so that the caller can
+        /// configure it via <c>BlockBasedTableOptions::secondary_cache</c>.
+        /// </summary>
         static rocksdb::Status Register(rocksdb::ConfigOptions& configOptions,
             rocksdb::Env** env,
             std::shared_ptr<rocksdb::Env>* guard,

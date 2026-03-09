@@ -3,6 +3,8 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Plugin.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp"
 
 #include <rocksdb/db.h>
 #include <rocksdb/file_system.h>
@@ -21,6 +23,15 @@ namespace AVEVA::RocksDB::Plugin::Azure
         std::optional<std::string_view> cachePath,
         size_t maxCacheSize)
     {
+        std::shared_ptr<Core::FileBasedCompressedSecondaryCache> cache;
+        if (cachePath)
+        {
+            cache = std::make_shared<Core::FileBasedCompressedSecondaryCache>(
+                std::filesystem::path(*cachePath),
+                std::make_shared<Core::LocalFilesystem>(logger),
+                maxCacheSize);
+        }
+
         auto pluginName = std::string(Name) + primary.GetDbName();
         if (backup)
         {
@@ -30,7 +41,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         if (rocksdb::ObjectLibrary::Default()->FindFactory<rocksdb::FileSystem>(pluginName) == nullptr)
         {
             rocksdb::ObjectLibrary::Default()->AddFactory<rocksdb::FileSystem>(pluginName,
-                [=, primary = std::move(primary), backup = std::move(backup), logger = std::move(logger)](const std::string& /* uri */, std::unique_ptr<rocksdb::FileSystem>* f, std::string* /* errmsg */)
+                [=, cache = std::move(cache), primary = std::move(primary), backup = std::move(backup), logger = std::move(logger)](const std::string& /* uri */, std::unique_ptr<rocksdb::FileSystem>* f, std::string* /* errmsg */)
                 {
                     auto impl = std::make_unique<Impl::BlobFilesystemImpl>
                         (
@@ -38,9 +49,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
                             backup,
                             dataFileInitialSize,
                             dataFileBufferSize,
-                            logger,
-                            cachePath,
-                            maxCacheSize
+                            logger
                         );
 
                     *f = std::unique_ptr<rocksdb::FileSystem>(new BlobFilesystem(rocksdb::FileSystem::Default(), std::move(impl), logger));
@@ -62,6 +71,15 @@ namespace AVEVA::RocksDB::Plugin::Azure
         std::optional<std::string_view> cachePath,
         size_t maxCacheSize)
     {
+        std::shared_ptr<Core::FileBasedCompressedSecondaryCache> cache;
+        if (cachePath)
+        {
+            cache = std::make_shared<Core::FileBasedCompressedSecondaryCache>(
+                std::filesystem::path(*cachePath),
+                std::make_shared<Core::LocalFilesystem>(logger),
+                maxCacheSize);
+        }
+
         auto pluginName = std::string(Name) + primary.GetDbName();
         if (backup)
         {
@@ -71,7 +89,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         if (rocksdb::ObjectLibrary::Default()->FindFactory<rocksdb::FileSystem>(pluginName) == nullptr)
         {
             rocksdb::ObjectLibrary::Default()->AddFactory<rocksdb::FileSystem>(pluginName,
-                [=, primary = std::move(primary), backup = std::move(backup), logger = std::move(logger)](const std::string& /* uri */, std::unique_ptr<rocksdb::FileSystem>* f, std::string* /* errmsg */)
+                [=, cache = std::move(cache), primary = std::move(primary), backup = std::move(backup), logger = std::move(logger)](const std::string& /* uri */, std::unique_ptr<rocksdb::FileSystem>* f, std::string* /* errmsg */)
                 {
                     auto impl = std::make_unique<Impl::BlobFilesystemImpl>
                         (
@@ -79,9 +97,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
                             backup,
                             dataFileInitialSize,
                             dataFileBufferSize,
-                            logger,
-                            cachePath,
-                            maxCacheSize
+                            logger
                         );
 
                     *f = std::unique_ptr<rocksdb::FileSystem>(new BlobFilesystem(rocksdb::FileSystem::Default(), std::move(impl), std::move(logger)));
