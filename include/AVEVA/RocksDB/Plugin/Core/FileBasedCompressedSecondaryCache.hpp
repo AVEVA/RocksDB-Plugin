@@ -36,7 +36,7 @@ namespace AVEVA::RocksDB::Plugin::Core
     ///   [1 byte:  version]
     ///   [1 byte:  CompressionType]
     ///   [8 bytes: data length]
-    ///   [4 bytes: CRC32C checksum]
+    ///   [4 bytes: CRC32C checksum of CompressionType + data length + data]
     ///   [N bytes: data]
     /// </remarks>
     class FileBasedCompressedSecondaryCache final : public rocksdb::SecondaryCache

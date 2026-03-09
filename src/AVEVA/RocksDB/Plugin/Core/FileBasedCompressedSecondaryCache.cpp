@@ -53,8 +53,9 @@ namespace AVEVA::RocksDB::Plugin::Core
         /// Current on-disk format version.  The version byte in every file header must match this
         /// value; mismatches are treated as corrupt/stale entries.
         /// Version 2: checksum uses CRC32C (Castagnoli) rather than CRC32/ISO.
+        /// Version 3: checksum covers compressionType + dataSize + payload (previously payload only).
         /// </summary>
-        static constexpr uint8_t kFileVersion = 2;
+        static constexpr uint8_t kFileVersion = 3;
 
         /// <summary>
         /// Minimum payload size to attempt zstd compression.  Below this threshold zstd's
@@ -137,6 +138,40 @@ namespace AVEVA::RocksDB::Plugin::Core
             out.resize(written);
             return out;
         }
+
+        /// <summary>
+        /// Compresses [data, data+size) with zstd if the payload meets the minimum
+        /// compressible threshold and the result is smaller than the input.
+        /// Returns the effective compression type and the bytes to write to disk.
+        /// When compression is applied, <c>result.storage</c> owns the compressed
+        /// bytes and <c>result.data</c> points into it; otherwise <c>result.data</c>
+        /// is the original input pointer unchanged.
+        /// </summary>
+        struct CompressResult
+        {
+            rocksdb::CompressionType type;
+            const char*              data;
+            size_t                   size;
+            std::string              storage; // non-empty only when compression was applied
+        };
+
+        static CompressResult MaybeCompress(const char* data, size_t size, int zstdLevel)
+        {
+            if (size >= FileFormat::kMinCompressibleSize)
+            {
+                std::string compressed = Compress(data, size, zstdLevel);
+                if (!compressed.empty() && compressed.size() < size)
+                {
+                    CompressResult result;
+                    result.type    = static_cast<rocksdb::CompressionType>(FileFormat::zstdCompression);
+                    result.storage = std::move(compressed);
+                    result.data    = result.storage.data();
+                    result.size    = result.storage.size();
+                    return result;
+                }
+            }
+            return { rocksdb::CompressionType::kNoCompression, data, size, {} };
+        }
     };
 
     /// <summary>
@@ -147,10 +182,35 @@ namespace AVEVA::RocksDB::Plugin::Core
     /// </summary>
     struct CrcUtil
     {
+        /// <summary>Computes CRC32C over a single span.</summary>
         static uint32_t Compute(const char* data, size_t size) noexcept
         {
 #if defined(_M_X64) || defined(_M_AMD64) || defined(__x86_64__)
-            uint32_t crc = ~0u;
+            return ~CrcUpdate(~0u, data, size);
+#else
+            boost::crc_32_type crc;
+            crc.process_bytes(data, size);
+            return static_cast<uint32_t>(crc.checksum());
+#endif
+        }
+
+        /// <summary>Computes CRC32C over two discontiguous spans as if they were concatenated.</summary>
+        static uint32_t Compute(const char* d1, size_t s1, const char* d2, size_t s2) noexcept
+        {
+#if defined(_M_X64) || defined(_M_AMD64) || defined(__x86_64__)
+            return ~CrcUpdate(CrcUpdate(~0u, d1, s1), d2, s2);
+#else
+            boost::crc_32_type crc;
+            crc.process_bytes(d1, s1);
+            crc.process_bytes(d2, s2);
+            return static_cast<uint32_t>(crc.checksum());
+#endif
+        }
+
+#if defined(_M_X64) || defined(_M_AMD64) || defined(__x86_64__)
+        /// <summary>Advances a running CRC32C register over <paramref name="size"/> bytes without the final complement.</summary>
+        static uint32_t CrcUpdate(uint32_t crc, const char* data, size_t size) noexcept
+        {
             const auto* p = reinterpret_cast<const uint8_t*>(data);
             while (size >= 8)
             {
@@ -168,13 +228,9 @@ namespace AVEVA::RocksDB::Plugin::Core
             }
             while (size--)
                 crc = _mm_crc32_u8(crc, *p++);
-            return ~crc;
-#else
-            boost::crc_32_type crc;
-            crc.process_bytes(data, size);
-            return static_cast<uint32_t>(crc.checksum());
-#endif
+            return crc;
         }
+#endif
     };
 
     /// <summary>Filesystem path helpers and best-effort file deletion.</summary>
@@ -309,21 +365,8 @@ namespace AVEVA::RocksDB::Plugin::Core
                 return s;
             }
 
-            std::string compressed;
-            if (dataSize >= FileFormat::kMinCompressibleSize)
-                compressed = ZstdCodec::Compress(buf.data(), dataSize, m_zstdLevel);
-
-            rocksdb::CompressionType compressionType = rocksdb::CompressionType::kNoCompression;
-            const char* writeData = buf.data();
-            size_t writeSize = dataSize;
-            if (!compressed.empty() && compressed.size() < dataSize)
-            {
-                compressionType = static_cast<rocksdb::CompressionType>(FileFormat::zstdCompression);
-                writeData = compressed.data();
-                writeSize = compressed.size();
-            }
-
-            return WriteEntry(key, compressionType, writeData, writeSize, force_insert);
+            const auto compressed = ZstdCodec::MaybeCompress(buf.data(), dataSize, m_zstdLevel);
+            return WriteEntry(key, compressed.type, compressed.data, compressed.size, force_insert);
         }
         catch (...)
         {
@@ -346,16 +389,8 @@ namespace AVEVA::RocksDB::Plugin::Core
 
             if (type == rocksdb::CompressionType::kNoCompression)
             {
-                std::string compressed = (saved.size() >= FileFormat::kMinCompressibleSize)
-                    ? ZstdCodec::Compress(saved.data(), saved.size(), m_zstdLevel)
-                    : std::string{};
-                const bool useCompression = !compressed.empty() && compressed.size() < saved.size();
-                return WriteEntry(key,
-                    useCompression
-                    ? static_cast<rocksdb::CompressionType>(FileFormat::zstdCompression)
-                    : rocksdb::CompressionType::kNoCompression,
-                    useCompression ? compressed.data() : saved.data(),
-                    useCompression ? compressed.size() : saved.size());
+                const auto compressed = ZstdCodec::MaybeCompress(saved.data(), saved.size(), m_zstdLevel);
+                return WriteEntry(key, compressed.type, compressed.data, compressed.size);
             }
             return WriteEntry(key, type, saved.data(), saved.size());
         }
@@ -428,7 +463,12 @@ namespace AVEVA::RocksDB::Plugin::Core
             header.version = FileFormat::kFileVersion;
             header.compressionType = static_cast<uint8_t>(type);
             header.dataSize = static_cast<uint64_t>(dataSize);
-            header.checksum = CrcUtil::Compute(data, dataSize);
+            // Checksum covers compressionType + dataSize (as stored in the header) + payload,
+            // so a bit-flip in either header field is detected alongside payload corruption.
+            header.checksum = CrcUtil::Compute(
+                reinterpret_cast<const char*>(&header.compressionType),
+                sizeof(header.compressionType) + sizeof(header.dataSize),
+                data, dataSize);
 
             // Combine header + payload into a single buffer for one write call.
             boost::container::small_vector<char, sizeof(FileFormat::Header) + 4096> writeBuf(storedSize);
@@ -553,13 +593,16 @@ namespace AVEVA::RocksDB::Plugin::Core
                     return nullptr;
                 }
 
-                // Splice the entry to the MRU front of the list in O(1).
-                m_lruList.splice(m_lruList.begin(), m_lruList, *indexIt);
-
                 if (advise_erase && SupportForceErase())
                 {
+                    // Entry is about to be removed entirely; skip the MRU splice.
                     advisedPair = RemoveEntryLocked(*indexIt);
                     entryRemovedByAdvise = true;
+                }
+                else
+                {
+                    // Splice the entry to the MRU front of the list in O(1).
+                    m_lruList.splice(m_lruList.begin(), m_lruList, *indexIt);
                 }
             }
             FileUtil::CommitEviction(*m_fs, advisedPair);
@@ -618,7 +661,10 @@ namespace AVEVA::RocksDB::Plugin::Core
 
             const char* dataPtr = mapped + sizeof(FileFormat::Header);
 
-            if (CrcUtil::Compute(dataPtr, dataSize) != header.checksum.value())
+            if (CrcUtil::Compute(
+                    reinterpret_cast<const char*>(&header.compressionType),
+                    sizeof(header.compressionType) + sizeof(header.dataSize),
+                    dataPtr, dataSize) != header.checksum.value())
             {
                 return nullptr;
             }
