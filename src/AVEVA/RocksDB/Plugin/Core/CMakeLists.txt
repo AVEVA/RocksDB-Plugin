@@ -2,6 +2,7 @@ add_library(aveva-rocksdb-plugin-core
     FileCache.cpp
     FileCacheEntry.cpp
     FileBasedCompressedSecondaryCache.cpp
+    LruFileIndex.cpp
     RocksDBHelpers.cpp
     Util.cpp
     LocalFilesystem.cpp
@@ -26,6 +27,7 @@ target_sources(aveva-rocksdb-plugin-core
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/LocalFile.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/LruFileIndex.hpp"
 )
 install(TARGETS aveva-rocksdb-plugin-core
     EXPORT

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
 
@@ -22,13 +22,9 @@
 #include <zstd.h>
 
 #include <boost/container/small_vector.hpp>
-#include <boost/unordered/unordered_flat_map.hpp>
 
-#include <atomic>
 #include <cstring>
 #include <iterator>
-#include <limits>
-#include <list>
 #include <new>
 #include <stdexcept>
 #include <vector>
@@ -236,48 +232,6 @@ namespace AVEVA::RocksDB::Plugin::Core
     struct FileUtil
     {
         /// <summary>
-        /// Returns the sharded path string for a cache entry file.
-        /// Entries are bucketed into one of 256 subdirectories named by the first two
-        /// hex digits of the filename (i.e. the hex encoding of the first byte of the
-        /// cache key) so that no single directory accumulates an unbounded number of
-        /// entries, which degrades readdir performance on many filesystems.
-        ///
-        /// Output format (normal case):
-        ///   <cacheDir> / <shard> / <filename>
-        ///
-        /// Example: cacheDir="C:\cache", key first byte=0x4A → filename="4aff..."
-        ///   → "C:\cache\4a\4aff..."
-        /// </summary>
-        static std::string ShardedPathStr(
-            const std::string& cacheDirStr, std::string_view filename)
-        {
-            // '\\' on Windows, '/' on POSIX.
-            constexpr char kSep = static_cast<char>(std::filesystem::path::preferred_separator);
-            std::string result;
-            if (filename.size() >= 2)
-            {
-                // Reserve exactly: cacheDir + sep + 2-char shard + sep + full filename.
-                result.reserve(cacheDirStr.size() + 1 + 2 + 1 + filename.size());
-                result += cacheDirStr;
-                result += kSep;
-                result.append(filename.data(), 2); // shard dir  = first two hex chars
-                result += kSep;
-                result.append(filename.data(), filename.size()); // filename = all hex chars
-            }
-            else
-            {
-                // Degenerate fallback: a single-character filename cannot be sharded.
-                // In practice unreachable — every key byte produces two hex chars —
-                // but handled defensively for zero-length or single-char edge cases.
-                result.reserve(cacheDirStr.size() + 1 + filename.size());
-                result += cacheDirStr;
-                result += kSep;
-                result.append(filename.data(), filename.size());
-            }
-            return result;
-        }
-
-        /// <summary>
         /// Renames origPath to graveyardPath then deletes the graveyard file.
         /// Both operations are best-effort; errors are silently ignored.
         /// See RemoveEntryLocked for the TOCTOU trade-off: a concurrent insert for the
@@ -323,8 +277,9 @@ namespace AVEVA::RocksDB::Plugin::Core
 
     FileBasedCompressedSecondaryCache::FileBasedCompressedSecondaryCache(
         std::filesystem::path cacheDir, std::shared_ptr<Filesystem> fs, size_t capacity, int zstdLevel)
-        : m_cacheDir(std::move(cacheDir)), m_cacheDirStr(m_cacheDir.string()),
-        m_fs(std::move(fs)), m_capacity(capacity), m_zstdLevel(zstdLevel)
+        : m_cacheDir(std::move(cacheDir)),
+        m_fs(std::move(fs)), m_zstdLevel(zstdLevel),
+        m_lruIndex(m_cacheDir.string(), capacity)
     {
         m_fs->DeleteDir(m_cacheDir);
         m_fs->CreateDir(m_cacheDir);
@@ -341,11 +296,11 @@ namespace AVEVA::RocksDB::Plugin::Core
 
     auto FileBasedCompressedSecondaryCache::KeyToFilename(
         const rocksdb::Slice& key) noexcept
-        -> boost::static_string<Entry::kMaxFilenameLen>
+        -> boost::static_string<LruFileIndex::kMaxFilenameLen>
     {
-        if (key.size() * 2 > Entry::kMaxFilenameLen)
+        if (key.size() * 2 > LruFileIndex::kMaxFilenameLen)
             return {};
-        boost::static_string<Entry::kMaxFilenameLen> result;
+        boost::static_string<LruFileIndex::kMaxFilenameLen> result;
         boost::algorithm::hex_lower(key.data(), key.data() + key.size(), std::back_inserter(result));
         return result;
     }
@@ -363,7 +318,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                 return rocksdb::Status::OK();
             }
 
-            if (key.size() * 2 > Entry::kMaxFilenameLen)
+            if (key.size() * 2 > LruFileIndex::kMaxFilenameLen)
                 return rocksdb::Status::InvalidArgument("cache key hex exceeds maximum inline buffer");
 
             const size_t dataSize = helper->size_cb(obj);
@@ -400,7 +355,7 @@ namespace AVEVA::RocksDB::Plugin::Core
             if (saved.size() == 0)
                 return rocksdb::Status::OK();
 
-            if (key.size() * 2 > Entry::kMaxFilenameLen)
+            if (key.size() * 2 > LruFileIndex::kMaxFilenameLen)
                 return rocksdb::Status::InvalidArgument("cache key hex exceeds maximum inline buffer");
 
             if (type == rocksdb::CompressionType::kNoCompression)
@@ -425,18 +380,18 @@ namespace AVEVA::RocksDB::Plugin::Core
     {
         try
         {
-            if (key.size() * 2 > Entry::kMaxFilenameLen)
+            if (key.size() * 2 > LruFileIndex::kMaxFilenameLen)
             {
                 return rocksdb::Status::InvalidArgument("cache key hex exceeds maximum inline buffer");
             }
 
             const auto filename = KeyToFilename(key);
-            const std::string pathStr = FileUtil::ShardedPathStr(m_cacheDirStr, filename);
+            const std::string pathStr = m_lruIndex.MakePath(filename);
             const size_t storedSize = dataSize + sizeof(FileFormat::Header);
 
             // Phase 1: lock, gate capacity, pin existing entry, schedule evictions.
             //          Commit I/O (rename + delete) only after releasing the lock.
-            auto reserved = ReserveCapacity(filename, storedSize, force_insert);
+            auto reserved = m_lruIndex.ReserveCapacity(filename, storedSize, force_insert);
             if (!reserved)
                 return rocksdb::Status::OK(); // admission control: over capacity, skip write
             FileUtil::CommitEvictions(*m_fs, *reserved);
@@ -447,7 +402,7 @@ namespace AVEVA::RocksDB::Plugin::Core
 
             // Phase 3: lock, register the new entry, correct concurrent overshoot.
             //          Commit I/O (rename + delete) only after releasing the lock.
-            const auto evictList = RegisterEntry(filename, storedSize);
+            const auto evictList = m_lruIndex.RegisterEntry(filename, storedSize);
             FileUtil::CommitEvictions(*m_fs, evictList);
 
             return rocksdb::Status::OK();
@@ -456,38 +411,6 @@ namespace AVEVA::RocksDB::Plugin::Core
         {
             return StatusUtil::CurrentExceptionToStatus();
         }
-    }
-
-    std::optional<FileBasedCompressedSecondaryCache::EvictList>
-        FileBasedCompressedSecondaryCache::ReserveCapacity(
-            std::string_view filename, size_t storedSize, bool force_insert)
-    {
-        EvictList evictPairs;
-        std::lock_guard lock(m_mutex);
-
-        auto indexIt = m_index.find(filename);
-        const size_t existingSize = (indexIt != m_index.end()) ? (*indexIt)->size : 0;
-
-        // When not forced, skip the write rather than evicting a potentially more
-        // valuable entry.  Net-change accounting ensures a same-key update is never
-        // skipped even when the cache is exactly full.
-        if (!force_insert && m_currentSize - existingSize + storedSize > m_capacity)
-            return std::nullopt;
-
-        // Pin the existing entry at MRU so EvictUntilSizeLocked cannot evict it,
-        // and so the temporary m_currentSize adjustment below avoids double-counting.
-        if (indexIt != m_index.end())
-            m_lruList.splice(m_lruList.begin(), m_lruList, *indexIt);
-
-        // Temporarily discount the existing entry so eviction is sized against the
-        // net new bytes required.  Restored before returning so m_currentSize stays
-        // consistent on any failure path after this method returns.
-        m_currentSize -= existingSize;
-        if (m_currentSize + storedSize > m_capacity)
-            EvictUntilSizeLocked(m_capacity >= storedSize ? m_capacity - storedSize : 0, evictPairs);
-        m_currentSize += existingSize;
-
-        return evictPairs;
     }
 
     rocksdb::Status FileBasedCompressedSecondaryCache::WriteToDisk(
@@ -521,45 +444,12 @@ namespace AVEVA::RocksDB::Plugin::Core
         return rocksdb::Status::OK();
     }
 
-    FileBasedCompressedSecondaryCache::EvictList
-        FileBasedCompressedSecondaryCache::RegisterEntry(
-            std::string_view filename, size_t storedSize)
-    {
-        EvictList evictPairs;
-        std::lock_guard lock(m_mutex);
-
-        // Remove any existing entry for this key — either the one preserved by
-        // Phase 1 or a newer one written by a concurrent thread between Phase 2
-        // and now.  The file on disk was atomically replaced by Phase 2's rename,
-        // so no separate file deletion is needed for the displaced entry.
-        auto existingIt = m_index.find(filename);
-        if (existingIt != m_index.end())
-        {
-            m_currentSize -= (*existingIt)->size;
-            m_lruList.erase(*existingIt);
-            m_index.erase(existingIt);
-        }
-
-        Entry newEntry{};
-        newEntry.filename.assign(filename.data(), filename.size());
-        newEntry.size = storedSize;
-        m_lruList.push_front(std::move(newEntry));
-        m_index.insert(m_lruList.begin());
-        m_currentSize += storedSize;
-
-        // Correct any capacity overshoot from concurrent writes for different keys
-        // that each independently passed Phase 1's admission check.
-        EvictUntilSizeLocked(m_capacity, evictPairs);
-
-        return evictPairs;
-    }
-
     std::optional<std::unique_ptr<MappedFileView>>
         FileBasedCompressedSecondaryCache::MapEntryForRead(
             std::string_view filename, const std::string& pathStr)
     {
-        std::shared_lock rdLock(m_mutex);
-        if (m_index.find(filename) == m_index.end())
+        auto rdLock = m_lruIndex.AcquireShared();
+        if (!m_lruIndex.ContainsLocked(filename))
             return std::nullopt;
         auto view = m_fs->MapReadOnly(pathStr);
         if (!view)
@@ -567,40 +457,12 @@ namespace AVEVA::RocksDB::Plugin::Core
         return view;
     }
 
-    bool FileBasedCompressedSecondaryCache::SpliceOrEraseEntry(
-        std::string_view filename, bool advise_erase,
-        std::pair<std::string, std::string>& advisedPair, bool& erased)
-    {
-        std::lock_guard lock(m_mutex);
-        auto indexIt = m_index.find(filename);
-        if (indexIt == m_index.end())
-            return false;
-        if (advise_erase && SupportForceErase())
-        {
-            advisedPair = RemoveEntryLocked(*indexIt);
-            erased = true;
-        }
-        else
-        {
-            m_lruList.splice(m_lruList.begin(), m_lruList, *indexIt);
-            erased = false;
-        }
-        return true;
-    }
-
     void FileBasedCompressedSecondaryCache::CleanupCorruptEntry(
         std::string_view filename) noexcept
     {
         try
         {
-            std::pair<std::string, std::string> evictPair;
-            {
-                std::lock_guard lock(m_mutex);
-                auto it = m_index.find(filename);
-                if (it != m_index.end())
-                    evictPair = RemoveEntryLocked(*it);
-            }
-            FileUtil::CommitEviction(*m_fs, evictPair);
+            FileUtil::CommitEviction(*m_fs, m_lruIndex.Remove(filename));
         }
         catch (...) {}
     }
@@ -661,11 +523,11 @@ namespace AVEVA::RocksDB::Plugin::Core
             kept_in_sec_cache = false;
             if (!helper || !helper->IsSecondaryCacheCompatible())
                 return nullptr;
-            if (key.size() * 2 > Entry::kMaxFilenameLen)
+            if (key.size() * 2 > LruFileIndex::kMaxFilenameLen)
                 return nullptr;
 
             const auto filename = KeyToFilename(key);
-            const std::string pathStr = FileUtil::ShardedPathStr(m_cacheDirStr, filename);
+            const std::string pathStr = m_lruIndex.MakePath(filename);
 
             // Phase 1 (shared_lock): index check + file mapping.
             auto mapped = MapEntryForRead(filename, pathStr);
@@ -681,7 +543,7 @@ namespace AVEVA::RocksDB::Plugin::Core
             // Phase 2 (exclusive_lock): splice to MRU or remove on advise_erase.
             bool entryRemovedByAdvise = false;
             std::pair<std::string, std::string> advisedPair;
-            if (!SpliceOrEraseEntry(filename, advise_erase, advisedPair, entryRemovedByAdvise))
+            if (!m_lruIndex.SpliceOrErase(filename, advise_erase, advisedPair, entryRemovedByAdvise))
                 return nullptr;
             FileUtil::CommitEviction(*m_fs, advisedPair);
 
@@ -745,17 +607,10 @@ namespace AVEVA::RocksDB::Plugin::Core
     {
         try
         {
-            if (key.size() * 2 > Entry::kMaxFilenameLen)
+            if (key.size() * 2 > LruFileIndex::kMaxFilenameLen)
                 return;
             const auto filename = KeyToFilename(key);
-            std::pair<std::string, std::string> evictPair;
-            {
-                std::lock_guard lock(m_mutex);
-                auto indexIt = m_index.find(filename);
-                if (indexIt != m_index.end())
-                    evictPair = RemoveEntryLocked(*indexIt);
-            }
-            FileUtil::CommitEviction(*m_fs, evictPair);
+            FileUtil::CommitEviction(*m_fs, m_lruIndex.Remove(filename));
         }
         catch (...) {}
     }
@@ -770,13 +625,7 @@ namespace AVEVA::RocksDB::Plugin::Core
     {
         try
         {
-            std::vector<std::pair<std::string, std::string>> evictPairs;
-            {
-                std::lock_guard lock(m_mutex);
-                m_capacity = capacity;
-                EvictUntilSizeLocked(m_capacity, evictPairs);
-            }
-            FileUtil::CommitEvictions(*m_fs, evictPairs);
+            FileUtil::CommitEvictions(*m_fs, m_lruIndex.SetCapacity(capacity));
             return rocksdb::Status::OK();
         }
         catch (...)
@@ -789,8 +638,7 @@ namespace AVEVA::RocksDB::Plugin::Core
     {
         try
         {
-            std::shared_lock lock(m_mutex);
-            capacity = m_capacity;
+            capacity = m_lruIndex.GetCapacity();
             return rocksdb::Status::OK();
         }
         catch (...)
@@ -803,8 +651,7 @@ namespace AVEVA::RocksDB::Plugin::Core
     {
         try
         {
-            std::shared_lock lock(m_mutex);
-            usage = m_currentSize;
+            usage = m_lruIndex.GetUsage();
             return rocksdb::Status::OK();
         }
         catch (...)
@@ -817,13 +664,7 @@ namespace AVEVA::RocksDB::Plugin::Core
     {
         try
         {
-            std::vector<std::pair<std::string, std::string>> evictPairs;
-            {
-                std::lock_guard lock(m_mutex);
-                m_capacity -= std::min(decrease, m_capacity);
-                EvictUntilSizeLocked(m_capacity, evictPairs);
-            }
-            FileUtil::CommitEvictions(*m_fs, evictPairs);
+            FileUtil::CommitEvictions(*m_fs, m_lruIndex.Deflate(decrease));
             return rocksdb::Status::OK();
         }
         catch (...)
@@ -836,10 +677,7 @@ namespace AVEVA::RocksDB::Plugin::Core
     {
         try
         {
-            std::lock_guard lock(m_mutex);
-            // Saturating add: clamp to size_t max rather than wrapping silently.
-            const size_t remaining = std::numeric_limits<size_t>::max() - m_capacity;
-            m_capacity += (increase > remaining) ? remaining : increase;
+            m_lruIndex.Inflate(increase);
             return rocksdb::Status::OK();
         }
         catch (...)
@@ -848,34 +686,5 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
     }
 
-    void FileBasedCompressedSecondaryCache::EvictUntilSizeLocked(
-        size_t targetSize, std::vector<std::pair<std::string, std::string>>& evictPairs)
-    {
-        while (m_currentSize > targetSize && !m_lruList.empty())
-        {
-            evictPairs.push_back(RemoveEntryLocked(std::prev(m_lruList.end())));
-            m_evictedCount.fetch_add(1, std::memory_order_relaxed);
-        }
     }
 
-    std::pair<std::string, std::string>
-        FileBasedCompressedSecondaryCache::RemoveEntryLocked(LruIterator it)
-    {
-        // Build the orig and graveyard path strings while under the lock so that the
-        // unique graveyard name is reserved before any concurrent writer can claim the
-        // same sequence number.  No filesystem operation is performed here; the caller
-        // must call FileUtil::CommitEviction on the returned pair after releasing the
-        // lock.  Deferring the rename outside the lock allows bulk evictions to release
-        // the mutex sooner, at the cost of a narrow TOCTOU window where a concurrent
-        // insert for the same key could have its file moved to the graveyard (causing
-        // one cache miss; the phantom index entry is then cleaned up by Lookup).
-        const std::string origPathStr = FileUtil::ShardedPathStr(m_cacheDirStr, it->filename);
-        const std::string graveyardPathStr =
-            origPathStr + "." +
-            std::to_string(m_seq.fetch_add(1, std::memory_order_relaxed)) + ".del";
-        m_currentSize -= it->size;
-        m_index.erase(it);
-        m_lruList.erase(it);
-        return { origPathStr, graveyardPathStr };
-    }
-}

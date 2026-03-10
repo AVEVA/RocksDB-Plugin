@@ -1,24 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #pragma once
 
-#include "AVEVA/RocksDB/Plugin/Core/Util.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/LruFileIndex.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Filesystem.hpp"
 
 #include <rocksdb/secondary_cache.h>
 
-#include <boost/unordered/unordered_flat_map.hpp>
-#include <boost/unordered/unordered_flat_set.hpp>
 #include <boost/static_string.hpp>
 
-#include <atomic>
 #include <cstdint>
 #include <filesystem>
-#include <list>
-#include <mutex>
 #include <optional>
-#include <shared_mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -108,46 +102,9 @@ namespace AVEVA::RocksDB::Plugin::Core
         rocksdb::Status GetUsage(size_t& usage) const noexcept;
 
         /// <summary>Returns the total number of entries evicted due to capacity pressure since construction.</summary>
-        uint64_t GetEvictedCount() const noexcept { return m_evictedCount.load(std::memory_order_relaxed); }
+        uint64_t GetEvictedCount() const noexcept { return m_lruIndex.GetEvictedCount(); }
 
     private:
-        /// <summary>Single data record held by both the hash index and the sequenced LRU index.</summary>
-        struct Entry
-        {
-            /// <summary>
-            /// Maximum hex-encoded key length supported inline (covers 32-byte / 256-bit keys).
-            /// </summary>
-            static constexpr size_t kMaxFilenameLen = 64;
-            boost::static_string<kMaxFilenameLen> filename{};
-            size_t size{0};
-        };
-
-        using LruList = std::list<Entry>;
-
-        /// <summary>Hashes and compares LruList iterators by their filename, enabling
-        /// heterogeneous lookup from a plain std::string_view without constructing a std::string.</summary>
-        struct IteratorHash
-        {
-            using is_transparent = void;
-            size_t operator()(LruList::iterator it) const noexcept { return StringHash{}(it->filename); }
-            size_t operator()(std::string_view sv) const noexcept  { return StringHash{}(sv); }
-        };
-        struct IteratorEqual
-        {
-            using is_transparent = void;
-            bool operator()(LruList::iterator a, LruList::iterator b) const noexcept { return a->filename == b->filename; }
-            bool operator()(std::string_view sv, LruList::iterator it) const noexcept { return sv == it->filename; }
-            bool operator()(LruList::iterator it, std::string_view sv) const noexcept { return it->filename == sv; }
-        };
-
-        using Index       = boost::unordered::unordered_flat_set<LruList::iterator, IteratorHash, IteratorEqual>;
-        using LruIterator = LruList::iterator;
-
-        /// <summary>Pending file-rename+delete pairs produced by locked helpers.
-        /// Each element is {originalPath, graveyardPath}; callers must commit
-        /// them after releasing the lock via FileUtil::CommitEvictions.</summary>
-        using EvictList   = std::vector<std::pair<std::string, std::string>>;
-
         /// <summary>Immediately-ready result handle returned by Lookup().</summary>
         class ResultHandle final : public rocksdb::SecondaryCacheResultHandle
         {
@@ -173,7 +130,7 @@ namespace AVEVA::RocksDB::Plugin::Core
 
         /// <summary>Hex-encodes <paramref name="key"/> and returns the result.
         /// Returns an empty string when the key is too long to encode inline.</summary>
-        [[nodiscard]] static boost::static_string<Entry::kMaxFilenameLen> KeyToFilename(
+        [[nodiscard]] static boost::static_string<LruFileIndex::kMaxFilenameLen> KeyToFilename(
             const rocksdb::Slice& key) noexcept;
 
         /// <summary>Writes bytes to disk and updates the in-memory index.</summary>
@@ -183,18 +140,6 @@ namespace AVEVA::RocksDB::Plugin::Core
                                    const char* data,
                                    size_t dataSize,
                                    bool force_insert = true) noexcept;
-
-        /// <summary>
-        /// Phase 1 of WriteEntry — called with no lock held.
-        /// Acquires m_mutex, checks admission control, pins the existing entry at MRU
-        /// so it cannot be accidentally evicted, then evicts enough LRU entries to
-        /// make room for the incoming write.
-        /// Returns std::nullopt when force_insert is false and the cache is over capacity,
-        /// signalling that the write should be skipped.  Otherwise returns the eviction
-        /// pairs the caller must commit outside the lock via FileUtil::CommitEvictions.
-        /// </summary>
-        [[nodiscard]] std::optional<EvictList>
-            ReserveCapacity(std::string_view filename, size_t storedSize, bool force_insert);
 
         /// <summary>
         /// Phase 2 of WriteEntry — called with no lock held.
@@ -207,39 +152,11 @@ namespace AVEVA::RocksDB::Plugin::Core
                                                   size_t dataSize,
                                                   size_t storedSize);
 
-        /// <summary>
-        /// Phase 3 of WriteEntry — called with no lock held.
-        /// Acquires m_mutex, removes any pre-existing or concurrently-written entry for
-        /// filename, registers the new entry at the MRU front, and corrects any capacity
-        /// overshoot from concurrent writes that each independently passed Phase 1.
-        /// Returns the eviction pairs the caller must commit outside the lock.
-        /// </summary>
-        [[nodiscard]] EvictList RegisterEntry(std::string_view filename, size_t storedSize);
-
-        /// <summary>Evicts LRU entries from the back of the list until <c>m_currentSize &lt;= targetSize</c>.
-        /// Updates the in-memory index under the lock and appends <c>{origPath, graveyardPath}</c> pairs to
-        /// <paramref name="evictPairs"/>; the caller must rename and delete those files after releasing
-        /// the lock via <c>FileUtil::CommitEvictions</c>.</summary>
-        /// <remarks>Must be called with m_mutex held.</remarks>
-        void EvictUntilSizeLocked(size_t targetSize, std::vector<std::pair<std::string, std::string>>& evictPairs);
-
-        /// <summary>Removes a single entry from the in-memory index and returns <c>{origPath, graveyardPath}</c>.
-        /// No filesystem rename is performed; the caller must call <c>FileUtil::CommitEviction</c> on the
-        /// returned pair after releasing the lock.</summary>
-        /// <remarks>Must be called with m_mutex held.</remarks>
-        [[nodiscard]] std::pair<std::string, std::string> RemoveEntryLocked(LruIterator it);
-
-        /// <summary>Phase 1 of Lookup — acquires shared_lock, checks the index, and maps the file.
+        /// <summary>Phase 1 of Lookup — acquires shared_lock on the index, checks the index, and maps the file.
         /// Returns <c>std::nullopt</c> on a definite miss; <c>optional(nullptr)</c> when the entry is in
         /// the index but the file could not be mapped (corruption); <c>optional(view)</c> on success.</summary>
         [[nodiscard]] std::optional<std::unique_ptr<MappedFileView>>
             MapEntryForRead(std::string_view filename, const std::string& pathStr);
-
-        /// <summary>Phase 2 of Lookup — acquires exclusive_lock, re-validates the index entry, then either
-        /// splices it to MRU or removes it when <paramref name="advise_erase"/> is set.
-        /// Returns <c>false</c> when the entry disappeared between Phase 1 and Phase 2 (treat as a miss).</summary>
-        [[nodiscard]] bool SpliceOrEraseEntry(std::string_view filename, bool advise_erase,
-            std::pair<std::string, std::string>& advisedPair, bool& erased);
 
         /// <summary>Removes a corrupt or missing entry from the in-memory index and commits the eviction.
         /// Best-effort; never throws.</summary>
@@ -255,26 +172,8 @@ namespace AVEVA::RocksDB::Plugin::Core
         static void RecordHitStats(rocksdb::Statistics* stats, rocksdb::CacheEntryRole role) noexcept;
 
         std::filesystem::path m_cacheDir;
-        std::string m_cacheDirStr;
         std::shared_ptr<Filesystem> m_fs;
-        size_t m_capacity;
-        int    m_zstdLevel;
-        size_t m_currentSize{0};
-
-        // shared_mutex used as a two-level reader-writer lock:
-        //   shared_lock  — concurrent readers: GetCapacity, GetUsage, Lookup phase 1.
-        //   unique_lock  — brief exclusive sections: MRU splice (Lookup phase 2),
-        //                  index mutations (WriteEntry, Erase, SetCapacity).
-        mutable std::shared_mutex m_mutex;
-
-        /// <summary>Sequenced LRU list: front = MRU, back = LRU.</summary>
-        LruList m_lruList;
-        /// <summary>Hash index: filename → iterator into m_lruList for O(1) lookup.</summary>
-        Index   m_index;
-
-        /// <summary>Monotonically increasing counter for unique staging and graveyard file names.</summary>
-        std::atomic<uint64_t> m_seq{0};
-        /// <summary>Total entries evicted due to capacity pressure since construction.</summary>
-        std::atomic<uint64_t> m_evictedCount{0};
+        int m_zstdLevel;
+        LruFileIndex m_lruIndex;
     };
 }
