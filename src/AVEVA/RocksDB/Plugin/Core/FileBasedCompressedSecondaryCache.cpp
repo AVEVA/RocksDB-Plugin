@@ -659,8 +659,11 @@ namespace AVEVA::RocksDB::Plugin::Core
     {
         try
         {
-            if (key.size() * 2 > LruFileIndex::kMaxFilenameLen)
+            if (IsKeyTooLong(key))
+            {
                 return;
+            }
+
             const auto filename = KeyToFilename(key);
             FileUtil::CommitEviction(*m_fs, m_lruIndex.Remove(filename));
         }
