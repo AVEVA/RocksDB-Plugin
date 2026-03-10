@@ -400,7 +400,6 @@ namespace AVEVA::RocksDB::Plugin::Core
             }
 
             const auto filename = KeyToFilename(key);
-            const std::string pathStr = m_lruIndex.MakePath(filename);
             const size_t storedSize = dataSize + sizeof(FileFormat::Header);
 
             // Phase 1: lock, gate capacity, pin existing entry, schedule evictions.
@@ -411,7 +410,7 @@ namespace AVEVA::RocksDB::Plugin::Core
             FileUtil::CommitEvictions(*m_fs, *reserved);
 
             // Phase 2: write the file — no lock held.
-            if (auto s = WriteToDisk(pathStr, type, data, dataSize, storedSize); !s.ok())
+            if (auto s = WriteToDisk(filename, type, data, dataSize, storedSize); !s.ok())
                 return s;
 
             // Phase 3: lock, register the new entry, correct concurrent overshoot.
@@ -428,12 +427,13 @@ namespace AVEVA::RocksDB::Plugin::Core
     }
 
     rocksdb::Status FileBasedCompressedSecondaryCache::WriteToDisk(
-        const std::string& pathStr,
+        std::string_view filename,
         rocksdb::CompressionType type,
         const char* data,
         size_t dataSize,
         size_t storedSize)
     {
+        const std::string pathStr = m_lruIndex.MakePath(filename);
         FileFormat::Header header{};
         header.magic = FileFormat::magicFilePrefix;
         header.version = FileFormat::kFileVersion;

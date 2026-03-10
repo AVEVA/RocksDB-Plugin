@@ -38,84 +38,142 @@ namespace AVEVA::RocksDB::Plugin::Core
     class LruFileIndex
     {
     public:
-        /// <summary>Maximum hex-encoded key length supported inline (covers 32-byte / 256-bit keys).</summary>
+        /// <summary>
+        /// Maximum hex-encoded key length supported inline
+        /// (covers 32-byte / 256-bit keys).
+        /// </summary>
         static constexpr size_t kMaxFilenameLen = 64;
 
-        /// <summary>Pending file-rename+delete pairs produced by mutating operations.
+        /// <summary>
+        /// Pending file-rename+delete pairs produced by mutating operations.
         /// Each element is {originalPath, graveyardPath}; callers must commit them
-        /// after the call returns.</summary>
+        /// after the call returns.
+        /// </summary>
         using EvictList = std::vector<std::pair<std::string, std::string>>;
 
         explicit LruFileIndex(std::string cacheDirStr, size_t capacity);
-
         LruFileIndex(const LruFileIndex&) = delete;
         LruFileIndex& operator=(const LruFileIndex&) = delete;
         LruFileIndex(LruFileIndex&&) = delete;
         LruFileIndex& operator=(LruFileIndex&&) = delete;
 
-        /// <summary>Returns the sharded on-disk path string for a cache entry file.</summary>
+        /// <returns>
+        /// The sharded on-disk path string for a cache entry file.
+        /// </returns>
         [[nodiscard]] std::string MakePath(std::string_view filename) const;
 
-        /// <summary>Returns a shared lock on the index, suitable for holding across I/O
-        /// that must not be interrupted by concurrent evictions (e.g. Lookup phase 1).</summary>
+        /// <returns>
+        /// A shared lock on the index, suitable for holding across I/O
+        /// that must not be interrupted by concurrent evictions (e.g. Lookup phase 1).
+        /// </returns>
         [[nodiscard]] std::shared_lock<std::shared_mutex> AcquireShared() const;
 
-        /// <summary>Returns true if <paramref name="filename"/> is present in the index.
+        /// <returns>
+        /// true if <paramref name="filename"/> is present in the index.
         /// Must be called while a lock returned by AcquireShared() (or the exclusive lock)
-        /// is held.</summary>
+        /// is held.
+        /// </summary>
         [[nodiscard]] bool ContainsLocked(std::string_view filename) const noexcept;
 
-        /// <summary>Admission control and eviction scheduling (WriteEntry phase 1).
+        /// <summary>
+        /// Admission control and eviction scheduling (WriteEntry phase 1).
         /// Returns std::nullopt when force_insert is false and the cache is over capacity.
-        /// Otherwise returns eviction pairs the caller must commit after the call.</summary>
+        /// Otherwise returns eviction pairs the caller must commit after the call.
+        /// </summary>
         [[nodiscard]] std::optional<EvictList> ReserveCapacity(
             std::string_view filename, size_t storedSize, bool force_insert);
 
-        /// <summary>Registers the newly-written entry and corrects capacity overshoot
-        /// from concurrent writers (WriteEntry phase 3).
-        /// Returns eviction pairs the caller must commit after the call.</summary>
+        /// <summary>
+        /// Registers the newly-written entry and corrects capacity overshoot
+        /// from concurrent writers.
+        /// </summary>
+        /// 
+        /// <returns>
+        /// Eviction pairs the caller must commit after the call.
+        /// </returns>
         [[nodiscard]] EvictList RegisterEntry(std::string_view filename, size_t storedSize);
 
-        /// <summary>Lookup phase 2: splices the entry to MRU or schedules it for erasure.
-        /// Returns false when the entry disappeared between phase 1 and phase 2.
-        /// Sets <paramref name="erased"/> and fills <paramref name="advisedPair"/> on removal.</summary>
-        [[nodiscard]] bool SpliceOrErase(std::string_view filename, bool advise_erase,
+        /// <summary>
+        /// Splices the entry to most recently used or schedules it for erasure.
+        /// </summary>
+        /// 
+        /// <returns>
+        /// false when the entry disappeared.
+        /// Sets <paramref name="erased"/> and fills <paramref name="advisedPair"/> on removal.
+        /// </returns>
+        [[nodiscard]] bool SpliceOrErase(std::string_view filename,
+            bool advise_erase,
             std::pair<std::string, std::string>& advisedPair, bool& erased);
 
-        /// <summary>Removes a single entry from the index.
-        /// Returns {origPath, graveyardPath}; both strings are empty if the entry was not found.
-        /// The caller must commit the pair after the call returns.</summary>
+        /// <summary>
+        /// Removes a single entry from the index.
+        /// </summary>
+        /// 
+        /// <returns>
+        /// {origPath, graveyardPath}; both strings are empty if the entry was not found.
+        /// The caller must commit the pair after the call returns.
+        /// </returns>
         [[nodiscard]] std::pair<std::string, std::string> Remove(
             std::string_view filename) noexcept;
 
-        /// <summary>Sets the capacity limit and evicts LRU entries as needed.
-        /// Returns eviction pairs the caller must commit after the call.</summary>
+        /// <summary>
+        /// Sets the capacity limit and evicts LRU entries as needed.
+        /// </summary>
+        /// 
+        /// <returns>
+        /// Eviction pairs the caller must commit after the call.
+        /// </returns>
         [[nodiscard]] EvictList SetCapacity(size_t capacity);
 
-        /// <summary>Reduces capacity by <paramref name="decrease"/> bytes and evicts as needed.
-        /// Returns eviction pairs the caller must commit after the call.</summary>
+        /// <summary>
+        /// Reduces capacity by <paramref name="decrease"/> bytes and evicts as needed.
+        /// </summary>
+        /// 
+        /// <returns>
+        /// Eviction pairs the caller must commit after the call.
+        /// </returns>
         [[nodiscard]] EvictList Deflate(size_t decrease);
 
-        /// <summary>Increases capacity by <paramref name="increase"/> bytes (saturating).</summary>
+        /// <summary>
+        /// Increases capacity by <paramref name="increase"/> bytes (saturating).
+        /// </summary>
         void Inflate(size_t increase);
 
+        /// <summary>
+        /// Gets the capacity of the container.
+        /// </summary>
+        /// <returns>The current capacity.</returns>
         [[nodiscard]] size_t GetCapacity() const noexcept;
+
+        /// <summary>
+        /// Gets the current usage in bytes.
+        /// </summary>
+        /// <returns>The current usage value.</returns>
         [[nodiscard]] size_t GetUsage() const noexcept;
+
+        /// <summary>
+        /// Gets the count of evicted items.
+        /// </summary>
+        /// <returns>The number of items that have been evicted since this object's inception.</returns>
         [[nodiscard]] uint64_t GetEvictedCount() const noexcept;
 
     private:
-        /// <summary>Single data record held by both the hash index and the sequenced LRU list.</summary>
+        /// <summary>
+        /// Single data record held by both the hash index and the sequenced LRU list.
+        /// </summary>
         struct Entry
         {
             boost::static_string<kMaxFilenameLen> filename{};
             size_t size{0};
         };
 
-        using LruList     = std::list<Entry>;
+        using LruList = std::list<Entry>;
         using LruIterator = LruList::iterator;
 
-        /// <summary>Hashes and compares LruList iterators by their filename, enabling
-        /// heterogeneous lookup from a plain std::string_view.</summary>
+        /// <summary>
+        /// Hashes and compares LruList iterators by their filename, enabling
+        /// heterogeneous lookup from a plain std::string_view.
+        /// </summary>
         struct IteratorHash
         {
             using is_transparent = void;
@@ -132,13 +190,17 @@ namespace AVEVA::RocksDB::Plugin::Core
 
         using Index = boost::unordered::unordered_flat_set<LruIterator, IteratorHash, IteratorEqual>;
 
-        /// <summary>Evicts LRU entries from the back of the list until m_currentSize &lt;= targetSize.
-        /// Must be called with m_mutex held.</summary>
+        /// <summary>
+        /// Evicts LRU entries from the back of the list until m_currentSize &lt;= targetSize.
+        /// Must be called with m_mutex held.
+        /// </summary>
         void EvictUntilSizeLocked(size_t targetSize, EvictList& evictPairs);
 
-        /// <summary>Removes a single entry from the in-memory index and returns {origPath, graveyardPath}.
+        /// <summary>
+        /// Removes a single entry from the in-memory index and returns {origPath, graveyardPath}.
         /// No filesystem operation is performed; the caller must commit the returned pair.
-        /// Must be called with m_mutex held.</summary>
+        /// Must be called with m_mutex held.
+        /// </summary>
         [[nodiscard]] std::pair<std::string, std::string> RemoveEntryLocked(LruIterator it);
 
         std::string m_cacheDirStr;
@@ -152,12 +214,20 @@ namespace AVEVA::RocksDB::Plugin::Core
 
         /// <summary>Sequenced LRU list: front = MRU, back = LRU.</summary>
         LruList m_lruList;
-        /// <summary>Hash index: filename → iterator into m_lruList for O(1) lookup.</summary>
-        Index   m_index;
 
-        /// <summary>Monotonically increasing counter for unique graveyard file names.</summary>
+        /// <summary>
+        /// Hash index: filename → iterator into m_lruList for O(1) lookup.
+        /// </summary>
+        Index m_index;
+
+        /// <summary>
+        /// Monotonically increasing counter for unique graveyard file names.
+        /// </summary>
         std::atomic<uint64_t> m_seq{0};
-        /// <summary>Total entries evicted due to capacity pressure since construction.</summary>
+
+        /// <summary>
+        /// Total entries evicted due to capacity pressure since construction.
+        /// </summary>
         std::atomic<uint64_t> m_evictedCount{0};
     };
 }

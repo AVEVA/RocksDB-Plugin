@@ -74,33 +74,53 @@ namespace AVEVA::RocksDB::Plugin::Core
     }
 
     std::optional<LruFileIndex::EvictList> LruFileIndex::ReserveCapacity(
-        std::string_view filename, size_t storedSize, bool force_insert)
+        const std::string_view filename,
+        const size_t storedSize,
+        const bool forceInsert)
     {
         EvictList evictPairs;
         std::lock_guard lock(m_mutex);
 
         auto indexIt = m_index.find(filename);
-        const size_t existingSize = (indexIt != m_index.end()) ? (*indexIt)->size : 0;
+        size_t existingSize;
+        if (indexIt != m_index.end())
+        {
+            existingSize = (*indexIt)->size;
+        }
+        else
+        {
+            existingSize = 0;
+        }
 
         // When not forced, skip the write rather than evicting a potentially more
         // valuable entry.  Net-change accounting ensures a same-key update is never
         // skipped even when the cache is exactly full.
-        if (!force_insert && m_currentSize - existingSize + storedSize > m_capacity)
+        if (!forceInsert && m_currentSize - existingSize + storedSize > m_capacity)
+        {
             return std::nullopt;
+        }
 
         // Pin the existing entry at MRU so EvictUntilSizeLocked cannot evict it,
         // and so the temporary m_currentSize adjustment below avoids double-counting.
         if (indexIt != m_index.end())
+        {
             m_lruList.splice(m_lruList.begin(), m_lruList, *indexIt);
+        }
 
         // Temporarily discount the existing entry so eviction is sized against the
         // net new bytes required.  Restored before returning so m_currentSize stays
         // consistent on any failure path after this method returns.
         m_currentSize -= existingSize;
         if (m_currentSize + storedSize > m_capacity)
-            EvictUntilSizeLocked(m_capacity >= storedSize ? m_capacity - storedSize : 0, evictPairs);
-        m_currentSize += existingSize;
+        {
+            // Determine the target size to evict down to so the new entry fits.
+            // If the new entry is larger than the total capacity, evict everything
+            // (target 0); otherwise evict down to (capacity - storedSize).
+            const size_t targetSize = (storedSize <= m_capacity) ? (m_capacity - storedSize) : 0;
+            EvictUntilSizeLocked(targetSize, evictPairs);
+        }
 
+        m_currentSize += existingSize;
         return evictPairs;
     }
 
@@ -214,7 +234,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         return m_evictedCount.load(std::memory_order_relaxed);
     }
 
-    void LruFileIndex::EvictUntilSizeLocked(size_t targetSize, EvictList& evictPairs)
+    void LruFileIndex::EvictUntilSizeLocked(const size_t targetSize, EvictList& evictPairs)
     {
         while (m_currentSize > targetSize && !m_lruList.empty())
         {

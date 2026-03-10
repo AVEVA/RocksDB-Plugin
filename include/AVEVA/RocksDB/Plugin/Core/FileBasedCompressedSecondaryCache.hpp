@@ -156,7 +156,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         /// Builds the on-disk header, computes the CRC32C checksum, concatenates header
         /// and payload into a single buffer, and writes it atomically to pathStr.
         /// </summary>
-        [[nodiscard]] rocksdb::Status WriteToDisk(const std::string& pathStr,
+        [[nodiscard]] rocksdb::Status WriteToDisk(std::string_view filename,
                                                   rocksdb::CompressionType type,
                                                   const char* data,
                                                   size_t dataSize,
