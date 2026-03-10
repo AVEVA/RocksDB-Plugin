@@ -162,7 +162,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                                                   size_t dataSize,
                                                   size_t storedSize);
 
-        /// <summary>Phase 1 of Lookup — acquires shared_lock on the index, checks the index, and maps the file.
+        /// <summary>Phase 1 of Lookup — pins the entry to prevent eviction during I/O, then maps the file.
         /// Returns <c>std::nullopt</c> on a definite miss; <c>optional(nullptr)</c> when the entry is in
         /// the index but the file could not be mapped (corruption); <c>optional(view)</c> on success.</summary>
         [[nodiscard]] std::optional<std::unique_ptr<MappedFileView>>

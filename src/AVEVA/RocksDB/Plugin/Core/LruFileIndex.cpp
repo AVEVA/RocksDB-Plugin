@@ -3,6 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Core/LruFileIndex.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <limits>
 #include <string>
@@ -63,14 +64,26 @@ namespace AVEVA::RocksDB::Plugin::Core
         return ShardedPathStr(m_cacheDirStr, filename);
     }
 
-    std::shared_lock<std::shared_mutex> LruFileIndex::AcquireShared() const
+    std::optional<LruFileIndex::ScopedPin> LruFileIndex::TryPin(std::string_view filename)
     {
-        return std::shared_lock<std::shared_mutex>(m_mutex);
+        std::lock_guard lock(m_mutex);
+        const auto it = m_index.find(filename);
+        if (it == m_index.end())
+            return std::nullopt;
+        ++(*it)->pinCount;
+        return ScopedPin(this, filename);
     }
 
-    bool LruFileIndex::ContainsLocked(std::string_view filename) const noexcept
+    void LruFileIndex::Unpin(std::string_view filename) noexcept
     {
-        return m_index.find(filename) != m_index.end();
+        try
+        {
+            std::lock_guard lock(m_mutex);
+            const auto it = m_index.find(filename);
+            if (it != m_index.end())
+                --(*it)->pinCount;
+        }
+        catch (...) {}
     }
 
     std::optional<LruFileIndex::EvictList> LruFileIndex::ReserveCapacity(
@@ -236,9 +249,14 @@ namespace AVEVA::RocksDB::Plugin::Core
 
     void LruFileIndex::EvictUntilSizeLocked(const size_t targetSize, EvictList& evictPairs)
     {
-        while (m_currentSize > targetSize && !m_lruList.empty())
+        while (m_currentSize > targetSize)
         {
-            evictPairs.push_back(RemoveEntryLocked(std::prev(m_lruList.end())));
+            // Find the LRU-most unpinned entry (scanning from the back of the list).
+            const auto rit = std::find_if(m_lruList.rbegin(), m_lruList.rend(),
+                [](const Entry& e) { return e.pinCount == 0; });
+            if (rit == m_lruList.rend())
+                break; // all remaining entries are pinned; cannot evict further
+            evictPairs.push_back(RemoveEntryLocked(std::prev(rit.base())));
             m_evictedCount.fetch_add(1, std::memory_order_relaxed);
         }
     }

@@ -462,12 +462,18 @@ namespace AVEVA::RocksDB::Plugin::Core
         FileBasedCompressedSecondaryCache::MapEntryForRead(
             std::string_view filename, const std::string& pathStr)
     {
-        auto rdLock = m_lruIndex.AcquireShared();
-        if (!m_lruIndex.ContainsLocked(filename))
+        const auto pin = m_lruIndex.TryPin(filename);
+        if (!pin)
+        {
             return std::nullopt;
+        }
+
         auto view = m_fs->MapReadOnly(pathStr);
         if (!view)
+        {
             return std::unique_ptr<MappedFileView>{};
+        }
+
         return view;
     }
 

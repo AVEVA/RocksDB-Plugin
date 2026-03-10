@@ -31,9 +31,8 @@ namespace AVEVA::RocksDB::Plugin::Core
     /// operations (via the filesystem) after the call returns.
     ///
     /// Locking model:
-    ///   shared_lock  — concurrent readers: GetCapacity, GetUsage,
-    ///                  and callers that hold the guard returned by AcquireShared().
-    ///   unique_lock  — brief exclusive sections: all index mutations.
+    ///   shared_lock  — concurrent readers: GetCapacity, GetUsage.
+    ///   unique_lock  — brief exclusive sections: all index mutations, TryPin, Unpin.
     /// </remarks>
     class LruFileIndex
     {
@@ -62,18 +61,51 @@ namespace AVEVA::RocksDB::Plugin::Core
         /// </returns>
         [[nodiscard]] std::string MakePath(std::string_view filename) const;
 
-        /// <returns>
-        /// A shared lock on the index, suitable for holding across I/O
-        /// that must not be interrupted by concurrent evictions (e.g. Lookup phase 1).
-        /// </returns>
-        [[nodiscard]] std::shared_lock<std::shared_mutex> AcquireShared() const;
-
-        /// <returns>
-        /// true if <paramref name="filename"/> is present in the index.
-        /// Must be called while a lock returned by AcquireShared() (or the exclusive lock)
-        /// is held.
+        /// <summary>
+        /// RAII guard that prevents the pinned entry from being evicted while I/O is
+        /// in progress.  Constructed only by TryPin(); releases the pin on destruction.
         /// </summary>
-        [[nodiscard]] bool ContainsLocked(std::string_view filename) const noexcept;
+        class ScopedPin
+        {
+        public:
+            ScopedPin() = default;
+            ~ScopedPin() noexcept { if (m_owner) m_owner->Unpin(m_filename); }
+
+            ScopedPin(const ScopedPin&) = delete;
+            ScopedPin& operator=(const ScopedPin&) = delete;
+
+            ScopedPin(ScopedPin&& o) noexcept
+                : m_owner(std::exchange(o.m_owner, nullptr))
+                , m_filename(std::move(o.m_filename))
+            {}
+            ScopedPin& operator=(ScopedPin&& o) noexcept
+            {
+                if (this != &o)
+                {
+                    if (m_owner) m_owner->Unpin(m_filename);
+                    m_owner    = std::exchange(o.m_owner, nullptr);
+                    m_filename = std::move(o.m_filename);
+                }
+                return *this;
+            }
+
+        private:
+            friend class LruFileIndex;
+            ScopedPin(LruFileIndex* owner, std::string_view filename)
+                : m_owner(owner)
+            {
+                m_filename.assign(filename.data(), filename.size());
+            }
+            LruFileIndex* m_owner{nullptr};
+            boost::static_string<kMaxFilenameLen> m_filename{};
+        };
+
+        /// <summary>
+        /// Pins an entry to prevent it being evicted while the caller performs I/O.
+        /// Returns a ScopedPin RAII guard that releases the pin on destruction,
+        /// or std::nullopt if the entry is not in the index.
+        /// </summary>
+        [[nodiscard]] std::optional<ScopedPin> TryPin(std::string_view filename);
 
         /// <summary>
         /// Admission control and eviction scheduling (WriteEntry phase 1).
@@ -165,6 +197,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         {
             boost::static_string<kMaxFilenameLen> filename{};
             size_t size{0};
+            uint32_t pinCount{0};
         };
 
         using LruList = std::list<Entry>;
@@ -207,9 +240,14 @@ namespace AVEVA::RocksDB::Plugin::Core
         size_t m_capacity;
         size_t m_currentSize{0};
 
+        /// <summary>
+        /// Decrements the pin count of the named entry.  Called by ScopedPin on destruction.
+        /// </summary>
+        void Unpin(std::string_view filename) noexcept;
+
         // shared_mutex used as a two-level reader-writer lock:
-        //   shared_lock  — concurrent readers: GetCapacity, GetUsage, AcquireShared callers.
-        //   unique_lock  — brief exclusive sections: all index mutations.
+        //   shared_lock  — concurrent readers: GetCapacity, GetUsage.
+        //   unique_lock  — brief exclusive sections: all index mutations, TryPin, Unpin.
         mutable std::shared_mutex m_mutex;
 
         /// <summary>Sequenced LRU list: front = MRU, back = LRU.</summary>
