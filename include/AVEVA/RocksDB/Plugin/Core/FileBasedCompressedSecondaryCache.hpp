@@ -133,6 +133,16 @@ namespace AVEVA::RocksDB::Plugin::Core
         [[nodiscard]] static boost::static_string<LruFileIndex::kMaxFilenameLen> KeyToFilename(
             const rocksdb::Slice& key) noexcept;
 
+        /// <summary>
+        /// Returns true when the hex-encoded key would exceed the inline filename buffer.
+        /// Each input byte is encoded as two hex characters, so the hex-encoded length is
+        /// twice the key length; the check uses <c>key.size() * 2</c> to reflect this.
+        /// </summary>
+        [[nodiscard]] static bool IsKeyTooLong(const rocksdb::Slice& key) noexcept
+        {
+            return key.size() * 2 > LruFileIndex::kMaxFilenameLen;
+        }
+
         /// <summary>Writes bytes to disk and updates the in-memory index.</summary>
         /// <param name="force_insert">When false, the write is skipped rather than evicting an existing entry to make room.</param>
         rocksdb::Status WriteEntry(const rocksdb::Slice& key,

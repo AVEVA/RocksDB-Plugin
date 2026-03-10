@@ -27,6 +27,9 @@
 #include <iterator>
 #include <new>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <ranges>
 #include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Core
@@ -95,7 +98,6 @@ namespace AVEVA::RocksDB::Plugin::Core
             if (!ctx) throw std::runtime_error("zstd: failed to create CCtx");
             return *ctx;
         }
-
         /// <summary>Returns the thread-local decompression context, reusing it to avoid per-call allocation overhead.</summary>
         static ZSTD_DCtx& GetDCtx()
         {
@@ -164,6 +166,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                     result.size = result.storage.size();
                     return result;
                 }
+
             }
             return { rocksdb::CompressionType::kNoCompression, data, size, {} };
         }
@@ -286,20 +289,26 @@ namespace AVEVA::RocksDB::Plugin::Core
 
         // Pre-create all 256 shard subdirectories so WriteEntry never calls
         // CreateDir on the hot write path.
-        const char* kHex = "0123456789abcdef";
-        for (int i = 0; i < 256; ++i)
+        constexpr std::string_view kHex = "0123456789abcdef";
+        for (const auto i : std::views::iota(0u, 256u))
         {
-            const char shard[3] = { kHex[i >> 4], kHex[i & 0xf], '\0' };
+            std::string shard;
+            shard.reserve(2);
+            shard.push_back(kHex.at(i >> 4));
+            shard.push_back(kHex.at(i & 0xf));
             m_fs->CreateDir(m_cacheDir / shard);
         }
     }
 
-    auto FileBasedCompressedSecondaryCache::KeyToFilename(
+    boost::static_string<LruFileIndex::kMaxFilenameLen>
+    FileBasedCompressedSecondaryCache::KeyToFilename(
         const rocksdb::Slice& key) noexcept
-        -> boost::static_string<LruFileIndex::kMaxFilenameLen>
     {
-        if (key.size() * 2 > LruFileIndex::kMaxFilenameLen)
+        if (IsKeyTooLong(key))
+        {
             return {};
+        }
+
         boost::static_string<LruFileIndex::kMaxFilenameLen> result;
         boost::algorithm::hex_lower(key.data(), key.data() + key.size(), std::back_inserter(result));
         return result;
@@ -318,7 +327,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                 return rocksdb::Status::OK();
             }
 
-            if (key.size() * 2 > LruFileIndex::kMaxFilenameLen)
+            if (IsKeyTooLong(key))
                 return rocksdb::Status::InvalidArgument("cache key hex exceeds maximum inline buffer");
 
             const size_t dataSize = helper->size_cb(obj);
@@ -353,16 +362,21 @@ namespace AVEVA::RocksDB::Plugin::Core
         try
         {
             if (saved.size() == 0)
+            {
                 return rocksdb::Status::OK();
+            }
 
-            if (key.size() * 2 > LruFileIndex::kMaxFilenameLen)
+            if (IsKeyTooLong(key))
+            {
                 return rocksdb::Status::InvalidArgument("cache key hex exceeds maximum inline buffer");
+            }
 
             if (type == rocksdb::CompressionType::kNoCompression)
             {
                 const auto compressed = ZstdCodec::MaybeCompress(saved.data(), saved.size(), m_zstdLevel);
                 return WriteEntry(key, compressed.type, compressed.data, compressed.size);
             }
+
             return WriteEntry(key, type, saved.data(), saved.size());
         }
         catch (...)
@@ -380,7 +394,7 @@ namespace AVEVA::RocksDB::Plugin::Core
     {
         try
         {
-            if (key.size() * 2 > LruFileIndex::kMaxFilenameLen)
+            if (IsKeyTooLong(key))
             {
                 return rocksdb::Status::InvalidArgument("cache key hex exceeds maximum inline buffer");
             }
