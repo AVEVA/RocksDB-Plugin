@@ -126,16 +126,10 @@ namespace AVEVA::RocksDB::Plugin::Core
         [[nodiscard]] EvictList RegisterEntry(std::string_view filename, size_t storedSize);
 
         /// <summary>
-        /// Splices the entry to most recently used or schedules it for erasure.
+        /// Promotes the entry to most-recently-used.
         /// </summary>
-        /// 
-        /// <returns>
-        /// false when the entry disappeared.
-        /// Sets <paramref name="erased"/> and fills <paramref name="advisedPair"/> on removal.
-        /// </returns>
-        [[nodiscard]] bool SpliceOrErase(std::string_view filename,
-            bool advise_erase,
-            std::pair<std::string, std::string>& advisedPair, bool& erased);
+        /// <returns>false when the entry is not in the index.</returns>
+        [[nodiscard]] bool Touch(std::string_view filename);
 
         /// <summary>
         /// Removes a single entry from the index.

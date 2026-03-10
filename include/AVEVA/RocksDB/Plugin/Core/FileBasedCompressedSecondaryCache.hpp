@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -163,20 +164,38 @@ namespace AVEVA::RocksDB::Plugin::Core
                                                   size_t storedSize);
 
         /// <summary>Phase 1 of Lookup — pins the entry to prevent eviction during I/O, then maps the file.
-        /// Returns <c>std::nullopt</c> on a definite miss; <c>optional(nullptr)</c> when the entry is in
-        /// the index but the file could not be mapped (corruption); <c>optional(view)</c> on success.</summary>
-        [[nodiscard]] std::optional<std::unique_ptr<MappedFileView>>
+        /// The three outcomes are named explicitly in MapEntryResult::Status.</summary>
+        struct MapEntryResult
+        {
+            enum class Status { Miss, Corrupt, Ok };
+            Status                          status;
+            std::unique_ptr<MappedFileView> view; // non-null only when status == Ok
+        };
+
+        [[nodiscard]] MapEntryResult
             MapEntryForRead(std::string_view filename, const std::string& pathStr);
 
         /// <summary>Removes a corrupt or missing entry from the in-memory index and commits the eviction.
         /// Best-effort; never throws.</summary>
         void CleanupCorruptEntry(std::string_view filename) noexcept;
 
-        /// <summary>Validates the on-disk header of a mapped cache entry and populates output fields.
-        /// Returns <c>false</c> on any mismatch (magic, version, bounds, or checksum).</summary>
-        [[nodiscard]] static bool ValidateHeader(const char* mapped, size_t mappedSize,
-            rocksdb::CompressionType& compressionType,
-            size_t& dataSize, const char*& dataPtr) noexcept;
+        /// <summary>
+        /// Validated and parsed fields extracted from a mapped cache entry's on-disk header.
+        /// </summary>
+        struct ParsedHeader
+        {
+            rocksdb::CompressionType compressionType;
+
+            /// <summary>
+            /// points into the mapped file, valid while the view is alive
+            /// </summary>
+            std::span<const char> payload;
+        };
+
+        /// <summary>Validates the on-disk header of a mapped cache entry.
+        /// Returns std::nullopt on any mismatch (magic, version, bounds, or checksum).</summary>
+        [[nodiscard]] static std::optional<ParsedHeader> ValidateHeader(
+            const char* mapped, size_t mappedSize) noexcept;
 
         /// <summary>Records a secondary cache hit to RocksDB's statistics subsystem.</summary>
         static void RecordHitStats(rocksdb::Statistics* stats, rocksdb::CacheEntryRole role) noexcept;

@@ -301,8 +301,8 @@ namespace AVEVA::RocksDB::Plugin::Core
     }
 
     boost::static_string<LruFileIndex::kMaxFilenameLen>
-    FileBasedCompressedSecondaryCache::KeyToFilename(
-        const rocksdb::Slice& key) noexcept
+        FileBasedCompressedSecondaryCache::KeyToFilename(
+            const rocksdb::Slice& key) noexcept
     {
         if (IsKeyTooLong(key))
         {
@@ -458,23 +458,23 @@ namespace AVEVA::RocksDB::Plugin::Core
         return rocksdb::Status::OK();
     }
 
-    std::optional<std::unique_ptr<MappedFileView>>
+    FileBasedCompressedSecondaryCache::MapEntryResult
         FileBasedCompressedSecondaryCache::MapEntryForRead(
             std::string_view filename, const std::string& pathStr)
     {
         const auto pin = m_lruIndex.TryPin(filename);
         if (!pin)
         {
-            return std::nullopt;
+            return { MapEntryResult::Status::Miss };
         }
 
         auto view = m_fs->MapReadOnly(pathStr);
         if (!view)
         {
-            return std::unique_ptr<MappedFileView>{};
+            return { MapEntryResult::Status::Corrupt };
         }
 
-        return view;
+        return { MapEntryResult::Status::Ok, std::move(view) };
     }
 
     void FileBasedCompressedSecondaryCache::CleanupCorruptEntry(
@@ -487,28 +487,29 @@ namespace AVEVA::RocksDB::Plugin::Core
         catch (...) {}
     }
 
-    bool FileBasedCompressedSecondaryCache::ValidateHeader(
-        const char* mapped, size_t mappedSize,
-        rocksdb::CompressionType& compressionType,
-        size_t& dataSize, const char*& dataPtr) noexcept
+    std::optional<FileBasedCompressedSecondaryCache::ParsedHeader>
+        FileBasedCompressedSecondaryCache::ValidateHeader(
+            const char* mapped, size_t mappedSize) noexcept
     {
         if (mappedSize < sizeof(FileFormat::Header))
-            return false;
+            return std::nullopt;
         FileFormat::Header header;
         std::memcpy(&header, mapped, sizeof(header));
         if (header.magic.value() != FileFormat::magicFilePrefix)
-            return false;
+            return std::nullopt;
         if (header.version.value() != FileFormat::kFileVersion)
-            return false;
-        dataSize = static_cast<size_t>(header.dataSize.value());
+            return std::nullopt;
+        const size_t dataSize = static_cast<size_t>(header.dataSize.value());
         if (dataSize + sizeof(FileFormat::Header) > mappedSize)
-            return false;
-        dataPtr = mapped + sizeof(FileFormat::Header);
-        compressionType = static_cast<rocksdb::CompressionType>(header.compressionType.value());
-        return CrcUtil::Compute(
+            return std::nullopt;
+        const char* dataPtr = mapped + sizeof(FileFormat::Header);
+        const auto compressionType = static_cast<rocksdb::CompressionType>(header.compressionType.value());
+        if (CrcUtil::Compute(
             reinterpret_cast<const char*>(&header.compressionType),
             sizeof(header.compressionType) + sizeof(header.dataSize),
-            dataPtr, dataSize) == header.checksum.value();
+            dataPtr, dataSize) != header.checksum.value())
+            return std::nullopt;
+        return ParsedHeader{ compressionType, std::span<const char>(dataPtr, dataSize) };
     }
 
     void FileBasedCompressedSecondaryCache::RecordHitStats(
@@ -531,88 +532,119 @@ namespace AVEVA::RocksDB::Plugin::Core
     std::unique_ptr<rocksdb::SecondaryCacheResultHandle>
         FileBasedCompressedSecondaryCache::Lookup(
             const rocksdb::Slice& key,
-            const rocksdb::Cache::CacheItemHelper* helper,
-            rocksdb::Cache::CreateContext* create_context,
+            const rocksdb::Cache::CacheItemHelper* cacheItemHelper,
+            rocksdb::Cache::CreateContext* createContext,
             bool /*wait*/,
-            bool advise_erase,
+            bool adviseErase,
             rocksdb::Statistics* stats,
-            bool& kept_in_sec_cache) noexcept
+            bool& keptInSecondaryCache) noexcept
     {
         try
         {
-            kept_in_sec_cache = false;
-            if (!helper || !helper->IsSecondaryCacheCompatible())
+            keptInSecondaryCache = false;
+            if (!cacheItemHelper || !cacheItemHelper->IsSecondaryCacheCompatible())
+            {
                 return nullptr;
-            if (key.size() * 2 > LruFileIndex::kMaxFilenameLen)
+            }
+
+            if (IsKeyTooLong(key))
+            {
                 return nullptr;
+            }
 
             const auto filename = KeyToFilename(key);
             const std::string pathStr = m_lruIndex.MakePath(filename);
 
-            // Phase 1 (shared_lock): index check + file mapping.
-            auto mapped = MapEntryForRead(filename, pathStr);
-            if (!mapped)
+            auto [mapStatus, view] = MapEntryForRead(filename, pathStr);
+            if (mapStatus == MapEntryResult::Status::Miss)
+            {
                 return nullptr;
-            if (!*mapped)
+            }
+            else if (mapStatus == MapEntryResult::Status::Corrupt)
             {
                 CleanupCorruptEntry(filename);
                 return nullptr;
             }
-            auto view = std::move(*mapped);
 
-            // Phase 2 (exclusive_lock): splice to MRU or remove on advise_erase.
-            bool entryRemovedByAdvise = false;
-            std::pair<std::string, std::string> advisedPair;
-            if (!m_lruIndex.SpliceOrErase(filename, advise_erase, advisedPair, entryRemovedByAdvise))
-                return nullptr;
-            FileUtil::CommitEviction(*m_fs, advisedPair);
+            if (adviseErase)
+            {
+                const auto evictionPair = m_lruIndex.Remove(filename);
+                if (evictionPair.first.empty())
+                {
+                    return nullptr; // entry disappeared between map and this stage.
+                }
+
+                FileUtil::CommitEviction(*m_fs, evictionPair);
+            }
+            else
+            {
+                if (!m_lruIndex.Touch(filename))
+                {
+                    return nullptr; // entry disappeared between map and this stage.
+                }
+            }
 
             // On any validation failure, remove the corrupt entry from the index.
+            // When advise_erase was set the entry is already gone, so no cleanup needed.
             bool entryIsValid = false;
             auto corruptionCleanup = boost::scope::make_scope_exit([&] noexcept {
-                if (!entryIsValid && !entryRemovedByAdvise)
+                if (!entryIsValid && !adviseErase)
                     CleanupCorruptEntry(filename);
                 });
 
-            rocksdb::CompressionType compressionType{};
-            size_t dataSize{};
-            const char* dataPtr{};
-            if (!ValidateHeader(view->Data(), view->Size(), compressionType, dataSize, dataPtr))
+            const auto parsedHeader = ValidateHeader(view->Data(), view->Size());
+            if (!parsedHeader)
+            {
                 return nullptr;
+            }
+
+            const auto& [compressionType, payload] = *parsedHeader;
 
             std::string decompressed;
             rocksdb::Slice dataSlice;
             rocksdb::CompressionType effectiveType;
             if (static_cast<uint8_t>(compressionType) == FileFormat::zstdCompression)
             {
-                try { decompressed = ZstdCodec::Decompress(dataPtr, dataSize); }
-                catch (const std::runtime_error&) { return nullptr; }
+                try
+                {
+                    decompressed = ZstdCodec::Decompress(payload.data(), payload.size());
+                }
+                catch (const std::runtime_error&)
+                {
+                    return nullptr;
+                }
+
                 dataSlice = { decompressed.data(), decompressed.size() };
                 effectiveType = rocksdb::CompressionType::kNoCompression;
             }
             else
             {
-                dataSlice = { dataPtr, dataSize };
+                dataSlice = { payload.data(), payload.size() };
                 effectiveType = compressionType;
             }
 
             rocksdb::Cache::ObjectPtr outObj = nullptr;
             size_t outCharge = 0;
-            auto s = helper->create_cb(dataSlice, effectiveType,
+            auto s = cacheItemHelper->create_cb(dataSlice,
+                effectiveType,
                 rocksdb::CacheTier::kNonVolatileBlockTier,
-                create_context, /*allocator=*/nullptr,
-                &outObj, &outCharge);
+                createContext,
+                /*allocator=*/nullptr,
+                &outObj,
+                &outCharge);
             if (!s.ok() || outObj == nullptr)
+            {
                 return nullptr;
+            }
 
             auto objCleanup = boost::scope::make_scope_exit([&] noexcept {
-                if (outObj) helper->del_cb(outObj, /*allocator=*/nullptr);
+                    if (outObj) cacheItemHelper->del_cb(outObj, /*allocator=*/nullptr);
                 });
 
-            RecordHitStats(stats, helper->role);
+            RecordHitStats(stats, cacheItemHelper->role);
 
             entryIsValid = true;
-            kept_in_sec_cache = !entryRemovedByAdvise;
+            keptInSecondaryCache = !adviseErase;
             auto result = std::make_unique<ResultHandle>(outObj, outCharge);
             objCleanup.set_active(false);
             return result;
@@ -706,5 +738,5 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
     }
 
-    }
+}
 

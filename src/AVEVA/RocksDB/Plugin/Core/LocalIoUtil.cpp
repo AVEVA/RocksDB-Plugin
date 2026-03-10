@@ -84,7 +84,7 @@ namespace AVEVA::RocksDB::Plugin::Core
     {
         try
         {
-            bip::file_mapping  fm(path.string().c_str(), bip::read_only);
+            bip::file_mapping fm(path.string().c_str(), bip::read_only);
             bip::mapped_region region(fm, bip::read_only);
             return std::make_unique<BoostMappedFileView>(std::move(fm), std::move(region));
         }

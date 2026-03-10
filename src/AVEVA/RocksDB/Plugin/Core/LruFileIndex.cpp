@@ -169,24 +169,16 @@ namespace AVEVA::RocksDB::Plugin::Core
         return evictPairs;
     }
 
-    bool LruFileIndex::SpliceOrErase(
-        std::string_view filename, bool advise_erase,
-        std::pair<std::string, std::string>& advisedPair, bool& erased)
+    bool LruFileIndex::Touch(std::string_view filename)
     {
         std::lock_guard lock(m_mutex);
-        auto indexIt = m_index.find(filename);
-        if (indexIt == m_index.end())
+        const auto it = m_index.find(filename);
+        if (it == m_index.end())
+        {
             return false;
-        if (advise_erase)
-        {
-            advisedPair = RemoveEntryLocked(*indexIt);
-            erased = true;
         }
-        else
-        {
-            m_lruList.splice(m_lruList.begin(), m_lruList, *indexIt);
-            erased = false;
-        }
+
+        m_lruList.splice(m_lruList.begin(), m_lruList, *it);
         return true;
     }
 
