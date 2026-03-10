@@ -12,7 +12,10 @@ TEST_F(FileBasedCompressedSecondaryCacheMockTests, WriteFileAtomicFailure_Insert
     // NiceMock returns false for bool by default; explicit ON_CALL documents intent.
     ON_CALL(*m_mockFs, WriteFileAtomic(_, _, _)).WillByDefault(Return(false));
 
-    auto cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_mockFs);
+    auto cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_mockFs,
+        FileBasedCompressedSecondaryCache::kDefaultCapacity,
+        FileBasedCompressedSecondaryCache::kDefaultZstdLevel,
+        MakeNullLogger());
 
     TestPayload payload{"data that will fail to write"};
     auto s = cache->Insert(MakeKey("io_fail_key"), &payload, &m_helper, /*force_insert=*/true);
@@ -45,7 +48,10 @@ TEST_F(FileBasedCompressedSecondaryCacheMockTests, MapReadOnlyFailure_LookupRetu
             return nullptr;
         });
 
-    auto cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_mockFs);
+    auto cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_mockFs,
+        FileBasedCompressedSecondaryCache::kDefaultCapacity,
+        FileBasedCompressedSecondaryCache::kDefaultZstdLevel,
+        MakeNullLogger());
 
     // Insert succeeds (WriteFileAtomic returns true): entry is registered in the index.
     TestPayload payload{"real data"};

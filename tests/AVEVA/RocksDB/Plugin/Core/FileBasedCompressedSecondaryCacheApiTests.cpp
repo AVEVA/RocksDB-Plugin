@@ -195,7 +195,10 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConstructorCleansStaleDirectory)
     ASSERT_TRUE(std::filesystem::exists(filePath)) << "Entry file must exist before re-creation";
 
     // Re-construct the cache over the same directory.
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs,
+        FileBasedCompressedSecondaryCache::kDefaultCapacity,
+        FileBasedCompressedSecondaryCache::kDefaultZstdLevel,
+        MakeNullLogger());
 
     // The stale file must have been removed by the constructor.
     EXPECT_FALSE(std::filesystem::exists(filePath))

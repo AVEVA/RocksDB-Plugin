@@ -57,7 +57,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentDifferentKeyInserts_Usa
 
     // Capacity allows exactly 3 entries; the remaining 13 must be evicted.
     const size_t capacity = 3 * (FileBasedCompressedSecondaryCache::kFileHeaderSize + kEntrySize);
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, FileBasedCompressedSecondaryCache::kDefaultZstdLevel, MakeNullLogger());
 
     std::vector<std::thread> threads;
     threads.reserve(kThreadCount);

@@ -11,6 +11,7 @@
 #include <boost/crc.hpp>
 #include <boost/endian/buffers.hpp>
 #include <boost/scope/scope_exit.hpp>
+#include <boost/log/trivial.hpp>
 
 // SSE4.2 CRC32C intrinsics (x64 only; boost::crc_32_type used as fallback).
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_AMD64))
@@ -34,6 +35,7 @@
 
 namespace AVEVA::RocksDB::Plugin::Core
 {
+    using namespace boost::log::trivial;
     /// <summary>On-disk layout constants and binary header structure.</summary>
     struct FileFormat
     {
@@ -279,10 +281,12 @@ namespace AVEVA::RocksDB::Plugin::Core
     };
 
     FileBasedCompressedSecondaryCache::FileBasedCompressedSecondaryCache(
-        std::filesystem::path cacheDir, std::shared_ptr<Filesystem> fs, size_t capacity, int zstdLevel)
+        std::filesystem::path cacheDir, std::shared_ptr<Filesystem> fs, size_t capacity, int zstdLevel,
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
         : m_cacheDir(std::move(cacheDir)),
         m_fs(std::move(fs)), m_zstdLevel(zstdLevel),
-        m_lruIndex(m_cacheDir.string(), capacity)
+        m_lruIndex(m_cacheDir.string(), capacity),
+        m_logger(std::move(logger))
     {
         m_fs->DeleteDir(m_cacheDir);
         m_fs->CreateDir(m_cacheDir);
@@ -298,6 +302,10 @@ namespace AVEVA::RocksDB::Plugin::Core
             shard.push_back(kHex.at(i & 0xf));
             m_fs->CreateDir(m_cacheDir / shard);
         }
+
+        BOOST_LOG_SEV(*m_logger, info)
+                << "FileBasedCompressedSecondaryCache: initialized dir='" << m_cacheDir.string()
+                << "', capacity=" << capacity << " bytes, zstd_level=" << zstdLevel;
     }
 
     boost::static_string<LruFileIndex::kMaxFilenameLen>
@@ -328,7 +336,9 @@ namespace AVEVA::RocksDB::Plugin::Core
             }
 
             if (IsKeyTooLong(key))
+            {
                 return rocksdb::Status::InvalidArgument("cache key hex exceeds maximum inline buffer");
+            }
 
             const size_t dataSize = helper->size_cb(obj);
             if (dataSize == 0)
@@ -336,8 +346,6 @@ namespace AVEVA::RocksDB::Plugin::Core
                 return rocksdb::Status::OK();
             }
 
-            // small_vector keeps payloads up to 4 KiB on the stack, avoiding a heap
-            // allocation for the common case of small index/filter/data blocks.
             boost::container::small_vector<char, 4096> buf(dataSize);
             auto s = helper->saveto_cb(obj, 0, dataSize, buf.data());
             if (!s.ok())
@@ -350,7 +358,9 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
         catch (...)
         {
-            return StatusUtil::CurrentExceptionToStatus();
+            const auto s = StatusUtil::CurrentExceptionToStatus();
+            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
+            return s;
         }
     }
     rocksdb::Status FileBasedCompressedSecondaryCache::InsertSaved(
@@ -381,7 +391,9 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
         catch (...)
         {
-            return StatusUtil::CurrentExceptionToStatus();
+            const auto s = StatusUtil::CurrentExceptionToStatus();
+            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
+            return s;
         }
     }
 
@@ -422,7 +434,9 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
         catch (...)
         {
-            return StatusUtil::CurrentExceptionToStatus();
+            const auto s = StatusUtil::CurrentExceptionToStatus();
+            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
+            return s;
         }
     }
 
@@ -453,7 +467,11 @@ namespace AVEVA::RocksDB::Plugin::Core
         std::memcpy(writeBuf.data() + sizeof(header), data, dataSize);
 
         if (!m_fs->WriteFileAtomic(pathStr, writeBuf.data(), writeBuf.size()))
+        {
+            BOOST_LOG_SEV(*m_logger, warning)
+                    << "FileBasedCompressedSecondaryCache: failed to write cache entry '" << pathStr << "'";
             return rocksdb::Status::IOError("Failed to write cache entry file", pathStr);
+        }
 
         return rocksdb::Status::OK();
     }
@@ -471,6 +489,8 @@ namespace AVEVA::RocksDB::Plugin::Core
         auto view = m_fs->MapReadOnly(pathStr);
         if (!view)
         {
+            BOOST_LOG_SEV(*m_logger, warning)
+                    << "FileBasedCompressedSecondaryCache: file missing for indexed entry '" << filename << "'";
             return { MapEntryResult::Status::Corrupt };
         }
 
@@ -484,7 +504,10 @@ namespace AVEVA::RocksDB::Plugin::Core
         {
             FileUtil::CommitEviction(*m_fs, m_lruIndex.Remove(filename));
         }
-        catch (...) {}
+        catch (...)
+        {
+            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << StatusUtil::CurrentExceptionToStatus().ToString();
+        }
     }
 
     std::optional<FileBasedCompressedSecondaryCache::ParsedHeader>
@@ -595,6 +618,8 @@ namespace AVEVA::RocksDB::Plugin::Core
             const auto parsedHeader = ValidateHeader(view->Data(), view->Size());
             if (!parsedHeader)
             {
+                BOOST_LOG_SEV(*m_logger, warning)
+                        << "FileBasedCompressedSecondaryCache: header validation failed for '" << filename << "'";
                 return nullptr;
             }
 
@@ -611,6 +636,8 @@ namespace AVEVA::RocksDB::Plugin::Core
                 }
                 catch (const std::runtime_error&)
                 {
+                    BOOST_LOG_SEV(*m_logger, warning)
+                            << "FileBasedCompressedSecondaryCache: decompression failed for '" << filename << "'";
                     return nullptr;
                 }
 
@@ -651,6 +678,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
         catch (...)
         {
+            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << StatusUtil::CurrentExceptionToStatus().ToString();
             return nullptr;
         }
     }
@@ -667,7 +695,10 @@ namespace AVEVA::RocksDB::Plugin::Core
             const auto filename = KeyToFilename(key);
             FileUtil::CommitEviction(*m_fs, m_lruIndex.Remove(filename));
         }
-        catch (...) {}
+        catch (...)
+        {
+            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << StatusUtil::CurrentExceptionToStatus().ToString();
+        }
     }
 
     void FileBasedCompressedSecondaryCache::WaitAll(
@@ -685,7 +716,9 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
         catch (...)
         {
-            return StatusUtil::CurrentExceptionToStatus();
+            const auto s = StatusUtil::CurrentExceptionToStatus();
+            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
+            return s;
         }
     }
 
@@ -698,7 +731,9 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
         catch (...)
         {
-            return StatusUtil::CurrentExceptionToStatus();
+            const auto s = StatusUtil::CurrentExceptionToStatus();
+            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
+            return s;
         }
     }
 
@@ -711,7 +746,9 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
         catch (...)
         {
-            return StatusUtil::CurrentExceptionToStatus();
+            const auto s = StatusUtil::CurrentExceptionToStatus();
+            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
+            return s;
         }
     }
 
@@ -724,7 +761,9 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
         catch (...)
         {
-            return StatusUtil::CurrentExceptionToStatus();
+            const auto s = StatusUtil::CurrentExceptionToStatus();
+            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
+            return s;
         }
     }
 
@@ -737,7 +776,9 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
         catch (...)
         {
-            return StatusUtil::CurrentExceptionToStatus();
+            const auto s = StatusUtil::CurrentExceptionToStatus();
+            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
+            return s;
         }
     }
 

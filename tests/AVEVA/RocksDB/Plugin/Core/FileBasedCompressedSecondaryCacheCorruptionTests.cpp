@@ -85,7 +85,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, CorruptedEntryRemovedFromIndexAft
 TEST_F(FileBasedCompressedSecondaryCacheTests, EvictedEntryFileIsDeletedFromDisk)
 {
     const size_t capacity = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, FileBasedCompressedSecondaryCache::kDefaultZstdLevel, MakeNullLogger());
 
     const std::string key1 = "evict_disk_k1";
     const std::string key2 = "evict_disk_k2";
@@ -111,7 +111,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, EvictedEntryFileIsDeletedFromDisk
 TEST_F(FileBasedCompressedSecondaryCacheTests, EvictedEntryLeavesNoGraveyardFile)
 {
     const size_t capacity = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, FileBasedCompressedSecondaryCache::kDefaultZstdLevel, MakeNullLogger());
 
     TestPayload p1{"0123456789"}; // fills capacity exactly
     TestPayload p2{"abcdefghij"}; // evicts p1 via RemoveEntryLocked → rename → delete

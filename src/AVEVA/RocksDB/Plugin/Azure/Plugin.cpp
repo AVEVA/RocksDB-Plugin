@@ -38,7 +38,9 @@ namespace AVEVA::RocksDB::Plugin::Azure
                     sc->reset(new Core::FileBasedCompressedSecondaryCache(
                         cacheDir,
                         std::make_shared<Core::LocalFilesystem>(logger),
-                        maxCacheSize));
+                        maxCacheSize,
+                        Core::FileBasedCompressedSecondaryCache::kDefaultZstdLevel,
+                        logger));
                     return sc->get();
                 });
         }
@@ -91,7 +93,9 @@ namespace AVEVA::RocksDB::Plugin::Azure
                     sc->reset(new Core::FileBasedCompressedSecondaryCache(
                         cacheDir,
                         std::make_shared<Core::LocalFilesystem>(logger),
-                        maxCacheSize));
+                        maxCacheSize,
+                        Core::FileBasedCompressedSecondaryCache::kDefaultZstdLevel,
+                        logger));
                     return sc->get();
                 });
         }

@@ -16,6 +16,9 @@
 #include <gmock/gmock.h>
 
 #include <boost/algorithm/hex.hpp>
+#include <boost/log/trivial.hpp>
+#include <boost/log/sources/severity_logger.hpp>
+#include <boost/log/core.hpp>
 
 #include <array>
 #include <atomic>
@@ -36,6 +39,14 @@ using ::testing::Return;
 
 namespace
 {
+    // Returns a severity_logger_mt that discards all log records.
+    // Use this wherever a non-null logger is required but log output is unwanted.
+    inline std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>
+    MakeNullLogger()
+    {
+        return std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
+    }
+
     // A simple heap-allocated payload object used by the test helper callbacks.
     struct TestPayload
     {
@@ -152,7 +163,10 @@ protected:
     {
         m_cacheDir = MakeTempDir(::testing::UnitTest::GetInstance()->current_test_info()->name());
         m_fs = std::make_shared<AVEVA::RocksDB::Plugin::Core::LocalFilesystem>();
-        m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs);
+        m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs,
+            FileBasedCompressedSecondaryCache::kDefaultCapacity,
+            FileBasedCompressedSecondaryCache::kDefaultZstdLevel,
+            MakeNullLogger());
     }
 
     void TearDown() override

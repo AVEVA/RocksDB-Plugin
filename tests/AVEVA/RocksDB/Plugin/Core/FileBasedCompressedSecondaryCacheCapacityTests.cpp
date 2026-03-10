@@ -10,7 +10,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, CapacityEvictsLruEntry)
 {
     // Capacity = 2 × (kFileHeaderSize + 10) bytes; holds exactly two 10-byte entries.
     const size_t capacity = 2 * (FileBasedCompressedSecondaryCache::kFileHeaderSize + 10);
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, FileBasedCompressedSecondaryCache::kDefaultZstdLevel, MakeNullLogger());
 
     const std::string key1 = "key_lru_1";
     const std::string key2 = "key_lru_2";
@@ -45,7 +45,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, CapacityEvictsLruEntry)
 TEST_F(FileBasedCompressedSecondaryCacheTests, LookupPromotesToMru)
 {
     const size_t capacity = 2 * (FileBasedCompressedSecondaryCache::kFileHeaderSize + 10);
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, FileBasedCompressedSecondaryCache::kDefaultZstdLevel, MakeNullLogger());
 
     const std::string key1 = "promo_key1";
     const std::string key2 = "promo_key2";
@@ -113,7 +113,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertFalse_WhenCacheFull_Sk
 {
     // Fill the cache exactly with two 10-byte entries.
     const size_t capacity = 2 * (FileBasedCompressedSecondaryCache::kFileHeaderSize + 10);
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, FileBasedCompressedSecondaryCache::kDefaultZstdLevel, MakeNullLogger());
 
     const std::string key1 = "fi_false_key1";
     const std::string key2 = "fi_false_key2";
@@ -148,7 +148,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertFalse_WhenCacheFull_Sk
 TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertTrue_WhenCacheFull_Evicts)
 {
     const size_t capacity = 2 * (FileBasedCompressedSecondaryCache::kFileHeaderSize + 10);
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, FileBasedCompressedSecondaryCache::kDefaultZstdLevel, MakeNullLogger());
 
     TestPayload p1{"0123456789"};
     TestPayload p2{"abcdefghij"};
@@ -176,7 +176,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertTrue_WhenCacheFull_Evi
 TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertFalse_SameKey_WhenFull_UpdatesData)
 {
     const size_t capacity = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, FileBasedCompressedSecondaryCache::kDefaultZstdLevel, MakeNullLogger());
 
     const std::string keyStr = "same_key_full";
     TestPayload original{"0123456789"}; // 10 bytes — fills capacity exactly
@@ -250,7 +250,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, DeflateAndInflateCapacity)
 {
     constexpr size_t kEntryStoredSize = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
     const size_t initialCapacity = 2 * kEntryStoredSize;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, initialCapacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, initialCapacity, FileBasedCompressedSecondaryCache::kDefaultZstdLevel, MakeNullLogger());
 
     TestPayload p1{"0123456789"};
     TestPayload p2{"abcdefghij"};
@@ -285,7 +285,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, DeflateAndInflateCapacity)
 // --------------------------------------------------------------------------
 TEST_F(FileBasedCompressedSecondaryCacheTests, Inflate_SaturationAtSizeMax)
 {
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, /*capacity=*/1024);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, /*capacity=*/1024, FileBasedCompressedSecondaryCache::kDefaultZstdLevel, MakeNullLogger());
 
     ASSERT_TRUE(m_cache->Inflate(std::numeric_limits<size_t>::max()).ok());
 
@@ -324,7 +324,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, SingleInsertEvictsMultipleEntries
 
     // Capacity fits 3 small entries (96 bytes) but NOT 3 small + 1 large.
     const size_t capacity = 3 * kSmallEntrySize;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, FileBasedCompressedSecondaryCache::kDefaultZstdLevel, MakeNullLogger());
 
     TestPayload p1{std::string(kSmallPayloadSize, '1')};
     TestPayload p2{std::string(kSmallPayloadSize, '2')};
@@ -365,7 +365,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, SingleInsertEvictsMultipleEntries
 // --------------------------------------------------------------------------
 TEST_F(FileBasedCompressedSecondaryCacheTests, ZeroCapacityAtConstruction_AllInsertsDropped)
 {
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, /*capacity=*/0);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, /*capacity=*/0, FileBasedCompressedSecondaryCache::kDefaultZstdLevel, MakeNullLogger());
 
     TestPayload p{"some data"};
 
@@ -402,7 +402,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, GetEvictedCount_StartsAtZero)
 TEST_F(FileBasedCompressedSecondaryCacheTests, GetEvictedCount_IncrementsOnCapacityEviction)
 {
     constexpr size_t kEntryStoredSize = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, kEntryStoredSize);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, kEntryStoredSize, FileBasedCompressedSecondaryCache::kDefaultZstdLevel, MakeNullLogger());
 
     TestPayload p1{"0123456789"};
     TestPayload p2{"abcdefghij"};
@@ -423,7 +423,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, GetEvictedCount_IncrementsOnCapac
 TEST_F(FileBasedCompressedSecondaryCacheTests, GetEvictedCount_IncrementsOnDeflate)
 {
     constexpr size_t kEntryStoredSize = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, 2 * kEntryStoredSize);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, 2 * kEntryStoredSize, FileBasedCompressedSecondaryCache::kDefaultZstdLevel, MakeNullLogger());
 
     TestPayload p1{"0123456789"};
     TestPayload p2{"abcdefghij"};

@@ -9,6 +9,7 @@
 #include <rocksdb/secondary_cache.h>
 
 #include <boost/static_string.hpp>
+#include <boost/log/trivial.hpp>
 
 #include <cstdint>
 #include <filesystem>
@@ -52,8 +53,10 @@ namespace AVEVA::RocksDB::Plugin::Core
         /// <param name="zstdLevel">zstd compression level (1–22); 1 is fastest, higher values trade CPU for ratio.</param>
         explicit FileBasedCompressedSecondaryCache(std::filesystem::path cacheDir,
                                                    std::shared_ptr<Filesystem> fs,
-                                                   size_t capacity  = kDefaultCapacity,
-                                                   int    zstdLevel = kDefaultZstdLevel);
+                                                   size_t capacity,
+                                                   int    zstdLevel,
+                                                   std::shared_ptr<boost::log::sources::severity_logger_mt<
+                                                       boost::log::trivial::severity_level>> logger);
 
         ~FileBasedCompressedSecondaryCache() override = default;
 
@@ -204,5 +207,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         std::shared_ptr<Filesystem> m_fs;
         int m_zstdLevel;
         LruFileIndex m_lruIndex;
+        std::shared_ptr<boost::log::sources::severity_logger_mt<
+            boost::log::trivial::severity_level>> m_logger;
     };
 }

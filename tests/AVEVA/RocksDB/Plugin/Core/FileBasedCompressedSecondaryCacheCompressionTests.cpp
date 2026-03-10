@@ -89,7 +89,8 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, CustomZstdLevel_RoundTrips)
         m_cacheDir,
         m_fs,
         FileBasedCompressedSecondaryCache::kDefaultCapacity,
-        /*zstdLevel=*/9);
+        /*zstdLevel=*/9,
+        MakeNullLogger());
 
     // 1 KiB of repeated bytes — highly compressible, exercises the compression path.
     const std::string raw(1024, 'X');
