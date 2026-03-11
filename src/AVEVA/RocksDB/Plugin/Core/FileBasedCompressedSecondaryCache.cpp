@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
+#include "ZstdCodec.hpp"
 
 #include <rocksdb/advanced_options.h>
 #include <rocksdb/slice.h>
@@ -19,8 +20,6 @@
 #elif defined(__SSE4_2__)
 #  include <nmmintrin.h>
 #endif
-
-#include <zstd.h>
 
 #include <boost/container/small_vector.hpp>
 
@@ -87,94 +86,7 @@ namespace AVEVA::RocksDB::Plugin::Core
     static_assert(sizeof(FileFormat::Header) == FileBasedCompressedSecondaryCache::kFileHeaderSize,
         "FileFormat::Header size must match the public kFileHeaderSize constant");
 
-    /// <summary>Thread-local context management, compression, and decompression.</summary>
-    struct ZstdCodec
-    {
-        struct CCtxDeleter { void operator()(ZSTD_CCtx* p) const noexcept { ZSTD_freeCCtx(p); } };
-        struct DCtxDeleter { void operator()(ZSTD_DCtx* p) const noexcept { ZSTD_freeDCtx(p); } };
-
-        /// <summary>Returns the thread-local compression context, reusing it to avoid per-call allocation overhead.</summary>
-        static ZSTD_CCtx& GetCCtx()
-        {
-            thread_local std::unique_ptr<ZSTD_CCtx, CCtxDeleter> ctx{ ZSTD_createCCtx() };
-            if (!ctx) throw std::runtime_error("zstd: failed to create CCtx");
-            return *ctx;
-        }
-        /// <summary>Returns the thread-local decompression context, reusing it to avoid per-call allocation overhead.</summary>
-        static ZSTD_DCtx& GetDCtx()
-        {
-            thread_local std::unique_ptr<ZSTD_DCtx, DCtxDeleter> ctx{ ZSTD_createDCtx() };
-            if (!ctx) throw std::runtime_error("zstd: failed to create DCtx");
-            return *ctx;
-        }
-
-        static std::string Compress(const char* data, size_t size, int level)
-        {
-            const size_t bound = ZSTD_compressBound(size);
-            std::string out(bound, '\0');
-            const size_t result = ZSTD_compressCCtx(&GetCCtx(), out.data(), bound, data, size, level);
-            if (ZSTD_isError(result))
-            {
-                return {};
-            }
-            out.resize(result);
-            return out;
-        }
-
-        static std::string Decompress(const char* data, size_t size)
-        {
-            const unsigned long long contentSize = ZSTD_getFrameContentSize(data, size);
-            if (contentSize == ZSTD_CONTENTSIZE_ERROR || contentSize == ZSTD_CONTENTSIZE_UNKNOWN)
-            {
-                throw std::runtime_error("zstd: could not determine decompressed size");
-            }
-            std::string out(static_cast<size_t>(contentSize), '\0');
-            const size_t written = ZSTD_decompressDCtx(&GetDCtx(), out.data(), out.size(), data, size);
-            if (ZSTD_isError(written))
-            {
-                throw std::runtime_error(ZSTD_getErrorName(written));
-            }
-            out.resize(written);
-            return out;
-        }
-
-        /// <summary>
-        /// Compresses [data, data+size) with zstd if the payload meets the minimum
-        /// compressible threshold and the result is smaller than the input.
-        /// Returns the effective compression type and the bytes to write to disk.
-        /// When compression is applied, <c>result.storage</c> owns the compressed
-        /// bytes and <c>result.data</c> points into it; otherwise <c>result.data</c>
-        /// is the original input pointer unchanged.
-        /// </summary>
-        struct CompressResult
-        {
-            rocksdb::CompressionType type;
-            const char* data;
-            size_t                   size;
-            std::string              storage; // non-empty only when compression was applied
-        };
-
-        static CompressResult MaybeCompress(const char* data, size_t size, int zstdLevel)
-        {
-            if (size >= FileFormat::kMinCompressibleSize)
-            {
-                std::string compressed = Compress(data, size, zstdLevel);
-                if (!compressed.empty() && compressed.size() < size)
-                {
-                    CompressResult result;
-                    result.type = static_cast<rocksdb::CompressionType>(FileFormat::zstdCompression);
-                    result.storage = std::move(compressed);
-                    result.data = result.storage.data();
-                    result.size = result.storage.size();
-                    return result;
-                }
-
-            }
-            return { rocksdb::CompressionType::kNoCompression, data, size, {} };
-        }
-    };
-
-    /// <summary>
+    ///
     /// Computes a 32-bit CRC32C (Castagnoli) checksum.
     /// On x64 the hardware path uses SSE4.2 instructions (_mm_crc32_u64/_u32/_u8) which are
     /// available on all x86-64 processors since Intel Nehalem / AMD Bulldozer (~2010).
@@ -353,7 +265,8 @@ namespace AVEVA::RocksDB::Plugin::Core
                 return s;
             }
 
-            const auto compressed = ZstdCodec::MaybeCompress(buf.data(), dataSize, m_zstdLevel);
+            const auto compressed = ZstdCodec::MaybeCompress(buf.data(), dataSize, m_zstdLevel,
+                FileFormat::kMinCompressibleSize, FileFormat::zstdCompression);
             return WriteEntry(key, compressed.type, compressed.data, compressed.size, force_insert);
         }
         catch (...)
@@ -383,7 +296,8 @@ namespace AVEVA::RocksDB::Plugin::Core
 
             if (type == rocksdb::CompressionType::kNoCompression)
             {
-                const auto compressed = ZstdCodec::MaybeCompress(saved.data(), saved.size(), m_zstdLevel);
+                const auto compressed = ZstdCodec::MaybeCompress(saved.data(), saved.size(), m_zstdLevel,
+                    FileFormat::kMinCompressibleSize, FileFormat::zstdCompression);
                 return WriteEntry(key, compressed.type, compressed.data, compressed.size);
             }
 
