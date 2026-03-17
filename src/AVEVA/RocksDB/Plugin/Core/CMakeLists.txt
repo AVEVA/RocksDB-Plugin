@@ -11,6 +11,15 @@ add_library(aveva-rocksdb-plugin-core
     LocalIoUtil.cpp
     CrcUtil.cpp
     ZstdCodec.cpp
+
+    # Private headers
+    LruFileIndex.hpp
+    MapEntryResult.hpp
+    ParsedHeader.hpp
+    FileFormat.hpp
+    ResultHandle.hpp
+    CrcUtil.hpp
+    ZstdCodec.hpp
 )
 add_library(aveva::rocksdb-plugin-core ALIAS aveva-rocksdb-plugin-core)
 set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../include")
@@ -30,10 +39,6 @@ target_sources(aveva-rocksdb-plugin-core
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/LocalFile.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/LruFileIndex.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/ResultHandle.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/MapEntryResult.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/ParsedHeader.hpp"
 )
 install(TARGETS aveva-rocksdb-plugin-core
     EXPORT

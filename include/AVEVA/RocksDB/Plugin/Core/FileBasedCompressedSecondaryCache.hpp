@@ -3,11 +3,8 @@
 
 #pragma once
 
-#include "AVEVA/RocksDB/Plugin/Core/LruFileIndex.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Filesystem.hpp"
-#include "AVEVA/RocksDB/Plugin/Core/MapEntryResult.hpp"
-#include "AVEVA/RocksDB/Plugin/Core/ParsedHeader.hpp"
-#include "AVEVA/RocksDB/Plugin/Core/ResultHandle.hpp"
+
 
 #include <rocksdb/secondary_cache.h>
 
@@ -21,6 +18,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <memory>
 
 namespace AVEVA::RocksDB::Plugin::Core
 {
@@ -41,13 +39,6 @@ namespace AVEVA::RocksDB::Plugin::Core
     /// </remarks>
     class FileBasedCompressedSecondaryCache final : public rocksdb::SecondaryCache
     {
-        std::filesystem::path m_cacheDir;
-        std::shared_ptr<Filesystem> m_fs;
-        int m_zstdLevel;
-        LruFileIndex m_lruIndex;
-        std::shared_ptr<boost::log::sources::severity_logger_mt<
-            boost::log::trivial::severity_level>> m_logger;
-
     public:
         static constexpr size_t kDefaultCapacity = 512ULL * 1024 * 1024; // 512 MiB
         static constexpr int kDefaultZstdLevel = 1;
@@ -75,7 +66,7 @@ namespace AVEVA::RocksDB::Plugin::Core
             std::shared_ptr<boost::log::sources::severity_logger_mt<
             boost::log::trivial::severity_level>> logger);
 
-        ~FileBasedCompressedSecondaryCache() override = default;
+        ~FileBasedCompressedSecondaryCache() override;
         FileBasedCompressedSecondaryCache(const FileBasedCompressedSecondaryCache&) = delete;
         FileBasedCompressedSecondaryCache& operator=(const FileBasedCompressedSecondaryCache&) = delete;
         FileBasedCompressedSecondaryCache(FileBasedCompressedSecondaryCache&&) = delete;
@@ -162,70 +153,9 @@ namespace AVEVA::RocksDB::Plugin::Core
         rocksdb::Status GetUsage(size_t& usage) const noexcept;
 
         /// <summary>Returns the total number of entries evicted due to capacity pressure since construction.</summary>
-        uint64_t GetEvictedCount() const noexcept { return m_lruIndex.GetEvictedCount(); }
+        uint64_t GetEvictedCount() const noexcept;
     private:
-        /// <summary>
-        /// Immediately-ready result handle returned by Lookup().
-        /// Moved to its own header to reduce this header's size.
-        /// </summary>
-
-        /// <summary>
-        /// Hex-encodes <paramref name="key"/> and returns the result.
-        /// Returns an empty string when the key is too long to encode inline.
-        /// </summary>
-        [[nodiscard]] static boost::static_string<LruFileIndex::kMaxFilenameLen> KeyToFilename(
-            const rocksdb::Slice& key) noexcept;
-
-        /// <summary>
-        /// Returns true when the hex-encoded key would exceed the inline filename buffer.
-        /// Each input byte is encoded as two hex characters, so the hex-encoded length is
-        /// twice the key length; the check uses <c>key.size() * 2</c> to reflect this.
-        /// </summary>
-        [[nodiscard]] static bool IsKeyTooLong(const rocksdb::Slice& key) noexcept
-        {
-            return key.size() * 2 > LruFileIndex::kMaxFilenameLen;
-        }
-
-        /// <summary>
-        /// Writes bytes to disk and updates the in-memory index.
-        /// </summary>
-        /// <param name="key">The key identifying the cache entry to write.</param>
-        /// <param name="type">The compression type of the data to store.</param>
-        /// <param name="data">Pointer to the bytes to write to disk.</param>
-        /// <param name="dataSize">Size in bytes of the data pointed to by <paramref name="data"/>.</param>
-        /// <param name="force_insert">When false, the write is skipped rather than evicting an existing entry to make room.</param>
-        rocksdb::Status WriteEntry(const rocksdb::Slice& key,
-            rocksdb::CompressionType type,
-            const char* data,
-            size_t dataSize,
-            bool force_insert = true) noexcept;
-
-        /// <summary>
-        /// Phase 2 of WriteEntry — called with no lock held.
-        /// Builds the on-disk header, computes the CRC32C checksum, concatenates header
-        /// and payload into a single buffer, and writes it atomically to pathStr.
-        /// </summary>
-        [[nodiscard]] rocksdb::Status WriteToDisk(std::string_view filename,
-            rocksdb::CompressionType type,
-            const char* data,
-            size_t dataSize,
-            size_t storedSize);
-
-        /// <summary>Phase 1 of Lookup — pins the entry to prevent eviction during I/O, then maps the file.
-        /// The three outcomes are named explicitly in MapEntryResult::Status.</summary>
-        // MapEntryResult and ParsedHeader have been moved to their own headers.
-        [[nodiscard]] MapEntryResult MapEntryForRead(std::string_view filename, const std::string& pathStr);
-
-        /// <summary>Removes a corrupt or missing entry from the in-memory index and commits the eviction.
-        /// Best-effort; never throws.</summary>
-        void CleanupCorruptEntry(std::string_view filename) noexcept;
-
-        /// <summary>Validates the on-disk header of a mapped cache entry.
-        /// Returns std::nullopt on any mismatch (magic, version, bounds, or checksum).</summary>
-        [[nodiscard]] std::optional<ParsedHeader> ValidateHeader(
-            const char* mapped, size_t mappedSize) noexcept;
-
-        /// <summary>Records a secondary cache hit to RocksDB's statistics subsystem.</summary>
-        static void RecordHitStats(rocksdb::Statistics* stats, rocksdb::CacheEntryRole role) noexcept;
+        class Impl;
+        std::unique_ptr<Impl> m_impl;
     };
 }

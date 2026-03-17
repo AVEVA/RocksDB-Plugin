@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
-#include "AVEVA/RocksDB/Plugin/Core/ResultHandle.hpp"
+#include "ResultHandle.hpp"
 
 #include <utility>
 
