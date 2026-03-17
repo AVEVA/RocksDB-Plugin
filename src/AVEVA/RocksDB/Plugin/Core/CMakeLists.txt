@@ -8,6 +8,7 @@ add_library(aveva-rocksdb-plugin-core
     LocalFilesystem.cpp
     LocalFile.cpp
     LocalIoUtil.cpp
+    CrcUtil.cpp
     ZstdCodec.cpp
 )
 add_library(aveva::rocksdb-plugin-core ALIAS aveva-rocksdb-plugin-core)

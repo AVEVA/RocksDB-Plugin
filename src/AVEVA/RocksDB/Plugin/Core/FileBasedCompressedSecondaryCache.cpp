@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
+#include "CrcUtil.hpp"
 #include "ZstdCodec.hpp"
 
 #include <rocksdb/advanced_options.h>
@@ -9,17 +10,9 @@
 #include <rocksdb/statistics.h>
 
 #include <boost/algorithm/hex.hpp>
-#include <boost/crc.hpp>
 #include <boost/endian/buffers.hpp>
 #include <boost/scope/scope_exit.hpp>
 #include <boost/log/trivial.hpp>
-
-// SSE4.2 CRC32C intrinsics (x64 only; boost::crc_32_type used as fallback).
-#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_AMD64))
-#  include <intrin.h>
-#elif defined(__SSE4_2__)
-#  include <nmmintrin.h>
-#endif
 
 #include <boost/container/small_vector.hpp>
 
@@ -85,65 +78,6 @@ namespace AVEVA::RocksDB::Plugin::Core
         "FileFormat::Header must be exactly 22 bytes with no padding");
     static_assert(sizeof(FileFormat::Header) == FileBasedCompressedSecondaryCache::kFileHeaderSize,
         "FileFormat::Header size must match the public kFileHeaderSize constant");
-
-    ///
-    /// Computes a 32-bit CRC32C (Castagnoli) checksum.
-    /// On x64 the hardware path uses SSE4.2 instructions (_mm_crc32_u64/_u32/_u8) which are
-    /// available on all x86-64 processors since Intel Nehalem / AMD Bulldozer (~2010).
-    /// A software fallback using boost::crc_32_type is compiled for other architectures.
-    /// </summary>
-    struct CrcUtil
-    {
-        /// <summary>Computes CRC32C over a single span.</summary>
-        static uint32_t Compute(const char* data, size_t size) noexcept
-        {
-#if defined(_M_X64) || defined(_M_AMD64) || defined(__x86_64__)
-            return ~CrcUpdate(~0u, data, size);
-#else
-            boost::crc_32_type crc;
-            crc.process_bytes(data, size);
-            return static_cast<uint32_t>(crc.checksum());
-#endif
-        }
-
-        /// <summary>Computes CRC32C over two discontiguous spans as if they were concatenated.</summary>
-        static uint32_t Compute(const char* d1, size_t s1, const char* d2, size_t s2) noexcept
-        {
-#if defined(_M_X64) || defined(_M_AMD64) || defined(__x86_64__)
-            return ~CrcUpdate(CrcUpdate(~0u, d1, s1), d2, s2);
-#else
-            boost::crc_32_type crc;
-            crc.process_bytes(d1, s1);
-            crc.process_bytes(d2, s2);
-            return static_cast<uint32_t>(crc.checksum());
-#endif
-        }
-
-#if defined(_M_X64) || defined(_M_AMD64) || defined(__x86_64__)
-        /// <summary>Advances a running CRC32C register over <paramref name="size"/> bytes without the final complement.</summary>
-        static uint32_t CrcUpdate(uint32_t crc, const char* data, size_t size) noexcept
-        {
-            const auto* p = reinterpret_cast<const uint8_t*>(data);
-            while (size >= 8)
-            {
-                uint64_t v;
-                std::memcpy(&v, p, 8);
-                crc = static_cast<uint32_t>(_mm_crc32_u64(crc, v));
-                p += 8; size -= 8;
-            }
-            if (size >= 4)
-            {
-                uint32_t v;
-                std::memcpy(&v, p, 4);
-                crc = _mm_crc32_u32(crc, v);
-                p += 4; size -= 4;
-            }
-            while (size--)
-                crc = _mm_crc32_u8(crc, *p++);
-            return crc;
-        }
-#endif
-    };
 
     /// <summary>Filesystem path helpers and best-effort file deletion.</summary>
     struct FileUtil
