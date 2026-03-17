@@ -5,6 +5,9 @@
 
 #include "AVEVA/RocksDB/Plugin/Core/LruFileIndex.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Filesystem.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/MapEntryResult.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/ParsedHeader.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/ResultHandle.hpp"
 
 #include <rocksdb/secondary_cache.h>
 
@@ -38,48 +41,86 @@ namespace AVEVA::RocksDB::Plugin::Core
     /// </remarks>
     class FileBasedCompressedSecondaryCache final : public rocksdb::SecondaryCache
     {
-    public:
-        static constexpr size_t kDefaultCapacity  = 512ULL * 1024 * 1024; // 512 MiB
-        static constexpr int    kDefaultZstdLevel  = 1;
+        std::filesystem::path m_cacheDir;
+        std::shared_ptr<Filesystem> m_fs;
+        int m_zstdLevel;
+        LruFileIndex m_lruIndex;
+        std::shared_ptr<boost::log::sources::severity_logger_mt<
+            boost::log::trivial::severity_level>> m_logger;
 
-        /// <summary>On-disk overhead per entry: magic(8) + version(1) + compressionType(1) + dataSize(8) + checksum(4).</summary>
+    public:
+        static constexpr size_t kDefaultCapacity = 512ULL * 1024 * 1024; // 512 MiB
+        static constexpr int kDefaultZstdLevel = 1;
+
+        /// <summary>
+        /// On-disk overhead per entry.
+        /// </summary>
         static constexpr size_t kFileHeaderSize = 22;
 
-        /// <summary>Constructs the cache.</summary>
+        /// <summary>
+        /// Constructs the cache.
+        /// </summary>
         /// <param name="cacheDir">Cache directory; will be created if it does not already exist.</param>
-        /// <param name="fs">Filesystem implementation used for all I/O.  Pass a
-        /// <c>LocalFilesystem</c> for production use or a mock for testing.</param>
+        /// <param name="fs">
+        /// Filesystem implementation used for all I/O.  Pass a
+        /// <c>LocalFilesystem</c> for production use or a mock for testing.
+        /// </param>
         /// <param name="capacity">Maximum number of bytes of entry data stored on disk.</param>
         /// <param name="zstdLevel">zstd compression level (1–22); 1 is fastest, higher values trade CPU for ratio.</param>
+        /// <param name="logger">A logger implementation.</param>
         explicit FileBasedCompressedSecondaryCache(std::filesystem::path cacheDir,
-                                                   std::shared_ptr<Filesystem> fs,
-                                                   size_t capacity,
-                                                   int    zstdLevel,
-                                                   std::shared_ptr<boost::log::sources::severity_logger_mt<
-                                                       boost::log::trivial::severity_level>> logger);
+            std::shared_ptr<Filesystem> fs,
+            size_t capacity,
+            int zstdLevel,
+            std::shared_ptr<boost::log::sources::severity_logger_mt<
+            boost::log::trivial::severity_level>> logger);
 
         ~FileBasedCompressedSecondaryCache() override = default;
-
         FileBasedCompressedSecondaryCache(const FileBasedCompressedSecondaryCache&) = delete;
         FileBasedCompressedSecondaryCache& operator=(const FileBasedCompressedSecondaryCache&) = delete;
         FileBasedCompressedSecondaryCache(FileBasedCompressedSecondaryCache&&) = delete;
         FileBasedCompressedSecondaryCache& operator=(FileBasedCompressedSecondaryCache&&) = delete;
 
-        const char* Name() const noexcept override { return "FileBasedCompressedSecondaryCache"; }
+        /// <summary>
+        /// The name of this class of Customizable.
+        /// </summary>
+        /// <returns>The name of this class.</returns>
+        const char* Name() const noexcept override;
 
-        /// <summary>Serializes <paramref name="obj"/> via helper callbacks and writes it to disk.</summary>
+        /// <summary>
+        /// Serializes <paramref name="obj"/> via <paramref name="helper"/>
+        /// callbacks and writes it to disk.
+        /// </summary>
+        /// <param name="key">The key identifying the cache entry.</param>
+        /// <param name="obj">Pointer to the cached object to serialize and store.</param>
+        /// <param name="helper">Callbacks used to serialize the object and obtain its size/charge.</param>
+        /// <param name="forceInsert">
+        /// If true, evict existing entries to make room; if false,
+        /// skip insertion when there is insufficient capacity.
+        /// </param>
         rocksdb::Status Insert(const rocksdb::Slice& key,
-                               rocksdb::Cache::ObjectPtr obj,
-                               const rocksdb::Cache::CacheItemHelper* helper,
-                               bool force_insert) noexcept override;
+            rocksdb::Cache::ObjectPtr obj,
+            const rocksdb::Cache::CacheItemHelper* helper,
+            bool forceInsert) noexcept override;
 
         /// <summary>Writes pre-serialized data (possibly already compressed) to disk.</summary>
+        /// <param name="key">The key identifying the cache entry.</param>
+        /// <param name="saved">A slice containing the pre-serialized (and possibly already compressed) payload to store.</param>
+        /// <param name="type">The compression type of the provided payload.</param>
+        /// <param name="source">The cache tier that produced the saved payload (for accounting or metadata purposes).</param>
         rocksdb::Status InsertSaved(const rocksdb::Slice& key,
-                                    const rocksdb::Slice& saved,
-                                    rocksdb::CompressionType type,
-                                    rocksdb::CacheTier source) noexcept override;
+            const rocksdb::Slice& saved,
+            rocksdb::CompressionType type,
+            rocksdb::CacheTier source) noexcept override;
 
         /// <summary>Looks up <paramref name="key"/> on disk and reconstructs the object via create_cb.</summary>
+        /// <param name="key">The key to look up in the secondary cache.</param>
+        /// <param name="helper">Callbacks used to reconstruct the cached object from stored bytes.</param>
+        /// <param name="create_context">Context provided by RocksDB used when creating the object (may be used by the helper).</param>
+        /// <param name="wait">If true, wait for the lookup to complete; otherwise return immediately if not ready.</param>
+        /// <param name="advise_erase">If true, the caller advises that the found entry should be erased after use.</param>
+        /// <param name="stats">Optional RocksDB statistics object to record secondary cache metrics.</param>
+        /// <param name="kept_in_sec_cache">Out-parameter set to true when the object was reconstructed and will be retained in the secondary cache.</param>
         /// <returns>An immediately-ready result handle, or nullptr if the key is not found.</returns>
         std::unique_ptr<rocksdb::SecondaryCacheResultHandle> Lookup(
             const rocksdb::Slice& key,
@@ -92,48 +133,46 @@ namespace AVEVA::RocksDB::Plugin::Core
 
         bool SupportForceErase() const noexcept override { return true; }
 
+        /// <summary>Erase any persisted entry identified by <paramref name="key"/> from the secondary cache.</summary>
+        /// <param name="key">The key identifying the cache entry to remove.</param>
         void Erase(const rocksdb::Slice& key) noexcept override;
 
         /// <summary>All handles returned by Lookup() are immediately ready; this is a no-op.</summary>
+        /// <param name="handles">A vector of result handles to wait on (ignored by this implementation).</param>
         void WaitAll(std::vector<rocksdb::SecondaryCacheResultHandle*> handles) noexcept override;
 
+        /// <summary>Set the maximum capacity of the on-disk cache.</summary>
+        /// <param name="capacity">New capacity in bytes.</param>
         rocksdb::Status SetCapacity(size_t capacity) noexcept override;
+
+        /// <summary>Get the current maximum capacity of the on-disk cache.</summary>
+        /// <param name="capacity">Out-parameter receiving the capacity in bytes.</param>
         rocksdb::Status GetCapacity(size_t& capacity) noexcept override;
+
+        /// <summary>Decrease the configured capacity by <paramref name="decrease"/> bytes.</summary>
+        /// <param name="decrease">Amount to reduce capacity by in bytes.</param>
         rocksdb::Status Deflate(size_t decrease) noexcept override;
+
+        /// <summary>Increase the configured capacity by <paramref name="increase"/> bytes.</summary>
+        /// <param name="increase">Amount to increase capacity by in bytes.</param>
         rocksdb::Status Inflate(size_t increase) noexcept override;
 
         /// <summary>Returns the number of bytes currently stored on disk.</summary>
+        /// <param name="usage">Out-parameter receiving the number of bytes currently used by stored entries.</param>
         rocksdb::Status GetUsage(size_t& usage) const noexcept;
 
         /// <summary>Returns the total number of entries evicted due to capacity pressure since construction.</summary>
         uint64_t GetEvictedCount() const noexcept { return m_lruIndex.GetEvictedCount(); }
-
     private:
-        /// <summary>Immediately-ready result handle returned by Lookup().</summary>
-        class ResultHandle final : public rocksdb::SecondaryCacheResultHandle
-        {
-        public:
-            ResultHandle(rocksdb::Cache::ObjectPtr value, size_t charge)
-                : m_value(value), m_charge(charge) {}
+        /// <summary>
+        /// Immediately-ready result handle returned by Lookup().
+        /// Moved to its own header to reduce this header's size.
+        /// </summary>
 
-            ~ResultHandle() override = default;
-            ResultHandle(const ResultHandle&) = delete;
-            ResultHandle& operator=(const ResultHandle&) = delete;
-            ResultHandle(ResultHandle&&) = delete;
-            ResultHandle& operator=(ResultHandle&&) = delete;
-
-            bool IsReady() noexcept override { return true; }
-            void Wait() noexcept override {}
-            rocksdb::Cache::ObjectPtr Value() noexcept override { return std::exchange(m_value, nullptr); }
-            size_t Size() noexcept override { return m_charge; }
-
-        private:
-            rocksdb::Cache::ObjectPtr m_value;
-            size_t m_charge;
-        };
-
-        /// <summary>Hex-encodes <paramref name="key"/> and returns the result.
-        /// Returns an empty string when the key is too long to encode inline.</summary>
+        /// <summary>
+        /// Hex-encodes <paramref name="key"/> and returns the result.
+        /// Returns an empty string when the key is too long to encode inline.
+        /// </summary>
         [[nodiscard]] static boost::static_string<LruFileIndex::kMaxFilenameLen> KeyToFilename(
             const rocksdb::Slice& key) noexcept;
 
@@ -147,13 +186,19 @@ namespace AVEVA::RocksDB::Plugin::Core
             return key.size() * 2 > LruFileIndex::kMaxFilenameLen;
         }
 
-        /// <summary>Writes bytes to disk and updates the in-memory index.</summary>
+        /// <summary>
+        /// Writes bytes to disk and updates the in-memory index.
+        /// </summary>
+        /// <param name="key">The key identifying the cache entry to write.</param>
+        /// <param name="type">The compression type of the data to store.</param>
+        /// <param name="data">Pointer to the bytes to write to disk.</param>
+        /// <param name="dataSize">Size in bytes of the data pointed to by <paramref name="data"/>.</param>
         /// <param name="force_insert">When false, the write is skipped rather than evicting an existing entry to make room.</param>
         rocksdb::Status WriteEntry(const rocksdb::Slice& key,
-                                   rocksdb::CompressionType type,
-                                   const char* data,
-                                   size_t dataSize,
-                                   bool force_insert = true) noexcept;
+            rocksdb::CompressionType type,
+            const char* data,
+            size_t dataSize,
+            bool force_insert = true) noexcept;
 
         /// <summary>
         /// Phase 2 of WriteEntry — called with no lock held.
@@ -161,53 +206,26 @@ namespace AVEVA::RocksDB::Plugin::Core
         /// and payload into a single buffer, and writes it atomically to pathStr.
         /// </summary>
         [[nodiscard]] rocksdb::Status WriteToDisk(std::string_view filename,
-                                                  rocksdb::CompressionType type,
-                                                  const char* data,
-                                                  size_t dataSize,
-                                                  size_t storedSize);
+            rocksdb::CompressionType type,
+            const char* data,
+            size_t dataSize,
+            size_t storedSize);
 
         /// <summary>Phase 1 of Lookup — pins the entry to prevent eviction during I/O, then maps the file.
         /// The three outcomes are named explicitly in MapEntryResult::Status.</summary>
-        struct MapEntryResult
-        {
-            enum class Status { Miss, Corrupt, Ok };
-            Status                          status;
-            std::unique_ptr<MappedFileView> view; // non-null only when status == Ok
-        };
-
-        [[nodiscard]] MapEntryResult
-            MapEntryForRead(std::string_view filename, const std::string& pathStr);
+        // MapEntryResult and ParsedHeader have been moved to their own headers.
+        [[nodiscard]] MapEntryResult MapEntryForRead(std::string_view filename, const std::string& pathStr);
 
         /// <summary>Removes a corrupt or missing entry from the in-memory index and commits the eviction.
         /// Best-effort; never throws.</summary>
         void CleanupCorruptEntry(std::string_view filename) noexcept;
 
-        /// <summary>
-        /// Validated and parsed fields extracted from a mapped cache entry's on-disk header.
-        /// </summary>
-        struct ParsedHeader
-        {
-            rocksdb::CompressionType compressionType;
-
-            /// <summary>
-            /// points into the mapped file, valid while the view is alive
-            /// </summary>
-            std::span<const char> payload;
-        };
-
         /// <summary>Validates the on-disk header of a mapped cache entry.
         /// Returns std::nullopt on any mismatch (magic, version, bounds, or checksum).</summary>
-        [[nodiscard]] static std::optional<ParsedHeader> ValidateHeader(
+        [[nodiscard]] std::optional<ParsedHeader> ValidateHeader(
             const char* mapped, size_t mappedSize) noexcept;
 
         /// <summary>Records a secondary cache hit to RocksDB's statistics subsystem.</summary>
         static void RecordHitStats(rocksdb::Statistics* stats, rocksdb::CacheEntryRole role) noexcept;
-
-        std::filesystem::path m_cacheDir;
-        std::shared_ptr<Filesystem> m_fs;
-        int m_zstdLevel;
-        LruFileIndex m_lruIndex;
-        std::shared_ptr<boost::log::sources::severity_logger_mt<
-            boost::log::trivial::severity_level>> m_logger;
     };
 }
