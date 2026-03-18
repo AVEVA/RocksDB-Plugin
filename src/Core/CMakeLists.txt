@@ -54,6 +54,8 @@ find_package(boost_intrusive CONFIG REQUIRED)
 find_package(boost_endian CONFIG REQUIRED)
 find_package(boost_thread CONFIG REQUIRED)
 find_package(boost_unordered CONFIG REQUIRED)
+find_package(boost_static_string CONFIG REQUIRED)
+
 find_package(RocksDB CONFIG REQUIRED)
 find_package(zstd CONFIG REQUIRED)
 find_package(aveva-install-library CONFIG REQUIRED)
@@ -68,6 +70,7 @@ target_link_libraries(aveva-rocksdb-plugin-core PUBLIC
     Boost::endian
     Boost::thread
     Boost::unordered
+    Boost::static_string
     RocksDB::rocksdb
     zstd::libzstd
 )
