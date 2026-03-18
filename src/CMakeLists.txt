@@ -1,2 +1,2 @@
-add_subdirectory(AVEVA/RocksDB/Plugin/Core)
-add_subdirectory(AVEVA/RocksDB/Plugin/Azure)
+add_subdirectory(Core)
+add_subdirectory(Azure)

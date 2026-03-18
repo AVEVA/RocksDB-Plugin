@@ -12,7 +12,7 @@ add_library(aveva-rocksdb-plugin-azure
     Plugin.cpp
 )
 add_library(aveva::rocksdb-plugin-azure ALIAS aveva-rocksdb-plugin-azure)
-set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../include")
+set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../../include")
 target_sources(aveva-rocksdb-plugin-azure
   PUBLIC
   FILE_SET HEADERS

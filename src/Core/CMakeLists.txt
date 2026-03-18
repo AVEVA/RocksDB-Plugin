@@ -22,7 +22,7 @@ add_library(aveva-rocksdb-plugin-core
     ZstdCodec.hpp
 )
 add_library(aveva::rocksdb-plugin-core ALIAS aveva-rocksdb-plugin-core)
-set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../include")
+set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../../include")
 target_sources(aveva-rocksdb-plugin-core
   PUBLIC
   FILE_SET HEADERS
