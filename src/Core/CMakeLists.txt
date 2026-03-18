@@ -69,7 +69,7 @@ target_link_libraries(aveva-rocksdb-plugin-core PUBLIC
     Boost::thread
     Boost::unordered
     RocksDB::rocksdb
-    zstd::libzstd_shared
+    zstd::libzstd
 )
 aveva_install_library(aveva-rocksdb-plugin-core)
 target_compile_features(aveva-rocksdb-plugin-core PUBLIC cxx_std_23)
