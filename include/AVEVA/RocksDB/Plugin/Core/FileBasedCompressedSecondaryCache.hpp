@@ -28,15 +28,6 @@ namespace AVEVA::RocksDB::Plugin::Core
     /// written to individual files under a configurable directory and are evicted
     /// from disk using an LRU policy once the configured capacity is exceeded.
     /// </summary>
-    /// <remarks>
-    /// File format per entry:
-    ///   [8 bytes: magic]
-    ///   [1 byte:  version]
-    ///   [1 byte:  CompressionType]
-    ///   [8 bytes: data length]
-    ///   [4 bytes: CRC32C checksum of CompressionType + data length + data]
-    ///   [N bytes: data]
-    /// </remarks>
     class FileBasedCompressedSecondaryCache final : public rocksdb::SecondaryCache
     {
     public:
