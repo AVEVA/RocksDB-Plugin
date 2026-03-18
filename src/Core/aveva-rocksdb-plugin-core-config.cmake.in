@@ -13,6 +13,9 @@ find_dependency(boost_intrusive REQUIRED)
 find_dependency(boost_endian REQUIRED)
 find_dependency(boost_thread REQUIRED)
 find_dependency(boost_unordered REQUIRED)
+find_dependency(boost_static_string REQUIRED)
+find_dependency(RocksDB REQUIRED)
+find_dependency(zstd REQUIRED)
 
 include(${CMAKE_CURRENT_LIST_DIR}/aveva-rocksdb-plugin-core-targets.cmake)
 
