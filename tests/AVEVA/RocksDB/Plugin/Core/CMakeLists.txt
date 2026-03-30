@@ -2,6 +2,14 @@ add_subdirectory(Mocks)
 add_executable(aveva-rocksdb-plugin-core-tests
     CoreTests.cpp
     FileCacheTests.cpp
+    FileBasedCompressedSecondaryCacheRoundTripTests.cpp
+    FileBasedCompressedSecondaryCacheCapacityTests.cpp
+    FileBasedCompressedSecondaryCacheCompressionTests.cpp
+    FileBasedCompressedSecondaryCacheCorruptionTests.cpp
+    FileBasedCompressedSecondaryCacheApiTests.cpp
+    FileBasedCompressedSecondaryCacheConcurrencyTests.cpp
+    FileBasedCompressedSecondaryCacheExceptionTests.cpp
+    FileBasedCompressedSecondaryCacheMockTests.cpp
 )
 
 target_link_libraries(aveva-rocksdb-plugin-core-tests PRIVATE GTest::gtest GTest::gmock aveva-rocksdb-plugin-core aveva-rocksdb-plugin-core-mocks)

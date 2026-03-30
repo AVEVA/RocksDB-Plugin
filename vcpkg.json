@@ -1,17 +1,25 @@
 {
-    "dependencies": [
-        "azure-identity-cpp",
-        "azure-storage-blobs-cpp",
-        "boost-intrusive",
-        "boost-log",
-        "rocksdb"
-    ],
-    "features": {
-        "testing": {
-            "description": "Dependencies needed for tests.",
-            "dependencies": [
-                "gtest"
-            ]
-        }
+  "dependencies": [
+    "azure-identity-cpp",
+    "azure-storage-blobs-cpp",
+    "boost-intrusive",
+    "boost-log",
+    "boost-static-string",
+    "rocksdb",
+    "boost-crc",
+    {
+      "name": "boost-iostreams",
+      "features": [
+        "zlib"
+      ]
     }
+  ],
+  "features": {
+    "testing": {
+      "description": "Dependencies needed for tests.",
+      "dependencies": [
+        "gtest"
+      ]
+    }
+  }
 }

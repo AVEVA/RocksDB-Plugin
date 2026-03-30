@@ -3,6 +3,8 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Plugin.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp"
 
 #include <rocksdb/db.h>
 #include <rocksdb/file_system.h>
@@ -27,6 +29,22 @@ namespace AVEVA::RocksDB::Plugin::Azure
             pluginName += backup->GetDbName();
         }
 
+        if (cachePath && rocksdb::ObjectLibrary::Default()->FindFactory<rocksdb::SecondaryCache>(pluginName) == nullptr)
+        {
+            const auto cacheDir = std::filesystem::path(*cachePath);
+            rocksdb::ObjectLibrary::Default()->AddFactory<rocksdb::SecondaryCache>(pluginName,
+                [cacheDir, maxCacheSize, logger](const std::string& /* uri */, std::unique_ptr<rocksdb::SecondaryCache>* sc, std::string* /* errmsg */)
+                {
+                    sc->reset(new Core::FileBasedCompressedSecondaryCache(
+                        cacheDir,
+                        std::make_shared<Core::LocalFilesystem>(logger),
+                        maxCacheSize,
+                        Core::FileBasedCompressedSecondaryCache::kDefaultZstdLevel,
+                        logger));
+                    return sc->get();
+                });
+        }
+
         if (rocksdb::ObjectLibrary::Default()->FindFactory<rocksdb::FileSystem>(pluginName) == nullptr)
         {
             rocksdb::ObjectLibrary::Default()->AddFactory<rocksdb::FileSystem>(pluginName,
@@ -38,9 +56,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
                             backup,
                             dataFileInitialSize,
                             dataFileBufferSize,
-                            logger,
-                            cachePath,
-                            maxCacheSize
+                            logger
                         );
 
                     *f = std::unique_ptr<rocksdb::FileSystem>(new BlobFilesystem(rocksdb::FileSystem::Default(), std::move(impl), logger));
@@ -68,6 +84,22 @@ namespace AVEVA::RocksDB::Plugin::Azure
             pluginName += backup->GetDbName();
         }
 
+        if (cachePath && rocksdb::ObjectLibrary::Default()->FindFactory<rocksdb::SecondaryCache>(pluginName) == nullptr)
+        {
+            const auto cacheDir = std::filesystem::path(*cachePath);
+            rocksdb::ObjectLibrary::Default()->AddFactory<rocksdb::SecondaryCache>(pluginName,
+                [cacheDir, maxCacheSize, logger](const std::string& /* uri */, std::unique_ptr<rocksdb::SecondaryCache>* sc, std::string* /* errmsg */)
+                {
+                    sc->reset(new Core::FileBasedCompressedSecondaryCache(
+                        cacheDir,
+                        std::make_shared<Core::LocalFilesystem>(logger),
+                        maxCacheSize,
+                        Core::FileBasedCompressedSecondaryCache::kDefaultZstdLevel,
+                        logger));
+                    return sc->get();
+                });
+        }
+
         if (rocksdb::ObjectLibrary::Default()->FindFactory<rocksdb::FileSystem>(pluginName) == nullptr)
         {
             rocksdb::ObjectLibrary::Default()->AddFactory<rocksdb::FileSystem>(pluginName,
@@ -79,9 +111,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
                             backup,
                             dataFileInitialSize,
                             dataFileBufferSize,
-                            logger,
-                            cachePath,
-                            maxCacheSize
+                            logger
                         );
 
                     *f = std::unique_ptr<rocksdb::FileSystem>(new BlobFilesystem(rocksdb::FileSystem::Default(), std::move(impl), std::move(logger)));
