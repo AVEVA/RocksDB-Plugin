@@ -351,13 +351,16 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
         const auto& container = GetContainer(prefix);
 
+        BOOST_LOG_SEV(*m_logger, severity_level::debug) << "Attempting to lock file '" << realPath << "'";
+
         auto client = std::make_unique<::Azure::Storage::Blobs::PageBlobClient>(container.GetPageBlobClient(std::string(realPath)));
         client->CreateIfNotExists(Configuration::PageBlob::DefaultSize);
-        auto lockFile = std::make_shared<LockFileImpl>(std::move(client), Configuration::LeaseLength);
+        auto lockFile = std::make_shared<LockFileImpl>(std::move(client), Configuration::LeaseLength, m_logger);
         if (lockFile->Lock())
         {
             m_locks.push_back(*lockFile);
             assert(lockFile->is_linked());
+            BOOST_LOG_SEV(*m_logger, severity_level::debug) << "Successfully locked file '" << realPath << "'. Active leases: " << m_locks.size();
             return lockFile;
         }
         else
@@ -371,8 +374,10 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         EnsureLiveness();
 
         std::scoped_lock _(m_lockFilesMutex);
+        BOOST_LOG_SEV(*m_logger, severity_level::debug) << "Unlocking file. Active leases before unlock: " << m_locks.size();
         lock.Unlock();
         lock.unlink();
+        BOOST_LOG_SEV(*m_logger, severity_level::debug) << "File unlocked. Active leases after unlock: " << m_locks.size();
     }
 
     DirectoryImpl BlobFilesystemImpl::CreateDirectory(const std::string& directoryPath)
@@ -769,6 +774,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                     }
 
                     // Attempt to renew all locks with retries
+                    BOOST_LOG_SEV(*m_logger, severity_level::debug) << "Attempting to renew " << needsRetry.size() << " leases";
                     int retries = 0;
                     while (needsRetry.size() > 0 && retries < 5 && !stopToken.stop_requested())
                     {

@@ -5,6 +5,7 @@
 #include <boost/intrusive/list.hpp>
 #include <azure/storage/blobs/page_blob_client.hpp>
 #include <azure/storage/blobs/blob_lease_client.hpp>
+#include <boost/log/trivial.hpp>
 #include <memory>
 #include <chrono>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
@@ -15,9 +16,10 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         std::unique_ptr<::Azure::Storage::Blobs::BlobLeaseClient> m_lease = nullptr;
         mutable std::chrono::steady_clock::time_point m_lastRenewalTime;
         std::chrono::seconds m_leaseLength;
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
 
     public:
-        LockFileImpl(std::unique_ptr<::Azure::Storage::Blobs::PageBlobClient> file, std::chrono::seconds leaseLength);
+        LockFileImpl(std::unique_ptr<::Azure::Storage::Blobs::PageBlobClient> file, std::chrono::seconds leaseLength, std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
         bool Lock();
         void Renew() const;
         void Unlock();

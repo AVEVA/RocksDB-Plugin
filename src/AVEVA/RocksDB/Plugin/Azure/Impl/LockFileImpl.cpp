@@ -10,12 +10,17 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+
+using boost::log::trivial::severity_level;
+
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
-    LockFileImpl::LockFileImpl(std::unique_ptr<::Azure::Storage::Blobs::PageBlobClient> file, std::chrono::seconds leaseLength)
+    LockFileImpl::LockFileImpl(std::unique_ptr<::Azure::Storage::Blobs::PageBlobClient> file, std::chrono::seconds leaseLength,
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
         : m_file(std::move(file)),
           m_lastRenewalTime(std::chrono::steady_clock::now()),
-          m_leaseLength(leaseLength)
+          m_leaseLength(leaseLength),
+          m_logger(logger)
     {
     }
 
@@ -24,8 +29,11 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         // Do not attempt to lock again when you already have a lock aquired.
         if (m_lease != nullptr)
         {
+            BOOST_LOG_SEV(*m_logger, boost::log::trivial::debug) << "Lock already acquired, skipping duplicate lock attempt";
             return false;
         }
+
+        BOOST_LOG_SEV(*m_logger, boost::log::trivial::debug) << "Attempting to acquire blob lease (timeout: " << m_leaseLength.count() << "s)";
 
         auto start = std::chrono::high_resolution_clock::now();
         auto end = std::chrono::high_resolution_clock::now();
@@ -44,6 +52,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             }
             catch (const ::Azure::Storage::StorageException& e)
             {
+                BOOST_LOG_SEV(*m_logger, boost::log::trivial::debug) << "Lease acquisition attempt failed: " << e.what() << ". Retrying...";
                 ex = e;
             }
 
@@ -52,6 +61,9 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
         if (ex.has_value())
         {
+            BOOST_LOG_SEV(*m_logger, boost::log::trivial::error) << "Failed to acquire blob lease after " 
+                << std::chrono::duration_cast<std::chrono::seconds>(end - start).count() << "s: " << ex->what();
+
             try
             {
                 if (m_lease != nullptr)
@@ -66,6 +78,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
         // Set the initial renewal time when lock is acquired
         m_lastRenewalTime = std::chrono::steady_clock::now();
+        BOOST_LOG_SEV(*m_logger, boost::log::trivial::info) << "Successfully acquired blob lease";
         return true;
     }
 
@@ -84,6 +97,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 std::to_string(m_leaseLength.count()) + " seconds)");
         }
 
+        BOOST_LOG_SEV(*m_logger, boost::log::trivial::debug) << "Renewing blob lease (time since last renewal: " 
+            << TimeSinceLastRenewal().count() << "s)";
         [[maybe_unused]] const auto result = m_lease->Renew();
         m_lastRenewalTime = std::chrono::steady_clock::now();
     }
@@ -95,8 +110,10 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             throw std::runtime_error("Cannot release lease that has not been acquired");
         }
 
+        BOOST_LOG_SEV(*m_logger, boost::log::trivial::debug) << "Releasing blob lease";
         m_lease->Release();
         m_lease.reset();
+        BOOST_LOG_SEV(*m_logger, boost::log::trivial::debug) << "Successfully released blob lease";
     }
 
     std::chrono::seconds LockFileImpl::TimeSinceLastRenewal() const
