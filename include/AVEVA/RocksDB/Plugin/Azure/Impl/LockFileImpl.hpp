@@ -17,9 +17,14 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         mutable std::chrono::steady_clock::time_point m_lastRenewalTime;
         std::chrono::seconds m_leaseLength;
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
+        std::string m_fileName;
 
     public:
-        LockFileImpl(std::unique_ptr<::Azure::Storage::Blobs::PageBlobClient> file, std::chrono::seconds leaseLength, std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
+        LockFileImpl(
+            std::unique_ptr<::Azure::Storage::Blobs::PageBlobClient> file,
+            std::chrono::seconds leaseLength,
+            std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+            std::string fileName);
         bool Lock();
         void Renew() const;
         void Unlock();
