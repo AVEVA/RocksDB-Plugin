@@ -27,6 +27,11 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         {
             throw std::runtime_error("logger cannot be null.");
         }
+
+        if (m_file == nullptr)
+        {
+            throw std::runtime_error("file cannot be null.");
+        }
     }
 
     bool LockFileImpl::Lock()
