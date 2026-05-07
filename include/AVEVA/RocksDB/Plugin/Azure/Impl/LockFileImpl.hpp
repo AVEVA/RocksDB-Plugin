@@ -6,6 +6,7 @@
 #include <azure/storage/blobs/page_blob_client.hpp>
 #include <azure/storage/blobs/blob_lease_client.hpp>
 #include <boost/log/trivial.hpp>
+#include <string>
 #include <memory>
 #include <chrono>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl

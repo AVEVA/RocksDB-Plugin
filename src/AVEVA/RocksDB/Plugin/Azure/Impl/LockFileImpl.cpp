@@ -41,7 +41,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         BOOST_LOG_SEV(*m_logger, severity_level::debug) << "Attempting to acquire blob lease for '" << m_fileName << "' (timeout: " << m_leaseLength.count() << "s)";
         auto start = std::chrono::high_resolution_clock::now();
         auto end = std::chrono::high_resolution_clock::now();
-        std::optional<std::exception> ex;
+        std::optional<std::string> lastError;
         while ((end - start) < m_leaseLength)
         {
             try
@@ -51,21 +51,21 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                 const auto response = m_lease->Acquire(m_leaseLength);
                 assert(response.Value.LeaseId == leaseId);
 
-                ex.reset();
+                lastError.reset();
                 break;
             }
             catch (const ::Azure::Storage::StorageException& e)
             {
-                ex = e;
+                lastError = e.what();
             }
 
             end = std::chrono::high_resolution_clock::now();
         }
 
-        if (ex.has_value())
+        if (lastError.has_value())
         {
             BOOST_LOG_SEV(*m_logger, severity_level::error) << "Failed to acquire blob lease for '" << m_fileName << "' after "
-                << std::chrono::duration_cast<std::chrono::seconds>(end - start).count() << "s: " << ex->what();
+                << std::chrono::duration_cast<std::chrono::seconds>(end - start).count() << "s: " << *lastError;
 
             try
             {
