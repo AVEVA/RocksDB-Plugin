@@ -4,82 +4,6 @@
 #include "FileBasedCompressedSecondaryCacheTestHelpers.hpp"
 
 // --------------------------------------------------------------------------
-// Corrupting the data bytes on disk causes Lookup to return nullptr
-// --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, CorruptedDataRejectedOnLookup)
-{
-    const std::string keyStr = "corrupt_test_key";
-    TestPayload payload{"data that will be silently corrupted on disk"};
-
-    ASSERT_TRUE(m_cache->Insert(MakeKey(keyStr), &payload, &m_helper, true).ok());
-
-    // Reconstruct the on-disk filename using the same hex encoding as KeyToFilename.
-    std::string hex;
-    boost::algorithm::hex_lower(keyStr.begin(), keyStr.end(), std::back_inserter(hex));
-    const auto filePath = m_cacheDir / hex.substr(0, 2) / hex;
-
-    // Flip one byte in the payload section (past the 22-byte header:
-    // 8 magic + 1 version + 1 compressionType + 8 dataSize + 4 checksum).
-    constexpr std::streamoff kFileHeaderSize = 8 + 1 + 1 + 8 + 4;
-    {
-        std::fstream f(filePath, std::ios::binary | std::ios::in | std::ios::out);
-        ASSERT_TRUE(f.is_open()) << "Cache file not found: " << filePath;
-        f.seekg(kFileHeaderSize);
-        char b = 0;
-        f.read(&b, 1);
-        f.seekp(kFileHeaderSize);
-        f.put(static_cast<char>(~static_cast<unsigned char>(b)));
-    }
-
-    bool kept = false;
-    auto handle = m_cache->Lookup(MakeKey(keyStr), &m_helper,
-                                  nullptr, true, false, nullptr, kept);
-    EXPECT_EQ(handle, nullptr);
-    EXPECT_FALSE(kept);
-}
-
-// --------------------------------------------------------------------------
-// After a corrupt file is rejected on Lookup, the entry is removed from the
-// index (second Lookup also returns nullptr) and the file is deleted from disk
-// --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, CorruptedEntryRemovedFromIndexAfterLookup)
-{
-    const std::string keyStr = "corrupt_cleanup_key";
-    TestPayload payload{"data to be corrupted"};
-
-    ASSERT_TRUE(m_cache->Insert(MakeKey(keyStr), &payload, &m_helper, true).ok());
-
-    std::string hex;
-    boost::algorithm::hex_lower(keyStr.begin(), keyStr.end(), std::back_inserter(hex));
-    const auto filePath = m_cacheDir / hex.substr(0, 2) / hex;
-
-    constexpr std::streamoff kFileHeaderSize = 8 + 1 + 1 + 8 + 4;
-    {
-        std::fstream f(filePath, std::ios::binary | std::ios::in | std::ios::out);
-        ASSERT_TRUE(f.is_open()) << "Cache file not found: " << filePath;
-        f.seekg(kFileHeaderSize);
-        char b = 0;
-        f.read(&b, 1);
-        f.seekp(kFileHeaderSize);
-        f.put(static_cast<char>(~static_cast<unsigned char>(b)));
-    }
-
-    // First lookup rejects the corrupt entry.
-    bool kept = false;
-    auto h1 = m_cache->Lookup(MakeKey(keyStr), &m_helper, nullptr, true, false, nullptr, kept);
-    EXPECT_EQ(h1, nullptr);
-    EXPECT_FALSE(kept);
-
-    // Second lookup must also miss — the entry must have been removed from the index.
-    auto h2 = m_cache->Lookup(MakeKey(keyStr), &m_helper, nullptr, true, false, nullptr, kept);
-    EXPECT_EQ(h2, nullptr);
-    EXPECT_FALSE(kept);
-
-    // The corrupt file must have been deleted from disk.
-    EXPECT_FALSE(std::filesystem::exists(filePath));
-}
-
-// --------------------------------------------------------------------------
 // When an entry is evicted, its file is deleted from disk
 // --------------------------------------------------------------------------
 TEST_F(FileBasedCompressedSecondaryCacheTests, EvictedEntryFileIsDeletedFromDisk)
@@ -97,7 +21,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, EvictedEntryFileIsDeletedFromDisk
 
     std::string hex1;
     boost::algorithm::hex_lower(key1.begin(), key1.end(), std::back_inserter(hex1));
-    const auto filePath1 = m_cacheDir / hex1.substr(0, 2) / hex1;
+    const auto filePath1 = m_cacheDir / hex1;
     ASSERT_TRUE(std::filesystem::exists(filePath1)) << "key1 file was not written";
 
     ASSERT_TRUE(m_cache->Insert(MakeKey(key2), &p2, &m_helper, true).ok());
@@ -186,7 +110,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, CorruptMagicNumber_RejectedOnLook
 
     std::string hex;
     boost::algorithm::hex_lower(keyStr.begin(), keyStr.end(), std::back_inserter(hex));
-    const auto filePath = m_cacheDir / hex.substr(0, 2) / hex;
+    const auto filePath = m_cacheDir / hex;
 
     // Flip a byte in the magic field (offset 0).
     {
@@ -224,7 +148,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, CorruptVersionByte_RejectedOnLook
 
     std::string hex;
     boost::algorithm::hex_lower(keyStr.begin(), keyStr.end(), std::back_inserter(hex));
-    const auto filePath = m_cacheDir / hex.substr(0, 2) / hex;
+    const auto filePath = m_cacheDir / hex;
 
     // The version byte is at offset 8 (after the 8-byte magic).
     constexpr std::streamoff kVersionOffset = 8;
@@ -261,10 +185,10 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, TruncatedFile_RejectedOnLookup)
 
     std::string hex;
     boost::algorithm::hex_lower(keyStr.begin(), keyStr.end(), std::back_inserter(hex));
-    const auto filePath = m_cacheDir / hex.substr(0, 2) / hex;
+    const auto filePath = m_cacheDir / hex;
 
     // Read the original 22-byte header from the valid file.
-    constexpr std::uintmax_t kHeaderSize = 22;
+    constexpr std::uintmax_t kHeaderSize = 18;
     std::array<char, kHeaderSize> headerBuf{};
     {
         std::ifstream f(filePath, std::ios::binary);

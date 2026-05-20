@@ -8,7 +8,6 @@
 #include "ParsedHeader.hpp"
 #include "FileFormat.hpp"
 #include "ResultHandle.hpp"
-#include "CrcUtil.hpp"
 #include "ZstdCodec.hpp"
 
 #include <rocksdb/advanced_options.h>
@@ -16,7 +15,6 @@
 #include <rocksdb/statistics.h>
 
 #include <boost/algorithm/hex.hpp>
-#include <boost/endian/buffers.hpp>
 #include <boost/scope/scope_exit.hpp>
 #include <boost/log/trivial.hpp>
 
@@ -28,7 +26,6 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <ranges>
 #include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Core
@@ -107,18 +104,6 @@ namespace AVEVA::RocksDB::Plugin::Core
         {
             m_fs->DeleteDir(m_cacheDir);
             m_fs->CreateDir(m_cacheDir);
-
-            // Pre-create all 256 shard subdirectories so WriteEntry never calls
-            // CreateDir on the hot write path.
-            constexpr std::string_view kHex = "0123456789abcdef";
-            for (const auto i : std::views::iota(0u, 256u))
-            {
-                std::string shard;
-                shard.reserve(2);
-                shard.push_back(kHex.at(i >> 4));
-                shard.push_back(kHex.at(i & 0xf));
-                m_fs->CreateDir(m_cacheDir / shard);
-            }
 
             BOOST_LOG_SEV(*m_logger, info)
                 << "FileBasedCompressedSecondaryCache: initialized dir='" << m_cacheDir.string()
@@ -434,16 +419,7 @@ namespace AVEVA::RocksDB::Plugin::Core
             }
         }
 
-        uint64_t GetEvictedCount() const noexcept
-        {
-            return m_lruIndex.GetEvictedCount();
-        }
     private:
-        /// <summary>
-        /// Immediately-ready result handle returned by Lookup().
-        /// Moved to its own header to reduce this header's size.
-        /// </summary>
-
         /// <summary>
         /// Hex-encodes <paramref name="key"/> and returns the result.
         /// Returns an empty string when the key is too long to encode inline.
@@ -523,8 +499,8 @@ namespace AVEVA::RocksDB::Plugin::Core
 
         /// <summary>
         /// Phase 2 of WriteEntry — called with no lock held.
-        /// Builds the on-disk header, computes the CRC32C checksum, concatenates header
-        /// and payload into a single buffer, and writes it atomically to pathStr.
+        /// Builds the on-disk header, concatenates header and payload into a single buffer,
+        /// and writes it atomically to pathStr.
         /// </summary>
         [[nodiscard]] rocksdb::Status WriteToDisk(const std::string_view filename,
             const rocksdb::CompressionType type,
@@ -538,12 +514,6 @@ namespace AVEVA::RocksDB::Plugin::Core
             header.version = FileFormat::kFileVersion;
             header.compressionType = static_cast<uint8_t>(type);
             header.dataSize = static_cast<uint64_t>(dataSize);
-            // Checksum covers compressionType + dataSize + payload so a bit-flip in any
-            // header field is detected alongside payload corruption.
-            header.checksum = CrcUtil::Compute(
-                reinterpret_cast<const char*>(&header.compressionType),
-                sizeof(header.compressionType) + sizeof(header.dataSize),
-                data, dataSize);
 
             // Combine header and payload into a single buffer for one atomic write call.
             // small_vector keeps entries up to ~4 KiB on the stack.
@@ -603,7 +573,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
 
         /// <summary>Validates the on-disk header of a mapped cache entry.
-        /// Returns std::nullopt on any mismatch (magic, version, bounds, or checksum).</summary>
+        /// Returns std::nullopt on any mismatch (magic, version, or bounds).</summary>
         [[nodiscard]] std::optional<ParsedHeader> ValidateHeader(
             const char* mapped,
             const size_t mappedSize) noexcept
@@ -633,15 +603,6 @@ namespace AVEVA::RocksDB::Plugin::Core
 
             const char* dataPtr = mapped + sizeof(FileFormat::Header);
             const auto compressionType = static_cast<rocksdb::CompressionType>(header.compressionType.value());
-            if (CrcUtil::Compute(
-                reinterpret_cast<const char*>(&header.compressionType),
-                sizeof(header.compressionType) + sizeof(header.dataSize),
-                dataPtr, dataSize) != header.checksum.value())
-            {
-                BOOST_LOG_SEV(*m_logger, error) << "Computed mismatched checksum. Cached file is corrupt";
-                return std::nullopt;
-            }
-
             return ParsedHeader{ compressionType, std::span<const char>(dataPtr, dataSize) };
         }
 
@@ -750,11 +711,6 @@ namespace AVEVA::RocksDB::Plugin::Core
     rocksdb::Status FileBasedCompressedSecondaryCache::GetUsage(size_t& usage) const noexcept
     {
         return m_impl->GetUsage(usage);
-    }
-
-    uint64_t FileBasedCompressedSecondaryCache::GetEvictedCount() const noexcept
-    {
-        return m_impl->GetEvictedCount();
     }
 
     rocksdb::Status FileBasedCompressedSecondaryCache::Deflate(const size_t decrease) noexcept

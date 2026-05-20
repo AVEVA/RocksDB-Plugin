@@ -53,20 +53,6 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, LookupWithNullHelper)
 }
 
 // --------------------------------------------------------------------------
-// The constructor pre-creates all 256 shard subdirectories (00–ff)
-// --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, ShardDirectoriesPreCreated)
-{
-    const char* kHex = "0123456789abcdef";
-    for (int i = 0; i < 256; ++i)
-    {
-        const char shard[3] = { kHex[i >> 4], kHex[i & 0xf], '\0' };
-        EXPECT_TRUE(std::filesystem::is_directory(m_cacheDir / shard))
-            << "Missing shard directory: " << shard;
-    }
-}
-
-// --------------------------------------------------------------------------
 // A successful Lookup increments the RocksDB hit statistics counters
 // --------------------------------------------------------------------------
 TEST_F(FileBasedCompressedSecondaryCacheTests, LookupRecordsHitStatistics)
@@ -191,7 +177,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConstructorCleansStaleDirectory)
     // Verify the file exists on disk.
     std::string hex;
     boost::algorithm::hex_lower(keyStr.begin(), keyStr.end(), std::back_inserter(hex));
-    const auto filePath = m_cacheDir / hex.substr(0, 2) / hex;
+    const auto filePath = m_cacheDir / hex;
     ASSERT_TRUE(std::filesystem::exists(filePath)) << "Entry file must exist before re-creation";
 
     // Re-construct the cache over the same directory.

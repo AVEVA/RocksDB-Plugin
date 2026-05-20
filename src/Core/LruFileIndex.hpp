@@ -8,7 +8,6 @@
 #include <boost/unordered/unordered_flat_set.hpp>
 #include <boost/static_string.hpp>
 
-#include <atomic>
 #include <cstdint>
 #include <list>
 #include <mutex>
@@ -57,7 +56,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         LruFileIndex& operator=(LruFileIndex&&) = delete;
 
         /// <returns>
-        /// The sharded on-disk path string for a cache entry file.
+        /// The on-disk path string for a cache entry file.
         /// </returns>
         [[nodiscard]] std::string MakePath(std::string_view filename) const;
 
@@ -177,12 +176,6 @@ namespace AVEVA::RocksDB::Plugin::Core
         /// <returns>The current usage value.</returns>
         [[nodiscard]] size_t GetUsage() const noexcept;
 
-        /// <summary>
-        /// Gets the count of evicted items.
-        /// </summary>
-        /// <returns>The number of items that have been evicted since this object's inception.</returns>
-        [[nodiscard]] uint64_t GetEvictedCount() const noexcept;
-
     private:
         /// <summary>
         /// Single data record held by both the hash index and the sequenced LRU list.
@@ -252,14 +245,5 @@ namespace AVEVA::RocksDB::Plugin::Core
         /// </summary>
         Index m_index;
 
-        /// <summary>
-        /// Monotonically increasing counter for unique graveyard file names.
-        /// </summary>
-        std::atomic<uint64_t> m_seq{0};
-
-        /// <summary>
-        /// Total entries evicted due to capacity pressure since construction.
-        /// </summary>
-        std::atomic<uint64_t> m_evictedCount{0};
     };
 }

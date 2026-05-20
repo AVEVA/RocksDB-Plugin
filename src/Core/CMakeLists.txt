@@ -9,7 +9,6 @@ add_library(aveva-rocksdb-plugin-core
     LocalFilesystem.cpp
     LocalFile.cpp
     LocalIoUtil.cpp
-    CrcUtil.cpp
     ZstdCodec.cpp
 
     # Private headers
@@ -18,7 +17,6 @@ add_library(aveva-rocksdb-plugin-core
     ParsedHeader.hpp
     FileFormat.hpp
     ResultHandle.hpp
-    CrcUtil.hpp
     ZstdCodec.hpp
 )
 add_library(aveva::rocksdb-plugin-core ALIAS aveva-rocksdb-plugin-core)
@@ -45,7 +43,6 @@ install(TARGETS aveva-rocksdb-plugin-core
 )
 find_package(boost_algorithm CONFIG REQUIRED)
 find_package(boost_container CONFIG REQUIRED)
-find_package(boost_crc CONFIG REQUIRED)
 find_package(boost_interprocess CONFIG REQUIRED)
 find_package(boost_iostreams CONFIG REQUIRED)
 find_package(boost_scope CONFIG REQUIRED)
@@ -62,7 +59,6 @@ find_package(aveva-install-library CONFIG REQUIRED)
 target_link_libraries(aveva-rocksdb-plugin-core PUBLIC
     Boost::algorithm
     Boost::container
-    Boost::crc
     Boost::interprocess
     Boost::scope
     Boost::log

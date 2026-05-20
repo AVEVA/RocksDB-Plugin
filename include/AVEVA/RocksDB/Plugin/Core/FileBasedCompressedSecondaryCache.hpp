@@ -37,7 +37,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         /// <summary>
         /// On-disk overhead per entry.
         /// </summary>
-        static constexpr size_t kFileHeaderSize = 22;
+        static constexpr size_t kFileHeaderSize = 18;
 
         /// <summary>
         /// Constructs the cache.
@@ -143,8 +143,6 @@ namespace AVEVA::RocksDB::Plugin::Core
         /// <param name="usage">Out-parameter receiving the number of bytes currently used by stored entries.</param>
         rocksdb::Status GetUsage(size_t& usage) const noexcept;
 
-        /// <summary>Returns the total number of entries evicted due to capacity pressure since construction.</summary>
-        uint64_t GetEvictedCount() const noexcept;
     private:
         class Impl;
         std::unique_ptr<Impl> m_impl;

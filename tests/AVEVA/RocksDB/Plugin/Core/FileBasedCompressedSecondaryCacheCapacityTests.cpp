@@ -336,9 +336,6 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, SingleInsertEvictsMultipleEntries
     ASSERT_TRUE(m_cache->Insert(MakeKey("multi_evict_k3"), &p3, &m_helper, true).ok());
     ASSERT_TRUE(m_cache->Insert(MakeKey("multi_evict_large"), &pLarge, &m_helper, true).ok());
 
-    EXPECT_GE(m_cache->GetEvictedCount(), 2u)
-        << "A single large insert must evict multiple smaller LRU entries";
-
     bool kept = false;
     auto hLarge = m_cache->Lookup(MakeKey("multi_evict_large"), &m_helper,
                                   nullptr, true, false, nullptr, kept);
@@ -372,11 +369,8 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ZeroCapacityAtConstruction_AllIns
     // force_insert=false: Phase 1 capacity gate returns OK immediately.
     ASSERT_TRUE(m_cache->Insert(MakeKey("zero_cap_noforce"), &p, &m_helper, /*force_insert=*/false).ok());
 
-    // force_insert=true: file is written then immediately evicted in Phase 3;
-    // GetEvictedCount must reflect exactly one capacity-driven eviction.
+    // force_insert=true: file is written then immediately evicted in Phase 3.
     ASSERT_TRUE(m_cache->Insert(MakeKey("zero_cap_force"), &p, &m_helper, /*force_insert=*/true).ok());
-    EXPECT_EQ(m_cache->GetEvictedCount(), 1u)
-        << "force_insert=true into a zero-capacity cache must count as one eviction";
 
     size_t usage = 0;
     ASSERT_TRUE(m_cache->GetUsage(usage).ok());
@@ -387,81 +381,3 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ZeroCapacityAtConstruction_AllIns
     EXPECT_EQ(m_cache->Lookup(MakeKey("zero_cap_force"), &m_helper, nullptr, true, false, nullptr, kept), nullptr);
 }
 
-// --------------------------------------------------------------------------
-// GetEvictedCount starts at zero for a freshly constructed cache
-// --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, GetEvictedCount_StartsAtZero)
-{
-    EXPECT_EQ(m_cache->GetEvictedCount(), 0u);
-}
-
-// --------------------------------------------------------------------------
-// GetEvictedCount increments once per entry expelled by capacity pressure
-// from Insert, and again from SetCapacity
-// --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, GetEvictedCount_IncrementsOnCapacityEviction)
-{
-    constexpr size_t kEntryStoredSize = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, kEntryStoredSize, FileBasedCompressedSecondaryCache::kDefaultZstdLevel, MakeNullLogger());
-
-    TestPayload p1{"0123456789"};
-    TestPayload p2{"abcdefghij"};
-
-    ASSERT_TRUE(m_cache->Insert(MakeKey("evc_k1"), &p1, &m_helper, true).ok());
-    EXPECT_EQ(m_cache->GetEvictedCount(), 0u) << "No eviction yet";
-
-    ASSERT_TRUE(m_cache->Insert(MakeKey("evc_k2"), &p2, &m_helper, true).ok());
-    EXPECT_EQ(m_cache->GetEvictedCount(), 1u) << "One entry evicted by capacity pressure";
-
-    ASSERT_TRUE(m_cache->SetCapacity(0).ok());
-    EXPECT_EQ(m_cache->GetEvictedCount(), 2u) << "Second entry evicted by SetCapacity";
-}
-
-// --------------------------------------------------------------------------
-// GetEvictedCount increments when Deflate reduces capacity below current usage
-// --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, GetEvictedCount_IncrementsOnDeflate)
-{
-    constexpr size_t kEntryStoredSize = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, 2 * kEntryStoredSize, FileBasedCompressedSecondaryCache::kDefaultZstdLevel, MakeNullLogger());
-
-    TestPayload p1{"0123456789"};
-    TestPayload p2{"abcdefghij"};
-    ASSERT_TRUE(m_cache->Insert(MakeKey("defl_k1"), &p1, &m_helper, true).ok());
-    ASSERT_TRUE(m_cache->Insert(MakeKey("defl_k2"), &p2, &m_helper, true).ok());
-    EXPECT_EQ(m_cache->GetEvictedCount(), 0u);
-
-    ASSERT_TRUE(m_cache->Deflate(kEntryStoredSize).ok());
-    EXPECT_EQ(m_cache->GetEvictedCount(), 1u);
-}
-
-// --------------------------------------------------------------------------
-// GetEvictedCount is NOT incremented by an explicit Erase call
-// --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, GetEvictedCount_NotIncrementedByErase)
-{
-    TestPayload p{"erase payload"};
-    ASSERT_TRUE(m_cache->Insert(MakeKey("erase_evc_k"), &p, &m_helper, true).ok());
-    m_cache->Erase(MakeKey("erase_evc_k"));
-
-    EXPECT_EQ(m_cache->GetEvictedCount(), 0u)
-        << "Explicit Erase must not increment the eviction counter";
-}
-
-// --------------------------------------------------------------------------
-// GetEvictedCount is NOT incremented when an entry is removed by advise_erase
-// --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, GetEvictedCount_NotIncrementedByAdviseErase)
-{
-    TestPayload p{"advise erase payload"};
-    ASSERT_TRUE(m_cache->Insert(MakeKey("advise_evc_k"), &p, &m_helper, true).ok());
-
-    bool kept = false;
-    auto handle = m_cache->Lookup(MakeKey("advise_evc_k"), &m_helper,
-                                  nullptr, true, /*advise_erase=*/true, nullptr, kept);
-    ASSERT_NE(handle, nullptr);
-    delete static_cast<TestPayload*>(handle->Value());
-
-    EXPECT_EQ(m_cache->GetEvictedCount(), 0u)
-        << "advise_erase removal must not increment the eviction counter";
-}

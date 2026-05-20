@@ -6,7 +6,6 @@
     "boost-log",
     "boost-static-string",
     "rocksdb",
-    "boost-crc",
     {
       "name": "boost-iostreams",
       "features": [

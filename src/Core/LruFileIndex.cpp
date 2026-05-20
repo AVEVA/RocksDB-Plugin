@@ -10,50 +10,6 @@
 
 namespace AVEVA::RocksDB::Plugin::Core
 {
-    namespace
-    {
-        /// <summary>
-        /// Returns the sharded path string for a cache entry file.
-        /// Entries are bucketed into one of 256 subdirectories named by the first two
-        /// hex digits of the filename (i.e. the hex encoding of the first byte of the
-        /// cache key) so that no single directory accumulates an unbounded number of
-        /// entries, which degrades readdir performance on many filesystems.
-        ///
-        /// Output format (normal case):
-        ///   <cacheDir> / <shard> / <filename>
-        ///
-        /// Example: cacheDir="C:\cache", key first byte=0x4A → filename="4aff..."
-        ///   → "C:\cache\4a\4aff..."
-        /// </summary>
-        std::string ShardedPathStr(const std::string& cacheDirStr, std::string_view filename)
-        {
-            // '\\' on Windows, '/' on POSIX.
-            constexpr char kSep = static_cast<char>(std::filesystem::path::preferred_separator);
-            std::string result;
-            if (filename.size() >= 2)
-            {
-                // Reserve exactly: cacheDir + sep + 2-char shard + sep + full filename.
-                result.reserve(cacheDirStr.size() + 1 + 2 + 1 + filename.size());
-                result += cacheDirStr;
-                result += kSep;
-                result.append(filename.data(), 2); // shard dir  = first two hex chars
-                result += kSep;
-                result.append(filename.data(), filename.size()); // filename = all hex chars
-            }
-            else
-            {
-                // Degenerate fallback: a single-character filename cannot be sharded.
-                // In practice unreachable — every key byte produces two hex chars —
-                // but handled defensively for zero-length or single-char edge cases.
-                result.reserve(cacheDirStr.size() + 1 + filename.size());
-                result += cacheDirStr;
-                result += kSep;
-                result.append(filename.data(), filename.size());
-            }
-            return result;
-        }
-    }
-
     LruFileIndex::LruFileIndex(std::string cacheDirStr, size_t capacity)
         : m_cacheDirStr(std::move(cacheDirStr)), m_capacity(capacity)
     {
@@ -61,7 +17,8 @@ namespace AVEVA::RocksDB::Plugin::Core
 
     std::string LruFileIndex::MakePath(std::string_view filename) const
     {
-        return ShardedPathStr(m_cacheDirStr, filename);
+        constexpr char kSep = static_cast<char>(std::filesystem::path::preferred_separator);
+        return m_cacheDirStr + kSep + std::string(filename.data(), filename.size());
     }
 
     std::optional<LruFileIndex::ScopedPin> LruFileIndex::TryPin(std::string_view filename)
@@ -234,11 +191,6 @@ namespace AVEVA::RocksDB::Plugin::Core
         return m_currentSize;
     }
 
-    uint64_t LruFileIndex::GetEvictedCount() const noexcept
-    {
-        return m_evictedCount.load(std::memory_order_relaxed);
-    }
-
     void LruFileIndex::EvictUntilSizeLocked(const size_t targetSize, EvictList& evictPairs)
     {
         while (m_currentSize > targetSize)
@@ -249,25 +201,22 @@ namespace AVEVA::RocksDB::Plugin::Core
             if (rit == m_lruList.rend())
                 break; // all remaining entries are pinned; cannot evict further
             evictPairs.push_back(RemoveEntryLocked(std::prev(rit.base())));
-            m_evictedCount.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
     std::pair<std::string, std::string>
         LruFileIndex::RemoveEntryLocked(LruIterator it)
     {
-        // Build the orig and graveyard path strings while under the lock so that the
-        // unique graveyard name is reserved before any concurrent writer can claim the
-        // same sequence number.  No filesystem operation is performed here; the caller
-        // must commit the returned pair after releasing the lock.  Deferring the rename
-        // outside the lock allows bulk evictions to release the mutex sooner, at the
-        // cost of a narrow TOCTOU window where a concurrent insert for the same key
-        // could have its file moved to the graveyard (causing one cache miss; the
-        // phantom index entry is then cleaned up by Lookup).
-        const std::string origPathStr = ShardedPathStr(m_cacheDirStr, it->filename);
-        const std::string graveyardPathStr =
-            origPathStr + "." +
-            std::to_string(m_seq.fetch_add(1, std::memory_order_relaxed)) + ".del";
+        // Build the orig and graveyard path strings while under the lock.
+        // No filesystem operation is performed here; the caller must commit the returned
+        // pair after releasing the lock.  Deferring the rename outside the lock allows
+        // bulk evictions to release the mutex sooner, at the cost of a narrow TOCTOU
+        // window where a concurrent insert for the same key could have its file moved to
+        // the graveyard (causing one cache miss; the phantom index entry is then cleaned
+        // up by Lookup).
+        constexpr char kSep = static_cast<char>(std::filesystem::path::preferred_separator);
+        const std::string origPathStr = m_cacheDirStr + kSep + std::string(it->filename.data(), it->filename.size());
+        const std::string graveyardPathStr = origPathStr + ".del";
         m_currentSize -= it->size;
         m_index.erase(it);
         m_lruList.erase(it);

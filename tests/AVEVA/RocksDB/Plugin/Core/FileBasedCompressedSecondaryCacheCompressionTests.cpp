@@ -18,10 +18,10 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, InsertCompressesCompressibleData)
 
     std::string hex;
     boost::algorithm::hex_lower(keyStr.begin(), keyStr.end(), std::back_inserter(hex));
-    const auto filePath = m_cacheDir / hex.substr(0, 2) / hex;
+    const auto filePath = m_cacheDir / hex;
 
-    // 8 magic + 1 version + 1 compressionType + 8 dataSize + 4 checksum = 22 bytes
-    constexpr std::uintmax_t kFileHeaderSize = 8 + 1 + 1 + 8 + 4;
+    // 8 magic + 1 version + 1 compressionType + 8 dataSize = 18 bytes
+    constexpr std::uintmax_t kFileHeaderSize = 8 + 1 + 1 + 8;
     const std::uintmax_t fileSize = std::filesystem::file_size(filePath);
 
     EXPECT_LT(fileSize, kFileHeaderSize + raw.size())
@@ -57,10 +57,10 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, InsertSavedWithNoCompressionCompr
 
     std::string hex;
     boost::algorithm::hex_lower(keyStr.begin(), keyStr.end(), std::back_inserter(hex));
-    const auto filePath = m_cacheDir / hex.substr(0, 2) / hex;
+    const auto filePath = m_cacheDir / hex;
 
-    // 8 magic + 1 version + 1 compressionType + 8 dataSize + 4 checksum = 22 bytes
-    constexpr std::uintmax_t kFileHeaderSize = 8 + 1 + 1 + 8 + 4;
+    // 8 magic + 1 version + 1 compressionType + 8 dataSize = 18 bytes
+    constexpr std::uintmax_t kFileHeaderSize = 8 + 1 + 1 + 8;
     const std::uintmax_t fileSize = std::filesystem::file_size(filePath);
 
     EXPECT_LT(fileSize, kFileHeaderSize + raw.size())
