@@ -353,7 +353,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
         auto client = std::make_unique<::Azure::Storage::Blobs::PageBlobClient>(container.GetPageBlobClient(std::string(realPath)));
         client->CreateIfNotExists(Configuration::PageBlob::DefaultSize);
-        auto lockFile = std::make_shared<LockFileImpl>(std::move(client), Configuration::LeaseLength);
+        auto lockFile = std::make_shared<LockFileImpl>(std::move(client), Configuration::LeaseLength, m_logger, std::string(realPath));
         if (lockFile->Lock())
         {
             m_locks.push_back(*lockFile);
@@ -769,6 +769,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
                     }
 
                     // Attempt to renew all locks with retries
+                    BOOST_LOG_SEV(*m_logger, severity_level::debug) << "Attempting to renew " << needsRetry.size() << " leases";
                     int retries = 0;
                     while (needsRetry.size() > 0 && retries < 5 && !stopToken.stop_requested())
                     {

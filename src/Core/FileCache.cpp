@@ -60,7 +60,7 @@ namespace AVEVA::RocksDB::Plugin::Core
             // accessing the file while it's being downloaded.
             if (it->second.GetState() != FileCacheEntry::State::QueuedForDownload)
             {
-                BOOST_LOG_SEV(*m_logger, boost::log::trivial::info) << "Marking file '" << filePath << "' as stale";
+                BOOST_LOG_SEV(*m_logger, debug) << "Marking file '" << filePath << "' as stale";
 
                 // If the file still in the download queue we don't have to worry about marking as stale.
                 // This is because when the file is downloaded, it will get the most current state from
@@ -92,7 +92,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                 std::forward_as_tuple(filePath, 0));
             m_entryList.push_front(inserted->second);
 
-            BOOST_LOG_SEV(*m_logger, info) << "Queueing for download: '" << filePath << "'";
+            BOOST_LOG_SEV(*m_logger, debug) << "Queueing for download: '" << filePath << "'";
             m_fileDownloadQueue.emplace(filePath);
 
             lock.unlock();
@@ -108,7 +108,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                 const auto state = fileEntry.GetState();
                 if (state == FileCacheEntry::State::Stale)
                 {
-                    BOOST_LOG_SEV(*m_logger, info) << "File is stale. Queueing for redownload: '" << filePath << "'";
+                    BOOST_LOG_SEV(*m_logger, debug) << "File is stale. Queueing for redownload: '" << filePath << "'";
                     m_fileDownloadQueue.emplace(filePath);
 
                     // Mark as downloading now so we don't queue it again.
@@ -190,7 +190,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                     std::unique_lock lock(m_mutex);
                     if (stopToken.stop_requested())
                     {
-                        BOOST_LOG_SEV(*m_logger, info) << "File cache should close. Exiting thread.";
+                        BOOST_LOG_SEV(*m_logger, debug) << "File cache should close. Exiting thread.";
                         lock.unlock();
                         return; // Exit the thread if we are closing
                     }
@@ -204,7 +204,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                     // We could have been woken up because it's time to close.
                     if (stopToken.stop_requested())
                     {
-                        BOOST_LOG_SEV(*m_logger, info) << "File cache should close. Exiting thread.";
+                        BOOST_LOG_SEV(*m_logger, debug) << "File cache should close. Exiting thread.";
                         lock.unlock();
                         return; // Exit the thread if we are closing
                     }
@@ -215,19 +215,19 @@ namespace AVEVA::RocksDB::Plugin::Core
                     auto it = m_cache.find(filePath);
                     if (it != m_cache.end())
                     {
-                        BOOST_LOG_SEV(*m_logger, info) << "Downloading '" << filePath << "' into cache";
+                        BOOST_LOG_SEV(*m_logger, debug) << "Downloading '" << filePath << "' into cache";
                         if (it->second.GetState() != FileCacheEntry::State::QueuedForDownload)
                         {
                             // The file was marked as stale while we were waiting for the condition variable.
                             // We should not download it.
-                            BOOST_LOG_SEV(*m_logger, info) << "File '" << filePath << "' is no longer marked as queued for download. Skipping download.";
+                            BOOST_LOG_SEV(*m_logger, debug) << "File '" << filePath << "' is no longer marked as queued for download. Skipping download.";
                             continue;
                         }
                     }
                     else
                     {
                         // The file was likely deleted while we were waiting for the condition variable.
-                        BOOST_LOG_SEV(*m_logger, info) << "File pending download '" << filePath << "' was deleted. Skipping download.";
+                        BOOST_LOG_SEV(*m_logger, debug) << "File pending download '" << filePath << "' was deleted. Skipping download.";
                         continue;
                     }
                 }
@@ -264,7 +264,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                     {
                         if (fileSize <= m_maxSize)
                         {
-                            BOOST_LOG_SEV(*m_logger, info) << "Cache is full at "
+                            BOOST_LOG_SEV(*m_logger, debug) << "Cache is full at "
                                 << currentSize << " (bytes). Max "
                                 << m_maxSize
                                 << " (bytes). Evicting files to make room for '"
@@ -283,7 +283,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                         }
                         else
                         {
-                            BOOST_LOG_SEV(*m_logger, info) << "Skipping eviction from file cache because the file '"
+                            BOOST_LOG_SEV(*m_logger, debug) << "Skipping eviction from file cache because the file '"
                                 << filePath
                                 << "' of size "
                                 << fileSize
@@ -320,7 +320,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                     continue;
                 }
 
-                BOOST_LOG_SEV(*m_logger, info) << "Finished downloading file '" << filePath << "'";
+                BOOST_LOG_SEV(*m_logger, debug) << "Finished downloading file '" << filePath << "'";
 
                 // Mark the file as active in the cache.
                 std::unique_lock lock(m_mutex);
@@ -331,17 +331,17 @@ namespace AVEVA::RocksDB::Plugin::Core
                     {
                         // Someone has marked this file as stale while we were downloading it.
                         // We should not mark it as active.
-                        BOOST_LOG_SEV(*m_logger, info) << "File '" << filePath << "' was marked as stale while we were downloading it. Will not mark as active.";
+                        BOOST_LOG_SEV(*m_logger, debug) << "File '" << filePath << "' was marked as stale while we were downloading it. Will not mark as active.";
                         continue;
                     }
 
-                    BOOST_LOG_SEV(*m_logger, info) << "Marking file '" << filePath << "' as active";
+                    BOOST_LOG_SEV(*m_logger, debug) << "Marking file '" << filePath << "' as active";
                     it->second.SetState(FileCacheEntry::State::Active);
                 }
                 else
                 {
                     // The file was likely deleted. We should clean up after ourselves.
-                    BOOST_LOG_SEV(*m_logger, info) << "File '" << filePath << "' was deleted. Removing file from cache";
+                    BOOST_LOG_SEV(*m_logger, debug) << "File '" << filePath << "' was deleted. Removing file from cache";
                     std::error_code ec;
                     auto cachedFilePath = m_cachePath / filePath;
                     m_filesystem->DeleteFile(cachedFilePath);
@@ -366,14 +366,14 @@ namespace AVEVA::RocksDB::Plugin::Core
         if (bytes > m_maxSize)
         {
             // No point in evicting everything from the cache if we can't fit the new file.
-            BOOST_LOG_SEV(*m_logger, info) << "Skipping eviction from file cache because "
+            BOOST_LOG_SEV(*m_logger, debug) << "Skipping eviction from file cache because "
                 << bytes
                 << " bytes is greater than the maximum of "
                 << m_maxSize;
             return false;
         }
 
-        BOOST_LOG_SEV(*m_logger, info) << "Attempting to evict " << bytes << " (bytes) from the file cache.";
+        BOOST_LOG_SEV(*m_logger, debug) << "Attempting to evict " << bytes << " (bytes) from the file cache.";
         int64_t bytesEvicted = 0;
         auto tail = m_entryList.s_iterator_to(m_entryList.back());
         while (bytesEvicted < bytes && tail != m_entryList.begin())
@@ -382,7 +382,7 @@ namespace AVEVA::RocksDB::Plugin::Core
             const auto state = tail->GetState();
             if (state == FileCacheEntry::State::Downloading || state == FileCacheEntry::State::QueuedForDownload)
             {
-                BOOST_LOG_SEV(*m_logger, info) << "Skipping eviction of '" << tail->GetFilePath() << "'. It is currently downloading or queued for download";
+                BOOST_LOG_SEV(*m_logger, debug) << "Skipping eviction of '" << tail->GetFilePath() << "'. It is currently downloading or queued for download";
                 tail = --tail;
                 continue;
             }
@@ -390,7 +390,7 @@ namespace AVEVA::RocksDB::Plugin::Core
             const std::string filePath = tail->GetFilePath();
             const auto fileSize = tail->GetSize();
 
-            BOOST_LOG_SEV(*m_logger, info) << "Evicting '" << filePath << "' of size " << fileSize << "'bytes' from file cache";
+            BOOST_LOG_SEV(*m_logger, debug) << "Evicting '" << filePath << "' of size " << fileSize << "'bytes' from file cache";
             tail = --tail;
             bytesEvicted += fileSize;
 
@@ -405,7 +405,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         auto it = m_cache.find(filePath);
         if (it != m_cache.end())
         {
-            BOOST_LOG_SEV(*m_logger, info) << "Removing file '" << filePath << "' from file cache.";
+            BOOST_LOG_SEV(*m_logger, debug) << "Removing file '" << filePath << "' from file cache.";
             auto& fileEntry = it->second;
             fileEntry.unlink();
 
