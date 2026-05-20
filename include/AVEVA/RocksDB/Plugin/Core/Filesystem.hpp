@@ -25,9 +25,10 @@ namespace AVEVA::RocksDB::Plugin::Core
 
         /// <summary>
         /// Atomically writes <paramref name="size"/> bytes from <paramref name="data"/> to
-        /// <paramref name="finalPath"/> using an internal staging file.  The write is
-        /// crash-safe: either the complete data appears at <paramref name="finalPath"/> or
-        /// the file is unchanged.  Returns <c>true</c> on success.
+        /// <paramref name="finalPath"/> using an internal staging file and rename.
+        /// The operation is atomic with respect to concurrent readers — they observe
+        /// either the prior version of the file or the complete new contents — but does
+        /// not guarantee durability across power loss.  Returns <c>true</c> on success.
         /// </summary>
         virtual bool WriteFileAtomic(const std::filesystem::path& finalPath,
                                      const char* data, size_t size) noexcept = 0;

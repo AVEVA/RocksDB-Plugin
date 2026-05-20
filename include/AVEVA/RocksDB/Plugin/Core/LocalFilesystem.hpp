@@ -35,8 +35,8 @@ namespace AVEVA::RocksDB::Plugin::Core
             const std::filesystem::path& path) noexcept override;
 
         /// <summary>Writes <paramref name="size"/> bytes to <paramref name="finalPath"/>
-        /// atomically via an internal staging file.  Uses unbuffered direct I/O so the
-        /// data goes to the OS in a single write call with no extra copy.</summary>
+        /// atomically via a staging file and rename.  Uses standard buffered OS writes;
+        /// observers see either the prior version or the complete new contents.</summary>
         bool WriteFileAtomic(const std::filesystem::path& finalPath,
                              const char* data, size_t size) noexcept override;
 

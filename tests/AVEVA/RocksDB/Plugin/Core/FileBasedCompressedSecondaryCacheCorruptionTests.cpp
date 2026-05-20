@@ -187,7 +187,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, TruncatedFile_RejectedOnLookup)
     boost::algorithm::hex_lower(keyStr.begin(), keyStr.end(), std::back_inserter(hex));
     const auto filePath = m_cacheDir / hex;
 
-    // Read the original 22-byte header from the valid file.
+    // Read the original 18-byte header from the valid file.
     constexpr std::uintmax_t kHeaderSize = 18;
     std::array<char, kHeaderSize> headerBuf{};
     {

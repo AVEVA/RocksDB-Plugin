@@ -21,7 +21,8 @@ namespace AVEVA::RocksDB::Plugin::Azure
         int64_t dataFileBufferSize,
         int64_t dataFileInitialSize,
         std::optional<std::string_view> cachePath,
-        size_t maxCacheSize)
+        size_t maxCacheSize,
+        std::shared_ptr<rocksdb::SecondaryCache>* outSecondaryCache)
     {
         auto pluginName = std::string(Name) + primary.GetDbName();
         if (backup)
@@ -29,20 +30,34 @@ namespace AVEVA::RocksDB::Plugin::Azure
             pluginName += backup->GetDbName();
         }
 
-        if (cachePath && rocksdb::ObjectLibrary::Default()->FindFactory<rocksdb::SecondaryCache>(pluginName) == nullptr)
+        if (cachePath)
         {
             const auto cacheDir = std::filesystem::path(*cachePath);
-            rocksdb::ObjectLibrary::Default()->AddFactory<rocksdb::SecondaryCache>(pluginName,
-                [cacheDir, maxCacheSize, logger](const std::string& /* uri */, std::unique_ptr<rocksdb::SecondaryCache>* sc, std::string* /* errmsg */)
-                {
-                    sc->reset(new Core::FileBasedCompressedSecondaryCache(
-                        cacheDir,
-                        std::make_shared<Core::LocalFilesystem>(logger),
-                        maxCacheSize,
-                        Core::FileBasedCompressedSecondaryCache::kDefaultZstdLevel,
-                        logger));
-                    return sc->get();
-                });
+
+            if (outSecondaryCache != nullptr)
+            {
+                *outSecondaryCache = std::make_shared<Core::FileBasedCompressedSecondaryCache>(
+                    cacheDir,
+                    std::make_shared<Core::LocalFilesystem>(logger),
+                    maxCacheSize,
+                    Core::FileBasedCompressedSecondaryCache::kDefaultZstdLevel,
+                    logger);
+            }
+
+            if (rocksdb::ObjectLibrary::Default()->FindFactory<rocksdb::SecondaryCache>(pluginName) == nullptr)
+            {
+                rocksdb::ObjectLibrary::Default()->AddFactory<rocksdb::SecondaryCache>(pluginName,
+                    [cacheDir, maxCacheSize, logger](const std::string& /* uri */, std::unique_ptr<rocksdb::SecondaryCache>* sc, std::string* /* errmsg */)
+                    {
+                        sc->reset(new Core::FileBasedCompressedSecondaryCache(
+                            cacheDir,
+                            std::make_shared<Core::LocalFilesystem>(logger),
+                            maxCacheSize,
+                            Core::FileBasedCompressedSecondaryCache::kDefaultZstdLevel,
+                            logger));
+                        return sc->get();
+                    });
+            }
         }
 
         if (rocksdb::ObjectLibrary::Default()->FindFactory<rocksdb::FileSystem>(pluginName) == nullptr)
@@ -76,7 +91,8 @@ namespace AVEVA::RocksDB::Plugin::Azure
         int64_t dataFileBufferSize,
         int64_t dataFileInitialSize,
         std::optional<std::string_view> cachePath,
-        size_t maxCacheSize)
+        size_t maxCacheSize,
+        std::shared_ptr<rocksdb::SecondaryCache>* outSecondaryCache)
     {
         auto pluginName = std::string(Name) + primary.GetDbName();
         if (backup)
@@ -84,20 +100,34 @@ namespace AVEVA::RocksDB::Plugin::Azure
             pluginName += backup->GetDbName();
         }
 
-        if (cachePath && rocksdb::ObjectLibrary::Default()->FindFactory<rocksdb::SecondaryCache>(pluginName) == nullptr)
+        if (cachePath)
         {
             const auto cacheDir = std::filesystem::path(*cachePath);
-            rocksdb::ObjectLibrary::Default()->AddFactory<rocksdb::SecondaryCache>(pluginName,
-                [cacheDir, maxCacheSize, logger](const std::string& /* uri */, std::unique_ptr<rocksdb::SecondaryCache>* sc, std::string* /* errmsg */)
-                {
-                    sc->reset(new Core::FileBasedCompressedSecondaryCache(
-                        cacheDir,
-                        std::make_shared<Core::LocalFilesystem>(logger),
-                        maxCacheSize,
-                        Core::FileBasedCompressedSecondaryCache::kDefaultZstdLevel,
-                        logger));
-                    return sc->get();
-                });
+
+            if (outSecondaryCache != nullptr)
+            {
+                *outSecondaryCache = std::make_shared<Core::FileBasedCompressedSecondaryCache>(
+                    cacheDir,
+                    std::make_shared<Core::LocalFilesystem>(logger),
+                    maxCacheSize,
+                    Core::FileBasedCompressedSecondaryCache::kDefaultZstdLevel,
+                    logger);
+            }
+
+            if (rocksdb::ObjectLibrary::Default()->FindFactory<rocksdb::SecondaryCache>(pluginName) == nullptr)
+            {
+                rocksdb::ObjectLibrary::Default()->AddFactory<rocksdb::SecondaryCache>(pluginName,
+                    [cacheDir, maxCacheSize, logger](const std::string& /* uri */, std::unique_ptr<rocksdb::SecondaryCache>* sc, std::string* /* errmsg */)
+                    {
+                        sc->reset(new Core::FileBasedCompressedSecondaryCache(
+                            cacheDir,
+                            std::make_shared<Core::LocalFilesystem>(logger),
+                            maxCacheSize,
+                            Core::FileBasedCompressedSecondaryCache::kDefaultZstdLevel,
+                            logger));
+                        return sc->get();
+                    });
+            }
         }
 
         if (rocksdb::ObjectLibrary::Default()->FindFactory<rocksdb::FileSystem>(pluginName) == nullptr)

@@ -102,6 +102,11 @@ namespace AVEVA::RocksDB::Plugin::Core
             m_lruIndex(m_cacheDir.string(), capacity),
             m_logger(std::move(logger))
         {
+            if (!m_logger)
+            {
+                throw std::invalid_argument("FileBasedCompressedSecondaryCache: logger cannot be null");
+            }
+
             m_fs->DeleteDir(m_cacheDir);
             m_fs->CreateDir(m_cacheDir);
 
@@ -551,7 +556,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                 return { MapEntryResult::Status::Corrupt };
             }
 
-            return { MapEntryResult::Status::Ok, std::move(view) };
+            return { MapEntryResult::Status::Ok, std::move(view), std::move(pin) };
         }
 
         /// <summary>Removes a corrupt or missing entry from the in-memory index and commits the eviction.

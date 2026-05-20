@@ -5,7 +5,7 @@
 
 // --------------------------------------------------------------------------
 // Insert compresses compressible data — the on-disk file must be smaller
-// than the uncompressed payload plus the 21-byte file header
+// than the uncompressed payload plus the 18-byte file header
 // --------------------------------------------------------------------------
 TEST_F(FileBasedCompressedSecondaryCacheTests, InsertCompressesCompressibleData)
 {
