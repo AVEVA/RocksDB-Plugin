@@ -1,6 +1,11 @@
 add_subdirectory(Impl)
 add_subdirectory(Models)
-add_library(aveva-rocksdb-plugin-azure
+
+# NOTE: Build this target as STATIC because `RocksDB::rocksdb` is
+# consumed as a static library. Keeping this target static preserves
+# that linkage model and gives downstream consumers more flexibility
+# in how they package and link their final binaries.
+add_library(aveva-rocksdb-plugin-azure STATIC
     LockFile.cpp
     Directory.cpp
     AzureErrorTranslator.cpp
