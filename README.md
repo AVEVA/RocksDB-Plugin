@@ -70,9 +70,7 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
         std::nullopt, /* backup credentials */
         std::make_shared<boost::log::sources::logger_mt>(),
         MbToBytes(2), /* dataFileBufferSize */
-        MbToBytes(4), /* dataFileInitialSize */
-        std::optional<std::string_view>(cachePath),
-        MbToBytes(1024) /* Cache Size */);
+        MbToBytes(4) /* dataFileInitialSize */);
     ```
 
 2. **Open RocksDB with Azure Storage**: 

@@ -3,6 +3,8 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Plugin.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp"
 #include "IntegrationTestHelpers.hpp"
 
 #include <rocksdb/cache.h>
@@ -27,8 +29,6 @@ class PluginSecondaryCacheIntegrationTests : public AzureIntegrationTestBase
 {
 protected:
     std::filesystem::path m_cacheDir;
-    std::string           m_pluginName;
-    rocksdb::ConfigOptions m_configOptions;
     rocksdb::Env*                    m_env = nullptr;
     std::shared_ptr<rocksdb::Env>    m_envGuard;
     std::string m_dbPath;
@@ -44,21 +44,19 @@ protected:
         m_cacheDir   = std::filesystem::temp_directory_path() /
                        ("aveva_plugin_sc_test_" + m_credentials->GetDbName());
         m_dbPath     = m_containerPrefix + "/" + m_blobName;
-        m_pluginName = std::string(Plugin::Name) + m_credentials->GetDbName();
 
         std::filesystem::create_directories(m_cacheDir);
 
+        rocksdb::ConfigOptions configOptions;
         auto status = Plugin::Register(
-            m_configOptions,
+            configOptions,
             &m_env,
             &m_envGuard,
             *m_credentials,
             std::nullopt,
             m_logger,
             Configuration::PageBlob::DefaultBufferSize,
-            Configuration::PageBlob::DefaultSize,
-            m_cacheDir.string(),
-            /*maxCacheSize=*/64ULL * 1024 * 1024);
+            Configuration::PageBlob::DefaultSize);
 
         if (!status.ok())
             GTEST_SKIP() << "Plugin::Register failed (Azure may be unavailable): "
@@ -83,11 +81,12 @@ protected:
     //   • a 4 KiB primary block cache (forces eviction to the secondary cache)
     rocksdb::DB* OpenDb(bool createIfMissing = true)
     {
-        std::shared_ptr<rocksdb::SecondaryCache> secondaryCache;
-        auto status = rocksdb::SecondaryCache::CreateFromString(
-            m_configOptions, m_pluginName, &secondaryCache);
-        if (!status.ok() || !secondaryCache)
-            return nullptr;
+        auto secondaryCache = std::make_shared<AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache>(
+            m_cacheDir,
+            std::make_shared<AVEVA::RocksDB::Plugin::Core::LocalFilesystem>(m_logger),
+            /*capacity=*/64ULL * 1024 * 1024,
+            AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache::kDefaultZstdLevel,
+            m_logger);
 
         // 4 KiB primary block cache — small enough to evict SST blocks to secondary.
         rocksdb::LRUCacheOptions cacheOpts;
@@ -108,36 +107,6 @@ protected:
         return db;
     }
 };
-
-// ---------------------------------------------------------------------------
-// Plugin::Register with a cache path registers a SecondaryCache factory that
-// CreateFromString can locate under the plugin name.
-// ---------------------------------------------------------------------------
-TEST_F(PluginSecondaryCacheIntegrationTests, Register_WithCachePath_RegistersSecondaryCacheFactory)
-{
-    std::shared_ptr<rocksdb::SecondaryCache> cache;
-    auto status = rocksdb::SecondaryCache::CreateFromString(
-        m_configOptions, m_pluginName, &cache);
-
-    ASSERT_TRUE(status.ok()) << status.ToString();
-    ASSERT_NE(cache, nullptr);
-    EXPECT_STREQ(cache->Name(), "FileBasedCompressedSecondaryCache");
-}
-
-// ---------------------------------------------------------------------------
-// A name that was never registered must not produce a SecondaryCache instance.
-// Note: ConfigOptions::ignore_unsupported_options defaults to true, so RocksDB
-// returns Status::OK with a null pointer rather than a non-OK status when no
-// factory matches.  The meaningful invariant is that cache remains nullptr.
-// ---------------------------------------------------------------------------
-TEST_F(PluginSecondaryCacheIntegrationTests, CreateFromString_UnknownName_Fails)
-{
-    std::shared_ptr<rocksdb::SecondaryCache> cache;
-    rocksdb::SecondaryCache::CreateFromString(
-        m_configOptions, m_pluginName + "_unknown_suffix", &cache);
-
-    EXPECT_EQ(cache, nullptr);
-}
 
 // ---------------------------------------------------------------------------
 // A RocksDB database can be opened with the Azure plugin env and a secondary
@@ -170,18 +139,19 @@ TEST_F(PluginSecondaryCacheIntegrationTests, OpenDb_PutFlushGet_RoundTrips)
 // ---------------------------------------------------------------------------
 TEST_F(PluginSecondaryCacheIntegrationTests, SecondaryCache_InsertSaved_WritesFilesToCacheDirectory)
 {
-    std::shared_ptr<rocksdb::SecondaryCache> secondaryCache;
-    auto status = rocksdb::SecondaryCache::CreateFromString(
-        m_configOptions, m_pluginName, &secondaryCache);
-    ASSERT_TRUE(status.ok()) << status.ToString();
-    ASSERT_NE(secondaryCache, nullptr);
+    auto secondaryCache = std::make_shared<AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache>(
+        m_cacheDir,
+        std::make_shared<AVEVA::RocksDB::Plugin::Core::LocalFilesystem>(m_logger),
+        /*capacity=*/64ULL * 1024 * 1024,
+        AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache::kDefaultZstdLevel,
+        m_logger);
 
     // Key must be ≤ 32 bytes so its hex representation fits within
     // FileBasedCompressedSecondaryCache::Entry::kMaxFilenameLen (64 chars).
     const std::string keyData(16, '\x42');
     const std::string payload(256, 'X');
 
-    status = secondaryCache->InsertSaved(
+    auto status = secondaryCache->InsertSaved(
         rocksdb::Slice(keyData),
         rocksdb::Slice(payload),
         rocksdb::CompressionType::kNoCompression,

@@ -179,13 +179,6 @@ namespace AVEVA::RocksDB::Plugin::Core
                     return rocksdb::Status::InvalidArgument("cache key hex exceeds maximum inline buffer");
                 }
 
-                if (type == rocksdb::CompressionType::kNoCompression)
-                {
-                    const auto compressed = ZstdCodec::MaybeCompress(saved.data(), saved.size(), m_zstdLevel,
-                        FileFormat::kMinCompressibleSize, FileFormat::zstdCompression);
-                    return WriteEntry(key, compressed.type, compressed.data, compressed.size);
-                }
-
                 return WriteEntry(key, type, saved.data(), saved.size());
             }
             catch (...)
@@ -232,15 +225,14 @@ namespace AVEVA::RocksDB::Plugin::Core
                     return nullptr;
                 }
 
+                std::pair<std::string, std::string> deferredEviction;
                 if (adviseErase)
                 {
-                    const auto evictionPair = m_lruIndex.Remove(filename);
-                    if (evictionPair.first.empty())
+                    deferredEviction = m_lruIndex.Remove(filename);
+                    if (deferredEviction.first.empty())
                     {
                         return nullptr; // entry disappeared between map and this stage.
                     }
-
-                    FileUtil::CommitEviction(*m_fs, evictionPair);
                 }
                 else
                 {
@@ -249,6 +241,15 @@ namespace AVEVA::RocksDB::Plugin::Core
                         return nullptr; // entry disappeared between map and this stage.
                     }
                 }
+
+                // Defer eviction I/O until after the mapped view is released to avoid
+                // rename/delete failures on Windows while the file is still mapped.
+                auto evictionCleanup = boost::scope::make_scope_exit([&] noexcept {
+                    if (!deferredEviction.first.empty())
+                    {
+                        FileUtil::CommitEviction(*m_fs, deferredEviction);
+                    }
+                    });
 
                 // On any validation failure, remove the corrupt entry from the index.
                 // When advise_erase was set the entry is already gone, so no cleanup needed.
@@ -444,12 +445,11 @@ namespace AVEVA::RocksDB::Plugin::Core
 
         /// <summary>
         /// Returns true when the hex-encoded key would exceed the inline filename buffer.
-        /// Each input byte is encoded as two hex characters, so the hex-encoded length is
-        /// twice the key length; the check uses <c>key.size() * 2</c> to reflect this.
+        /// Each input byte is encoded as two hex characters; uses an overflow-safe comparison.
         /// </summary>
         [[nodiscard]] static bool IsKeyTooLong(const rocksdb::Slice& key) noexcept
         {
-            return key.size() * 2 > LruFileIndex::kMaxFilenameLen;
+            return key.size() > LruFileIndex::kMaxFilenameLen / 2;
         }
 
         /// <summary>
@@ -542,7 +542,7 @@ namespace AVEVA::RocksDB::Plugin::Core
         [[nodiscard]] MapEntryResult MapEntryForRead(const std::string_view filename,
             const std::string& pathStr)
         {
-            const auto pin = m_lruIndex.TryPin(filename);
+            auto pin = m_lruIndex.TryPin(filename);
             if (!pin)
             {
                 return { MapEntryResult::Status::Miss };
@@ -601,7 +601,7 @@ namespace AVEVA::RocksDB::Plugin::Core
             }
 
             const auto dataSize = static_cast<size_t>(header.dataSize.value());
-            if (dataSize + sizeof(FileFormat::Header) > mappedSize)
+            if (dataSize > mappedSize - sizeof(FileFormat::Header))
             {
                 return std::nullopt;
             }

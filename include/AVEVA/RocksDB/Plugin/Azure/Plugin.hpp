@@ -8,7 +8,6 @@
 
 #include <boost/log/trivial.hpp>
 #include <rocksdb/env.h>
-#include <rocksdb/secondary_cache.h>
 
 #include <memory>
 #include <string_view>
@@ -19,13 +18,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         static const constexpr std::string_view Name = "azblobfs";
 
         /// <summary>
-        /// Registers the Azure blob filesystem plugin.
-        /// When <paramref name="cachePath"/> is provided, a
-        /// <c>FileBasedCompressedSecondaryCache</c> is created and written to
-        /// <paramref name="outSecondaryCache"/> (if non-null) so that the caller can
-        /// wire it into <c>LRUCacheOptions::secondary_cache</c>.
-        /// The same factory is also registered in <c>ObjectLibrary</c> under the plugin name
-        /// for use via <c>SecondaryCache::CreateFromString</c>.
+        /// Registers the Azure blob filesystem plugin with the RocksDB ObjectLibrary.
         /// </summary>
         static rocksdb::Status Register(rocksdb::ConfigOptions& configOptions,
             rocksdb::Env** env,
@@ -34,19 +27,10 @@ namespace AVEVA::RocksDB::Plugin::Azure
             std::optional<Models::ServicePrincipalStorageInfo> backup,
             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
-            int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
-            std::optional<std::string_view> cachePath = {},
-            size_t maxCacheSize = Impl::Configuration::MaxCacheSize,
-            std::shared_ptr<rocksdb::SecondaryCache>* outSecondaryCache = nullptr);
+            int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize);
 
         /// <summary>
-        /// Registers the Azure blob filesystem plugin.
-        /// When <paramref name="cachePath"/> is provided, a
-        /// <c>FileBasedCompressedSecondaryCache</c> is created and written to
-        /// <paramref name="outSecondaryCache"/> (if non-null) so that the caller can
-        /// wire it into <c>LRUCacheOptions::secondary_cache</c>.
-        /// The same factory is also registered in <c>ObjectLibrary</c> under the plugin name
-        /// for use via <c>SecondaryCache::CreateFromString</c>.
+        /// Registers the Azure blob filesystem plugin with the RocksDB ObjectLibrary.
         /// </summary>
         static rocksdb::Status Register(rocksdb::ConfigOptions& configOptions,
             rocksdb::Env** env,
@@ -55,9 +39,6 @@ namespace AVEVA::RocksDB::Plugin::Azure
             std::optional<Models::ChainedCredentialInfo> backup,
             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
-            int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
-            std::optional<std::string_view> cachePath = {},
-            size_t maxCacheSize = Impl::Configuration::MaxCacheSize,
-            std::shared_ptr<rocksdb::SecondaryCache>* outSecondaryCache = nullptr);
+            int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize);
     };
 }

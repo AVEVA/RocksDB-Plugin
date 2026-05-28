@@ -84,8 +84,8 @@ namespace AVEVA::RocksDB::Plugin::Core
             // Generate a unique staging path using an internal sequence counter so
             // concurrent writes to the same final path cannot clobber each other.
             const auto seq = m_seq.fetch_add(1, std::memory_order_relaxed);
-            const auto stagingPath = std::filesystem::path(
-                finalPath.string() + "." + std::to_string(seq) + ".tmp");
+            auto stagingPath = finalPath;
+            stagingPath += L"." + std::to_wstring(seq) + L".tmp";
 
             auto stagingCleanup = boost::scope::make_scope_exit([&] {
                 std::error_code ec;
