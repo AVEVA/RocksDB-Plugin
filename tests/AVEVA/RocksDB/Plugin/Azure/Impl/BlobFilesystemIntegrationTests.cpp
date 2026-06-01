@@ -189,6 +189,24 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildren_WithFiles_ReturnsFileNames)
     EXPECT_TRUE(m_filesystem->DeleteFile(file3));
 }
 
+TEST_F(BlobFilesystemIntegrationTests, GetChildren_PathMatchesExistingBlobName_ReturnsNoChildren)
+{
+    // Arrange
+    const std::string filePath = m_containerPrefix + "/LOCK";
+    {
+        auto f = m_filesystem->CreateWriteableFile(filePath);
+    }
+
+    // Act
+    const auto children = m_filesystem->GetChildren(filePath);
+
+    // Assert - Listing a file path should not produce child entries.
+    EXPECT_TRUE(children.empty());
+
+    // Cleanup
+    EXPECT_TRUE(m_filesystem->DeleteFile(filePath));
+}
+
 TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_ReturnsCorrectSizes)
 {
     // Arrange
@@ -225,6 +243,24 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_ReturnsCorrectS
     // Cleanup
     EXPECT_TRUE(m_filesystem->DeleteFile(file1));
     EXPECT_TRUE(m_filesystem->DeleteFile(file2));
+}
+
+TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_PathMatchesExistingBlobName_ReturnsNoEntries)
+{
+    // Arrange - A file path should not be interpreted as a directory listing prefix.
+    const std::string filePath = m_containerPrefix + "/LOCK";
+    {
+        auto f = m_filesystem->CreateWriteableFile(filePath);
+    }
+
+    // Act
+    const auto attributes = m_filesystem->GetChildrenFileAttributes(filePath);
+
+    // Assert
+    EXPECT_TRUE(attributes.empty());
+
+    // Cleanup
+    EXPECT_TRUE(m_filesystem->DeleteFile(filePath));
 }
 
 TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_EmptyDirectory_ReturnsEmpty)
