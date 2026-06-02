@@ -192,10 +192,7 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildren_WithFiles_ReturnsFileNames)
 TEST_F(BlobFilesystemIntegrationTests, GetChildren_PathMatchesExistingBlobName_ReturnsNoChildren)
 {
     // Arrange
-    const std::string filePath = m_containerPrefix + "/LOCK";
-    {
-        auto f = m_filesystem->CreateWriteableFile(filePath);
-    }
+    const std::string filePath = m_containerPrefix + "/" + GenerateRandomBlobName("LOCK");
 
     // Act
     const auto children = m_filesystem->GetChildren(filePath);
