@@ -193,6 +193,9 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildren_PathMatchesExistingBlobName_R
 {
     // Arrange
     const std::string filePath = m_containerPrefix + "/" + GenerateRandomBlobName("LOCK");
+    {
+        auto f = m_filesystem->CreateWriteableFile(filePath);
+    }
 
     // Act
     const auto children = m_filesystem->GetChildren(filePath);
@@ -268,6 +271,9 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_PathMatchesExis
 {
     // Arrange - A file path should not be interpreted as a directory listing prefix.
     const std::string filePath = m_containerPrefix + "/" + GenerateRandomBlobName("LOCK");
+    {
+        auto f = m_filesystem->CreateWriteableFile(filePath);
+    }
 
     // Act
     const auto attributes = m_filesystem->GetChildrenFileAttributes(filePath);
