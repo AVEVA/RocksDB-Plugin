@@ -4,12 +4,10 @@
 #include "AVEVA/RocksDB/Plugin/Core/FileCacheEntry.hpp"
 namespace AVEVA::RocksDB::Plugin::Core
 {
-    // NOTE: the state of the file cache entry should default to QueuedForDownload.
-    // This way, there is no confusion if another read request is made before
-    // the file has finished downloading and we can safely return nothing without
-    // queuing up another download.
+    // New entries start as stale. The first access records the file in cache
+    // metadata, and a subsequent access queues it for background download.
     FileCacheEntry::FileCacheEntry(const std::string_view filePath, const int64_t size)
-        : m_state(State::QueuedForDownload), m_filePath(std::move(filePath)), m_size(size)
+        : m_state(State::Stale), m_filePath(std::move(filePath)), m_size(size)
     {
     }
 

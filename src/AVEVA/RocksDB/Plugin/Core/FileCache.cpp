@@ -83,20 +83,15 @@ namespace AVEVA::RocksDB::Plugin::Core
         auto it = m_cache.find(filePath);
         if (it == m_cache.end())
         {
-            // File not found, create a new entry
-            BOOST_LOG_SEV(*m_logger, debug) << "File not found in cache '" << filePath << "'";
+            // File not found in cache. The first access only records an entry and
+            // marks it stale. A subsequent access to the same SST queues download.
+            BOOST_LOG_SEV(*m_logger, debug) << "File not found in cache on first access '" << filePath << "'";
 
             auto [inserted, _] = m_cache.emplace(
                 std::piecewise_construct,
                 std::forward_as_tuple(std::string(filePath)),
                 std::forward_as_tuple(filePath, 0));
             m_entryList.push_front(inserted->second);
-
-            BOOST_LOG_SEV(*m_logger, debug) << "Queueing for download: '" << filePath << "'";
-            m_fileDownloadQueue.emplace(filePath);
-
-            lock.unlock();
-            m_cv.notify_one();
             return std::nullopt;
         }
         else
@@ -432,4 +427,3 @@ namespace AVEVA::RocksDB::Plugin::Core
         return size;
     }
 }
-

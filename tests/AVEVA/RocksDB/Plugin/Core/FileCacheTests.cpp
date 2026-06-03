@@ -315,3 +315,56 @@ TEST_F(FileCacheTests, CacheSizeExceeded)
     ASSERT_EQ(fileSize, m_cache.CacheSize());
     ASSERT_EQ(3, m_removedFiles.size());
 }
+
+TEST_F(FileCacheTests, ReadFile_FirstAccess_DoesNotStartDownload)
+{
+    // Arrange
+    EXPECT_CALL(*m_containerClient, GetBlobClient(_)).Times(0);
+
+    // Act
+    char buffer[1];
+    const auto bytesRead = m_cache.ReadFile("1.sst", 0, 1, buffer);
+
+    // Assert
+    EXPECT_FALSE(bytesRead);
+    EXPECT_TRUE(m_cache.HasFile("1.sst"));
+}
+
+TEST_F(FileCacheTests, ReadFile_SecondAccess_QueuesAndDownloads)
+{
+    // Arrange
+    std::string fileData = "X";
+    EXPECT_CALL(*m_containerClient, GetBlobClient("1.sst"))
+        .Times(::testing::AtLeast(1))
+        .WillRepeatedly(Invoke([&fileData](const std::string&)
+            {
+                auto blob = std::make_unique<BlobClientMock>();
+                ON_CALL(*blob, GetSize())
+                    .WillByDefault(Return(fileData.size()));
+                ON_CALL(*blob, DownloadTo(Matcher<const std::string&>(_), _, _))
+                    .WillByDefault(Return());
+                return blob;
+            }));
+
+    EXPECT_CALL(*m_filesystem, Open(std::filesystem::path(m_folderName) / "1.sst"))
+        .Times(::testing::AtLeast(1))
+        .WillRepeatedly(Invoke([&fileData](const std::filesystem::path&)
+            {
+                auto file = std::make_unique<FileMock>();
+                ON_CALL(*file, Read(_, _, _))
+                    .WillByDefault(Invoke([&fileData](char* buffer, uint64_t offset, uint64_t length) -> uint64_t
+                        {
+                            std::copy(fileData.data() + offset, fileData.data() + offset + length, buffer);
+                            return length - offset;
+                        }));
+                return file;
+            }));
+    // Act
+    char buffer[1];
+    const auto bytesReadOnFirstAccess = m_cache.ReadFile("1.sst", 0, 1, buffer);
+    EnsureReadFromCache("1.sst");
+
+    // Assert
+    EXPECT_FALSE(bytesReadOnFirstAccess);
+    EXPECT_TRUE(m_cache.HasFile("1.sst"));
+}
