@@ -522,8 +522,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            const auto context = "source='" + s + "', target='" + t + "'";
-            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex, context);
+            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex) << " (RenameFile: source='" << s << "', target='" << t << "')";
             return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
         }
         catch (const std::exception& ex)
