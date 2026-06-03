@@ -20,23 +20,23 @@ namespace AVEVA::RocksDB::Plugin::Azure
     {
         std::string FormatRequestFailedLogMessage(const ::Azure::Core::RequestFailedException& ex, const std::string_view path = {})
         {
-            std::ostringstream ss;
-            ss << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") ";
+            std::ostringstream formattedMessage;
+            formattedMessage << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") ";
 
             if (!path.empty())
             {
                 if (ex.StatusCode == ::Azure::Core::Http::HttpStatusCode::NotFound)
                 {
-                    ss << "Blob/path '" << path << "' not found. ";
+                    formattedMessage << "Blob/path '" << path << "' not found. ";
                 }
                 else
                 {
-                    ss << "Blob/path '" << path << "'. ";
+                    formattedMessage << "Blob/path '" << path << "'. ";
                 }
             }
 
-            ss << ex.Message;
-            return ss.str();
+            formattedMessage << ex.Message;
+            return formattedMessage.str();
         }
     }
 
