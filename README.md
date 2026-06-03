@@ -94,6 +94,7 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
 
 - **Caching**: Enable local caching for frequently accessed data
 - **Startup-friendly caching**: SSTs are cached on repeat access, which avoids eager one-time startup scans downloading every SST.
+- **Bounded stale metadata**: Never-downloaded stale SST entries are capped and oldest metadata-only entries are pruned to prevent unbounded cache index growth.
 
 For detailed configuration examples and advanced usage patterns, see the [Azure Plugin Documentation](src/AVEVA/RocksDB/Plugin/Azure/README.md).
 
