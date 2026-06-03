@@ -11,9 +11,35 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Logger.hpp"
 
 #include <boost/log/trivial.hpp>
+#include <sstream>
+#include <string_view>
 namespace AVEVA::RocksDB::Plugin::Azure
 {
     using namespace boost::log::trivial;
+    namespace
+    {
+        std::string FormatRequestFailedLogMessage(const ::Azure::Core::RequestFailedException& ex, const std::string_view path = {})
+        {
+            std::ostringstream formattedMessage;
+            formattedMessage << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") ";
+
+            if (!path.empty())
+            {
+                if (ex.StatusCode == ::Azure::Core::Http::HttpStatusCode::NotFound)
+                {
+                    formattedMessage << "Blob/path '" << path << "' not found. ";
+                }
+                else
+                {
+                    formattedMessage << "Blob/path '" << path << "'. ";
+                }
+            }
+
+            formattedMessage << ex.Message;
+            return formattedMessage.str();
+        }
+    }
+
     BlobFilesystem::BlobFilesystem(std::shared_ptr<rocksdb::FileSystem> rocksdbFs, std::unique_ptr<Impl::BlobFilesystemImpl> filesystem, std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
         : rocksdb::FileSystemWrapper(std::move(rocksdbFs)),
         m_filesystem(std::move(filesystem)),
@@ -47,7 +73,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex, f);
             return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
         }
         catch (const std::exception& ex)
@@ -73,7 +99,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex, f);
             return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
         }
         catch (const std::exception& ex)
@@ -99,7 +125,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex, f);
             return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
         }
         catch (const std::exception& ex)
@@ -125,7 +151,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex, fname);
             return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
         }
         catch (const std::exception& ex)
@@ -152,7 +178,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex, fname);
             return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
         }
         catch (const std::exception& ex)
@@ -178,7 +204,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex, fname);
             return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
         }
         catch (const std::exception& ex)
@@ -210,7 +236,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex, name);
             return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
         }
         catch (const std::exception& ex)
@@ -241,7 +267,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex, f);
             return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
         }
         catch (const std::exception& ex)
@@ -267,7 +293,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex, dir);
             return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
         }
         catch (const std::exception& ex)
@@ -301,7 +327,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex, dir);
             return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
         }
         catch (const std::exception& ex)
@@ -332,7 +358,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex, f);
             return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
         }
         catch (const std::exception& ex)
@@ -359,7 +385,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex, fname);
             return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
         }
         catch (const std::exception& ex)
@@ -406,7 +432,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex, d);
             return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
         }
         catch (const std::exception& ex)
@@ -434,7 +460,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex, f);
             return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
         }
         catch (const std::exception& ex)
@@ -460,7 +486,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex, fname);
             return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
         }
         catch (const std::exception& ex)
@@ -496,7 +522,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex) << " (RenameFile: source='" << s << "', target='" << t << "')";
             return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
         }
         catch (const std::exception& ex)
@@ -551,7 +577,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex, f);
             return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
         }
         catch (const std::exception& ex)
@@ -585,7 +611,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex);
             return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
         }
         catch (const std::exception& ex)
@@ -619,7 +645,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         }
         catch (const ::Azure::Core::RequestFailedException& ex)
         {
-            BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+            BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex, fname);
             return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
         }
         catch (const std::exception& ex)
