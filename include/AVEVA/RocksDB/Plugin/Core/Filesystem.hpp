@@ -5,6 +5,8 @@
 #include "AVEVA/RocksDB/Plugin/Core/File.hpp"
 #include <filesystem>
 #include <memory>
+#include <optional>
+#include <string>
 namespace AVEVA::RocksDB::Plugin::Core
 {
     class Filesystem
@@ -18,10 +20,12 @@ namespace AVEVA::RocksDB::Plugin::Core
         virtual bool CreateDir(const std::filesystem::path& path) = 0;
 
         /// <summary>
-        /// Returns a read-only memory-mapped view of the file at <paramref name="path"/>.
-        /// Returns <c>nullptr</c> if the file does not exist or cannot be mapped.
+        /// Reads the entire contents of the file at <paramref name="path"/> into a string.
+        /// Returns <c>std::nullopt</c> if the file does not exist, cannot be opened, or a
+        /// read error occurs.
         /// </summary>
-        virtual std::unique_ptr<MappedFileView> MapReadOnly(const std::filesystem::path& path) noexcept = 0;
+        virtual std::optional<std::string> ReadFileContents(
+            const std::filesystem::path& path) noexcept = 0;
 
         /// <summary>
         /// Atomically writes <paramref name="size"/> bytes from <paramref name="data"/> to

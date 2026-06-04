@@ -165,7 +165,6 @@ protected:
         m_fs = std::make_shared<AVEVA::RocksDB::Plugin::Core::LocalFilesystem>();
         m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs,
             FileBasedCompressedSecondaryCache::kDefaultCapacity,
-            FileBasedCompressedSecondaryCache::kDefaultZstdLevel,
             MakeNullLogger());
     }
 

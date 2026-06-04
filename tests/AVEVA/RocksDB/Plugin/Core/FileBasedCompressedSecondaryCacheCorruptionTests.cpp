@@ -9,7 +9,7 @@
 TEST_F(FileBasedCompressedSecondaryCacheTests, EvictedEntryFileIsDeletedFromDisk)
 {
     const size_t capacity = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, FileBasedCompressedSecondaryCache::kDefaultZstdLevel, MakeNullLogger());
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, MakeNullLogger());
 
     const std::string key1 = "evict_disk_k1";
     const std::string key2 = "evict_disk_k2";
@@ -35,7 +35,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, EvictedEntryFileIsDeletedFromDisk
 TEST_F(FileBasedCompressedSecondaryCacheTests, EvictedEntryLeavesNoGraveyardFile)
 {
     const size_t capacity = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, FileBasedCompressedSecondaryCache::kDefaultZstdLevel, MakeNullLogger());
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, MakeNullLogger());
 
     TestPayload p1{"0123456789"}; // fills capacity exactly
     TestPayload p2{"abcdefghij"}; // evicts p1 via RemoveEntryLocked → rename → delete
@@ -98,83 +98,8 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, SetCapacityLeavesNoGraveyardFiles
 }
 
 // --------------------------------------------------------------------------
-// Corrupting the magic bytes in the file header causes Lookup to return
-// nullptr and removes the entry from the index
-// --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, CorruptMagicNumber_RejectedOnLookup)
-{
-    const std::string keyStr = "corrupt_magic_key";
-    TestPayload payload{"data for magic corruption test"};
-
-    ASSERT_TRUE(m_cache->Insert(MakeKey(keyStr), &payload, &m_helper, true).ok());
-
-    std::string hex;
-    boost::algorithm::hex_lower(keyStr.begin(), keyStr.end(), std::back_inserter(hex));
-    const auto filePath = m_cacheDir / hex;
-
-    // Flip a byte in the magic field (offset 0).
-    {
-        std::fstream f(filePath, std::ios::binary | std::ios::in | std::ios::out);
-        ASSERT_TRUE(f.is_open()) << "Cache file not found: " << filePath;
-        f.seekg(0);
-        char b = 0;
-        f.read(&b, 1);
-        f.seekp(0);
-        f.put(static_cast<char>(~static_cast<unsigned char>(b)));
-    }
-
-    bool kept = false;
-    auto handle = m_cache->Lookup(MakeKey(keyStr), &m_helper,
-                                  nullptr, true, false, nullptr, kept);
-    EXPECT_EQ(handle, nullptr) << "Corrupt magic must cause Lookup to return nullptr";
-    EXPECT_FALSE(kept);
-
-    // Entry must have been removed from the index.
-    auto handle2 = m_cache->Lookup(MakeKey(keyStr), &m_helper,
-                                   nullptr, true, false, nullptr, kept);
-    EXPECT_EQ(handle2, nullptr);
-}
-
-// --------------------------------------------------------------------------
-// Corrupting the version byte in the file header causes Lookup to return
-// nullptr and removes the entry from the index
-// --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, CorruptVersionByte_RejectedOnLookup)
-{
-    const std::string keyStr = "corrupt_version_key";
-    TestPayload payload{"data for version corruption test"};
-
-    ASSERT_TRUE(m_cache->Insert(MakeKey(keyStr), &payload, &m_helper, true).ok());
-
-    std::string hex;
-    boost::algorithm::hex_lower(keyStr.begin(), keyStr.end(), std::back_inserter(hex));
-    const auto filePath = m_cacheDir / hex;
-
-    // The version byte is at offset 8 (after the 8-byte magic).
-    constexpr std::streamoff kVersionOffset = 8;
-    {
-        std::fstream f(filePath, std::ios::binary | std::ios::in | std::ios::out);
-        ASSERT_TRUE(f.is_open()) << "Cache file not found: " << filePath;
-        f.seekp(kVersionOffset);
-        // Write an invalid version (0xFF) instead of the expected version (1).
-        f.put(static_cast<char>(0xFF));
-    }
-
-    bool kept = false;
-    auto handle = m_cache->Lookup(MakeKey(keyStr), &m_helper,
-                                  nullptr, true, false, nullptr, kept);
-    EXPECT_EQ(handle, nullptr) << "Corrupt version must cause Lookup to return nullptr";
-    EXPECT_FALSE(kept);
-
-    // Entry must have been removed from the index.
-    auto handle2 = m_cache->Lookup(MakeKey(keyStr), &m_helper,
-                                   nullptr, true, false, nullptr, kept);
-    EXPECT_EQ(handle2, nullptr);
-}
-
-// --------------------------------------------------------------------------
-// A truncated file (contains only the header, no payload data) causes
-// Lookup to return nullptr and removes the entry from the index
+// An empty file (0 bytes) cannot provide the 1-byte type prefix; Lookup
+// must return nullptr and remove the entry from the index
 // --------------------------------------------------------------------------
 TEST_F(FileBasedCompressedSecondaryCacheTests, TruncatedFile_RejectedOnLookup)
 {
@@ -187,29 +112,16 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, TruncatedFile_RejectedOnLookup)
     boost::algorithm::hex_lower(keyStr.begin(), keyStr.end(), std::back_inserter(hex));
     const auto filePath = m_cacheDir / hex;
 
-    // Read the original 18-byte header from the valid file.
-    constexpr std::uintmax_t kHeaderSize = 18;
-    std::array<char, kHeaderSize> headerBuf{};
-    {
-        std::ifstream f(filePath, std::ios::binary);
-        ASSERT_TRUE(f.is_open());
-        f.read(headerBuf.data(), kHeaderSize);
-        ASSERT_TRUE(f.good());
-    }
-
-    // Rewrite the file with only the header (no payload).
-    // The header's dataSize field still claims a non-zero payload, which will
-    // fail the (dataSize + headerSize > mappedSize) validation in Lookup.
+    // Truncate the file to zero bytes so the 1-byte type prefix is missing.
     {
         std::ofstream f(filePath, std::ios::binary | std::ios::trunc);
         ASSERT_TRUE(f.is_open());
-        f.write(headerBuf.data(), kHeaderSize);
     }
 
     bool kept = false;
     auto handle = m_cache->Lookup(MakeKey(keyStr), &m_helper,
                                   nullptr, true, false, nullptr, kept);
-    EXPECT_EQ(handle, nullptr) << "Truncated file must cause Lookup to return nullptr";
+    EXPECT_EQ(handle, nullptr) << "Empty file must cause Lookup to return nullptr";
     EXPECT_FALSE(kept);
 
     // Entry must have been removed from the index.

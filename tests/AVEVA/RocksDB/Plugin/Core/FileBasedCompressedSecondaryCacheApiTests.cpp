@@ -83,14 +83,13 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, GetUsageReflectsCurrentSize)
     ASSERT_TRUE(m_cache->GetUsage(usage).ok());
     EXPECT_EQ(usage, 0u) << "Empty cache must report zero usage";
 
-    // 1 KiB of identical bytes — definitely compressible by zstd.
     const std::string data(1024, 'Z');
     TestPayload p1{data};
     ASSERT_TRUE(m_cache->Insert(MakeKey("usage_k1"), &p1, &m_helper, true).ok());
 
     ASSERT_TRUE(m_cache->GetUsage(usage).ok());
-    EXPECT_GT(usage, 0u) << "Usage must be non-zero after an insert";
-    EXPECT_LT(usage, data.size()) << "On-disk usage (compressed data + header) must be less than raw payload size for compressible data";
+    EXPECT_EQ(usage, FileBasedCompressedSecondaryCache::kFileHeaderSize + data.size())
+        << "Usage must equal kFileHeaderSize + payload size after insert";
 
     m_cache->Erase(MakeKey("usage_k1"));
 
@@ -183,7 +182,6 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConstructorCleansStaleDirectory)
     // Re-construct the cache over the same directory.
     m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs,
         FileBasedCompressedSecondaryCache::kDefaultCapacity,
-        FileBasedCompressedSecondaryCache::kDefaultZstdLevel,
         MakeNullLogger());
 
     // The stale file must have been removed by the constructor.

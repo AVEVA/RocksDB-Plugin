@@ -29,9 +29,9 @@ namespace AVEVA::RocksDB::Plugin::Core
         bool DeleteDir(const std::filesystem::path& path) override;
         bool CreateDir(const std::filesystem::path& path) override;
 
-        /// <summary>Memory-maps <paramref name="path"/> read-only using
-        /// <c>boost::interprocess</c>.  Returns <c>nullptr</c> on failure.</summary>
-        std::unique_ptr<MappedFileView> MapReadOnly(
+        /// <summary>Reads the entire contents of <paramref name="path"/> into a string using
+        /// standard buffered I/O.  Returns <c>std::nullopt</c> on any failure.</summary>
+        std::optional<std::string> ReadFileContents(
             const std::filesystem::path& path) noexcept override;
 
         /// <summary>Writes <paramref name="size"/> bytes to <paramref name="finalPath"/>
@@ -50,5 +50,10 @@ namespace AVEVA::RocksDB::Plugin::Core
 
         /// <summary>Monotonically increasing counter for unique staging file names.</summary>
         std::atomic<uint64_t> m_seq{0};
+
+        /// <summary>Writes all bytes to <paramref name="path"/> using standard buffered I/O.
+        /// Returns <c>true</c> on success.</summary>
+        static bool WriteAllBytesToFile(const std::filesystem::path& path,
+                                        const char* data, size_t size) noexcept;
     };
 }

@@ -50,14 +50,14 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentSameKeyInsert_UsageAcco
 // --------------------------------------------------------------------------
 TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentDifferentKeyInserts_UsageWithinCapacity)
 {
-    // 10-byte payloads: at this size zstd adds overhead so entries are stored
-    // uncompressed, giving a predictable on-disk size of (kFileHeaderSize + 10) bytes each.
+    // 10-byte payloads: entries are stored with a 1-byte header prefix, giving a
+    // predictable on-disk size of (kFileHeaderSize + 10) bytes each.
     constexpr size_t kEntrySize = 10;
     constexpr int    kThreadCount = 16;
 
     // Capacity allows exactly 3 entries; the remaining 13 must be evicted.
     const size_t capacity = 3 * (FileBasedCompressedSecondaryCache::kFileHeaderSize + kEntrySize);
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, FileBasedCompressedSecondaryCache::kDefaultZstdLevel, MakeNullLogger());
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, MakeNullLogger());
 
     std::vector<std::thread> threads;
     threads.reserve(kThreadCount);

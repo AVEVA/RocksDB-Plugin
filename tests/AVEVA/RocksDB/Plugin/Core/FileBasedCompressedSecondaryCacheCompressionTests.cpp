@@ -4,13 +4,11 @@
 #include "FileBasedCompressedSecondaryCacheTestHelpers.hpp"
 
 // --------------------------------------------------------------------------
-// Insert compresses compressible data — the on-disk file must be smaller
-// than the uncompressed payload plus the 18-byte file header
+// Insert stores data as-is: on-disk file size must equal kFileHeaderSize + payload
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, InsertCompressesCompressibleData)
+TEST_F(FileBasedCompressedSecondaryCacheTests, Insert_StoresDataAsIs)
 {
-    const std::string keyStr = "compress_size_key";
-    // 1 KiB of identical bytes — highly compressible.
+    const std::string keyStr = "store_asis_key";
     const std::string raw(1024, 'A');
     TestPayload payload{raw};
 
@@ -20,33 +18,17 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, InsertCompressesCompressibleData)
     boost::algorithm::hex_lower(keyStr.begin(), keyStr.end(), std::back_inserter(hex));
     const auto filePath = m_cacheDir / hex;
 
-    // 8 magic + 1 version + 1 compressionType + 8 dataSize = 18 bytes
-    constexpr std::uintmax_t kFileHeaderSize = 8 + 1 + 1 + 8;
     const std::uintmax_t fileSize = std::filesystem::file_size(filePath);
-
-    EXPECT_LT(fileSize, kFileHeaderSize + raw.size())
-        << "Expected compressed file (" << fileSize << " B) to be smaller than "
-        << "header + uncompressed payload (" << kFileHeaderSize + raw.size() << " B)";
-
-    // Round-trip must still produce the original data.
-    bool kept = false;
-    auto handle = m_cache->Lookup(MakeKey(keyStr), &m_helper,
-                                  nullptr, true, false, nullptr, kept);
-    ASSERT_NE(handle, nullptr);
-    auto* result = static_cast<TestPayload*>(handle->Value());
-    ASSERT_NE(result, nullptr);
-    EXPECT_EQ(result->data, raw);
-    delete result;
+    EXPECT_EQ(fileSize, FileBasedCompressedSecondaryCache::kFileHeaderSize + raw.size())
+        << "File must be exactly kFileHeaderSize + payload bytes; no compression is applied";
 }
 
 // --------------------------------------------------------------------------
-// InsertSaved with kNoCompression compresses compressible data — on-disk file
-// must be smaller than header + raw payload size
+// InsertSaved stores data as-is regardless of the supplied CompressionType
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, InsertSavedWithNoCompressionCompressesCompressibleData)
+TEST_F(FileBasedCompressedSecondaryCacheTests, InsertSaved_StoresDataAsIs)
 {
-    const std::string keyStr = "insertsaved_compress_key";
-    // 1 KiB of identical bytes — highly compressible.
+    const std::string keyStr = "insertsaved_asis_key";
     const std::string raw(1024, 'B');
     const rocksdb::Slice saved(raw);
 
@@ -59,53 +41,42 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, InsertSavedWithNoCompressionCompr
     boost::algorithm::hex_lower(keyStr.begin(), keyStr.end(), std::back_inserter(hex));
     const auto filePath = m_cacheDir / hex;
 
-    // 8 magic + 1 version + 1 compressionType + 8 dataSize = 18 bytes
-    constexpr std::uintmax_t kFileHeaderSize = 8 + 1 + 1 + 8;
     const std::uintmax_t fileSize = std::filesystem::file_size(filePath);
-
-    EXPECT_LT(fileSize, kFileHeaderSize + raw.size())
-        << "InsertSaved with kNoCompression should compress compressible data; "
-        << "file (" << fileSize << " B) must be smaller than header + raw payload ("
-        << kFileHeaderSize + raw.size() << " B)";
-
-    // Round-trip must still produce the original data.
-    bool kept = false;
-    auto handle = m_cache->Lookup(MakeKey(keyStr), &m_helper,
-                                  nullptr, true, false, nullptr, kept);
-    ASSERT_NE(handle, nullptr);
-    auto* result = static_cast<TestPayload*>(handle->Value());
-    ASSERT_NE(result, nullptr);
-    EXPECT_EQ(result->data, raw);
-    delete result;
+    EXPECT_EQ(fileSize, FileBasedCompressedSecondaryCache::kFileHeaderSize + raw.size())
+        << "InsertSaved must store data as-is; no compression is applied by the cache";
 }
 
 // --------------------------------------------------------------------------
-// A non-default zstd level is accepted and produces a correct round-trip
+// The 1-byte compression type prefix is preserved across a round-trip.
+// InsertSaved with kSnappyCompression must hand the same type back to create_cb.
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, CustomZstdLevel_RoundTrips)
+TEST_F(FileBasedCompressedSecondaryCacheTests, CompressionType_PreservedOnRoundTrip)
 {
-    // Use level 9 (high compression) instead of the default level 1.
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(
-        m_cacheDir,
-        m_fs,
-        FileBasedCompressedSecondaryCache::kDefaultCapacity,
-        /*zstdLevel=*/9,
-        MakeNullLogger());
+    const std::string keyStr = "compression_type_key";
+    const std::string raw(64, 'C');
+    const rocksdb::Slice saved(raw);
 
-    // 1 KiB of repeated bytes — highly compressible, exercises the compression path.
-    const std::string raw(1024, 'X');
-    TestPayload payload{raw};
+    auto s = m_cache->InsertSaved(MakeKey(keyStr), saved,
+                                   rocksdb::CompressionType::kSnappyCompression,
+                                   rocksdb::CacheTier::kVolatileTier);
+    ASSERT_TRUE(s.ok()) << s.ToString();
 
-    ASSERT_TRUE(m_cache->Insert(MakeKey("zstd_level9_key"), &payload, &m_helper, true).ok());
+    // Use CapturingCreateCb to observe what compression type is passed to create_cb.
+    g_capturedCompressionType = rocksdb::CompressionType::kNoCompression;
+    rocksdb::Cache::CacheItemHelper capturingHelperNoSec{rocksdb::CacheEntryRole::kDataBlock, TestDeleteCb};
+    rocksdb::Cache::CacheItemHelper capturingHelper{
+        rocksdb::CacheEntryRole::kDataBlock,
+        TestDeleteCb,
+        TestSizeCb,
+        TestSaveToCb,
+        CapturingCreateCb,
+        &capturingHelperNoSec};
 
     bool kept = false;
-    auto handle = m_cache->Lookup(MakeKey("zstd_level9_key"), &m_helper,
+    auto handle = m_cache->Lookup(MakeKey(keyStr), &capturingHelper,
                                   nullptr, true, false, nullptr, kept);
     ASSERT_NE(handle, nullptr);
-    EXPECT_TRUE(kept);
-
-    auto* result = static_cast<TestPayload*>(handle->Value());
-    ASSERT_NE(result, nullptr);
-    EXPECT_EQ(result->data, raw);
-    delete result;
+    EXPECT_EQ(g_capturedCompressionType, rocksdb::CompressionType::kSnappyCompression)
+        << "The compression type stored in the 1-byte prefix must be handed to create_cb unchanged";
+    delete static_cast<TestPayload*>(handle->Value());
 }

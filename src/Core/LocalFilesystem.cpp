@@ -3,10 +3,11 @@
 
 #include "AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/LocalFile.hpp"
-#include "LocalIoUtil.hpp"
 
 #include <boost/log/trivial.hpp>
 #include <boost/scope/scope_exit.hpp>
+
+#include <fstream>
 
 namespace AVEVA::RocksDB::Plugin::Core
 {
@@ -69,10 +70,25 @@ namespace AVEVA::RocksDB::Plugin::Core
         return true;
     }
 
-    std::unique_ptr<MappedFileView> LocalFilesystem::MapReadOnly(
+    std::optional<std::string> LocalFilesystem::ReadFileContents(
         const std::filesystem::path& path) noexcept
     {
-        return LocalIoUtil::MapFileReadOnly(path);
+        try
+        {
+            std::ifstream f(path, std::ios::in | std::ios::binary | std::ios::ate);
+            if (!f.is_open()) return std::nullopt;
+            const auto size = f.tellg();
+            if (size < 0) return std::nullopt;
+            std::string contents(static_cast<size_t>(size), '\0');
+            f.seekg(0);
+            f.read(contents.data(), size);
+            if (!f) return std::nullopt;
+            return contents;
+        }
+        catch (...)
+        {
+            return std::nullopt;
+        }
     }
 
     bool LocalFilesystem::WriteFileAtomic(
@@ -92,7 +108,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                 std::filesystem::remove(stagingPath, ec);
                 });
 
-            if (!LocalIoUtil::WriteAllBytesToFile(stagingPath, data, size))
+            if (!WriteAllBytesToFile(stagingPath, data, size))
                 return false;
 
             std::error_code ec;
@@ -115,5 +131,22 @@ namespace AVEVA::RocksDB::Plugin::Core
         std::error_code ec;
         std::filesystem::rename(from, to, ec);
         return !ec;
+    }
+
+    bool LocalFilesystem::WriteAllBytesToFile(
+        const std::filesystem::path& path,
+        const char* data, size_t size) noexcept
+    {
+        try
+        {
+            std::ofstream f(path, std::ios::out | std::ios::binary | std::ios::trunc);
+            if (!f.is_open()) return false;
+            f.write(data, static_cast<std::streamsize>(size));
+            return f.good();
+        }
+        catch (...)
+        {
+            return false;
+        }
     }
 }

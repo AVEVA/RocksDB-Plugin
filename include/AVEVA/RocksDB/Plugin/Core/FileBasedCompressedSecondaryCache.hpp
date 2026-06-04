@@ -32,12 +32,12 @@ namespace AVEVA::RocksDB::Plugin::Core
     {
     public:
         static constexpr size_t kDefaultCapacity = 512ULL * 1024 * 1024; // 512 MiB
-        static constexpr int kDefaultZstdLevel = 1;
 
         /// <summary>
-        /// On-disk overhead per entry.
+        /// Per-entry on-disk overhead: one byte stores the RocksDB CompressionType
+        /// of the payload so it can be faithfully restored on lookup.
         /// </summary>
-        static constexpr size_t kFileHeaderSize = 18;
+        static constexpr size_t kFileHeaderSize = 1;
 
         /// <summary>
         /// Constructs the cache.
@@ -48,12 +48,10 @@ namespace AVEVA::RocksDB::Plugin::Core
         /// <c>LocalFilesystem</c> for production use or a mock for testing.
         /// </param>
         /// <param name="capacity">Maximum number of bytes of entry data stored on disk.</param>
-        /// <param name="zstdLevel">zstd compression level (1–22); 1 is fastest, higher values trade CPU for ratio.</param>
         /// <param name="logger">A logger implementation.</param>
         explicit FileBasedCompressedSecondaryCache(std::filesystem::path cacheDir,
             std::shared_ptr<Filesystem> fs,
             size_t capacity,
-            int zstdLevel,
             std::shared_ptr<boost::log::sources::severity_logger_mt<
             boost::log::trivial::severity_level>> logger);
 
@@ -85,11 +83,11 @@ namespace AVEVA::RocksDB::Plugin::Core
             const rocksdb::Cache::CacheItemHelper* helper,
             bool forceInsert) noexcept override;
 
-        /// <summary>Writes pre-serialized data (possibly already compressed) to disk.</summary>
+        /// <summary>Writes pre-serialized data (possibly already compressed by RocksDB) to disk.</summary>
         /// <param name="key">The key identifying the cache entry.</param>
-        /// <param name="saved">A slice containing the pre-serialized (and possibly already compressed) payload to store.</param>
+        /// <param name="saved">A slice containing the pre-serialized payload to store.</param>
         /// <param name="type">The compression type of the provided payload.</param>
-        /// <param name="source">The cache tier that produced the saved payload (for accounting or metadata purposes).</param>
+        /// <param name="source">The cache tier that produced the saved payload.</param>
         rocksdb::Status InsertSaved(const rocksdb::Slice& key,
             const rocksdb::Slice& saved,
             rocksdb::CompressionType type,

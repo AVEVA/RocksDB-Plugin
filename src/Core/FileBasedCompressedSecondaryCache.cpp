@@ -4,11 +4,7 @@
 #include "AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
 
 #include "LruFileIndex.hpp"
-#include "MapEntryResult.hpp"
-#include "ParsedHeader.hpp"
-#include "FileFormat.hpp"
 #include "ResultHandle.hpp"
-#include "ZstdCodec.hpp"
 
 #include <rocksdb/advanced_options.h>
 #include <rocksdb/slice.h>
@@ -20,9 +16,11 @@
 
 #include <boost/container/small_vector.hpp>
 
+#include <cstdint>
 #include <cstring>
 #include <iterator>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -31,9 +29,6 @@
 namespace AVEVA::RocksDB::Plugin::Core
 {
     using namespace boost::log::trivial;
-    static_assert(sizeof(FileFormat::Header) == FileBasedCompressedSecondaryCache::kFileHeaderSize,
-        "FileFormat::Header size must match the public kFileHeaderSize constant");
-
 
     /// <summary>Filesystem path helpers and best-effort file deletion.</summary>
     struct FileUtil
@@ -86,19 +81,30 @@ namespace AVEVA::RocksDB::Plugin::Core
     {
         std::filesystem::path m_cacheDir;
         std::shared_ptr<Filesystem> m_fs;
-        int m_zstdLevel;
         LruFileIndex m_lruIndex;
         std::shared_ptr<boost::log::sources::severity_logger_mt<
             boost::log::trivial::severity_level>> m_logger;
+
+        /// <summary>
+        /// Result of attempting to read a cache entry file.
+        /// When status is Ok, contents holds the raw file bytes.
+        /// The pin prevents LRU eviction while the caller processes the data.
+        /// </summary>
+        struct ReadEntryResult
+        {
+            enum class Status { Miss, Corrupt, Ok };
+            Status status;
+            std::string contents;
+            std::optional<LruFileIndex::ScopedPin> pin;
+        };
 
     public:
         explicit Impl(std::filesystem::path cacheDir,
             std::shared_ptr<Filesystem> fs,
             size_t capacity,
-            int zstdLevel,
             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
             : m_cacheDir(std::move(cacheDir)),
-            m_fs(std::move(fs)), m_zstdLevel(zstdLevel),
+            m_fs(std::move(fs)),
             m_lruIndex(m_cacheDir.string(), capacity),
             m_logger(std::move(logger))
         {
@@ -112,7 +118,7 @@ namespace AVEVA::RocksDB::Plugin::Core
 
             BOOST_LOG_SEV(*m_logger, info)
                 << "FileBasedCompressedSecondaryCache: initialized dir='" << m_cacheDir.string()
-                << "', capacity=" << capacity << " bytes, zstd_level=" << zstdLevel;
+                << "', capacity=" << capacity << " bytes";
         }
 
         const char* Name() const noexcept
@@ -150,9 +156,8 @@ namespace AVEVA::RocksDB::Plugin::Core
                     return s;
                 }
 
-                const auto compressed = ZstdCodec::MaybeCompress(buf.data(), dataSize, m_zstdLevel,
-                    FileFormat::kMinCompressibleSize, FileFormat::zstdCompression);
-                return WriteEntry(key, compressed.type, compressed.data, compressed.size, forceInsert);
+                return WriteEntry(key, rocksdb::CompressionType::kNoCompression,
+                                  buf.data(), dataSize, forceInsert);
             }
             catch (...)
             {
@@ -214,12 +219,12 @@ namespace AVEVA::RocksDB::Plugin::Core
                 const auto filename = KeyToFilename(key);
                 const std::string pathStr = m_lruIndex.MakePath(filename);
 
-                auto mapResult = MapEntryForRead(filename, pathStr);
-                if (mapResult.status == MapEntryResult::Status::Miss)
+                auto readResult = ReadEntryForLookup(filename, pathStr);
+                if (readResult.status == ReadEntryResult::Status::Miss)
                 {
                     return nullptr;
                 }
-                else if (mapResult.status == MapEntryResult::Status::Corrupt)
+                else if (readResult.status == ReadEntryResult::Status::Corrupt)
                 {
                     CleanupCorruptEntry(filename);
                     return nullptr;
@@ -259,45 +264,23 @@ namespace AVEVA::RocksDB::Plugin::Core
                         CleanupCorruptEntry(filename);
                     });
 
-                const auto parsedHeader = ValidateHeader(mapResult.view->Data(), mapResult.view->Size());
-                if (!parsedHeader)
+                // File format: [1-byte compression type][payload bytes]
+                const auto& contents = readResult.contents;
+                if (contents.empty())
                 {
                     BOOST_LOG_SEV(*m_logger, warning)
-                        << "FileBasedCompressedSecondaryCache: header validation failed for '" << filename << "'";
+                        << "FileBasedCompressedSecondaryCache: file empty for indexed entry '" << filename << "'";
                     return nullptr;
                 }
 
-                const auto& [compressionType, payload] = *parsedHeader;
-
-                std::string decompressed;
-                rocksdb::Slice dataSlice;
-                rocksdb::CompressionType effectiveType;
-                if (static_cast<uint8_t>(compressionType) == FileFormat::zstdCompression)
-                {
-                    try
-                    {
-                        decompressed = ZstdCodec::Decompress(payload.data(), payload.size());
-                    }
-                    catch (const std::runtime_error&)
-                    {
-                        BOOST_LOG_SEV(*m_logger, warning)
-                            << "FileBasedCompressedSecondaryCache: decompression failed for '" << filename << "'";
-                        return nullptr;
-                    }
-
-                    dataSlice = { decompressed.data(), decompressed.size() };
-                    effectiveType = rocksdb::CompressionType::kNoCompression;
-                }
-                else
-                {
-                    dataSlice = { payload.data(), payload.size() };
-                    effectiveType = compressionType;
-                }
+                const auto compressionType = static_cast<rocksdb::CompressionType>(
+                    static_cast<uint8_t>(contents[0]));
+                const rocksdb::Slice dataSlice{ contents.data() + 1, contents.size() - 1 };
 
                 rocksdb::Cache::ObjectPtr outObj = nullptr;
                 size_t outCharge = 0;
                 auto s = cacheItemHelper->create_cb(dataSlice,
-                    effectiveType,
+                    compressionType,
                     rocksdb::CacheTier::kNonVolatileBlockTier,
                     createContext,
                     /*allocator=*/nullptr,
@@ -474,7 +457,8 @@ namespace AVEVA::RocksDB::Plugin::Core
                 }
 
                 const auto filename = KeyToFilename(key);
-                const size_t storedSize = dataSize + sizeof(FileFormat::Header);
+                // storedSize includes the 1-byte compression type prefix
+                const size_t storedSize = dataSize + FileBasedCompressedSecondaryCache::kFileHeaderSize;
 
                 // Phase 1: lock, gate capacity, pin existing entry, schedule evictions.
                 //          Commit I/O (rename + delete) only after releasing the lock.
@@ -504,8 +488,8 @@ namespace AVEVA::RocksDB::Plugin::Core
 
         /// <summary>
         /// Phase 2 of WriteEntry — called with no lock held.
-        /// Builds the on-disk header, concatenates header and payload into a single buffer,
-        /// and writes it atomically to pathStr.
+        /// Writes a 1-byte compression type prefix followed by the raw payload in a single
+        /// atomic write call.
         /// </summary>
         [[nodiscard]] rocksdb::Status WriteToDisk(const std::string_view filename,
             const rocksdb::CompressionType type,
@@ -514,17 +498,11 @@ namespace AVEVA::RocksDB::Plugin::Core
             const size_t storedSize)
         {
             const std::string pathStr = m_lruIndex.MakePath(filename);
-            FileFormat::Header header{};
-            header.magic = FileFormat::magicFilePrefix;
-            header.version = FileFormat::kFileVersion;
-            header.compressionType = static_cast<uint8_t>(type);
-            header.dataSize = static_cast<uint64_t>(dataSize);
 
-            // Combine header and payload into a single buffer for one atomic write call.
-            // small_vector keeps entries up to ~4 KiB on the stack.
-            boost::container::small_vector<char, sizeof(FileFormat::Header) + 4096> writeBuf(storedSize);
-            std::memcpy(writeBuf.data(), &header, sizeof(header));
-            std::memcpy(writeBuf.data() + sizeof(header), data, dataSize);
+            // File format: [1-byte compression type][payload bytes]
+            boost::container::small_vector<char, 1 + 4096> writeBuf(storedSize);
+            writeBuf[0] = static_cast<char>(static_cast<uint8_t>(type));
+            std::memcpy(writeBuf.data() + 1, data, dataSize);
 
             if (!m_fs->WriteFileAtomic(pathStr, writeBuf.data(), writeBuf.size()))
             {
@@ -536,27 +514,29 @@ namespace AVEVA::RocksDB::Plugin::Core
             return rocksdb::Status::OK();
         }
 
-        /// <summary>Phase 1 of Lookup — pins the entry to prevent eviction during I/O, then maps the file.
-        /// The three outcomes are named explicitly in MapEntryResult::Status.</summary>
-        // MapEntryResult and ParsedHeader have been moved to their own headers.
-        [[nodiscard]] MapEntryResult MapEntryForRead(const std::string_view filename,
+        /// <summary>
+        /// Phase 1 of Lookup — pins the entry to prevent eviction during I/O, then reads
+        /// the file into memory.  The three outcomes are named explicitly in
+        /// ReadEntryResult::Status.
+        /// </summary>
+        [[nodiscard]] ReadEntryResult ReadEntryForLookup(const std::string_view filename,
             const std::string& pathStr)
         {
             auto pin = m_lruIndex.TryPin(filename);
             if (!pin)
             {
-                return { MapEntryResult::Status::Miss };
+                return { ReadEntryResult::Status::Miss };
             }
 
-            auto view = m_fs->MapReadOnly(pathStr);
-            if (!view)
+            auto contents = m_fs->ReadFileContents(pathStr);
+            if (!contents)
             {
                 BOOST_LOG_SEV(*m_logger, warning)
                     << "FileBasedCompressedSecondaryCache: file missing for indexed entry '" << filename << "'";
-                return { MapEntryResult::Status::Corrupt };
+                return { ReadEntryResult::Status::Corrupt };
             }
 
-            return { MapEntryResult::Status::Ok, std::move(view), std::move(pin) };
+            return { ReadEntryResult::Status::Ok, std::move(*contents), std::move(pin) };
         }
 
         /// <summary>Removes a corrupt or missing entry from the in-memory index and commits the eviction.
@@ -575,40 +555,6 @@ namespace AVEVA::RocksDB::Plugin::Core
                     << ": "
                     << StatusUtil::CurrentExceptionToStatus().ToString();
             }
-        }
-
-        /// <summary>Validates the on-disk header of a mapped cache entry.
-        /// Returns std::nullopt on any mismatch (magic, version, or bounds).</summary>
-        [[nodiscard]] std::optional<ParsedHeader> ValidateHeader(
-            const char* mapped,
-            const size_t mappedSize) noexcept
-        {
-            if (mappedSize < sizeof(FileFormat::Header))
-            {
-                return std::nullopt;
-            }
-
-            FileFormat::Header header;
-            std::memcpy(&header, mapped, sizeof(header));
-            if (header.magic.value() != FileFormat::magicFilePrefix)
-            {
-                return std::nullopt;
-            }
-
-            if (header.version.value() != FileFormat::kFileVersion)
-            {
-                return std::nullopt;
-            }
-
-            const auto dataSize = static_cast<size_t>(header.dataSize.value());
-            if (dataSize > mappedSize - sizeof(FileFormat::Header))
-            {
-                return std::nullopt;
-            }
-
-            const char* dataPtr = mapped + sizeof(FileFormat::Header);
-            const auto compressionType = static_cast<rocksdb::CompressionType>(header.compressionType.value());
-            return ParsedHeader{ compressionType, std::span<const char>(dataPtr, dataSize) };
         }
 
         /// <summary>Records a secondary cache hit to RocksDB's statistics subsystem.</summary>
@@ -643,12 +589,10 @@ namespace AVEVA::RocksDB::Plugin::Core
         std::filesystem::path cacheDir,
         std::shared_ptr<Filesystem> fs,
         const size_t capacity,
-        const int zstdLevel,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
         : m_impl(std::make_unique<Impl>(std::move(cacheDir),
             std::move(fs),
             capacity,
-            zstdLevel,
             std::move(logger)))
     {
     }
@@ -700,7 +644,7 @@ namespace AVEVA::RocksDB::Plugin::Core
     void FileBasedCompressedSecondaryCache::WaitAll(
         std::vector<rocksdb::SecondaryCacheResultHandle*> handles) noexcept
     {
-        return m_impl->WaitAll(handles);
+        m_impl->WaitAll(std::move(handles));
     }
 
     rocksdb::Status FileBasedCompressedSecondaryCache::SetCapacity(const size_t capacity) noexcept

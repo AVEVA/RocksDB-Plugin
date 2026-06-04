@@ -85,7 +85,6 @@ protected:
             m_cacheDir,
             std::make_shared<AVEVA::RocksDB::Plugin::Core::LocalFilesystem>(m_logger),
             /*capacity=*/64ULL * 1024 * 1024,
-            AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache::kDefaultZstdLevel,
             m_logger);
 
         // 4 KiB primary block cache — small enough to evict SST blocks to secondary.
@@ -143,7 +142,6 @@ TEST_F(PluginSecondaryCacheIntegrationTests, SecondaryCache_InsertSaved_WritesFi
         m_cacheDir,
         std::make_shared<AVEVA::RocksDB::Plugin::Core::LocalFilesystem>(m_logger),
         /*capacity=*/64ULL * 1024 * 1024,
-        AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache::kDefaultZstdLevel,
         m_logger);
 
     // Key must be ≤ 32 bytes so its hex representation fits within
