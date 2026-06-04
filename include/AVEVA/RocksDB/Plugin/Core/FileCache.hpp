@@ -58,8 +58,10 @@ namespace AVEVA::RocksDB::Plugin::Core
     private:
         void BackgroundDownload(std::stop_token stopToken);
         void EntryAccessedUnsafe(FileCacheEntry& file);
+        void PruneUndownloadedStaleEntriesUnsafe();
         bool EvictAtLeast(int64_t bytes);
         void RemoveFileUnsafe(std::string_view filePath);
+        size_t CountUndownloadedStaleEntriesUnsafe() const noexcept;
         int64_t GetCurrentSizeUnsafe() const noexcept;
     };
 }

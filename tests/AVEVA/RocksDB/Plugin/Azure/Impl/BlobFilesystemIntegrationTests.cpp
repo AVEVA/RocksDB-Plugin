@@ -189,6 +189,46 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildren_WithFiles_ReturnsFileNames)
     EXPECT_TRUE(m_filesystem->DeleteFile(file3));
 }
 
+TEST_F(BlobFilesystemIntegrationTests, GetChildren_PathMatchesExistingBlobName_ReturnsNoChildren)
+{
+    // Arrange
+    const std::string filePath = m_containerPrefix + "/" + GenerateRandomBlobName("LOCK");
+    {
+        auto f = m_filesystem->CreateWriteableFile(filePath);
+    }
+
+    // Act
+    const auto children = m_filesystem->GetChildren(filePath);
+
+    // Assert - Listing a file path should not produce child entries.
+    EXPECT_TRUE(children.empty());
+
+    // Cleanup
+    EXPECT_TRUE(m_filesystem->DeleteFile(filePath));
+}
+
+TEST_F(BlobFilesystemIntegrationTests, GetChildren_DirectoryMarkerBlob_IgnoresEmptyEntry)
+{
+    // Arrange
+    const std::string dirPrefix = m_containerPrefix + "/marker-dir-" + GenerateRandomBlobName();
+    const std::string directoryMarker = dirPrefix + "/";
+    const std::string filePath = dirPrefix + "/file1.sst";
+    {
+        auto marker = m_filesystem->CreateWriteableFile(directoryMarker);
+        auto file = m_filesystem->CreateWriteableFile(filePath);
+    }
+
+    // Act
+    const auto children = m_filesystem->GetChildren(dirPrefix);
+
+    // Assert - The directory marker maps to an empty suffix and should not be returned.
+    EXPECT_EQ(1, children.size());
+    EXPECT_TRUE(std::find(children.begin(), children.end(), "file1.sst") != children.end());
+
+    // Cleanup
+    [[maybe_unused]] const auto remaining = m_filesystem->DeleteDir(dirPrefix);
+}
+
 TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_ReturnsCorrectSizes)
 {
     // Arrange
@@ -225,6 +265,24 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_ReturnsCorrectS
     // Cleanup
     EXPECT_TRUE(m_filesystem->DeleteFile(file1));
     EXPECT_TRUE(m_filesystem->DeleteFile(file2));
+}
+
+TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_PathMatchesExistingBlobName_ReturnsNoEntries)
+{
+    // Arrange - A file path should not be interpreted as a directory listing prefix.
+    const std::string filePath = m_containerPrefix + "/" + GenerateRandomBlobName("LOCK");
+    {
+        auto f = m_filesystem->CreateWriteableFile(filePath);
+    }
+
+    // Act
+    const auto attributes = m_filesystem->GetChildrenFileAttributes(filePath);
+
+    // Assert
+    EXPECT_TRUE(attributes.empty());
+
+    // Cleanup
+    EXPECT_TRUE(m_filesystem->DeleteFile(filePath));
 }
 
 TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_EmptyDirectory_ReturnsEmpty)

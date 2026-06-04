@@ -430,18 +430,22 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         opts.PageSizeHint = sizeHint;
         auto extractChildName = [&realPath](const auto& blob) -> std::string
             {
-                size_t startPos = blob.Name.find(realPath);
-                if (startPos != std::string::npos)
+                if (blob.Name.starts_with(realPath))
                 {
-                    auto index = startPos + realPath.length();
-                    assert(index < blob.Name.size());
+                    auto index = realPath.length();
+                    if (index >= blob.Name.size())
+                    {
+                        // Exact match (e.g. listing "LOCK" where a blob named "LOCK" exists).
+                        // There is no child entry to return.
+                        return {};
+                    }
 
                     if (blob.Name[index] == '/')
                     {
                         index++;
                     }
 
-                    return blob.Name.substr(index);
+                    return index < blob.Name.size() ? blob.Name.substr(index) : std::string{};
                 }
                 return {};
             };
@@ -488,8 +492,23 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         {
             for (const auto& blob : blobs.Blobs)
             {
+                if (blob.Name.size() <= realPath.length())
+                {
+                    continue;
+                }
+
+                auto index = realPath.length();
+                if (blob.Name[index] == '/')
+                {
+                    index++;
+                }
+                if (index >= blob.Name.size())
+                {
+                    continue;
+                }
+
                 const auto client = container.GetPageBlobClient(blob.Name);
-                attributes.emplace_back(BlobHelpers::GetFileSize(client), blob.Name.substr(realPath.length()));
+                attributes.emplace_back(BlobHelpers::GetFileSize(client), blob.Name.substr(index));
             }
 
             if (!blobs.NextPageToken.HasValue())

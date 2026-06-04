@@ -4,9 +4,15 @@
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/RocksDBHelpers.hpp"
 #include <boost/log/trivial.hpp>
+#include <vector>
 using namespace boost::log::trivial;
 namespace AVEVA::RocksDB::Plugin::Core
 {
+    namespace
+    {
+        constexpr size_t MaxUndownloadedStaleEntries = 2048;
+    }
+
     FileCache::FileCache(std::filesystem::path cachePath,
         int64_t maxCacheSize,
         std::shared_ptr<ContainerClient> containerClient,
@@ -83,20 +89,16 @@ namespace AVEVA::RocksDB::Plugin::Core
         auto it = m_cache.find(filePath);
         if (it == m_cache.end())
         {
-            // File not found, create a new entry
-            BOOST_LOG_SEV(*m_logger, debug) << "File not found in cache '" << filePath << "'";
+            // File not found in cache. The first access only records an entry and
+            // marks it stale. A subsequent access to the same SST queues download.
+            BOOST_LOG_SEV(*m_logger, debug) << "File not found in cache on first access '" << filePath << "'";
 
             auto [inserted, _] = m_cache.emplace(
                 std::piecewise_construct,
                 std::forward_as_tuple(std::string(filePath)),
                 std::forward_as_tuple(filePath, 0));
             m_entryList.push_front(inserted->second);
-
-            BOOST_LOG_SEV(*m_logger, debug) << "Queueing for download: '" << filePath << "'";
-            m_fileDownloadQueue.emplace(filePath);
-
-            lock.unlock();
-            m_cv.notify_one();
+            PruneUndownloadedStaleEntriesUnsafe();
             return std::nullopt;
         }
         else
@@ -108,7 +110,7 @@ namespace AVEVA::RocksDB::Plugin::Core
                 const auto state = fileEntry.GetState();
                 if (state == FileCacheEntry::State::Stale)
                 {
-                    BOOST_LOG_SEV(*m_logger, debug) << "File is stale. Queueing for redownload: '" << filePath << "'";
+                    BOOST_LOG_SEV(*m_logger, debug) << "File is stale. Queueing for download: '" << filePath << "'";
                     m_fileDownloadQueue.emplace(filePath);
 
                     // Mark as downloading now so we don't queue it again.
@@ -361,6 +363,33 @@ namespace AVEVA::RocksDB::Plugin::Core
         m_entryList.push_front(file);
     }
 
+    void FileCache::PruneUndownloadedStaleEntriesUnsafe()
+    {
+        auto staleEntries = CountUndownloadedStaleEntriesUnsafe();
+        if (staleEntries <= MaxUndownloadedStaleEntries)
+        {
+            return;
+        }
+
+        std::vector<std::string> staleEntriesToRemove;
+        staleEntriesToRemove.reserve(staleEntries - MaxUndownloadedStaleEntries);
+
+        for (auto it = m_entryList.rbegin(); it != m_entryList.rend() && staleEntries > MaxUndownloadedStaleEntries; ++it)
+        {
+            if (it->GetState() == FileCacheEntry::State::Stale && it->GetSize() == 0)
+            {
+                staleEntriesToRemove.push_back(it->GetFilePath());
+                staleEntries--;
+            }
+        }
+
+        for (const auto& staleEntry : staleEntriesToRemove)
+        {
+            BOOST_LOG_SEV(*m_logger, debug) << "Pruning stale metadata-only entry '" << staleEntry << "'";
+            RemoveFileUnsafe(staleEntry);
+        }
+    }
+
     bool FileCache::EvictAtLeast(const int64_t bytes)
     {
         if (bytes > m_maxSize)
@@ -431,5 +460,18 @@ namespace AVEVA::RocksDB::Plugin::Core
 
         return size;
     }
-}
 
+    size_t FileCache::CountUndownloadedStaleEntriesUnsafe() const noexcept
+    {
+        size_t count = 0;
+        for (const auto& entry : m_entryList)
+        {
+            if (entry.GetState() == FileCacheEntry::State::Stale && entry.GetSize() == 0)
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+}
