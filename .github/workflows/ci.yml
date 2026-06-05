@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - "feature/**"
+      - "jss/**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            preset: WindowsDebug
+            build_config: Debug
+          - os: ubuntu-latest
+            preset: LinuxDebug
+            build_config: Debug
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgJsonGlob: "**/vcpkg.json"
+
+      - name: Configure
+        shell: pwsh
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build/${{ matrix.preset }} --config ${{ matrix.build_config }}
+
+      - name: Test
+        shell: pwsh
+        run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure --build-config ${{ matrix.build_config }}

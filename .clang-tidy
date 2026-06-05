@@ -1,0 +1,14 @@
+---
+Checks: >
+  bugprone-*,
+  cppcoreguidelines-*,
+  modernize-*,
+  performance-*,
+  readability-*,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -readability-identifier-length
+WarningsAsErrors: '*'
+HeaderFilterRegex: '^(src|include)/'
+FormatStyle: file
+...

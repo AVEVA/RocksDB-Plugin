@@ -1,0 +1,30 @@
+#!/usr/bin/env sh
+set -e
+
+# Secret scanning with gitleaks if available.
+if command -v gitleaks >/dev/null 2>&1; then
+  if ! gitleaks protect --staged --verbose --redact; then
+    echo "gitleaks detected potential secrets in staged files. Commit blocked."
+    exit 1
+  fi
+fi
+
+clang_format_cmd="$(command -v clang-format 2>/dev/null || true)"
+if [ -z "$clang_format_cmd" ]; then
+  exit 0
+fi
+
+staged_files="$(git diff --cached --name-only --diff-filter=ACMR)"
+files_to_format="$(printf '%s\n' "$staged_files" | grep -E '\\.(c|cc|cpp|cxx|h|hh|hpp|hxx)$' || true)"
+
+if [ -z "$files_to_format" ]; then
+  exit 0
+fi
+
+echo "Running clang-format on staged C/C++ files..."
+printf '%s\n' "$files_to_format" | while IFS= read -r file; do
+  if [ -f "$file" ]; then
+    "$clang_format_cmd" -i --style=file "$file"
+    git add "$file"
+  fi
+done

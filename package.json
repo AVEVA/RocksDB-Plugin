@@ -1,0 +1,16 @@
+{
+  "name": "rocksdb-plugin-readiness",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Minimal metadata/config surface for readiness tooling.",
+  "scripts": {
+    "build": "echo \"Use CMake presets for native build\"",
+    "test": "echo \"Use ctest for native tests\"",
+    "lint": "eslint . --ext .js,.cjs,.mjs",
+    "format:check": "prettier --check \"**/*.{md,json,yml,yaml}\""
+  },
+  "devDependencies": {
+    "eslint": "^9.0.0",
+    "prettier": "^3.0.0"
+  }
+}
