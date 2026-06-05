@@ -278,6 +278,11 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, DeflateAndInflateCapacity)
 
     TestPayload p3{"ABCDEFGHIJ"};
     ASSERT_TRUE(m_cache->Insert(MakeKey("deflate_key3"), &p3, &m_helper, true).ok());
+
+    // deflate_key2 must still be present after Inflate restored capacity.
+    auto h2Again = m_cache->Lookup(MakeKey("deflate_key2"), &m_helper, nullptr, true, false, nullptr, kept);
+    ASSERT_NE(h2Again, nullptr) << "deflate_key2 must still be in the cache after Inflate";
+    delete static_cast<TestPayload*>(h2Again->Value());
 }
 
 // --------------------------------------------------------------------------

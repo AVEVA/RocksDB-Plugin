@@ -63,8 +63,9 @@ namespace AVEVA::RocksDB::Plugin::Core
         }
 
         // When not forced, skip the write rather than evicting a potentially more
-        // valuable entry.  Net-change accounting ensures a same-key update is never
-        // skipped even when the cache is exactly full.
+        // valuable entry.  Net-change accounting means a same-key update is skipped
+        // only when the new entry is strictly larger than the existing one and the
+        // delta would exceed capacity; equal-or-smaller replacements always proceed.
         if (!forceInsert && m_currentSize - existingSize + storedSize > m_capacity)
         {
             return std::nullopt;
@@ -81,13 +82,18 @@ namespace AVEVA::RocksDB::Plugin::Core
         // net new bytes required.  Restored before returning so m_currentSize stays
         // consistent on any failure path after this method returns.
         m_currentSize -= existingSize;
+
+        // If a single entry is larger than the entire capacity it can never fit,
+        // even after evicting everything.  Restore the size accounting and bail.
+        if (storedSize > m_capacity)
+        {
+            m_currentSize += existingSize;
+            return std::nullopt;
+        }
+
         if (m_currentSize + storedSize > m_capacity)
         {
-            // Determine the target size to evict down to so the new entry fits.
-            // If the new entry is larger than the total capacity, evict everything
-            // (target 0); otherwise evict down to (capacity - storedSize).
-            const size_t targetSize = (storedSize <= m_capacity) ? (m_capacity - storedSize) : 0;
-            EvictUntilSizeLocked(targetSize, evictPairs);
+            EvictUntilSizeLocked(m_capacity - storedSize, evictPairs);
         }
 
         m_currentSize += existingSize;
@@ -193,6 +199,15 @@ namespace AVEVA::RocksDB::Plugin::Core
 
     void LruFileIndex::EvictUntilSizeLocked(const size_t targetSize, EvictList& evictPairs)
     {
+        // Pre-reserve capacity for the worst-case number of evictions so that
+        // push_back cannot throw std::bad_alloc after entries have already been
+        // removed from the index, which would leave m_currentSize inconsistent.
+        if (m_currentSize > targetSize)
+        {
+            const size_t maxEvictions = m_lruList.size();
+            evictPairs.reserve(evictPairs.size() + maxEvictions);
+        }
+
         while (m_currentSize > targetSize)
         {
             // Find the LRU-most unpinned entry (scanning from the back of the list).

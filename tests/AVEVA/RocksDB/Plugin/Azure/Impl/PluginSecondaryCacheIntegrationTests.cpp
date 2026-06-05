@@ -79,7 +79,7 @@ protected:
     //   • the Azure plugin env from Plugin::Register
     //   • a fresh FileBasedCompressedSecondaryCache created via CreateFromString
     //   • a 4 KiB primary block cache (forces eviction to the secondary cache)
-    rocksdb::DB* OpenDb(bool createIfMissing = true)
+    std::unique_ptr<rocksdb::DB> OpenDb(bool createIfMissing = true)
     {
         auto secondaryCache = std::make_shared<AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache>(
             m_cacheDir,
@@ -103,7 +103,7 @@ protected:
 
         rocksdb::DB* db = nullptr;
         rocksdb::DB::Open(opts, m_dbPath, &db);
-        return db;
+        return std::unique_ptr<rocksdb::DB>(db);
     }
 };
 
@@ -113,7 +113,7 @@ protected:
 // ---------------------------------------------------------------------------
 TEST_F(PluginSecondaryCacheIntegrationTests, OpenDb_PutFlushGet_RoundTrips)
 {
-    auto* db = OpenDb();
+    auto db = OpenDb();
     ASSERT_NE(db, nullptr) << "Failed to open RocksDB with Azure plugin + secondary cache";
 
     ASSERT_TRUE(db->Put({}, "k1", "value_one").ok());
@@ -126,8 +126,6 @@ TEST_F(PluginSecondaryCacheIntegrationTests, OpenDb_PutFlushGet_RoundTrips)
 
     ASSERT_TRUE(db->Get({}, "k2", &val).ok());
     EXPECT_EQ(val, "value_two");
-
-    delete db;
 }
 
 // ---------------------------------------------------------------------------
@@ -176,20 +174,19 @@ TEST_F(PluginSecondaryCacheIntegrationTests, DataReadable_AfterDbReopenWithSameS
 
     // First open: write 20 entries and flush them to SST.
     {
-        auto* db = OpenDb(/*createIfMissing=*/true);
+        auto db = OpenDb(/*createIfMissing=*/true);
         ASSERT_NE(db, nullptr);
 
         for (int i = 0; i < 20; ++i)
             ASSERT_TRUE(db->Put({}, "reopen_key_" + std::to_string(i), expectedVal).ok());
 
         ASSERT_TRUE(db->Flush({}).ok());
-        delete db;
     }
 
     // Second open: primary cache is cold; reads that miss the primary cache are
     // served from the secondary cache before falling back to the SST on Azure.
     {
-        auto* db = OpenDb(/*createIfMissing=*/false);
+        auto db = OpenDb(/*createIfMissing=*/false);
         ASSERT_NE(db, nullptr) << "Failed to reopen RocksDB after initial write";
 
         for (int i = 0; i < 20; ++i)
@@ -199,6 +196,5 @@ TEST_F(PluginSecondaryCacheIntegrationTests, DataReadable_AfterDbReopenWithSameS
                 << "Key not found after reopen: reopen_key_" << i;
             EXPECT_EQ(val, expectedVal) << "Data mismatch for reopen_key_" << i;
         }
-        delete db;
     }
 }

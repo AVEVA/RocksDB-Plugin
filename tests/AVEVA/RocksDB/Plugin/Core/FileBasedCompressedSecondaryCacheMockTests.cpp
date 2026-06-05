@@ -78,3 +78,29 @@ TEST_F(FileBasedCompressedSecondaryCacheMockTests, ReadFileContentsFailure_Looku
     EXPECT_EQ(handle2, nullptr) << "Subsequent Lookup must also miss after index cleanup";
 }
 
+// --------------------------------------------------------------------------
+// [Mock I/O] InsertSaved calls WriteFileAtomic — verifies the cache writes
+// pre-serialised block data to disk when RocksDB hands it to the secondary tier.
+// --------------------------------------------------------------------------
+TEST_F(FileBasedCompressedSecondaryCacheMockTests, InsertSaved_CallsWriteFileAtomic)
+{
+    EXPECT_CALL(*m_mockFs, WriteFileAtomic(_, _, _))
+        .Times(1)
+        .WillOnce(Return(true));
+
+    auto cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_mockFs,
+        FileBasedCompressedSecondaryCache::kDefaultCapacity,
+        MakeNullLogger());
+
+    const std::string keyData(16, '\x42');
+    const std::string payload(64, 'X');
+
+    auto status = cache->InsertSaved(
+        rocksdb::Slice(keyData),
+        rocksdb::Slice(payload),
+        rocksdb::CompressionType::kNoCompression,
+        rocksdb::CacheTier::kVolatileTier);
+
+    EXPECT_TRUE(status.ok()) << status.ToString();
+}
+
