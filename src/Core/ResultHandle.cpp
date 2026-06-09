@@ -3,8 +3,6 @@
 
 #include "ResultHandle.hpp"
 
-#include <utility>
-
 namespace AVEVA::RocksDB::Plugin::Core
 {
     ResultHandle::ResultHandle(rocksdb::Cache::ObjectPtr value, size_t charge)
@@ -23,7 +21,9 @@ namespace AVEVA::RocksDB::Plugin::Core
 
     rocksdb::Cache::ObjectPtr ResultHandle::Value() noexcept
     {
-        return std::exchange(m_value, nullptr);
+        auto value = m_value;
+        m_value = nullptr;
+        return value;
     }
 
     size_t ResultHandle::Size() noexcept

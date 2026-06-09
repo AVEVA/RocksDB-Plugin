@@ -6,7 +6,6 @@
 #include <rocksdb/secondary_cache.h>
 
 #include <cstddef>
-#include <utility>
 
 namespace AVEVA::RocksDB::Plugin::Core
 {
@@ -47,9 +46,10 @@ namespace AVEVA::RocksDB::Plugin::Core
 
         /// <summary>
         /// Transfers ownership of the stored object pointer to the caller and
-        /// returns it. Subsequent calls return nullptr.
+        /// returns it. The caller is responsible for the pointer lifecycle after
+        /// this call. Subsequent calls return nullptr.
         /// </summary>
-        /// <returns>Pointer to the cached object or nullptr if already taken.</returns>
+        /// <returns>Pointer to the cached object, or nullptr if already taken.</returns>
         rocksdb::Cache::ObjectPtr Value() noexcept override;
 
         /// <summary>Returns the charge (size in bytes) of the stored object.</summary>
@@ -58,8 +58,9 @@ namespace AVEVA::RocksDB::Plugin::Core
 
     private:
         /// <summary>
-        /// Pointer to the reconstructed cache object. Ownership is transferred to
-        /// the caller by a call to <c>Value()</c> which sets this field to nullptr.
+        /// Pointer to the reconstructed cache object held until <c>Value()</c>
+        /// transfers ownership to the caller. This handle does not delete the
+        /// object and sets this field to nullptr after transfer.
         /// </summary>
         rocksdb::Cache::ObjectPtr m_value;
 
