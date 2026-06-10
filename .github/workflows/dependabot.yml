@@ -1,6 +1,10 @@
 name: Dependency Updates
 
 on:
+  push:
+    branches:
+      - main
+      - "jss/**"
   schedule:
     - cron: "0 11 * * 1" # Weekly Monday at 4 AM MST
   workflow_dispatch:
