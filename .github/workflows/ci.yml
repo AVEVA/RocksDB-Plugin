@@ -31,9 +31,15 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgJsonGlob: "**/vcpkg.json"
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git ${{ runner.temp }}/vcpkg
+          if ($IsWindows) {
+            & "${{ runner.temp }}/vcpkg/bootstrap-vcpkg.bat"
+          } else {
+            & "${{ runner.temp }}/vcpkg/bootstrap-vcpkg.sh"
+          }
+          echo "VCPKG_ROOT=${{ runner.temp }}/vcpkg" >> $env:GITHUB_ENV
 
       - name: Configure
         shell: pwsh
