@@ -74,9 +74,9 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         const auto result = m_client.Download(options, ::Azure::Core::Context{});
         const auto& content = result.Value;
 
-        auto bytesRead = content.BodyStream->ReadToCount(reinterpret_cast<uint8_t*>(buffer.data()), buffer.size());
+        auto bytesRead = static_cast<int64_t>(content.BodyStream->ReadToCount(reinterpret_cast<uint8_t*>(buffer.data()), buffer.size()));
 
-        assert(static_cast<int>(content.ContentRange.Length.ValueOr(-1)) == bytesRead && "Bytes read differ from server ContentRange");
+        assert(content.ContentRange.Length.ValueOr(-1) == bytesRead && "Bytes read differ from server ContentRange");
         return bytesRead;
     }
 }
