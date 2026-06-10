@@ -45,11 +45,10 @@ namespace AVEVA::RocksDB::Plugin::Core
         void Wait() noexcept override;
 
         /// <summary>
-        /// Transfers ownership of the stored object pointer to the caller and
-        /// returns it. The caller is responsible for the pointer lifecycle after
-        /// this call. Subsequent calls return nullptr.
+        /// Returns the stored object pointer. Ownership is transferred to the
+        /// caller; this handle does not manage the object's lifetime.
         /// </summary>
-        /// <returns>Pointer to the cached object, or nullptr if already taken.</returns>
+        /// <returns>Pointer to the cached object.</returns>
         rocksdb::Cache::ObjectPtr Value() noexcept override;
 
         /// <summary>Returns the charge (size in bytes) of the stored object.</summary>
@@ -59,8 +58,8 @@ namespace AVEVA::RocksDB::Plugin::Core
     private:
         /// <summary>
         /// Pointer to the reconstructed cache object held until <c>Value()</c>
-        /// transfers ownership to the caller. This handle does not delete the
-        /// object and sets this field to nullptr after transfer.
+        /// transfers ownership to the caller. This handle does not own or
+        /// delete the object.
         /// </summary>
         rocksdb::Cache::ObjectPtr m_value;
 

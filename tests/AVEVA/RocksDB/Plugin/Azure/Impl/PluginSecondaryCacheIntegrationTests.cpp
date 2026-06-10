@@ -101,9 +101,9 @@ protected:
         opts.create_if_missing = createIfMissing;
         opts.table_factory.reset(rocksdb::NewBlockBasedTableFactory(tableOpts));
 
-        rocksdb::DB* db = nullptr;
+        std::unique_ptr<rocksdb::DB> db;
         rocksdb::DB::Open(opts, m_dbPath, &db);
-        return std::unique_ptr<rocksdb::DB>(db);
+        return db;
     }
 };
 

@@ -21,9 +21,7 @@ namespace AVEVA::RocksDB::Plugin::Core
 
     rocksdb::Cache::ObjectPtr ResultHandle::Value() noexcept
     {
-        auto value = m_value;
-        m_value = nullptr;
-        return value;
+        return m_value;
     }
 
     size_t ResultHandle::Size() noexcept
