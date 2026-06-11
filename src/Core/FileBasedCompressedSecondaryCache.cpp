@@ -279,6 +279,10 @@ namespace AVEVA::RocksDB::Plugin::Core
 
                 rocksdb::Cache::ObjectPtr outObj = nullptr;
                 size_t outCharge = 0;
+                auto objCleanup = boost::scope::make_scope_exit([&] noexcept {
+                    if (outObj) cacheItemHelper->del_cb(outObj, /*allocator=*/nullptr);
+                    });
+
                 auto s = cacheItemHelper->create_cb(dataSlice,
                     compressionType,
                     rocksdb::CacheTier::kNonVolatileBlockTier,
@@ -290,10 +294,6 @@ namespace AVEVA::RocksDB::Plugin::Core
                 {
                     return nullptr;
                 }
-
-                auto objCleanup = boost::scope::make_scope_exit([&] noexcept {
-                    if (outObj) cacheItemHelper->del_cb(outObj, /*allocator=*/nullptr);
-                    });
 
                 RecordHitStats(stats, cacheItemHelper->role);
 

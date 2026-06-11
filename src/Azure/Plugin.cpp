@@ -17,7 +17,9 @@ namespace AVEVA::RocksDB::Plugin::Azure
         std::optional<Models::ServicePrincipalStorageInfo> backup,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         int64_t dataFileBufferSize,
-        int64_t dataFileInitialSize)
+        int64_t dataFileInitialSize,
+        std::optional<std::string_view> cachePath,
+        size_t maxCacheSize)
     {
         auto pluginName = std::string(Name) + primary.GetDbName();
         if (backup)
@@ -36,7 +38,9 @@ namespace AVEVA::RocksDB::Plugin::Azure
                             backup,
                             dataFileInitialSize,
                             dataFileBufferSize,
-                            logger
+                            logger,
+                            cachePath,
+                            maxCacheSize
                         );
 
                     *f = std::unique_ptr<rocksdb::FileSystem>(new BlobFilesystem(rocksdb::FileSystem::Default(), std::move(impl), logger));
@@ -54,7 +58,9 @@ namespace AVEVA::RocksDB::Plugin::Azure
         std::optional<Models::ChainedCredentialInfo> backup,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         int64_t dataFileBufferSize,
-        int64_t dataFileInitialSize)
+        int64_t dataFileInitialSize,
+        std::optional<std::string_view> cachePath,
+        size_t maxCacheSize)
     {
         auto pluginName = std::string(Name) + primary.GetDbName();
         if (backup)
@@ -73,7 +79,9 @@ namespace AVEVA::RocksDB::Plugin::Azure
                             backup,
                             dataFileInitialSize,
                             dataFileBufferSize,
-                            logger
+                            logger,
+                            cachePath,
+                            maxCacheSize
                         );
 
                     *f = std::unique_ptr<rocksdb::FileSystem>(new BlobFilesystem(rocksdb::FileSystem::Default(), std::move(impl), std::move(logger)));

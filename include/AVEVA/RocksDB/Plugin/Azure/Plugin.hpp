@@ -27,7 +27,9 @@ namespace AVEVA::RocksDB::Plugin::Azure
             std::optional<Models::ServicePrincipalStorageInfo> backup,
             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
-            int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize);
+            int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
+            std::optional<std::string_view> cachePath = std::nullopt,
+            size_t maxCacheSize = 0);
 
         /// <summary>
         /// Registers the Azure blob filesystem plugin with the RocksDB ObjectLibrary.
@@ -39,6 +41,8 @@ namespace AVEVA::RocksDB::Plugin::Azure
             std::optional<Models::ChainedCredentialInfo> backup,
             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
-            int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize);
+            int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
+            std::optional<std::string_view> cachePath = std::nullopt,
+            size_t maxCacheSize = 0);
     };
 }
