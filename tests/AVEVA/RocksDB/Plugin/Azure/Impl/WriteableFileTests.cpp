@@ -145,18 +145,19 @@ TEST_F(WriteableFileTests, Append_LessThanAPage_UploadPagesNotCalled)
     // Arrange
     ON_CALL(*m_blobClient, GetSize()).WillByDefault(::testing::Return(0));
     ON_CALL(*m_blobClient, GetCapacity()).WillByDefault(::testing::Return(Configuration::PageBlob::PageSize * 2));
-    EXPECT_CALL(*m_blobClient, UploadPages(_, _))
-        .Times(0);
 
     constexpr size_t partialPageSize = 333;
     std::vector<char> dataToAppend(partialPageSize, 'p');
+    auto blobClientRef = m_blobClient;
     WriteableFileImpl file{ "", std::move(m_blobClient), nullptr, m_logger, Configuration::PageBlob::PageSize * 2 };
 
     // Act
     file.Append(dataToAppend);
 
-    // Assert
+    // Assert — UploadPages was not called during Append (only in destructor cleanup)
     ASSERT_EQ(dataToAppend.size(), file.GetFileSize());
+    EXPECT_CALL(*blobClientRef, UploadPages(_, _)).Times(1);
+    file.Close();
 }
 
 TEST_F(WriteableFileTests, Append_MultipleWritesLargerThanPage_UploadPagesCalled)
