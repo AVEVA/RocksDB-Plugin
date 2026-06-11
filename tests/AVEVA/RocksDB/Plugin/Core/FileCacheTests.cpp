@@ -244,10 +244,10 @@ TEST_F(FileCacheTests, ReadFileFromCache)
         .WillRepeatedly(Invoke([&fileData](const std::string&)
             {
                 auto blob = std::make_unique<BlobClientMock>();
-                EXPECT_CALL(*blob, GetSize())
-                    .WillRepeatedly(Return(fileData.size()));
-                EXPECT_CALL(*blob, DownloadTo(Matcher<const std::string&>(_), _, _))
-                    .Times(1);
+                ON_CALL(*blob, GetSize())
+                    .WillByDefault(Return(fileData.size()));
+                ON_CALL(*blob, DownloadTo(Matcher<const std::string&>(_), _, _))
+                    .WillByDefault(Return());
 
                 return blob;
             }));

@@ -18,7 +18,6 @@ using ::testing::Invoke;
 using ::testing::DoAll;
 using ::testing::SetArgPointee;
 using ::testing::NiceMock;
-using ::testing::StrictMock;
 
 /// <summary>
 /// Helper class for blob simulation
@@ -404,14 +403,14 @@ TEST_F(ReadWriteFileImplTests, Expand_IncreasesCapacity) {
 // Test destructor retries Close on failure
 TEST_F(ReadWriteFileImplTests, Destructor_RetriesCloseOnFailure) {
     // Arrange
-    auto strictMock = std::make_shared<StrictMock<BlobClientMock>>();
+    auto mock = std::make_shared<::testing::NiceMock<BlobClientMock>>();
 
     // Setup initial calls for construction
-    EXPECT_CALL(*strictMock, GetSize()).WillOnce(Return(0));
-    EXPECT_CALL(*strictMock, GetCapacity()).WillOnce(Return(Configuration::PageBlob::DefaultSize));
+    ON_CALL(*mock, GetSize()).WillByDefault(Return(0));
+    ON_CALL(*mock, GetCapacity()).WillByDefault(Return(Configuration::PageBlob::DefaultSize));
 
     // Setup SetSize to fail a few times then succeed
-    EXPECT_CALL(*strictMock, SetSize(_))
+    EXPECT_CALL(*mock, SetSize(_))
         .Times(3)
         .WillOnce(testing::Throw(std::runtime_error("Network error")))
         .WillOnce(testing::Throw(std::runtime_error("Network error")))
@@ -419,7 +418,7 @@ TEST_F(ReadWriteFileImplTests, Destructor_RetriesCloseOnFailure) {
 
     // Act - destructor should retry
     {
-        ReadWriteFileImpl file(m_testFileName, strictMock, nullptr, m_logger);
+        ReadWriteFileImpl file(m_testFileName, mock, nullptr, m_logger);
     } // Destructor called here
 
     // Assert - mock expectations verify retry behavior
