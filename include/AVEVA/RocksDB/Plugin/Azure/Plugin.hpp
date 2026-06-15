@@ -16,6 +16,10 @@ namespace AVEVA::RocksDB::Plugin::Azure
     struct Plugin
     {
         static const constexpr std::string_view Name = "azblobfs";
+
+        /// <summary>
+        /// Registers the Azure blob filesystem plugin with the RocksDB ObjectLibrary.
+        /// </summary>
         static rocksdb::Status Register(rocksdb::ConfigOptions& configOptions,
             rocksdb::Env** env,
             std::shared_ptr<rocksdb::Env>* guard,
@@ -24,8 +28,12 @@ namespace AVEVA::RocksDB::Plugin::Azure
             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
             int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
-            std::optional<std::string_view> cachePath = {},
-            size_t maxCacheSize = Impl::Configuration::MaxCacheSize);
+            std::optional<std::string_view> cachePath = std::nullopt,
+            size_t maxCacheSize = 0);
+
+        /// <summary>
+        /// Registers the Azure blob filesystem plugin with the RocksDB ObjectLibrary.
+        /// </summary>
         static rocksdb::Status Register(rocksdb::ConfigOptions& configOptions,
             rocksdb::Env** env,
             std::shared_ptr<rocksdb::Env>* guard,
@@ -34,7 +42,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
             int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
-            std::optional<std::string_view> cachePath = {},
-            size_t maxCacheSize = Impl::Configuration::MaxCacheSize);
+            std::optional<std::string_view> cachePath = std::nullopt,
+            size_t maxCacheSize = 0);
     };
 }

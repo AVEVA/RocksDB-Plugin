@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
+#include <cstddef>
 #include <cstdint>
 namespace AVEVA::RocksDB::Plugin::Core
 {

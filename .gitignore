@@ -1,2 +1,13 @@
 build/
 .vs/
+
+# AVEVA Copilot Workflows
+.github/.sync/
+.github/agent-output-initialisers/
+.github/checklists/
+.github/gates/
+.github/helpers/
+.github/registry/
+.github/settings/
+.github/templates/
+.copilottracking/

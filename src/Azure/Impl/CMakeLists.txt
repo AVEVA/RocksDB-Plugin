@@ -13,7 +13,7 @@ add_library(aveva-rocksdb-plugin-azure-impl
     AzureContainerClient.cpp
 )
 add_library(aveva::rocksdb-plugin-azure-impl ALIAS aveva-rocksdb-plugin-azure-impl)
-set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../include")
+set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../../../include")
 target_sources(aveva-rocksdb-plugin-azure-impl
   PUBLIC
   FILE_SET HEADERS

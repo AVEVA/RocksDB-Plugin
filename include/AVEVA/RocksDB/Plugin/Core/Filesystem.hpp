@@ -4,6 +4,9 @@
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Core/File.hpp"
 #include <filesystem>
+#include <memory>
+#include <optional>
+#include <string>
 namespace AVEVA::RocksDB::Plugin::Core
 {
     class Filesystem
@@ -15,5 +18,30 @@ namespace AVEVA::RocksDB::Plugin::Core
         virtual bool DeleteFile(const std::filesystem::path& path) = 0;
         virtual bool DeleteDir(const std::filesystem::path& path) = 0;
         virtual bool CreateDir(const std::filesystem::path& path) = 0;
+
+        /// <summary>
+        /// Reads the entire contents of the file at <paramref name="path"/> into a string.
+        /// Returns <c>std::nullopt</c> if the file does not exist, cannot be opened, or a
+        /// read error occurs.
+        /// </summary>
+        virtual std::optional<std::string> ReadFileContents(
+            const std::filesystem::path& path) noexcept = 0;
+
+        /// <summary>
+        /// Atomically writes <paramref name="size"/> bytes from <paramref name="data"/> to
+        /// <paramref name="finalPath"/> using an internal staging file and rename.
+        /// The operation is atomic with respect to concurrent readers — they observe
+        /// either the prior version of the file or the complete new contents — but does
+        /// not guarantee durability across power loss.  Returns <c>true</c> on success.
+        /// </summary>
+        virtual bool WriteFileAtomic(const std::filesystem::path& finalPath,
+                                     const char* data, size_t size) noexcept = 0;
+
+        /// <summary>
+        /// Renames <paramref name="from"/> to <paramref name="to"/>.
+        /// Returns <c>true</c> on success.
+        /// </summary>
+        virtual bool RenameFile(const std::filesystem::path& from,
+                                const std::filesystem::path& to) noexcept = 0;
     };
 }

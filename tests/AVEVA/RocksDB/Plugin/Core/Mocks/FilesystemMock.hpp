@@ -4,6 +4,8 @@
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Core/Filesystem.hpp"
 #include <gmock/gmock.h>
+#include <optional>
+#include <string>
 
 namespace AVEVA::RocksDB::Plugin::Core::Mocks
 {
@@ -17,5 +19,13 @@ namespace AVEVA::RocksDB::Plugin::Core::Mocks
         MOCK_METHOD(bool, DeleteFile, (const std::filesystem::path& path), (override));
         MOCK_METHOD(bool, DeleteDir, (const std::filesystem::path& path), (override));
         MOCK_METHOD(bool, CreateDir, (const std::filesystem::path& path), (override));
+        MOCK_METHOD(std::optional<std::string>, ReadFileContents,
+            (const std::filesystem::path& path), (noexcept, override));
+        MOCK_METHOD(bool, WriteFileAtomic,
+            (const std::filesystem::path& finalPath, const char* data, size_t size),
+            (noexcept, override));
+        MOCK_METHOD(bool, RenameFile,
+            (const std::filesystem::path& from, const std::filesystem::path& to),
+            (noexcept, override));
     };
 }

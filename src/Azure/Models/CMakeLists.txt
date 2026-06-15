@@ -3,7 +3,7 @@ add_library(aveva-rocksdb-plugin-azure-models
     ServicePrincipalStorageInfo.cpp
 )
 add_library(aveva::rocksdb-plugin-azure-models ALIAS aveva-rocksdb-plugin-azure-models)
-set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../include")
+set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../../../include")
 target_sources(aveva-rocksdb-plugin-azure-models
   PUBLIC
   FILE_SET HEADERS
