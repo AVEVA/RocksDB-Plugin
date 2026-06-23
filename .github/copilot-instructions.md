@@ -62,9 +62,10 @@ support, CMake, clang-format/clang-tidy, gitleaks, vcpkg, and git hook configura
 > **Hard rule: NEVER create or publish a PR without explicit user approval.**
 
 1. Use the azure-devops skill to prepare the pull request.
-2. Read [.github/PULL_REQUEST_TEMPLATE.md](PULL_REQUEST_TEMPLATE.md) **before** composing the
-   PR description.
-3. Populate all template sections: summary, verification, risk/rollback, and the checklist.
+2. Read [.github/PULL_REQUEST_TEMPLATE.md](PULL_REQUEST_TEMPLATE.md)
+   **before** composing the PR description.
+3. Populate all template sections: PR type, current/new behavior, how it was verified, and the
+   security compliance checklist.
 4. **Stop and ask the user to confirm before creating the PR.** Show the draft description and
    wait for explicit approval.
 5. After the PR is created, reply to any addressed review comments confirming the fix was
