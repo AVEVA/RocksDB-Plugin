@@ -348,12 +348,12 @@ else
     }
 }
 
-# Check Node.js / npm (optional — used for eslint/prettier readiness tooling)
+# Check Node.js / npm (optional — used to run agentrc readiness tooling via npx)
 $NODE_PATH = (Get-Command node -ErrorAction SilentlyContinue).Source
 if (-not $NODE_PATH)
 {
     $hasWarnings = $true
-    Write-Host("⚠️ Node.js is not installed. It is only needed for optional lint/format tooling (eslint, prettier). Install from 'https://nodejs.org/' if you plan to run those scripts.") -ForegroundColor Yellow
+    Write-Host("⚠️ Node.js is not installed. It is only needed to run the agentrc readiness check via npx. Install from 'https://nodejs.org/' if you plan to run that tooling.") -ForegroundColor Yellow
 }
 else
 {

@@ -2,6 +2,8 @@
   "name": "native-repo",
   "criteria": {
     "disable": [
+      "build-script",
+      "test-script",
       "lint-config",
       "format-config",
       "typecheck-config",
