@@ -7,6 +7,9 @@ This repository is currently maintained by AVEVA teams.
 1. Open an issue describing the bug or proposed change.
 2. Align on scope before opening a pull request.
 3. Ensure your local environment is configured with `VCPKG_ROOT`.
+4. Run `./devdoctor.ps1` from the repository root. It validates required tooling
+   (CMake, clang-format/clang-tidy, gitleaks, vcpkg) and configures the shared git
+   hooks path (`core.hooksPath = .github/hooks`) so the pre-commit hook runs locally.
 
 ## Build and Test
 

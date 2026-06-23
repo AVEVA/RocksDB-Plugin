@@ -1,8 +1,0 @@
-#!/usr/bin/env sh
-set -e
-
-if [ -f ".github/hooks/pre-commit" ]; then
-  exec sh .github/hooks/pre-commit
-fi
-
-exit 0

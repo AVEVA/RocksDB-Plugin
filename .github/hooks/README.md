@@ -1,20 +1,29 @@
 # Hooks
 
-This folder contains repository hook scripts in a GitHub-oriented layout.
+This folder contains repository Git hook scripts. The repository is configured to
+use this directory as the hooks path (`core.hooksPath = .github/hooks`) so hooks are
+versioned and shared across the team — no manual copying into `.git/hooks` is needed.
 
 ## Pre-commit Hook
 
-The `pre-commit` script scans staged files for secrets and formats staged C/C++ files.
+The `pre-commit` script:
 
-To use it locally on Linux/macOS/Git Bash:
+- Scans staged files for secrets with [gitleaks](https://github.com/gitleaks/gitleaks)
+  (required — the commit is blocked if gitleaks is not installed).
+- Formats staged C/C++ files under `src/`, `include/`, and `tests/` with `clang-format`.
 
-```bash
-cp .github/hooks/pre-commit .git/hooks/pre-commit
-chmod +x .git/hooks/pre-commit
-```
+## Setup
 
-On Windows PowerShell:
+Run the environment doctor from the repository root — it configures the hooks path
+automatically and reports any missing tools:
 
 ```powershell
-Copy-Item .github/hooks/pre-commit .git/hooks/pre-commit -Force
+./devdoctor.ps1
 ```
+
+To configure the hooks path manually:
+
+```powershell
+git config --local core.hooksPath .github/hooks
+```
+
