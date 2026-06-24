@@ -1,0 +1,52 @@
+#!/bin/sh
+set -e
+
+# --- Secret scanning (gitleaks) ---
+# Catches credentials and secrets before they reach the remote.
+# Install: https://github.com/gitleaks/gitleaks?tab=readme-ov-file#installing
+if command -v gitleaks >/dev/null 2>&1; then
+  if ! gitleaks protect --staged --verbose --redact; then
+    echo "gitleaks detected potential secrets in staged files. Commit blocked."
+    echo "Review the output above, remove any credentials, and retry."
+    exit 1
+  fi
+else
+  echo "ERROR: gitleaks not found — secret scanning cannot run. Install it or run ./devdoctor.ps1 for setup guidance."
+  exit 1
+fi
+
+# --- clang-format ---
+clang_format_cmd="$(command -v clang-format 2>/dev/null || true)"
+powershell_cmd=""
+if [ -z "$clang_format_cmd" ]; then
+  if command -v powershell.exe >/dev/null 2>&1; then
+    powershell_cmd="powershell.exe"
+  elif command -v pwsh >/dev/null 2>&1; then
+    powershell_cmd="pwsh"
+  fi
+fi
+
+if [ -z "$clang_format_cmd" ] && [ -z "$powershell_cmd" ]; then
+  echo "clang-format is required in PATH. Run ./devdoctor.ps1 for setup guidance."
+  exit 1
+fi
+
+staged_files="$(git diff --cached --name-only --diff-filter=ACMR)"
+files_to_format="$(printf '%s\n' "$staged_files" | grep -E '^(src|include|tests)/.*\.(c|cc|cpp|cxx|h|hh|hpp|hxx)$' || true)"
+
+if [ -z "$files_to_format" ]; then
+  exit 0
+fi
+
+echo "Running clang-format on staged C/C++ files..."
+printf '%s\n' "$files_to_format" | while IFS= read -r file; do
+  if [ -f "$file" ]; then
+    if [ -n "$clang_format_cmd" ]; then
+      "$clang_format_cmd" -i --style=file "$file"
+    else
+      "$powershell_cmd" -NoProfile -Command "& (Get-Command clang-format -ErrorAction Stop).Source -i --style=file '$file'" >/dev/null
+    fi
+
+    git add "$file"
+  fi
+done
