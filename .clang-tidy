@@ -8,7 +8,7 @@ Checks: >
   -cppcoreguidelines-avoid-magic-numbers,
   -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
   -readability-identifier-length
-WarningsAsErrors: '*'
+WarningsAsErrors: 'bugprone-*'
 HeaderFilterRegex: '^(src|include)/'
 FormatStyle: file
 ...

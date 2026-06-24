@@ -1,6 +1,11 @@
 build/
 .vs/
 
+# Local environment files — never commit real secrets; .env.example is the template
+.env
+.env.*
+!.env.example
+
 # AVEVA Copilot Workflows
 .github/.sync/
 .github/agent-output-initialisers/

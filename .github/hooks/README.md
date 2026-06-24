@@ -1,8 +1,9 @@
 # Hooks
 
-This folder contains repository Git hook scripts. The repository is configured to
-use this directory as the hooks path (`core.hooksPath = .github/hooks`) so hooks are
-versioned and shared across the team — no manual copying into `.git/hooks` is needed.
+This folder contains repository Git hook scripts. Git does not run them automatically
+just because they live here — `core.hooksPath` is a per-clone setting that each contributor
+must configure once (see [Setup](#setup)). Keeping the scripts in the repo lets them be
+versioned and shared across the team without copying into `.git/hooks`.
 
 ## Pre-commit Hook
 

@@ -138,7 +138,7 @@ else
 # Check Visual Studio installation and required C++ workload (Windows only)
 if ($IsWindows -or $env:OS -eq "Windows_NT")
 {
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} "\Microsoft Visual Studio\Installer\vswhere.exe"
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
     if (-not (Test-Path $vswhere))
     {
         $hasErrors = $true
@@ -156,8 +156,11 @@ if ($IsWindows -or $env:OS -eq "Windows_NT")
         {
             Write-Host("✅ Found a Visual Studio installation path: '$VS_PATH'") -ForegroundColor Green
 
-            $hasCppWorkload = &$vswhere -property isComplete -requires "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
-            if (-not $hasCppWorkload)
+            # `-requires` filters to installations that actually have the C++ toolset; an empty
+            # result means the workload is missing. Avoid `-property isComplete`, which can return
+            # the string "0" (truthy in PowerShell) and falsely report the workload as present.
+            $cppInstallPath = &$vswhere -products * -requires "Microsoft.VisualStudio.Component.VC.Tools.x86.x64" -property installationPath
+            if (-not $cppInstallPath)
             {
                 $hasErrors = $true
                 Write-Host("❌ The 'Desktop development with C++' workload is not installed in Visual Studio. Please install it via the Visual Studio Installer.") -ForegroundColor Red
@@ -203,9 +206,8 @@ $CMAKE_PATH = (Get-Command cmake -ErrorAction SilentlyContinue).Source
 if (-not $CMAKE_PATH)
 {
     $hasErrors = $true
-    Write-Host("❌ Unable to find cmake. Please ensure that you are running in a " +
-        "developer console and that you have the 'Desktop development with C++' " +
-        "workload installed in Visual Studio") -ForegroundColor Red
+    Write-Host("❌ Unable to find cmake. Please install CMake 3.22+ and ensure it is on your PATH. " +
+        "On Windows, run from a Visual Studio developer console with the 'Desktop development with C++' workload.") -ForegroundColor Red
 }
 else
 {
@@ -310,15 +312,17 @@ else
 }
 
 $expectedBinarySource = "x-az-universal,https://dev.azure.com/AVEVA-VSTS,,Cloud-Platform,"
+$binarySourceRead = "${expectedBinarySource}read"
+$binarySourceReadWrite = "${expectedBinarySource}readwrite"
 if (-not $env:VCPKG_BINARY_SOURCES)
 {
     $hasWarnings = $true
-    Write-Host("⚠️ VCPKG_BINARY_SOURCES environment variable is not set. Consider setting it to '$expectedBinarySource" + "readwrite' or '$expectedBinarySource" + "read' to enable binary caching.") -ForegroundColor Yellow
+    Write-Host("⚠️ VCPKG_BINARY_SOURCES environment variable is not set. Consider setting it to '$binarySourceReadWrite' or '$binarySourceRead' to enable binary caching.") -ForegroundColor Yellow
 }
 elseif ($env:VCPKG_BINARY_SOURCES -notmatch [regex]::Escape($expectedBinarySource) + "(read|readwrite)")
 {
     $hasWarnings = $true
-    Write-Host("⚠️ VCPKG_BINARY_SOURCES is set but not configured for Azure binary caching. Consider setting it to '$expectedBinarySource" + "read' or '$expectedBinarySource" + "readwrite' to take advantage of binary caching. You don't have to set this up but it's HIGHLY encouraged. Your initial build is GUARANTEED TO BE SLOW without it. Current value: '$env:VCPKG_BINARY_SOURCES'") -ForegroundColor Yellow
+    Write-Host("⚠️ VCPKG_BINARY_SOURCES is set but not configured for Azure binary caching. Consider setting it to '$binarySourceRead' or '$binarySourceReadWrite' to take advantage of binary caching. You don't have to set this up but it's HIGHLY encouraged. Your initial build is GUARANTEED TO BE SLOW without it. Current value: '$env:VCPKG_BINARY_SOURCES'") -ForegroundColor Yellow
 }
 else
 {
