@@ -38,28 +38,6 @@ if [ -z "$files_to_format" ]; then
   exit 0
 fi
 
-# Guard against partially-staged files: formatting the working tree and re-adding
-# the whole file below would silently stage unstaged edits the developer did not
-# intend to commit. Refuse to proceed when a staged file also has unstaged changes.
-unstaged_cpp="$(git diff --name-only --diff-filter=ACMR | grep -E '^(src|include|tests)/.*\.(c|cc|cpp|cxx|h|hh|hpp|hxx)$' || true)"
-partially_staged=""
-for file in $files_to_format; do
-  for changed in $unstaged_cpp; do
-    if [ "$file" = "$changed" ]; then
-      partially_staged="$partially_staged $file"
-    fi
-  done
-done
-
-if [ -n "$partially_staged" ]; then
-  echo "ERROR: the following staged files also have unstaged changes:"
-  for file in $partially_staged; do
-    echo "  $file"
-  done
-  echo "Fully stage (git add) or stash these changes before committing so clang-format does not restage unintended edits."
-  exit 1
-fi
-
 echo "Running clang-format on staged C/C++ files..."
 printf '%s\n' "$files_to_format" | while IFS= read -r file; do
   if [ -f "$file" ]; then

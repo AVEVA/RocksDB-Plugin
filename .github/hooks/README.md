@@ -28,3 +28,6 @@ To configure the hooks path manually:
 git config --local core.hooksPath .github/hooks
 ```
 
+This is a one-time setup per clone. Once `core.hooksPath` is configured, the `pre-commit`
+hook runs automatically on every commit in this repository.
+
