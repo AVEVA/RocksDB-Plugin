@@ -41,8 +41,10 @@ void LoggerImpl::Logv(const int logLevel, const char* format, va_list ap) {
     }
 
     const auto totalBufferOffset = static_cast<size_t>(result) + offset;
-    if (totalBufferOffset > m_buffer.size()) {
-        m_buffer.resize(totalBufferOffset);
+    if (totalBufferOffset + 1 > m_buffer.size()) {
+        // vsnprintf truncates unless the buffer can also hold the trailing NUL terminator,
+        // so size it for totalBufferOffset characters plus one NUL byte.
+        m_buffer.resize(totalBufferOffset + 1);
         const int newResult = vsnprintf(m_buffer.data() + offset, m_buffer.size() - offset, format, ap);
         if (newResult < 0) {
             throw std::runtime_error("Unable to format log message");
@@ -50,7 +52,6 @@ void LoggerImpl::Logv(const int logLevel, const char* format, va_list ap) {
     }
 
     m_file->Append(std::span(m_buffer.data(), m_buffer.data() + totalBufferOffset));
-    va_end(ap);
 }
 
 void LoggerImpl::Flush() { m_file->Sync(); }

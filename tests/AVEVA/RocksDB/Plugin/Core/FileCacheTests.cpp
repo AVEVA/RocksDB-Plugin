@@ -42,27 +42,29 @@ class FileCacheTests : public ::testing::Test {
     }
 
     void EnsureReadFromCache(const std::string_view filePath) {
-        while (true) {
+        constexpr int maxAttempts = 100; // ~10s at 100ms per attempt before failing fast
+        for (int attempt = 0; attempt < maxAttempts; ++attempt) {
             const auto bytesRead = m_cache.ReadFile(filePath, 0, 0, nullptr);
             if (bytesRead) {
-                break;
-            } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                return;
             }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
+        FAIL() << "Timed out waiting for '" << filePath << "' to become readable from cache";
     }
 
     void EnsureReadFromCache(const std::string_view filePath, const size_t expectedCacheSize) {
         char buffer[1];
-        while (true) {
+        constexpr int maxAttempts = 100; // ~10s at 100ms per attempt before failing fast
+        for (int attempt = 0; attempt < maxAttempts; ++attempt) {
             const auto bytesRead = m_cache.ReadFile(filePath, 0, 1, buffer);
             if (bytesRead) {
                 ASSERT_EQ(expectedCacheSize, m_cache.CacheSize());
-                break;
-            } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                return;
             }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
+        FAIL() << "Timed out waiting for '" << filePath << "' to become readable from cache";
     }
 };
 

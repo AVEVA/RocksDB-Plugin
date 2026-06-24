@@ -87,13 +87,12 @@ class FileBasedCompressedSecondaryCache final : public rocksdb::SecondaryCache {
     /// <summary>Looks up <paramref name="key"/> on disk and reconstructs the object via create_cb.</summary>
     /// <param name="key">The key to look up in the secondary cache.</param>
     /// <param name="helper">Callbacks used to reconstruct the cached object from stored bytes.</param>
-    /// <param name="create_context">Context provided by RocksDB used when creating the object (may be used by the
-    /// helper).</param> <param name="wait">If true, wait for the lookup to complete; otherwise return immediately if
-    /// not ready.</param> <param name="advise_erase">If true, the caller advises that the found entry should be erased
-    /// after use.</param> <param name="stats">Optional RocksDB statistics object to record secondary cache
-    /// metrics.</param> <param name="kept_in_sec_cache">Out-parameter set to true when the object was reconstructed and
-    /// will be retained in the secondary cache.</param> <returns>An immediately-ready result handle, or nullptr if the
-    /// key is not found.</returns>
+    /// <param name="create_context">Context provided by RocksDB, used when creating the object.</param>
+    /// <param name="wait">If true, wait for the lookup to complete; otherwise return immediately.</param>
+    /// <param name="advise_erase">If true, advises that the found entry should be erased after use.</param>
+    /// <param name="stats">Optional RocksDB statistics object to record secondary cache metrics.</param>
+    /// <param name="kept_in_sec_cache">Set to true when the object will be retained in the secondary cache.</param>
+    /// <returns>An immediately-ready result handle, or nullptr if the key is not found.</returns>
     std::unique_ptr<rocksdb::SecondaryCacheResultHandle>
     Lookup(const rocksdb::Slice& key, const rocksdb::Cache::CacheItemHelper* helper,
            rocksdb::Cache::CreateContext* create_context, bool wait, bool advise_erase, rocksdb::Statistics* stats,
