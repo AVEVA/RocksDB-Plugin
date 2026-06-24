@@ -6,7 +6,8 @@
 // --------------------------------------------------------------------------
 // Insert stores data as-is: on-disk file size must equal kFileHeaderSize + payload
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, Insert_StoresDataAsIs) {
+TEST_F(FileBasedCompressedSecondaryCacheTests, Insert_StoresDataAsIs)
+{
     const std::string keyStr = "store_asis_key";
     const std::string raw(1024, 'A');
     TestPayload payload{raw};
@@ -25,13 +26,15 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, Insert_StoresDataAsIs) {
 // --------------------------------------------------------------------------
 // InsertSaved stores data as-is regardless of the supplied CompressionType
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, InsertSaved_StoresDataAsIs) {
+TEST_F(FileBasedCompressedSecondaryCacheTests, InsertSaved_StoresDataAsIs)
+{
     const std::string keyStr = "insertsaved_asis_key";
     const std::string raw(1024, 'B');
     const rocksdb::Slice saved(raw);
 
-    auto s = m_cache->InsertSaved(MakeKey(keyStr), saved, rocksdb::CompressionType::kNoCompression,
-                                  rocksdb::CacheTier::kVolatileTier);
+    auto s = m_cache->InsertSaved(MakeKey(keyStr), saved,
+                                   rocksdb::CompressionType::kNoCompression,
+                                   rocksdb::CacheTier::kVolatileTier);
     ASSERT_TRUE(s.ok()) << s.ToString();
 
     std::string hex;
@@ -47,27 +50,31 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, InsertSaved_StoresDataAsIs) {
 // The 1-byte compression type prefix is preserved across a round-trip.
 // InsertSaved with kSnappyCompression must hand the same type back to create_cb.
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, CompressionType_PreservedOnRoundTrip) {
+TEST_F(FileBasedCompressedSecondaryCacheTests, CompressionType_PreservedOnRoundTrip)
+{
     const std::string keyStr = "compression_type_key";
     const std::string raw(64, 'C');
     const rocksdb::Slice saved(raw);
 
-    auto s = m_cache->InsertSaved(MakeKey(keyStr), saved, rocksdb::CompressionType::kSnappyCompression,
-                                  rocksdb::CacheTier::kVolatileTier);
+    auto s = m_cache->InsertSaved(MakeKey(keyStr), saved,
+                                   rocksdb::CompressionType::kSnappyCompression,
+                                   rocksdb::CacheTier::kVolatileTier);
     ASSERT_TRUE(s.ok()) << s.ToString();
 
     // Use CapturingCreateCb to observe what compression type is passed to create_cb.
     g_capturedCompressionType = rocksdb::CompressionType::kNoCompression;
     rocksdb::Cache::CacheItemHelper capturingHelperNoSec{rocksdb::CacheEntryRole::kDataBlock, TestDeleteCb};
-    rocksdb::Cache::CacheItemHelper capturingHelper{rocksdb::CacheEntryRole::kDataBlock,
-                                                    TestDeleteCb,
-                                                    TestSizeCb,
-                                                    TestSaveToCb,
-                                                    CapturingCreateCb,
-                                                    &capturingHelperNoSec};
+    rocksdb::Cache::CacheItemHelper capturingHelper{
+        rocksdb::CacheEntryRole::kDataBlock,
+        TestDeleteCb,
+        TestSizeCb,
+        TestSaveToCb,
+        CapturingCreateCb,
+        &capturingHelperNoSec};
 
     bool kept = false;
-    auto handle = m_cache->Lookup(MakeKey(keyStr), &capturingHelper, nullptr, true, false, nullptr, kept);
+    auto handle = m_cache->Lookup(MakeKey(keyStr), &capturingHelper,
+                                  nullptr, true, false, nullptr, kept);
     ASSERT_NE(handle, nullptr);
     EXPECT_EQ(g_capturedCompressionType, rocksdb::CompressionType::kSnappyCompression)
         << "The compression type stored in the 1-byte prefix must be handed to create_cb unchanged";

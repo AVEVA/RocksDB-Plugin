@@ -3,16 +3,29 @@
 
 #include "ResultHandle.hpp"
 
-namespace AVEVA::RocksDB::Plugin::Core {
-ResultHandle::ResultHandle(rocksdb::Cache::ObjectPtr value, size_t charge) : m_value(value), m_charge(charge) {}
+namespace AVEVA::RocksDB::Plugin::Core
+{
+    ResultHandle::ResultHandle(rocksdb::Cache::ObjectPtr value, size_t charge)
+        : m_value(value), m_charge(charge)
+    {
+    }
 
-ResultHandle::~ResultHandle() = default;
+    ResultHandle::~ResultHandle() = default;
 
-bool ResultHandle::IsReady() noexcept { return true; }
+    bool ResultHandle::IsReady() noexcept
+    {
+        return true;
+    }
 
-void ResultHandle::Wait() noexcept {}
+    void ResultHandle::Wait() noexcept {}
 
-rocksdb::Cache::ObjectPtr ResultHandle::Value() noexcept { return m_value; }
+    rocksdb::Cache::ObjectPtr ResultHandle::Value() noexcept
+    {
+        return m_value;
+    }
 
-size_t ResultHandle::Size() noexcept { return m_charge; }
-} // namespace AVEVA::RocksDB::Plugin::Core
+    size_t ResultHandle::Size() noexcept
+    {
+        return m_charge;
+    }
+}

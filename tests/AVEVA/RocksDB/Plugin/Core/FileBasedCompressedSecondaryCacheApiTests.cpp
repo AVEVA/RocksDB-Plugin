@@ -6,7 +6,8 @@
 // --------------------------------------------------------------------------
 // Insert with a null helper returns OK without writing anything
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, InsertWithNullHelper) {
+TEST_F(FileBasedCompressedSecondaryCacheTests, InsertWithNullHelper)
+{
     TestPayload payload{"should not be stored"};
     auto s = m_cache->Insert(MakeKey("null_helper_k"), &payload, /*helper=*/nullptr, true);
     ASSERT_TRUE(s.ok());
@@ -19,7 +20,8 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, InsertWithNullHelper) {
 // Insert with a non-secondary-cache-compatible helper returns OK without
 // writing anything
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, InsertWithIncompatibleHelper) {
+TEST_F(FileBasedCompressedSecondaryCacheTests, InsertWithIncompatibleHelper)
+{
     TestPayload payload{"should not be stored"};
     // m_helperNoSec has no size_cb/saveto_cb/create_cb callbacks.
     auto s = m_cache->Insert(MakeKey("incompat_helper_k"), &payload, &m_helperNoSec, true);
@@ -32,13 +34,15 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, InsertWithIncompatibleHelper) {
 // --------------------------------------------------------------------------
 // Lookup with a null helper returns nullptr without touching the cache
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, LookupWithNullHelper) {
+TEST_F(FileBasedCompressedSecondaryCacheTests, LookupWithNullHelper)
+{
     const std::string keyStr = "null_lookup_key";
     TestPayload payload{"real data"};
     ASSERT_TRUE(m_cache->Insert(MakeKey(keyStr), &payload, &m_helper, true).ok());
 
     bool kept = true; // deliberately true to confirm it is overwritten
-    auto handle = m_cache->Lookup(MakeKey(keyStr), /*helper=*/nullptr, nullptr, true, false, nullptr, kept);
+    auto handle = m_cache->Lookup(MakeKey(keyStr), /*helper=*/nullptr,
+                                  nullptr, true, false, nullptr, kept);
     EXPECT_EQ(handle, nullptr);
     EXPECT_FALSE(kept);
 
@@ -51,7 +55,8 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, LookupWithNullHelper) {
 // --------------------------------------------------------------------------
 // A successful Lookup increments the RocksDB hit statistics counters
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, LookupRecordsHitStatistics) {
+TEST_F(FileBasedCompressedSecondaryCacheTests, LookupRecordsHitStatistics)
+{
     const std::string keyStr = "stats_key";
     TestPayload payload{"statistics test payload"};
 
@@ -60,7 +65,8 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, LookupRecordsHitStatistics) {
     auto stats = rocksdb::CreateDBStatistics();
 
     bool kept = false;
-    auto handle = m_cache->Lookup(MakeKey(keyStr), &m_helper, nullptr, true, false, stats.get(), kept);
+    auto handle = m_cache->Lookup(MakeKey(keyStr), &m_helper,
+                                  nullptr, true, false, stats.get(), kept);
     ASSERT_NE(handle, nullptr);
     delete static_cast<TestPayload*>(handle->Value());
 
@@ -71,7 +77,8 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, LookupRecordsHitStatistics) {
 // --------------------------------------------------------------------------
 // GetUsage reflects the number of bytes currently tracked on disk
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, GetUsageReflectsCurrentSize) {
+TEST_F(FileBasedCompressedSecondaryCacheTests, GetUsageReflectsCurrentSize)
+{
     size_t usage = 999;
     ASSERT_TRUE(m_cache->GetUsage(usage).ok());
     EXPECT_EQ(usage, 0u) << "Empty cache must report zero usage";
@@ -93,7 +100,8 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, GetUsageReflectsCurrentSize) {
 // --------------------------------------------------------------------------
 // WaitAll is a no-op: must not crash on an empty or non-empty handle list
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, WaitAllIsNoOp) {
+TEST_F(FileBasedCompressedSecondaryCacheTests, WaitAllIsNoOp)
+{
     // Empty vector.
     std::vector<rocksdb::SecondaryCacheResultHandle*> noHandles;
     m_cache->WaitAll(noHandles);
@@ -106,7 +114,8 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, WaitAllIsNoOp) {
 // --------------------------------------------------------------------------
 // SupportForceErase returns true: advise_erase is honoured
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, SupportForceEraseReturnsTrue) {
+TEST_F(FileBasedCompressedSecondaryCacheTests, SupportForceEraseReturnsTrue)
+{
     EXPECT_TRUE(m_cache->SupportForceErase());
 }
 
@@ -115,7 +124,8 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, SupportForceEraseReturnsTrue) {
 // must return InvalidArgument from Insert and InsertSaved; Lookup and Erase
 // must silently treat it as a miss/no-op
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, OverlongKeyReturnsInvalidArgument) {
+TEST_F(FileBasedCompressedSecondaryCacheTests, OverlongKeyReturnsInvalidArgument)
+{
     // 33 bytes → 66 hex chars > kMaxFilenameLen(64).
     const std::string longKey(33, 'k');
 
@@ -124,14 +134,17 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, OverlongKeyReturnsInvalidArgument
     EXPECT_FALSE(sInsert.ok());
     EXPECT_TRUE(sInsert.IsInvalidArgument()) << sInsert.ToString();
 
-    auto sSaved = m_cache->InsertSaved(MakeKey(longKey), rocksdb::Slice("data"),
-                                       rocksdb::CompressionType::kNoCompression, rocksdb::CacheTier::kVolatileTier);
+    auto sSaved = m_cache->InsertSaved(MakeKey(longKey),
+                                        rocksdb::Slice("data"),
+                                        rocksdb::CompressionType::kNoCompression,
+                                        rocksdb::CacheTier::kVolatileTier);
     EXPECT_FALSE(sSaved.ok());
     EXPECT_TRUE(sSaved.IsInvalidArgument()) << sSaved.ToString();
 
     // Lookup and Erase must not crash.
     bool kept = true;
-    auto handle = m_cache->Lookup(MakeKey(longKey), &m_helper, nullptr, true, false, nullptr, kept);
+    auto handle = m_cache->Lookup(MakeKey(longKey), &m_helper,
+                                  nullptr, true, false, nullptr, kept);
     EXPECT_EQ(handle, nullptr);
     EXPECT_FALSE(kept);
 
@@ -144,7 +157,8 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, OverlongKeyReturnsInvalidArgument
 // --------------------------------------------------------------------------
 // Name() returns the expected compile-time string
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, Name_ReturnsExpectedString) {
+TEST_F(FileBasedCompressedSecondaryCacheTests, Name_ReturnsExpectedString)
+{
     EXPECT_STREQ(m_cache->Name(), "FileBasedCompressedSecondaryCache");
 }
 
@@ -152,7 +166,8 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, Name_ReturnsExpectedString) {
 // Constructing a new cache over an existing directory with stale files
 // removes them and starts fresh
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, ConstructorCleansStaleDirectory) {
+TEST_F(FileBasedCompressedSecondaryCacheTests, ConstructorCleansStaleDirectory)
+{
     const std::string keyStr = "stale_dir_key";
     TestPayload payload{"stale data"};
 
@@ -165,8 +180,9 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConstructorCleansStaleDirectory) 
     ASSERT_TRUE(std::filesystem::exists(filePath)) << "Entry file must exist before re-creation";
 
     // Re-construct the cache over the same directory.
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(
-        m_cacheDir, m_fs, FileBasedCompressedSecondaryCache::kDefaultCapacity, MakeNullLogger());
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs,
+        FileBasedCompressedSecondaryCache::kDefaultCapacity,
+        MakeNullLogger());
 
     // The stale file must have been removed by the constructor.
     EXPECT_FALSE(std::filesystem::exists(filePath))
@@ -179,13 +195,15 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConstructorCleansStaleDirectory) 
 
     // Lookup for the old key must miss.
     bool kept = false;
-    auto handle = m_cache->Lookup(MakeKey(keyStr), &m_helper, nullptr, true, false, nullptr, kept);
+    auto handle = m_cache->Lookup(MakeKey(keyStr), &m_helper,
+                                  nullptr, true, false, nullptr, kept);
     EXPECT_EQ(handle, nullptr);
 
     // The new cache must be fully operational.
     TestPayload p2{"fresh data"};
     ASSERT_TRUE(m_cache->Insert(MakeKey("fresh_key"), &p2, &m_helper, true).ok());
-    auto handle2 = m_cache->Lookup(MakeKey("fresh_key"), &m_helper, nullptr, true, false, nullptr, kept);
+    auto handle2 = m_cache->Lookup(MakeKey("fresh_key"), &m_helper,
+                                   nullptr, true, false, nullptr, kept);
     ASSERT_NE(handle2, nullptr);
     delete static_cast<TestPayload*>(handle2->Value());
 }

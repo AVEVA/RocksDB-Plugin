@@ -1,119 +1,151 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Mocks/BlobClientMock.hpp"
 
-#include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <gmock/gmock.h>
 
 using namespace AVEVA::RocksDB::Plugin::Azure::Impl;
 using namespace AVEVA::RocksDB::Plugin::Core;
 using namespace AVEVA::RocksDB::Plugin::Core::Mocks;
 using ::testing::_;
-using ::testing::DoAll;
-using ::testing::Invoke;
-using ::testing::NiceMock;
 using ::testing::Return;
+using ::testing::Invoke;
+using ::testing::DoAll;
 using ::testing::SetArgPointee;
+using ::testing::NiceMock;
 using ::testing::StrictMock;
 
 /// <summary>
 /// Helper class for blob simulation
 /// </summary>
-class BlobSimulator {
+class BlobSimulator
+{
     uint64_t m_fileSize;
     uint64_t m_capacity;
     std::vector<uint8_t> m_data;
 
-  public:
+public:
     explicit BlobSimulator(uint64_t initialCapacity = Configuration::PageBlob::DefaultSize)
-        : m_fileSize(0), m_capacity(initialCapacity) {
+        : m_fileSize(0), m_capacity(initialCapacity)
+    {
         m_data.resize(static_cast<size_t>(initialCapacity), 0);
     }
 
-    uint64_t GetSize() const { return m_fileSize; }
+    uint64_t GetSize() const
+    {
+        return m_fileSize;
+    }
 
-    void SetSize(int64_t size) { m_fileSize = static_cast<uint64_t>(size); }
+    void SetSize(int64_t size)
+    {
+        m_fileSize = static_cast<uint64_t>(size);
+    }
 
-    uint64_t GetCapacity() const { return m_capacity; }
+    uint64_t GetCapacity() const
+    {
+        return m_capacity;
+    }
 
-    void SetCapacity(int64_t capacity) {
+    void SetCapacity(int64_t capacity)
+    {
         m_capacity = static_cast<uint64_t>(capacity);
-        if (static_cast<size_t>(capacity) > m_data.size()) {
+        if (static_cast<size_t>(capacity) > m_data.size())
+        {
             m_data.resize(static_cast<size_t>(capacity), 0);
         }
     }
 
-    void UploadPages(const std::span<char> buffer, int64_t offset) {
-        if (static_cast<size_t>(offset) + buffer.size() > m_data.size()) {
+    void UploadPages(const std::span<char> buffer, int64_t offset)
+    {
+        if (static_cast<size_t>(offset) + buffer.size() > m_data.size())
+        {
             m_data.resize(static_cast<size_t>(offset) + buffer.size(), 0);
         }
 
         std::copy(buffer.begin(), buffer.end(), reinterpret_cast<char*>(m_data.data()) + offset);
     }
 
-    int64_t DownloadTo(std::span<char> buffer, int64_t offset, int64_t length) {
-        if (static_cast<size_t>(offset) < m_data.size()) {
+    int64_t DownloadTo(std::span<char> buffer, int64_t offset, int64_t length)
+    {
+        if (static_cast<size_t>(offset) < m_data.size())
+        {
             size_t available = std::min(static_cast<size_t>(length), m_data.size() - static_cast<size_t>(offset));
             std::copy_n(reinterpret_cast<char*>(m_data.data()) + offset, available, buffer.data());
             // Zero out any remaining bytes
-            if (available < buffer.size()) {
+            if (available < buffer.size())
+            {
                 std::fill_n(buffer.data() + available, buffer.size() - available, static_cast<char>(0));
             }
 
             return static_cast<int64_t>(available);
-        } else {
+        }
+        else
+        {
             std::fill_n(buffer.data(), buffer.size(), static_cast<char>(0));
             return 0;
         }
     }
 
-    const std::vector<uint8_t>& GetData() const { return m_data; }
+    const std::vector<uint8_t>& GetData() const
+    {
+        return m_data;
+    }
 };
 
-class ReadWriteFileImplTests : public ::testing::Test {
-  protected:
+class ReadWriteFileImplTests : public ::testing::Test
+{
+protected:
     std::shared_ptr<BlobClientMock> m_mockBlobClient;
     std::shared_ptr<BlobSimulator> m_blobSim;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
     std::string m_testFileName = "test.blob";
 
-    void TearDown() override { ASSERT_TRUE(::testing::Mock::VerifyAndClearExpectations(m_mockBlobClient.get())); }
+    void TearDown() override
+    {
+        ASSERT_TRUE(::testing::Mock::VerifyAndClearExpectations(m_mockBlobClient.get()));
+    }
 
-    void SetUp() override {
+    void SetUp() override
+    {
         m_mockBlobClient = std::make_shared<BlobClientMock>();
         m_blobSim = std::make_shared<BlobSimulator>();
         m_logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
 
         // Setup default mock behavior using the simulator
-        ON_CALL(*m_mockBlobClient, GetSize()).WillByDefault(Invoke([this]() { return m_blobSim->GetSize(); }));
+        ON_CALL(*m_mockBlobClient, GetSize())
+            .WillByDefault(Invoke([this]() { return m_blobSim->GetSize(); }));
 
-        ON_CALL(*m_mockBlobClient, SetSize(_)).WillByDefault(Invoke([this](int64_t size) {
-            m_blobSim->SetSize(size);
-        }));
+        ON_CALL(*m_mockBlobClient, SetSize(_))
+            .WillByDefault(Invoke([this](int64_t size) { m_blobSim->SetSize(size); }));
 
-        ON_CALL(*m_mockBlobClient, GetCapacity()).WillByDefault(Invoke([this]() { return m_blobSim->GetCapacity(); }));
+        ON_CALL(*m_mockBlobClient, GetCapacity())
+            .WillByDefault(Invoke([this]() { return m_blobSim->GetCapacity(); }));
 
-        ON_CALL(*m_mockBlobClient, SetCapacity(_)).WillByDefault(Invoke([this](int64_t capacity) {
-            m_blobSim->SetCapacity(capacity);
-        }));
+        ON_CALL(*m_mockBlobClient, SetCapacity(_))
+            .WillByDefault(Invoke([this](int64_t capacity) { m_blobSim->SetCapacity(capacity); }));
 
         ON_CALL(*m_mockBlobClient, UploadPages(_, _))
-            .WillByDefault(Invoke(
-                [this](const std::span<char> buffer, int64_t offset) { m_blobSim->UploadPages(buffer, offset); }));
+            .WillByDefault(Invoke([this](const std::span<char> buffer, int64_t offset)
+                {
+                    m_blobSim->UploadPages(buffer, offset);
+                }));
 
-        ON_CALL(*m_mockBlobClient,
-                DownloadTo(testing::A<std::span<char>>(), testing::A<int64_t>(), testing::A<int64_t>()))
-            .WillByDefault(Invoke([this](std::span<char> buffer, int64_t offset, int64_t length) {
-                return m_blobSim->DownloadTo(buffer, offset, length);
-            }));
+        ON_CALL(*m_mockBlobClient, DownloadTo(testing::A<std::span<char>>(), testing::A<int64_t>(), testing::A<int64_t>()))
+            .WillByDefault(Invoke([this](std::span<char> buffer, int64_t offset, int64_t length)
+                {
+                    return m_blobSim->DownloadTo(buffer, offset, length);
+                }));
     }
 
-    std::unique_ptr<ReadWriteFileImpl> CreateFile() {
-        return std::make_unique<ReadWriteFileImpl>(m_testFileName, m_mockBlobClient, nullptr, m_logger);
+    std::unique_ptr<ReadWriteFileImpl> CreateFile()
+    {
+        return std::make_unique<ReadWriteFileImpl>(
+            m_testFileName, m_mockBlobClient, nullptr, m_logger);
     }
 };
 
@@ -136,7 +168,7 @@ TEST_F(ReadWriteFileImplTests, Constructor_InitializesFromEmptyBlob) {
     auto file = CreateFile();
 
     // Assert
-    char buffer[10] = {0};
+    char buffer[10] = { 0 };
     auto bytesRead = file->Read(0, 10, buffer);
     EXPECT_EQ(0, bytesRead); // Nothing to read from empty file
 }
@@ -196,7 +228,8 @@ TEST_F(ReadWriteFileImplTests, Write_NonPageAlignedEnd_HandlesPostPadding) {
 
 TEST_F(ReadWriteFileImplTests, Write_BufferFull_TriggersAutoFlush) {
     // Arrange
-    EXPECT_CALL(*m_mockBlobClient, UploadPages(_, _)).Times(2);
+    EXPECT_CALL(*m_mockBlobClient, UploadPages(_, _))
+        .Times(2);
 
     auto file = CreateFile();
     const int64_t dataSize = Configuration::PageBlob::DefaultBufferSize + Configuration::PageBlob::PageSize;
@@ -249,7 +282,9 @@ TEST_F(ReadWriteFileImplTests, Flush_PartialFirstPage_MergesExistingData) {
 TEST_F(ReadWriteFileImplTests, Sync_UpdatesFileSizeMetadata) {
     // Arrange
     const int64_t dataSize = 500;
-    EXPECT_CALL(*m_mockBlobClient, SetSize(500)).Times(::testing::Exactly(1)).WillOnce(::testing::DoDefault());
+    EXPECT_CALL(*m_mockBlobClient, SetSize(500))
+        .Times(::testing::Exactly(1))
+        .WillOnce(::testing::DoDefault());
 
     auto file = CreateFile();
     std::vector<char> data(dataSize, 'E');

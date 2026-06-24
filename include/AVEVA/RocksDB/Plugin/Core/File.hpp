@@ -4,11 +4,13 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
-namespace AVEVA::RocksDB::Plugin::Core {
-class File {
-  public:
-    virtual ~File() = default;
+namespace AVEVA::RocksDB::Plugin::Core
+{
+    class File
+    {
+    public:
+        virtual ~File() = default;
 
-    virtual int64_t Read(char* buffer, int64_t offset, int64_t length) = 0;
-};
-} // namespace AVEVA::RocksDB::Plugin::Core
+        virtual int64_t Read(char* buffer, int64_t offset, int64_t length) = 0;
+    };
+}
