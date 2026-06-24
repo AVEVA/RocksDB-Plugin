@@ -6,8 +6,7 @@
 // --------------------------------------------------------------------------
 // Inserting more data than the capacity evicts the oldest (LRU) entry
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, CapacityEvictsLruEntry)
-{
+TEST_F(FileBasedCompressedSecondaryCacheTests, CapacityEvictsLruEntry) {
     // Capacity = 2 × (kFileHeaderSize + 10) bytes; holds exactly two 10-byte entries.
     const size_t capacity = 2 * (FileBasedCompressedSecondaryCache::kFileHeaderSize + 10);
     m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, MakeNullLogger());
@@ -42,8 +41,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, CapacityEvictsLruEntry)
 // --------------------------------------------------------------------------
 // Lookup promotes an entry to MRU; subsequent eviction targets the true LRU
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, LookupPromotesToMru)
-{
+TEST_F(FileBasedCompressedSecondaryCacheTests, LookupPromotesToMru) {
     const size_t capacity = 2 * (FileBasedCompressedSecondaryCache::kFileHeaderSize + 10);
     m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, MakeNullLogger());
 
@@ -67,8 +65,8 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, LookupPromotesToMru)
     // Inserting key3 must evict the LRU entry, which is now key2 (not key1).
     ASSERT_TRUE(m_cache->Insert(MakeKey(key3), &p3, &m_helper, true).ok());
 
-    EXPECT_EQ(m_cache->Lookup(MakeKey(key2), &m_helper, nullptr, true, false, nullptr, kept),
-              nullptr) << "key2 was LRU after promotion, must be evicted";
+    EXPECT_EQ(m_cache->Lookup(MakeKey(key2), &m_helper, nullptr, true, false, nullptr, kept), nullptr)
+        << "key2 was LRU after promotion, must be evicted";
 
     auto h1b = m_cache->Lookup(MakeKey(key1), &m_helper, nullptr, true, false, nullptr, kept);
     ASSERT_NE(h1b, nullptr) << "key1 was promoted to MRU, must still be present";
@@ -82,16 +80,14 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, LookupPromotesToMru)
 // --------------------------------------------------------------------------
 // advise_erase=true removes the entry from the secondary cache after Lookup
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, LookupWithAdviseEraseRemovesEntry)
-{
+TEST_F(FileBasedCompressedSecondaryCacheTests, LookupWithAdviseEraseRemovesEntry) {
     const std::string keyStr = "advise_erase_key";
     TestPayload payload{"ephemeral data"};
 
     ASSERT_TRUE(m_cache->Insert(MakeKey(keyStr), &payload, &m_helper, true).ok());
 
     bool kept = false;
-    auto handle = m_cache->Lookup(MakeKey(keyStr), &m_helper,
-                                  nullptr, true, /*advise_erase=*/true, nullptr, kept);
+    auto handle = m_cache->Lookup(MakeKey(keyStr), &m_helper, nullptr, true, /*advise_erase=*/true, nullptr, kept);
 
     ASSERT_NE(handle, nullptr);
     EXPECT_FALSE(kept); // entry removed from secondary cache
@@ -102,15 +98,13 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, LookupWithAdviseEraseRemovesEntry
     delete result;
 
     // A subsequent Lookup should find nothing.
-    EXPECT_EQ(m_cache->Lookup(MakeKey(keyStr), &m_helper, nullptr, true, false, nullptr, kept),
-              nullptr);
+    EXPECT_EQ(m_cache->Lookup(MakeKey(keyStr), &m_helper, nullptr, true, false, nullptr, kept), nullptr);
 }
 
 // --------------------------------------------------------------------------
 // force_insert=false skips insertion without evicting when cache is full
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertFalse_WhenCacheFull_SkipsWithoutEvicting)
-{
+TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertFalse_WhenCacheFull_SkipsWithoutEvicting) {
     // Fill the cache exactly with two 10-byte entries.
     const size_t capacity = 2 * (FileBasedCompressedSecondaryCache::kFileHeaderSize + 10);
     m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, MakeNullLogger());
@@ -130,8 +124,8 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertFalse_WhenCacheFull_Sk
     ASSERT_TRUE(m_cache->Insert(MakeKey(key3), &p3, &m_helper, /*force_insert=*/false).ok());
 
     bool kept = false;
-    EXPECT_EQ(m_cache->Lookup(MakeKey(key3), &m_helper, nullptr, true, false, nullptr, kept),
-              nullptr) << "key3 must not have been inserted";
+    EXPECT_EQ(m_cache->Lookup(MakeKey(key3), &m_helper, nullptr, true, false, nullptr, kept), nullptr)
+        << "key3 must not have been inserted";
 
     auto h1 = m_cache->Lookup(MakeKey(key1), &m_helper, nullptr, true, false, nullptr, kept);
     ASSERT_NE(h1, nullptr);
@@ -145,8 +139,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertFalse_WhenCacheFull_Sk
 // --------------------------------------------------------------------------
 // force_insert=true evicts as normal when cache is full
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertTrue_WhenCacheFull_Evicts)
-{
+TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertTrue_WhenCacheFull_Evicts) {
     const size_t capacity = 2 * (FileBasedCompressedSecondaryCache::kFileHeaderSize + 10);
     m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, MakeNullLogger());
 
@@ -161,8 +154,8 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertTrue_WhenCacheFull_Evi
     ASSERT_TRUE(m_cache->Insert(MakeKey("fi_true_key3"), &p3, &m_helper, /*force_insert=*/true).ok());
 
     bool kept = false;
-    EXPECT_EQ(m_cache->Lookup(MakeKey("fi_true_key1"), &m_helper, nullptr, true, false, nullptr, kept),
-              nullptr) << "key1 must be evicted";
+    EXPECT_EQ(m_cache->Lookup(MakeKey("fi_true_key1"), &m_helper, nullptr, true, false, nullptr, kept), nullptr)
+        << "key1 must be evicted";
 
     auto h3 = m_cache->Lookup(MakeKey("fi_true_key3"), &m_helper, nullptr, true, false, nullptr, kept);
     ASSERT_NE(h3, nullptr);
@@ -173,8 +166,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertTrue_WhenCacheFull_Evi
 // force_insert=false on an existing key succeeds even when the cache is full
 // (net capacity change = 0 because the old entry is replaced, not added)
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertFalse_SameKey_WhenFull_UpdatesData)
-{
+TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertFalse_SameKey_WhenFull_UpdatesData) {
     const size_t capacity = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
     m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, MakeNullLogger());
 
@@ -197,8 +189,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertFalse_SameKey_WhenFull
 // --------------------------------------------------------------------------
 // SetCapacity triggers eviction of LRU entries
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, SetCapacityTriggersEviction)
-{
+TEST_F(FileBasedCompressedSecondaryCacheTests, SetCapacityTriggersEviction) {
     TestPayload p1{"1234567890"}; // 10 bytes
     TestPayload p2{"abcdefghij"}; // 10 bytes
 
@@ -209,8 +200,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, SetCapacityTriggersEviction)
     ASSERT_TRUE(m_cache->SetCapacity(FileBasedCompressedSecondaryCache::kFileHeaderSize + 10).ok());
 
     bool kept = false;
-    EXPECT_EQ(m_cache->Lookup(MakeKey("set_cap_key1"), &m_helper, nullptr, true, false, nullptr, kept),
-              nullptr);
+    EXPECT_EQ(m_cache->Lookup(MakeKey("set_cap_key1"), &m_helper, nullptr, true, false, nullptr, kept), nullptr);
 
     auto h2 = m_cache->Lookup(MakeKey("set_cap_key2"), &m_helper, nullptr, true, false, nullptr, kept);
     ASSERT_NE(h2, nullptr);
@@ -224,8 +214,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, SetCapacityTriggersEviction)
 // --------------------------------------------------------------------------
 // SetCapacity(0) evicts every entry
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, SetCapacityZeroEvictsAll)
-{
+TEST_F(FileBasedCompressedSecondaryCacheTests, SetCapacityZeroEvictsAll) {
     TestPayload p1{"payload one"};
     TestPayload p2{"payload two"};
 
@@ -246,8 +235,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, SetCapacityZeroEvictsAll)
 // --------------------------------------------------------------------------
 // Deflate reduces capacity and triggers eviction; Inflate restores it
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, DeflateAndInflateCapacity)
-{
+TEST_F(FileBasedCompressedSecondaryCacheTests, DeflateAndInflateCapacity) {
     constexpr size_t kEntryStoredSize = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
     const size_t initialCapacity = 2 * kEntryStoredSize;
     m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, initialCapacity, MakeNullLogger());
@@ -288,16 +276,15 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, DeflateAndInflateCapacity)
 // --------------------------------------------------------------------------
 // Inflate with SIZE_MAX must clamp to SIZE_MAX (saturating add), not wrap
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, Inflate_SaturationAtSizeMax)
-{
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, /*capacity=*/1024, MakeNullLogger());
+TEST_F(FileBasedCompressedSecondaryCacheTests, Inflate_SaturationAtSizeMax) {
+    m_cache =
+        std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, /*capacity=*/1024, MakeNullLogger());
 
     ASSERT_TRUE(m_cache->Inflate(std::numeric_limits<size_t>::max()).ok());
 
     size_t cap = 0;
     ASSERT_TRUE(m_cache->GetCapacity(cap).ok());
-    EXPECT_EQ(cap, std::numeric_limits<size_t>::max())
-        << "Inflate(SIZE_MAX) must saturate at SIZE_MAX, not wrap";
+    EXPECT_EQ(cap, std::numeric_limits<size_t>::max()) << "Inflate(SIZE_MAX) must saturate at SIZE_MAX, not wrap";
 
     // A further Inflate from SIZE_MAX must be a no-op — already saturated.
     ASSERT_TRUE(m_cache->Inflate(1).ok());
@@ -308,23 +295,20 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, Inflate_SaturationAtSizeMax)
 // --------------------------------------------------------------------------
 // Deflate by more than the current capacity must floor at zero, not underflow
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, DeflateByMoreThanCapacity_ClampsToZero)
-{
+TEST_F(FileBasedCompressedSecondaryCacheTests, DeflateByMoreThanCapacity_ClampsToZero) {
     ASSERT_TRUE(m_cache->Deflate(std::numeric_limits<size_t>::max()).ok());
 
     size_t cap = 999;
     ASSERT_TRUE(m_cache->GetCapacity(cap).ok());
-    EXPECT_EQ(cap, 0u)
-        << "Deflate(SIZE_MAX) must floor capacity at zero, not underflow";
+    EXPECT_EQ(cap, 0u) << "Deflate(SIZE_MAX) must floor capacity at zero, not underflow";
 }
 
 // --------------------------------------------------------------------------
 // A single large insert evicts multiple smaller entries at once
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, SingleInsertEvictsMultipleEntries)
-{
+TEST_F(FileBasedCompressedSecondaryCacheTests, SingleInsertEvictsMultipleEntries) {
     constexpr size_t kSmallPayloadSize = 10;
-    constexpr size_t kSmallEntrySize   = FileBasedCompressedSecondaryCache::kFileHeaderSize + kSmallPayloadSize;
+    constexpr size_t kSmallEntrySize = FileBasedCompressedSecondaryCache::kFileHeaderSize + kSmallPayloadSize;
     constexpr size_t kLargePayloadSize = 30;
 
     // Capacity fits 3 small entries (96 bytes) but NOT 3 small + 1 large.
@@ -342,18 +326,17 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, SingleInsertEvictsMultipleEntries
     ASSERT_TRUE(m_cache->Insert(MakeKey("multi_evict_large"), &pLarge, &m_helper, true).ok());
 
     bool kept = false;
-    auto hLarge = m_cache->Lookup(MakeKey("multi_evict_large"), &m_helper,
-                                  nullptr, true, false, nullptr, kept);
+    auto hLarge = m_cache->Lookup(MakeKey("multi_evict_large"), &m_helper, nullptr, true, false, nullptr, kept);
     ASSERT_NE(hLarge, nullptr);
     auto* resultLarge = static_cast<TestPayload*>(hLarge->Value());
     ASSERT_NE(resultLarge, nullptr);
     EXPECT_EQ(resultLarge->data, pLarge.data);
     delete resultLarge;
 
-    EXPECT_EQ(m_cache->Lookup(MakeKey("multi_evict_k1"), &m_helper, nullptr, true, false, nullptr, kept),
-              nullptr) << "key1 (LRU) must be evicted";
-    EXPECT_EQ(m_cache->Lookup(MakeKey("multi_evict_k2"), &m_helper, nullptr, true, false, nullptr, kept),
-              nullptr) << "key2 must be evicted to make room for the large entry";
+    EXPECT_EQ(m_cache->Lookup(MakeKey("multi_evict_k1"), &m_helper, nullptr, true, false, nullptr, kept), nullptr)
+        << "key1 (LRU) must be evicted";
+    EXPECT_EQ(m_cache->Lookup(MakeKey("multi_evict_k2"), &m_helper, nullptr, true, false, nullptr, kept), nullptr)
+        << "key2 must be evicted to make room for the large entry";
 
     size_t usage = 0;
     ASSERT_TRUE(m_cache->GetUsage(usage).ok());
@@ -365,8 +348,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, SingleInsertEvictsMultipleEntries
 // — force_insert=false is skipped in Phase 1 (capacity gate);
 //   force_insert=true writes the file and immediately evicts it in Phase 3
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, ZeroCapacityAtConstruction_AllInsertsDropped)
-{
+TEST_F(FileBasedCompressedSecondaryCacheTests, ZeroCapacityAtConstruction_AllInsertsDropped) {
     m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, /*capacity=*/0, MakeNullLogger());
 
     TestPayload p{"some data"};
@@ -385,4 +367,3 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ZeroCapacityAtConstruction_AllIns
     EXPECT_EQ(m_cache->Lookup(MakeKey("zero_cap_noforce"), &m_helper, nullptr, true, false, nullptr, kept), nullptr);
     EXPECT_EQ(m_cache->Lookup(MakeKey("zero_cap_force"), &m_helper, nullptr, true, false, nullptr, kept), nullptr);
 }
-

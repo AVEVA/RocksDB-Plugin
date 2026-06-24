@@ -6,8 +6,7 @@
 // --------------------------------------------------------------------------
 // When an entry is evicted, its file is deleted from disk
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, EvictedEntryFileIsDeletedFromDisk)
-{
+TEST_F(FileBasedCompressedSecondaryCacheTests, EvictedEntryFileIsDeletedFromDisk) {
     const size_t capacity = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
     m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, MakeNullLogger());
 
@@ -32,8 +31,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, EvictedEntryFileIsDeletedFromDisk
 // --------------------------------------------------------------------------
 // After eviction-driven removal, no .del graveyard files must remain on disk
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, EvictedEntryLeavesNoGraveyardFile)
-{
+TEST_F(FileBasedCompressedSecondaryCacheTests, EvictedEntryLeavesNoGraveyardFile) {
     const size_t capacity = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
     m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, MakeNullLogger());
 
@@ -43,47 +41,41 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, EvictedEntryLeavesNoGraveyardFile
     ASSERT_TRUE(m_cache->Insert(MakeKey("grv_evict_k1"), &p1, &m_helper, true).ok());
     ASSERT_TRUE(m_cache->Insert(MakeKey("grv_evict_k2"), &p2, &m_helper, true).ok());
 
-    EXPECT_EQ(CountGraveyardFiles(m_cacheDir), 0u)
-        << ".del graveyard files must be deleted before Insert returns";
+    EXPECT_EQ(CountGraveyardFiles(m_cacheDir), 0u) << ".del graveyard files must be deleted before Insert returns";
 }
 
 // --------------------------------------------------------------------------
 // After Erase, no .del graveyard files must remain on disk
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, EraseFileLeavesNoGraveyardFile)
-{
+TEST_F(FileBasedCompressedSecondaryCacheTests, EraseFileLeavesNoGraveyardFile) {
     TestPayload p{"data to erase"};
     ASSERT_TRUE(m_cache->Insert(MakeKey("grv_erase_key"), &p, &m_helper, true).ok());
 
     m_cache->Erase(MakeKey("grv_erase_key"));
 
-    EXPECT_EQ(CountGraveyardFiles(m_cacheDir), 0u)
-        << "Erase must not leave .del graveyard files on disk";
+    EXPECT_EQ(CountGraveyardFiles(m_cacheDir), 0u) << "Erase must not leave .del graveyard files on disk";
 }
 
 // --------------------------------------------------------------------------
 // After advise_erase Lookup, no .del graveyard files must remain on disk
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, AdviseEraseLeavesNoGraveyardFile)
-{
+TEST_F(FileBasedCompressedSecondaryCacheTests, AdviseEraseLeavesNoGraveyardFile) {
     TestPayload p{"ephemeral"};
     ASSERT_TRUE(m_cache->Insert(MakeKey("grv_advise_key"), &p, &m_helper, true).ok());
 
     bool kept = false;
-    auto handle = m_cache->Lookup(MakeKey("grv_advise_key"), &m_helper,
-                                   nullptr, true, /*advise_erase=*/true, nullptr, kept);
+    auto handle =
+        m_cache->Lookup(MakeKey("grv_advise_key"), &m_helper, nullptr, true, /*advise_erase=*/true, nullptr, kept);
     ASSERT_NE(handle, nullptr);
     delete static_cast<TestPayload*>(handle->Value());
 
-    EXPECT_EQ(CountGraveyardFiles(m_cacheDir), 0u)
-        << "advise_erase must not leave .del graveyard files on disk";
+    EXPECT_EQ(CountGraveyardFiles(m_cacheDir), 0u) << "advise_erase must not leave .del graveyard files on disk";
 }
 
 // --------------------------------------------------------------------------
 // After SetCapacity triggers eviction, no .del graveyard files must remain
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, SetCapacityLeavesNoGraveyardFiles)
-{
+TEST_F(FileBasedCompressedSecondaryCacheTests, SetCapacityLeavesNoGraveyardFiles) {
     constexpr size_t kEntryStoredSize = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
     TestPayload p1{"0123456789"};
     TestPayload p2{"abcdefghij"};
@@ -93,16 +85,14 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, SetCapacityLeavesNoGraveyardFiles
     // Shrink to one entry, triggering eviction of the LRU entry.
     ASSERT_TRUE(m_cache->SetCapacity(kEntryStoredSize).ok());
 
-    EXPECT_EQ(CountGraveyardFiles(m_cacheDir), 0u)
-        << "SetCapacity must not leave .del graveyard files on disk";
+    EXPECT_EQ(CountGraveyardFiles(m_cacheDir), 0u) << "SetCapacity must not leave .del graveyard files on disk";
 }
 
 // --------------------------------------------------------------------------
 // An empty file (0 bytes) cannot provide the 1-byte type prefix; Lookup
 // must return nullptr and remove the entry from the index
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, TruncatedFile_RejectedOnLookup)
-{
+TEST_F(FileBasedCompressedSecondaryCacheTests, TruncatedFile_RejectedOnLookup) {
     const std::string keyStr = "truncated_file_key";
     TestPayload payload{"data that will be truncated on disk"};
 
@@ -119,13 +109,11 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, TruncatedFile_RejectedOnLookup)
     }
 
     bool kept = false;
-    auto handle = m_cache->Lookup(MakeKey(keyStr), &m_helper,
-                                  nullptr, true, false, nullptr, kept);
+    auto handle = m_cache->Lookup(MakeKey(keyStr), &m_helper, nullptr, true, false, nullptr, kept);
     EXPECT_EQ(handle, nullptr) << "Empty file must cause Lookup to return nullptr";
     EXPECT_FALSE(kept);
 
     // Entry must have been removed from the index.
-    auto handle2 = m_cache->Lookup(MakeKey(keyStr), &m_helper,
-                                   nullptr, true, false, nullptr, kept);
+    auto handle2 = m_cache->Lookup(MakeKey(keyStr), &m_helper, nullptr, true, false, nullptr, kept);
     EXPECT_EQ(handle2, nullptr);
 }

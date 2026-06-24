@@ -8,233 +8,198 @@
 #include <limits>
 #include <string>
 
-namespace AVEVA::RocksDB::Plugin::Core
-{
-    LruFileIndex::LruFileIndex(std::string cacheDirStr, size_t capacity)
-        : m_cacheDirStr(std::move(cacheDirStr)), m_capacity(capacity)
-    {
-    }
+namespace AVEVA::RocksDB::Plugin::Core {
+LruFileIndex::LruFileIndex(std::string cacheDirStr, size_t capacity)
+    : m_cacheDirStr(std::move(cacheDirStr)), m_capacity(capacity) {}
 
-    std::string LruFileIndex::MakePath(std::string_view filename) const
-    {
-        constexpr char kSep = static_cast<char>(std::filesystem::path::preferred_separator);
-        return m_cacheDirStr + kSep + std::string(filename.data(), filename.size());
-    }
+std::string LruFileIndex::MakePath(std::string_view filename) const {
+    constexpr char kSep = static_cast<char>(std::filesystem::path::preferred_separator);
+    return m_cacheDirStr + kSep + std::string(filename.data(), filename.size());
+}
 
-    std::optional<LruFileIndex::ScopedPin> LruFileIndex::TryPin(std::string_view filename)
-    {
+std::optional<LruFileIndex::ScopedPin> LruFileIndex::TryPin(std::string_view filename) {
+    std::lock_guard lock(m_mutex);
+    const auto it = m_index.find(filename);
+    if (it == m_index.end())
+        return std::nullopt;
+    ++(*it)->pinCount;
+    return ScopedPin(this, filename);
+}
+
+void LruFileIndex::Unpin(std::string_view filename) noexcept {
+    try {
         std::lock_guard lock(m_mutex);
         const auto it = m_index.find(filename);
-        if (it == m_index.end())
-            return std::nullopt;
-        ++(*it)->pinCount;
-        return ScopedPin(this, filename);
-    }
-
-    void LruFileIndex::Unpin(std::string_view filename) noexcept
-    {
-        try
-        {
-            std::lock_guard lock(m_mutex);
-            const auto it = m_index.find(filename);
-            if (it != m_index.end())
-                --(*it)->pinCount;
-        }
-        catch (...) {}
-    }
-
-    std::optional<LruFileIndex::EvictList> LruFileIndex::ReserveCapacity(
-        const std::string_view filename,
-        const size_t storedSize,
-        const bool forceInsert)
-    {
-        EvictList evictPairs;
-        std::lock_guard lock(m_mutex);
-
-        auto indexIt = m_index.find(filename);
-        size_t existingSize;
-        if (indexIt != m_index.end())
-        {
-            existingSize = (*indexIt)->size;
-        }
-        else
-        {
-            existingSize = 0;
-        }
-
-        // When not forced, skip the write rather than evicting a potentially more
-        // valuable entry.  Net-change accounting means a same-key update is skipped
-        // only when the new entry is strictly larger than the existing one and the
-        // delta would exceed capacity; equal-or-smaller replacements always proceed.
-        if (!forceInsert && m_currentSize - existingSize + storedSize > m_capacity)
-        {
-            return std::nullopt;
-        }
-
-        // Pin the existing entry at MRU so EvictUntilSizeLocked cannot evict it,
-        // and so the temporary m_currentSize adjustment below avoids double-counting.
-        if (indexIt != m_index.end())
-        {
-            m_lruList.splice(m_lruList.begin(), m_lruList, *indexIt);
-        }
-
-        // Temporarily discount the existing entry so eviction is sized against the
-        // net new bytes required.  Restored before returning so m_currentSize stays
-        // consistent on any failure path after this method returns.
-        m_currentSize -= existingSize;
-
-        // If a single entry is larger than the entire capacity it can never fit,
-        // even after evicting everything.  Restore the size accounting and bail.
-        if (storedSize > m_capacity)
-        {
-            m_currentSize += existingSize;
-            return std::nullopt;
-        }
-
-        if (m_currentSize + storedSize > m_capacity)
-        {
-            EvictUntilSizeLocked(m_capacity - storedSize, evictPairs);
-        }
-
-        m_currentSize += existingSize;
-        return evictPairs;
-    }
-
-    LruFileIndex::EvictList LruFileIndex::RegisterEntry(
-        std::string_view filename, size_t storedSize)
-    {
-        EvictList evictPairs;
-        std::lock_guard lock(m_mutex);
-
-        // Remove any existing entry for this key — either the one preserved by
-        // ReserveCapacity or a newer one written by a concurrent thread between the
-        // disk write and now.  The file on disk was atomically replaced, so no
-        // separate file deletion is needed for the displaced entry.
-        auto existingIt = m_index.find(filename);
-        if (existingIt != m_index.end())
-        {
-            m_currentSize -= (*existingIt)->size;
-            m_lruList.erase(*existingIt);
-            m_index.erase(existingIt);
-        }
-
-        Entry newEntry{};
-        newEntry.filename.assign(filename.data(), filename.size());
-        newEntry.size = storedSize;
-        m_lruList.push_front(std::move(newEntry));
-        m_index.insert(m_lruList.begin());
-        m_currentSize += storedSize;
-
-        // Correct any capacity overshoot from concurrent writes for different keys
-        // that each independently passed ReserveCapacity's admission check.
-        EvictUntilSizeLocked(m_capacity, evictPairs);
-
-        return evictPairs;
-    }
-
-    bool LruFileIndex::Touch(std::string_view filename)
-    {
-        std::lock_guard lock(m_mutex);
-        const auto it = m_index.find(filename);
-        if (it == m_index.end())
-        {
-            return false;
-        }
-
-        m_lruList.splice(m_lruList.begin(), m_lruList, *it);
-        return true;
-    }
-
-    std::pair<std::string, std::string> LruFileIndex::Remove(
-        std::string_view filename) noexcept
-    {
-        try
-        {
-            std::lock_guard lock(m_mutex);
-            auto it = m_index.find(filename);
-            if (it != m_index.end())
-                return RemoveEntryLocked(*it);
-        }
-        catch (...) {}
-        return {};
-    }
-
-    LruFileIndex::EvictList LruFileIndex::SetCapacity(size_t capacity)
-    {
-        EvictList evictPairs;
-        std::lock_guard lock(m_mutex);
-        m_capacity = capacity;
-        EvictUntilSizeLocked(m_capacity, evictPairs);
-        return evictPairs;
-    }
-
-    LruFileIndex::EvictList LruFileIndex::Deflate(size_t decrease)
-    {
-        EvictList evictPairs;
-        std::lock_guard lock(m_mutex);
-        m_capacity -= std::min(decrease, m_capacity);
-        EvictUntilSizeLocked(m_capacity, evictPairs);
-        return evictPairs;
-    }
-
-    void LruFileIndex::Inflate(size_t increase)
-    {
-        std::lock_guard lock(m_mutex);
-        // Saturating add: clamp to size_t max rather than wrapping silently.
-        const size_t remaining = std::numeric_limits<size_t>::max() - m_capacity;
-        m_capacity += (increase > remaining) ? remaining : increase;
-    }
-
-    size_t LruFileIndex::GetCapacity() const noexcept
-    {
-        std::shared_lock lock(m_mutex);
-        return m_capacity;
-    }
-
-    size_t LruFileIndex::GetUsage() const noexcept
-    {
-        std::shared_lock lock(m_mutex);
-        return m_currentSize;
-    }
-
-    void LruFileIndex::EvictUntilSizeLocked(const size_t targetSize, EvictList& evictPairs)
-    {
-        // Pre-reserve capacity for the worst-case number of evictions so that
-        // push_back cannot throw std::bad_alloc after entries have already been
-        // removed from the index, which would leave m_currentSize inconsistent.
-        if (m_currentSize > targetSize)
-        {
-            const size_t maxEvictions = m_lruList.size();
-            evictPairs.reserve(evictPairs.size() + maxEvictions);
-        }
-
-        while (m_currentSize > targetSize)
-        {
-            // Find the LRU-most unpinned entry (scanning from the back of the list).
-            const auto rit = std::find_if(m_lruList.rbegin(), m_lruList.rend(),
-                [](const Entry& e) { return e.pinCount == 0; });
-            if (rit == m_lruList.rend())
-                break; // all remaining entries are pinned; cannot evict further
-            evictPairs.push_back(RemoveEntryLocked(std::prev(rit.base())));
-        }
-    }
-
-    std::pair<std::string, std::string>
-        LruFileIndex::RemoveEntryLocked(LruIterator it)
-    {
-        // Build the orig and graveyard path strings while under the lock.
-        // No filesystem operation is performed here; the caller must commit the returned
-        // pair after releasing the lock.  Deferring the rename outside the lock allows
-        // bulk evictions to release the mutex sooner, at the cost of a narrow TOCTOU
-        // window where a concurrent insert for the same key could have its file moved to
-        // the graveyard (causing one cache miss; the phantom index entry is then cleaned
-        // up by Lookup).
-        constexpr char kSep = static_cast<char>(std::filesystem::path::preferred_separator);
-        const std::string origPathStr = m_cacheDirStr + kSep + std::string(it->filename.data(), it->filename.size());
-        const std::string graveyardPathStr = origPathStr + ".del";
-        m_currentSize -= it->size;
-        m_index.erase(it);
-        m_lruList.erase(it);
-        return { origPathStr, graveyardPathStr };
+        if (it != m_index.end())
+            --(*it)->pinCount;
+    } catch (...) {
     }
 }
+
+std::optional<LruFileIndex::EvictList> LruFileIndex::ReserveCapacity(const std::string_view filename,
+                                                                     const size_t storedSize, const bool forceInsert) {
+    EvictList evictPairs;
+    std::lock_guard lock(m_mutex);
+
+    auto indexIt = m_index.find(filename);
+    size_t existingSize;
+    if (indexIt != m_index.end()) {
+        existingSize = (*indexIt)->size;
+    } else {
+        existingSize = 0;
+    }
+
+    // When not forced, skip the write rather than evicting a potentially more
+    // valuable entry.  Net-change accounting means a same-key update is skipped
+    // only when the new entry is strictly larger than the existing one and the
+    // delta would exceed capacity; equal-or-smaller replacements always proceed.
+    if (!forceInsert && m_currentSize - existingSize + storedSize > m_capacity) {
+        return std::nullopt;
+    }
+
+    // Pin the existing entry at MRU so EvictUntilSizeLocked cannot evict it,
+    // and so the temporary m_currentSize adjustment below avoids double-counting.
+    if (indexIt != m_index.end()) {
+        m_lruList.splice(m_lruList.begin(), m_lruList, *indexIt);
+    }
+
+    // Temporarily discount the existing entry so eviction is sized against the
+    // net new bytes required.  Restored before returning so m_currentSize stays
+    // consistent on any failure path after this method returns.
+    m_currentSize -= existingSize;
+
+    // If a single entry is larger than the entire capacity it can never fit,
+    // even after evicting everything.  Restore the size accounting and bail.
+    if (storedSize > m_capacity) {
+        m_currentSize += existingSize;
+        return std::nullopt;
+    }
+
+    if (m_currentSize + storedSize > m_capacity) {
+        EvictUntilSizeLocked(m_capacity - storedSize, evictPairs);
+    }
+
+    m_currentSize += existingSize;
+    return evictPairs;
+}
+
+LruFileIndex::EvictList LruFileIndex::RegisterEntry(std::string_view filename, size_t storedSize) {
+    EvictList evictPairs;
+    std::lock_guard lock(m_mutex);
+
+    // Remove any existing entry for this key — either the one preserved by
+    // ReserveCapacity or a newer one written by a concurrent thread between the
+    // disk write and now.  The file on disk was atomically replaced, so no
+    // separate file deletion is needed for the displaced entry.
+    auto existingIt = m_index.find(filename);
+    if (existingIt != m_index.end()) {
+        m_currentSize -= (*existingIt)->size;
+        m_lruList.erase(*existingIt);
+        m_index.erase(existingIt);
+    }
+
+    Entry newEntry{};
+    newEntry.filename.assign(filename.data(), filename.size());
+    newEntry.size = storedSize;
+    m_lruList.push_front(std::move(newEntry));
+    m_index.insert(m_lruList.begin());
+    m_currentSize += storedSize;
+
+    // Correct any capacity overshoot from concurrent writes for different keys
+    // that each independently passed ReserveCapacity's admission check.
+    EvictUntilSizeLocked(m_capacity, evictPairs);
+
+    return evictPairs;
+}
+
+bool LruFileIndex::Touch(std::string_view filename) {
+    std::lock_guard lock(m_mutex);
+    const auto it = m_index.find(filename);
+    if (it == m_index.end()) {
+        return false;
+    }
+
+    m_lruList.splice(m_lruList.begin(), m_lruList, *it);
+    return true;
+}
+
+std::pair<std::string, std::string> LruFileIndex::Remove(std::string_view filename) noexcept {
+    try {
+        std::lock_guard lock(m_mutex);
+        auto it = m_index.find(filename);
+        if (it != m_index.end())
+            return RemoveEntryLocked(*it);
+    } catch (...) {
+    }
+    return {};
+}
+
+LruFileIndex::EvictList LruFileIndex::SetCapacity(size_t capacity) {
+    EvictList evictPairs;
+    std::lock_guard lock(m_mutex);
+    m_capacity = capacity;
+    EvictUntilSizeLocked(m_capacity, evictPairs);
+    return evictPairs;
+}
+
+LruFileIndex::EvictList LruFileIndex::Deflate(size_t decrease) {
+    EvictList evictPairs;
+    std::lock_guard lock(m_mutex);
+    m_capacity -= std::min(decrease, m_capacity);
+    EvictUntilSizeLocked(m_capacity, evictPairs);
+    return evictPairs;
+}
+
+void LruFileIndex::Inflate(size_t increase) {
+    std::lock_guard lock(m_mutex);
+    // Saturating add: clamp to size_t max rather than wrapping silently.
+    const size_t remaining = std::numeric_limits<size_t>::max() - m_capacity;
+    m_capacity += (increase > remaining) ? remaining : increase;
+}
+
+size_t LruFileIndex::GetCapacity() const noexcept {
+    std::shared_lock lock(m_mutex);
+    return m_capacity;
+}
+
+size_t LruFileIndex::GetUsage() const noexcept {
+    std::shared_lock lock(m_mutex);
+    return m_currentSize;
+}
+
+void LruFileIndex::EvictUntilSizeLocked(const size_t targetSize, EvictList& evictPairs) {
+    // Pre-reserve capacity for the worst-case number of evictions so that
+    // push_back cannot throw std::bad_alloc after entries have already been
+    // removed from the index, which would leave m_currentSize inconsistent.
+    if (m_currentSize > targetSize) {
+        const size_t maxEvictions = m_lruList.size();
+        evictPairs.reserve(evictPairs.size() + maxEvictions);
+    }
+
+    while (m_currentSize > targetSize) {
+        // Find the LRU-most unpinned entry (scanning from the back of the list).
+        const auto rit =
+            std::find_if(m_lruList.rbegin(), m_lruList.rend(), [](const Entry& e) { return e.pinCount == 0; });
+        if (rit == m_lruList.rend())
+            break; // all remaining entries are pinned; cannot evict further
+        evictPairs.push_back(RemoveEntryLocked(std::prev(rit.base())));
+    }
+}
+
+std::pair<std::string, std::string> LruFileIndex::RemoveEntryLocked(LruIterator it) {
+    // Build the orig and graveyard path strings while under the lock.
+    // No filesystem operation is performed here; the caller must commit the returned
+    // pair after releasing the lock.  Deferring the rename outside the lock allows
+    // bulk evictions to release the mutex sooner, at the cost of a narrow TOCTOU
+    // window where a concurrent insert for the same key could have its file moved to
+    // the graveyard (causing one cache miss; the phantom index entry is then cleaned
+    // up by Lookup).
+    constexpr char kSep = static_cast<char>(std::filesystem::path::preferred_separator);
+    const std::string origPathStr = m_cacheDirStr + kSep + std::string(it->filename.data(), it->filename.size());
+    const std::string graveyardPathStr = origPathStr + ".del";
+    m_currentSize -= it->size;
+    m_index.erase(it);
+    m_lruList.erase(it);
+    return {origPathStr, graveyardPathStr};
+}
+} // namespace AVEVA::RocksDB::Plugin::Core
