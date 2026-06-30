@@ -57,7 +57,7 @@ Focused diagnosis and repair:
 ### Critical (Blockers)
 - [ ] Git installed and in PATH
 - [ ] C++ compiler available (MSVC on Windows, GCC 13+ or Clang 16+ on Linux)
-- [ ] CMake 3.25+ installed (`cmake --version`)
+- [ ] CMake installed and available (`cmake --version`)
 - [ ] `VCPKG_ROOT` environment variable set and valid
 - [ ] vcpkg bootstrapped (`vcpkg --version`)
 - [ ] Long path support enabled (Windows only — `git config --system core.longpaths`)
