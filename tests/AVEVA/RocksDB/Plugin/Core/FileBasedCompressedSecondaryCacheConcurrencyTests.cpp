@@ -93,7 +93,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentLookups_AllReturnCorrec
     // Pre-populate the cache with kEntryCount distinct entries.
     std::vector<std::string> keys(kEntryCount);
     std::vector<std::string> expectedData(kEntryCount);
-    for (int i = 0; i < kEntryCount; ++i)
+    for (size_t i = 0; i < static_cast<size_t>(kEntryCount); ++i)
     {
         keys[i]         = "conc_lookup_key_" + std::to_string(i);
         expectedData[i] = "payload_" + std::to_string(i) + "_data";
@@ -107,9 +107,9 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentLookups_AllReturnCorrec
 
     std::vector<std::thread> threads;
     threads.reserve(kEntryCount * kReaderCount);
-    for (int r = 0; r < kReaderCount; ++r)
+    for (size_t r = 0; r < static_cast<size_t>(kReaderCount); ++r)
     {
-        for (int i = 0; i < kEntryCount; ++i)
+        for (size_t i = 0; i < static_cast<size_t>(kEntryCount); ++i)
         {
             threads.emplace_back([&, i] {
                 bool kept = false;
