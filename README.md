@@ -112,6 +112,50 @@ and the list of [known plugins](https://github.com/facebook/rocksdb/blob/main/PL
     * Presets can be found in [CMakePresets.json](CMakePresets.json)
 4. Build the project (e.g., `cmake --build <rocksdb-plugin-build-path>`)
 
+## Dependency update automation
+
+This repository uses a hybrid dependency update strategy:
+
+- **Dependabot** (`.github/dependabot.yml`) for supported ecosystems:
+  - GitHub Actions (`github-actions`)
+- **Scheduled workflow** (`.github/workflows/dependency-updates.yml`) for **vcpkg**, because Dependabot does not natively support `vcpkg.json` manifests or the `vcpkg-configuration.json` `baseline`.
+
+### vcpkg update scope
+
+The vcpkg baseline update workflow covers the pinned packages in this repository, including:
+
+- `azure-identity-cpp`
+- `azure-storage-blobs-cpp`
+- `boost-*` packages in `vcpkg.json`
+- `rocksdb`
+- `zstd`
+- `gtest` (test feature dependency)
+
+### Cadence and ownership
+
+- Updates run **weekly** (Monday 11:00 UTC / 04:00 MST).
+- PRs are grouped where supported, and labeled with `dependencies` and `nebula`.
+- Nebula ownership is requested via team reviewer assignment.
+
+### CI gate for dependency PRs
+
+The vcpkg automation validates updates by running:
+
+1. `cmake --preset LinuxDebug`
+2. `cmake --build build/LinuxDebug --config Debug`
+3. `ctest --test-dir build/LinuxDebug --output-on-failure --build-config Debug`
+
+Dependency update PRs should only be merged after CI checks pass.
+
+### Investigated alternatives for vcpkg updates
+
+Dependabot native vcpkg support is currently unavailable. We evaluated:
+
+- Dependabot extension + scheduled Azure Pipelines for Azure Repos (`AVEVA-VSTS`)
+- Renovate
+
+For this GitHub-hosted repository (`AVEVA/RocksDB-Plugin`), we selected the scheduled GitHub Actions workflow approach to keep vcpkg baseline updates automated and validated in-repo with existing CI commands.
+
 ## Contributing
 
 We are not accepting PRs from anyone outside of the AVEVA organization currently.

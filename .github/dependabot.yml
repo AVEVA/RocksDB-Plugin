@@ -1,0 +1,33 @@
+# Dependabot configuration for the AVEVA RocksDB Plugin.
+#
+# Dependabot does NOT natively support vcpkg manifests (vcpkg.json) or the
+# vcpkg-configuration.json builtin-baseline. Those C++ dependencies
+# (azure-identity-cpp, azure-storage-blobs-cpp, boost-*, rocksdb, zstd, gtest)
+# are kept up to date by the scheduled workflow at
+# .github/workflows/dependency-updates.yml, which bumps the vcpkg baseline,
+# rebuilds, runs the tests, and opens a pull request.
+#
+# Dependabot is currently scoped to GitHub Actions only. vcpkg dependency
+# updates are handled by .github/workflows/dependency-updates.yml.
+version: 2
+updates:
+  # GitHub Actions referenced by the repository's workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "11:00"
+      timezone: "Etc/UTC"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    labels:
+      - "dependencies"
+      - "nebula"
+    reviewers:
+      - "AVEVA/Nebula"
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 5

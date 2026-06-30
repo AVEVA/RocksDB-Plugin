@@ -1,0 +1,152 @@
+name: Dependency Updates
+
+on:
+  push:
+    branches:
+      - main
+      - "jss/**"
+  schedule:
+    - cron: "0 11 * * 1" # Weekly Monday at 11:00 UTC (04:00 MST)
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Force PR creation even if build/test fails"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-vcpkg:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup vcpkg
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP/vcpkg"
+          & "$env:RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh"
+          echo "VCPKG_ROOT=$env:RUNNER_TEMP/vcpkg" >> $env:GITHUB_ENV
+
+      - name: Update vcpkg baseline
+        id: update
+        shell: pwsh
+        run: |
+          $config = Get-Content vcpkg-configuration.json -Raw | ConvertFrom-Json
+          $currentBaseline = $config.'default-registry'.baseline
+          Write-Host "Current baseline: $currentBaseline"
+
+          git -C $env:VCPKG_ROOT fetch origin master --quiet
+          $latestCommit = git -C $env:VCPKG_ROOT rev-parse origin/master
+          Write-Host "Latest vcpkg commit: $latestCommit"
+
+          if ($currentBaseline -eq $latestCommit) {
+            echo "updated=false" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+
+          $content = Get-Content vcpkg-configuration.json -Raw
+          $escapedCurrent = [regex]::Escape($currentBaseline)
+          $updatedContent = $content -replace $escapedCurrent, $latestCommit
+          Set-Content vcpkg-configuration.json -Value $updatedContent -NoNewline
+
+          echo "updated=true" >> $env:GITHUB_OUTPUT
+          echo "old_baseline=$currentBaseline" >> $env:GITHUB_OUTPUT
+          echo "new_baseline=$latestCommit" >> $env:GITHUB_OUTPUT
+
+      - name: Verify build and tests
+        id: verify
+        if: steps.update.outputs.updated == 'true'
+        shell: pwsh
+        run: |
+          $force = "${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}" -eq "true"
+          $buildPassed = $true
+          $testsPassed = $true
+
+          cmake --preset LinuxDebug
+          if ($LASTEXITCODE -ne 0) {
+            $buildPassed = $false
+          }
+
+          if ($buildPassed) {
+            cmake --build build/LinuxDebug --config Debug
+            if ($LASTEXITCODE -ne 0) {
+              $buildPassed = $false
+            }
+          }
+
+          if ($buildPassed) {
+            ctest --test-dir build/LinuxDebug --output-on-failure --build-config Debug
+            if ($LASTEXITCODE -ne 0) {
+              $testsPassed = $false
+            }
+          } else {
+            $testsPassed = $false
+          }
+
+          echo "build_passed=$($buildPassed.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          echo "tests_passed=$($testsPassed.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+          if ((-not $buildPassed -or -not $testsPassed) -and -not $force) {
+            throw "Build/test verification failed."
+          }
+
+      - name: Create or update Pull Request
+        if: steps.update.outputs.updated == 'true' && ((steps.verify.outputs.build_passed == 'true' && steps.verify.outputs.tests_passed == 'true') || (github.event_name == 'workflow_dispatch' && inputs.force == true))
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $branch = "dependabot/vcpkg-baseline"
+          $title = "chore(deps): update vcpkg baseline"
+
+          # Check if there are actual changes to push
+          git add vcpkg-configuration.json
+          $changes = git status --porcelain | Where-Object { $_ -match '^ ?M' }
+
+          if (-not $changes) {
+            Write-Host "No packages to update."
+            exit 0
+          }
+
+          # Build PR description
+          $buildStatus = if ("${{ steps.verify.outputs.build_passed }}" -eq "true") { "passed" } else { "failed (forced)" }
+          $testStatus = if ("${{ steps.verify.outputs.tests_passed }}" -eq "true") { "passed" } else { "failed (forced)" }
+          $body = @"
+          ## Automated vcpkg dependency update
+
+          Updates vcpkg baseline from ``${{ steps.update.outputs.old_baseline }}`` to ``${{ steps.update.outputs.new_baseline }}``.
+
+          ### Verification
+          - Build: $buildStatus
+          - Tests: $testStatus
+
+          ---
+          *This PR was created automatically by the dependency update workflow.*
+          "@
+
+          # Push changes
+          Write-Host "##[command] Packages updated. Pushing changes..."
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B $branch
+          git commit -m $title
+          git push --force-with-lease origin $branch
+
+          # Check if PR already exists
+          $existingPr = gh pr list --head $branch --json number --jq ".[0].number"
+          Write-Host "PR Exists: $existingPr"
+
+          if ($existingPr) {
+            Write-Host "##[command] Updating existing PR #$existingPr..."
+            gh pr edit $existingPr --body $body
+          } else {
+            Write-Host "##[command] Creating PR..."
+            gh pr create --title $title --body $body --label "dependencies" --label "nebula" --reviewer "AVEVA/Nebula" --base main
+          }
