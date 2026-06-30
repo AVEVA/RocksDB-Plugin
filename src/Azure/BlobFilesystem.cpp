@@ -605,7 +605,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
             }
 
             m_filesystem->UnlockFile(lockFile->GetImpl());
-            std::erase_if(m_lockFiles, [lockFile](const auto& l) { return l == lockFile; });
+            std::erase_if(m_lockFiles, [lockFile](const auto& lockFileEntry) { return lockFileEntry == lockFile; });
             delete lockFile;
             return rocksdb::IOStatus::OK();
         }
