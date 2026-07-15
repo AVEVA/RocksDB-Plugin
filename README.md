@@ -114,15 +114,14 @@ and the list of [known plugins](https://github.com/facebook/rocksdb/blob/main/PL
 
 ## Dependency update automation
 
-This repository uses a hybrid dependency update strategy:
+This repository uses Dependabot for dependency updates:
 
-- **Dependabot** (`.github/dependabot.yml`) for supported ecosystems:
-  - GitHub Actions (`github-actions`)
-- **Scheduled workflow** (`.github/workflows/dependency-updates.yml`) for **vcpkg**, because Dependabot does not natively support `vcpkg.json` manifests or the `vcpkg-configuration.json` `baseline`.
+- vcpkg (`vcpkg.json` `builtin-baseline`)
+- GitHub Actions (`github-actions`)
 
 ### vcpkg update scope
 
-The vcpkg baseline update workflow covers the pinned packages in this repository, including:
+The vcpkg baseline updates cover the pinned packages in this repository, including:
 
 - `azure-identity-cpp`
 - `azure-storage-blobs-cpp`
@@ -147,14 +146,7 @@ The vcpkg automation validates updates by running:
 
 Dependency update PRs should only be merged after CI checks pass.
 
-### Investigated alternatives for vcpkg updates
-
-Dependabot native vcpkg support is currently unavailable. We evaluated:
-
-- Dependabot extension + scheduled Azure Pipelines for Azure Repos (`AVEVA-VSTS`)
-- Renovate
-
-For this GitHub-hosted repository (`AVEVA/RocksDB-Plugin`), we selected the scheduled GitHub Actions workflow approach to keep vcpkg baseline updates automated and validated in-repo with existing CI commands.
+For this GitHub-hosted repository (`AVEVA/RocksDB-Plugin`), Dependabot targets `vcpkg.json` `builtin-baseline` directly to keep vcpkg updates automated.
 
 ## Contributing
 
