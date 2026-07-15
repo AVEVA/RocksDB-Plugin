@@ -311,18 +311,15 @@ else
     Write-Host("✅ Found VCPKG_ROOT: '$env:VCPKG_ROOT'") -ForegroundColor Green
 }
 
-$expectedBinarySource = "x-az-universal,https://dev.azure.com/AVEVA-VSTS,,Cloud-Platform,"
-$binarySourceRead = "${expectedBinarySource}read"
-$binarySourceReadWrite = "${expectedBinarySource}readwrite"
 if (-not $env:VCPKG_BINARY_SOURCES)
 {
     $hasWarnings = $true
-    Write-Host("⚠️ VCPKG_BINARY_SOURCES environment variable is not set. Consider setting it to '$binarySourceReadWrite' or '$binarySourceRead' to enable binary caching.") -ForegroundColor Yellow
+    Write-Host("⚠️ VCPKG_BINARY_SOURCES environment variable is not set. Consider setting it to enable vcpkg binary caching.") -ForegroundColor Yellow
 }
-elseif ($env:VCPKG_BINARY_SOURCES -notmatch [regex]::Escape($expectedBinarySource) + "(read|readwrite)")
+elseif ($env:VCPKG_BINARY_SOURCES -notmatch "x-az-universal")
 {
     $hasWarnings = $true
-    Write-Host("⚠️ VCPKG_BINARY_SOURCES is set but not configured for Azure binary caching. Consider setting it to '$binarySourceRead' or '$binarySourceReadWrite' to take advantage of binary caching. You don't have to set this up but it's HIGHLY encouraged. Your initial build is GUARANTEED TO BE SLOW without it. Current value: '$env:VCPKG_BINARY_SOURCES'") -ForegroundColor Yellow
+    Write-Host("⚠️ VCPKG_BINARY_SOURCES is set but may not be configured for Azure binary caching. Without it your initial build may be slow. Current value: '$env:VCPKG_BINARY_SOURCES'") -ForegroundColor Yellow
 }
 else
 {
@@ -343,7 +340,7 @@ else
         if (-not $azDevOpsAccount)
         {
             $hasWarnings = $true
-            Write-Host("⚠️ Not logged in to Azure. Please follow the authentication instructions at: 'https://dev.azure.com/AVEVA-VSTS/Cloud%20Platform/_artifacts/feed/Cloud-Platform/connect'. Click on the 'Universal Packages' section to find the instructions.") -ForegroundColor Yellow
+            Write-Host("⚠️ Not logged in to Azure. Please run 'az login' to authenticate with your Azure account.") -ForegroundColor Yellow
         }
         else
         {
