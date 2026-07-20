@@ -1,45 +1,12 @@
 # CODEOWNERS
 #
-# Team: Nebula (RnD-Team-Nebula)
-# Primary owners: ADO group RnD-Team-Nebula
-# Members:
-#   - Venkata Sai Sabareesh Kappagantu <sabareesh.kappagantu@aveva.com> (R&D Manager)
-#   - Ariana Kiaei <ariana.kiaei@aveva.com> (Technical Lead)
-#   - Calvin La <calvin.la@aveva.com> (Technical Lead)
-#   - Nathaniel Wright <nathaniel.wright@aveva.com> (Technical Lead)
-#   - Elizabeth McClellan <elizabeth.mcclellan@aveva.com>
-#   - Gabriel Bick <gabriel.bick@aveva.com>
-#   - Jesus Naranjo <jesus.naranjo@aveva.com>
-#   - Keri Christian <keri.christian@aveva.com>
-#
-# This file documents ownership of code areas in this repository.
-# Azure DevOps enforces reviewers via Branch Policies → Required Reviewers — this file
-# serves as authoritative documentation and is respected by tools like agentrc.
+# Documents ownership of code areas in this repository. Listed owners are
+# automatically requested for review when a matching path changes.
 #
 # Syntax: <path-pattern>  <owner> [<owner> ...]
-# Owners: use ADO group aliases (e.g. @rnd-team-nebula)
+# Owners are GitHub usernames (or @org/team handles, if a team is configured).
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Native C++ plugin sources
-src/                                 @rnd-team-nebula
-
-# Public C++ headers (API surface — requires careful review)
-include/                             @rnd-team-nebula
-
-# C++ tests
-tests/                               @rnd-team-nebula
-
-# Build and CI infrastructure
-infrastructure/                      @rnd-team-nebula
-pipelines/                           @rnd-team-nebula
-CMakeLists.txt                       @rnd-team-nebula
-CMakePresets.json                    @rnd-team-nebula
-vcpkg.json                           @rnd-team-nebula
-vcpkg-configuration.json             @rnd-team-nebula
-
-# AI agent instructions and skills (impacts all Copilot workflows)
-.github/copilot-instructions.md      @rnd-team-nebula
-.github/agents/                      @rnd-team-nebula
-.github/skills/                      @rnd-team-nebula
-AGENTS.md                            @rnd-team-nebula
+# Default owners for the entire repository
+*   @sbrsh-aveva @njwright-aveva @akiaei01 @calvinhla-aveva @emcclellanAv @gabrielbick @jssnaranjo @kerichristianaveva
