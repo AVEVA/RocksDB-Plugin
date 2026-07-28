@@ -114,39 +114,12 @@ and the list of [known plugins](https://github.com/facebook/rocksdb/blob/main/PL
 
 ## Dependency update automation
 
-This repository uses Dependabot for dependency updates:
+This repository uses [Dependabot](https://docs.github.com/en/code-security/dependabot) to automate dependency updates. Configuration lives in [`.github/dependabot.yml`](.github/dependabot.yml) and covers:
 
-- vcpkg (`vcpkg.json` `builtin-baseline`)
-- GitHub Actions (`github-actions`)
-
-### vcpkg update scope
-
-The vcpkg baseline updates cover the pinned packages in this repository, including:
-
-- `azure-identity-cpp`
-- `azure-storage-blobs-cpp`
-- `boost-*` packages in `vcpkg.json`
-- `rocksdb`
-- `zstd`
-- `gtest` (test feature dependency)
-
-### Cadence and ownership
-
-- Updates run **weekly** (Monday 11:00 UTC / 04:00 MST).
-- PRs are grouped where supported, and labeled with `dependencies` and `nebula`.
-- Nebula ownership is requested via team reviewer assignment.
-
-### CI gate for dependency PRs
-
-The vcpkg automation validates updates by running:
-
-1. `cmake --preset LinuxDebug`
-2. `cmake --build build/LinuxDebug --config Debug`
-3. `ctest --test-dir build/LinuxDebug --output-on-failure --build-config Debug`
+- **vcpkg** — bumps the `builtin-baseline` in [`vcpkg.json`](vcpkg.json).
+- **GitHub Actions** — keeps workflow action versions current.
 
 Dependency update PRs should only be merged after CI checks pass.
-
-For this GitHub-hosted repository (`AVEVA/RocksDB-Plugin`), Dependabot targets `vcpkg.json` `builtin-baseline` directly to keep vcpkg updates automated.
 
 ## Contributing
 
