@@ -314,39 +314,11 @@ else
 if (-not $env:VCPKG_BINARY_SOURCES)
 {
     $hasWarnings = $true
-    Write-Host("⚠️ VCPKG_BINARY_SOURCES environment variable is not set. Consider setting it to enable vcpkg binary caching.") -ForegroundColor Yellow
-}
-elseif ($env:VCPKG_BINARY_SOURCES -notmatch "x-az-universal")
-{
-    $hasWarnings = $true
-    Write-Host("⚠️ VCPKG_BINARY_SOURCES is set but may not be configured for Azure binary caching. Without it your initial build may be slow. Current value: '$env:VCPKG_BINARY_SOURCES'") -ForegroundColor Yellow
+    Write-Host("⚠️ VCPKG_BINARY_SOURCES environment variable is not set. Consider setting it to enable local vcpkg binary caching (e.g., 'clear;files,<path>,readwrite'). See: 'https://learn.microsoft.com/en-us/vcpkg/users/binarycaching'") -ForegroundColor Yellow
 }
 else
 {
     Write-Host("✅ Found VCPKG_BINARY_SOURCES: '$env:VCPKG_BINARY_SOURCES'") -ForegroundColor Green
-
-    $AZ_CLI_PATH = (Get-Command az -ErrorAction SilentlyContinue).Source
-    if (-not $AZ_CLI_PATH)
-    {
-        $hasErrors = $true
-        Write-Host("❌ Azure CLI (az) is not installed. Since VCPKG_BINARY_SOURCES is configured for Azure DevOps, please install it: 'https://learn.microsoft.com/en-us/cli/azure/install-azure-cli-windows'") -ForegroundColor Red
-    }
-    else
-    {
-        Write-Host("✅ Found Azure CLI: '${AZ_CLI_PATH}'") -ForegroundColor Green
-
-        # Check if logged in to Azure
-        $azDevOpsAccount = az account show 2>$null | ConvertFrom-Json -ErrorAction SilentlyContinue
-        if (-not $azDevOpsAccount)
-        {
-            $hasWarnings = $true
-            Write-Host("⚠️ Not logged in to Azure. Please run 'az login' to authenticate with your Azure account.") -ForegroundColor Yellow
-        }
-        else
-        {
-            Write-Host("✅ Logged in to Azure (Subscription: $($azDevOpsAccount.name))") -ForegroundColor Green
-        }
-    }
 }
 
 # Check Node.js / npm (optional — used to run agentrc readiness tooling via npx)
