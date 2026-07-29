@@ -1,0 +1,54 @@
+# Dependabot configuration for the AVEVA RocksDB Plugin.
+# vcpkg updates are tracked via vcpkg.json builtin-baseline.
+# See: https://learn.microsoft.com/en-us/vcpkg/concepts/dependabot
+version: 2
+updates:
+  # vcpkg manifest updates: bumps vcpkg.json builtin-baseline.
+  - package-ecosystem: "vcpkg"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "11:00"
+      timezone: "Etc/UTC"
+    labels:
+      - "dependencies"
+    reviewers:
+      - "sbrsh-aveva"
+      - "njwright-aveva"
+      - "akiaei01"
+      - "calvinhla-aveva"
+      - "emcclellanAv"
+      - "gabrielbick"
+      - "jssnaranjo"
+      - "kerichristianaveva"
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 5
+
+  # GitHub Actions referenced by the repository's workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "11:00"
+      timezone: "Etc/UTC"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    labels:
+      - "dependencies"
+    reviewers:
+      - "sbrsh-aveva"
+      - "njwright-aveva"
+      - "akiaei01"
+      - "calvinhla-aveva"
+      - "emcclellanAv"
+      - "gabrielbick"
+      - "jssnaranjo"
+      - "kerichristianaveva"
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 5
