@@ -112,6 +112,15 @@ and the list of [known plugins](https://github.com/facebook/rocksdb/blob/main/PL
     * Presets can be found in [CMakePresets.json](CMakePresets.json)
 4. Build the project (e.g., `cmake --build <rocksdb-plugin-build-path>`)
 
+## Dependency update automation
+
+This repository uses [Dependabot](https://docs.github.com/en/code-security/dependabot) to automate dependency updates. Configuration lives in [`.github/dependabot.yml`](.github/dependabot.yml) and covers:
+
+- **vcpkg** — bumps the `builtin-baseline` in [`vcpkg.json`](vcpkg.json).
+- **GitHub Actions** — keeps workflow action versions current.
+
+Dependency update PRs should only be merged after CI checks pass.
+
 ## Contributing
 
 We are not accepting PRs from anyone outside of the AVEVA organization currently.
