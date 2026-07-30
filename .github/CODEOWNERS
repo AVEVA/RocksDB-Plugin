@@ -1,0 +1,12 @@
+# CODEOWNERS
+#
+# Documents ownership of code areas in this repository. Listed owners are
+# automatically requested for review when a matching path changes.
+#
+# Syntax: <path-pattern>  <owner> [<owner> ...]
+# Owners are GitHub usernames (or @org/team handles, if a team is configured).
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Default owners for the entire repository
+*   @sbrsh-aveva @njwright-aveva @akiaei01 @calvinhla-aveva @emcclellanAv @gabrielbick @jssnaranjo @kerichristianaveva

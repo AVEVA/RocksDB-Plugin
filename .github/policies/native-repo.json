@@ -1,0 +1,24 @@
+{
+  "name": "native-repo",
+  "criteria": {
+    "disable": [
+      "build-script",
+      "test-script",
+      "lint-config",
+      "format-config",
+      "typecheck-config",
+      "lockfile",
+      "ci-config",
+      "env-example",
+      "observability",
+      "dependabot",
+      "apm-config",
+      "apm-locked-deps",
+      "apm-ci-integration",
+      "instructions-consistency"
+    ]
+  },
+  "extras": {
+    "disable": ["pre-commit"]
+  }
+}

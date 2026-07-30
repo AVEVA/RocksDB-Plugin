@@ -1,0 +1,69 @@
+{
+  "instructionFile": ".github/copilot-instructions.md",
+  "systemMessage": "Research using read-only tools and make a concrete implementation plan for the given task. Include: which layer is affected (Azure plugin under src/AVEVA/RocksDB/Plugin/Azure or Core abstractions under src/AVEVA/RocksDB/Plugin/Core), which specific files to create or modify, the order of changes, what tests to add or update under tests/, and how to build and verify with a CMake preset and ctest.",
+  "cases": [
+    {
+      "id": "azure-error-translation-new-status",
+      "prompt": "Azure Blob Storage can return HTTP 412 (PreconditionFailed) when an ETag/If-Match condition fails on a page blob write. Right now AzureErrorTranslator maps it to a generic IOError. Map PreconditionFailed to a more appropriate, retryable RocksDB IOStatus instead.",
+      "expectation": [
+        "Classifies the change as Azure-layer work in src/AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.cpp and its header include/AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp.",
+        "Adds a new case to the switch in AzureErrorTranslator::IOStatusFromError for Azure::Core::Http::HttpStatusCode::PreconditionFailed.",
+        "Returns a rocksdb::IOStatus and uses status.SetRetryable(true) consistent with the existing RequestTimeout and ServiceUnavailable handling, rather than swallowing the error.",
+        "Plans to build with a CMake preset and run ctest, adding a unit test that asserts PreconditionFailed maps to the expected retryable IOStatus.",
+        "Keeps the default branch returning IOStatus::IOError for unmapped codes."
+      ]
+    },
+    {
+      "id": "filecache-evict-race",
+      "prompt": "In Core/FileCache, a file can be evicted by EvictAtLeast on one thread while the background jthread downloader is still writing to that same FileCacheEntry. Investigate whether RemoveFileUnsafe and the background download path are correctly serialized, and describe the fix.",
+      "expectation": [
+        "Classifies the change as Core abstractions work in src/AVEVA/RocksDB/Plugin/Core/FileCache.cpp and FileCacheEntry.cpp.",
+        "Traces the locking around m_mutex and how the *Unsafe methods (RemoveFileUnsafe, EntryAccessedUnsafe, EvictAtLeast) assume the caller holds the lock.",
+        "Examines the BackgroundDownload(std::stop_token) path and the m_fileDownloadQueue / m_cv coordination for a window where an entry is evicted mid-download.",
+        "Identifies whether the fix is a locking/ordering change or a per-entry state flag, and explains why it closes the race without deadlocking against the background jthread.",
+        "Plans to build with a CMake preset and run ctest, adding or extending a concurrency test in tests/AVEVA/RocksDB/Plugin/Core/FileCacheTests.cpp using the existing FilesystemMock/ContainerClientMock pattern."
+      ]
+    },
+    {
+      "id": "plugin-register-new-overload-param",
+      "prompt": "Add an optional read-ahead size parameter to Plugin::Register so callers can tune prefetching for the Azure Page Blob filesystem. Existing callers must not need to change.",
+      "expectation": [
+        "Notes that Plugin::Register is declared in include/AVEVA/RocksDB/Plugin/Azure/Plugin.hpp and has two overloads (ServicePrincipalStorageInfo and ChainedCredentialInfo) that must both be updated consistently.",
+        "Adds the new parameter as a trailing argument with a default sourced from Impl::Configuration (matching the existing dataFileBufferSize / dataFileInitialSize / maxCacheSize defaults) so the public API stays backward compatible.",
+        "Threads the value through Plugin.cpp into the BlobFilesystem / Impl construction path rather than leaking implementation details into the header.",
+        "Plans to build with a CMake preset and run ctest, adding a test that exercises the new parameter."
+      ]
+    },
+    {
+      "id": "pageblob-failed-write-not-surfaced",
+      "prompt": "A reviewer suspects that when PageBlob::SetSize or a page write throws an Azure SDK exception, the failure may not propagate back to RocksDB as an IOStatus on the WriteableFile path. Investigate and describe the fix.",
+      "expectation": [
+        "Classifies the change as Azure-layer work spanning src/AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.cpp, WriteableFileImpl.cpp, and BlobHelpers.cpp.",
+        "Traces how Azure SDK exceptions (Azure::Storage::StorageException / RequestFailedException) are caught and converted via AzureErrorTranslator::IOStatusFromError into a rocksdb::IOStatus.",
+        "Confirms the WriteableFile / ReadWriteFile public methods return the translated IOStatus instead of swallowing or asserting on the failure.",
+        "Plans to build with a CMake preset and run ctest, adding a test under tests/AVEVA/RocksDB/Plugin/Azure/Impl/ (e.g. WriteableFileTests.cpp) that forces a blob failure and asserts the error surfaces as the expected IOStatus."
+      ]
+    },
+    {
+      "id": "filecache-stale-eviction-correctness",
+      "prompt": "When a cached file is marked stale via MarkFileAsStaleIfExists but has not yet been re-downloaded, it should not be served from cache and should be pruned. Verify PruneUndownloadedStaleEntriesUnsafe handles this correctly and add coverage.",
+      "expectation": [
+        "Classifies the change as Core abstractions work in src/AVEVA/RocksDB/Plugin/Core/FileCache.cpp.",
+        "Examines the interaction between MarkFileAsStaleIfExists, PruneUndownloadedStaleEntriesUnsafe, CountUndownloadedStaleEntriesUnsafe, and ReadFile to confirm a stale-but-undownloaded entry is never returned as a cache hit.",
+        "Confirms all *Unsafe helpers are only called while m_mutex is held.",
+        "Plans to build with a CMake preset and run ctest, adding a test in tests/AVEVA/RocksDB/Plugin/Core/FileCacheTests.cpp that marks an entry stale before download completes and asserts it is pruned and re-fetched."
+      ]
+    },
+    {
+      "id": "pr-workflow-approval",
+      "prompt": "I've finished fixing a bug where a failed page-blob DownloadTo in the Azure plugin was returning a partial read instead of an error IOStatus. All ctest cases pass. Get a pull request created.",
+      "expectation": [
+        "Uses the azure-devops skill to prepare and create the pull request.",
+        "Reads .github/PULL_REQUEST_TEMPLATE.md to populate the PR description (PR type, current/new behavior, verification, security compliance checklist) before creating.",
+        "ASKS the user for explicit approval before publishing the PR.",
+        "Does NOT create the PR unilaterally without waiting for the user to confirm.",
+        "Notes in the verification section that the fix was validated by building with a CMake preset and running ctest."
+      ]
+    }
+  ]
+}
