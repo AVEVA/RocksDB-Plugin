@@ -1,6 +1,6 @@
 {
   "$comment": "builtin-baseline pins the default (microsoft/vcpkg) registry version set. Dependabot's vcpkg ecosystem monitors this field and opens PRs to bump it. See https://learn.microsoft.com/vcpkg/concepts/dependabot",
-  "builtin-baseline": "eae1680538b86f962455c27abca2aad0dc304a4d",
+  "builtin-baseline": "9e593bb18ea69cc5095e012465dcd675a822ed0d",
   "dependencies": [
     "azure-identity-cpp",
     "azure-storage-blobs-cpp",
