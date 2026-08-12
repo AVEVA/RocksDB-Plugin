@@ -1,0 +1,45 @@
+name: Assign Random Dependabot Reviewers
+
+on:
+  pull_request:
+    types: [opened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  assign-reviewers:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Randomly assign 2 reviewers
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # List of potential reviewers
+          reviewers=(
+            "sbrsh-aveva"
+            "njwright-aveva"
+            "akiaei01"
+            "calvinhla-aveva"
+            "emcclellanAv"
+            "gabrielbick"
+            "jssnaranjo"
+            "kerichristianaveva"
+          )
+
+          # Fisher-Yates shuffle and pick first 2
+          for ((i = ${#reviewers[@]} - 1; i > 0; i--)); do
+            j=$((RANDOM % (i + 1)))
+            temp=${reviewers[i]}
+            reviewers[i]=${reviewers[j]}
+            reviewers[j]=$temp
+          done
+
+          selected="${reviewers[0]},${reviewers[1]}"
+          echo "Selected reviewers: $selected"
+
+          # Assign reviewers to PR
+          gh pr edit $PR_NUMBER --add-reviewer "$selected" --repo "$REPO"

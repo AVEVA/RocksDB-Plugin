@@ -13,15 +13,6 @@ updates:
       timezone: "Etc/UTC"
     labels:
       - "dependencies"
-    reviewers:
-      - "sbrsh-aveva"
-      - "njwright-aveva"
-      - "akiaei01"
-      - "calvinhla-aveva"
-      - "emcclellanAv"
-      - "gabrielbick"
-      - "jssnaranjo"
-      - "kerichristianaveva"
     commit-message:
       prefix: "chore(deps)"
     open-pull-requests-limit: 5
@@ -40,15 +31,6 @@ updates:
           - "*"
     labels:
       - "dependencies"
-    reviewers:
-      - "sbrsh-aveva"
-      - "njwright-aveva"
-      - "akiaei01"
-      - "calvinhla-aveva"
-      - "emcclellanAv"
-      - "gabrielbick"
-      - "jssnaranjo"
-      - "kerichristianaveva"
     commit-message:
       prefix: "chore(deps)"
     open-pull-requests-limit: 5
