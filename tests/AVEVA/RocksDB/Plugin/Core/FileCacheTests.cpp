@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <unordered_set>
 using AVEVA::RocksDB::Plugin::Core::FileCache;
 using AVEVA::RocksDB::Plugin::Core::Mocks::BlobClientMock;
@@ -183,11 +184,15 @@ TEST_F(FileCacheTests, ReadRandomLargeFiles_EvictionWorks) {
 TEST_F(FileCacheTests, ReadFileFromCache) {
     // Arrange
     std::string fileData = "Hello, World!";
-    EXPECT_CALL(*m_containerClient, GetBlobClient("1.sst")).WillRepeatedly(Invoke([&fileData](const std::string&) {
+    // BackgroundDownload calls GetBlobClient twice per file: once for GetSize and once for
+    // DownloadTo. Each call returns a fresh mock, so we track DownloadTo with a shared counter
+    // rather than a per-blob EXPECT_CALL which would fail on the size-only blob.
+    std::atomic<int> downloadCount{0};
+    EXPECT_CALL(*m_containerClient, GetBlobClient("1.sst")).WillRepeatedly(Invoke([&fileData, &downloadCount](const std::string&) {
         auto blob = std::make_unique<BlobClientMock>();
-        EXPECT_CALL(*blob, GetSize()).WillRepeatedly(Return(fileData.size()));
-        EXPECT_CALL(*blob, DownloadTo(Matcher<const std::string&>(_), _, _)).Times(1);
-
+        ON_CALL(*blob, GetSize()).WillByDefault(Return(fileData.size()));
+        ON_CALL(*blob, DownloadTo(Matcher<const std::string&>(_), _, _))
+            .WillByDefault([&downloadCount](const std::string&, int64_t, int64_t) { downloadCount++; });
         return blob;
     }));
     EXPECT_CALL(*m_filesystem, Open(std::filesystem::path(m_folderName) / "1.sst"))
@@ -201,6 +206,7 @@ TEST_F(FileCacheTests, ReadFileFromCache) {
             return file;
         }));
     EnsureReadFromCache("1.sst");
+    EXPECT_EQ(1, downloadCount) << "DownloadTo should have been called exactly once";
 
     // Act
     std::vector<char> buffer;
