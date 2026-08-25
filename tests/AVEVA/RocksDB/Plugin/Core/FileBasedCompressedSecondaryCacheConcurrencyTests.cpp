@@ -13,10 +13,10 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentSameKeyInsert_UsageAcco
     const std::string sharedKey = "concurrent_same_key";
     const std::string data(1024, 'C');
 
-    constexpr int kThreadCount = 8;
+    constexpr size_t kThreadCount = 8;
     std::vector<std::thread> threads;
     threads.reserve(kThreadCount);
-    for (int i = 0; i < kThreadCount; ++i) {
+    for (size_t i = 0; i < kThreadCount; ++i) {
         threads.emplace_back([&] {
             TestPayload p{data};
             m_cache->Insert(MakeKey(sharedKey), &p, &m_helper, /*force_insert=*/true);
@@ -50,7 +50,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentDifferentKeyInserts_Usa
     // 10-byte payloads: entries are stored with a 1-byte header prefix, giving a
     // predictable on-disk size of (kFileHeaderSize + 10) bytes each.
     constexpr size_t kEntrySize = 10;
-    constexpr int kThreadCount = 16;
+    constexpr size_t kThreadCount = 16;
 
     // Capacity allows exactly 3 entries; the remaining 13 must be evicted.
     const size_t capacity = 3 * (FileBasedCompressedSecondaryCache::kFileHeaderSize + kEntrySize);
@@ -58,7 +58,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentDifferentKeyInserts_Usa
 
     std::vector<std::thread> threads;
     threads.reserve(kThreadCount);
-    for (int i = 0; i < kThreadCount; ++i) {
+    for (size_t i = 0; i < kThreadCount; ++i) {
         threads.emplace_back([&, i] {
             // Each thread gets a distinct 10-character payload.
             TestPayload p{std::string(kEntrySize, static_cast<char>('A' + (i % 26)))};
@@ -81,13 +81,13 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentDifferentKeyInserts_Usa
 // Phase 1 uses shared_lock so all readers proceed simultaneously.
 // --------------------------------------------------------------------------
 TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentLookups_AllReturnCorrectData) {
-    constexpr int kEntryCount = 8;
-    constexpr int kReaderCount = 4; // reader threads per entry
+    constexpr size_t kEntryCount = 8;
+    constexpr size_t kReaderCount = 4; // reader threads per entry
 
     // Pre-populate the cache with kEntryCount distinct entries.
     std::vector<std::string> keys(kEntryCount);
     std::vector<std::string> expectedData(kEntryCount);
-    for (int i = 0; i < kEntryCount; ++i) {
+    for (size_t i = 0; i < kEntryCount; ++i) {
         keys[i] = "conc_lookup_key_" + std::to_string(i);
         expectedData[i] = "payload_" + std::to_string(i) + "_data";
         TestPayload p{expectedData[i]};
@@ -100,8 +100,8 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentLookups_AllReturnCorrec
 
     std::vector<std::thread> threads;
     threads.reserve(kEntryCount * kReaderCount);
-    for (int r = 0; r < kReaderCount; ++r) {
-        for (int i = 0; i < kEntryCount; ++i) {
+    for (size_t r = 0; r < kReaderCount; ++r) {
+        for (size_t i = 0; i < kEntryCount; ++i) {
             threads.emplace_back([&, i] {
                 bool kept = false;
                 auto handle = m_cache->Lookup(MakeKey(keys[i]), &m_helper, nullptr, true, false, nullptr, kept);
@@ -127,11 +127,11 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentLookups_AllReturnCorrec
 // crash, deadlock, or corrupt internal state
 // --------------------------------------------------------------------------
 TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentMixedInsertEraseLookup) {
-    constexpr int kKeyCount = 8;
-    constexpr int kThreadsPerOp = 4;
+    constexpr size_t kKeyCount = 8;
+    constexpr size_t kThreadsPerOp = 4;
 
     // Pre-populate half the keys so Erase and Lookup have something to hit.
-    for (int i = 0; i < kKeyCount / 2; ++i) {
+    for (size_t i = 0; i < kKeyCount / 2; ++i) {
         TestPayload p{"prepop_" + std::to_string(i)};
         ASSERT_TRUE(m_cache->Insert(MakeKey("mixed_k" + std::to_string(i)), &p, &m_helper, true).ok());
     }
@@ -140,8 +140,8 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentMixedInsertEraseLookup)
     threads.reserve(kKeyCount * kThreadsPerOp * 2 + kKeyCount);
 
     // Insert threads.
-    for (int i = 0; i < kKeyCount; ++i) {
-        for (int t = 0; t < kThreadsPerOp; ++t) {
+    for (size_t i = 0; i < kKeyCount; ++i) {
+        for (size_t t = 0; t < kThreadsPerOp; ++t) {
             threads.emplace_back([&, i] {
                 TestPayload p{"insert_" + std::to_string(i)};
                 m_cache->Insert(MakeKey("mixed_k" + std::to_string(i)), &p, &m_helper, true);
@@ -150,13 +150,13 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentMixedInsertEraseLookup)
     }
 
     // Erase threads.
-    for (int i = 0; i < kKeyCount; ++i) {
+    for (size_t i = 0; i < kKeyCount; ++i) {
         threads.emplace_back([&, i] { m_cache->Erase(MakeKey("mixed_k" + std::to_string(i))); });
     }
 
     // Lookup threads.
-    for (int i = 0; i < kKeyCount; ++i) {
-        for (int t = 0; t < kThreadsPerOp; ++t) {
+    for (size_t i = 0; i < kKeyCount; ++i) {
+        for (size_t t = 0; t < kThreadsPerOp; ++t) {
             threads.emplace_back([&, i] {
                 bool kept = false;
                 auto handle = m_cache->Lookup(MakeKey("mixed_k" + std::to_string(i)), &m_helper, nullptr, true, false,
