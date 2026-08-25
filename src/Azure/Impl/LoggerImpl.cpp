@@ -6,6 +6,9 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 LoggerImpl::LoggerImpl(std::unique_ptr<WriteableFileImpl> file, int logLevel)
     : m_file(std::move(file)), m_logLevel(logLevel), m_buffer(4096) {}
 
+LoggerImpl::LoggerImpl(std::unique_ptr<WriteableFileImpl> file, int logLevel, std::chrono::seconds cooldown)
+    : m_file(std::move(file)), m_logLevel(logLevel), m_buffer(4096), m_rateLimiter(std::make_unique<LogRateLimiter>(cooldown)) {}
+
 void LoggerImpl::Logv(const int logLevel, const char* format, ...) {
     va_list va;
     va_start(va, format);
@@ -16,6 +19,25 @@ void LoggerImpl::Logv(const int logLevel, const char* format, ...) {
 void LoggerImpl::Logv(const int logLevel, const char* format, va_list ap) {
     if (logLevel < m_logLevel) {
         return;
+    }
+
+    if (m_rateLimiter) {
+        const auto result = m_rateLimiter->CheckAndRecord(format);
+        if (result.decision == RateDecision::Suppress) {
+            return;
+        }
+        if (result.decision == RateDecision::AllowWithSummary) {
+            // Emit the suppression summary as its own line before the current message.
+            // Format: "[N similar messages suppressed in last 30s]\n"
+            const auto seconds = m_rateLimiter->Cooldown().count();
+            char summary[128];
+            const int n = snprintf(summary, sizeof(summary),
+                "[%u similar messages suppressed in last %llds]\n",
+                result.suppressedCount, static_cast<long long>(seconds));
+            if (n > 0) {
+                m_file->Append(std::span(summary, summary + static_cast<size_t>(n)));
+            }
+        }
     }
 
     // RFC 3339 format UTC time

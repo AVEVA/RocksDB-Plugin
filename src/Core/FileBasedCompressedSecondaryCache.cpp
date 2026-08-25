@@ -137,7 +137,7 @@ class FileBasedCompressedSecondaryCache::Impl {
             return WriteEntry(key, rocksdb::CompressionType::kNoCompression, buf.data(), dataSize, forceInsert);
         } catch (...) {
             const auto s = StatusUtil::CurrentExceptionToStatus();
-            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
+            BOOST_LOG_SEV(*m_logger, warning) << Name() << "::" << __func__ << ": " << s.ToString();
             return s;
         }
     }
@@ -156,7 +156,7 @@ class FileBasedCompressedSecondaryCache::Impl {
             return WriteEntry(key, type, saved.data(), saved.size());
         } catch (...) {
             const auto s = StatusUtil::CurrentExceptionToStatus();
-            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
+            BOOST_LOG_SEV(*m_logger, warning) << Name() << "::" << __func__ << ": " << s.ToString();
             return s;
         }
     }
@@ -247,7 +247,7 @@ class FileBasedCompressedSecondaryCache::Impl {
             objCleanup.set_active(false);
             return result;
         } catch (...) {
-            BOOST_LOG_SEV(*m_logger, error)
+            BOOST_LOG_SEV(*m_logger, warning)
                 << Name() << "::" << __func__ << ": " << StatusUtil::CurrentExceptionToStatus().ToString();
             return nullptr;
         }
@@ -263,7 +263,7 @@ class FileBasedCompressedSecondaryCache::Impl {
             const auto filename = KeyToFilename(key);
             FileUtil::CommitEviction(*m_fs, m_lruIndex.Remove(filename));
         } catch (...) {
-            BOOST_LOG_SEV(*m_logger, error)
+            BOOST_LOG_SEV(*m_logger, warning)
                 << Name() << "::" << __func__ << ": " << StatusUtil::CurrentExceptionToStatus().ToString();
         }
     }
@@ -276,7 +276,7 @@ class FileBasedCompressedSecondaryCache::Impl {
             return rocksdb::Status::OK();
         } catch (...) {
             const auto s = StatusUtil::CurrentExceptionToStatus();
-            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
+            BOOST_LOG_SEV(*m_logger, warning) << Name() << "::" << __func__ << ": " << s.ToString();
             return s;
         }
     }
@@ -287,7 +287,7 @@ class FileBasedCompressedSecondaryCache::Impl {
             return rocksdb::Status::OK();
         } catch (...) {
             const auto s = StatusUtil::CurrentExceptionToStatus();
-            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
+            BOOST_LOG_SEV(*m_logger, warning) << Name() << "::" << __func__ << ": " << s.ToString();
             return s;
         }
     }
@@ -298,7 +298,7 @@ class FileBasedCompressedSecondaryCache::Impl {
             return rocksdb::Status::OK();
         } catch (...) {
             const auto s = StatusUtil::CurrentExceptionToStatus();
-            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
+            BOOST_LOG_SEV(*m_logger, warning) << Name() << "::" << __func__ << ": " << s.ToString();
             return s;
         }
     }
@@ -309,7 +309,7 @@ class FileBasedCompressedSecondaryCache::Impl {
             return rocksdb::Status::OK();
         } catch (...) {
             const auto s = StatusUtil::CurrentExceptionToStatus();
-            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
+            BOOST_LOG_SEV(*m_logger, warning) << Name() << "::" << __func__ << ": " << s.ToString();
             return s;
         }
     }
@@ -320,7 +320,7 @@ class FileBasedCompressedSecondaryCache::Impl {
             return rocksdb::Status::OK();
         } catch (...) {
             const auto s = StatusUtil::CurrentExceptionToStatus();
-            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
+            BOOST_LOG_SEV(*m_logger, warning) << Name() << "::" << __func__ << ": " << s.ToString();
             return s;
         }
     }
@@ -388,7 +388,7 @@ class FileBasedCompressedSecondaryCache::Impl {
             return rocksdb::Status::OK();
         } catch (...) {
             const auto s = StatusUtil::CurrentExceptionToStatus();
-            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
+            BOOST_LOG_SEV(*m_logger, warning) << Name() << "::" << __func__ << ": " << s.ToString();
             return s;
         }
     }
@@ -443,7 +443,7 @@ class FileBasedCompressedSecondaryCache::Impl {
         try {
             FileUtil::CommitEviction(*m_fs, m_lruIndex.Remove(filename));
         } catch (...) {
-            BOOST_LOG_SEV(*m_logger, error)
+            BOOST_LOG_SEV(*m_logger, warning)
                 << Name() << "::" << __func__ << ": " << StatusUtil::CurrentExceptionToStatus().ToString();
         }
     }

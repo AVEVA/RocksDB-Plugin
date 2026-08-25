@@ -18,6 +18,7 @@
 #include <azure/storage/blobs/blob_container_client.hpp>
 #include <boost/log/trivial.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
@@ -101,7 +102,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         [[nodiscard]] ReadWriteFileImpl CreateReadWriteFile(const std::string& filePath);
         [[nodiscard]] WriteableFileImpl ReopenWriteableFile(const std::string& filePath);
         [[nodiscard]] WriteableFileImpl ReuseWritableFile(const std::string& filePath);
-        LoggerImpl CreateLogger(const std::string& filePath, int logLevel);
+        LoggerImpl CreateLogger(const std::string& filePath, int logLevel,
+            std::chrono::seconds cooldown = std::chrono::seconds{30});
         std::shared_ptr<LockFileImpl> LockFile(const std::string& filePath);
         void UnlockFile(LockFileImpl& lock);
         DirectoryImpl CreateDirectory(const std::string& directoryPath);
