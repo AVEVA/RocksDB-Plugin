@@ -49,8 +49,8 @@ int64_t PageBlob::Download(std::span<char> buffer, int64_t offset, int64_t lengt
 
     auto bytesRead = content.BodyStream->ReadToCount(reinterpret_cast<uint8_t*>(buffer.data()), buffer.size());
 
-    assert(static_cast<int>(content.ContentRange.Length.ValueOr(-1)) == bytesRead &&
+    assert(content.ContentRange.Length.ValueOr(static_cast<int64_t>(-1)) == static_cast<int64_t>(bytesRead) &&
            "Bytes read differ from server ContentRange");
-    return bytesRead;
+    return static_cast<int64_t>(bytesRead);
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
