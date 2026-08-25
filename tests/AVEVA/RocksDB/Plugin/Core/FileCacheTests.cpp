@@ -284,8 +284,8 @@ TEST_F(FileCacheTests, ReadFile_SecondAccess_QueuesAndDownloads) {
         .WillRepeatedly(Invoke([&fileData](const std::filesystem::path&) {
             auto file = std::make_unique<FileMock>();
             ON_CALL(*file, Read(_, _, _))
-                .WillByDefault(Invoke([&fileData](char* buffer, uint64_t offset, uint64_t length) -> uint64_t {
-                    std::copy(fileData.data() + offset, fileData.data() + offset + length, buffer);
+                .WillByDefault(Invoke([&fileData](char* buf, uint64_t offset, uint64_t length) -> uint64_t {
+                    std::copy(fileData.data() + offset, fileData.data() + offset + length, buf);
                     return length - offset;
                 }));
             return file;
