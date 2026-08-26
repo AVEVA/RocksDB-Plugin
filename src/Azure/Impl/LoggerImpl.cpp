@@ -34,8 +34,10 @@ void LoggerImpl::Logv(const int logLevel, const char* format, va_list ap) {
             const int n = snprintf(summary, sizeof(summary),
                 "[%u similar messages suppressed in last %llds]\n",
                 result.suppressedCount, static_cast<long long>(seconds));
-            if (n > 0) {
-                m_file->Append(std::span(summary, summary + static_cast<size_t>(n)));
+            const size_t toWrite = static_cast<size_t>(
+                (n <= 0) ? 0 : (n >= static_cast<int>(sizeof(summary)) ? (sizeof(summary) - 1) : n));
+            if (toWrite > 0) {
+                m_file->Append(std::span(summary, summary + toWrite));
             }
         }
     }
