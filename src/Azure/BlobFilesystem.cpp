@@ -48,8 +48,9 @@ void BlobFilesystem::LogRequestFailed(const ::Azure::Core::RequestFailedExceptio
             return;
         }
         if (result.decision == Impl::RateDecision::AllowWithSummary) {
+            const auto seconds = m_blobNotFoundRateLimiter.Cooldown().count();
             BOOST_LOG_SEV(*m_logger, warning)
-                << "[" << result.suppressedCount << " BlobNotFound messages suppressed in last 30s]";
+                << "[" << result.suppressedCount << " BlobNotFound messages suppressed in last " << seconds << "s]";
         }
     }
     BOOST_LOG_SEV(*m_logger, warning) << FormatRequestFailedLogMessage(ex, path);
