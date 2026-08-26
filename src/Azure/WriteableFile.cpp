@@ -100,8 +100,7 @@ uint64_t WriteableFile::GetFileSize(const rocksdb::IOOptions&, rocksdb::IODebugC
         BOOST_LOG_SEV(*m_logger, warning) << ex.what();
         return 0;
     } catch (...) {
-        // [CODE REVIEW] LOW: message copied from Sync(); should read "Unknown error when getting file size"
-        BOOST_LOG_SEV(*m_logger, warning) << "Unknown error when syncing file";
+        BOOST_LOG_SEV(*m_logger, warning) << "Unknown error when getting file size";
         return 0;
     }
 }
