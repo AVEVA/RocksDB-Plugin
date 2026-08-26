@@ -46,7 +46,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
         // Inspects the format string and decides whether to allow or suppress the message.
         // Safe to call from multiple threads concurrently.
-        // @param format  The printf-style format string passed to Logv (never null).
+        // @param format  The printf-style format string passed to Logv (may be null).
         RateCheckResult CheckAndRecord(const char* format);
 
     private:
