@@ -53,10 +53,10 @@ WriteableFileImpl::~WriteableFileImpl() {
             Close();
             break;
         } catch (const std::exception& e) {
-            BOOST_LOG_SEV(*m_logger, debug) << "Failed to close file '" << m_name << "' on attempt " << i;
-            BOOST_LOG_SEV(*m_logger, debug) << "Exception details: " << e.what();
+            BOOST_LOG_SEV(*m_logger, warning) << "Failed to close file '" << m_name << "' on attempt " << i;
+            BOOST_LOG_SEV(*m_logger, warning) << "Exception details: " << e.what();
         } catch (...) {
-            BOOST_LOG_SEV(*m_logger, debug) << "Failed to close file '" << m_name << "' on attempt " << i;
+            BOOST_LOG_SEV(*m_logger, warning) << "Failed to close file '" << m_name << "' on attempt " << i;
         }
     }
 }

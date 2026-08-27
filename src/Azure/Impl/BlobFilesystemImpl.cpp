@@ -271,8 +271,7 @@ LoggerImpl BlobFilesystemImpl::CreateLogger(const std::string& filePath, const i
     return LoggerImpl{std::move(impl), logLevel,
                        std::make_unique<LogRateLimiter>(
                            std::vector<std::string>{"Stalling writes because we have",
-                                                    "Stopping writes because we have",
-                                                    "BlobNotFound"},
+                                                    "Stopping writes because we have"},
                            cooldown)};
 }
 

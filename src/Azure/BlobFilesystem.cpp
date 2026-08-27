@@ -53,8 +53,10 @@ void BlobFilesystem::LogRequestFailed(const ::Azure::Core::RequestFailedExceptio
             BOOST_LOG_SEV(*m_logger, warning)
                 << "[" << result.suppressedCount << " BlobNotFound messages suppressed in last " << seconds << "s]";
         }
+        BOOST_LOG_SEV(*m_logger, warning) << FormatRequestFailedLogMessage(ex, path);
+        return;
     }
-    BOOST_LOG_SEV(*m_logger, warning) << FormatRequestFailedLogMessage(ex, path);
+    BOOST_LOG_SEV(*m_logger, error) << FormatRequestFailedLogMessage(ex, path);
 }
 
 BlobFilesystem::~BlobFilesystem() {

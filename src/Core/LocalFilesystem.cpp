@@ -28,7 +28,7 @@ bool LocalFilesystem::DeleteFile(const std::filesystem::path& path) {
     std::filesystem::remove(path, ec);
     if (ec) {
         if (m_logger)
-            BOOST_LOG_SEV(*m_logger, warning)
+            BOOST_LOG_SEV(*m_logger, error)
                 << "Failed to remove file '" << path.string() << "'. Error: " << ec.message();
         return false;
     }
@@ -40,7 +40,7 @@ bool LocalFilesystem::DeleteDir(const std::filesystem::path& path) {
     std::filesystem::remove_all(path, ec);
     if (ec) {
         if (m_logger)
-            BOOST_LOG_SEV(*m_logger, warning)
+            BOOST_LOG_SEV(*m_logger, error)
                 << "Failed to remove directories '" << path.string() << "'. Error: " << ec.message();
         return false;
     }
@@ -52,7 +52,7 @@ bool LocalFilesystem::CreateDir(const std::filesystem::path& path) {
     std::filesystem::create_directories(path, ec);
     if (ec) {
         if (m_logger)
-            BOOST_LOG_SEV(*m_logger, warning)
+            BOOST_LOG_SEV(*m_logger, error)
                 << "Failed to create directories '" << path.string() << "'. Error: " << ec.message();
         return false;
     }

@@ -202,7 +202,7 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                 auto blobClient = m_containerClient->GetBlobClient(filePath);
                 fileSize = blobClient->GetSize();
             } catch (std::exception& e) {
-                BOOST_LOG_SEV(*m_logger, warning)
+                BOOST_LOG_SEV(*m_logger, error)
                     << "Failed to get file size for '" << filePath << "'. Error: " << e.what();
                 continue;
             }
@@ -215,7 +215,7 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                     it->second.SetSize(fileSize);
                 } else {
                     // The file was likely deleted while we were waiting for the condition variable.
-                    BOOST_LOG_SEV(*m_logger, warning) << "Could not find file entry '" << filePath
+                    BOOST_LOG_SEV(*m_logger, error) << "Could not find file entry '" << filePath
                                                     << "' in cache after getting file size. Skipping download.";
                     continue;
                 }
@@ -229,7 +229,7 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
 
                         const auto bytesToEvict = (currentSize + fileSize) - m_maxSize;
                         if (!EvictAtLeast(bytesToEvict)) {
-                            BOOST_LOG_SEV(*m_logger, warning)
+                            BOOST_LOG_SEV(*m_logger, error)
                                 << "Couldn't evict enough space to fit new file '" << filePath << "'";
                             RemoveFileUnsafe(filePath);
                             continue;
@@ -259,7 +259,7 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                 // NOTE: We're not putting the filePath back on the download queue because
                 // this operation could _also_ throw. Let the next read be a cache miss which
                 // will queue up the download again.
-                BOOST_LOG_SEV(*m_logger, warning)
+                BOOST_LOG_SEV(*m_logger, error)
                     << "Failed to download file '" << filePath << "'. Removing entry from cache. Error: " << e.what();
 
                 std::scoped_lock lock(m_mutex);
