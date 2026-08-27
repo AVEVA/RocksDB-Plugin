@@ -10,6 +10,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LoggerImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobAttributes.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/DirectoryImpl.hpp"
@@ -103,7 +104,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         [[nodiscard]] WriteableFileImpl ReopenWriteableFile(const std::string& filePath);
         [[nodiscard]] WriteableFileImpl ReuseWritableFile(const std::string& filePath);
         LoggerImpl CreateLogger(const std::string& filePath, int logLevel,
-            std::chrono::seconds cooldown = std::chrono::seconds{30});
+            std::chrono::seconds cooldown = Configuration::LogRateLimiterCooldown);
         std::shared_ptr<LockFileImpl> LockFile(const std::string& filePath);
         void UnlockFile(LockFileImpl& lock);
         DirectoryImpl CreateDirectory(const std::string& directoryPath);
