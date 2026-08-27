@@ -27,7 +27,7 @@ constexpr const char* kOtherFormat = "Compaction started for column family [defa
 TEST(LogRateLimiterTests, NonMatchingFormat_AlwaysAllowed)
 {
     // Arrange
-    LogRateLimiter limiter{kCooldown};
+    LogRateLimiter limiter{{"Stalling writes because we have"}, kCooldown};
 
     // Act / Assert — non-matching messages are always Allow, regardless of how
     // many times they are called.
@@ -42,7 +42,7 @@ TEST(LogRateLimiterTests, NonMatchingFormat_AlwaysAllowed)
 TEST(LogRateLimiterTests, NullFormat_AlwaysAllowed)
 {
     // Arrange
-    LogRateLimiter limiter{kCooldown};
+    LogRateLimiter limiter{{"Stalling writes because we have"}, kCooldown};
 
     // Act
     const auto result = limiter.CheckAndRecord(nullptr);
@@ -57,7 +57,7 @@ TEST(LogRateLimiterTests, NullFormat_AlwaysAllowed)
 TEST(LogRateLimiterTests, MatchingFormat_FirstCall_Allowed)
 {
     // Arrange
-    LogRateLimiter limiter{kCooldown};
+    LogRateLimiter limiter{{"Stalling writes because we have"}, kCooldown};
 
     // Act
     const auto result = limiter.CheckAndRecord(kStallingWritesFormat);
@@ -72,7 +72,7 @@ TEST(LogRateLimiterTests, MatchingFormat_FirstCall_Allowed)
 TEST(LogRateLimiterTests, MatchingFormat_SecondCallWithinWindow_Suppressed)
 {
     // Arrange
-    LogRateLimiter limiter{kCooldown};
+    LogRateLimiter limiter{{"Stalling writes because we have"}, kCooldown};
     limiter.CheckAndRecord(kStallingWritesFormat); // first — opens the window
 
     // Act
@@ -86,7 +86,7 @@ TEST(LogRateLimiterTests, MatchingFormat_SecondCallWithinWindow_Suppressed)
 TEST(LogRateLimiterTests, MatchingFormat_MultipleCallsWithinWindow_AllSuppressed)
 {
     // Arrange
-    LogRateLimiter limiter{kCooldown};
+    LogRateLimiter limiter{{"Stalling writes because we have"}, kCooldown};
     limiter.CheckAndRecord(kStallingWritesFormat); // first — opens the window
 
     // Act / Assert
@@ -102,7 +102,7 @@ TEST(LogRateLimiterTests, MatchingFormat_MultipleCallsWithinWindow_AllSuppressed
 TEST(LogRateLimiterTests, MatchingFormat_AfterCooldown_WithSuppressed_AllowWithSummary)
 {
     // Arrange
-    LogRateLimiter limiter{kCooldown};
+    LogRateLimiter limiter{{"Stalling writes because we have"}, kCooldown};
     limiter.CheckAndRecord(kStallingWritesFormat);        // Allow — opens window
     limiter.CheckAndRecord(kStallingWritesFormat);        // Suppress (count = 1)
     limiter.CheckAndRecord(kStallingWritesFormat);        // Suppress (count = 2)
@@ -120,7 +120,7 @@ TEST(LogRateLimiterTests, MatchingFormat_AfterCooldown_WithSuppressed_AllowWithS
 TEST(LogRateLimiterTests, MatchingFormat_AfterCooldown_NoSuppressed_Allow)
 {
     // Arrange — open window then let it expire with no intervening suppressions
-    LogRateLimiter limiter{kCooldown};
+    LogRateLimiter limiter{{"Stalling writes because we have"}, kCooldown};
     limiter.CheckAndRecord(kStallingWritesFormat);
 
     std::this_thread::sleep_for(kCooldown + std::chrono::milliseconds{50});
@@ -139,7 +139,7 @@ TEST(LogRateLimiterTests, Cooldown_ReturnsConfiguredValue)
 {
     // Arrange
     const auto expected = std::chrono::seconds{42};
-    LogRateLimiter limiter{expected};
+    LogRateLimiter limiter{{}, expected};
 
     // Act / Assert
     EXPECT_EQ(expected, limiter.Cooldown());
@@ -150,7 +150,7 @@ TEST(LogRateLimiterTests, Cooldown_ReturnsConfiguredValue)
 TEST(LogRateLimiterTests, StoppingWritesFormat_FirstCall_Allowed)
 {
     // Arrange
-    LogRateLimiter limiter{kCooldown};
+    LogRateLimiter limiter{{"Stopping writes because we have"}, kCooldown};
 
     // Act
     const auto result = limiter.CheckAndRecord(kStoppingWritesFormat);
@@ -163,7 +163,7 @@ TEST(LogRateLimiterTests, StoppingWritesFormat_FirstCall_Allowed)
 TEST(LogRateLimiterTests, StoppingWritesFormat_SecondCallWithinWindow_Suppressed)
 {
     // Arrange
-    LogRateLimiter limiter{kCooldown};
+    LogRateLimiter limiter{{"Stopping writes because we have"}, kCooldown};
     limiter.CheckAndRecord(kStoppingWritesFormat); // first — opens the window
 
     // Act
@@ -179,7 +179,7 @@ TEST(LogRateLimiterTests, DifferentPatterns_TrackedIndependently)
 {
     // Arrange — stalling and stopping writes are separate patterns and must each
     // have their own independent cooldown bucket.
-    LogRateLimiter limiter{kCooldown};
+    LogRateLimiter limiter{{"Stalling writes because we have", "Stopping writes because we have"}, kCooldown};
 
     // Open the stalling-writes window.
     const auto firstStalling = limiter.CheckAndRecord(kStallingWritesFormat);
@@ -202,7 +202,7 @@ TEST(LogRateLimiterTests, DifferentPatterns_TrackedIndependently)
 TEST(LogRateLimiterTests, BlobNotFound_FirstCall_Allowed)
 {
     // Arrange
-    LogRateLimiter limiter{kCooldown};
+    LogRateLimiter limiter{{"BlobNotFound"}, kCooldown};
 
     // Act
     const auto result = limiter.CheckAndRecord(kBlobNotFoundErrorCode);
@@ -215,7 +215,7 @@ TEST(LogRateLimiterTests, BlobNotFound_FirstCall_Allowed)
 TEST(LogRateLimiterTests, BlobNotFound_SecondCallWithinWindow_Suppressed)
 {
     // Arrange
-    LogRateLimiter limiter{kCooldown};
+    LogRateLimiter limiter{{"BlobNotFound"}, kCooldown};
     limiter.CheckAndRecord(kBlobNotFoundErrorCode); // first — opens the window
 
     // Act
@@ -228,7 +228,7 @@ TEST(LogRateLimiterTests, BlobNotFound_SecondCallWithinWindow_Suppressed)
 TEST(LogRateLimiterTests, BlobNotFound_AfterCooldown_WithSuppressed_AllowWithSummary)
 {
     // Arrange
-    LogRateLimiter limiter{kCooldown};
+    LogRateLimiter limiter{{"BlobNotFound"}, kCooldown};
     limiter.CheckAndRecord(kBlobNotFoundErrorCode); // Allow — opens window
     limiter.CheckAndRecord(kBlobNotFoundErrorCode); // Suppress (count = 1)
     limiter.CheckAndRecord(kBlobNotFoundErrorCode); // Suppress (count = 2)
