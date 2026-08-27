@@ -2,12 +2,13 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LoggerImpl.hpp"
+#include <format>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 LoggerImpl::LoggerImpl(std::unique_ptr<WriteableFileImpl> file, int logLevel)
     : m_file(std::move(file)), m_logLevel(logLevel), m_buffer(4096) {}
 
-LoggerImpl::LoggerImpl(std::unique_ptr<WriteableFileImpl> file, int logLevel, std::chrono::seconds cooldown)
-    : m_file(std::move(file)), m_logLevel(logLevel), m_buffer(4096), m_rateLimiter(std::make_unique<LogRateLimiter>(cooldown)) {}
+LoggerImpl::LoggerImpl(std::unique_ptr<WriteableFileImpl> file, int logLevel, std::unique_ptr<LogRateLimiter> rateLimiter)
+    : m_file(std::move(file)), m_logLevel(logLevel), m_buffer(4096), m_rateLimiter(std::move(rateLimiter)) {}
 
 void LoggerImpl::Logv(const int logLevel, const char* format, ...) {
     va_list va;
@@ -30,15 +31,9 @@ void LoggerImpl::Logv(const int logLevel, const char* format, va_list ap) {
             // Emit the suppression summary as its own line before the current message.
             // Format: "[N similar messages suppressed in last 30s]\n"
             const auto seconds = m_rateLimiter->Cooldown().count();
-            char summary[128];
-            const int n = snprintf(summary, sizeof(summary),
-                "[%u similar messages suppressed in last %llds]\n",
-                result.suppressedCount, static_cast<long long>(seconds));
-            const size_t toWrite =
-                (n <= 0) ? 0 : (static_cast<size_t>(n) >= sizeof(summary) ? (sizeof(summary) - 1) : static_cast<size_t>(n));
-            if (toWrite > 0) {
-                m_file->Append(std::span(summary, summary + toWrite));
-            }
+            const auto summary = std::format("[{} similar messages suppressed in last {}s]\n",
+                result.suppressedCount, seconds);
+            m_file->Append(std::span(summary.data(), summary.data() + summary.size()));
         }
     }
 

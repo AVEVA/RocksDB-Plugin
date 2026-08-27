@@ -5,8 +5,11 @@
 #include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl
 {
@@ -36,10 +39,11 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     class LogRateLimiter
     {
     public:
-        // Constructs a limiter with the given cooldown window.
-        // @param cooldown  Minimum interval between two allowed emissions of the same
-        //                  matched prefix.  Defaults to 30 seconds.
-        explicit LogRateLimiter(std::chrono::seconds cooldown = std::chrono::seconds{30});
+        // Constructs a limiter with the given patterns and cooldown window.
+        // @param patterns  Substrings to search for in the log format string.
+        // @param cooldown  Minimum interval between two allowed emissions of a matched pattern.
+        //                  Defaults to 30 seconds.
+        explicit LogRateLimiter(std::vector<std::string> patterns, std::chrono::seconds cooldown = std::chrono::seconds{30});
 
         // Returns the configured cooldown window.
         std::chrono::seconds Cooldown() const { return m_cooldown; }
@@ -50,21 +54,16 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         RateCheckResult CheckAndRecord(const char* format);
 
     private:
-        // Patterns matched via std::string_view::starts_with against the format string.
-        // Extended by adding entries to the initialiser list in the .cpp file.
-        static const std::string_view k_patterns[];
-        static const std::size_t k_patternCount;
-
         struct PatternState
         {
-            std::chrono::steady_clock::time_point lastEmitted{};
+            std::optional<std::chrono::steady_clock::time_point> lastEmitted;
             uint32_t suppressedCount{0};
         };
 
         const std::chrono::seconds m_cooldown;
+        std::vector<std::string> m_patterns;
         std::mutex m_mutex;
-        // Key is the matched pattern string_view's data() pointer — cheap identity comparison
-        // since all pattern pointers come from the static k_patterns array.
-        std::unordered_map<const char*, PatternState> m_state;
+        // Key is a string_view into m_patterns (stable: vector is never modified after construction).
+        std::unordered_map<std::string_view, PatternState> m_state;
     };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

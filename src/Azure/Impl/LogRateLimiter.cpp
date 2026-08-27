@@ -3,20 +3,14 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LogRateLimiter.hpp"
 
+#include <optional>
 #include <string_view>
+#include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 
-// Noisy RocksDB log prefixes that are subject to rate limiting.
-// Add new entries here as additional patterns are identified.
-const std::string_view LogRateLimiter::k_patterns[] = {
-    "Stalling writes because we have",
-    "Stopping writes because we have",
-    "BlobNotFound",
-};
-const std::size_t LogRateLimiter::k_patternCount = std::size(LogRateLimiter::k_patterns);
-
-LogRateLimiter::LogRateLimiter(std::chrono::seconds cooldown) : m_cooldown(cooldown) {}
+LogRateLimiter::LogRateLimiter(std::vector<std::string> patterns, std::chrono::seconds cooldown)
+    : m_cooldown(cooldown), m_patterns(std::move(patterns)) {}
 
 RateCheckResult LogRateLimiter::CheckAndRecord(const char* format)
 {
@@ -28,31 +22,32 @@ RateCheckResult LogRateLimiter::CheckAndRecord(const char* format)
     const std::string_view sv{format};
 
     // Find the first matching pattern (if any).
-    const std::string_view* matched = nullptr;
-    for (std::size_t i = 0; i < k_patternCount; ++i)
+    std::optional<std::string_view> matched;
+    for (const auto& p : m_patterns)
     {
-        if (sv.starts_with(k_patterns[i]))
+        if (sv.find(p) != std::string_view::npos)
         {
-            matched = &k_patterns[i];
+            matched = std::string_view{p};
             break;
         }
     }
 
-    if (matched == nullptr)
+    if (!matched)
     {
         // Not a noisy pattern — pass straight through, no state update.
         return {RateDecision::Allow, 0};
     }
 
     const auto now = std::chrono::steady_clock::now();
-    const char* key = matched->data(); // stable pointer into static storage
 
     std::lock_guard<std::mutex> lock(m_mutex);
-    auto& state = m_state[key]; // default-inserts PatternState{} on first access
+    auto& state = m_state[*matched]; // default-inserts PatternState{} on first access
 
-    const auto elapsed = now - state.lastEmitted;
+    // nullopt means this pattern has never been emitted — always allow on first occurrence.
+    const bool cooldownExpired = !state.lastEmitted ||
+                                 (now - *state.lastEmitted) >= m_cooldown;
 
-    if (elapsed >= m_cooldown)
+    if (cooldownExpired)
     {
         // Cooldown has expired (or this is the very first occurrence).
         const uint32_t suppressed = state.suppressedCount;

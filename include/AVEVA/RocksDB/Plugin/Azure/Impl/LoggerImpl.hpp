@@ -20,9 +20,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         // Constructs a logger with no rate limiting.
         LoggerImpl(std::unique_ptr<WriteableFileImpl> file, int logLevel);
 
-        // Constructs a logger that rate-limits known noisy patterns.
-        // @param cooldown  Minimum interval between two allowed emissions for a matched pattern.
-        LoggerImpl(std::unique_ptr<WriteableFileImpl> file, int logLevel, std::chrono::seconds cooldown);
+        // Constructs a logger with an injected rate limiter.
+        LoggerImpl(std::unique_ptr<WriteableFileImpl> file, int logLevel, std::unique_ptr<LogRateLimiter> rateLimiter);
 
         void Logv(int logLevel, const char* format, ...);
         void Logv(int logLevel, const char* format, va_list ap);
