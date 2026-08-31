@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #pragma once
 #include <chrono>
@@ -40,9 +40,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
     {
     public:
         // Constructs a limiter with the given patterns and cooldown window.
-        // @param patterns  Substrings to search for in the log format string.
-        // @param cooldown  Minimum interval between two allowed emissions of a matched pattern.
-        //                  Defaults to 30 seconds.
+        // <param name="patterns">  Substrings to search for in the log format string.</param>
+        // <param name="cooldown">  Minimum interval between two allowed emissions of a matched pattern. Defaults to 30 seconds. </param>
         explicit LogRateLimiter(std::vector<std::string> patterns, std::chrono::seconds cooldown = std::chrono::seconds{30});
 
         // Returns the configured cooldown window.
@@ -50,7 +49,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
         // Inspects the format string and decides whether to allow or suppress the message.
         // Safe to call from multiple threads concurrently.
-        // @param format  The printf-style format string passed to Logv (may be null).
+        // <param name="format">  The printf-style format string passed to Logv (may be null). </param>
         RateCheckResult CheckAndRecord(const char* format);
 
     private:
