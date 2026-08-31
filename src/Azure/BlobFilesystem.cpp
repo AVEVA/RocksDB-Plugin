@@ -43,7 +43,7 @@ BlobFilesystem::BlobFilesystem(
 
 void BlobFilesystem::LogRequestFailed(const ::Azure::Core::RequestFailedException& ex,
                                       std::string_view path) {
-    if (ex.StatusCode == ::Azure::Core::Http::HttpStatusCode::NotFound) {
+    if (ex.ErrorCode == "BlobNotFound") {
         const auto result = m_blobNotFoundRateLimiter.CheckAndRecord(ex.ErrorCode.c_str());
         if (result.decision == Impl::RateDecision::Suppress) {
             return;
