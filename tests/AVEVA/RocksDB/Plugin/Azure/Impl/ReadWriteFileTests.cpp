@@ -373,7 +373,9 @@ TEST_F(ReadWriteFileImplTests, Destructor_RetriesCloseOnFailure) {
 
     // Setup initial calls for construction
     EXPECT_CALL(*strictMock, GetSize()).WillOnce(Return(0));
-    EXPECT_CALL(*strictMock, GetCapacity()).WillOnce(Return(Configuration::PageBlob::DefaultSize));
+    // GetCapacity is called once at construction and again inside Flush() on each
+    // Close() retry, so allow it to be called repeatedly.
+    EXPECT_CALL(*strictMock, GetCapacity()).WillRepeatedly(Return(Configuration::PageBlob::DefaultSize));
 
     // Setup SetSize to fail a few times then succeed
     EXPECT_CALL(*strictMock, SetSize(_))

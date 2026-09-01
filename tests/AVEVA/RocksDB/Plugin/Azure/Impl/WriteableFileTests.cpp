@@ -124,6 +124,11 @@ TEST_F(WriteableFileTests, Constructor_PartialLastPageInBlob_DataDownloaded) {
 
 TEST_F(WriteableFileTests, Append_LessThanAPage_UploadPagesNotCalled) {
     // Arrange
+    // UploadPages must not be called during Append itself (data stays buffered).
+    // Save the raw pointer before moving so we can verify expectations before
+    // file's destructor runs — the destructor calls Close()->Sync()->Flush()
+    // which legitimately uploads the buffered data.
+    auto* mockPtr = m_blobClient.get();
     EXPECT_CALL(*m_blobClient, UploadPages(_, _)).Times(0);
 
     constexpr size_t partialPageSize = 333;
@@ -133,8 +138,10 @@ TEST_F(WriteableFileTests, Append_LessThanAPage_UploadPagesNotCalled) {
     // Act
     file.Append(dataToAppend);
 
-    // Assert
+    // Assert - verify no upload happened during Append, then clear expectations
+    // so the destructor's flush doesn't trigger spurious failures.
     ASSERT_EQ(dataToAppend.size(), file.GetFileSize());
+    ASSERT_TRUE(::testing::Mock::VerifyAndClearExpectations(mockPtr));
 }
 
 TEST_F(WriteableFileTests, Append_MultipleWritesLargerThanPage_UploadPagesCalled) {
@@ -372,7 +379,8 @@ TEST_F(WriteableFileTests, Truncate_ToZero_FileEmptied) {
     EXPECT_CALL(*m_blobClient, GetSize()).WillRepeatedly(::testing::Return(0));
     EXPECT_CALL(*m_blobClient, GetCapacity()).WillRepeatedly(::testing::Return(Configuration::PageBlob::PageSize * 2));
     EXPECT_CALL(*m_blobClient, UploadPages(_, _)).Times(::testing::AtLeast(1));
-    EXPECT_CALL(*m_blobClient, SetSize(0)).Times(2); // Once in Sync before truncate, once in Truncate
+    EXPECT_CALL(*m_blobClient, SetSize(static_cast<int64_t>(initialDataSize))).Times(1); // From Sync() inside Truncate
+    EXPECT_CALL(*m_blobClient, SetSize(0)).Times(2); // Once from Truncate body, once from destructor Close()
     EXPECT_CALL(*m_blobClient, SetCapacity(0)).Times(1);
 
     WriteableFileImpl file{"test.dat", m_blobClient, nullptr, m_logger};

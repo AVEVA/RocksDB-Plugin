@@ -255,7 +255,8 @@ WriteableFileImpl BlobFilesystemImpl::ReuseWritableFile(const std::string& fileP
     }
 }
 
-LoggerImpl BlobFilesystemImpl::CreateLogger(const std::string& filePath, const int logLevel) {
+LoggerImpl BlobFilesystemImpl::CreateLogger(const std::string& filePath, const int logLevel,
+                                            const std::chrono::seconds cooldown) {
     EnsureLiveness();
 
     const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
@@ -267,7 +268,11 @@ LoggerImpl BlobFilesystemImpl::CreateLogger(const std::string& filePath, const i
     auto blobClient = std::make_shared<PageBlob>(std::move(client));
     auto impl = std::make_unique<WriteableFileImpl>(realPath, std::move(blobClient), nullptr, m_logger,
                                                     Configuration::PageBlob::DefaultSize);
-    return LoggerImpl{std::move(impl), logLevel};
+    return LoggerImpl{std::move(impl), logLevel,
+                       std::make_unique<LogRateLimiter>(
+                           std::vector<std::string>{"Stalling writes because we have",
+                                                    "Stopping writes because we have"},
+                           cooldown)};
 }
 
 std::shared_ptr<LockFileImpl> BlobFilesystemImpl::LockFile(const std::string& filePath) {

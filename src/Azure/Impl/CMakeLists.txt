@@ -7,6 +7,7 @@ add_library(aveva-rocksdb-plugin-azure-impl
     BlobFilesystemImpl.cpp
     StorageAccount.cpp
     LoggerImpl.cpp
+    LogRateLimiter.cpp
     LockFileImpl.cpp
     BlobAttributes.cpp
     DirectoryImpl.cpp
@@ -29,6 +30,7 @@ target_sources(aveva-rocksdb-plugin-azure-impl
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/LoggerImpl.hpp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/LogRateLimiter.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobAttributes.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/DirectoryImpl.hpp"

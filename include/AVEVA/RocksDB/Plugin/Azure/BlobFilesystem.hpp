@@ -4,7 +4,9 @@
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/LockFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/LogRateLimiter.hpp"
 
+#include <azure/core/exception.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/intrusive/list.hpp>
 
@@ -20,6 +22,12 @@ namespace AVEVA::RocksDB::Plugin::Azure
         std::unique_ptr<Impl::BlobFilesystemImpl> m_filesystem;
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
         std::vector<Azure::LockFile*> m_lockFiles;
+        Impl::LogRateLimiter m_blobNotFoundRateLimiter;
+
+        // Logs a RequestFailedException, suppressing repeated BlobNotFound (404) messages
+        // during the rate-limit cooldown window.
+        void LogRequestFailed(const ::Azure::Core::RequestFailedException& ex,
+                              std::string_view path = {});
     public:
         BlobFilesystem(std::shared_ptr<rocksdb::FileSystem> rocksdbFs,
             std::unique_ptr<Impl::BlobFilesystemImpl> filesystem,
