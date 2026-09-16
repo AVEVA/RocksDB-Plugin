@@ -39,14 +39,14 @@ this mode to check the build before you point the tool at Azure.
 
 Gather these items before you start.
 
-| Item | Where it comes from |
-|---|---|
-| Azure Storage Account (Page Blob support). | Azure Portal → Storage account → Endpoints. |
-| Blob container name. | Any valid Azure container name. |
-| Entra ID (Azure AD) Service Principal. | Tenant ID, Client (App) ID, and Client Secret, from an App Registration. |
-| RBAC role. | Storage Blob Data Contributor. |
+- **Azure Storage Account (Page Blob support).** Get the endpoint from the
+  Azure Portal, under Storage account → Endpoints.
+- **Blob container name.** Any valid Azure container name.
+- **Entra ID (Azure AD) Service Principal.** Get the Tenant ID, Client
+  (App) ID, and Client Secret from an App Registration.
+- **RBAC role.** Storage Blob Data Contributor.
 
-Notes on the table above:
+Notes on the items above:
 
 - Container names use lowercase letters, digits, and hyphens only, 3 to 63
   characters. Do not use dots or underscores. A name like `user.name` fails
@@ -70,7 +70,7 @@ Set the plugin configuration through the environment:
 
 ```powershell
 $env:AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL = "https://<account>.blob.core.windows.net"
-$env:AZURE_STORAGE_ACCOUNT_NAME         = "<account>"            # the <account> label from the URL above; used by --db and the az storage commands
+$env:AZURE_STORAGE_ACCOUNT_NAME         = "<account>"            # matches the account label above.
 $env:AVEVA_DB_BENCH_CONTAINER           = "<container>"          # lowercase, digits, hyphens only
 $env:AVEVA_DB_BENCH_TENANT_ID           = "<tenant-guid>"
 $env:AVEVA_DB_BENCH_CLIENT_ID           = "<service-principal-app-id>"
@@ -122,6 +122,7 @@ and search it instead.
 $out = & $exe --benchmarks=fillseq --num=10 --compression_type=zlib `
     --fs_uri="azblobfs$($env:AVEVA_DB_BENCH_CONTAINER)" `
     --db="$($env:AZURE_STORAGE_ACCOUNT_NAME)+$($env:AVEVA_DB_BENCH_CONTAINER)/bench-db" 2>&1
+# Search the captured output for the registration message.
 if ($out -match "Azure plugin registered") { "PLUGIN OK" } else { "PLUGIN NOT REGISTERED" }
 ```
 
@@ -137,6 +138,7 @@ your personal `az login`.
 
 ```powershell
 az login --service-principal -u $env:AVEVA_DB_BENCH_CLIENT_ID -p $env:AVEVA_DB_BENCH_CLIENT_SECRET --tenant $env:AVEVA_DB_BENCH_TENANT_ID
+# Check the container state.
 az storage container exists --account-name $env:AZURE_STORAGE_ACCOUNT_NAME --name $env:AVEVA_DB_BENCH_CONTAINER --auth-mode login
 az login   # Switch back to your own identity when done.
 ```
@@ -168,13 +170,9 @@ Add these flags to get latency percentiles and RocksDB's internal counters.
     *>&1 | Tee-Object -FilePath C:\temp\dbbench_output.txt
 ```
 
-- `--histogram=1` adds per-benchmark P50/P95/P99/P100 latency to the summary
-  line. Without this flag, `db_bench` reports only the average.
-- `--statistics=1` prints RocksDB's internal `Statistics` counters at the
-  end. These counters include cache hits and misses, compaction activity,
-  and per-op latency histograms such as `rocksdb.db.write.micros`.
-- Use `Tee-Object`/`*>&1` to save a local copy. Do not rely on
-  `--report_file` for this (see the gotcha below).
+- `--histogram=1` adds per-benchmark P50/P95/P99/P100 latency to the summary line. Without this flag, `db_bench` reports only the average.
+- `--statistics=1` prints RocksDB's internal `Statistics` counters at the end. These counters include cache hits and misses, compaction activity, and per-op latency histograms such as `rocksdb.db.write.micros`.
+- Use `Tee-Object`/`*>&1` to save a local copy. Do not rely on `--report_file` for this (see the gotcha below).
 
 ### `--report_file` gotcha
 
@@ -220,14 +218,14 @@ Check these `--statistics=1` counters:
 ## Where to look for performance improvements
 
 Compare an Azure-backed run against an equivalent local-disk run with the
-same flags:
+same flags.
 
 ```powershell
-# Baseline: local disk
+# Baseline: local disk.
 & $exe --benchmarks=fillrandom,readrandom --num=200000 --value_size=1024 `
     --compression_type=zlib --statistics=1 --histogram=1 --db=C:\temp\baseline
 
-# Plugin: Azure-backed
+# Plugin: Azure-backed.
 & $exe --benchmarks=fillrandom,readrandom --num=200000 --value_size=1024 `
     --compression_type=zlib --statistics=1 --histogram=1 `
     --fs_uri="azblobfs$($env:AVEVA_DB_BENCH_CONTAINER)" `
@@ -238,36 +236,15 @@ Compare the two output files side by side.
 
 Check these signals, in priority order, for follow-up investigation:
 
-1. **`rocksdb.db.write.micros` P50/P99, against the local baseline.** Manual
-   runs show the plugin's per-write overhead near 40-50 ms median, against
-   sub-millisecond on local disk. Network round-trips to Azure cause most
-   of this cost. If the gap does not shrink as `--value_size` grows, the
-   cost stays fixed per request and does not grow with byte count. Try
-   this fix first: combine more writes into each Azure request, through a
-   larger WAL flush buffer and fewer, larger page-blob writes.
+1. **`rocksdb.db.write.micros` P50/P99, against the local baseline.** Manual runs show the plugin's per-write overhead near 40-50 ms median, against sub-millisecond on local disk. Network round-trips to Azure cause most of this cost. If the gap does not shrink as `--value_size` grows, the cost stays fixed per request and does not grow with byte count. Try this fix first: combine more writes into each Azure request, through a larger WAL flush buffer and fewer, larger page-blob writes.
 
-2. **`rocksdb.manifest.file.sync.micros`.** This event is infrequent, but
-   also network-bound. Optimize this path only when MANIFEST churn is high,
-   for example under many small DB reopens or compactions.
+2. **`rocksdb.manifest.file.sync.micros`.** This event is infrequent, but also network-bound. Optimize this path only when MANIFEST churn is high, for example under many small DB reopens or compactions.
 
-3. **Read-path cache effectiveness**, through
-   `rocksdb.block.cache.hit`/`rocksdb.block.cache.miss` from
-   `--statistics=1`. A high miss rate under a workload larger than memory
-   sends every miss to Azure over the network. Adjust the block cache
-   size, or use the plugin's secondary cache
-   (`Core/FileBasedCompressedSecondaryCache`), to reduce this cost.
+3. **Read-path cache effectiveness**, through `rocksdb.block.cache.hit`/`rocksdb.block.cache.miss` from `--statistics=1`. A high miss rate under a workload larger than memory sends every miss to Azure over the network. Adjust the block cache size, or use the plugin's secondary cache (`Core/FileBasedCompressedSecondaryCache`), to reduce this cost.
 
-4. **Concurrent benchmarks, with `--threads>1`.** Real deployments run
-   concurrent workloads. A `fillseq`/`readrandom`-only baseline does not
-   show lock contention or lease-renewal thread overhead. Run the
-   `db_bench` benchmarks named for concurrent read and write mixes, and
-   profile the `BlobFilesystemImpl` lease-renewal thread under load.
+4. **Concurrent benchmarks, with `--threads>1`.** Real deployments run concurrent workloads. A `fillseq`/`readrandom`-only baseline does not show lock contention or lease-renewal thread overhead. Run the `db_bench` benchmarks named for concurrent read and write mixes, and profile the `BlobFilesystemImpl` lease-renewal thread under load.
 
-5. **Compaction behavior on Azure.** SST files are also page blobs, and
-   compaction rewrites many of these files. Watch
-   `rocksdb.compaction.times.micros` and the total bytes written
-   (`rocksdb.bytes.per.write` times op count). Check whether compaction
-   raises Azure write volume more than expected.
+5. **Compaction behavior on Azure.** SST files are also page blobs, and compaction rewrites many of these files. Watch `rocksdb.compaction.times.micros` and the total bytes written (`rocksdb.bytes.per.write` times op count). Check whether compaction raises Azure write volume more than expected.
 
 ## Cleanup
 
@@ -283,83 +260,3 @@ az storage container delete --account-name $env:AZURE_STORAGE_ACCOUNT_NAME --nam
 - `db_bench` command-line flags stay the same as upstream. See the
   [upstream docs](https://github.com/facebook/rocksdb/wiki/Benchmarking-tools)
   and `db_bench.exe --help` for the full flag list.
-- This wrapper is a proof of concept. The follow-up work items below cover
-  scenario definitions and plugin performance work.
-
-## Follow-up work
-
-These candidate work items follow up on 4983896. Each item uses the
-Connextra user story format: *As a [role], I can [capability], so that
-[benefit].*
-
-### 1. Benchmark scenarios and baseline report.
-
-**User story:** As a plugin engineer, I can run db_bench scenarios against
-local disk and Azure, so that I have a repeatable performance baseline.
-
-**Description:** The db_bench proof of concept shows that the plugin works
-with Azure Blob Storage. The team needs standard benchmark scenarios. The
-team needs a baseline report that compares local disk and Azure runs. Use
-this baseline to measure future performance changes.
-
-**Acceptance criteria:**
-- Select benchmark scenarios for graphdb workloads.
-- Define parameters for each scenario: key size, value size, dataset size,
-  and thread count.
-- Store the scenario definitions as a script or config file in the
-  repository.
-- Run each scenario against local disk and against the Azure plugin.
-- Record ops per second, latency percentiles, and statistics counters for
-  each run.
-- Publish the comparison as a versioned report.
-
-### 2. Reduce per-write latency to Azure.
-
-**User story:** As a plugin engineer, I can batch writes into each Azure
-request, so that the plugin performs better under load.
-
-**Description:** Manual tests show a fixed cost near 40 to 50 milliseconds
-for each write to Azure. The payload size does not change this cost by
-much. The team needs a way to combine more writes into fewer Azure
-requests.
-
-**Acceptance criteria:**
-- Confirm that per-write latency depends on request count, not payload
-  size.
-- Build a prototype that batches writes before it sends them to Azure.
-- Compare the prototype against the baseline report from item 1.
-- Show a measurable drop in P50 and P99 write latency.
-- Run the full test suite and confirm no test fails.
-
-### 3. Managed Identity support for db_bench.
-
-**User story:** As a CI engineer, I can run db_bench with Managed Identity,
-so that the pipeline does not need a stored client secret.
-
-**Description:** The db_bench wrapper supports Service Principal auth
-today. The plugin supports Managed Identity through the
-`ChainedCredentialInfo` class. The wrapper needs the same support.
-
-**Acceptance criteria:**
-- Add Managed Identity support to the db_bench wrapper.
-- Select the auth mode through an environment variable.
-- Update this README with steps for both auth modes.
-- Test the change against an environment that uses Managed Identity.
-
-### 4. Automated smoke test for the Azure plugin wiring.
-
-**User story:** As a plugin maintainer, I can run a smoke test, so that I
-catch regressions in the db_bench and Azure plugin wiring.
-
-**Description:** Today, a person must run manual steps to check the
-db_bench and Azure plugin wiring. The team needs a script that runs these
-checks and reports pass or fail.
-
-**Acceptance criteria:**
-- Write a script that sets the required environment variables.
-- Run fillseq and check for the Azure plugin registered message.
-- Run readrandom with use_existing_db=1. Confirm the tool finds every key.
-- Delete the test container after the check.
-- Add the script to CI, or document it as a manual gate before each
-  release.
-- Show a clear error message that names the step that failed.
