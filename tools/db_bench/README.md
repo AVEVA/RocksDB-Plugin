@@ -20,9 +20,9 @@ cmake --build build/WindowsRelease --config RelWithDebInfo --target aveva_db_ben
 ```
 
 This build step uses an [overlay port](../../infrastructure/vcpkg-overlays/rocksdb).
-The overlay port rebuilds vcpkg's `rocksdb` with `WITH_BENCHMARK_TOOLS=ON`.
-The overlay port also exports `RocksDB::db_bench_tool` as an installable
-static library.
+The overlay port keeps `WITH_BENCHMARK_TOOLS=OFF` and instead applies
+`0004-install-db-bench-tool-lib.patch`, which exports `RocksDB::db_bench_tool`
+as an installable static library that the wrapper links against.
 
 ## Run — local filesystem (smoke test)
 
@@ -30,7 +30,7 @@ Set no `AVEVA_DB_BENCH_*` variables to pass through to stock `db_bench`. Use
 this mode to check the build before you point the tool at Azure.
 
 ```powershell
-./build/WindowsRelease/tools/db_bench/db_bench.exe `
+./build/WindowsRelease/tools/db_bench/RelWithDebInfo/db_bench.exe `
     --benchmarks=fillseq,readrandom `
     --num=100000
 ```
@@ -61,7 +61,8 @@ Notes on the table above:
 
 The wrapper supports Service Principal auth today only. To add Managed
 Identity or `ChainedCredentialInfo` support, follow the second
-`Plugin::Register` overload in `main.cpp` as a model.
+`Plugin::Register` overload declared in `Plugin.hpp` (implemented in
+`src/Azure/Plugin.cpp`) as a model.
 
 ## Run — Azure backend
 
@@ -69,6 +70,7 @@ Set the plugin configuration through the environment:
 
 ```powershell
 $env:AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL = "https://<account>.blob.core.windows.net"
+$env:AZURE_STORAGE_ACCOUNT_NAME         = "<account>"            # the <account> label from the URL above; used by --db and the az storage commands
 $env:AVEVA_DB_BENCH_CONTAINER           = "<container>"          # lowercase, digits, hyphens only
 $env:AVEVA_DB_BENCH_TENANT_ID           = "<tenant-guid>"
 $env:AVEVA_DB_BENCH_CLIENT_ID           = "<service-principal-app-id>"

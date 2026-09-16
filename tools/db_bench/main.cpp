@@ -15,7 +15,7 @@
 // through the plugin add:
 //
 //   --fs_uri=azblobfs<container>
-//   --db=<storage-account-url>/<container>/<db-subpath>
+//   --db=<account>+<container>/<db-subpath>
 //
 // See tools/db_bench/README.md for concrete invocation examples.
 
