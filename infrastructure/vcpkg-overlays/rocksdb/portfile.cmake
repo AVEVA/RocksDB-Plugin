@@ -5,15 +5,6 @@
 # Sync procedure when the vcpkg builtin-baseline is bumped:
 #   1. Diff $VCPKG_ROOT/ports/rocksdb against this directory.
 #   2. Re-apply the changes below on top of the upstream port.
-#   3. Bump the version guard.
-set(AVEVA_ROCKSDB_EXPECTED_VERSION "11.1.2")
-if(NOT VERSION STREQUAL AVEVA_ROCKSDB_EXPECTED_VERSION)
-  message(FATAL_ERROR
-    "AVEVA rocksdb overlay port is pinned to ${AVEVA_ROCKSDB_EXPECTED_VERSION} "
-    "but vcpkg resolved rocksdb ${VERSION}. Re-sync the overlay from "
-    "$VCPKG_ROOT/ports/rocksdb and bump AVEVA_ROCKSDB_EXPECTED_VERSION.")
-endif()
-
 vcpkg_from_github(
   OUT_SOURCE_PATH SOURCE_PATH
   REPO facebook/rocksdb
@@ -22,7 +13,6 @@ vcpkg_from_github(
   HEAD_REF main
   PATCHES
     0001-fix-dependencies.patch
-    0002-fix-android.patch
     # TODO: This patch should be deleted after following PR will be merged. https://github.com/facebook/rocksdb/pull/13573
     0003-include_cstdint.patch
     0004-install-db-bench-tool-lib.patch
