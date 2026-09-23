@@ -36,8 +36,9 @@ AVEVA::RocksDB::Plugin::Azure::Impl::WriteableFileImpl::WriteableFileImpl(
         m_lastPageOffset = lastPageOffset;
         if (lastPageBytes > 0) // There is a partially filled page
         {
-            const auto bytesDownoaded = m_blobClient->DownloadTo(m_buffer, m_lastPageOffset, lastPageBytes);
-            assert(bytesDownoaded == lastPageBytes);
+            [[maybe_unused]] const auto bytesDownloaded =
+                m_blobClient->DownloadTo(m_buffer, m_lastPageOffset, lastPageBytes);
+            assert(bytesDownloaded == lastPageBytes);
             m_bufferOffset = lastPageBytes;
             m_flushed = false; // We have existing partial page data in buffer
         }
@@ -172,7 +173,8 @@ void WriteableFileImpl::Truncate(int64_t size) {
 
     if (partialPageSize != 0) {
         // Read the partial page into memory for further appends
-        const auto bytesDownloaded = m_blobClient->DownloadTo(m_buffer, totalPageOffset, partialPageSize);
+        [[maybe_unused]] const auto bytesDownloaded =
+            m_blobClient->DownloadTo(m_buffer, totalPageOffset, partialPageSize);
         assert(bytesDownloaded == partialPageSize);
         m_bufferOffset = partialPageSize;
         m_flushed = false; // We have data in buffer now
