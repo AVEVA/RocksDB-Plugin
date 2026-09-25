@@ -32,18 +32,19 @@ The repo also ships shared building blocks in `src/Core/`:
 - A **file cache with an LRU index** (`FileCache`, `LruFileIndex`). It keeps hot
   blob content on the local disk.
 
-See [`README.md`](https://github.com/AVEVA/RocksDB-Plugin/blob/main/README.md) for the product summary. See
-[`ARCHITECTURE.md`](https://github.com/AVEVA/RocksDB-Plugin/blob/main/ARCHITECTURE.md) for the component map.
+See [`README.md`](README.md) for the product summary. See
+[`ARCHITECTURE.md`](ARCHITECTURE.md) for the component map.
 
-### Primary consumer: platform-graphdb-storage
+### Primary consumer
 
-The main consumer of this plugin is the **AVEVA `platform-graphdb-storage`**
-service. It uses the plugin to store its RocksDB data in Azure Blob Storage instead
-of on a local disk. This lets the service run as a stateless workload.
+The plugin has a downstream service that uses it. The service stores its RocksDB
+data in Azure Blob Storage instead of on a local disk. The plugin lets that
+service run as a stateless workload.
 
-Keep this fact in mind when you change public headers or public behavior:
+Remember the downstream consumer when you change public headers or public
+behavior:
 
-- A break in the public API breaks the `platform-graphdb-storage` build.
+- A break in the public API breaks the downstream consumer's build.
 - A break in the on-disk or on-blob format can break live services.
 - A change in an error code can change the recovery path in the consumer.
 
@@ -73,8 +74,7 @@ description. The PR template has a section for breaking changes. Fill it in.
 Follow these rules:
 
 - Public headers live in `include/AVEVA/RocksDB/Plugin/`. Treat them as a
-  backward-compatible contract. Downstream services (for example,
-  `platform-graphdb-storage`) build against them.
+  backward-compatible contract. Downstream services build against them.
 - `Impl/` folders hold internal code. This applies to both
   `src/Azure/Impl/` and `include/AVEVA/RocksDB/Plugin/Azure/Impl/`. The `Impl/`
   headers are public only because the templated public headers need them at
@@ -95,12 +95,12 @@ You need these tools:
     - On Windows: MSVC in Visual Studio 2022 with the "Desktop development
       with C++" workload.
     - On Linux: a recent GCC or Clang. Look at the `LinuxDebug` and
-      `LinuxRelease` flags in [`CMakePresets.json`](https://github.com/AVEVA/RocksDB-Plugin/blob/main/CMakePresets.json). Your
+      `LinuxRelease` flags in [`CMakePresets.json`](CMakePresets.json). Your
       compiler must accept them without warnings.
 5. [vcpkg](https://github.com/microsoft/vcpkg). The build resolves dependencies from
-   [`vcpkg.json`](https://github.com/AVEVA/RocksDB-Plugin/blob/main/vcpkg.json) with the manifest feature `testing`.
+   [`vcpkg.json`](vcpkg.json) with the manifest feature `testing`.
 6. [clang-format and clang-tidy](https://releases.llvm.org/). The rules are in
-   [`.clang-format`](https://github.com/AVEVA/RocksDB-Plugin/blob/main/.clang-format) and [`.clang-tidy`](https://github.com/AVEVA/RocksDB-Plugin/blob/main/.clang-tidy).
+   [`.clang-format`](.clang-format) and [`.clang-tidy`](.clang-tidy).
 7. [gitleaks](https://github.com/gitleaks/gitleaks). The pre-commit hook blocks
    your commit if you do not install `gitleaks`.
 8. On Windows only, turn on long path support. Set
@@ -136,7 +136,7 @@ The doctor does these checks:
   commit.
 
 Do not skip this step. If you skip it, you can commit unformatted code or leak
-secrets. See [`.github/hooks/README.md`](https://github.com/AVEVA/RocksDB-Plugin/blob/main/.github/hooks/README.md) for more.
+secrets. See [`.github/hooks/README.md`](.github/hooks/README.md) for more.
 
 ### 3.4 First build
 
@@ -153,7 +153,7 @@ cmake --build build/WindowsDebug --config Debug
 ctest --test-dir build/WindowsDebug --output-on-failure --build-config Debug
 ```
 
-The presets are in [`CMakePresets.json`](https://github.com/AVEVA/RocksDB-Plugin/blob/main/CMakePresets.json). The names are
+The presets are in [`CMakePresets.json`](CMakePresets.json). The names are
 `WindowsDebug`, `WindowsRelease`, `LinuxDebug`, and `LinuxRelease`. The Release
 presets use `RelWithDebInfo` and turn on interprocedural optimization.
 
@@ -205,7 +205,7 @@ The expected loop is:
 4. Build and run the tests for your preset (see §3.4).
 5. Commit. The pre-commit hook runs `gitleaks` and `clang-format` on the staged
    files under `src/`, `include/`, and `tests/`.
-6. Open a PR. Follow the [PR template](https://github.com/AVEVA/RocksDB-Plugin/blob/main/.github/PULL_REQUEST_TEMPLATE.md). The
+6. Open a PR. Follow the [PR template](.github/PULL_REQUEST_TEMPLATE.md). The
    title format is `<type>(<scope>): <subject>`. Use `feat`, `fix`, `docs`,
    `refactor`, `perf`, `test`, `build`, `chore`, `ci`, or `revert`. For a
    breaking change to a public header, use `feat(scope)!: ...`.
@@ -230,7 +230,7 @@ Follow these rules:
 - Add new source files to the nearest `CMakeLists.txt`.
 - Write comments about *why*, not *what*. Add a short comment block for
   functions that are more than about 5 lines.
-- Follow [`.clang-format`](https://github.com/AVEVA/RocksDB-Plugin/blob/main/.clang-format) and [`.clang-tidy`](https://github.com/AVEVA/RocksDB-Plugin/blob/main/.clang-tidy).
+- Follow [`.clang-format`](.clang-format) and [`.clang-tidy`](.clang-tidy).
   The hook formats the staged files for you, but you must fix the tidy
   warnings.
 
@@ -325,8 +325,8 @@ std::unique_ptr<rocksdb::DB> db{rawDb};
 ### 6.3 Register with a chained credential (production)
 
 Use `ChainedCredentialInfo` in production. It tries managed identity first, then
-falls back to the service principal. This is the path that
-`platform-graphdb-storage` uses when it runs in Azure.
+falls back to the service principal. Prefer this path when the service runs in
+Azure.
 
 ```cpp
 #include <AVEVA/RocksDB/Plugin/Azure/Models/ChainedCredentialInfo.hpp>
@@ -391,10 +391,10 @@ tableOpts.block_cache = blockCache;
 options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(tableOpts));
 ```
 
-### 6.5 How `platform-graphdb-storage` uses this
+### 6.5 How a downstream service integrates the plugin
 
-The `platform-graphdb-storage` service integrates the plugin in the same
-pattern as above. The key points are:
+A downstream service integrates the plugin in the same pattern as above. The key
+points are:
 
 - The service creates a `ChainedCredentialInfo` from its own configuration
   (managed identity in Azure, service principal in local dev).
@@ -407,7 +407,7 @@ pattern as above. The key points are:
 
 When you change how `Plugin::Register` behaves, how the env maps paths, or how
 errors translate, check the change against this consumer path. If you cannot
-build against the consumer, at least add or update a test in
+build against a downstream consumer, at least add or update a test in
 `tests/AVEVA/RocksDB/Plugin/Azure/Impl/` that covers the scenario.
 
 ---
@@ -438,17 +438,17 @@ build against the consumer, at least add or update a test in
 
 Docs in this repo:
 
-- [`README.md`](https://github.com/AVEVA/RocksDB-Plugin/blob/main/README.md) — product summary and a first usage example.
-- [`ARCHITECTURE.md`](https://github.com/AVEVA/RocksDB-Plugin/blob/main/ARCHITECTURE.md) — component map.
-- [`CONTRIBUTING.md`](https://github.com/AVEVA/RocksDB-Plugin/blob/main/CONTRIBUTING.md) — day-to-day flow.
-- [`SECURITY.md`](https://github.com/AVEVA/RocksDB-Plugin/blob/main/SECURITY.md) — how to report a security issue.
-- [`AGENTS.md`](https://github.com/AVEVA/RocksDB-Plugin/blob/main/AGENTS.md) and
-  [`.github/copilot-instructions.md`](https://github.com/AVEVA/RocksDB-Plugin/blob/main/.github/copilot-instructions.md) — how
+- [`README.md`](README.md) — product summary and a first usage example.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — component map.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — day-to-day flow.
+- [`SECURITY.md`](SECURITY.md) — how to report a security issue.
+- [`AGENTS.md`](AGENTS.md) and
+  [`.github/copilot-instructions.md`](.github/copilot-instructions.md) — how
   AI agents behave in this repo. This is useful context when you use Copilot
   or another agent.
-- [`.github/PULL_REQUEST_TEMPLATE.md`](https://github.com/AVEVA/RocksDB-Plugin/blob/main/.github/PULL_REQUEST_TEMPLATE.md) — PR
+- [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md) — PR
   expectations and the security checklist.
-- [`.github/hooks/README.md`](https://github.com/AVEVA/RocksDB-Plugin/blob/main/.github/hooks/README.md) — pre-commit hook
+- [`.github/hooks/README.md`](.github/hooks/README.md) — pre-commit hook
   details.
 
 External docs:
