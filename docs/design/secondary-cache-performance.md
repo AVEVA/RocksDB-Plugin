@@ -5,12 +5,21 @@ SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 # Design proposal: high-performance local-disk secondary cache
 
+**Revision:** v0.1 (initial draft, 2026-09-28).
 **Status:** Draft 1 — for review. Open questions in [§14](#14-open-questions-and-concerns) are
 deliberately unanswered pending feedback.
 **Component:** `AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache`
 **Scope constraint:** no changes to RocksDB; no changes to the plugin outside the secondary cache
 and the configuration needed to construct and load it.
 **RocksDB reference tree:** `C:\dev\rocksdb`, version 11.12.0 (`ROCKSDB_VERSION_INT = 11012000`).
+**Evidence base:** [`research/`](research/) — the background-research outputs this proposal was
+derived from, committed alongside it so revisions can be diffed against their sources.
+
+### Revision history
+
+| Revision | Date | Change |
+|---|---|---|
+| v0.1 | 2026-09-28 | Initial draft. No open questions answered yet. All §8 figures are unvalidated hypotheses. |
 
 ---
 
