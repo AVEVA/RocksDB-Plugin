@@ -60,13 +60,7 @@ int main(int argc, char** argv) {
     using AVEVA::RocksDB::Plugin::Azure::Impl::StorageAccount;
     using AVEVA::RocksDB::Plugin::Azure::Models::ServicePrincipalStorageInfo;
 
-    auto storageAccountUrl = Env("AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL");
-    if (!storageAccountUrl) {
-        std::cerr << "aveva_db_bench: AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL not set; "
-                     "Azure plugin will NOT be registered. Falling through to stock db_bench.\n";
-        std::_Exit(rocksdb::db_bench_tool(argc, argv));
-    }
-
+    const auto storageAccountUrl = Require("AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL", Env("AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL"));
     const auto container    = Require("AVEVA_DB_BENCH_CONTAINER",     Env("AVEVA_DB_BENCH_CONTAINER"));
     const auto tenantId     = Require("AVEVA_DB_BENCH_TENANT_ID",     Env("AVEVA_DB_BENCH_TENANT_ID"));
     const auto clientId     = Require("AVEVA_DB_BENCH_CLIENT_ID",     Env("AVEVA_DB_BENCH_CLIENT_ID"));
@@ -102,10 +96,14 @@ int main(int argc, char** argv) {
               << "    --fs_uri=" << fsUri << "\n"
               << "    --db=" << dbPath << "/<your-db-name>\n";
 
-    const int rc = rocksdb::db_bench_tool(argc, argv);
+    std::fflush(nullptr);
+    std::cout.flush();
+    const auto rc = rocksdb::db_bench_tool(argc, argv);
 
     // Skip C++ static destructors: boost.log tears down thread-local storage
     // before the plugin's background threads exit, which triggers SIGABRT
     // (exit 134) after the benchmark has already finished.
+    std::fflush(nullptr);
+    std::cout.flush();
     std::_Exit(rc);
 }

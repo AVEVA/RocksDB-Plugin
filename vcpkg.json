@@ -29,6 +29,12 @@
       "dependencies": [
         "gtest"
       ]
+    },
+    "db_bench": {
+      "description": "Dependencies needed for db_bench tool.",
+      "dependencies": [
+        "boost-log"
+      ]
     }
   }
 }
