@@ -5,9 +5,9 @@ SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 # Design proposal: high-performance local-disk secondary cache
 
-**Revision:** v0.1 (initial draft, 2026-09-28).
-**Status:** Draft 1 — for review. Open questions in [§14](#14-open-questions-and-concerns) are
-deliberately unanswered pending feedback.
+**Revision:** v0.2 (decisions incorporated, 2026-09-29).
+**Status:** Reviewed design; [§14](#14-review-decisions-and-residual-concerns) records the
+explicit answers and accepted defaults. Performance hypotheses still require measurement.
 **Component:** `AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache`
 **Scope constraint:** no changes to RocksDB; no changes to the plugin outside the secondary cache
 and the configuration needed to construct and load it.
@@ -20,6 +20,7 @@ derived from, committed alongside it so revisions can be diffed against their so
 | Revision | Date | Change |
 |---|---|---|
 | v0.1 | 2026-09-28 | Initial draft. No open questions answered yet. All §8 figures are unvalidated hypotheses. |
+| v0.2 | 2026-09-29 | Incorporated Q1–Q19 decisions; scoped to one 16–256 GiB ephemeral cache per process, buffered I/O, FIFO reclaim, no new compression or warm restart. |
 
 ---
 
@@ -43,7 +44,7 @@ caches described in the Kangaroo and CacheLib literature:
   write buffer and flushed in large aligned I/Os. Insert cost becomes a `memcpy` plus an amortized
   fraction of one sequential write. **Zero** metadata operations per entry.
 - A **sharded, open-addressing in-memory index** mapping a 64-bit key hash to a packed location,
-  ~32 B/entry DRAM instead of the current ~140 B/entry (with a documented path to ~19 B).
+  ~32 B/entry DRAM instead of the current ~140 B/entry; tighter packing is deferred to profiling.
 - **Region-granular FIFO reclaim** instead of per-entry LRU eviction: eviction becomes an index
   sweep plus a buffer reset, with no filesystem operation at all, and write amplification stays
   at ~1.0.
@@ -56,10 +57,9 @@ caches described in the Kangaroo and CacheLib literature:
 - Correct interpretation of **`Deflate`/`Inflate`** as a *RAM reservation* signal rather than a
   command to delete persistent data (§6.7) — the current implementation performs disk eviction in
   response to a memory-pressure hint, which is both expensive and semantically wrong.
-- Optional **warm restart**: the current constructor unconditionally deletes the cache directory,
-  so every process restart starts cold. In a stateless cloud deployment backed by Azure Blob
-  Storage, a cold cache means every block is re-fetched over the network. Region-structured
-  storage makes a persistent index checkpoint cheap.
+- **Cold start on ephemeral storage**: startup always resets cache regions and rebuilds an empty
+  index. There is no checkpoint, restart scan, or persistence mode; the deployment does not retain
+  this volume across process restarts.
 
 Expected effect on the hot paths, to be confirmed by the benchmark harness in §11.6:
 insert throughput dominated by `memcpy` rather than file creation, lookup latency reduced by
@@ -110,9 +110,10 @@ overload.
 3. **Measured improvement** on the benchmark harness (§11.6) against the current implementation on
    the same hardware, reported as a table of p50/p99/p99.9 latency and throughput for insert,
    lookup-hit, lookup-miss, and mixed workloads at 1/4/16/64 threads.
-4. **Bounded DRAM**: index memory ≤ 0.3 % of configured disk capacity at 8 KiB mean entry size,
-   explicitly accounted and reportable.
-5. **Write amplification** (bytes written to device ÷ bytes inserted) ≤ 1.1 at steady state.
+4. **Bounded DRAM**: index memory ≤ 0.5 % of configured disk capacity at 8 KiB mean entry size
+   (~32 B / 8192 B = 0.39%, or ~1 GiB at 256 GiB), explicitly accounted and reportable.
+5. **Write amplification** (bytes written to device ÷ bytes inserted) ≤ 1.1 at steady state
+   **without hot-entry reinsertion**; measure and report the reinsertion tradeoff separately.
 
 ---
 
@@ -313,7 +314,7 @@ Full source list in §15.
 | L2 | Make the write path an append into a memory buffer; flush in large, aligned, sequential I/Os. | Navy `Region::openAndAllocate` bump allocation with an attached in-memory `Buffer` (`Region.h:98-101,143-190`); Aerospike append-only write-blocks; Flashield batches into ~512 MiB sequential segments. |
 | L3 | Evict at **region granularity**, not object granularity. Eviction becomes an index sweep, not I/O. | Navy documents the region-reclaim/item-eviction split explicitly as the mechanism that amortizes flash GC and avoids per-item write amplification (`RegionManager.h:299-303`, `BlockCache.cpp:673-736`). |
 | L4 | FIFO region reclaim with *reinsertion* of still-hot objects beats strict LRU on flash, because LRU on flash costs random writes. | CacheLib's LRU→FIFO region-eviction change cut **device-level WA 1.5× → 1.05×** (15% fewer NAND writes/sec) at a small app-level WA cost (OSDI'20 p.780). Navy `HitsReinsertionPolicy` / `PercentageReinsertionPolicy` restore the lost recency signal. |
-| L5 | DRAM index cost per object is the scaling limit; store only a key hash plus a packed address, and validate the full key against the on-disk record. | Navy `Index::ItemRecord` is **8 B**, `PackedItemRecord` **5 B** (`Index.h:49-67,184-193`); CacheLib LOC index = 0.01–0.61% of cache size (OSDI'20 p.775/780); Flashield <4 B/object; FASTER 8 B/key; Segcache ~5 B/object. Our ~32 B/entry v1 target is conservative against these, with a documented path to ~19 B. |
+| L5 | DRAM index cost per object is the scaling limit; store only a key hash plus a compact address, and validate the full key against the on-disk record. | Navy `Index::ItemRecord` is **8 B**, `PackedItemRecord` **5 B** (`Index.h:49-67,184-193`); CacheLib LOC index = 0.01–0.61% of cache size (OSDI'20 p.775/780); Flashield <4 B/object; FASTER 8 B/key; Segcache ~5 B/object. Our ~32 B/entry v1 estimate retains explicit length and generation fields; tighter packing needs proof against 16 MiB records and 256 GiB capacity. |
 | L6 | Apply **admission control**. Admitting everything burns endurance and evicts useful data for one-hit wonders. | CacheLib measured its uncontrolled write rate at **50% above** the sustainable device rate, and its advanced admission policy cut flash write rate **44%** with no hit-ratio loss (OSDI'20 Appendix C). Flashield's median cumulative WA is **0.5–0.54×** vs 2.85× (RIPQ) / 3.67× (victim cache). RocksDB's own dummy-entry trick is the same idea at zero cost. |
 | L7 | Checksum the record header **independently** from the payload. Validate the header first; a header-checksum failure during a region scan should abort the rest of that region, while a payload-only failure is non-fatal (skip the item, keep iterating). | Navy `BlockCache.cpp:535,560,654-661,673-736,1025-1033`; BigHash per-bucket `checksum_` + `generationTime_` (`Bucket.h:105-107`). |
 | L8 | Keep very small objects out of the big log if they dominate — a set/bucket store with per-bucket Bloom filters is far more DRAM- and space-efficient for objects ≪ device page. | Navy BigHash: **no per-item DRAM index**, 4 KiB buckets, Bloom filter sized **16 B per ~25 entries with 4 hashes**, skipping >90% of useless flash reads (`BigHash.h:47-62,66`; `NavySetup.cpp:127-134`). Cost: ~6.5× app-level WA because every insert rewrites a full 4 KiB bucket. Kangaroo's KLog→KSet buffering (flush only once ≥2 objects collide on a set) cuts that from 17.9× to **5.8×** alwa. |
@@ -395,25 +396,34 @@ flowchart LR
   region_00000.dat # fixed-size region file, default 64 MiB
   region_00001.dat
   ...
-  INDEX            # optional index checkpoint written on clean shutdown (§6.8)
 ```
 
 `regionCount = ceil(capacityBytes / regionSizeBytes)`. Region files are **preallocated** at
 construction (`SetEndOfFile`, and `SetFileValidData` where the privilege is held, on Windows;
 `fallocate` on Linux) so steady state never pays block-allocation cost and the cache cannot fail
-mid-run because the volume filled up.
+mid-run because the volume filled up. The deployment has **one cache per process, configured
+between 16 and 256 GiB** (256–4,096 default-size regions); preserve the existing constructor's
+512 MiB default for compatibility, but validate the 16 and 256 GiB deployment endpoints. At
+256 GiB and 8 KiB entries, the ~32 B/entry index estimate reaches ~1 GiB: budget this explicitly,
+including the OS page cache from buffered I/O.
 
 #### 6.1.2 Region layout
 
 A region is an append log of records written in `flushBlockSize` (default 1 MiB) aligned chunks.
-The last 4 KiB is a footer, written when the region is sealed, listing `(keyHash, offset, length)`
-for every record. The footer makes index reconstruction and reclaim sweeps cheap (§6.5, §6.8).
+Reserve the last **1 MiB** for a checksummed footer containing a header (entry count, write
+cursor, format, overflow flag) and `(keyHash, offset, length)` descriptors. Each descriptor is
+16 B, so 1 MiB fits 65,536 descriptors, enough for 64 MiB of records ≥ 1 KiB. At 8 KiB records,
+~8,000 descriptors occupy ~128 KiB. A 4 KiB footer could hold only ~250 descriptors and is
+**not** sufficient. If smaller records exceed footer capacity, seal with the overflow flag and
+scan records sequentially at reclaim rather than dropping valid inserts; bound scan work to one
+region and measure frequency. Footers serve reclaim, **not** restart recovery (§6.8). Their
+reserved 1 MiB costs 1.56% of each region's physical capacity.
 
 ```text
 +-------------------------------------------------------------+
-| record 0 | record 1 | ... | record k | free | FOOTER (4 KiB) |
+| record 0 | record 1 | ... | record k | free | FOOTER (1 MiB) |
 +-------------------------------------------------------------+
- 0                                             regionSize-4096
+ 0                                           regionSize-1MiB
 ```
 
 #### 6.1.3 Record format
@@ -464,10 +474,10 @@ ShardedIndex
 ```
 
 ```cpp
-struct Location {           // 14 bytes of fields, 16 with natural padding
+struct Location {           // 16 bytes of fields, no padding required
     uint32_t regionId;
     uint32_t offsetInAlignUnits;   // record offset / 64
-    uint16_t lengthInAlignUnits;   // record length / 64   (covers 4 MiB; widen if maxEntrySize grows)
+    uint32_t lengthInAlignUnits;   // record length / 64; covers maxEntrySize = 16 MiB
     uint16_t generation;           // region reclaim generation
     uint8_t  hitCount;             // saturating, for reinsertion policy
     uint8_t  flags;                // tombstone/ghost
@@ -479,12 +489,10 @@ struct Location {           // 14 bytes of fields, 16 with natural padding
 - A slot is the 8-byte `keyHash` plus a 16-byte `Location` = **24 B**; at a 0.75 load factor that is
   **~32 B per live entry** versus ~140 B today — a **4–4.5×** reduction. For a 100 GiB cache at
   8 KiB entries: ~420 MiB instead of ~1.8 GiB.
-- Navy achieves 5–8 B per entry (L5) by packing the address into a single `uint32_t` and encoding
-  size exponentially. If the DRAM figure turns out to matter, §10 phase 4 can adopt the same trick:
-  dropping `regionId`/`offsetInAlignUnits` to one packed `uint32_t` address and `lengthInAlignUnits`
-  to a 6-bit exponent yields a 6-byte `Location`, i.e. ~19 B/entry at 0.75 load. It is deliberately
-  **not** in v1 because it trades debuggability and a clean invariant (`generation`) for DRAM we
-  probably have.
+- Navy achieves 5–8 B per entry (L5) by packing the address and encoding size exponentially.
+  Packing our offset/size fields is a *conditional* memory optimization after phase 0; the
+  16 MiB max entry size and region generation must still be represented. The previous
+  ~19 B/entry sketch did not account for these bounds and is not a committed target.
 
 **Implementation choice.** Start with `boost::unordered_flat_map<uint64_t, Location>` per shard
 (already a dependency, no new code to get wrong). Hand-roll a packed open-addressing table only if
@@ -520,8 +528,8 @@ rocksdb::Status Insert(const rocksdb::Slice& key, rocksdb::Cache::ObjectPtr obj,
     scratch.EnsureCapacity(valueSize);
     if (auto s = helper->saveto_cb(obj, 0, valueSize, scratch.data()); !s.ok()) return s;
 
-    auto [payload, type] = MaybeCompress(scratch.span(valueSize), helper->role);
-    return AppendRecord(key, payload, type, rocksdb::CacheTier::kVolatileTier);
+    return AppendRecord(key, scratch.span(valueSize), rocksdb::kNoCompression,
+                        rocksdb::CacheTier::kVolatileTier);
 }
 ```
 
@@ -546,7 +554,7 @@ rocksdb::Status AppendRecord(const rocksdb::Slice& key, std::span<const std::byt
     // 3. Publish. Last writer wins for duplicate keys.
     m_index.Upsert(res.keyHash,
                    Location{res.regionId, res.offset / kRecordAlign,
-                            static_cast<uint16_t>(recLen / kRecordAlign), res.generation, 0, 0});
+                            recLen / kRecordAlign, res.generation, 0, 0});
 
     // 4. Account; hand a completed flush block to the IoEngine if this append filled one.
     m_regions.Publish(res);
@@ -554,11 +562,11 @@ rocksdb::Status AppendRecord(const rocksdb::Slice& key, std::span<const std::byt
 }
 ```
 
-Cost on the caller's (RocksDB foreground) thread: one `fetch_add`, one payload `memcpy`, one
-sharded mutex acquisition, and — when compression is enabled — the compressor. **No syscall, no
-allocation, no global lock.**
+Cost on the caller's (RocksDB foreground) thread: one `fetch_add`, one payload `memcpy`, and one
+sharded mutex acquisition. **No syscall, no new compression, no global lock**; preallocated
+scratch/buffers avoid per-operation allocation.
 
-`InsertSaved` takes the same path, skipping `saveto_cb` and `MaybeCompress` and preserving the
+`InsertSaved` takes the same path, skipping `saveto_cb` and preserving the
 caller's `CompressionType` and `CacheTier` verbatim (existing round-trip tests assert this).
 
 #### 6.3.2 Admission policy
@@ -626,7 +634,7 @@ append streams, reducing `fetch_add` contention and increasing device parallelis
 
 When every buffer is in flight, `Insert` **drops** the entry rather than stalling: the cache must
 never add latency to the read path it exists to accelerate. Counted as `insertsDroppedNoBuffer`.
-**Open question Q6.**
+**Accepted default Q6.**
 
 #### 6.3.4 Why no per-key ordered job queue
 
@@ -698,9 +706,8 @@ Key properties:
 - **Direct I/O alignment.** With `FILE_FLAG_NO_BUFFERING` / `O_DIRECT`, offset, length and buffer
   address must all be device-block aligned; `kRecordAlign = 64` is insufficient, so the read is
   widened to the enclosing 4 KiB range and the payload sliced out (≤ 8 KiB of extra transfer).
-  Whether to use direct I/O at all is **open question Q1**: buffered I/O gives a free second-level
-  cache in the OS page cache — arguably a feature for a secondary cache — at the cost of
-  double-caching and unpredictable memory pressure inside a container memory limit.
+  **Decision Q1:** buffered I/O is the default; direct I/O is an opt-in benchmarking/configuration
+  path. Measure page-cache residency and memory pressure before changing the default.
 - **Read-your-writes.** If the location is inside an unflushed write buffer, the data is served by
   `memcpy` from that buffer under the region's reader guard.
 - **Pinning against reclaim.** The reclaimer flips the region to `Reclaiming`, removes all of its
@@ -736,7 +743,7 @@ void WaitAll(std::vector<rocksdb::SecondaryCacheResultHandle*> handles) noexcept
 
 The `IoEngine` completion path sets `m_done` and notifies; validation and `create_cb` run in
 `Wait()` on the caller's thread. That keeps the I/O threads free and avoids block-construction CPU
-starving the completion path — **open question Q7** covers the alternative.
+starving the completion path — **accepted default Q7**.
 
 Because `Lookup(wait=true)` stays fully synchronous and `WaitAll` is trivially correct for
 already-ready handles, the async path ships behind `enableAsyncLookup`, defaulted off until
@@ -747,8 +754,9 @@ benchmarked (§10 phase 4).
 At steady state all regions are full. To open a new region, the `RegionManager` reclaims the oldest:
 
 ```text
-1. victim = oldest sealed region                       [policy: kFifo | kLruRegion]
-2. read its 4 KiB footer -> list of (keyHash, offset, len)
+1. victim = oldest sealed region                       [policy: kFifo]
+2. read its 1 MiB footer -> list of (keyHash, offset, len);
+   if overflow is marked, scan record headers/key hashes across the region instead
 3. if reinsertion is enabled: re-append entries whose hitCount >= threshold into the open region
 4. for each footer entry: RemoveIfInRegion(keyHash, victimId, victimGeneration)
      (a newer copy of the same key in another region must survive)
@@ -756,9 +764,11 @@ At steady state all regions are full. To open a new region, the `RegionManager` 
 6. cursor = 0; ++generation; state = Open
 ```
 
-Cost: one 4 KiB read plus *k* index removals for a whole 64 MiB region. At 8 KiB entries that is
-~8 000 removals amortized over ~8 000 inserts — roughly **one index operation per insert and zero
-filesystem operations**, versus two metadata operations per evicted entry today.
+Cost: one 1 MiB footer read (or one 63 MiB sequential region scan for unusually tiny entries)
+plus *k* index removals for a whole 64 MiB region. At 8 KiB entries that is ~8,000 removals
+amortized over ~8,000 inserts — roughly **one index operation per insert and zero filesystem
+metadata operations**, versus two per evicted entry today. Reinsertion adds reads/writes and
+must be included in measured write amplification.
 
 **Generation counters** make stale index entries harmless: if a region has been reclaimed since the
 `Location` was published, the generation mismatches and the read is a miss. Combined with the
@@ -767,29 +777,17 @@ in-record key check, the index is safe under any interleaving.
 **Why FIFO and not LRU?** (L4) LRU on a log-structured store requires either random writes to move
 entries or per-entry metadata plus a defragmentation pass. Published results (CacheLib, Kangaroo,
 S3-FIFO/SIEVE) show FIFO-with-reinsertion captures most of LRU's hit ratio at a fraction of the
-write amplification. The delta is workload-specific, so it is an explicit **measurement task**
-(§11.6) and **open question Q2**; `kLruRegion` (reclaim the least-recently-*read* region) is a
-one-line policy change costing 8 bytes per region.
+write amplification. **Decision Q2:** use FIFO; measure the workload-specific hit-ratio delta
+(§11.6) but do not implement an LRU-region fallback in this revision.
 
 ### 6.6 Compression
 
-The class is named `FileBasedCompressedSecondaryCache` but never compresses on the `Insert` path.
-Proposal:
-
-- `compression`: `kNone` (default in v1, preserving today's behaviour) | `kZstd` | `kLz4`.
-  `zstd` is already a vcpkg dependency.
-- Compress only when the incoming type is `kNoCompression` — i.e. on `Insert`, never on
-  `InsertSaved`. This is exactly `CompressedSecondaryCache`'s rule.
-- Honour `doNotCompressRoles`, defaulting to `{kFilterBlock}` (Bloom filters are near-incompressible
-  and latency-critical), mirroring RocksDB.
-- Reject the compressed form if it saves < 12.5 % (RocksDB's own heuristic).
-- Store the resulting `CompressionType` in the record header and hand it back to `create_cb`
-  verbatim — existing round-trip tests assert this and must keep passing.
-
-Tradeoff: ~1–3 µs per 4 KiB block to compress (zstd level 1) on the *eviction* path and ~0.5–1 µs to
-decompress on the *lookup* path, in exchange for 2–4× more effective capacity and proportionally
-less write amplification. When the miss penalty is an Azure Blob Storage round trip (~5–50 ms) the
-trade is overwhelmingly favourable — but it is a policy decision, hence **open question Q5**.
+**Decision Q5:** no new compression in this redesign. `Insert` stores `kNoCompression` and the
+serialized bytes verbatim, preserving today's behaviour; `InsertSaved` preserves the already
+compressed payload and its incoming `CompressionType` verbatim. The record header retains its
+compression field so `create_cb` receives the exact type expected by RocksDB. The historical class
+name remains for API compatibility, not as a promise that `Insert` compresses. No compression
+options, compressor on the foreground thread, or compression implementation phase are planned.
 
 ### 6.7 Capacity semantics: `SetCapacity` vs `Deflate`/`Inflate`
 
@@ -802,31 +800,23 @@ trade is overwhelmingly favourable — but it is a policy decision, hence **open
 | `Inflate(n)` | increases disk capacity | restore the DRAM budget up to the configured maximum |
 
 This matches `include/rocksdb/secondary_cache.h` ("temporary RAM capacity reduction") and the
-adapter's use of these calls to rebalance a shared reservation. It is a **behaviour change** that
-breaks `DeflateAndInflateCapacity` and `DeflateByMoreThanCapacity_ClampsToZero`, which assert
-disk-level effects. **Open question Q8**; a `deflateAffectsDiskCapacity` flag preserves today's
-behaviour if required.
+adapter's use of these calls to rebalance a shared reservation. **Decision Q8:** reinterpret;
+the cache is not wired behind `NewTieredCache`. Replace the tests asserting disk-level effects
+with tests asserting that on-disk entries and disk capacity survive `Deflate`/`Inflate`. Do not
+preserve the incorrect disk-deletion behaviour behind a compatibility flag.
 
-### 6.8 Durability and restart
+### 6.8 Ephemeral storage and restart
 
-Three modes, selected by `persistence`:
+**Decision Q9:** the cache volume is ephemeral and will not survive a process restart. At every
+construction, invalidate any existing region files and index state, preallocate the configured
+regions, and begin empty. Never load an index checkpoint or scan regions to rebuild the index.
+No `PersistenceMode`, `INDEX` file, clean-shutdown marker, or restart recovery logic is needed.
+The `CACHE` superblock identifies the currently running instance and format for internal checks,
+not for warm recovery. A fresh instance UUID prevents stale data from a previous incarnation
+being mistaken for current data.
 
-1. `kDropOnStart` (today's behaviour; **proposed v1 default**) — reset all regions at startup.
-   Trivially correct, always cold.
-2. `kWarmOnCleanShutdown` — the destructor writes `INDEX` plus a "clean" flag in the superblock;
-   startup loads the index only if the flag is set *and* the config fingerprint matches, and clears
-   the flag immediately so an unclean shutdown after a warm start is detected.
-3. `kWarmByScan` — no checkpoint; rebuild by reading each region footer
-   (`regionCount` × 4 KiB ≈ 6 MiB for a 100 GiB cache, ~10 ms). Robust to unclean shutdown.
-
-Records are self-validating, so even a subtly wrong index cannot produce corrupt data — the worst
-case is a miss. RocksDB block-cache keys are derived from a per-SST unique ID, so an entry for a
-deleted SST is simply never looked up: no correctness hazard, only wasted space. The superblock
-still stores a config fingerprint to stop a completely different DB from reusing the directory.
-**Open question Q9.**
-
-No `fsync` is issued on the write path. A cache needs *integrity*, which the per-record CRC
-provides, not *durability* (L12).
+No `fsync` is issued on the write path. Per-record CRC protects *integrity* while the process is
+running; cache contents are disposable across restart.
 
 ### 6.9 Platform I/O layer
 
@@ -847,8 +837,8 @@ class BlockDevice {
 
 | Platform | Sync I/O | Async | Preallocation | Discard |
 |---|---|---|---|---|
-| Windows | `ReadFile`/`WriteFile` with an `OVERLAPPED` offset on a persistent handle opened `FILE_FLAG_OVERLAPPED` (optionally `FILE_FLAG_NO_BUFFERING`) | IOCP thread pool (works back to Server 2019); `IORING` only on Win11/Server 2022+, so not v1 | `SetEndOfFile` (+ `SetFileValidData` when the privilege is held) | `FSCTL_SET_ZERO_DATA` on sparse files, best effort |
-| Linux | `pread`/`pwrite` (optionally `O_DIRECT`) | thread pool in v1; `io_uring` behind a flag later | `fallocate` | `FALLOC_FL_PUNCH_HOLE` |
+| Windows | `ReadFile`/`WriteFile` with an `OVERLAPPED` offset on a persistent handle opened `FILE_FLAG_OVERLAPPED` (optionally `FILE_FLAG_NO_BUFFERING`) | thread pool in v1; IOCP or `IORING` benchmark candidates on supported recent Windows releases | `SetEndOfFile` (+ `SetFileValidData` when the privilege is held) | `FSCTL_SET_ZERO_DATA` on sparse files, best effort |
+| Linux | `pread`/`pwrite` (optionally `O_DIRECT`) | thread pool in v1; `io_uring` benchmark candidate on supported recent kernels | `fallocate` | `FALLOC_FL_PUNCH_HOLE` |
 | Tests | `MemoryBlockDevice` — RAM-backed regions with programmable fault and torn-write injection | immediate or deferred completion | — | — |
 
 `MemoryBlockDevice` is the key testability lever: every unit test in §11 can run against RAM with
@@ -856,7 +846,9 @@ deterministic fault injection, preserving the spirit of the existing `Filesystem
 
 v1 uses a **thread-pool `IoEngine`** on both platforms — simple, portable, and adequate (4–8 threads
 saturate a consumer NVMe for 4–32 KiB reads). IOCP and `io_uring` are later optimizations gated on
-measurement. **Open question Q10.**
+measurement. **Decision Q10:** only recent Windows and Linux are supported, so no older-kernel
+or Server 2019 fallback is required; this removes a compatibility constraint but does not by itself
+justify replacing the measurable v1 thread-pool baseline with an unmeasured native engine.
 
 ### 6.10 Configuration and wiring
 
@@ -878,15 +870,10 @@ struct FileBasedSecondaryCacheOptions {
     ReinsertionPolicy    reinsertion          = ReinsertionPolicy::kHitCount;
     uint8_t              reinsertionThreshold = 1;
 
-    CompressionMode      compression      = CompressionMode::kNone;
-    int                  compressionLevel = 1;
-
-    PersistenceMode      persistence       = PersistenceMode::kDropOnStart;
     bool                 useDirectIo       = false;
     bool                 enableAsyncLookup = false;
     uint32_t             ioThreads         = 4;
 
-    bool                 deflateAffectsDiskCapacity = false;   // compatibility escape hatch
     StorageEngine        engine = StorageEngine::kRegion;      // kLegacy during the transition
 };
 ```
@@ -903,12 +890,14 @@ FileBasedCompressedSecondaryCache(std::filesystem::path, FileBasedSecondaryCache
 ```
 
 In the new engine the legacy `std::shared_ptr<Filesystem>` parameter is used only for directory
-creation/removal; a `nullptr` selects the platform `BlockDevice` directly. **Open question Q11.**
+creation/removal; a `nullptr` selects the platform `BlockDevice` directly. **Accepted default Q11.**
 
 Optionally register a `rocksdb::ObjectLibrary` factory so the cache can be built from a URI
-(`aveva_file_secondary_cache://<dir>?capacity=...`), enabling `db_bench --secondary_cache_uri=` for
-benchmarking without bespoke harness code. This is "configuration to load and use the cache" and so
-is in scope. **Open question Q15.**
+(`aveva_file_secondary_cache://<dir>?capacity=...`). The reference RocksDB tree does **not**
+define `--secondary_cache_uri` in `db_bench_tool.cc`; wire this into `cache_bench` where the flag
+exists, or into the plugin's own harness, after confirming the linked RocksDB version supports
+the `ObjectLibrary` registration. This is configuration to load/use the cache and is in scope.
+**Accepted default Q15.**
 
 ### 6.11 Observability
 
@@ -921,7 +910,7 @@ bytesInserted, bytesWrittenToDevice           -> write amplification
 bytesRead, readIoCount, readIoLatencyHistogram
 regionsReclaimed, entriesEvictedByReclaim, entriesReinserted
 indexSlots, indexLiveEntries, indexGhostEntries, indexBytes
-compressionBytesIn, compressionBytesOut
+footerOverflowScans
 ```
 
 Counters are cache-line-padded relaxed atomics. Hot paths must not log per operation: the current
@@ -1036,8 +1025,8 @@ class ShardedIndex {
 };
 ```
 
-`RemoveAllInRegion` driven by the region footer is O(entries-in-region) with random shard access;
-driven by shard iteration it is O(index size). The footer approach is why footers exist.
+`RemoveAllInRegion` driven by the region footer (or bounded overflow scan) is
+O(entries-in-region) with random shard access; driven by shard iteration it is O(index size).
 
 ### 7.3 Changes to `FileBasedCompressedSecondaryCache.cpp`
 
@@ -1081,7 +1070,7 @@ claims):
 - **H2** lookup p99 improves ≥ 3× for page-cache-resident hits and ≥ 1.5× for device hits.
 - **H3** throughput scales near-linearly to ≥ 16 threads (today it flattens at ~2).
 - **H4** batched lookups improve ≥ 3× with `enableAsyncLookup` at batch depth ≥ 16.
-- **H5** index DRAM drops ≥ 5×.
+- **H5** index DRAM drops ≥ 4× (140 B / ~32 B per live entry), measured at equal occupancy.
 - **H6** with `kSecondChance` admission, device bytes written drop ≥ 40 % on a Zipfian workload
   with no material hit-ratio loss.
 
@@ -1092,16 +1081,16 @@ claims):
 | Decision | Gain | Cost / risk | Mitigation |
 |---|---|---|---|
 | Region log instead of file-per-entry | eliminates all per-entry metadata I/O; enables batching and sequential writes | we now own space management, so bugs become data-corruption bugs rather than "file missing" | per-record CRC + key; generation counters; `MemoryBlockDevice` fault injection; fuzzing |
-| FIFO region reclaim | O(1) eviction; WA ≈ 1 | can evict a hot entry whose region neighbours are cold | reinsertion on hit count; `kLruRegion` fallback; measure (Q2) |
+| FIFO region reclaim | amortized constant per-entry reclaim; WA ≈ 1 absent reinsertion | can evict a hot entry whose region neighbours are cold | reinsertion on hit count; measure hit-ratio delta (Q2) |
 | 64-bit hash index + on-disk key validation | 4–4.5× less DRAM | a hash collision costs one device read then a miss | ~4 × 10⁻⁶ at 13 M entries; counted in `missesKeyMismatch` |
 | Index-only `Erase`/eviction | removes 2 MD ops per eviction | space is not reclaimed until the region recycles; live bytes ≠ written bytes | track both; `GetUsage` reports live bytes, stats expose written bytes |
 | Non-blocking insert (drop when buffers are full) | RocksDB foreground threads never block on the cache | admission rate dips during write bursts | tunable buffers; `insertsDroppedNoBuffer` counter; Q6 |
 | Preallocated regions | no allocation stalls, no `ENOSPC` surprises | the cache occupies its full configured size from day one | document it; `SetCapacity` shrinks; it is what a cache *should* do |
 | No `fsync` | no write stalls | power loss can leave a torn record | CRC turns a torn record into a miss; the cache is never a source of truth |
-| Optional warm restart | avoids a cold cache after every deployment, when misses cost an Azure round trip | more persistent state to get wrong | self-validating records make the worst case a miss; default stays `kDropOnStart` |
-| Optional direct I/O | predictable memory use; no double-caching | loses the free OS page cache; alignment complexity; `SetFileValidData` needs a privilege | default off; Q1 |
-| Compression on `Insert` | 2–4× effective capacity; less WA | CPU on the eviction (foreground) path | default off in v1; `doNotCompressRoles`; Q5 |
-| Reinterpreting `Deflate`/`Inflate` | correct per the RocksDB contract; removes a delete storm under memory pressure | behaviour change; breaks two existing tests | `deflateAffectsDiskCapacity` flag; Q8 |
+| Cold-only startup | no recovery code or stale-index ambiguity | cold cache after each restart | ephemeral deployment cannot preserve cache contents; measure warm-up traffic |
+| Optional direct I/O | predictable memory use; no double-caching | loses the free OS page cache; alignment complexity | buffered default; opt-in direct I/O benchmark (Q1) |
+| No new compression on `Insert` | no foreground compression CPU, preserves current wire semantics | lower effective capacity if blocks are compressible | preserve incoming compressed bytes via `InsertSaved`; revisit only with measured need (Q5) |
+| Reinterpreting `Deflate`/`Inflate` | correct per the RocksDB contract; removes a delete storm under memory pressure | behaviour change; breaks two existing tests | replace assertions with RAM-reservation and disk-preservation tests (Q8) |
 | A new `BlockDevice` abstraction rather than extending `Core::Filesystem` | positioned and async I/O, alignment, preallocation, discard | a second I/O abstraction in the codebase | it is cache-private; `Core::Filesystem` is untouched, so the Azure layer is unaffected |
 | Large blast radius | the incremental fixes (remove the double copy, use `pread`, shard the lock) are worth perhaps 2×; replacing the substrate is worth an order of magnitude | a rewrite of the storage layer | phased delivery (§10) with the legacy engine one flag away until the new one is proven |
 
@@ -1136,12 +1125,10 @@ most of the win.
 | **3. Flip the default and delete the legacy engine** | after benchmarks and a soak test | `kRegion` default; `LruFileIndex` removed. |
 | **4. Async lookup** | `IoEngine`, `AsyncResultHandle`, real `WaitAll`; measured with MultiGet. | H4 confirmed, or the feature is dropped. |
 | **5. Admission and reinsertion policies** | §6.3.2, §6.5 | H6 confirmed; hit-ratio delta measured. |
-| **6. Compression** | §6.6 | capacity/CPU trade measured. |
-| **7. Warm restart** | §6.8 modes 2 and 3 | crash-injection suite green. |
-| **8. Platform I/O optimization** | IOCP / `io_uring` / direct I/O, only if phase 4 shows the thread pool is the bottleneck | measured. |
+| **6. Platform I/O optimization (optional)** | IOCP / `io_uring` / direct I/O, only if phase 4 shows the thread pool is the bottleneck | measured on supported recent OS versions. |
 
-Phases 4–8 are individually optional and gated on measurement. The design accommodates all of them
-without a further on-disk format change — the record header carries `formatVersion`.
+Phases 4–6 are individually optional and gated on measurement. No compression or warm-restart
+phase is planned. The record header carries `formatVersion` for future format changes.
 
 ---
 
@@ -1155,11 +1142,11 @@ replaced with equivalent assertions against the new substrate.
 | `InsertAndLookup`, `InsertSavedAndLookup`, `LookupMissReturnsNull`, `EraseRemovesEntry`, `EraseNonExistentKeyIsNoOp`, `OverwriteExistingKeyReturnsNewData`, `InsertSavedZeroSize_ReturnsOkWithoutInserting`, `InsertSavedWithPreCompressedData`, `InsertSaved_PreCompressed_CreateCbReceivesOriginalCompressionType` | **keep unchanged** — these are contract tests |
 | `InsertWithNullHelper`, `InsertWithIncompatibleHelper`, `LookupWithNullHelper`, `LookupRecordsHitStatistics`, `WaitAllIsNoOp`*, `SupportForceEraseReturnsTrue`, `Name_ReturnsExpectedString` | keep (*`WaitAllIsNoOp` becomes `WaitAllOnReadyHandlesIsNoOp`) |
 | `GetUsageReflectsCurrentSize` | keep, re-expressed against live bytes |
-| `OverlongKeyReturnsInvalidArgument` | **revisit**: the region format has no filename length limit, so the 64-hex-char cap disappears. Either keep an explicit `maxKeyLength` for compatibility or drop the restriction and delete the test. Noted in Q11. |
+| `OverlongKeyReturnsInvalidArgument` | **replace**: the region format has no filename-length restriction; check round trip of former overlong key and enforce only the explicit record/key bounds (Q11). |
 | `CapacityEvictsLruEntry`, `LookupPromotesToMru`, `SingleInsertEvictsMultipleEntries` | **rewrite**: reclaim is FIFO at region granularity, so "the LRU entry is gone" becomes "entries from the oldest region are gone". Use a tiny `regionSize` to keep it deterministic. |
 | `ForceInsertFalse_WhenCacheFull_SkipsWithoutEvicting`, `ForceInsertTrue_WhenCacheFull_Evicts`, `ForceInsertFalse_SameKey_WhenFull_UpdatesData` | keep, re-expressed against the admission policy |
 | `SetCapacityTriggersEviction`, `SetCapacityZeroEvictsAll`, `ZeroCapacityAtConstruction_AllInsertsDropped` | keep, region-count based |
-| `DeflateAndInflateCapacity`, `DeflateByMoreThanCapacity_ClampsToZero`, `Inflate_SaturationAtSizeMax` | **change** per §6.7, or keep under `deflateAffectsDiskCapacity = true` (Q8) |
+| `DeflateAndInflateCapacity`, `DeflateByMoreThanCapacity_ClampsToZero`, `Inflate_SaturationAtSizeMax` | **replace** per §6.7: assert RAM-reservation bounds and that disk capacity, usage and readable entries are unchanged (Q8) |
 | `EvictedEntryFileIsDeletedFromDisk`, `EvictedEntryLeavesNoGraveyardFile`, `EraseFileLeavesNoGraveyardFile`, `AdviseEraseLeavesNoGraveyardFile`, `SetCapacityLeavesNoGraveyardFiles`, `ConstructorCleansStaleDirectory` | **delete or replace** — no per-entry files and no graveyard exist. Replace with "a reclaimed region has no live index entries" and "the cache directory contains only the expected region files". |
 | `TruncatedFile_RejectedOnLookup` | **strengthen** into the corruption matrix of §11.2 |
 | `WriteFileAtomicFailure_InsertReturnsIOError`, `ReadFileContentsFailure_LookupReturnsNullAndCleansIndex`, `InsertSaved_CallsWriteFileAtomic` | **rewrite** against `MemoryBlockDevice` fault injection |
@@ -1174,9 +1161,11 @@ replaced with equivalent assertions against the new substrate.
   **not** remove a newer copy in another region; `RemoveAllInRegion` on a mixed region; generation
   mismatch → miss; growth behaviour; `ApproximateMemoryUsage` monotonicity; a forced 64-bit hash
   collision (inject the hash function) is rejected by the key comparison.
-- **`RegionManager`** — open → seal → reclaim cycle; footer write/read; a reader pin blocks reset
-  and then releases it; generation increments; `SetCapacity` shrink retires the right regions;
-  reclaim racing an outstanding write reservation.
+- **`RegionManager`** — open → seal → reclaim cycle; 1 MiB footer write/read at 1 KiB, 4 KiB and
+  8 KiB entry sizes; overflow fallback with sub-1 KiB entries; corrupted footer produces a
+  safe region miss/eviction, never stale data; a reader pin blocks reset and then releases it;
+  generation increments; `SetCapacity` shrink retires the right regions; reclaim racing an
+  outstanding write reservation.
 - **`WriteBuffer`** — append across a `flushBlockSize` boundary; buffer exhaustion; read-your-writes
   from an unflushed buffer; flush ordering.
 - **`AdmissionPolicy`** — the decision table for each policy; `force_insert` override; role
@@ -1215,12 +1204,12 @@ behaviour, a crash, or a `kOk` result whose payload span leaves the buffer.*
 
 ### 11.5 Crash and restart
 
-- `kDropOnStart`: no live entries survive a restart.
-- `kWarmOnCleanShutdown`: a clean shutdown warms; a simulated crash (process killed without running
-  the destructor, in an integration test) starts cold and never returns corrupt data.
-- `kWarmByScan`: rebuild from footers; a region with a corrupt footer is skipped and its entries are
-  simply absent.
-- Torn-write simulation: truncate the final flush block; only the affected records are lost.
+- Clean and abrupt process exits both lead to a cold start on fresh ephemeral storage; assert no
+  live entries after construction, even if stale region files were left in the directory.
+- Invalidate stale region files before exposing the new instance. Inject failures during cleanup
+  and preallocation; construction must fail explicitly rather than reusing stale data.
+- Torn-write simulation during a live instance: truncate the final flush block; only the affected
+  records are lost, and corrupt records never reach `create_cb`.
 
 ### 11.6 Performance harness — the core validation loop
 
@@ -1231,7 +1220,9 @@ behaviour, a crash, or a `kOk` result whose payload span leaves the buffer.*
 - **Operations**: insert-only; lookup-hit-only; lookup-miss-only; 90/10 read/insert; MultiGet-style
   batched async lookups at batch 1/8/32/128.
 - **Dimensions**: threads ∈ {1, 4, 16, 64}; entry size ∈ {1, 4, 8, 32} KiB; capacity ∈ {512 MiB,
-  8 GiB}; working set ∈ {0.5×, 1×, 4×} capacity.
+  8 GiB} for development; add a soak at **16 GiB and 256 GiB** with one cache per process and
+  working set ∈ {0.5×, 1×, 4×} capacity where hardware permits. Record observed peak index DRAM,
+  page-cache use, preallocation time and file-handle count.
 - **Reported**: ops/s; p50/p99/p99.9/max latency; device bytes written (from our counters *and* from
   OS counters); write amplification; hit ratio; index bytes; CPU per operation.
 - **Comparison**: legacy engine vs region engine, same process, same hardware, same seed.
@@ -1248,8 +1239,9 @@ needs no Azure credentials (the current one skips without them):
   correctness, and no error statuses.
 - Compare `rocksdb::Statistics` block-cache hit ratios and throughput with the secondary cache off,
   legacy, and new.
-- If the `ObjectLibrary` registration is adopted (Q15), drive the same comparison through
-  `db_bench --secondary_cache_uri`.
+- If the `ObjectLibrary` registration is available (Q15), drive the same comparison through
+  `cache_bench --secondary_cache_uri` or the plugin harness; the reference `db_bench` lacks
+  this flag.
 - Keep the Azure-backed integration test as-is, and add an assertion that a block served from the
   secondary cache produces **no** blob read — i.e. the cache actually saves network round trips.
 
@@ -1271,7 +1263,7 @@ needs no Azure credentials (the current one skips without them):
 | Self-managed storage introduces a silent-corruption bug | high | CRC and key in every record; fuzzing; fault injection; phased rollout with the legacy engine one flag away |
 | Region reclaim races an in-flight read | high | index-removal-before-wait ordering; per-region reader counts; generation tags; dedicated race tests |
 | DRAM regression from write buffers on small deployments | medium | buffers default to 2 MiB total; exposed in stats and documented |
-| Hit-ratio regression from FIFO reclaim | medium | measure (Q2); `kLruRegion` and reinsertion fallbacks |
+| Hit-ratio regression from FIFO reclaim | medium | measure (Q2); tune reinsertion thresholds, not an unapproved LRU fallback |
 | Windows/Linux I/O divergence | medium | the `BlockDevice` abstraction plus the same suite on both presets in CI |
 | No build environment available in the current workspace (`VCPKG_ROOT` unset, no configured build tree, cmake not on `PATH`) so no baseline numbers could be captured while writing this draft | medium | phase 0 exists precisely to establish the baseline before any change lands; the numeric claims in §3.1 and §8 are explicitly labelled as hypotheses |
 | Scope creep into `FileCache` or the Azure layer | low | explicit non-goals (§2.2) |
@@ -1289,31 +1281,39 @@ needs no Azure credentials (the current one skips without them):
 
 ---
 
-## 14. Open questions and concerns
+## 14. Review decisions and residual concerns
 
-For the review pass. Each has a proposed default so implementation is never blocked on an answer.
+The reviewer explicitly answered Q1, Q2, Q3, Q5, Q8, Q9 and Q10 on 2026-09-29;
+**every unanswered question accepts its proposed v0.1 default**. This is the authoritative
+decision record for the numbered questions in v0.1; none remains a decision blocker.
 
-| # | Question | Proposed default |
+| # | Decision | Basis |
 |---|---|---|
-| **Q1** | Direct I/O (`FILE_FLAG_NO_BUFFERING` / `O_DIRECT`) or buffered? Buffered gives a free OS page-cache tier — attractive when a miss costs an Azure round trip — but double-caches and makes memory use unpredictable under a container/job-object limit. What are the deployment's memory constraints? | buffered in v1; `useDirectIo` option; measure both |
-| **Q2** | Is a hit-ratio regression from FIFO region reclaim acceptable in exchange for an order-of-magnitude throughput gain and much lower write amplification? Do we have a representative block-access trace to evaluate against? | FIFO plus hit-count reinsertion; measure |
-| **Q3** | What is the maximum realistic cache capacity per node, and how many cache instances per process (one per DB? per column family?) | design for ≥ 256 GiB; widen `Location` if needed |
-| **Q4** | Many region files or one large file with regions as offset ranges? Many files eases shrink/grow and isolates corruption; one file is simpler and would play better with a raw volume later. | many files |
-| **Q5** | Should `Insert` compress (the class is *named* `…CompressedSecondaryCache`)? What CPU headroom exists on the RocksDB foreground threads that call `Insert`? Is the plugin ever used behind RocksDB's `TieredCache`, which would already deliver compressed bytes via `InsertSaved`? | off in v1; `kZstd` level 1 once measured |
-| **Q6** | When all write buffers are in flight, should `Insert` **drop** the entry (never block a foreground thread) or **block** (maximize hit ratio)? | drop, with a counter |
-| **Q7** | For async lookups, should `create_cb` run on the I/O completion thread or the waiter's thread? The former cuts latency; the latter is simpler and cannot starve the I/O pool. | waiter's thread in v1 |
-| **Q8** | Do you agree `Deflate`/`Inflate` must stop deleting on-disk data (§6.7)? This is a behaviour change that breaks two tests. Is the cache ever wired behind `NewTieredCache`, where these are called frequently? | reinterpret; keep a compatibility flag |
-| **Q9** | Is warm restart wanted, and in which mode? In a pod that restarts frequently against Azure Blob Storage a cold cache is expensive, but a cache surviving a *deployment* may hold blocks for SSTs that no longer exist (harmless, just wasted space). Is the cache directory on ephemeral local SSD or on a persistent volume? | `kDropOnStart` in v1; `kWarmByScan` as the target |
-| **Q10** | Is `io_uring` (Linux ≥ 5.6) / Windows `IORING` (Win11 / Server 2022+) acceptable, or must we support older kernels and Server 2019? This decides whether the async engine can be more than a thread pool. | thread pool; platform engines behind flags |
-| **Q11** | May the legacy constructor's `std::shared_ptr<Filesystem>` parameter be deprecated or ignored for I/O — and may the 64-hex-character key-length restriction (`kMaxFilenameLen`) be dropped, since the region format has no such limit? Are there external callers depending on either? | keep the parameter but ignore it for I/O; drop the key-length cap |
-| **Q12** | What is the SLO we are optimizing: p99 `Get` latency, aggregate throughput, or Azure egress/transaction cost? These favour different admission and compression settings. | p99 read latency plus blob-call reduction |
-| **Q13** | What is the expected entry-size distribution? If a large fraction is < 1 KiB, a BigHash/Kangaroo-style set-associative store for small entries becomes worth the complexity. | assume ≥ 4 KiB dominant |
-| **Q14** | Is there an SSD endurance budget (DWPD) for the cache device? It sets the admission policy's target write rate. | expose `kDynamicRandom` with a configurable MB/s |
-| **Q15** | Should the cache expose a `rocksdb::ObjectLibrary` URI factory (enabling `db_bench --secondary_cache_uri`)? It is in scope as configuration, but it adds public surface. | yes — it materially helps benchmarking |
-| **Q16** | Is a phased rollout with both engines compiled in acceptable, or is a single clean cutover preferred? Dual engines double the test matrix for a release or two. | phased |
-| **Q17** | Is there an existing production telemetry source for secondary-cache hit ratio and miss cost that we can use to validate H1–H6 against reality rather than only synthetic benchmarks? | assume not; build the harness |
-| **Q18** | What device utilization should we target? Prior art is unanimous that low device-level write amplification requires real overprovisioning (CacheLib runs its small-object engine at ~50%; Kangaroo measures ≈1× device WA at 50% utilization vs ≈10× at 100%). Configuring the cache at 100% of the partition will cost endurance and tail latency. Is sizing the cache at ~60–70% of the device acceptable? | default `capacity` ≤ 70% of device; warn above that |
-| **Q19** | Should region reclaim return space to the filesystem (sparse hole-punch / `FSCTL_FILE_LEVEL_TRIM`) so the SSD FTL can skip copy-out, or keep regions fully allocated? Punching helps device GC but NTFS has documented extent-count failures on fragmented sparse files (L20). | keep regions allocated in v1; whole-region TRIM behind a flag |
+| **Q1** | Buffered I/O by default; keep opt-in `useDirectIo` for measurement. | explicit answer |
+| **Q2** | FIFO region reclaim with hit-count reinsertion; measure hit-ratio delta. | explicit answer |
+| **Q3** | One cache per process, 16–256 GiB configured disk capacity. | explicit answer |
+| **Q4** | Multiple region files. | accepted default |
+| **Q5** | Do not add compression on `Insert`; preserve incoming `InsertSaved` compression type. | explicit answer |
+| **Q6** | Drop inserts rather than block on full write buffers; count drops. | accepted default |
+| **Q7** | Run `create_cb` on the waiting thread in v1. | accepted default |
+| **Q8** | Reinterpret `Deflate`/`Inflate` as RAM reservation, not disk eviction; not wired behind `NewTieredCache`. No legacy disk-deletion flag. | explicit answer; no need to retain the semantic bug |
+| **Q9** | Always cold-start on ephemeral storage; no warm-restart modes or checkpoint. | explicit answer |
+| **Q10** | Support only recent Windows/Linux; thread-pool async in v1, measure native engines before adopting them. | explicit answer plus accepted performance-gated default |
+| **Q11** | Keep legacy constructor parameter for API compatibility; remove filename-based 64-hex-character key cap in the new engine. | accepted default |
+| **Q12** | Optimize p99 read latency and avoid Azure Blob reads; track throughput and endurance as secondary metrics. | accepted default |
+| **Q13** | Assume entries ≥ 4 KiB dominate; defer a small-object bucket engine pending traces. | accepted default |
+| **Q14** | Expose dynamic-random admission with a configurable write-rate budget (MB/s); do not assume a device DWPD. | accepted default |
+| **Q15** | Provide `ObjectLibrary` URI configuration for benchmarking if the linked RocksDB build supports registration. | accepted default |
+| **Q16** | Phased rollout; retain legacy engine during validation. | accepted default |
+| **Q17** | No production trace assumed; build and use the benchmark harness. | accepted default |
+| **Q18** | Default configured capacity ≤ 70% of device; warn if higher. | accepted default |
+| **Q19** | Keep regions allocated in v1; whole-region TRIM behind a flag. | accepted default |
+
+**Residual concerns to validate, not reopen as design questions:** measure the FIFO hit-ratio
+delta on representative traces, the ~1 GiB index footprint at 256 GiB/8 KiB entries, buffered
+page-cache pressure, actual SSD write budget, and whether the linked RocksDB version exposes the
+intended `ObjectLibrary` registration entry point. Those measurements may change optimizations,
+not the accepted defaults without another review.
 
 ---
 
