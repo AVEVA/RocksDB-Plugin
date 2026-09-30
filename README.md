@@ -131,7 +131,7 @@ their size:
 
 ```
 RAM ≈ ~16 bytes × (capacity / average stored block size)   (BlockCache index)
-    + 2 × regionSizeBytes                                   (in-memory write buffers)
+    + 2 × cleanRegions × regionSizeBytes                    (in-memory write buffers)
     + maxParcelMemoryMB                                     (insert queue bound; excess inserts are dropped)
     + reader/writer thread stacks
 ```

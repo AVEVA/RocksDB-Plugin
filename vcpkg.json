@@ -13,11 +13,11 @@
     "boost-scope",
     "boost-static-string",
     "boost-thread",
+    "boost-unordered",
     {
       "name": "cachelib-navy",
-      "platform": "linux"
+      "platform": "linux & x64"
     },
-    "boost-unordered",
     "rocksdb",
     "zstd",
     {

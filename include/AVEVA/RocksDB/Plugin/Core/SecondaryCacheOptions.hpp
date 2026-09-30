@@ -32,7 +32,7 @@ enum class SecondaryCacheBackend {
 /// Tuning knobs for the CacheLib (Navy) secondary cache. The defaults minimize DRAM
 /// because RocksDB's block cache already provides the in-memory tier.
 /// Fixed DRAM overhead is roughly
-/// <c>(cleanRegions + 1) * regionSizeBytes + maxParcelMemoryMB + thread stacks</c>
+/// <c>2 * cleanRegions * regionSizeBytes + maxParcelMemoryMB + thread stacks</c>
 /// plus about 12-16 bytes per cached block for the index.
 /// I/O is synchronous (pread/pwrite) on Navy's reader and writer thread pools.
 /// </summary>
@@ -91,7 +91,7 @@ struct SecondaryCacheOptions {
 
     SecondaryCacheBackend backend = SecondaryCacheBackend::Default;
 
-    /// <summary>Directory owned by the cache. Its previous contents are discarded on open.</summary>
+    /// <summary>Directory owned by the cache. Previous cache contents are discarded on open.</summary>
     std::filesystem::path cacheDir;
 
     /// <summary>Maximum number of bytes stored on disk.</summary>
