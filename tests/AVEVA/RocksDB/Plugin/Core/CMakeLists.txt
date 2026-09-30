@@ -15,3 +15,6 @@ add_executable(aveva-rocksdb-plugin-core-tests
 target_link_libraries(aveva-rocksdb-plugin-core-tests PRIVATE GTest::gtest GTest::gmock aveva-rocksdb-plugin-core aveva-rocksdb-plugin-core-mocks)
 include(GoogleTest)
 gtest_discover_tests(aveva-rocksdb-plugin-core-tests)
+
+add_executable(aveva-secondary-cache-benchmark SecondaryCacheBenchmark.cpp)
+target_link_libraries(aveva-secondary-cache-benchmark PRIVATE aveva-rocksdb-plugin-core)
