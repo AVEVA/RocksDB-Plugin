@@ -32,6 +32,9 @@
 #include <vector>
 
 using AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache;
+using AVEVA::RocksDB::Plugin::Core::FileBasedSecondaryCacheAdmissionPolicy;
+using AVEVA::RocksDB::Plugin::Core::FileBasedSecondaryCacheEngine;
+using AVEVA::RocksDB::Plugin::Core::FileBasedSecondaryCacheOptions;
 using AVEVA::RocksDB::Plugin::Core::Mocks::FilesystemMock;
 using ::testing::_;
 using ::testing::NiceMock;
@@ -131,6 +134,40 @@ class FileBasedCompressedSecondaryCacheTests : public ::testing::Test {
         m_fs = std::make_shared<AVEVA::RocksDB::Plugin::Core::LocalFilesystem>();
         m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(
             m_cacheDir, m_fs, FileBasedCompressedSecondaryCache::kDefaultCapacity, MakeNullLogger());
+    }
+
+    void TearDown() override {
+        m_cache.reset();
+        std::filesystem::remove_all(m_cacheDir);
+    }
+
+    static rocksdb::Slice MakeKey(const std::string& s) { return rocksdb::Slice(s); }
+};
+
+class RegionFileBasedCompressedSecondaryCacheTests : public ::testing::Test {
+  protected:
+    std::filesystem::path m_cacheDir;
+    std::unique_ptr<FileBasedCompressedSecondaryCache> m_cache;
+    rocksdb::Cache::CacheItemHelper m_helperNoSec{rocksdb::CacheEntryRole::kDataBlock, TestDeleteCb};
+    rocksdb::Cache::CacheItemHelper m_helper{
+        rocksdb::CacheEntryRole::kDataBlock, TestDeleteCb, TestSizeCb, TestSaveToCb, TestCreateCb, &m_helperNoSec};
+
+    static FileBasedSecondaryCacheOptions MakeOptions(size_t capacity = 8 * 1024 * 1024,
+                                                      size_t regionSize = (1 * 1024 * 1024) + (256 * 1024),
+                                                      size_t flushBlockSize = 64 * 1024) {
+        FileBasedSecondaryCacheOptions options;
+        options.capacity = capacity;
+        options.regionSize = regionSize;
+        options.flushBlockSize = flushBlockSize;
+        options.maxEntrySize = (regionSize - (1 * 1024 * 1024)) / 4;
+        options.admissionPolicy = FileBasedSecondaryCacheAdmissionPolicy::kAdmitAll;
+        options.engine = FileBasedSecondaryCacheEngine::kRegion;
+        return options;
+    }
+
+    void SetUp() override {
+        m_cacheDir = MakeTempDir(::testing::UnitTest::GetInstance()->current_test_info()->name());
+        m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, MakeOptions(), MakeNullLogger());
     }
 
     void TearDown() override {

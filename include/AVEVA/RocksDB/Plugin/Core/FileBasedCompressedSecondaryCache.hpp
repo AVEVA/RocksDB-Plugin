@@ -20,6 +20,26 @@
 #include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Core {
+enum class FileBasedSecondaryCacheAdmissionPolicy : uint8_t {
+    kAdmitAll,
+    kSecondChance,
+};
+
+enum class FileBasedSecondaryCacheEngine : uint8_t {
+    kLegacy,
+    kRegion,
+};
+
+struct FileBasedSecondaryCacheOptions {
+    size_t capacity{512ULL * 1024 * 1024};
+    size_t regionSize{64ULL * 1024 * 1024};
+    size_t flushBlockSize{1ULL * 1024 * 1024};
+    uint32_t indexShards{64};
+    size_t maxEntrySize{16ULL * 1024 * 1024};
+    FileBasedSecondaryCacheAdmissionPolicy admissionPolicy{FileBasedSecondaryCacheAdmissionPolicy::kAdmitAll};
+    FileBasedSecondaryCacheEngine engine{FileBasedSecondaryCacheEngine::kLegacy};
+};
+
 /// <summary>
 /// A file-based secondary cache for RocksDB that persists evicted block cache
 /// entries to disk. Entries serialized via the CacheItemHelper callbacks are
@@ -48,6 +68,14 @@ class FileBasedCompressedSecondaryCache final : public rocksdb::SecondaryCache {
     /// <param name="logger">A logger implementation.</param>
     explicit FileBasedCompressedSecondaryCache(
         std::filesystem::path cacheDir, std::shared_ptr<Filesystem> fs, size_t capacity,
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
+
+    /// <summary>
+    /// Constructs the cache with explicit engine and region-engine options.
+    /// The default engine remains the legacy file-per-entry implementation.
+    /// </summary>
+    explicit FileBasedCompressedSecondaryCache(
+        std::filesystem::path cacheDir, FileBasedSecondaryCacheOptions options,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
 
     ~FileBasedCompressedSecondaryCache() override;

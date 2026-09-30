@@ -1,4 +1,8 @@
 add_library(aveva-rocksdb-plugin-core
+    SecondaryCache/AdmissionPolicy.cpp
+    SecondaryCache/BlockDevice.cpp
+    SecondaryCache/RecordFormat.cpp
+    SecondaryCache/RegionManager.cpp
     FileCache.cpp
     FileCacheEntry.cpp
     FileBasedCompressedSecondaryCache.cpp
@@ -12,6 +16,12 @@ add_library(aveva-rocksdb-plugin-core
     # Private headers
     LruFileIndex.hpp
     ResultHandle.hpp
+    SecondaryCache/AdmissionPolicy.hpp
+    SecondaryCache/BlockDevice.hpp
+    SecondaryCache/CacheStats.hpp
+    SecondaryCache/RecordFormat.hpp
+    SecondaryCache/RegionManager.hpp
+    SecondaryCache/ShardedIndex.hpp
 )
 add_library(aveva::rocksdb-plugin-core ALIAS aveva-rocksdb-plugin-core)
 set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../../include")

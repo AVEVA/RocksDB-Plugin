@@ -5,9 +5,12 @@ SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 # ADR: high-performance local-disk secondary cache
 
-**Revision:** v0.2 (decisions incorporated, 2026-09-29).
-**Status:** Accepted design, v1 implementation in progress. [§14](#14-review-decisions-and-residual-concerns)
-records the explicit answers and accepted defaults. Performance hypotheses still require measurement.
+**Revision:** v0.3 (v1 phase 2 implemented and measured, 2026-09-30).
+**Status:** Accepted design. Phase 2 ("region substrate", §10) is implemented behind an opt-in
+`FileBasedSecondaryCacheOptions{engine = kRegion}`; the legacy engine remains the default during
+rollout. [§14](#14-review-decisions-and-residual-concerns) records the explicit answers and
+accepted defaults. §8.2 records the first measured comparison; H1/H2 are supported, H3–H6 remain
+open (require multi-threaded/Zipfian/DRAM-occupancy measurement, out of scope for this pass).
 **Component:** `AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache`
 **Scope constraint:** no changes to RocksDB; no changes to the plugin outside the secondary cache
 and the configuration needed to construct and load it.
@@ -35,6 +38,7 @@ the baseline/candidate workloads in §11.6 produce reproducible results.
 |---|---|---|
 | v0.1 | 2026-09-28 | Initial draft. No open questions answered yet. All §8 figures are unvalidated hypotheses. |
 | v0.2 | 2026-09-29 | Incorporated Q1–Q19 decisions; scoped to one 16–256 GiB ephemeral cache per process, buffered I/O, FIFO reclaim, no new compression or warm restart. |
+| v0.3 | 2026-09-30 | Implemented and measured phase 2 (region substrate): `RecordFormat`, `BlockDevice`/`MemoryBlockDevice`, `ShardedIndex`, `RegionManager` (FIFO reclaim, footer + overflow scan, reader pinning), `AdmissionPolicy` (kAdmitAll/kSecondChance), all behind `FileBasedSecondaryCacheOptions{engine = kRegion}`; legacy engine unchanged and still the default. 246/246 tests pass (57 existing + new unit/corruption/concurrency/region-engine-parity tests). §8.2 records the first measured comparison (~99× faster insert, ~3.8× faster lookup on a single-threaded, single-VM, 8 KiB-entry, Debug-build workload). Async lookup, additional admission policies, direct I/O, Linux port, fuzzing, and the nightly perf gate remain out of scope (§10 phases 3–6). |
 
 ---
 
@@ -1109,6 +1113,45 @@ engine must be measured with the identical harness, workload, and trial count on
 and the Confidence Gate (stable variance, single-variable comparison, representative workload)
 must be satisfied before any hypothesis is marked confirmed or refuted.
 
+### 8.2 v1 region engine vs. legacy engine (measured)
+
+Captured 2026-09-30, same VM, same harness (`aveva-secondary-cache-benchmark`), same workload
+(7 trials, 2000 entries of 8 KiB), immediately after implementing the region engine described in
+§6–§7 behind `FileBasedSecondaryCacheOptions{engine = kRegion}` (legacy engine unchanged and still
+the default). Both engines measured back-to-back in the same process build, independently
+reproduced twice (once by the implementing agent, once directly by re-running the harness):
+
+| Metric | Legacy (re-measured) | Region engine | Ratio |
+|---|---|---|---|
+| Insert mean (µs/op) | 5320.6 (σ 177.8) | 53.7 (σ 1.2) | **~99×** faster |
+| Lookup-hit mean (µs/op) | 240.5 (σ 54.5) | 64.0 (σ 1.9) | **~3.8×** faster |
+
+The legacy re-measurement (5320.6 µs insert, 240.5 µs lookup) is within run-to-run variance of the
+§8.1 baseline (5255.8 µs / 364.0 µs from a separate process invocation), which is expected given
+the ~15–59 % coefficients of variation already noted for the file-per-entry engine — itself
+further evidence that its cost is dominated by unpredictable filesystem metadata operations
+rather than the payload size or a stable constant. The region engine's variance is dramatically
+lower (CoV ~2–3 % vs. 15–59 %), consistent with a `memcpy`/`pread`-bound cost model that no longer
+depends on filesystem metadata churn.
+
+**Verdict against §8's hypotheses**, on this single-threaded, single-VM, Debug-build measurement:
+
+- **H1** (insert ≥ 20× faster): **strongly supported**, ~99× measured — the metadata-bound → 
+  `fetch_add`+`memcpy`-bound transition is real and larger than the conservative 20× floor.
+- **H2** (lookup p99 ≥ 3× for page-cache hits): **supported for the mean** (~3.8×); p99/p50
+  percentiles were not captured by this harness (it reports only per-trial means) — a follow-up
+  should extend the harness to report percentiles before this is marked fully confirmed.
+- **H3–H6**: not evaluated by this pass (require multi-threaded, Zipfian/trace, and DRAM-occupancy
+  measurements respectively — out of scope for phase 2; tracked as follow-up work, see below).
+
+**Caveats, stated plainly**: this is a Debug build, single-threaded, single VM, uniform-key
+workload, 8 KiB entries only, and does not yet include the region reclaim (FIFO eviction) cost
+under sustained overwrite pressure at steady state, nor Release-build numbers, nor multi-threaded
+contention. It is a genuine, reproducible, order-of-magnitude improvement on the measured
+dimension, not a final production performance characterization — §11.6's full harness (workloads,
+thread counts, Release build, soak at 16–256 GiB) remains the bar for a production performance
+claim.
+
 ---
 
 ## 9. Tradeoffs
@@ -1152,18 +1195,25 @@ must be satisfied before any hypothesis is marked confirmed or refuted.
 Each phase is an independently reviewable and revertable PR with its own tests. Phases 0–3 deliver
 most of the win.
 
-| Phase | Content | Exit criteria |
-|---|---|---|
-| **0. Benchmarks first** | `SecondaryCacheBench` micro-benchmark and the `MemoryBlockDevice` skeleton; record a baseline for the *current* implementation on Windows and Linux. | Baseline table committed into this document. |
-| **1. Low-risk fixes to the current code** | remove the double payload copy; `default_init` buffers; positioned read on a reusable handle instead of `ReadFileContents`; shard `LruFileIndex` by key hash; stop the O(n) pinned scan; rate-limit the warning logs. No format change. | Existing tests green; measured delta recorded. |
-| **2. Region substrate** | `RecordFormat`, `BlockDevice` (+`MemoryBlockDevice`), `RegionManager`, `WriteBuffer`, `ShardedIndex`; new engine behind `engine = kRegion`, default still `kLegacy`. | New engine passes the full ported suite; both engines selectable. |
-| **3. Flip the default and delete the legacy engine** | after benchmarks and a soak test | `kRegion` default; `LruFileIndex` removed. |
-| **4. Async lookup** | `IoEngine`, `AsyncResultHandle`, real `WaitAll`; measured with MultiGet. | H4 confirmed, or the feature is dropped. |
-| **5. Admission and reinsertion policies** | §6.3.2, §6.5 | H6 confirmed; hit-ratio delta measured. |
-| **6. Platform I/O optimization (optional)** | IOCP / `io_uring` / direct I/O, only if phase 4 shows the thread pool is the bottleneck | measured on supported recent OS versions. |
+| Phase | Content | Exit criteria | Status |
+|---|---|---|---|
+| **0. Benchmarks first** | `SecondaryCacheBench` micro-benchmark and the `MemoryBlockDevice` skeleton; record a baseline for the *current* implementation on Windows and Linux. | Baseline table committed into this document. | **Done** (§8.1, Windows only; Linux not yet run in this environment). |
+| **1. Low-risk fixes to the current code** | remove the double payload copy; `default_init` buffers; positioned read on a reusable handle instead of `ReadFileContents`; shard `LruFileIndex` by key hash; stop the O(n) pinned scan; rate-limit the warning logs. No format change. | Existing tests green; measured delta recorded. | Not done — superseded by phase 2 directly; the legacy engine is unchanged and kept only as the rollout comparison point, not incrementally patched. |
+| **2. Region substrate** | `RecordFormat`, `BlockDevice` (+`MemoryBlockDevice`), `RegionManager`, `WriteBuffer`, `ShardedIndex`; new engine behind `engine = kRegion`, default still `kLegacy`. | New engine passes the full ported suite; both engines selectable. | **Done** (§8.2). `WriteBuffer` was implemented as a single buffer per open region rather than the described ring of N buffers — see the scope note directly below. Async lookup (§6.4.1) and the full `IoEngine` were intentionally deferred to phase 4; `Lookup` is synchronous-only for the region engine in this pass. |
+| **3. Flip the default and delete the legacy engine** | after benchmarks and a soak test | `kRegion` default; `LruFileIndex` removed. | Not started — requires a soak test and broader benchmark coverage (§11.6) first. |
+| **4. Async lookup** | `IoEngine`, `AsyncResultHandle`, real `WaitAll`; measured with MultiGet. | H4 confirmed, or the feature is dropped. | Not started. |
+| **5. Admission and reinsertion policies** | §6.3.2, §6.5 | H6 confirmed; hit-ratio delta measured. | Partially started — `kAdmitAll` and `kSecondChance` are implemented; `kProbabilistic`, `kRoleWeighted`, `kDynamicRandom`, and reinsertion-on-hit-count are not. |
+| **6. Platform I/O optimization (optional)** | IOCP / `io_uring` / direct I/O, only if phase 4 shows the thread pool is the bottleneck | measured on supported recent OS versions. | Not started. |
 
 Phases 4–6 are individually optional and gated on measurement. No compression or warm-restart
 phase is planned. The record header carries `formatVersion` for future format changes.
+
+**Phase 2 scope note (§10, this revision):** the region engine implemented here uses one write
+buffer per open region rather than the "ring of `writeBuffersPerRegion`" design in §6.3.3, and
+`openRegions` is fixed at 1 (no multi-region write striping). Both are documented simplifications,
+not silent deviations: they reduce steady-state write concurrency but do not change correctness,
+and are straightforward additive follow-ups once phase 4/5 motivate them with measurement. Region
+reclaim races an outstanding write reservation are exercised in `SecondaryCacheRegionManagerTests`.
 
 ---
 
