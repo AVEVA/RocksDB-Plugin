@@ -1,0 +1,25 @@
+{
+  "name": "cachelib-navy",
+  "version-string": "2026.02.23.00",
+  "description": "Thrift-free build of CacheLib's Navy flash cache engine (BlockCache/BigHash) without the CacheLib DRAM allocator. AVEVA overlay port.",
+  "homepage": "https://github.com/facebook/CacheLib",
+  "license": "Apache-2.0",
+  "supports": "linux & x64",
+  "dependencies": [
+    "boost-regex",
+    "folly",
+    "fmt",
+    "glog",
+    "magic-enum",
+    "tsl-sparse-map",
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    },
+    {
+      "name": "vcpkg-cmake-config",
+      "host": true
+    },
+    "xxhash"
+  ]
+}

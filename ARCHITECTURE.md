@@ -11,11 +11,14 @@ The AVEVA RocksDB Plugin provides filesystem and caching extensions so RocksDB c
    - Azure SDK integration, credential handling, and status translation.
 2. `src/Core/`
    - Shared filesystem abstractions and utility logic.
-   - Secondary cache, file cache, and related indexing helpers.
+   - Secondary caches (`FileBasedCompressedSecondaryCache`; `CacheLibSecondaryCache` on Linux),
+     `CreateSecondaryCache` factory, file cache, and related indexing helpers.
 3. `include/AVEVA/RocksDB/Plugin/`
    - Public API surface for plugin consumers.
 4. `tests/`
    - Unit and integration tests validating plugin behavior.
+5. `infrastructure/vcpkg/ports/cachelib-navy/`
+   - vcpkg overlay port that builds CacheLib's Navy flash engine without fbthrift, gtest, or libnuma.
 
 ## Key Design Expectations
 

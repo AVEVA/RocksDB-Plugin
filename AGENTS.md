@@ -9,10 +9,10 @@ This is the **AVEVA RocksDB Plugin** — a C++ library providing AVEVA-specific 
 | Path | Purpose |
 |------|---------|
 | `src/Azure/` | Azure Page Blob Filesystem plugin (blob storage integration, file read/write, directory ops, error translation) |
-| `src/Core/` | Filesystem abstractions: local filesystem, compressed secondary cache, file cache with LRU index, utilities |
+| `src/Core/` | Filesystem abstractions: local filesystem, secondary caches (file based; CacheLib on Linux) and factory, file cache with LRU index, utilities |
 | `include/AVEVA/RocksDB/Plugin/` | Public C++ headers |
 | `tests/` | C++ test suites |
-| `infrastructure/` | Build and CI infrastructure |
+| `infrastructure/` | Build and CI infrastructure, including the `cachelib-navy` vcpkg overlay port |
 
 ## Procedure
 1. Classify whether the change is in the Azure storage layer (`src/Azure/`) or the Core abstractions (`src/Core/`).
@@ -47,3 +47,4 @@ ctest --test-dir build/ --output-on-failure
 - On Windows, long path support must be enabled for stable builds.
 - Azure SDK calls are asynchronous; ensure proper `.get()` / `.wait()` handling on futures to avoid races.
 - `vcpkg` is used for dependency management — run `vcpkg install` from `vcpkg-configuration.json` before first build.
+- On Linux the first build compiles folly and the `cachelib-navy` overlay port from source. Secondary cache behavior must pass `SecondaryCacheContractTests` for every backend; see `infrastructure/vcpkg/ports/cachelib-navy/README.md` before bumping CacheLib.

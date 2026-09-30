@@ -12,6 +12,9 @@ find_dependency(boost_thread REQUIRED)
 find_dependency(boost_unordered REQUIRED)
 find_dependency(boost_static_string REQUIRED)
 find_dependency(RocksDB REQUIRED)
+if(@AVEVA_ROCKSDB_WITH_CACHELIB@)
+    find_dependency(cachelib-navy CONFIG REQUIRED)
+endif()
 
 include(${CMAKE_CURRENT_LIST_DIR}/aveva-rocksdb-plugin-core-targets.cmake)
 

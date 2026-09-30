@@ -1,0 +1,134 @@
+diff --git a/cachelib/allocator/memory/Slab.h b/cachelib/allocator/memory/Slab.h
+index f852941..1a27bfe 100644
+--- a/cachelib/allocator/memory/Slab.h
++++ b/cachelib/allocator/memory/Slab.h
+@@ -17,7 +17,7 @@
+ #pragma once
+ 
+ #include <folly/logging/xlog.h>
+-#include <gtest/gtest.h>
++#include "cachelib/common/FriendTest.h"
+ 
+ #include <cstddef>
+ #include <cstdint>
+diff --git a/cachelib/allocator/nvmcache/NavySetup.cpp b/cachelib/allocator/nvmcache/NavySetup.cpp
+index c1a0fdb..1a1e4ce 100644
+--- a/cachelib/allocator/nvmcache/NavySetup.cpp
++++ b/cachelib/allocator/nvmcache/NavySetup.cpp
+@@ -17,13 +17,11 @@
+ #include "cachelib/allocator/nvmcache/NavySetup.h"
+ 
+ #include <folly/logging/xlog.h>
+-#include <gmock/gmock.h>
+ 
+ #include "cachelib/allocator/nvmcache/NavyConfig.h"
+ #include "cachelib/navy/Factory.h"
+ #include "cachelib/navy/common/Types.h"
+ #include "cachelib/navy/scheduler/JobScheduler.h"
+-#include "cachelib/navy/testing/MockDevice.h"
+ 
+ namespace facebook {
+ namespace cachelib {
+@@ -386,43 +384,9 @@ std::unique_ptr<navy::AbstractCache> createNavyCache(
+     const navy::NavyPersistParams& persistParams) {
+   auto device = createDevice(config, std::move(encryptor));
+ 
+-  std::unique_ptr<navy::MockDevice> mockDevice;
+-  switch (config.hasBadDeviceForTesting()) {
+-  case navy::BadDeviceStatus::DataCorruption:
+-    // Use mock device. This is for testing
+-    mockDevice = std::make_unique<navy::MockDevice>(
+-        device->getSize(), device->getIOAlignmentSize());
+-    mockDevice->setRealDevice(std::move(device));
+-    ON_CALL(*mockDevice, readImpl(testing::_, testing::_, testing::_))
+-        .WillByDefault(
+-            testing::Invoke([d = &mockDevice->getRealDeviceRef()](
+-                                uint64_t offset, uint32_t size, void* buffer) {
+-              XDCHECK_EQ(size % d->getIOAlignmentSize(), 0u);
+-              XDCHECK_EQ(offset % d->getIOAlignmentSize(), 0u);
+-              auto res = d->read(offset, size, buffer);
+-              if (!res) {
+-                return res;
+-              }
+-
+-              // Corrupt the first byte which will break checksum
+-              reinterpret_cast<char*>(buffer)[0] += 1;
+-              return res;
+-            }));
+-
+-    device = std::move(mockDevice);
+-    break;
+-  case navy::BadDeviceStatus::IoReqFailure:
+-    // Use mock device. This is for testing
+-    mockDevice = std::make_unique<navy::MockDevice>(
+-        device->getSize(), device->getIOAlignmentSize());
+-    mockDevice->setRealDevice(std::move(device));
+-    ON_CALL(*mockDevice, readImpl(testing::_, testing::_, testing::_))
+-        .WillByDefault(testing::Return(false));
+-
+-    device = std::move(mockDevice);
+-    break;
+-  default:
+-    break;
++  if (config.hasBadDeviceForTesting() != navy::BadDeviceStatus::None) {
++    throw std::invalid_argument(
++        "Bad device testing is not supported in this build");
+   }
+ 
+   auto proto = navy::createCacheProto();
+diff --git a/cachelib/common/FriendTest.h b/cachelib/common/FriendTest.h
+new file mode 100644
+index 0000000..72fea76
+--- /dev/null
++++ b/cachelib/common/FriendTest.h
+@@ -0,0 +1,24 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++// Token-identical to gtest's FRIEND_TEST so that including gtest afterwards is
++// a benign redefinition. Avoids a gtest dependency for non-test consumers.
++#ifndef FRIEND_TEST
++#define FRIEND_TEST(test_case_name, test_name) \
++  friend class test_case_name##_##test_name##_Test
++#endif
+diff --git a/cachelib/navy/admission_policy/DynamicRandomAP.h b/cachelib/navy/admission_policy/DynamicRandomAP.h
+index 86e82b2..4e7dbbf 100644
+--- a/cachelib/navy/admission_policy/DynamicRandomAP.h
++++ b/cachelib/navy/admission_policy/DynamicRandomAP.h
+@@ -26,7 +26,7 @@
+ #include "cachelib/common/PercentileStats.h"
+ #include "cachelib/common/Profiled.h"
+ #include "cachelib/navy/admission_policy/AdmissionPolicy.h"
+-#include "gtest/gtest_prod.h"
++#include "cachelib/common/FriendTest.h"
+ 
+ namespace facebook {
+ namespace cachelib {
+diff --git a/cachelib/navy/driver/Driver.h b/cachelib/navy/driver/Driver.h
+index 02c7c99..2b36311 100644
+--- a/cachelib/navy/driver/Driver.h
++++ b/cachelib/navy/driver/Driver.h
+@@ -16,7 +16,7 @@
+ 
+ #pragma once
+ 
+-#include <gtest/gtest_prod.h>
++#include "cachelib/common/FriendTest.h"
+ 
+ #include <memory>
+ #include <stdexcept>

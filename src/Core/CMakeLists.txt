@@ -5,6 +5,7 @@ add_library(aveva-rocksdb-plugin-core
     ResultHandle.cpp
     LruFileIndex.cpp
     RocksDBHelpers.cpp
+    SecondaryCacheFactory.cpp
     Util.cpp
     LocalFilesystem.cpp
     LocalFile.cpp
@@ -31,7 +32,24 @@ target_sources(aveva-rocksdb-plugin-core
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/LocalFile.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/SecondaryCacheOptions.hpp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/SecondaryCacheFactory.hpp"
 )
+if(AVEVA_ROCKSDB_WITH_CACHELIB)
+    target_sources(aveva-rocksdb-plugin-core
+      PRIVATE
+        CacheLibSecondaryCache.cpp
+      PUBLIC
+      FILE_SET HEADERS
+      FILES
+        "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/CacheLibSecondaryCache.hpp"
+    )
+    find_package(cachelib-navy CONFIG REQUIRED)
+    # PRIVATE: CacheLib/folly headers never leak into the public API. Static
+    # consumers still get the link dependency via $<LINK_ONLY:...>.
+    target_link_libraries(aveva-rocksdb-plugin-core PRIVATE cachelib-navy::cachelib_navy)
+    target_compile_definitions(aveva-rocksdb-plugin-core PUBLIC AVEVA_ROCKSDB_WITH_CACHELIB=1)
+endif()
 install(TARGETS aveva-rocksdb-plugin-core
     EXPORT
 )

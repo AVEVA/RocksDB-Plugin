@@ -95,6 +95,53 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
 
 For detailed configuration examples and advanced usage patterns, see the [Azure Plugin Documentation](src/AVEVA/RocksDB/Plugin/Azure/README.md).
 
+### SSD Secondary Cache
+
+RocksDB's block cache can spill evicted blocks to a local SSD through a
+[secondary cache](https://github.com/facebook/rocksdb/wiki/SecondaryCache-(Experimental)).
+`CreateSecondaryCache` (`AVEVA/RocksDB/Plugin/Core/SecondaryCacheFactory.hpp`) builds one from
+`SecondaryCacheOptions`:
+
+| Backend | Platforms | Notes |
+|---|---|---|
+| `CacheLib` | Linux x64 | CacheLib's flash engine (Navy BlockCache) with no CacheLib DRAM tier. Region-based FIFO/LRU eviction keeps admitting new blocks when full; blocks stay on SSD after a hit, so they are written once. The default on Linux. |
+| `FileBased` | All | `FileBasedCompressedSecondaryCache`: one file per block. The default on Windows. |
+
+```cpp
+#include <AVEVA/RocksDB/Plugin/Core/SecondaryCacheFactory.hpp>
+
+using namespace AVEVA::RocksDB::Plugin::Core;
+
+SecondaryCacheOptions sec;
+sec.cacheDir = "/mnt/nvme/rocksdb-cache";
+sec.capacity = 64ULL << 30;                 // SSD bytes
+sec.logger = std::make_shared<SecondaryCacheOptions::Logger>();
+// sec.backend = SecondaryCacheBackend::FileBased;  // force the file based cache
+// sec.cachelib.regionSizeBytes = 16 << 20;         // CacheLib tuning, see SecondaryCacheOptions.hpp
+
+rocksdb::LRUCacheOptions primary;
+primary.capacity = 1ULL << 30;
+primary.secondary_cache = CreateSecondaryCache(sec);
+table_options.block_cache = primary.MakeSharedCache();
+```
+
+The CacheLib cache starts empty on every open and supports HyperClockCache as the primary cache as well.
+Its RAM use is dominated by the in-memory index, which scales with the number of cached blocks, not
+their size:
+
+```
+RAM ≈ ~16 bytes × (capacity / average stored block size)   (BlockCache index)
+    + 2 × regionSizeBytes                                   (in-memory write buffers)
+    + maxParcelMemoryMB                                     (insert queue bound; excess inserts are dropped)
+    + reader/writer thread stacks
+```
+
+For example, 256 GiB of 4 KiB blocks is ~64 M entries, or ~1 GiB of index, plus ~70 MiB with the default
+settings (16 MiB regions, 32 MiB parcel memory, 4+4 threads). Larger RocksDB `block_size` values reduce
+the index proportionally. The CacheLib backend is built from source through the `cachelib-navy`
+[overlay port](infrastructure/vcpkg/ports/cachelib-navy/README.md) and can be disabled with
+`-DAVEVA_ROCKSDB_WITH_CACHELIB=OFF`.
+
 Plugins are compiled with RocksDB and can be optionally enabled at runtime. To learn more about RocksDB
 plugins, please check out RocksDB's documentation on [building plugins](https://github.com/facebook/rocksdb/blob/main/plugin/README.md)
 and the list of [known plugins](https://github.com/facebook/rocksdb/blob/main/PLUGINS.md) that are being developed. Below is the list of plugins that exist in this repository and are actively being developed and maintained by AVEVA.
