@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
 
     ServicePrincipalStorageInfo primary{
         container,
-        *storageAccountUrl,
+        storageAccountUrl,
         clientId,
         clientSecret,
         tenantId,

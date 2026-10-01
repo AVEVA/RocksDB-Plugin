@@ -13,7 +13,7 @@
                 "CMAKE_CXX_EXTENSIONS": "OFF",
                 "CMAKE_CXX_VISIBILITY_PRESET": "hidden",
                 "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
-                "VCPKG_MANIFEST_FEATURES": "testing",
+                "VCPKG_MANIFEST_FEATURES": "testing;db-bench",
                 "CMAKE_PREFIX_PATH": {
                     "type": "STRING",
                     "value": "${sourceDir}/infrastructure/cmake"
@@ -87,32 +87,6 @@
             "cacheVariables":
             {
                 "CMAKE_CXX_FLAGS": "-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -D_GLIBCXX_ASSERTIONS -fstack-protector-strong -fstack-clash-protection -fcf-protection=full -Wall -Werror -Wpedantic -Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-align -Wunused -Woverloaded-virtual -Wconversion -Wsign-conversion -Wnull-dereference -Wdouble-promotion -Wformat=2 -Wimplicit-fallthrough -Wmisleading-indentation -Wduplicated-cond -Wlogical-op -Wuseless-cast -Wduplicated-branches -Wsuggest-override"
-            }
-        },
-        {
-            "name": "WindowsReleaseDbBench",
-            "displayName": "MSVC Release Build (with aveva_db_bench)",
-            "inherits":
-            [
-                "WindowsRelease"
-            ],
-            "cacheVariables":
-            {
-                "VCPKG_MANIFEST_FEATURES": "testing;db-bench",
-                "AVEVA_ROCKSDB_BUILD_DB_BENCH": "ON"
-            }
-        },
-        {
-            "name": "LinuxReleaseDbBench",
-            "displayName": "Linux Release Build (with aveva_db_bench)",
-            "inherits":
-            [
-                "LinuxRelease"
-            ],
-            "cacheVariables":
-            {
-                "VCPKG_MANIFEST_FEATURES": "testing;db-bench",
-                "AVEVA_ROCKSDB_BUILD_DB_BENCH": "ON"
             }
         }
     ]
