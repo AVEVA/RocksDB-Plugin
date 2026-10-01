@@ -31,6 +31,7 @@ vcpkg_check_features(OUT_FEATURE_OPTIONS FEATURE_OPTIONS
     "bzip2" WITH_BZ2
     "numa" WITH_NUMA
     "tbb" WITH_TBB
+    "db-bench" WITH_DB_BENCH
 )
 
 if(WITH_LIBURING)
@@ -41,7 +42,12 @@ endif()
 vcpkg_cmake_configure(
   SOURCE_PATH "${SOURCE_PATH}"
   OPTIONS
-    -DWITH_GFLAGS=ON
+    # db_bench_tool (installed by 0004-install-db-bench-tool-lib.patch) is gated
+    # on WITH_GFLAGS, so gflags + that static lib are only built when the
+    # "db-bench" feature is active. WITH_BENCHMARK_TOOLS stays OFF: it also
+    # builds table_reader_bench/memtablerep_bench/etc. which pull in gtest and
+    # break the Windows build (see 0004 patch notes).
+    -DWITH_GFLAGS=${WITH_DB_BENCH}
     -DWITH_TESTS=OFF
     -DWITH_BENCHMARK_TOOLS=OFF
     -DWITH_TOOLS=OFF

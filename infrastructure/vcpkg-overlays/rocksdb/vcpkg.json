@@ -6,7 +6,6 @@
   "license": "GPL-2.0-only OR Apache-2.0",
   "supports": "!uwp & !(arm & !arm64 & android)",
   "dependencies": [
-    "gflags",
     {
       "name": "vcpkg-cmake",
       "host": true
@@ -79,6 +78,12 @@
       "description": "build with zstd",
       "dependencies": [
         "zstd"
+      ]
+    },
+    "db-bench": {
+      "description": "Install RocksDB's db_bench_tool as a static library (requires gflags).",
+      "dependencies": [
+        "gflags"
       ]
     }
   }

@@ -30,10 +30,15 @@
         "gtest"
       ]
     },
-    "db_bench": {
-      "description": "Dependencies needed for db_bench tool.",
+    "db-bench": {
+      "description": "Build the aveva_db_bench wrapper; activates the overlay rocksdb port's db-bench feature so db_bench_tool is available.",
       "dependencies": [
-        "boost-log"
+        {
+          "name": "rocksdb",
+          "features": [
+            "db-bench"
+          ]
+        }
       ]
     }
   }

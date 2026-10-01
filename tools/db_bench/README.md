@@ -12,17 +12,27 @@ work" below for the planned next steps.
 
 ## Build
 
-The wrapper is off by default. Turn it on. Configure the build.
+The wrapper is off by default. Use the dedicated preset, which turns on both the
+`db-bench` vcpkg manifest feature (so the overlay builds `db_bench_tool`) and the
+`AVEVA_ROCKSDB_BUILD_DB_BENCH` CMake option in one step.
 
 ```powershell
-cmake --preset WindowsRelease -DAVEVA_ROCKSDB_BUILD_DB_BENCH=ON
-cmake --build build/WindowsRelease --config RelWithDebInfo --target aveva_db_bench
+cmake --preset WindowsReleaseDbBench
+cmake --build build/WindowsReleaseDbBench --config RelWithDebInfo --target aveva_db_bench
 ```
 
-This build step uses an [overlay port](../../infrastructure/vcpkg-overlays/rocksdb).
-The overlay port keeps `WITH_BENCHMARK_TOOLS=OFF` and instead applies
-`0004-install-db-bench-tool-lib.patch`, which exports `RocksDB::db_bench_tool`
-as an installable static library that the wrapper links against.
+Both switches must be set together. The CMake option alone is not enough: without
+the `db-bench` manifest feature, vcpkg builds RocksDB without gflags and the
+`RocksDB::db_bench_tool` target the wrapper links against will not exist. If you
+configure manually instead of using the preset, pass both:
+`-DVCPKG_MANIFEST_FEATURES="testing;db-bench" -DAVEVA_ROCKSDB_BUILD_DB_BENCH=ON`.
+
+This build uses an [overlay port](../../infrastructure/vcpkg-overlays/rocksdb).
+The overlay keeps `WITH_BENCHMARK_TOOLS=OFF` and instead applies
+`0004-install-db-bench-tool-lib.patch`, which exports `RocksDB::db_bench_tool` as
+an installable static library that the wrapper links against. That library (and
+gflags) are built only when the `db-bench` feature is active, so normal builds
+are unaffected.
 
 ## Run — local filesystem (smoke test)
 

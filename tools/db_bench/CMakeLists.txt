@@ -1,3 +1,6 @@
+# db_bench_tool (from the overlay's 0004 patch) PUBLIC-links gflags, so the
+# gflags targets must be importable before RocksDB's exported config is loaded.
+find_package(gflags CONFIG REQUIRED)
 find_package(RocksDB CONFIG REQUIRED)
 
 add_executable(aveva_db_bench main.cpp)
