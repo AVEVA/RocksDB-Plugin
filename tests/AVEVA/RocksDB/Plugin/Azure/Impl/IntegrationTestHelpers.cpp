@@ -18,6 +18,21 @@
 using namespace boost::log::trivial;
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl::Testing {
+TestIoContext::TestIoContext(std::size_t threadCount) : m_workGuard(boost::asio::make_work_guard(m_context)) {
+    m_threads.reserve(threadCount);
+    for (std::size_t i = 0; i < threadCount; ++i) {
+        m_threads.emplace_back([this]() { m_context.run(); });
+    }
+}
+
+TestIoContext::~TestIoContext() {
+    m_workGuard.reset();
+    m_context.stop();
+    for (auto& thread : m_threads) {
+        thread.join();
+    }
+}
+
 std::optional<Models::ServicePrincipalStorageInfo> LoadAzureCredentialsFromEnvironment() {
     const char* spId = std::getenv("AZURE_SERVICE_PRINCIPAL_ID");
     const char* spSecret = std::getenv("AZURE_SERVICE_PRINCIPAL_SECRET");
@@ -69,7 +84,7 @@ void AzureIntegrationTestBase::TearDown() { CleanupBlob(); }
 
 void AzureIntegrationTestBase::CreateContainerClient() {
     try {
-        m_runtime = std::make_shared<ClientRuntime>();
+        m_runtime = std::make_shared<ClientRuntime>(m_ioContext.Get());
         const auto serviceClient = BlobHelpers::CreateServiceClient(*m_runtime, *m_credentials);
 
         m_containerClient = std::make_shared<AzureClient::BlobContainerClient>(

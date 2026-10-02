@@ -29,7 +29,7 @@ class BlobFilesystemIntegrationTests : public AzureIntegrationTestBase {
         AzureIntegrationTestBase::SetUp();
 
         if (m_credentials) {
-            m_filesystem = std::make_unique<BlobFilesystemImpl>(*m_credentials,
+            m_filesystem = std::make_unique<BlobFilesystemImpl>(m_ioContext.Get(), *m_credentials,
                                                                 std::nullopt, // No backup credentials for tests
                                                                 Configuration::PageBlob::DefaultSize,
                                                                 Configuration::PageBlob::DefaultBufferSize, m_logger);

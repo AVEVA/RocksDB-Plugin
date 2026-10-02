@@ -111,32 +111,10 @@ std::unique_ptr<::AVEVA::IHttpClient> CreateHttpClient(boost::asio::io_context& 
 }
 } // namespace
 
-ClientRuntime::ClientRuntime(std::size_t threadCount)
-    : m_workGuard(boost::asio::make_work_guard(m_context)), m_httpClient(CreateHttpClient(m_context)) {
-    if (threadCount == 0) {
-        threadCount = 1;
-    }
+ClientRuntime::ClientRuntime(boost::asio::io_context& context) : m_httpClient(CreateHttpClient(context)) {}
 
-    m_threads.reserve(threadCount);
-    for (std::size_t i = 0; i < threadCount; ++i) {
-        m_threads.emplace_back([this]() { m_context.run(); });
-    }
-}
-
-ClientRuntime::~ClientRuntime() {
-    m_workGuard.reset();
-    m_context.stop();
-    for (auto& thread : m_threads) {
-        if (thread.get_id() == std::this_thread::get_id()) {
-            // Released from inside a completion handler; it cannot join itself.
-            thread.detach();
-        } else if (thread.joinable()) {
-            thread.join();
-        }
-    }
-
-    m_httpClient.reset();
-}
+// The io_context belongs to the host, which keeps running it; only the HTTP client created here is released.
+ClientRuntime::~ClientRuntime() = default;
 
 ::AVEVA::IHttpClient& ClientRuntime::HttpClient() const noexcept { return *m_httpClient; }
 

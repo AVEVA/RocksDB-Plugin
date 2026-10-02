@@ -46,11 +46,16 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
     ```cpp
     #include <AVEVA/RocksDB/Plugin/Azure/Plugin.hpp>
     #include <AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp>
+    #include <boost/asio/io_context.hpp>
     #include <boost/log/sources/logger.hpp>
     #include <memory>
 
     using AVEVA::RocksDB::Plugin::Azure::Plugin;
     using AVEVA::RocksDB::Plugin::Azure::Models::ServicePrincipalStorageInfo;
+
+    // The application owns the io_context the plugin performs its Azure I/O on. Keep it alive and running
+    // (on threads that never call into RocksDB) for as long as the filesystem is in use.
+    boost::asio::io_context ioContext;
 
     rocksdb::Env* env = nullptr;
     std::shared_ptr<rocksdb::Env> guard = nullptr;
@@ -66,6 +71,7 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
     rocksdb::Status status = Plugin::Register(primaryDbOptions,
         &env,
         &guard,
+        ioContext,
         storageCredentials,
         std::nullopt, /* backup credentials */
         std::make_shared<boost::log::sources::logger_mt>(),

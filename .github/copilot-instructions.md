@@ -91,7 +91,7 @@ support, CMake, clang-format/clang-tidy, gitleaks, vcpkg, and git hook configura
 - CMake cache issues are common after branch switches — delete `build/` and reconfigure
   rather than patching the cache.
 - On Windows, long path support must be enabled for stable builds (`devdoctor.ps1` reports this).
-- Azure client (`libs/AzureClient`) calls are asynchronous; the plugin blocks on them with `boost::asio::use_future` + `.get()` — never call `.get()` on one of the `ClientRuntime` I/O threads to
+- Azure client (`libs/AzureClient`) calls are asynchronous; the plugin blocks on them with `boost::asio::use_future` + `.get()` — never call `.get()` on a thread running the host-supplied `io_context` (the plugin never owns or runs one; it is injected via `Plugin::Register` / `BlobFilesystemImpl`) to
   avoid races.
 - `vcpkg` is used for dependency management — ensure `VCPKG_ROOT` is set and bootstrap vcpkg
   before the first build.

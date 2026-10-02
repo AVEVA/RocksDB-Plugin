@@ -8,6 +8,8 @@
 #include "AVEVA/RocksDB/Plugin/Core/BlobClient.hpp"
 
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>
+#include <boost/asio/executor_work_guard.hpp>
+#include <boost/asio/io_context.hpp>
 #include <boost/log/trivial.hpp>
 #include <gtest/gtest.h>
 
@@ -16,6 +18,7 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl::Testing {
@@ -37,10 +40,34 @@ std::string GenerateRandomBlobName(const std::string& prefix = "test");
 bool IsAuthenticationError(const std::exception& e);
 
 /// <summary>
+/// Plays the host application's role for tests: owns an io_context and runs it on its own threads until destroyed.
+/// </summary>
+class TestIoContext {
+    boost::asio::io_context m_context;
+    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> m_workGuard;
+    std::vector<std::thread> m_threads;
+
+  public:
+    static const constexpr std::size_t DefaultThreadCount = 4;
+
+    explicit TestIoContext(std::size_t threadCount = DefaultThreadCount);
+    ~TestIoContext();
+    TestIoContext(const TestIoContext&) = delete;
+    TestIoContext& operator=(const TestIoContext&) = delete;
+    TestIoContext(TestIoContext&&) = delete;
+    TestIoContext& operator=(TestIoContext&&) = delete;
+
+    [[nodiscard]] boost::asio::io_context& Get() noexcept { return m_context; }
+};
+
+/// <summary>
 /// Base class for Azure integration tests with common setup and teardown.
 /// </summary>
 class AzureIntegrationTestBase : public ::testing::Test {
   protected:
+    // Declared first so that it is destroyed last, after every Azure client using it (including those owned by
+    // derived fixtures, whose members are destroyed before the base's).
+    TestIoContext m_ioContext;
     std::optional<Models::ServicePrincipalStorageInfo> m_credentials;
     std::shared_ptr<ClientRuntime> m_runtime;
     std::shared_ptr<AzureClient::BlobContainerClient> m_containerClient;

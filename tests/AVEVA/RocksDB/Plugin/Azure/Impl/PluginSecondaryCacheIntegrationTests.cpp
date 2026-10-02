@@ -45,9 +45,9 @@ class PluginSecondaryCacheIntegrationTests : public AzureIntegrationTestBase {
         std::filesystem::create_directories(m_cacheDir);
 
         rocksdb::ConfigOptions configOptions;
-        auto status =
-            Plugin::Register(configOptions, &m_env, &m_envGuard, *m_credentials, std::nullopt, m_logger,
-                             Configuration::PageBlob::DefaultBufferSize, Configuration::PageBlob::DefaultSize);
+        auto status = Plugin::Register(configOptions, &m_env, &m_envGuard, m_ioContext.Get(), *m_credentials,
+                                       std::nullopt, m_logger, Configuration::PageBlob::DefaultBufferSize,
+                                       Configuration::PageBlob::DefaultSize);
 
         if (!status.ok())
             GTEST_SKIP() << "Plugin::Register failed (Azure may be unavailable): " << status.ToString();

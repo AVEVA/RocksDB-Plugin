@@ -9,17 +9,13 @@
 #include <AVEVA/HttpClient/HttpClient.hpp>
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 
-#include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/use_future.hpp>
 
-#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <memory>
-#include <thread>
 #include <utility>
-#include <vector>
 
 #ifdef _WIN32
 // Boost.Asio pulls in <windows.h>, whose macros clash with RocksDB method names (mirrors rocksdb/env.h).
@@ -30,22 +26,19 @@
 #endif
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// <summary>
-/// Owns the I/O threads and the HTTP client that every Azure Blob Storage client of a filesystem uses.
+/// Holds the HTTP client that every Azure Blob Storage client of a filesystem uses, bound to an io_context
+/// owned and run by the host application. The runtime never runs, stops or destroys that io_context: the host
+/// must keep it alive and running on at least one thread for as long as the runtime exists.
 /// The AVEVA Azure clients only hold a reference to the HTTP client, so every object that owns such a
 /// client also shares ownership of the runtime to keep it alive for as long as the client exists.
 /// Operations are started with boost::asio::use_future and waited for on the caller's thread, which
-/// must never be one of the runtime's I/O threads.
+/// must never be one of the threads running the io_context.
 /// </summary>
 class ClientRuntime {
-    boost::asio::io_context m_context;
-    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> m_workGuard;
     std::unique_ptr<::AVEVA::IHttpClient> m_httpClient;
-    std::vector<std::thread> m_threads;
 
   public:
-    static const constexpr std::size_t DefaultThreadCount = 4;
-
-    explicit ClientRuntime(std::size_t threadCount = DefaultThreadCount);
+    explicit ClientRuntime(boost::asio::io_context& context);
     ~ClientRuntime();
     ClientRuntime(const ClientRuntime&) = delete;
     ClientRuntime& operator=(const ClientRuntime&) = delete;

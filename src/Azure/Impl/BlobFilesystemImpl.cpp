@@ -59,11 +59,11 @@ uint32_t ToListPageSize(int32_t sizeHint) { return static_cast<uint32_t>(std::cl
 } // namespace
 
 BlobFilesystemImpl::BlobFilesystemImpl(
-    const std::string& name, const std::string& storageAccountUrl, const std::string& storageAccountKey,
-    int64_t dataFileInitialSize, int64_t dataFileBufferSize,
+    boost::asio::io_context& ioContext, const std::string& name, const std::string& storageAccountUrl,
+    const std::string& storageAccountKey, int64_t dataFileInitialSize, int64_t dataFileBufferSize,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     std::optional<std::string_view> cachePath, size_t maxCacheSize)
-    : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize) {
+    : BlobFilesystemImpl(std::move(logger), ioContext, dataFileInitialSize, dataFileBufferSize) {
     auto options = BlobHelpers::CreateServiceClientOptions(storageAccountUrl);
     options.SharedKey.AccountName = BlobHelpers::AccountNameFromUrl(storageAccountUrl);
     options.SharedKey.AccountKey = storageAccountKey;
@@ -72,12 +72,12 @@ BlobFilesystemImpl::BlobFilesystemImpl(
 }
 
 BlobFilesystemImpl::BlobFilesystemImpl(
-    const std::string& name, const std::string& storageAccountUrl, const std::string& servicePrincipalId,
-    const std::string& servicePrincipalSecret, const std::string& tenantId, int64_t dataFileInitialSize,
-    int64_t dataFileBufferSize,
+    boost::asio::io_context& ioContext, const std::string& name, const std::string& storageAccountUrl,
+    const std::string& servicePrincipalId, const std::string& servicePrincipalSecret, const std::string& tenantId,
+    int64_t dataFileInitialSize, int64_t dataFileBufferSize,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     std::optional<std::string_view> cachePath, size_t maxCacheSize)
-    : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize) {
+    : BlobFilesystemImpl(std::move(logger), ioContext, dataFileInitialSize, dataFileBufferSize) {
     auto options = BlobHelpers::CreateServiceClientOptions(storageAccountUrl);
     options.TokenCredential =
         BlobHelpers::CreateClientSecretCredential(*m_runtime, tenantId, servicePrincipalId, servicePrincipalSecret);
@@ -86,12 +86,12 @@ BlobFilesystemImpl::BlobFilesystemImpl(
 }
 
 BlobFilesystemImpl::BlobFilesystemImpl(
-    const std::string& name, const std::string& storageAccountUrl, const std::string& tenantId,
-    const std::string& clientId, const std::string& serviceConnectionId, const std::string& accessToken,
-    int64_t dataFileInitialSize, int64_t dataFileBufferSize,
+    boost::asio::io_context& ioContext, const std::string& name, const std::string& storageAccountUrl,
+    const std::string& tenantId, const std::string& clientId, const std::string& serviceConnectionId,
+    const std::string& accessToken, int64_t dataFileInitialSize, int64_t dataFileBufferSize,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     std::optional<std::string_view> cachePath, size_t maxCacheSize)
-    : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize) {
+    : BlobFilesystemImpl(std::move(logger), ioContext, dataFileInitialSize, dataFileBufferSize) {
     auto options = BlobHelpers::CreateServiceClientOptions(storageAccountUrl);
     options.TokenCredential =
         BlobHelpers::CreatePipelinesCredential(*m_runtime, tenantId, clientId, serviceConnectionId, accessToken);
@@ -100,11 +100,11 @@ BlobFilesystemImpl::BlobFilesystemImpl(
 }
 
 BlobFilesystemImpl::BlobFilesystemImpl(
-    Models::ChainedCredentialInfo primary, std::optional<Models::ChainedCredentialInfo> backup,
-    int64_t dataFileInitialSize, int64_t dataFileBufferSize,
+    boost::asio::io_context& ioContext, Models::ChainedCredentialInfo primary,
+    std::optional<Models::ChainedCredentialInfo> backup, int64_t dataFileInitialSize, int64_t dataFileBufferSize,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     std::optional<std::string_view> cachePath, size_t maxCacheSize)
-    : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize) {
+    : BlobFilesystemImpl(std::move(logger), ioContext, dataFileInitialSize, dataFileBufferSize) {
     AddContainer(BlobHelpers::CreateServiceClient(*m_runtime, primary), primary.GetStorageAccountUrl(),
                  primary.GetDbName(), cachePath, maxCacheSize);
 
@@ -115,11 +115,11 @@ BlobFilesystemImpl::BlobFilesystemImpl(
 }
 
 BlobFilesystemImpl::BlobFilesystemImpl(
-    Models::ServicePrincipalStorageInfo primary, std::optional<Models::ServicePrincipalStorageInfo> backup,
-    int64_t dataFileInitialSize, int64_t dataFileBufferSize,
+    boost::asio::io_context& ioContext, Models::ServicePrincipalStorageInfo primary,
+    std::optional<Models::ServicePrincipalStorageInfo> backup, int64_t dataFileInitialSize, int64_t dataFileBufferSize,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     std::optional<std::string_view> cachePath, size_t maxCacheSize)
-    : BlobFilesystemImpl(std::move(logger), dataFileInitialSize, dataFileBufferSize) {
+    : BlobFilesystemImpl(std::move(logger), ioContext, dataFileInitialSize, dataFileBufferSize) {
     AddContainer(BlobHelpers::CreateServiceClient(*m_runtime, primary), primary.GetStorageAccountUrl(),
                  primary.GetDbName(), cachePath, maxCacheSize);
 
@@ -589,9 +589,9 @@ void BlobFilesystemImpl::RenameFile(const std::string& fromFilePath, const std::
 
 BlobFilesystemImpl::BlobFilesystemImpl(
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>&& logger,
-    int64_t dataFileInitialSize, int64_t dataFileBufferSize)
+    boost::asio::io_context& ioContext, int64_t dataFileInitialSize, int64_t dataFileBufferSize)
     : m_logger(std::move(logger)), m_dataFileInitialSize(dataFileInitialSize), m_dataFileBufferSize(dataFileBufferSize),
-      m_runtime(std::make_shared<ClientRuntime>()),
+      m_runtime(std::make_shared<ClientRuntime>(ioContext)),
       m_lockRenewalThread{[this](std::stop_token stopToken) { RenewLease(stopToken); }} {}
 
 const std::shared_ptr<AzureClient::BlobContainerClient>&

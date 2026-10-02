@@ -45,5 +45,5 @@ ctest --test-dir build/ --output-on-failure
 ## Known Pitfalls
 - CMake cache issues are common after branch switches — delete `build/` and reconfigure rather than patching the cache.
 - On Windows, long path support must be enabled for stable builds.
-- Azure client (`libs/AzureClient`) calls are asynchronous; the plugin blocks on them with `boost::asio::use_future` + `.get()` — never call `.get()` on one of the `ClientRuntime` I/O threads to avoid races.
+- Azure client (`libs/AzureClient`) calls are asynchronous; the plugin blocks on them with `boost::asio::use_future` + `.get()` — never call `.get()` on a thread running the host-supplied `io_context` (the plugin never owns or runs one; it is injected via `Plugin::Register` / `BlobFilesystemImpl`) to avoid races.
 - `vcpkg` is used for dependency management — run `vcpkg install` from `vcpkg-configuration.json` before first build.

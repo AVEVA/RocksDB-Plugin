@@ -50,8 +50,8 @@ class BlobFilesystemImpl {
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
     int64_t m_dataFileInitialSize;
     int64_t m_dataFileBufferSize;
-    // Owns the I/O threads and HTTP client used by every Azure client below; declared before them so it
-    // outlives them during destruction.
+    // HTTP client (on the injected, host-owned io_context) used by every Azure client below; declared before them
+    // so it outlives them during destruction.
     std::shared_ptr<ClientRuntime> m_runtime;
     std::unordered_map<std::string, ServiceContainer, Core::StringHash, Core::StringEqual> m_clients;
     std::unordered_map<std::string, std::shared_ptr<Core::FileCache>, Core::StringHash, Core::StringEqual> m_fileCaches;
@@ -61,31 +61,35 @@ class BlobFilesystemImpl {
     std::jthread m_lockRenewalThread;
 
   public:
+    // Every constructor takes the host-owned io_context that all Azure I/O runs on. The filesystem never runs,
+    // stops or destroys it; the host must keep it alive and running for the filesystem's whole lifetime and must
+    // not call into the filesystem from the threads running it.
     BlobFilesystemImpl(
-        const std::string& name, const std::string& storageAccountUrl, const std::string& storageAccountKey,
+        boost::asio::io_context& ioContext, const std::string& name, const std::string& storageAccountUrl,
+        const std::string& storageAccountKey, int64_t dataFileInitialSize, int64_t dataFileBufferSize,
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+        std::optional<std::string_view> cachePath = {}, size_t maxCacheSize = Configuration::MaxCacheSize);
+    BlobFilesystemImpl(
+        boost::asio::io_context& ioContext, const std::string& name, const std::string& storageAccountUrl,
+        const std::string& servicePrincipalId, const std::string& servicePrincipalSecret, const std::string& tenantId,
         int64_t dataFileInitialSize, int64_t dataFileBufferSize,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::optional<std::string_view> cachePath = {}, size_t maxCacheSize = Configuration::MaxCacheSize);
     BlobFilesystemImpl(
-        const std::string& name, const std::string& storageAccountUrl, const std::string& servicePrincipalId,
-        const std::string& servicePrincipalSecret, const std::string& tenantId, int64_t dataFileInitialSize,
+        boost::asio::io_context& ioContext, const std::string& name, const std::string& storageAccountUrl,
+        const std::string& tenantId, const std::string& clientId, const std::string& serviceConnectionId,
+        const std::string& accessToken, int64_t dataFileInitialSize, int64_t dataFileBufferSize,
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+        std::optional<std::string_view> cachePath = {}, size_t maxCacheSize = Configuration::MaxCacheSize);
+    BlobFilesystemImpl(
+        boost::asio::io_context& ioContext, Models::ChainedCredentialInfo primary,
+        std::optional<Models::ChainedCredentialInfo> backup, int64_t dataFileInitialSize, int64_t dataFileBufferSize,
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+        std::optional<std::string_view> cachePath = {}, size_t maxCacheSize = Configuration::MaxCacheSize);
+    BlobFilesystemImpl(
+        boost::asio::io_context& ioContext, Models::ServicePrincipalStorageInfo primary,
+        std::optional<Models::ServicePrincipalStorageInfo> backup, int64_t dataFileInitialSize,
         int64_t dataFileBufferSize,
-        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-        std::optional<std::string_view> cachePath = {}, size_t maxCacheSize = Configuration::MaxCacheSize);
-    BlobFilesystemImpl(
-        const std::string& name, const std::string& storageAccountUrl, const std::string& tenantId,
-        const std::string& clientId, const std::string& serviceConnectionId, const std::string& accessToken,
-        int64_t dataFileInitialSize, int64_t dataFileBufferSize,
-        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-        std::optional<std::string_view> cachePath = {}, size_t maxCacheSize = Configuration::MaxCacheSize);
-    BlobFilesystemImpl(
-        Models::ChainedCredentialInfo primary, std::optional<Models::ChainedCredentialInfo> backup,
-        int64_t dataFileInitialSize, int64_t dataFileBufferSize,
-        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-        std::optional<std::string_view> cachePath = {}, size_t maxCacheSize = Configuration::MaxCacheSize);
-    BlobFilesystemImpl(
-        Models::ServicePrincipalStorageInfo primary, std::optional<Models::ServicePrincipalStorageInfo> backup,
-        int64_t dataFileInitialSize, int64_t dataFileBufferSize,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::optional<std::string_view> cachePath = {}, size_t maxCacheSize = Configuration::MaxCacheSize);
 
@@ -115,7 +119,7 @@ class BlobFilesystemImpl {
   private:
     BlobFilesystemImpl(
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>&& logger,
-        int64_t dataFileInitialSize = 0, int64_t dataFileBufferSize = 0);
+        boost::asio::io_context& ioContext, int64_t dataFileInitialSize, int64_t dataFileBufferSize);
     void AddContainer(AzureClient::BlobServiceClient serviceClient, const std::string& storageAccountUrl,
                       const std::string& name, std::optional<std::string_view> cachePath, size_t maxCacheSize);
     [[nodiscard]] const std::shared_ptr<AzureClient::BlobContainerClient>& GetContainer(std::string_view prefix) const;
