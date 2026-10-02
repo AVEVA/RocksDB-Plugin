@@ -4,7 +4,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 
-#include <azure/core/exception.hpp>
+#include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include <cassert>
 #include <limits>
 
@@ -22,7 +22,7 @@ rocksdb::IOStatus ReadableFile::Read(const size_t n, const rocksdb::IOOptions&, 
                "bytesRead exceeds size_t max value");
         *result = rocksdb::Slice(scratch, static_cast<size_t>(bytesRead));
         return rocksdb::IOStatus::OK();
-    } catch (const ::Azure::Core::RequestFailedException& e) {
+    } catch (const RequestFailedException& e) {
         return AzureErrorTranslator::IOStatusFromError(e.Message, e.StatusCode);
     } catch (const std::exception& e) {
         return rocksdb::IOStatus::IOError(e.what());
@@ -44,7 +44,7 @@ rocksdb::IOStatus ReadableFile::Read(const uint64_t offset, const size_t n, cons
                "bytesRead exceeds size_t max value");
         *result = rocksdb::Slice(scratch, static_cast<size_t>(bytesRead));
         return rocksdb::IOStatus::OK();
-    } catch (const ::Azure::Core::RequestFailedException& e) {
+    } catch (const RequestFailedException& e) {
         return AzureErrorTranslator::IOStatusFromError(e.Message, e.StatusCode);
     } catch (const std::exception& e) {
         return rocksdb::IOStatus::IOError(e.what());
@@ -59,7 +59,7 @@ rocksdb::IOStatus ReadableFile::Skip(const uint64_t n) {
                "skip value exceeds int64_t max value");
         m_file.Skip(static_cast<int64_t>(n));
         return rocksdb::IOStatus::OK();
-    } catch (const ::Azure::Core::RequestFailedException& e) {
+    } catch (const RequestFailedException& e) {
         return AzureErrorTranslator::IOStatusFromError(e.Message, e.StatusCode);
     } catch (const std::exception& e) {
         return rocksdb::IOStatus::IOError(e.what());

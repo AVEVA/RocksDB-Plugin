@@ -1,0 +1,401 @@
+trigger:
+  branches:
+    include:
+      - main
+      - master
+
+pr:
+  branches:
+    include:
+      - '*'
+
+schedules:
+  - cron: '0 2 * * *'
+    displayName: Nightly fuzzing
+    branches:
+      include:
+        - main
+        - master
+    always: true
+
+variables:
+  - template: pipelines/templates/shared-variables.yml
+
+stages:
+  - stage: build_and_test
+    displayName: Build and test
+    jobs:
+      - job: windows
+        displayName: Windows presets
+        pool:
+          vmImage: $(DefaultWindowsVmImage)
+        strategy:
+          matrix:
+            debug:
+              Preset: CIWindowsDebug
+              TestPreset: CIWindowsDebug
+            release:
+              Preset: CIWindowsRelease
+              TestPreset: CIWindowsRelease
+        variables:
+          VCPKG_DEFAULT_BINARY_CACHE: $(Pipeline.Workspace)/vcpkg-binary-cache
+        steps:
+          - checkout: self
+          - task: Cache@2
+            displayName: Restore vcpkg binary cache
+            inputs:
+              key: 'vcpkg | "$(Agent.OS)" | "$(Preset)" | vcpkg.json | vcpkg-configuration.json'
+              restoreKeys: |
+                vcpkg | "$(Agent.OS)" | "$(Preset)"
+              path: $(VCPKG_DEFAULT_BINARY_CACHE)
+          - task: PowerShell@2
+            displayName: Configure, build, and test
+            inputs:
+              pwsh: true
+              filePath: pipelines/scripts/build.ps1
+              arguments: >
+                -Preset $(Preset)
+                -TestPreset $(TestPreset)
+                -WithTests $(AvevaAzureClientWithTests)
+            env:
+              AVEVA_AZURE_CLIENT_VCPKG_FEATURES: $(AvevaAzureClientVcpkgFeatures)
+
+      - job: linux
+        displayName: Linux presets
+        pool:
+          vmImage: $(DefaultLinuxVmImage)
+        strategy:
+          matrix:
+            debug:
+              Preset: CILinuxDebugCCache
+              TestPreset: CILinuxDebug
+            release:
+              Preset: CILinuxReleaseCCache
+              TestPreset: CILinuxRelease
+        variables:
+          VCPKG_DEFAULT_BINARY_CACHE: $(Pipeline.Workspace)/vcpkg-binary-cache
+        steps:
+          - checkout: self
+          - task: Cache@2
+            displayName: Restore vcpkg binary cache
+            inputs:
+              key: 'vcpkg | "$(Agent.OS)" | "$(Preset)" | vcpkg.json | vcpkg-configuration.json'
+              restoreKeys: |
+                vcpkg | "$(Agent.OS)" | "$(Preset)"
+              path: $(VCPKG_DEFAULT_BINARY_CACHE)
+          - task: PowerShell@2
+            displayName: Configure, build, and test
+            inputs:
+              pwsh: true
+              filePath: pipelines/scripts/build.ps1
+              arguments: >
+                -Preset $(Preset)
+                -TestPreset $(TestPreset)
+                -WithTests $(AvevaAzureClientWithTests)
+            env:
+              AVEVA_AZURE_CLIENT_VCPKG_FEATURES: $(AvevaAzureClientVcpkgFeatures)
+
+  - stage: lint
+    displayName: Lint
+    dependsOn: build_and_test
+    jobs:
+      - job: no_debug_output
+        displayName: No debug output in src/include
+        pool:
+          vmImage: $(DefaultLinuxVmImage)
+        steps:
+          - checkout: self
+          - task: PowerShell@2
+            displayName: Grep for DEBUG- and fprintf(stderr
+            inputs:
+              pwsh: true
+              targetType: inline
+              script: |
+                $paths = @(
+                    Join-Path "$(Build.SourcesDirectory)" "src",
+                    Join-Path "$(Build.SourcesDirectory)" "include"
+                ) | Where-Object { Test-Path $_ }
+                $matches = Get-ChildItem -Path $paths -Recurse -File |
+                    Select-String -Pattern 'DEBUG-', 'fprintf\(stderr'
+                if ($matches)
+                {
+                    $matches | ForEach-Object { Write-Host "$($_.Path):$($_.LineNumber): $($_.Line)" }
+                    Write-Error "Found debug instrumentation (DEBUG- or fprintf(stderr) under src/ or include/."
+                    exit 1
+                }
+                Write-Host "No debug instrumentation found under src/ or include/."
+
+      - job: format
+        displayName: clang-format
+        pool:
+          vmImage: $(DefaultLinuxVmImage)
+        steps:
+          - checkout: self
+          - bash: |
+              wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+              echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-22 main" | sudo tee /etc/apt/sources.list.d/llvm-22.list
+              sudo apt-get update
+              sudo apt-get install --yes clang-format-22
+            displayName: Install clang-format 22
+          - bash: git ls-files '*.cpp' '*.hpp' | xargs clang-format-22 --dry-run --Werror
+            displayName: Check formatting
+      - job: clang_tidy
+        displayName: clang-tidy
+        pool:
+          vmImage: $(DefaultLinuxVmImage)
+        steps:
+          - checkout: self
+          - bash: |
+              sudo apt-get update
+              sudo apt-get install --yes clang-tidy
+            displayName: Install clang-tidy
+          - task: PowerShell@2
+            displayName: Configure compile database
+            inputs:
+              pwsh: true
+              filePath: pipelines/scripts/build.ps1
+              arguments: >
+                -Preset CILinuxDebug
+                -TestPreset CILinuxDebug
+                -WithTests $(AvevaAzureClientWithTests)
+                -ConfigureOnly
+            env:
+              BUILD_BINARIESDIRECTORY: $(Build.BinariesDirectory)/lint
+              AVEVA_AZURE_CLIENT_VCPKG_FEATURES: $(AvevaAzureClientVcpkgFeatures)
+          - task: PowerShell@2
+            displayName: Run clang-tidy
+            inputs:
+              pwsh: true
+              targetType: inline
+              script: |
+                $buildDir = Join-Path "$(Build.BinariesDirectory)" "lint/LinuxDebug"
+                $paths = @(
+                    Join-Path "$(Build.SourcesDirectory)" "src",
+                    Join-Path "$(Build.SourcesDirectory)" "tests",
+                    Join-Path "$(Build.SourcesDirectory)" "benchmarks",
+                    Join-Path "$(Build.SourcesDirectory)" "examples"
+                ) | Where-Object { Test-Path $_ }
+                $files = Get-ChildItem -Path $paths -Filter *.cpp -Recurse -File
+                $failed = @()
+                foreach ($file in $files)
+                {
+                    clang-tidy --quiet -p $buildDir $file.FullName
+                    if ($LASTEXITCODE -ne 0) { $failed += $file.FullName }
+                }
+                if ($failed)
+                {
+                    Write-Error "clang-tidy reported errors (WarningsAsErrors in .clang-tidy) in:`n$($failed -join "`n")"
+                    exit 1
+                }
+
+      - job: installed_package_consumer
+        displayName: Build examples against the installed package
+        pool:
+          vmImage: $(DefaultLinuxVmImage)
+        steps:
+          - checkout: self
+          - task: PowerShell@2
+            displayName: Build the library
+            inputs:
+              pwsh: true
+              filePath: pipelines/scripts/build.ps1
+              arguments: >
+                -Preset CILinuxRelease
+                -WithTests $(AvevaAzureClientWithTests)
+                -SkipTests
+            env:
+              BUILD_BINARIESDIRECTORY: $(Build.BinariesDirectory)/consumer
+              AVEVA_AZURE_CLIENT_VCPKG_FEATURES: $(AvevaAzureClientVcpkgFeatures)
+          - task: PowerShell@2
+            displayName: Install, then build and run examples/ via find_package
+            inputs:
+              pwsh: true
+              targetType: inline
+              script: |
+                $ErrorActionPreference = "Stop"
+                $PSNativeCommandUseErrorActionPreference = $true
+                $buildDir = "$(Build.BinariesDirectory)/consumer/LinuxRelease"
+                $prefix = "$(Build.BinariesDirectory)/consumer/install"
+                cmake --install $buildDir --prefix $prefix --config RelWithDebInfo
+                $deps = Join-Path $buildDir "vcpkg_installed/x64-linux"
+                cmake -S "$(Build.SourcesDirectory)/examples" -B "$(Build.BinariesDirectory)/consumer/examples" `
+                    -DCMAKE_BUILD_TYPE=RelWithDebInfo "-DCMAKE_PREFIX_PATH=$prefix;$deps"
+                cmake --build "$(Build.BinariesDirectory)/consumer/examples"
+                & "$(Build.BinariesDirectory)/consumer/examples/aveva-azure-client-quick-start"
+
+  - stage: coverage
+    displayName: Coverage
+    dependsOn: build_and_test
+    jobs:
+      - job: linux_coverage
+        displayName: Linux coverage
+        pool:
+          vmImage: $(DefaultLinuxVmImage)
+        steps:
+          - checkout: self
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.x'
+          - script: python -m pip install --upgrade gcovr
+            displayName: Install gcovr
+          - task: PowerShell@2
+            displayName: Configure and build with coverage
+            inputs:
+              pwsh: true
+              filePath: pipelines/scripts/build.ps1
+              arguments: >
+                -Preset CILinuxDebug
+                -TestPreset CILinuxDebug
+                -TestLabel unit
+                -WithTests $(AvevaAzureClientWithTests)
+                -AdditionalConfigureArgs "-DAVEVA_AZURE_CLIENT_ENABLE_COVERAGE=ON"
+            env:
+              BUILD_BINARIESDIRECTORY: $(Build.BinariesDirectory)/coverage
+              AVEVA_AZURE_CLIENT_VCPKG_FEATURES: $(AvevaAzureClientVcpkgFeatures)
+          - script: >
+              gcovr
+              --root "$(Build.SourcesDirectory)"
+              --filter "$(Build.SourcesDirectory)/src"
+              --filter "$(Build.SourcesDirectory)/include"
+              --exclude-throw-branches
+              --exclude-unreachable-branches
+              --branches
+              --merge-lines
+              --gcov-ignore-parse-errors=negative_hits.warn
+              --print-summary
+              --xml-pretty "$(Build.ArtifactStagingDirectory)/coverage/unit/coverage.xml"
+              --html-details "$(Build.ArtifactStagingDirectory)/coverage/unit/coverage.html"
+              --fail-under-line $(CoverageLineThreshold)
+              --fail-under-branch $(CoverageBranchThreshold)
+            displayName: Generate unit-only coverage report (the only coverage gate; integration tests need Azure credentials and are not run here)
+          - task: PublishBuildArtifacts@1
+            inputs:
+              PathtoPublish: $(Build.ArtifactStagingDirectory)/coverage
+              ArtifactName: coverage
+              publishLocation: Container
+
+  - stage: sanitizers
+    displayName: Sanitizers
+    dependsOn: build_and_test
+    jobs:
+      - job: linux_sanitizers
+        displayName: Linux sanitizer presets
+        pool:
+          vmImage: $(DefaultLinuxVmImage)
+        strategy:
+          matrix:
+            asan:
+              Preset: CILinuxDebugASan
+              TestPreset: CILinuxDebugASan
+            ubsan:
+              Preset: CILinuxDebugUBSan
+              TestPreset: CILinuxDebugUBSan
+            tsan:
+              Preset: CILinuxDebugTSan
+              TestPreset: CILinuxDebugTSan
+        steps:
+          - checkout: self
+          # TSan's shadow memory layout cannot cope with the 32-bit mmap ASLR entropy that recent
+          # Ubuntu kernels default to ("FATAL: ThreadSanitizer: unexpected memory mapping").
+          - bash: sudo sysctl -w vm.mmap_rnd_bits=28
+            displayName: Reduce mmap ASLR entropy for ThreadSanitizer
+            condition: eq(variables['Preset'], 'CILinuxDebugTSan')
+          - task: PowerShell@2
+            displayName: Configure, build, and test
+            inputs:
+              pwsh: true
+              filePath: pipelines/scripts/build.ps1
+              arguments: >
+                -Preset $(Preset)
+                -TestPreset $(TestPreset)
+                -WithTests $(AvevaAzureClientWithTests)
+                -AdditionalTestArgs "-LE" "integration"
+            env:
+              AVEVA_AZURE_CLIENT_VCPKG_FEATURES: $(AvevaAzureClientVcpkgFeatures)
+
+  - stage: benchmarks
+    displayName: Benchmarks
+    dependsOn: build_and_test
+    jobs:
+      - job: linux_benchmarks
+        displayName: Linux benchmarks (informational, never blocks the pipeline)
+        continueOnError: true
+        pool:
+          vmImage: $(DefaultLinuxVmImage)
+        steps:
+          - checkout: self
+          - task: PowerShell@2
+            displayName: Configure and build with benchmarks
+            inputs:
+              pwsh: true
+              filePath: pipelines/scripts/build.ps1
+              arguments: >
+                -Preset CILinuxRelease
+                -WithTests $(AvevaAzureClientWithTests)
+                -WithBenchmarks $true
+                -SkipTests
+                -AdditionalConfigureArgs "-DAVEVA_AZURE_CLIENT_BENCHMARKS=ON"
+            env:
+              BUILD_BINARIESDIRECTORY: $(Build.BinariesDirectory)/bench
+          - task: PowerShell@2
+            displayName: Run benchmarks and publish JSON results
+            continueOnError: true
+            inputs:
+              pwsh: true
+              targetType: inline
+              script: |
+                $out = "$(Build.ArtifactStagingDirectory)/benchmarks"
+                New-Item -ItemType Directory -Force $out | Out-Null
+                Get-ChildItem "$(Build.BinariesDirectory)/bench/LinuxRelease" -Recurse -File |
+                    Where-Object { $_.Name -like "*benchmark*" -and -not $_.Extension -and $_.UnixMode -match "x" } |
+                    ForEach-Object {
+                        & $_.FullName --benchmark_format=json --benchmark_out="$out/$($_.Name).json"
+                    }
+          - task: PublishBuildArtifacts@1
+            condition: succeededOrFailed()
+            inputs:
+              PathtoPublish: $(Build.ArtifactStagingDirectory)/benchmarks
+              ArtifactName: benchmarks
+              publishLocation: Container
+
+  - stage: fuzz
+    displayName: Fuzz (scheduled)
+    dependsOn: []
+    condition: eq(variables['Build.Reason'], 'Schedule')
+    jobs:
+      - job: parse_fuzz
+        displayName: libFuzzer response parsers
+        timeoutInMinutes: 30
+        pool:
+          vmImage: $(DefaultLinuxVmImage)
+        steps:
+          - checkout: self
+          - bash: sudo apt-get update && sudo apt-get install --yes clang
+            displayName: Install clang
+          - task: PowerShell@2
+            displayName: Configure and build the fuzz target
+            inputs:
+              pwsh: true
+              filePath: pipelines/scripts/build.ps1
+              arguments: >
+                -Preset CILinuxDebug
+                -WithTests $false
+                -SkipTests
+                -AdditionalConfigureArgs "-DCMAKE_CXX_COMPILER=clang++" "-DCMAKE_C_COMPILER=clang" "-DAVEVA_AZURE_CLIENT_FUZZ=ON"
+            env:
+              BUILD_BINARIESDIRECTORY: $(Build.BinariesDirectory)/fuzz
+          - bash: |
+              set -euo pipefail
+              mkdir -p "$(Build.ArtifactStagingDirectory)/fuzz/corpus" "$(Build.ArtifactStagingDirectory)/fuzz/crashes"
+              cp tests/fuzz/corpus/* "$(Build.ArtifactStagingDirectory)/fuzz/corpus/"
+              fuzzer=$(find "$(Build.BinariesDirectory)/fuzz" -name aveva-azure-client-parse-fuzz -type f | head -n 1)
+              "$fuzzer" -max_total_time=300 -max_len=65536 \
+                -artifact_prefix="$(Build.ArtifactStagingDirectory)/fuzz/crashes/" \
+                "$(Build.ArtifactStagingDirectory)/fuzz/corpus"
+            displayName: Run libFuzzer for 5 minutes
+          - task: PublishBuildArtifacts@1
+            condition: succeededOrFailed()
+            inputs:
+              PathtoPublish: $(Build.ArtifactStagingDirectory)/fuzz
+              ArtifactName: fuzz
+              publishLocation: Container

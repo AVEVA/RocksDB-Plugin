@@ -1,0 +1,25 @@
+{
+  "dependencies": [
+    {
+      "name": "boost-asio"
+    },
+    {
+      "name": "boost-beast"
+    },
+    {
+      "name": "boost-intrusive"
+    },
+    {
+      "name": "boost-unordered"
+    },
+    {
+      "name": "boost-url"
+    },
+    {
+      "name": "openssl"
+    },
+    {
+      "name": "gtest"
+    }
+  ]
+}

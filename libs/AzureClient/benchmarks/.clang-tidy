@@ -1,0 +1,14 @@
+# The throughput benchmarks replace the global `operator new`/`operator delete` so they can measure how many
+# bytes an upload allocates. A replacement allocator has to use the C allocation functions: calling anything
+# that itself allocates (including `::operator new`) would recurse, so `cppcoreguidelines-no-malloc` and
+# `cppcoreguidelines-owning-memory` cannot be satisfied here. Everything else inherits the repository config.
+#
+# `readability-inconsistent-declaration-parameter-name` is disabled for the same reason: the UCRT declares
+# the replaceable allocation functions in <vcruntime_new.h> with reserved parameter names (`_Block`,
+# `_Size`). Matching those names in our definitions would violate the repository's identifier-naming rules
+# (and uses identifiers reserved for the implementation), so the two checks cannot both be satisfied.
+InheritParentConfig: true
+Checks: >-
+  -cppcoreguidelines-no-malloc,
+  -cppcoreguidelines-owning-memory,
+  -readability-inconsistent-declaration-parameter-name

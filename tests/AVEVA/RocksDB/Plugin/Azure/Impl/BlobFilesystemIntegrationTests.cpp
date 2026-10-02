@@ -5,48 +5,39 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "IntegrationTestHelpers.hpp"
 
+#include <boost/asio/use_future.hpp>
 #include <gtest/gtest.h>
-#include <azure/storage/blobs.hpp>
-#include <azure/identity.hpp>
 
+#include <algorithm>
+
+#include <memory>
 #include <string>
 #include <vector>
-#include <memory>
 
 using AVEVA::RocksDB::Plugin::Azure::Impl::BlobFilesystemImpl;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Configuration;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Testing::AzureIntegrationTestBase;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Testing::GenerateRandomBlobName;
 
-class BlobFilesystemIntegrationTests : public AzureIntegrationTestBase
-{
-protected:
+class BlobFilesystemIntegrationTests : public AzureIntegrationTestBase {
+  protected:
     std::unique_ptr<BlobFilesystemImpl> m_filesystem;
 
-    std::string GetBlobNamePrefix() const override
-    {
-        return "test-filesystem";
-    }
+    std::string GetBlobNamePrefix() const override { return "test-filesystem"; }
 
-    void SetUp() override
-    {
+    void SetUp() override {
         AzureIntegrationTestBase::SetUp();
 
-        if (m_credentials)
-        {
-            m_filesystem = std::make_unique<BlobFilesystemImpl>(
-                *m_credentials,
-                std::nullopt,  // No backup credentials for tests
-                Configuration::PageBlob::DefaultSize,
-                Configuration::PageBlob::DefaultBufferSize,
-                m_logger
-            );
+        if (m_credentials) {
+            m_filesystem = std::make_unique<BlobFilesystemImpl>(*m_credentials,
+                                                                std::nullopt, // No backup credentials for tests
+                                                                Configuration::PageBlob::DefaultSize,
+                                                                Configuration::PageBlob::DefaultBufferSize, m_logger);
         }
     }
 };
 
-TEST_F(BlobFilesystemIntegrationTests, CreateWriteableFile_CreatesNewFile)
-{
+TEST_F(BlobFilesystemIntegrationTests, CreateWriteableFile_CreatesNewFile) {
     // Arrange
     const auto path = m_containerPrefix + "/" + m_blobName;
 
@@ -58,8 +49,7 @@ TEST_F(BlobFilesystemIntegrationTests, CreateWriteableFile_CreatesNewFile)
     EXPECT_EQ(0, m_filesystem->GetFileSize(path));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, CreateReadableFile_FromExistingBlob_Succeeds)
-{
+TEST_F(BlobFilesystemIntegrationTests, CreateReadableFile_FromExistingBlob_Succeeds) {
     // Arrange
     std::vector<char> testData(1024, 'X');
     CreateBlobWithData(testData);
@@ -72,8 +62,7 @@ TEST_F(BlobFilesystemIntegrationTests, CreateReadableFile_FromExistingBlob_Succe
     EXPECT_EQ(testData.size(), file.GetSize());
 }
 
-TEST_F(BlobFilesystemIntegrationTests, CreateReadWriteFile_CreatesNewFile)
-{
+TEST_F(BlobFilesystemIntegrationTests, CreateReadWriteFile_CreatesNewFile) {
     // Arrange
     const auto path = m_containerPrefix + "/" + m_blobName;
 
@@ -84,8 +73,7 @@ TEST_F(BlobFilesystemIntegrationTests, CreateReadWriteFile_CreatesNewFile)
     EXPECT_TRUE(m_filesystem->FileExists(path));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, FileExists_NonExistentFile_ReturnsFalse)
-{
+TEST_F(BlobFilesystemIntegrationTests, FileExists_NonExistentFile_ReturnsFalse) {
     // Arrange
     std::string nonExistentFile = m_containerPrefix + "/nonexistent-" + m_blobName;
 
@@ -93,8 +81,7 @@ TEST_F(BlobFilesystemIntegrationTests, FileExists_NonExistentFile_ReturnsFalse)
     EXPECT_FALSE(m_filesystem->FileExists(nonExistentFile));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, GetFileSize_AfterWriting_ReturnsCorrectSize)
-{
+TEST_F(BlobFilesystemIntegrationTests, GetFileSize_AfterWriting_ReturnsCorrectSize) {
     // Arrange
     const size_t dataSize = 2048;
     std::vector<char> testData(dataSize, 'A');
@@ -108,8 +95,7 @@ TEST_F(BlobFilesystemIntegrationTests, GetFileSize_AfterWriting_ReturnsCorrectSi
     EXPECT_EQ(dataSize, size);
 }
 
-TEST_F(BlobFilesystemIntegrationTests, GetFileModificationTime_ReturnsValidTimestamp)
-{
+TEST_F(BlobFilesystemIntegrationTests, GetFileModificationTime_ReturnsValidTimestamp) {
     // Arrange
     const auto path = m_containerPrefix + "/" + m_blobName;
     auto file = m_filesystem->CreateWriteableFile(path);
@@ -121,8 +107,7 @@ TEST_F(BlobFilesystemIntegrationTests, GetFileModificationTime_ReturnsValidTimes
     EXPECT_GT(modTime, 0);
 }
 
-TEST_F(BlobFilesystemIntegrationTests, DeleteFile_ExistingFile_ReturnsTrue)
-{
+TEST_F(BlobFilesystemIntegrationTests, DeleteFile_ExistingFile_ReturnsTrue) {
     // Arrange
     const auto path = m_containerPrefix + "/" + m_blobName;
     auto file = m_filesystem->CreateWriteableFile(path);
@@ -136,8 +121,7 @@ TEST_F(BlobFilesystemIntegrationTests, DeleteFile_ExistingFile_ReturnsTrue)
     EXPECT_FALSE(m_filesystem->FileExists(path));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, DeleteFile_NonExistentFile_ReturnsFalse)
-{
+TEST_F(BlobFilesystemIntegrationTests, DeleteFile_NonExistentFile_ReturnsFalse) {
     // Arrange
     std::string nonExistentFile = m_containerPrefix + "/nonexistent-" + m_blobName;
 
@@ -148,8 +132,7 @@ TEST_F(BlobFilesystemIntegrationTests, DeleteFile_NonExistentFile_ReturnsFalse)
     EXPECT_FALSE(deleted);
 }
 
-TEST_F(BlobFilesystemIntegrationTests, GetChildren_EmptyDirectory_ReturnsEmpty)
-{
+TEST_F(BlobFilesystemIntegrationTests, GetChildren_EmptyDirectory_ReturnsEmpty) {
     // Arrange
     std::string dirPrefix = m_containerPrefix + "/empty-dir-" + GenerateRandomBlobName();
 
@@ -160,8 +143,7 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildren_EmptyDirectory_ReturnsEmpty)
     EXPECT_TRUE(children.empty());
 }
 
-TEST_F(BlobFilesystemIntegrationTests, GetChildren_WithFiles_ReturnsFileNames)
-{
+TEST_F(BlobFilesystemIntegrationTests, GetChildren_WithFiles_ReturnsFileNames) {
     // Arrange
     std::string dirPrefix = m_containerPrefix + "/test-dir-" + GenerateRandomBlobName();
     std::string file1 = dirPrefix + "/file1.sst";
@@ -189,8 +171,7 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildren_WithFiles_ReturnsFileNames)
     EXPECT_TRUE(m_filesystem->DeleteFile(file3));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, GetChildren_PathMatchesExistingBlobName_ReturnsNoChildren)
-{
+TEST_F(BlobFilesystemIntegrationTests, GetChildren_PathMatchesExistingBlobName_ReturnsNoChildren) {
     // Arrange
     const std::string filePath = m_containerPrefix + "/" + GenerateRandomBlobName("LOCK");
     {
@@ -207,8 +188,7 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildren_PathMatchesExistingBlobName_R
     EXPECT_TRUE(m_filesystem->DeleteFile(filePath));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, GetChildren_DirectoryMarkerBlob_IgnoresEmptyEntry)
-{
+TEST_F(BlobFilesystemIntegrationTests, GetChildren_DirectoryMarkerBlob_IgnoresEmptyEntry) {
     // Arrange
     const std::string dirPrefix = m_containerPrefix + "/marker-dir-" + GenerateRandomBlobName();
     const std::string directoryMarker = dirPrefix + "/";
@@ -229,8 +209,7 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildren_DirectoryMarkerBlob_IgnoresEm
     [[maybe_unused]] const auto remaining = m_filesystem->DeleteDir(dirPrefix);
 }
 
-TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_ReturnsCorrectSizes)
-{
+TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_ReturnsCorrectSizes) {
     // Arrange
     std::string dirPrefix = m_containerPrefix + "/attr-dir-" + GenerateRandomBlobName();
     std::string file1 = dirPrefix + "/file1.sst";
@@ -239,11 +218,11 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_ReturnsCorrectS
     {
         auto f1 = m_filesystem->CreateWriteableFile(file1);
         f1.Append(std::vector<char>(512, 'A'));
-        f1.Sync();  // Sync to update size metadata
+        f1.Sync(); // Sync to update size metadata
 
         auto f2 = m_filesystem->CreateWriteableFile(file2);
         f2.Append(std::vector<char>(1024, 'B'));
-        f2.Sync();  // Sync to update size metadata
+        f2.Sync(); // Sync to update size metadata
 
         // Act
         auto attributes = m_filesystem->GetChildrenFileAttributes(dirPrefix + "/");
@@ -252,9 +231,9 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_ReturnsCorrectS
         EXPECT_EQ(2, attributes.size());
 
         auto it1 = std::find_if(attributes.begin(), attributes.end(),
-            [](const auto& attr) { return attr.GetName() == "file1.sst"; });
+                                [](const auto& attr) { return attr.GetName() == "file1.sst"; });
         auto it2 = std::find_if(attributes.begin(), attributes.end(),
-            [](const auto& attr) { return attr.GetName() == "file2.sst"; });
+                                [](const auto& attr) { return attr.GetName() == "file2.sst"; });
 
         EXPECT_NE(attributes.end(), it1);
         EXPECT_NE(attributes.end(), it2);
@@ -267,8 +246,7 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_ReturnsCorrectS
     EXPECT_TRUE(m_filesystem->DeleteFile(file2));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_PathMatchesExistingBlobName_ReturnsNoEntries)
-{
+TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_PathMatchesExistingBlobName_ReturnsNoEntries) {
     // Arrange - A file path should not be interpreted as a directory listing prefix.
     const std::string filePath = m_containerPrefix + "/" + GenerateRandomBlobName("LOCK");
     {
@@ -285,8 +263,7 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_PathMatchesExis
     EXPECT_TRUE(m_filesystem->DeleteFile(filePath));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_EmptyDirectory_ReturnsEmpty)
-{
+TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_EmptyDirectory_ReturnsEmpty) {
     // Arrange
     std::string dirPrefix = m_containerPrefix + "/empty-attr-dir-" + GenerateRandomBlobName();
 
@@ -297,8 +274,7 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_EmptyDirectory_
     EXPECT_TRUE(attributes.empty());
 }
 
-TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_WithSubdirectories_ReturnsAllFiles)
-{
+TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_WithSubdirectories_ReturnsAllFiles) {
     // Arrange
     std::string dirPrefix = m_containerPrefix + "/nested-attr-dir-" + GenerateRandomBlobName();
     std::string file1 = dirPrefix + "/file1.sst";
@@ -325,11 +301,11 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_WithSubdirector
         EXPECT_EQ(3, attributes.size());
 
         auto it1 = std::find_if(attributes.begin(), attributes.end(),
-            [](const auto& attr) { return attr.GetName() == "file1.sst"; });
+                                [](const auto& attr) { return attr.GetName() == "file1.sst"; });
         auto it2 = std::find_if(attributes.begin(), attributes.end(),
-            [](const auto& attr) { return attr.GetName() == "subdir/file2.sst"; });
+                                [](const auto& attr) { return attr.GetName() == "subdir/file2.sst"; });
         auto it3 = std::find_if(attributes.begin(), attributes.end(),
-            [](const auto& attr) { return attr.GetName() == "subdir/nested/file3.log"; });
+                                [](const auto& attr) { return attr.GetName() == "subdir/nested/file3.log"; });
 
         EXPECT_NE(attributes.end(), it1);
         EXPECT_NE(attributes.end(), it2);
@@ -345,8 +321,7 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_WithSubdirector
     EXPECT_TRUE(m_filesystem->DeleteFile(file3));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_ZeroSizeFiles_ReturnsCorrectly)
-{
+TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_ZeroSizeFiles_ReturnsCorrectly) {
     // Arrange
     std::string dirPrefix = m_containerPrefix + "/zero-size-dir-" + GenerateRandomBlobName();
     std::string file1 = dirPrefix + "/empty1.sst";
@@ -363,8 +338,7 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_ZeroSizeFiles_R
         // Assert
         EXPECT_EQ(2, attributes.size());
 
-        for (const auto& attr : attributes)
-        {
+        for (const auto& attr : attributes) {
             EXPECT_EQ(0, attr.GetSize());
         }
     }
@@ -374,20 +348,14 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_ZeroSizeFiles_R
     EXPECT_TRUE(m_filesystem->DeleteFile(file2));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_MixedFileSizes_ReturnsCorrectly)
-{
+TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_MixedFileSizes_ReturnsCorrectly) {
     // Arrange
     std::string dirPrefix = m_containerPrefix + "/mixed-sizes-dir-" + GenerateRandomBlobName();
     std::vector<std::pair<std::string, size_t>> fileSpecs = {
-        {"tiny.sst", 1},
-        {"small.sst", 128},
-        {"medium.sst", 4096},
-        {"large.sst", 65536}
-    };
+        {"tiny.sst", 1}, {"small.sst", 128}, {"medium.sst", 4096}, {"large.sst", 65536}};
 
     {
-        for (const auto& [filename, size] : fileSpecs)
-        {
+        for (const auto& [filename, size] : fileSpecs) {
             std::string fullPath = dirPrefix + "/" + filename;
             auto file = m_filesystem->CreateWriteableFile(fullPath);
             file.Append(std::vector<char>(size, 'X'));
@@ -400,10 +368,9 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_MixedFileSizes_
         // Assert
         EXPECT_EQ(fileSpecs.size(), attributes.size());
 
-        for (const auto& [filename, expectedSize] : fileSpecs)
-        {
+        for (const auto& [filename, expectedSize] : fileSpecs) {
             auto it = std::find_if(attributes.begin(), attributes.end(),
-                [&filename](const auto& attr) { return attr.GetName() == filename; });
+                                   [&filename](const auto& attr) { return attr.GetName() == filename; });
 
             ASSERT_NE(attributes.end(), it) << "File " << filename << " not found in attributes";
             EXPECT_EQ(expectedSize, it->GetSize()) << "Wrong size for file " << filename;
@@ -414,8 +381,7 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_MixedFileSizes_
     [[maybe_unused]] size_t remaining = m_filesystem->DeleteDir(dirPrefix);
 }
 
-TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_WithoutTrailingSlash_ReturnsCorrectly)
-{
+TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_WithoutTrailingSlash_ReturnsCorrectly) {
     // Arrange
     std::string dirPrefix = m_containerPrefix + "/no-slash-dir-" + GenerateRandomBlobName();
     std::string file1 = dirPrefix + "/file1.sst";
@@ -442,16 +408,14 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_WithoutTrailing
     EXPECT_TRUE(m_filesystem->DeleteFile(file2));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_LargeNumberOfFiles_HandlesCorrectly)
-{
+TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_LargeNumberOfFiles_HandlesCorrectly) {
     // Arrange - Create more files than typical page size to test pagination
     std::string dirPrefix = m_containerPrefix + "/many-files-dir-" + GenerateRandomBlobName();
-    const int fileCount = 25;  // Should be enough to test pagination behavior
+    const int fileCount = 25; // Should be enough to test pagination behavior
     std::vector<std::string> filePaths;
 
     {
-        for (int i = 0; i < fileCount; ++i)
-        {
+        for (int i = 0; i < fileCount; ++i) {
             std::string filePath = dirPrefix + "/file" + std::to_string(i) + ".sst";
             filePaths.push_back(filePath);
 
@@ -468,13 +432,12 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_LargeNumberOfFi
         EXPECT_EQ(fileCount, attributes.size());
 
         // Verify each file is present with correct size
-        for (int i = 0; i < fileCount; ++i)
-        {
+        for (int i = 0; i < fileCount; ++i) {
             std::string filename = "file" + std::to_string(i) + ".sst";
             size_t expectedSize = static_cast<size_t>(100 * (i + 1));
 
             auto it = std::find_if(attributes.begin(), attributes.end(),
-                [&filename](const auto& attr) { return attr.GetName() == filename; });
+                                   [&filename](const auto& attr) { return attr.GetName() == filename; });
 
             ASSERT_NE(attributes.end(), it) << "File " << filename << " not found";
             EXPECT_EQ(expectedSize, it->GetSize()) << "Wrong size for " << filename;
@@ -485,15 +448,13 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_LargeNumberOfFi
     [[maybe_unused]] size_t remaining = m_filesystem->DeleteDir(dirPrefix);
 }
 
-TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_VeryLargeNumberOfFiles_TestsPagination)
-{
+TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_VeryLargeNumberOfFiles_TestsPagination) {
     // Arrange - Create many files to force multiple pages (more than default PageSizeHint)
     std::string dirPrefix = m_containerPrefix + "/pagination-test-dir-" + GenerateRandomBlobName();
-    const int fileCount = 15;  // Reasonable number for integration test, adjust PageSizeHint to test pagination
+    const int fileCount = 15; // Reasonable number for integration test, adjust PageSizeHint to test pagination
 
     {
-        for (int i = 0; i < fileCount; ++i)
-        {
+        for (int i = 0; i < fileCount; ++i) {
             std::string filePath = dirPrefix + "/file" + std::to_string(i) + ".sst";
             auto file = m_filesystem->CreateWriteableFile(filePath);
             // Write unique size for each file
@@ -508,13 +469,12 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_VeryLargeNumber
         EXPECT_EQ(fileCount, attributes.size()) << "Pagination should return all files";
 
         // Verify all files have correct sizes
-        for (int i = 0; i < fileCount; ++i)
-        {
+        for (int i = 0; i < fileCount; ++i) {
             std::string filename = "file" + std::to_string(i) + ".sst";
             size_t expectedSize = static_cast<size_t>(50 * (i + 1));
 
             auto it = std::find_if(attributes.begin(), attributes.end(),
-                [&filename](const auto& attr) { return attr.GetName() == filename; });
+                                   [&filename](const auto& attr) { return attr.GetName() == filename; });
 
             ASSERT_NE(attributes.end(), it) << "File " << filename << " not found - pagination may have failed";
             EXPECT_EQ(expectedSize, it->GetSize()) << "Wrong size for " << filename;
@@ -525,20 +485,14 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_VeryLargeNumber
     [[maybe_unused]] size_t remaining = m_filesystem->DeleteDir(dirPrefix);
 }
 
-TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_DifferentFileTypes_ReturnsAll)
-{
+TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_DifferentFileTypes_ReturnsAll) {
     // Arrange
     std::string dirPrefix = m_containerPrefix + "/file-types-dir-" + GenerateRandomBlobName();
     std::vector<std::pair<std::string, size_t>> fileSpecs = {
-        {"data.sst", 1024},
-     {"log.log", 512},
-        {"manifest.manifest", 256},
-        {"current.current", 128}
-    };
+        {"data.sst", 1024}, {"log.log", 512}, {"manifest.manifest", 256}, {"current.current", 128}};
 
     {
-        for (const auto& [filename, size] : fileSpecs)
-        {
+        for (const auto& [filename, size] : fileSpecs) {
             std::string fullPath = dirPrefix + "/" + filename;
             auto file = m_filesystem->CreateWriteableFile(fullPath);
             file.Append(std::vector<char>(size, 'X'));
@@ -551,10 +505,9 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_DifferentFileTy
         // Assert
         EXPECT_EQ(fileSpecs.size(), attributes.size());
 
-        for (const auto& [filename, expectedSize] : fileSpecs)
-        {
+        for (const auto& [filename, expectedSize] : fileSpecs) {
             auto it = std::find_if(attributes.begin(), attributes.end(),
-                [&filename](const auto& attr) { return attr.GetName() == filename; });
+                                   [&filename](const auto& attr) { return attr.GetName() == filename; });
 
             ASSERT_NE(attributes.end(), it) << "File " << filename << " not found";
             EXPECT_EQ(expectedSize, it->GetSize());
@@ -565,8 +518,7 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildrenFileAttributes_DifferentFileTy
     [[maybe_unused]] size_t remaining = m_filesystem->DeleteDir(dirPrefix);
 }
 
-TEST_F(BlobFilesystemIntegrationTests, DeleteDir_RemovesAllFilesInDirectory)
-{
+TEST_F(BlobFilesystemIntegrationTests, DeleteDir_RemovesAllFilesInDirectory) {
     // Arrange
     std::string dirPrefix = m_containerPrefix + "/delete-dir-" + GenerateRandomBlobName();
     std::string file1 = dirPrefix + "/file1.sst";
@@ -596,12 +548,10 @@ TEST_F(BlobFilesystemIntegrationTests, DeleteDir_RemovesAllFilesInDirectory)
 // File Rename Tests
 // ============================================================================
 
-TEST_F(BlobFilesystemIntegrationTests, RenameFile_MovesDataCorrectly)
-{
+TEST_F(BlobFilesystemIntegrationTests, RenameFile_MovesDataCorrectly) {
     // Arrange
     std::vector<char> testData(1024);
-    for (size_t i = 0; i < testData.size(); ++i)
-    {
+    for (size_t i = 0; i < testData.size(); ++i) {
         testData[i] = static_cast<char>(i % 256);
     }
 
@@ -611,7 +561,7 @@ TEST_F(BlobFilesystemIntegrationTests, RenameFile_MovesDataCorrectly)
     {
         auto file = m_filesystem->CreateWriteableFile(originalName);
         file.Append(testData);
-        file.Sync();  // Sync to update size metadata
+        file.Sync(); // Sync to update size metadata
     }
 
     EXPECT_TRUE(m_filesystem->FileExists(originalName));
@@ -638,8 +588,7 @@ TEST_F(BlobFilesystemIntegrationTests, RenameFile_MovesDataCorrectly)
     EXPECT_TRUE(m_filesystem->DeleteFile(newName));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, Truncate_ReducesFileSize)
-{
+TEST_F(BlobFilesystemIntegrationTests, Truncate_ReducesFileSize) {
     // Arrange
     std::vector<char> testData(2048, 'X');
     CreateBlobWithData(testData);
@@ -654,8 +603,7 @@ TEST_F(BlobFilesystemIntegrationTests, Truncate_ReducesFileSize)
     EXPECT_EQ(1024, m_filesystem->GetFileSize(path));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, Truncate_ToLargerSize_DoesNothing)
-{
+TEST_F(BlobFilesystemIntegrationTests, Truncate_ToLargerSize_DoesNothing) {
     // Arrange
     std::vector<char> testData(1024, 'X');
     CreateBlobWithData(testData);
@@ -670,8 +618,7 @@ TEST_F(BlobFilesystemIntegrationTests, Truncate_ToLargerSize_DoesNothing)
     EXPECT_EQ(1024, m_filesystem->GetFileSize(path));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, LockFile_SuccessfullyAcquiresLock)
-{
+TEST_F(BlobFilesystemIntegrationTests, LockFile_SuccessfullyAcquiresLock) {
     // Arrange
     std::string lockFileName = m_containerPrefix + "/lock-" + m_blobName;
 
@@ -688,8 +635,7 @@ TEST_F(BlobFilesystemIntegrationTests, LockFile_SuccessfullyAcquiresLock)
     EXPECT_TRUE(m_filesystem->DeleteFile(lockFileName));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, UnlockFile_ReleasesLock)
-{
+TEST_F(BlobFilesystemIntegrationTests, UnlockFile_ReleasesLock) {
     // Arrange
     std::string lockFileName = m_containerPrefix + "/lock-" + m_blobName;
     auto lock = m_filesystem->LockFile(lockFileName);
@@ -705,8 +651,7 @@ TEST_F(BlobFilesystemIntegrationTests, UnlockFile_ReleasesLock)
     EXPECT_TRUE(m_filesystem->DeleteFile(lockFileName));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, UnlockFile_InvalidLock_ReturnsFalse)
-{
+TEST_F(BlobFilesystemIntegrationTests, UnlockFile_InvalidLock_ReturnsFalse) {
     // Arrange
     std::string lockFileName1 = m_containerPrefix + "/lock1-" + m_blobName;
     std::string lockFileName2 = m_containerPrefix + "/lock2-" + m_blobName;
@@ -726,14 +671,13 @@ TEST_F(BlobFilesystemIntegrationTests, UnlockFile_InvalidLock_ReturnsFalse)
     EXPECT_TRUE(m_filesystem->DeleteFile(lockFileName2));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, ReopenWriteableFile_PreservesExistingData)
-{
+TEST_F(BlobFilesystemIntegrationTests, ReopenWriteableFile_PreservesExistingData) {
     // Arrange
     const auto path = m_containerPrefix + "/" + m_blobName;
     std::vector<char> initialData(512, 'A');
     auto file = m_filesystem->CreateWriteableFile(path);
     file.Append(initialData);
-    file.Sync();  // Sync to update size metadata
+    file.Sync(); // Sync to update size metadata
 
     // Act - Reopen the file
     auto reopenedFile = m_filesystem->ReopenWriteableFile(path);
@@ -744,19 +688,18 @@ TEST_F(BlobFilesystemIntegrationTests, ReopenWriteableFile_PreservesExistingData
     // Verify we can append more data
     std::vector<char> newData(512, 'B');
     reopenedFile.Append(newData);
-    reopenedFile.Sync();  // Sync to update size metadata
+    reopenedFile.Sync(); // Sync to update size metadata
 
     EXPECT_EQ(initialData.size() + newData.size(), m_filesystem->GetFileSize(path));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, ReuseWritableFile_CreatesNewFile)
-{
+TEST_F(BlobFilesystemIntegrationTests, ReuseWritableFile_CreatesNewFile) {
     // Arrange
     const auto path = m_containerPrefix + "/" + m_blobName;
     std::vector<char> oldData(1024, 'X');
     auto file = m_filesystem->CreateWriteableFile(path);
     file.Append(oldData);
-    file.Sync();  // Sync to update size metadata
+    file.Sync(); // Sync to update size metadata
 
     EXPECT_EQ(oldData.size(), m_filesystem->GetFileSize(path));
 
@@ -768,8 +711,7 @@ TEST_F(BlobFilesystemIntegrationTests, ReuseWritableFile_CreatesNewFile)
     EXPECT_EQ(0, m_filesystem->GetFileSize(path));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, CreateLogger_CreatesLogFile)
-{
+TEST_F(BlobFilesystemIntegrationTests, CreateLogger_CreatesLogFile) {
     // Arrange
     std::string logFileName = m_containerPrefix + "/" + m_blobName;
 
@@ -780,8 +722,7 @@ TEST_F(BlobFilesystemIntegrationTests, CreateLogger_CreatesLogFile)
     EXPECT_TRUE(m_filesystem->FileExists(logFileName));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, CreateDirectory_ReturnsDirectoryImpl)
-{
+TEST_F(BlobFilesystemIntegrationTests, CreateDirectory_ReturnsDirectoryImpl) {
     // Arrange
     std::string dirPath = m_containerPrefix + "/test-directory-" + GenerateRandomBlobName();
 
@@ -791,21 +732,19 @@ TEST_F(BlobFilesystemIntegrationTests, CreateDirectory_ReturnsDirectoryImpl)
     // Assert - Directory operations should work
     // Note: Azure Blob Storage doesn't have real directories,
     // but we should be able to create a DirectoryImpl object
-    EXPECT_NO_THROW(
-        {
-            // Fsync is a no-op but should not throw
-            directory.Fsync();
-        });
+    EXPECT_NO_THROW({
+        // Fsync is a no-op but should not throw
+        directory.Fsync();
+    });
 }
 
-TEST_F(BlobFilesystemIntegrationTests, CreateWriteableFile_SameFileTwice_TruncatesExisting)
-{
+TEST_F(BlobFilesystemIntegrationTests, CreateWriteableFile_SameFileTwice_TruncatesExisting) {
     // Arrange
     const auto path = m_containerPrefix + "/" + m_blobName;
     std::vector<char> firstData(1024, 'A');
     auto file1 = m_filesystem->CreateWriteableFile(path);
     file1.Append(firstData);
-    file1.Sync();  // Sync to update size metadata
+    file1.Sync(); // Sync to update size metadata
 
     EXPECT_EQ(firstData.size(), m_filesystem->GetFileSize(path));
 
@@ -816,13 +755,11 @@ TEST_F(BlobFilesystemIntegrationTests, CreateWriteableFile_SameFileTwice_Truncat
     EXPECT_EQ(0, m_filesystem->GetFileSize(path));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, GetChildren_WithSizeHint_ReturnsResults)
-{
+TEST_F(BlobFilesystemIntegrationTests, GetChildren_WithSizeHint_ReturnsResults) {
     // Arrange
     std::string dirPrefix = m_containerPrefix + "/hint-dir-" + GenerateRandomBlobName();
 
-    for (int i = 0; i < 5; ++i)
-    {
+    for (int i = 0; i < 5; ++i) {
         std::string fileName = dirPrefix + "/file" + std::to_string(i) + ".sst";
         {
             auto f = m_filesystem->CreateWriteableFile(fileName);
@@ -840,15 +777,13 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildren_WithSizeHint_ReturnsResults)
     [[maybe_unused]] size_t remaining = m_filesystem->DeleteDir(dirPrefix);
 }
 
-TEST_F(BlobFilesystemIntegrationTests, RenameFile_LargeFile_HandlesCorrectly)
-{
+TEST_F(BlobFilesystemIntegrationTests, RenameFile_LargeFile_HandlesCorrectly) {
     // Arrange - Create a file larger than buffer size to test chunked rename.
-  // The file should be larger than 5MB so that request limits are verified to be below
+    // The file should be larger than 5MB so that request limits are verified to be below
     // what is acceptable by azure.
     const size_t largeSize = static_cast<size_t>(6) * 1024 * 1024; // 6Mb
     std::vector<char> largeData(largeSize);
-    for (size_t i = 0; i < largeData.size(); ++i)
-    {
+    for (size_t i = 0; i < largeData.size(); ++i) {
         largeData[i] = static_cast<char>(i % 256);
     }
 
@@ -857,7 +792,7 @@ TEST_F(BlobFilesystemIntegrationTests, RenameFile_LargeFile_HandlesCorrectly)
 
     auto file = m_filesystem->CreateWriteableFile(originalName);
     file.Append(largeData);
-    file.Sync();  // Sync to update size metadata
+    file.Sync(); // Sync to update size metadata
 
     // Act
     m_filesystem->RenameFile(originalName, newName);
@@ -871,8 +806,7 @@ TEST_F(BlobFilesystemIntegrationTests, RenameFile_LargeFile_HandlesCorrectly)
     EXPECT_TRUE(m_filesystem->DeleteFile(newName));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, FileExists_DirectoryPath_ReturnsTrueIfHasChildren)
-{
+TEST_F(BlobFilesystemIntegrationTests, FileExists_DirectoryPath_ReturnsTrueIfHasChildren) {
     // Arrange - Create a directory structure with files
     std::string dirPrefix = m_containerPrefix + "/dir-check-" + GenerateRandomBlobName();
     std::string file1 = dirPrefix + "/file1.sst";
@@ -891,8 +825,7 @@ TEST_F(BlobFilesystemIntegrationTests, FileExists_DirectoryPath_ReturnsTrueIfHas
     EXPECT_FALSE(m_filesystem->FileExists(dirPrefix));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, FileExists_EmptyDirectoryPath_ReturnsFalse)
-{
+TEST_F(BlobFilesystemIntegrationTests, FileExists_EmptyDirectoryPath_ReturnsFalse) {
     // Arrange - Create a path that looks like a directory but has no children
     std::string emptyDirPath = m_containerPrefix + "/empty-check-" + GenerateRandomBlobName();
 
@@ -900,8 +833,7 @@ TEST_F(BlobFilesystemIntegrationTests, FileExists_EmptyDirectoryPath_ReturnsFals
     EXPECT_FALSE(m_filesystem->FileExists(emptyDirPath));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, RenameFile_DestinationExists_OverwritesFile)
-{
+TEST_F(BlobFilesystemIntegrationTests, RenameFile_DestinationExists_OverwritesFile) {
     // Arrange - Create both source and destination files
     std::vector<char> sourceData(512, 'S');
     std::vector<char> destData(256, 'D');
@@ -943,26 +875,19 @@ TEST_F(BlobFilesystemIntegrationTests, RenameFile_DestinationExists_OverwritesFi
     EXPECT_TRUE(m_filesystem->DeleteFile(destPath));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, RenameFile_NonExistentSource_ThrowsOrFails)
-{
+TEST_F(BlobFilesystemIntegrationTests, RenameFile_NonExistentSource_ThrowsOrFails) {
     // Arrange
     std::string nonExistentSource = m_containerPrefix + "/nonexistent-src-" + m_blobName;
     std::string destPath = m_containerPrefix + "/rename-dest-" + m_blobName;
 
     // Act & Assert - Should throw or fail when source doesn't exist
-    EXPECT_THROW(
-        {
- m_filesystem->RenameFile(nonExistentSource, destPath);
-        },
-        std::exception
-    );
+    EXPECT_THROW({ m_filesystem->RenameFile(nonExistentSource, destPath); }, std::exception);
 
     // Destination should not have been created
     EXPECT_FALSE(m_filesystem->FileExists(destPath));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, LockFile_AlreadyLocked_ThrowsException)
-{
+TEST_F(BlobFilesystemIntegrationTests, LockFile_AlreadyLocked_ThrowsException) {
     // Arrange - Lock a file first
     std::string lockFileName = m_containerPrefix + "/double-lock-" + m_blobName;
     auto firstLock = m_filesystem->LockFile(lockFileName);
@@ -970,20 +895,14 @@ TEST_F(BlobFilesystemIntegrationTests, LockFile_AlreadyLocked_ThrowsException)
     EXPECT_EQ(1, m_filesystem->GetLeaseClientCount());
 
     // Act & Assert - Attempting to lock again should throw
-    EXPECT_THROW(
-        {
-            auto secondLock = m_filesystem->LockFile(lockFileName);
-        },
-        std::exception
-    );
+    EXPECT_THROW({ auto secondLock = m_filesystem->LockFile(lockFileName); }, std::exception);
 
     // Cleanup
     m_filesystem->UnlockFile(*firstLock);
     EXPECT_TRUE(m_filesystem->DeleteFile(lockFileName));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, LockFile_AfterUnlock_SucceedsOnSecondAttempt)
-{
+TEST_F(BlobFilesystemIntegrationTests, LockFile_AfterUnlock_SucceedsOnSecondAttempt) {
     // Arrange - Lock and then unlock a file
     std::string lockFileName = m_containerPrefix + "/relock-" + m_blobName;
     auto firstLock = m_filesystem->LockFile(lockFileName);
@@ -1004,22 +923,15 @@ TEST_F(BlobFilesystemIntegrationTests, LockFile_AfterUnlock_SucceedsOnSecondAtte
     EXPECT_TRUE(m_filesystem->DeleteFile(lockFileName));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, Truncate_NonExistentFile_ThrowsOrFails)
-{
+TEST_F(BlobFilesystemIntegrationTests, Truncate_NonExistentFile_ThrowsOrFails) {
     // Arrange
     std::string nonExistentFile = m_containerPrefix + "/nonexistent-truncate-" + m_blobName;
 
     // Act & Assert - Truncating non-existent file should throw
-    EXPECT_THROW(
-        {
-            m_filesystem->Truncate(nonExistentFile, 100);
-        },
-        std::exception
-    );
+    EXPECT_THROW({ m_filesystem->Truncate(nonExistentFile, 100); }, std::exception);
 }
 
-TEST_F(BlobFilesystemIntegrationTests, Truncate_ToZero_ReducesToZero)
-{
+TEST_F(BlobFilesystemIntegrationTests, Truncate_ToZero_ReducesToZero) {
     // Arrange
     std::vector<char> testData(1024, 'Z');
     CreateBlobWithData(testData);
@@ -1034,64 +946,40 @@ TEST_F(BlobFilesystemIntegrationTests, Truncate_ToZero_ReducesToZero)
     EXPECT_EQ(0, m_filesystem->GetFileSize(path));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, GetFileSize_NonExistentFile_ThrowsOrFails)
-{
+TEST_F(BlobFilesystemIntegrationTests, GetFileSize_NonExistentFile_ThrowsOrFails) {
     // Arrange
     std::string nonExistentFile = m_containerPrefix + "/nonexistent-size-" + m_blobName;
 
     // Act & Assert - Getting size of non-existent file should throw
-    EXPECT_THROW(
-        {
-            [[maybe_unused]] auto size = m_filesystem->GetFileSize(nonExistentFile);
-        },
-        std::exception
-    );
+    EXPECT_THROW({ [[maybe_unused]] auto size = m_filesystem->GetFileSize(nonExistentFile); }, std::exception);
 }
 
-TEST_F(BlobFilesystemIntegrationTests, GetFileModificationTime_NonExistentFile_ThrowsOrFails)
-{
+TEST_F(BlobFilesystemIntegrationTests, GetFileModificationTime_NonExistentFile_ThrowsOrFails) {
     // Arrange
     std::string nonExistentFile = m_containerPrefix + "/nonexistent-modtime-" + m_blobName;
 
     // Act & Assert - Getting modification time of non-existent file should throw
     EXPECT_THROW(
-        {
-            [[maybe_unused]] auto modTime = m_filesystem->GetFileModificationTime(nonExistentFile);
-        },
-        std::exception
-    );
+        { [[maybe_unused]] auto modTime = m_filesystem->GetFileModificationTime(nonExistentFile); }, std::exception);
 }
 
-TEST_F(BlobFilesystemIntegrationTests, CreateReadableFile_NonExistentFile_ThrowsOrFails)
-{
+TEST_F(BlobFilesystemIntegrationTests, CreateReadableFile_NonExistentFile_ThrowsOrFails) {
     // Arrange
     std::string nonExistentFile = m_containerPrefix + "/nonexistent-read-" + m_blobName;
 
     // Act & Assert - Creating readable file from non-existent blob should throw
-    EXPECT_THROW(
-        {
-            auto file = m_filesystem->CreateReadableFile(nonExistentFile);
-        },
-        std::exception
-    );
+    EXPECT_THROW({ auto file = m_filesystem->CreateReadableFile(nonExistentFile); }, std::exception);
 }
 
-TEST_F(BlobFilesystemIntegrationTests, ReopenWriteableFile_NonExistentFile_ThrowsOrFails)
-{
+TEST_F(BlobFilesystemIntegrationTests, ReopenWriteableFile_NonExistentFile_ThrowsOrFails) {
     // Arrange
     std::string nonExistentFile = m_containerPrefix + "/nonexistent-reopen-" + m_blobName;
 
     // Act & Assert - Reopening non-existent file should throw
-    EXPECT_THROW(
-        {
-            auto file = m_filesystem->ReopenWriteableFile(nonExistentFile);
-        },
-        std::exception
-    );
+    EXPECT_THROW({ auto file = m_filesystem->ReopenWriteableFile(nonExistentFile); }, std::exception);
 }
 
-TEST_F(BlobFilesystemIntegrationTests, DeleteDir_EmptyDirectory_ReturnsZero)
-{
+TEST_F(BlobFilesystemIntegrationTests, DeleteDir_EmptyDirectory_ReturnsZero) {
     // Arrange - Create an empty directory path (no files)
     std::string emptyDirPrefix = m_containerPrefix + "/empty-delete-" + GenerateRandomBlobName();
 
@@ -1102,8 +990,7 @@ TEST_F(BlobFilesystemIntegrationTests, DeleteDir_EmptyDirectory_ReturnsZero)
     EXPECT_EQ(0, remainingFiles);
 }
 
-TEST_F(BlobFilesystemIntegrationTests, DeleteDir_RootPath_DeletesAllInContainer)
-{
+TEST_F(BlobFilesystemIntegrationTests, DeleteDir_RootPath_DeletesAllInContainer) {
     // Arrange - Create files in root and subdirectories
     std::string uniquePrefix = m_containerPrefix + "/root-delete-" + GenerateRandomBlobName();
     std::string file1 = uniquePrefix + "/file1.sst";
@@ -1126,12 +1013,10 @@ TEST_F(BlobFilesystemIntegrationTests, DeleteDir_RootPath_DeletesAllInContainer)
     EXPECT_FALSE(m_filesystem->FileExists(file2));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, CreateWriteableFile_VeryLongPath_HandlesCorrectly)
-{
+TEST_F(BlobFilesystemIntegrationTests, CreateWriteableFile_VeryLongPath_HandlesCorrectly) {
     // Arrange - Create a very long path with nested directories
     std::string longPath = m_containerPrefix;
-    for (int i = 0; i < 10; ++i)
-    {
+    for (int i = 0; i < 10; ++i) {
         longPath += "/verylongdirectoryname" + std::to_string(i);
     }
     longPath += "/file.sst";
@@ -1150,8 +1035,7 @@ TEST_F(BlobFilesystemIntegrationTests, CreateWriteableFile_VeryLongPath_HandlesC
     EXPECT_TRUE(m_filesystem->DeleteFile(longPath));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, CreateWriteableFile_SpecialCharactersInName_HandlesCorrectly)
-{
+TEST_F(BlobFilesystemIntegrationTests, CreateWriteableFile_SpecialCharactersInName_HandlesCorrectly) {
     // Arrange - Create file with special characters (that are valid in blob names)
     std::string specialPath = m_containerPrefix + "/special-chars-file_name.with-dashes.sst";
 
@@ -1169,12 +1053,10 @@ TEST_F(BlobFilesystemIntegrationTests, CreateWriteableFile_SpecialCharactersInNa
     EXPECT_TRUE(m_filesystem->DeleteFile(specialPath));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, GetChildren_VeryLongDirectoryPath_HandlesCorrectly)
-{
+TEST_F(BlobFilesystemIntegrationTests, GetChildren_VeryLongDirectoryPath_HandlesCorrectly) {
     // Arrange - Create files in a very nested directory
     std::string longDirPath = m_containerPrefix;
-    for (int i = 0; i < 5; ++i)
-    {
+    for (int i = 0; i < 5; ++i) {
         longDirPath += "/nested" + std::to_string(i);
     }
 
@@ -1198,8 +1080,7 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildren_VeryLongDirectoryPath_Handles
     [[maybe_unused]] const auto remaining = m_filesystem->DeleteDir(longDirPath);
 }
 
-TEST_F(BlobFilesystemIntegrationTests, RenameFile_SameSourceAndDestination_HandlesGracefully)
-{
+TEST_F(BlobFilesystemIntegrationTests, RenameFile_SameSourceAndDestination_HandlesGracefully) {
     // Arrange - Create a file
     std::vector<char> testData(256, 'R');
     std::string filePath = m_containerPrefix + "/same-rename-" + m_blobName;
@@ -1232,8 +1113,7 @@ TEST_F(BlobFilesystemIntegrationTests, RenameFile_SameSourceAndDestination_Handl
     EXPECT_TRUE(m_filesystem->DeleteFile(filePath));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, CreateWriteableFile_AfterDelete_RecreatesSuccessfully)
-{
+TEST_F(BlobFilesystemIntegrationTests, CreateWriteableFile_AfterDelete_RecreatesSuccessfully) {
     // Arrange - Create, delete, then recreate the same file
     const auto path = m_containerPrefix + "/" + m_blobName;
 
@@ -1261,15 +1141,14 @@ TEST_F(BlobFilesystemIntegrationTests, CreateWriteableFile_AfterDelete_Recreates
     EXPECT_EQ(1024, m_filesystem->GetFileSize(path));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, SequentialRead_ETagMismatch_RefreshesAndRetriess)
-{
+TEST_F(BlobFilesystemIntegrationTests, SequentialRead_ETagMismatch_RefreshesAndRetriess) {
     // Arrange
     std::string blobName = m_containerPrefix + "/original-" + m_blobName;
 
     std::vector<char> initialData(512, 'a');
     auto file = m_filesystem->CreateWriteableFile(blobName);
     file.Append(initialData);
-    file.Sync();  // Sync to update size metadata
+    file.Sync(); // Sync to update size metadata
 
     auto readFile = m_filesystem->CreateReadableFile(blobName);
     std::vector<char> readBuffer(512);
@@ -1281,28 +1160,27 @@ TEST_F(BlobFilesystemIntegrationTests, SequentialRead_ETagMismatch_RefreshesAndR
     // Act
     std::vector<char> updatedData(512, 'b');
     file.Append(updatedData);
-    file.Sync();  // Sync to update size metadata
+    file.Sync(); // Sync to update size metadata
 
-    // Assert    
+    // Assert
     std::vector<char> readAppendedBuffer(1024);
     bytesRead = readFile.SequentialRead(static_cast<int64_t>(1024), readAppendedBuffer.data());
     EXPECT_EQ(512, bytesRead);
     EXPECT_EQ(1024, readFile.GetSize());
-    EXPECT_EQ(512, std::count(readAppendedBuffer.begin(), readAppendedBuffer.begin() + 512, 'b'));    
+    EXPECT_EQ(512, std::count(readAppendedBuffer.begin(), readAppendedBuffer.begin() + 512, 'b'));
 
     // Cleanup
     EXPECT_TRUE(m_filesystem->DeleteFile(blobName));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, RandomRead_ETagMismatch_RefreshesAndRetries)
-{
+TEST_F(BlobFilesystemIntegrationTests, RandomRead_ETagMismatch_RefreshesAndRetries) {
     // Arrange
     std::string blobName = m_containerPrefix + "/original-" + m_blobName;
 
     std::vector<char> initialData(512, 'a');
     auto file = m_filesystem->CreateWriteableFile(blobName);
     file.Append(initialData);
-    file.Sync();  // Sync to update size metadata
+    file.Sync(); // Sync to update size metadata
 
     auto readFile = m_filesystem->CreateReadableFile(blobName);
     std::vector<char> readBuffer(512);
@@ -1314,9 +1192,9 @@ TEST_F(BlobFilesystemIntegrationTests, RandomRead_ETagMismatch_RefreshesAndRetri
     // Act
     std::vector<char> updatedData(512, 'b');
     file.Append(updatedData);
-    file.Sync();  // Sync to update size metadata
+    file.Sync(); // Sync to update size metadata
 
-    // Assert    
+    // Assert
     std::vector<char> readAppendedBuffer(1024);
     bytesRead = readFile.RandomRead(0, static_cast<int64_t>(1024), readAppendedBuffer.data());
     EXPECT_EQ(1024, bytesRead);
@@ -1328,8 +1206,7 @@ TEST_F(BlobFilesystemIntegrationTests, RandomRead_ETagMismatch_RefreshesAndRetri
     EXPECT_TRUE(m_filesystem->DeleteFile(blobName));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, RandomRead_AfterBlobGrows_UpdatesSize)
-{
+TEST_F(BlobFilesystemIntegrationTests, RandomRead_AfterBlobGrows_UpdatesSize) {
     // Arrange
     std::string blobName = m_containerPrefix + "/original-" + m_blobName;
     std::vector<char> initialData(256, 'Z');

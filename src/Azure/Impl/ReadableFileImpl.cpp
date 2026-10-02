@@ -5,7 +5,7 @@
 
 #include <boost/log/trivial.hpp>
 
-#include <azure/core/exception.hpp>
+#include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include <cassert>
 
 using namespace boost::log::trivial;
@@ -90,8 +90,8 @@ int64_t ReadableFileImpl::DownloadWithRetry(const int64_t offset, const int64_t 
                 m_blobClient->Download(std::span<char>(buffer, static_cast<size_t>(toRead)), offset, toRead, m_etag);
             bytesRead = std::min(bytesRead, remaining);
             success = true;
-        } catch (const ::Azure::Core::RequestFailedException& ex) {
-            if (ex.StatusCode == ::Azure::Core::Http::HttpStatusCode::PreconditionFailed) {
+        } catch (const RequestFailedException& ex) {
+            if (ex.StatusCode == HttpStatus::PreconditionFailed) {
                 RefreshBlobMetadata();
             } else {
                 throw;
@@ -106,6 +106,6 @@ void ReadableFileImpl::RefreshBlobMetadata() const {
     m_size = m_blobClient->GetSize();
     m_etag = m_blobClient->GetEtag();
     BOOST_LOG_SEV(*m_logger, debug) << "Blob metadata refreshed for file '" << m_name << "' :size = " << m_size
-                                    << " bytes, etag = " << m_etag.ToString();
+                                    << " bytes, etag = " << m_etag;
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

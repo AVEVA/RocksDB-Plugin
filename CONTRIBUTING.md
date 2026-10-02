@@ -21,7 +21,7 @@ This repository is currently maintained by AVEVA teams.
 
 1. Follow modern C++ practices (RAII, strong typing, clear ownership).
 2. Keep public headers in `include/AVEVA/RocksDB/Plugin/` backward compatible.
-3. For Azure layer changes, preserve complete Azure SDK error to RocksDB status mapping.
+3. For Azure layer changes, preserve complete Azure client error to RocksDB status mapping.
 4. Add tests for all functional changes.
 
 ## Pull Request Expectations

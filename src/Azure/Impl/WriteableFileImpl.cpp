@@ -9,9 +9,6 @@
 #include <boost/log/trivial.hpp>
 
 #include <algorithm>
-using namespace ::Azure::Storage;
-using namespace ::Azure::Storage::Blobs;
-using namespace ::Azure::Core::IO;
 using namespace boost::log::trivial;
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 AVEVA::RocksDB::Plugin::Azure::Impl::WriteableFileImpl::WriteableFileImpl(

@@ -1,0 +1,11 @@
+# Tests are the executable specification of the library, and the literals in them *are* that
+# specification: a block size of 4194304, an HTTP status of 412, the 37 bytes a fixture uploads, the offsets a
+# range request is expected to produce. Hoisting each of those into a named constant would move the expected
+# value away from the assertion that checks it and make the tests harder, not easier, to read - the opposite
+# of what the magic-number checks are for. They are therefore off for test code only; `src/`, `include/` and
+# `examples/` remain subject to them. Every other check inherits the repository configuration and still gates
+# the build.
+InheritParentConfig: true
+Checks: >-
+  -cppcoreguidelines-avoid-magic-numbers,
+  -readability-magic-numbers

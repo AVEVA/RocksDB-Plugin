@@ -3,21 +3,19 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 namespace AVEVA::RocksDB::Plugin::Azure {
-rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const std::string& context,
-                                                          const ::Azure::Core::Http::HttpStatusCode& statusCode) {
-    using ::Azure::Core::Http::HttpStatusCode;
+rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const std::string& context, unsigned int statusCode) {
     using rocksdb::IOStatus;
 
     rocksdb::IOStatus status;
     switch (statusCode) {
-    case HttpStatusCode::BadRequest:
+    case HttpStatus::BadRequest:
         return IOStatus::InvalidArgument(context);
-    case HttpStatusCode::NotFound:
+    case HttpStatus::NotFound:
         return IOStatus::NotFound(context);
-    case HttpStatusCode::RequestTimeout:
+    case HttpStatus::RequestTimeout:
         status.SetRetryable(true);
         return IOStatus::TimedOut(context);
-    case HttpStatusCode::ServiceUnavailable:
+    case HttpStatus::ServiceUnavailable:
         status = IOStatus::Busy(context);
         status.SetRetryable(true);
         return status;

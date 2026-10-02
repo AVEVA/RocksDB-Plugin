@@ -1,0 +1,19 @@
+set(AVEVA_AZURE_CLIENT_VERSION @PROJECT_VERSION@)
+
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(aveva-http-client CONFIG REQUIRED)
+find_dependency(OpenSSL REQUIRED)
+find_dependency(boost_asio CONFIG REQUIRED)
+# Private dependencies: a static library still exports them as $<LINK_ONLY:...> link items.
+find_dependency(boost_algorithm CONFIG REQUIRED)
+find_dependency(boost_property_tree CONFIG REQUIRED)
+find_dependency(boost_url CONFIG REQUIRED)
+find_dependency(boost_uuid CONFIG REQUIRED)
+# libxml2's own config package (not CMake's FindLibXml2) carries a static build's system libraries (e.g. bcrypt).
+find_dependency(LibXml2 CONFIG REQUIRED)
+
+include(${CMAKE_CURRENT_LIST_DIR}/aveva-azure-client-targets.cmake)
+
+check_required_components(aveva-azure-client)

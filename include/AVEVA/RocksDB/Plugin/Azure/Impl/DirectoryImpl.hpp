@@ -2,20 +2,23 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
-#include <azure/storage/blobs/blob_container_client.hpp>
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
+
+#include <AVEVA/AzureClient/BlobContainerClient.hpp>
 
 #include <memory>
 #include <string>
-namespace AVEVA::RocksDB::Plugin::Azure::Impl
-{
-    class DirectoryImpl
-    {
-        ::Azure::Storage::Blobs::BlobContainerClient m_client;
-        std::string m_name;
+#include <string_view>
+namespace AVEVA::RocksDB::Plugin::Azure::Impl {
+class DirectoryImpl {
+    std::shared_ptr<ClientRuntime> m_runtime;
+    std::shared_ptr<AzureClient::BlobContainerClient> m_client;
+    std::string m_name;
 
-    public:
-        DirectoryImpl(::Azure::Storage::Blobs::BlobContainerClient client, std::string_view dirname);
-        void Fsync();
-        size_t GetUniqueId(char* id, size_t maxSize) const noexcept;
-    };
-}
+  public:
+    DirectoryImpl(std::shared_ptr<ClientRuntime> runtime, std::shared_ptr<AzureClient::BlobContainerClient> client,
+                  std::string_view dirname);
+    void Fsync();
+    size_t GetUniqueId(char* id, size_t maxSize) const noexcept;
+};
+} // namespace AVEVA::RocksDB::Plugin::Azure::Impl

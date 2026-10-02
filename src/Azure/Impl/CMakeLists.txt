@@ -12,6 +12,8 @@ add_library(aveva-rocksdb-plugin-azure-impl
     BlobAttributes.cpp
     DirectoryImpl.cpp
     AzureContainerClient.cpp
+    ClientRuntime.cpp
+    TokenCredentials.cpp
 )
 add_library(aveva::rocksdb-plugin-azure-impl ALIAS aveva-rocksdb-plugin-azure-impl)
 set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../../../include")
@@ -35,21 +37,31 @@ target_sources(aveva-rocksdb-plugin-azure-impl
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobAttributes.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/DirectoryImpl.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/AzureContainerClient.hpp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/TokenCredentials.hpp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 )
 install(TARGETS aveva-rocksdb-plugin-azure-impl
     EXPORT
 )
-find_package(azure-identity-cpp CONFIG REQUIRED)
-find_package(azure-storage-blobs-cpp CONFIG REQUIRED)
+find_package(boost_asio CONFIG REQUIRED)
 find_package(boost_log CONFIG REQUIRED)
+find_package(boost_property_tree CONFIG REQUIRED)
 find_package(aveva-install-library CONFIG REQUIRED)
 target_link_libraries(aveva-rocksdb-plugin-azure-impl PUBLIC
     aveva-rocksdb-plugin-core
     aveva-rocksdb-plugin-azure-models
-    Azure::azure-storage-blobs
-    Azure::azure-identity
+    aveva::azure-client
+    aveva::http-client
+    Boost::asio
     Boost::log
 )
+target_link_libraries(aveva-rocksdb-plugin-azure-impl PRIVATE
+    Boost::property_tree
+    $<$<PLATFORM_ID:Windows>:crypt32>
+)
+# Boost.Asio/Winapi/Atomic must agree on the target Windows version across every TU.
+target_compile_definitions(aveva-rocksdb-plugin-azure-impl PUBLIC $<$<PLATFORM_ID:Windows>:_WIN32_WINNT=0x0A00>)
 aveva_install_library(aveva-rocksdb-plugin-azure-impl)
 target_compile_features(aveva-rocksdb-plugin-azure-impl PUBLIC cxx_std_23)
 set_target_properties(aveva-rocksdb-plugin-azure-impl PROPERTIES

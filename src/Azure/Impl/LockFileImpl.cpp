@@ -4,22 +4,48 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 
-#include <azure/storage/blobs.hpp>
+#include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
+#include <boost/asio/use_future.hpp>
+
+#include <array>
 #include <cassert>
+#include <cstdint>
+#include <cstdio>
 #include <optional>
+#include <random>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 using boost::log::trivial::severity_level;
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
+namespace {
+// Azure requires proposed lease IDs to be GUID-formatted; build a random (version 4) GUID.
+std::string NewLeaseId() {
+    thread_local std::mt19937_64 engine{std::random_device{}()};
+    std::array<std::uint8_t, 16> bytes{};
+    for (auto& value : bytes) {
+        value = static_cast<std::uint8_t>(engine());
+    }
+    bytes[6] = static_cast<std::uint8_t>((bytes[6] & 0x0FU) | 0x40U);
+    bytes[8] = static_cast<std::uint8_t>((bytes[8] & 0x3FU) | 0x80U);
+
+    std::array<char, 37> text{};
+    std::snprintf(text.data(), text.size(), "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                  bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9],
+                  bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
+    return std::string{text.data()};
+}
+} // namespace
 LockFileImpl::LockFileImpl(
-    std::unique_ptr<::Azure::Storage::Blobs::PageBlobClient> file, std::chrono::seconds leaseLength,
+    std::shared_ptr<ClientRuntime> runtime, std::unique_ptr<AzureClient::PageBlobClient> file,
+    std::chrono::seconds leaseLength,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     std::string fileName)
-    : m_file(std::move(file)), m_lastRenewalTime(std::chrono::steady_clock::now()), m_leaseLength(leaseLength),
-      m_logger(logger), m_fileName(std::move(fileName)) {
+    : m_runtime(std::move(runtime)), m_file(std::move(file)), m_lastRenewalTime(std::chrono::steady_clock::now()),
+      m_leaseLength(leaseLength), m_logger(logger), m_fileName(std::move(fileName)) {
     if (m_logger == nullptr) {
         throw std::runtime_error("logger cannot be null.");
     }
@@ -31,7 +57,7 @@ LockFileImpl::LockFileImpl(
 
 bool LockFileImpl::Lock() {
     // Do not attempt to lock again when you already have a lock aquired.
-    if (m_lease != nullptr) {
+    if (m_leaseId.has_value()) {
         BOOST_LOG_SEV(*m_logger, severity_level::debug)
             << "Lock already acquired for '" << m_fileName << "', skipping duplicate lock attempt";
         return false;
@@ -43,18 +69,23 @@ bool LockFileImpl::Lock() {
     auto end = std::chrono::high_resolution_clock::now();
     std::optional<std::string> lastError;
     while ((end - start) < m_leaseLength) {
-        try {
-            const auto leaseId = ::Azure::Storage::Blobs::BlobLeaseClient::CreateUniqueLeaseId();
-            m_lease = std::make_unique<::Azure::Storage::Blobs::BlobLeaseClient>(*m_file, leaseId);
-            const auto response = m_lease->Acquire(m_leaseLength);
-            assert(response.Value.LeaseId == leaseId);
-
+        AzureClient::AcquireLeaseOptions options;
+        options.ProposedLeaseId = NewLeaseId();
+        options.Duration = m_leaseLength;
+        const auto leaseId = options.ProposedLeaseId;
+        auto result = m_file->AcquireLeaseAsync(std::move(options), boost::asio::use_future).get();
+        if (result.has_value()) {
+            assert(result->Value().LeaseId == leaseId);
+            m_leaseId = leaseId;
             lastError.reset();
             break;
-        } catch (const ::Azure::Storage::StorageException& e) {
-            lastError = e.what();
         }
 
+        lastError = result.error().Message.empty() ? result.error().Code.message() : result.error().Message;
+
+        // Avoid hammering the service while another owner holds the lease.
+        static const constexpr auto retryDelay = std::chrono::milliseconds(250);
+        std::this_thread::sleep_for(retryDelay);
         end = std::chrono::high_resolution_clock::now();
     }
 
@@ -62,13 +93,6 @@ bool LockFileImpl::Lock() {
         BOOST_LOG_SEV(*m_logger, severity_level::error)
             << "Failed to acquire blob lease for '" << m_fileName << "' after "
             << std::chrono::duration_cast<std::chrono::seconds>(end - start).count() << "s: " << *lastError;
-
-        try {
-            if (m_lease != nullptr) {
-                m_lease->Release();
-            }
-        } catch (...) {
-        }
 
         return false;
     }
@@ -80,7 +104,7 @@ bool LockFileImpl::Lock() {
 }
 
 void LockFileImpl::Renew() const {
-    if (m_lease == nullptr) {
+    if (!m_leaseId.has_value()) {
         throw std::runtime_error("Cannot renew lease that has not been acquired");
     }
 
@@ -94,18 +118,22 @@ void LockFileImpl::Renew() const {
     BOOST_LOG_SEV(*m_logger, severity_level::debug)
         << "Renewing blob lease for '" << m_fileName << "' (time since last renewal: " << TimeSinceLastRenewal().count()
         << "s)";
-    [[maybe_unused]] const auto result = m_lease->Renew();
+    AzureClient::RenewLeaseOptions options;
+    options.LeaseId = *m_leaseId;
+    Unwrap(m_file->RenewLeaseAsync(std::move(options), boost::asio::use_future).get());
     m_lastRenewalTime = std::chrono::steady_clock::now();
 }
 
 void LockFileImpl::Unlock() {
-    if (m_lease == nullptr) {
+    if (!m_leaseId.has_value()) {
         throw std::runtime_error("Cannot release lease that has not been acquired");
     }
 
     BOOST_LOG_SEV(*m_logger, severity_level::debug) << "Releasing blob lease for '" << m_fileName << "'";
-    m_lease->Release();
-    m_lease.reset();
+    AzureClient::ReleaseLeaseOptions options;
+    options.LeaseId = *m_leaseId;
+    Unwrap(m_file->ReleaseLeaseAsync(std::move(options), boost::asio::use_future).get());
+    m_leaseId.reset();
     BOOST_LOG_SEV(*m_logger, severity_level::debug) << "Successfully released blob lease for '" << m_fileName << "'";
 }
 

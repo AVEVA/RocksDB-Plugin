@@ -1,0 +1,8 @@
+variables:
+  CCacheBaseLinuxDirectory: /home/imadmin/ccache
+  CoverageLineThreshold: '90'
+  CoverageBranchThreshold: '80'
+  DefaultWindowsVmImage: windows-2022
+  DefaultLinuxVmImage: ubuntu-24.04
+  AvevaAzureClientWithTests: 'true'
+  AvevaAzureClientVcpkgFeatures: 'tests'

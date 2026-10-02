@@ -1,38 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include "IntegrationTestHelpers.hpp"
 
+#include <boost/asio/use_future.hpp>
 #include <gtest/gtest.h>
-#include <azure/storage/blobs.hpp>
-#include <azure/identity.hpp>
-#include <azure/core/http/http.hpp>
+
+#include <algorithm>
 
 #include <string>
 
-using AVEVA::RocksDB::Plugin::Azure::Impl::ReadableFileImpl;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Configuration;
+using AVEVA::RocksDB::Plugin::Azure::Impl::ReadableFileImpl;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Testing::AzureIntegrationTestBase;
 
-class ReadableFileIntegrationTests : public AzureIntegrationTestBase
-{
-protected:
-    std::string GetBlobNamePrefix() const override
-    {
-        return "test-readable";
-    }
+class ReadableFileIntegrationTests : public AzureIntegrationTestBase {
+  protected:
+    std::string GetBlobNamePrefix() const override { return "test-readable"; }
 };
 
-TEST_F(ReadableFileIntegrationTests, SequentialRead_SmallFile_ReadsCorrectly)
-{
+TEST_F(ReadableFileIntegrationTests, SequentialRead_SmallFile_ReadsCorrectly) {
     // Arrange
     std::vector<char> testData(1024);
-    for (size_t i = 0; i < testData.size(); ++i)
-    {
+    for (size_t i = 0; i < testData.size(); ++i) {
         testData[i] = static_cast<char>(i % 256);
     }
 
@@ -49,12 +43,10 @@ TEST_F(ReadableFileIntegrationTests, SequentialRead_SmallFile_ReadsCorrectly)
     EXPECT_EQ(testData.size(), file.GetOffset());
 }
 
-TEST_F(ReadableFileIntegrationTests, SequentialRead_MultipleChunks_ReadsInOrder)
-{
+TEST_F(ReadableFileIntegrationTests, SequentialRead_MultipleChunks_ReadsInOrder) {
     // Arrange
     std::vector<char> testData(2048);
-    for (size_t i = 0; i < testData.size(); ++i)
-    {
+    for (size_t i = 0; i < testData.size(); ++i) {
         testData[i] = static_cast<char>(i % 256);
     }
 
@@ -84,12 +76,10 @@ TEST_F(ReadableFileIntegrationTests, SequentialRead_MultipleChunks_ReadsInOrder)
     EXPECT_EQ(testData, combined);
 }
 
-TEST_F(ReadableFileIntegrationTests, RandomRead_DifferentOffsets_ReadsCorrectly)
-{
+TEST_F(ReadableFileIntegrationTests, RandomRead_DifferentOffsets_ReadsCorrectly) {
     // Arrange
     std::vector<char> testData(Configuration::PageBlob::PageSize * 2);
-    for (size_t i = 0; i < testData.size(); ++i)
-    {
+    for (size_t i = 0; i < testData.size(); ++i) {
         testData[i] = static_cast<char>(i % 256);
     }
 
@@ -119,12 +109,10 @@ TEST_F(ReadableFileIntegrationTests, RandomRead_DifferentOffsets_ReadsCorrectly)
     EXPECT_EQ(0, file.GetOffset());
 }
 
-TEST_F(ReadableFileIntegrationTests, Skip_AdvancesOffset_WithoutReading)
-{
+TEST_F(ReadableFileIntegrationTests, Skip_AdvancesOffset_WithoutReading) {
     // Arrange
     std::vector<char> testData(1024);
-    for (size_t i = 0; i < testData.size(); ++i)
-    {
+    for (size_t i = 0; i < testData.size(); ++i) {
         testData[i] = static_cast<char>(i % 256);
     }
 
@@ -142,8 +130,7 @@ TEST_F(ReadableFileIntegrationTests, Skip_AdvancesOffset_WithoutReading)
     EXPECT_TRUE(std::equal(buffer.begin(), buffer.end(), testData.begin() + 100));
 }
 
-TEST_F(ReadableFileIntegrationTests, GetSize_ReturnsCorrectSize)
-{
+TEST_F(ReadableFileIntegrationTests, GetSize_ReturnsCorrectSize) {
     // Arrange
     std::vector<char> testData(12345);
     auto blobClient = CreateBlobWithData(testData);
@@ -156,12 +143,10 @@ TEST_F(ReadableFileIntegrationTests, GetSize_ReturnsCorrectSize)
     EXPECT_EQ(testData.size(), size);
 }
 
-TEST_F(ReadableFileIntegrationTests, SequentialRead_BeyondFileSize_ReturnsAvailableData)
-{
+TEST_F(ReadableFileIntegrationTests, SequentialRead_BeyondFileSize_ReturnsAvailableData) {
     // Arrange
     std::vector<char> testData(500);
-    for (size_t i = 0; i < testData.size(); ++i)
-    {
+    for (size_t i = 0; i < testData.size(); ++i) {
         testData[i] = 'X';
     }
 
@@ -177,8 +162,7 @@ TEST_F(ReadableFileIntegrationTests, SequentialRead_BeyondFileSize_ReturnsAvaila
     EXPECT_TRUE(std::equal(buffer.begin(), buffer.begin() + 500, testData.begin()));
 }
 
-TEST_F(ReadableFileIntegrationTests, ReadEmptyFile_ReturnsZero)
-{
+TEST_F(ReadableFileIntegrationTests, ReadEmptyFile_ReturnsZero) {
     // Arrange - Create empty blob
     std::vector<char> emptyData;
     auto blobClient = CreateBlobWithData(emptyData);

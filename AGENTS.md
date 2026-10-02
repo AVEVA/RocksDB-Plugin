@@ -16,7 +16,7 @@ This is the **AVEVA RocksDB Plugin** — a C++ library providing AVEVA-specific 
 
 ## Procedure
 1. Classify whether the change is in the Azure storage layer (`src/Azure/`) or the Core abstractions (`src/Core/`).
-2. For Azure layer changes, verify error translation is complete — map all Azure SDK error codes to appropriate RocksDB `Status` codes.
+2. For Azure layer changes, verify error translation is complete — map all Azure client (libs/AzureClient) error codes to appropriate RocksDB `Status` codes.
 3. For file cache changes (`Core/FileCache`), confirm LRU eviction logic and thread safety.
 4. Rebuild and run tests after any native change.
 5. Check that public headers in `include/` remain backward compatible.
@@ -38,12 +38,12 @@ ctest --test-dir build/ --output-on-failure
 ## Conventions
 - Follow modern C++ (C++17 or newer) idioms.
 - Use RAII for resource management — avoid raw pointers with manual `delete`.
-- Map Azure SDK errors to meaningful RocksDB `rocksdb::Status` codes; do not swallow errors silently.
+- Map Azure client errors (`RequestFailedException`) to meaningful RocksDB `rocksdb::Status` codes; do not swallow errors silently.
 - New source files must be added to the owning `CMakeLists.txt`.
 - Public headers go in `include/AVEVA/RocksDB/Plugin/` — do not leak implementation details into headers.
 
 ## Known Pitfalls
 - CMake cache issues are common after branch switches — delete `build/` and reconfigure rather than patching the cache.
 - On Windows, long path support must be enabled for stable builds.
-- Azure SDK calls are asynchronous; ensure proper `.get()` / `.wait()` handling on futures to avoid races.
+- Azure client (`libs/AzureClient`) calls are asynchronous; the plugin blocks on them with `boost::asio::use_future` + `.get()` — never call `.get()` on one of the `ClientRuntime` I/O threads to avoid races.
 - `vcpkg` is used for dependency management — run `vcpkg install` from `vcpkg-configuration.json` before first build.

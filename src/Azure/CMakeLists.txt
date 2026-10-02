@@ -33,15 +33,11 @@ target_sources(aveva-rocksdb-plugin-azure
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Plugin.hpp"
 )
-find_package(azure-identity-cpp CONFIG REQUIRED)
-find_package(azure-storage-blobs-cpp CONFIG REQUIRED)
 find_package(RocksDB CONFIG REQUIRED)
 find_package(aveva-install-library CONFIG REQUIRED)
 target_link_libraries(aveva-rocksdb-plugin-azure PUBLIC
     aveva::rocksdb-plugin-core
     aveva::rocksdb-plugin-azure-impl
-    Azure::azure-storage-blobs
-    Azure::azure-identity
     RocksDB::rocksdb
 )
 aveva_install_library(aveva-rocksdb-plugin-azure)

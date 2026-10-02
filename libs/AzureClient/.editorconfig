@@ -1,0 +1,33 @@
+root = true
+# All files
+[*]
+indent_style = space
+end_of_file = crlf
+
+[*.{cpp,h,hpp}]
+indent_size = 4
+insert_final_newline = true
+charset = utf-8
+cpp_indent_case_contents_when_block = true
+cpp_new_line_before_open_brace_namespace = new_line
+cpp_space_pointer_reference_alignment = left
+
+[*.{cmake,txt}]
+indent_size = 4
+
+# XML project files
+[*.{csproj,vbproj,vcxproj,vcxproj.filters,proj,projitems,shproj}]
+indent_size = 2
+
+# XML config files
+[*.{props,targets,ruleset,config,nuspec,resx,vsixmanifest,vsct}]
+indent_size = 2
+
+# JSON files
+[*.json]
+indent_size = 2
+
+# Shell script files
+[*.sh]
+end_of_line = lf
+indent_size = 2

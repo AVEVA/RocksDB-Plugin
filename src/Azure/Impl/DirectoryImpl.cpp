@@ -2,9 +2,12 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/DirectoryImpl.hpp"
+
+#include <algorithm>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-DirectoryImpl::DirectoryImpl(::Azure::Storage::Blobs::BlobContainerClient client, const std::string_view dirname)
-    : m_client(std::move(client)), m_name(dirname) {}
+DirectoryImpl::DirectoryImpl(std::shared_ptr<ClientRuntime> runtime,
+                             std::shared_ptr<AzureClient::BlobContainerClient> client, const std::string_view dirname)
+    : m_runtime(std::move(runtime)), m_client(std::move(client)), m_name(dirname) {}
 
 void DirectoryImpl::Fsync() {
     // TODO: figure out whether this is needed

@@ -1,12 +1,12 @@
 # AVEVA RocksDB Plugins
 
-This project contains AVEVA's plugins for the [RocksDB](https://rocksdb.org/) database that bring RocksDB to Azure Cloud infrastructure. This plugin leverages the [Azure SDK for C++](https://github.com/Azure/azure-sdk-for-cpp) and Azure Blob Storage to provide a seamless, cloud-native storage solution for RocksDB applications.
+This project contains AVEVA's plugins for the [RocksDB](https://rocksdb.org/) database that bring RocksDB to Azure Cloud infrastructure. This plugin leverages AVEVA's in-house Azure Blob Storage client ([libs/AzureClient](libs/AzureClient), built on [libs/HttpClient](libs/HttpClient) and Boost.Asio) and Azure Blob Storage to provide a seamless, cloud-native storage solution for RocksDB applications.
 
 ## Plugin List
 
 ### [Azure Page Blob Filesystem](src/AVEVA/RocksDB/Plugin/Azure)
 
-This plugin uses the [Azure SDK for C++](https://github.com/Azure/azure-sdk-for-cpp) for interacting with page blobs
+This plugin uses the AVEVA Azure client library ([libs/AzureClient](libs/AzureClient)) for interacting with page blobs
 in place of a local filesystem. This allows a service using RocksDB to be deployed in a "stateless" manner
 (e.g., Kubernetes Pod, Service Fabric stateless service, etc.) and connect to an Azure blob container
 for all of its storage needs. This is similar to using
@@ -111,6 +111,11 @@ and the list of [known plugins](https://github.com/facebook/rocksdb/blob/main/PL
 3. Configure the project (e.g., `cmake -S <rocksdb-plugin-path> -B <rocksdb-plugin-build-path> --preset [Windows/Linux][Debug/Release]`)
     * Presets can be found in [CMakePresets.json](CMakePresets.json)
 4. Build the project (e.g., `cmake --build <rocksdb-plugin-build-path>`)
+
+The Azure plugin talks to Blob Storage through the in-tree libraries in [libs/AzureClient](libs/AzureClient) and
+[libs/HttpClient](libs/HttpClient), which are built as part of this project (Boost.Asio/Beast + OpenSSL from vcpkg).
+TLS certificates are verified against the system trust store; on Windows the `ROOT` certificate store is exported
+automatically. Set `SSL_CERT_FILE` or `SSL_CERT_DIR` to use a custom CA bundle instead.
 
 ## Dependency update automation
 

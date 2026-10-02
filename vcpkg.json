@@ -2,20 +2,28 @@
   "$comment": "builtin-baseline pins the default (microsoft/vcpkg) registry version set. Dependabot's vcpkg ecosystem monitors this field and opens PRs to bump it. See https://learn.microsoft.com/vcpkg/concepts/dependabot",
   "builtin-baseline": "9e593bb18ea69cc5095e012465dcd675a822ed0d",
   "dependencies": [
-    "azure-identity-cpp",
-    "azure-storage-blobs-cpp",
     "boost-algorithm",
+    "boost-asio",
+    "boost-beast",
     "boost-container",
     "boost-endian",
     "boost-interprocess",
     "boost-intrusive",
     "boost-log",
+    "boost-property-tree",
     "boost-scope",
     "boost-static-string",
     "boost-thread",
     "boost-unordered",
+    "boost-url",
+    "boost-uuid",
+    "openssl",
     "rocksdb",
     "zstd",
+    {
+      "name": "libxml2",
+      "default-features": false
+    },
     {
       "name": "boost-iostreams",
       "features": [

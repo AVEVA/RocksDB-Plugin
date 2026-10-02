@@ -1,0 +1,19 @@
+{
+  "name": "aveva-http-client",
+  "version": "0.0.1",
+  "dependencies": [
+    "boost-asio",
+    "boost-beast",
+    "boost-unordered",
+    "boost-url",
+    "openssl",
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    },
+    {
+      "name": "vcpkg-cmake-config",
+      "host": true
+    }
+  ]
+}

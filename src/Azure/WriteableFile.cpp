@@ -19,7 +19,7 @@ rocksdb::IOStatus WriteableFile::Append(const rocksdb::Slice& data, const rocksd
                                         rocksdb::IODebugContext*) {
     try {
         m_file.Append(std::span(data.data(), data.size()));
-    } catch (const ::Azure::Core::RequestFailedException& ex) {
+    } catch (const RequestFailedException& ex) {
         BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
                                         << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
         return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
@@ -36,7 +36,7 @@ rocksdb::IOStatus WriteableFile::Append(const rocksdb::Slice& data, const rocksd
 rocksdb::IOStatus WriteableFile::Close(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
     try {
         m_file.Close();
-    } catch (const ::Azure::Core::RequestFailedException& ex) {
+    } catch (const RequestFailedException& ex) {
         BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
                                         << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
         return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
@@ -53,7 +53,7 @@ rocksdb::IOStatus WriteableFile::Close(const rocksdb::IOOptions&, rocksdb::IODeb
 rocksdb::IOStatus WriteableFile::Flush(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
     try {
         m_file.Flush();
-    } catch (const ::Azure::Core::RequestFailedException& ex) {
+    } catch (const RequestFailedException& ex) {
         BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
                                         << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
         return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
@@ -70,7 +70,7 @@ rocksdb::IOStatus WriteableFile::Flush(const rocksdb::IOOptions&, rocksdb::IODeb
 rocksdb::IOStatus WriteableFile::Sync(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
     try {
         m_file.Sync();
-    } catch (const ::Azure::Core::RequestFailedException& ex) {
+    } catch (const RequestFailedException& ex) {
         BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
                                         << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
         return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
@@ -92,7 +92,7 @@ uint64_t WriteableFile::GetFileSize(const rocksdb::IOOptions&, rocksdb::IODebugC
         assert(fileSize <= std::numeric_limits<int64_t>::max() && "File size must fit in int64_t");
 
         return static_cast<uint64_t>(fileSize);
-    } catch (const ::Azure::Core::RequestFailedException& ex) {
+    } catch (const RequestFailedException& ex) {
         BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
                                         << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
         return 0;

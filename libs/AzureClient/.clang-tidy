@@ -1,0 +1,94 @@
+Checks: >-
+  bugprone-*,
+  concurrency-*,
+  cppcoreguidelines-*,
+  misc-*,
+  modernize-*,
+  performance-*,
+  readability-*,
+  -bugprone-exception-escape,
+  -concurrency-mt-unsafe,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -modernize-use-trailing-return-type,
+  -performance-avoid-endl,
+  -readability-identifier-length
+FormatStyle: file
+HeaderFilterRegex: '(include|src|tests|benchmarks)[\\/].*'
+# `cppcoreguidelines-pro-type-reinterpret-cast` is excluded above because this library hands buffers to C
+# APIs (OpenSSL's `unsigned char*`, libxml2's `xmlChar*`) and views `std::byte` storage as characters; the
+# standard offers no conforming alternative for those conversions.
+# `concurrency-mt-unsafe` is excluded because the only function it reports here is `std::getenv`, used to read
+# configuration once at start-up. The C++ standard library offers no thread-safe way to read the environment,
+# and the check cannot be scoped to a single call site, so it is turned off repository-wide rather than
+# suppressed inline. None of the check's other targets (`strtok`, `asctime`, `rand`, ...) are used.
+# Every other check that is enabled above is gating: a finding fails the lint stage. If a check is not
+# appropriate for this code base, remove it from `Checks` (with a rationale) rather than demoting it here or
+# sprinkling NOLINT.
+WarningsAsErrors: '*'
+CheckOptions:
+  # Boost ships symbols in `impl/` and `detail/` headers that are not meant to be included directly; always
+  # attribute them to the public header instead. `stdlib.h` and `time.h` (plus the UCRT's internal
+  # `corecrt_*time.h`) are ignored for the same reason: MSVC declares its secure/POSIX extensions
+  # (`_dupenv_s`, `_mkgmtime`) only there, while `<cstdlib>`/`<ctime>` are the spellings C++ code must use --
+  # `modernize-deprecated-headers` rejects the C spellings outright. MSVC's internal `__msvc_*.hpp` /
+  # `corecrt_*` implementation headers are ignored as well: they do not exist on other platforms, so code must
+  # keep including the standard header that re-exports them.
+  - key: misc-include-cleaner.IgnoreHeaders
+    value: '.*[/\\]impl[/\\].*;.*[/\\]detail[/\\].*;.*[/\\]stdlib\.h;.*[/\\]time\.h;.*[/\\]corecrt.*;.*[/\\]__msvc_.*'
+  # Plain option/result aggregates (no invariant to protect) expose all of their state publicly; only classes
+  # that mix public data with encapsulated state are worth reporting. This mirrors the default used by the
+  # cppcoreguidelines alias of the same check.
+  - key: misc-non-private-member-variables-in-classes.IgnoreClassesWithAllMemberVariablesBeingPublic
+    value: 'true'
+  # Static data members use an `s_` prefix to distinguish them from per-instance `m_` state.
+  - key: readability-identifier-naming.ClassMemberCase
+    value: camelBack
+  - key: readability-identifier-naming.ClassMemberPrefix
+    value: s_
+  - key: readability-identifier-naming.FunctionCase
+    value: CamelCase
+  - key: readability-identifier-naming.ClassMethodCase
+    value: CamelCase
+  - key: readability-identifier-naming.PublicMethodCase
+    value: CamelCase
+  - key: readability-identifier-naming.ProtectedMethodCase
+    value: CamelCase
+  - key: readability-identifier-naming.PrivateMethodCase
+    value: CamelCase
+  - key: readability-identifier-naming.PublicMemberCase
+    value: CamelCase
+  - key: readability-identifier-naming.ProtectedMemberCase
+    value: CamelCase
+  - key: readability-identifier-naming.PrivateMemberPrefix
+    value: m_
+  - key: readability-identifier-naming.PrivateMemberCase
+    value: camelBack
+  - key: readability-identifier-naming.ParameterCase
+    value: camelBack
+  - key: readability-identifier-naming.VariableCase
+    value: camelBack
+  # Constants keep the PascalCase spelling used by the public API surface.
+  - key: readability-identifier-naming.ConstantCase
+    value: CamelCase
+  - key: readability-identifier-naming.ConstantMemberCase
+    value: CamelCase
+  - key: readability-identifier-naming.ConstantParameterCase
+    value: camelBack
+  - key: readability-identifier-naming.ConstexprVariableCase
+    value: CamelCase
+  - key: readability-identifier-naming.ClassConstantCase
+    value: CamelCase
+  - key: readability-identifier-naming.GlobalConstantCase
+    value: CamelCase
+  - key: readability-identifier-naming.LocalConstantCase
+    value: camelBack
+  - key: readability-identifier-naming.StaticConstantCase
+    value: CamelCase
+  - key: readability-identifier-naming.EnumConstantCase
+    value: CamelCase
+  # Customization points that must match a name mandated by the standard library or Boost (for example
+  # `get_executor` for the Asio executor concept and `make_error_code` for `std::error_code` ADL lookup).
+  - key: readability-identifier-naming.FunctionIgnoredRegexp
+    value: '(make_error_code|make_error_condition)'
+  - key: readability-identifier-naming.PublicMethodIgnoredRegexp
+    value: '(get_executor|begin|end|cbegin|cend|size|empty|allocate|deallocate)'

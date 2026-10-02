@@ -27,7 +27,7 @@ Azure Blob Storage as a local filesystem.
 ## Procedure
 
 1. Classify the change: Azure storage layer (`src/.../Azure/`) or Core abstractions (`src/.../Core/`).
-2. For Azure-layer changes, verify error translation is complete — map all Azure SDK error
+2. For Azure-layer changes, verify error translation is complete — map all Azure client (libs/AzureClient) error
    codes to appropriate RocksDB `rocksdb::Status` codes. Never swallow errors silently.
 3. For file-cache changes (`Core/FileCache`), confirm LRU eviction logic and thread safety.
 4. Plan the smallest safe change that preserves the public header API surface.
@@ -74,7 +74,7 @@ support, CMake, clang-format/clang-tidy, gitleaks, vcpkg, and git hook configura
 
 - Follow modern C++ (C++17 or newer) idioms.
 - Use RAII for resource management — avoid raw pointers with manual `delete`.
-- Map Azure SDK errors to meaningful `rocksdb::Status` codes; do not swallow errors silently.
+- Map Azure client errors (`RequestFailedException`) to meaningful `rocksdb::Status` codes; do not swallow errors silently.
 - New source files must be added to the owning `CMakeLists.txt`.
 - Public headers go in `include/AVEVA/RocksDB/Plugin/` — do not leak implementation details
   into headers.
@@ -91,7 +91,7 @@ support, CMake, clang-format/clang-tidy, gitleaks, vcpkg, and git hook configura
 - CMake cache issues are common after branch switches — delete `build/` and reconfigure
   rather than patching the cache.
 - On Windows, long path support must be enabled for stable builds (`devdoctor.ps1` reports this).
-- Azure SDK calls are asynchronous; ensure proper `.get()` / `.wait()` handling on futures to
+- Azure client (`libs/AzureClient`) calls are asynchronous; the plugin blocks on them with `boost::asio::use_future` + `.get()` — never call `.get()` on one of the `ClientRuntime` I/O threads to
   avoid races.
 - `vcpkg` is used for dependency management — ensure `VCPKG_ROOT` is set and bootstrap vcpkg
   before the first build.

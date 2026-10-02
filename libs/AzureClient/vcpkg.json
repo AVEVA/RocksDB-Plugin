@@ -1,0 +1,34 @@
+{
+  "name": "aveva-azure-client",
+  "version": "0.0.1",
+  "dependencies": [
+    {
+      "name": "aveva-http-client"
+    },
+    "openssl",
+    "boost-asio",
+    "boost-url",
+    "boost-uuid",
+    "boost-algorithm",
+    "boost-property-tree",
+    {
+      "name": "libxml2",
+      "default-features": false
+    }
+  ],
+  "features": {
+    "tests": {
+      "description": "Builds the unit and integration test targets and pulls in their dependencies.",
+      "dependencies": [
+        "boost-beast",
+        "gtest"
+      ]
+    },
+    "benchmarks": {
+      "description": "Builds the Google Benchmark micro-benchmark targets.",
+      "dependencies": [
+        "benchmark"
+      ]
+    }
+  }
+}
