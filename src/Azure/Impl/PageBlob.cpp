@@ -75,6 +75,42 @@ std::string PageBlob::GetEtag() {
     return std::move(properties.ETag);
 }
 
+void PageBlob::DownloadAsync(int64_t blobOffset, int64_t readLength, const std::string& ifMatch,
+                             DownloadCallback callback) {
+    AzureClient::DownloadBlobOptions options;
+    options.Range = ToRange(blobOffset, readLength);
+    options.Conditions.IfMatch = ifMatch;
+    m_client.DownloadAsync(
+        std::move(options),
+        [callback = std::move(callback)](auto result) mutable {
+            std::exception_ptr error;
+            std::string content;
+            try {
+                content = std::move(Unwrap(std::move(result)).Content);
+            } catch (...) {
+                error = std::current_exception();
+            }
+            callback(error, std::move(content));
+        },
+        RequestOptionsForTransfer(m_client.GetDefaultRequestOptions(), static_cast<uint64_t>(readLength)));
+}
+
+void PageBlob::GetMetadataAsync(MetadataCallback callback) {
+    m_client.GetPropertiesAsync([callback = std::move(callback)](auto result) mutable {
+        std::exception_ptr error;
+        int64_t size = 0;
+        std::string etag;
+        try {
+            auto properties = Unwrap(std::move(result));
+            size = BlobHelpers::FileSizeFromProperties(properties);
+            etag = std::move(properties.ETag);
+        } catch (...) {
+            error = std::current_exception();
+        }
+        callback(error, size, std::move(etag));
+    });
+}
+
 int64_t PageBlob::Download(std::span<char> buffer, int64_t offset, int64_t length, const std::string& ifMatch) {
     AzureClient::DownloadBlobOptions options;
     options.Range = ToRange(offset, length);

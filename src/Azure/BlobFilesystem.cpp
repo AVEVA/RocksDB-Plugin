@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/AsyncReadRequest.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Directory.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
@@ -473,11 +474,16 @@ rocksdb::IOStatus BlobFilesystem::IsDirectory(const std::string& path, const roc
     return target_->IsDirectory(path, options, is_dir, dbg);
 }
 
-rocksdb::IOStatus BlobFilesystem::Poll(std::vector<void*>&, size_t) { return rocksdb::IOStatus::NotSupported(); }
+// Reads issued via ReadAsync complete on the host io_context; their callbacks are delivered here on the caller's
+// thread. Every handle is waited on, which satisfies any min_completions.
+rocksdb::IOStatus BlobFilesystem::Poll(std::vector<void*>& io_handles, size_t) { return PollAsyncReads(io_handles); }
 
-rocksdb::IOStatus BlobFilesystem::AbortIO(std::vector<void*>&) { return rocksdb::IOStatus::NotSupported(); }
+rocksdb::IOStatus BlobFilesystem::AbortIO(std::vector<void*>& io_handles) { return AbortAsyncReads(io_handles); }
 
 void BlobFilesystem::DiscardCacheForDirectory(const std::string&) { return; }
 
-void BlobFilesystem::SupportedOps(int64_t& supported_ops) { supported_ops = rocksdb::FSSupportedOps::kAsyncIO; }
+// Only async reads are advertised: Prefetch, FS-allocated buffers and verify-and-reconstruct are not implemented.
+void BlobFilesystem::SupportedOps(int64_t& supported_ops) {
+    supported_ops = int64_t{1} << rocksdb::FSSupportedOps::kAsyncIO;
+}
 } // namespace AVEVA::RocksDB::Plugin::Azure

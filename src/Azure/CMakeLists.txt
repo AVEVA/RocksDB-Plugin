@@ -6,6 +6,7 @@ add_subdirectory(Models)
 # that linkage model and gives downstream consumers more flexibility
 # in how they package and link their final binaries.
 add_library(aveva-rocksdb-plugin-azure STATIC
+    AsyncReadRequest.cpp
     LockFile.cpp
     Directory.cpp
     AzureErrorTranslator.cpp
@@ -23,6 +24,7 @@ target_sources(aveva-rocksdb-plugin-azure
   FILE_SET HEADERS
   BASE_DIRS "${base-include-dir}"
   FILES
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/AsyncReadRequest.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/LockFile.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Directory.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"

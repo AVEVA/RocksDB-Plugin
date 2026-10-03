@@ -28,5 +28,9 @@ class PageBlob final : public Core::BlobClient {
                              const std::string& ifMatch) override;
     virtual void UploadPages(const std::span<char> buffer, int64_t blobOffset) override;
     virtual std::string GetEtag() override;
+    // Fully asynchronous: completions run on the injected io_context's threads and never block on it.
+    virtual void DownloadAsync(int64_t blobOffset, int64_t readLength, const std::string& ifMatch,
+                               DownloadCallback callback) override;
+    virtual void GetMetadataAsync(MetadataCallback callback) override;
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

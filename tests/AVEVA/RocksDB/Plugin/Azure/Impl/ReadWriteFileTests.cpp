@@ -14,7 +14,6 @@ using namespace AVEVA::RocksDB::Plugin::Core;
 using namespace AVEVA::RocksDB::Plugin::Core::Mocks;
 using ::testing::_;
 using ::testing::DoAll;
-using ::testing::Invoke;
 using ::testing::NiceMock;
 using ::testing::Return;
 using ::testing::SetArgPointee;
@@ -89,27 +88,25 @@ class ReadWriteFileImplTests : public ::testing::Test {
         m_logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
 
         // Setup default mock behavior using the simulator
-        ON_CALL(*m_mockBlobClient, GetSize()).WillByDefault(Invoke([this]() { return m_blobSim->GetSize(); }));
+        ON_CALL(*m_mockBlobClient, GetSize()).WillByDefault([this]() { return m_blobSim->GetSize(); });
 
-        ON_CALL(*m_mockBlobClient, SetSize(_)).WillByDefault(Invoke([this](int64_t size) {
-            m_blobSim->SetSize(size);
-        }));
+        ON_CALL(*m_mockBlobClient, SetSize(_)).WillByDefault([this](int64_t size) { m_blobSim->SetSize(size); });
 
-        ON_CALL(*m_mockBlobClient, GetCapacity()).WillByDefault(Invoke([this]() { return m_blobSim->GetCapacity(); }));
+        ON_CALL(*m_mockBlobClient, GetCapacity()).WillByDefault([this]() { return m_blobSim->GetCapacity(); });
 
-        ON_CALL(*m_mockBlobClient, SetCapacity(_)).WillByDefault(Invoke([this](int64_t capacity) {
+        ON_CALL(*m_mockBlobClient, SetCapacity(_)).WillByDefault([this](int64_t capacity) {
             m_blobSim->SetCapacity(capacity);
-        }));
+        });
 
         ON_CALL(*m_mockBlobClient, UploadPages(_, _))
-            .WillByDefault(Invoke(
-                [this](const std::span<char> buffer, int64_t offset) { m_blobSim->UploadPages(buffer, offset); }));
+            .WillByDefault(
+                [this](const std::span<char> buffer, int64_t offset) { m_blobSim->UploadPages(buffer, offset); });
 
         ON_CALL(*m_mockBlobClient,
                 DownloadTo(testing::A<std::span<char>>(), testing::A<int64_t>(), testing::A<int64_t>()))
-            .WillByDefault(Invoke([this](std::span<char> buffer, int64_t offset, int64_t length) {
+            .WillByDefault([this](std::span<char> buffer, int64_t offset, int64_t length) {
                 return m_blobSim->DownloadTo(buffer, offset, length);
-            }));
+            });
     }
 
     std::unique_ptr<ReadWriteFileImpl> CreateFile() {

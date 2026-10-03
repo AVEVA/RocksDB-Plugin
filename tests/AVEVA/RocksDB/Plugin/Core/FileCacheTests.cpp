@@ -19,7 +19,6 @@ using AVEVA::RocksDB::Plugin::Core::Mocks::FilesystemMock;
 using boost::log::sources::severity_logger_mt;
 using boost::log::trivial::severity_level;
 using ::testing::_;
-using ::testing::Invoke;
 using ::testing::Matcher;
 using ::testing::Return;
 class FileCacheTests : public ::testing::Test {
@@ -72,20 +71,20 @@ class FileCacheTests : public ::testing::Test {
 TEST_F(FileCacheTests, ReadEvenSpaced256MbFiles) {
     // Arrange
     const auto fileSize = static_cast<size_t>(268435456);
-    EXPECT_CALL(*m_containerClient, GetBlobClient(_)).WillRepeatedly(Invoke([fileSize](const std::string&) {
+    EXPECT_CALL(*m_containerClient, GetBlobClient(_)).WillRepeatedly([fileSize](const std::string&) {
         auto blob = std::make_unique<BlobClientMock>();
         EXPECT_CALL(*blob, GetSize()).WillRepeatedly(Return(fileSize));
         return blob;
-    }));
+    });
 
-    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly(Invoke([](const std::filesystem::path&) {
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
         auto file = std::make_unique<FileMock>();
-        EXPECT_CALL(*file, Read(_, _, _)).WillRepeatedly(Invoke([](char*, uint64_t offset, uint64_t length) {
+        EXPECT_CALL(*file, Read(_, _, _)).WillRepeatedly([](char*, uint64_t offset, uint64_t length) {
             return length - offset;
-        }));
+        });
 
         return file;
-    }));
+    });
 
     // Act
     EnsureReadFromCache("1.sst", fileSize);
@@ -116,50 +115,50 @@ TEST_F(FileCacheTests, ReadRandomLargeFiles_EvictionWorks) {
     const auto fileSize5 = static_cast<size_t>(330812579);
     const auto fileSize6 = static_cast<size_t>(509715200);
 
-    EXPECT_CALL(*m_containerClient, GetBlobClient("1.sst")).WillRepeatedly(Invoke([fileSize1](const std::string&) {
+    EXPECT_CALL(*m_containerClient, GetBlobClient("1.sst")).WillRepeatedly([fileSize1](const std::string&) {
         auto blob = std::make_unique<BlobClientMock>();
         EXPECT_CALL(*blob, GetSize()).WillRepeatedly(Return(fileSize1));
         return blob;
-    }));
+    });
 
-    EXPECT_CALL(*m_containerClient, GetBlobClient("2.sst")).WillRepeatedly(Invoke([fileSize2](const std::string&) {
+    EXPECT_CALL(*m_containerClient, GetBlobClient("2.sst")).WillRepeatedly([fileSize2](const std::string&) {
         auto blob = std::make_unique<BlobClientMock>();
         EXPECT_CALL(*blob, GetSize()).WillRepeatedly(Return(fileSize2));
         return blob;
-    }));
+    });
 
-    EXPECT_CALL(*m_containerClient, GetBlobClient("3.sst")).WillRepeatedly(Invoke([fileSize3](const std::string&) {
+    EXPECT_CALL(*m_containerClient, GetBlobClient("3.sst")).WillRepeatedly([fileSize3](const std::string&) {
         auto blob = std::make_unique<BlobClientMock>();
         EXPECT_CALL(*blob, GetSize()).WillRepeatedly(Return(fileSize3));
         return blob;
-    }));
+    });
 
-    EXPECT_CALL(*m_containerClient, GetBlobClient("4.sst")).WillRepeatedly(Invoke([fileSize4](const std::string&) {
+    EXPECT_CALL(*m_containerClient, GetBlobClient("4.sst")).WillRepeatedly([fileSize4](const std::string&) {
         auto blob = std::make_unique<BlobClientMock>();
         EXPECT_CALL(*blob, GetSize()).WillRepeatedly(Return(fileSize4));
         return blob;
-    }));
+    });
 
-    EXPECT_CALL(*m_containerClient, GetBlobClient("5.sst")).WillRepeatedly(Invoke([fileSize5](const std::string&) {
+    EXPECT_CALL(*m_containerClient, GetBlobClient("5.sst")).WillRepeatedly([fileSize5](const std::string&) {
         auto blob = std::make_unique<BlobClientMock>();
         EXPECT_CALL(*blob, GetSize()).WillRepeatedly(Return(fileSize5));
         return blob;
-    }));
+    });
 
-    EXPECT_CALL(*m_containerClient, GetBlobClient("6.sst")).WillRepeatedly(Invoke([fileSize6](const std::string&) {
+    EXPECT_CALL(*m_containerClient, GetBlobClient("6.sst")).WillRepeatedly([fileSize6](const std::string&) {
         auto blob = std::make_unique<BlobClientMock>();
         EXPECT_CALL(*blob, GetSize()).WillRepeatedly(Return(fileSize6));
         return blob;
-    }));
+    });
 
-    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly(Invoke([](const std::filesystem::path&) {
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
         auto file = std::make_unique<FileMock>();
-        EXPECT_CALL(*file, Read(_, _, _)).WillRepeatedly(Invoke([](char*, uint64_t offset, uint64_t length) {
+        EXPECT_CALL(*file, Read(_, _, _)).WillRepeatedly([](char*, uint64_t offset, uint64_t length) {
             return length - offset;
-        }));
+        });
 
         return file;
-    }));
+    });
 
     // Act
     EnsureReadFromCache("1.sst", fileSize1);
@@ -188,15 +187,16 @@ TEST_F(FileCacheTests, ReadFileFromCache) {
     // DownloadTo. Each call returns a fresh mock, so we track DownloadTo with a shared counter
     // rather than a per-blob EXPECT_CALL which would fail on the size-only blob.
     std::atomic<int> downloadCount{0};
-    EXPECT_CALL(*m_containerClient, GetBlobClient("1.sst")).WillRepeatedly(Invoke([&fileData, &downloadCount](const std::string&) {
-        auto blob = std::make_unique<BlobClientMock>();
-        ON_CALL(*blob, GetSize()).WillByDefault(Return(fileData.size()));
-        ON_CALL(*blob, DownloadTo(Matcher<const std::string&>(_), _, _))
-            .WillByDefault([&downloadCount](const std::string&, int64_t, int64_t) { downloadCount++; });
-        return blob;
-    }));
+    EXPECT_CALL(*m_containerClient, GetBlobClient("1.sst"))
+        .WillRepeatedly([&fileData, &downloadCount](const std::string&) {
+            auto blob = std::make_unique<BlobClientMock>();
+            ON_CALL(*blob, GetSize()).WillByDefault(Return(fileData.size()));
+            ON_CALL(*blob, DownloadTo(Matcher<const std::string&>(_), _, _))
+                .WillByDefault([&downloadCount](const std::string&, int64_t, int64_t) { downloadCount++; });
+            return blob;
+        });
     EXPECT_CALL(*m_filesystem, Open(std::filesystem::path(m_folderName) / "1.sst"))
-        .WillRepeatedly(Invoke([&fileData](const std::filesystem::path&) {
+        .WillRepeatedly([&fileData](const std::filesystem::path&) {
             auto file = std::make_unique<FileMock>();
             EXPECT_CALL(*file, Read(_, _, _))
                 .WillRepeatedly([&fileData](char* buffer, uint64_t offset, uint64_t length) -> uint64_t {
@@ -204,7 +204,7 @@ TEST_F(FileCacheTests, ReadFileFromCache) {
                     return length - offset;
                 });
             return file;
-        }));
+        });
     EnsureReadFromCache("1.sst");
     EXPECT_EQ(1, downloadCount) << "DownloadTo should have been called exactly once";
 
@@ -223,20 +223,20 @@ TEST_F(FileCacheTests, CacheSizeExceeded) {
     // Arrange
     const auto fileSize = static_cast<size_t>(20000);
 
-    EXPECT_CALL(*m_containerClient, GetBlobClient(_)).WillRepeatedly(Invoke([fileSize](const std::string&) {
+    EXPECT_CALL(*m_containerClient, GetBlobClient(_)).WillRepeatedly([fileSize](const std::string&) {
         auto blob = std::make_unique<BlobClientMock>();
         EXPECT_CALL(*blob, GetSize()).WillRepeatedly(Return(fileSize));
         return blob;
-    }));
+    });
 
-    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly(Invoke([](const std::filesystem::path&) {
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
         auto file = std::make_unique<FileMock>();
-        EXPECT_CALL(*file, Read(_, _, _)).WillRepeatedly(Invoke([](char*, uint64_t offset, uint64_t length) {
+        EXPECT_CALL(*file, Read(_, _, _)).WillRepeatedly([](char*, uint64_t offset, uint64_t length) {
             return length - offset;
-        }));
+        });
 
         return file;
-    }));
+    });
 
     EnsureReadFromCache("1.sst");
     EnsureReadFromCache("2.sst");
@@ -278,24 +278,24 @@ TEST_F(FileCacheTests, ReadFile_SecondAccess_QueuesAndDownloads) {
 
     EXPECT_CALL(*m_containerClient, GetBlobClient("1.sst"))
         .Times(::testing::AtLeast(1))
-        .WillRepeatedly(Invoke([&fileData](const std::string&) {
+        .WillRepeatedly([&fileData](const std::string&) {
             auto blob = std::make_unique<BlobClientMock>();
             ON_CALL(*blob, GetSize()).WillByDefault(Return(fileData.size()));
             ON_CALL(*blob, DownloadTo(Matcher<const std::string&>(_), _, _)).WillByDefault(Return());
             return blob;
-        }));
+        });
 
     EXPECT_CALL(*m_filesystem, Open(std::filesystem::path(m_folderName) / "1.sst"))
         .Times(::testing::AtLeast(1))
-        .WillRepeatedly(Invoke([&fileData](const std::filesystem::path&) {
+        .WillRepeatedly([&fileData](const std::filesystem::path&) {
             auto file = std::make_unique<FileMock>();
             ON_CALL(*file, Read(_, _, _))
-                .WillByDefault(Invoke([&fileData](char* buf, uint64_t offset, uint64_t length) -> uint64_t {
+                .WillByDefault([&fileData](char* buf, uint64_t offset, uint64_t length) -> uint64_t {
                     std::copy(fileData.data() + offset, fileData.data() + offset + length, buf);
                     return length - offset;
-                }));
+                });
             return file;
-        }));
+        });
 
     // Act
     const auto bytesReadOnSecondAccess = m_cache.ReadFile("1.sst", 0, 1, buffer);

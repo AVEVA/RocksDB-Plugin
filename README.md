@@ -98,6 +98,7 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
 
 - **Caching**: Enable local caching for frequently accessed data. SSTs are cached on repeat access, which avoids eager one-time startup scans downloading every SST.
 - **Bounded stale metadata**: Never-downloaded stale SST entries are capped and oldest metadata-only entries are pruned to prevent unbounded cache index growth.
+- **Async IO**: The filesystem advertises `FSSupportedOps::kAsyncIO` and implements `ReadAsync`/`Poll`/`AbortIO`, so setting `rocksdb::ReadOptions::async_io = true` overlaps blob downloads with RocksDB's work (iterator readahead, `MultiGet`). Async reads are issued directly on the host `io_context` (no extra threads); completion handlers only copy bytes into RocksDB's buffer, and RocksDB's callbacks are delivered from `Poll`/`AbortIO` on the calling thread.
 
 For detailed configuration examples and advanced usage patterns, see the [Azure Plugin Documentation](src/AVEVA/RocksDB/Plugin/Azure/README.md).
 

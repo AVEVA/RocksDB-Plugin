@@ -9,19 +9,29 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 class ReadableFileImpl {
     std::string m_name;
     std::shared_ptr<Core::BlobClient> m_blobClient;
     std::shared_ptr<Core::FileCache> m_fileCache;
     int64_t m_offset;
+    // Random (and async) reads may run concurrently on one file, so the cached blob metadata is guarded.
+    // Held by pointer to keep the type movable.
+    std::unique_ptr<std::mutex> m_metadataMutex;
     mutable int64_t m_size;
     mutable std::string m_etag;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
 
     int64_t DownloadWithRetry(const int64_t offset, const int64_t bytesToRead, char* buffer) const;
+    [[nodiscard]] std::pair<int64_t, std::string> GetMetadata() const;
+    void SetMetadata(int64_t size, std::string etag) const;
+    static void RefreshMetadataAndReadAsync(std::shared_ptr<const ReadableFileImpl> self, int64_t offset,
+                                            int64_t bytesToRead, Core::BlobClient::DownloadCallback callback);
 
   public:
     ReadableFileImpl(
@@ -33,6 +43,17 @@ class ReadableFileImpl {
 
     // NOTE: Random so doesn't affect the sequential reads
     [[nodiscard]] int64_t RandomRead(int64_t offset, int64_t bytesToRead, char* buffer) const;
+
+    // Serves a random read from the local file cache only; returns nullopt when it must go to the blob.
+    [[nodiscard]] std::optional<size_t> TryReadFromCache(int64_t offset, int64_t bytesToRead, char* buffer) const;
+
+    using ReadCallback = Core::BlobClient::DownloadCallback;
+
+    // Non-blocking random read from the blob (bypassing the file cache), with the same ETag/size refresh and retry
+    // semantics as RandomRead. `self` keeps the file alive until `callback` has run; the callback may run on an
+    // io_context thread or inline, so it must not block on blob I/O.
+    static void ReadAsync(std::shared_ptr<const ReadableFileImpl> self, int64_t offset, int64_t bytesToRead,
+                          ReadCallback callback);
 
     int64_t GetOffset() const;
     void Skip(int64_t n);

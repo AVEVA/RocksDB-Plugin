@@ -3,8 +3,11 @@
 
 #pragma once
 #include <cstdint>
+#include <exception>
+#include <functional>
 #include <span>
 #include <string>
+#include <utility>
 namespace AVEVA::RocksDB::Plugin::Core {
 class BlobClient {
   public:
@@ -74,5 +77,55 @@ class BlobClient {
     /// <returns>The number of bytes actually downloaded.</returns>
     virtual int64_t Download(std::span<char> buffer, int64_t blobOffset, int64_t readLength,
                              const std::string& ifMatch) = 0;
+
+    /// <summary>
+    /// Completion of DownloadAsync: an exception (null on success) and the downloaded bytes.
+    /// </summary>
+    using DownloadCallback = std::function<void(std::exception_ptr error, std::string data)>;
+
+    /// <summary>
+    /// Completion of GetMetadataAsync: an exception (null on success), the blob's size and its ETag.
+    /// </summary>
+    using MetadataCallback = std::function<void(std::exception_ptr error, int64_t size, std::string etag)>;
+
+    /// <summary>
+    /// Asynchronously downloads a portion of the blob, performing an ETag match check. The callback may run on any
+    /// thread (including inline) and must not block on further blob I/O. The default implementation is synchronous.
+    /// </summary>
+    /// <param name="blobOffset">The starting position (in bytes) in the blob from which to begin downloading.</param>
+    /// <param name="readLength">The number of bytes to download from the offset.</param>
+    /// <param name="ifMatch">The ETag to check against.</param>
+    /// <param name="callback">Invoked exactly once with the outcome.</param>
+    virtual void DownloadAsync(int64_t blobOffset, int64_t readLength, const std::string& ifMatch,
+                               DownloadCallback callback) {
+        std::string data;
+        std::exception_ptr error;
+        try {
+            data.resize(static_cast<size_t>(readLength));
+            data.resize(static_cast<size_t>(Download(std::span<char>(data), blobOffset, readLength, ifMatch)));
+        } catch (...) {
+            error = std::current_exception();
+            data.clear();
+        }
+        callback(error, std::move(data));
+    }
+
+    /// <summary>
+    /// Asynchronously retrieves the blob's size and ETag. Same threading rules as DownloadAsync. The default
+    /// implementation is synchronous.
+    /// </summary>
+    /// <param name="callback">Invoked exactly once with the outcome.</param>
+    virtual void GetMetadataAsync(MetadataCallback callback) {
+        int64_t size = 0;
+        std::string etag;
+        std::exception_ptr error;
+        try {
+            size = GetSize();
+            etag = GetEtag();
+        } catch (...) {
+            error = std::current_exception();
+        }
+        callback(error, size, std::move(etag));
+    }
 };
 } // namespace AVEVA::RocksDB::Plugin::Core

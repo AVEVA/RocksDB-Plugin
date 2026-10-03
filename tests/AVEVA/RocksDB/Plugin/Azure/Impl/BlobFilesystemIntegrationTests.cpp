@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
+#include "AVEVA/RocksDB/Plugin/Azure/AsyncReadRequest.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
 #include "IntegrationTestHelpers.hpp"
 
 #include <boost/asio/use_future.hpp>
@@ -1231,6 +1233,53 @@ TEST_F(BlobFilesystemIntegrationTests, RandomRead_AfterBlobGrows_UpdatesSize) {
     EXPECT_EQ(100, bytesRead);
     EXPECT_TRUE(std::all_of(buffer.begin(), buffer.end(), [](char c) { return c == 'Y'; }));
     EXPECT_EQ(768, readFile.GetSize());
+
+    // Cleanup
+    EXPECT_TRUE(m_filesystem->DeleteFile(blobName));
+}
+
+TEST_F(BlobFilesystemIntegrationTests, ReadAsync_MultipleRequests_PollDeliversData) {
+    // Arrange
+    std::string blobName = m_containerPrefix + "/async-" + m_blobName;
+    std::vector<char> data(4096);
+    for (size_t i = 0; i < data.size(); ++i) {
+        data[i] = static_cast<char>('a' + (i / 512));
+    }
+    auto writeFile = m_filesystem->CreateWriteableFile(blobName);
+    writeFile.Append(data);
+    writeFile.Sync();
+    writeFile.Close();
+    AVEVA::RocksDB::Plugin::Azure::ReadableFile file{m_filesystem->CreateReadableFile(blobName)};
+
+    // Act
+    constexpr size_t Count = 8;
+    std::vector<std::vector<char>> scratches(Count, std::vector<char>(512));
+    std::vector<rocksdb::IOStatus> statuses(Count);
+    std::vector<std::string> results(Count);
+    std::vector<void*> handles(Count, nullptr);
+    std::vector<rocksdb::IOHandleDeleter> deleters(Count);
+    for (size_t i = 0; i < Count; ++i) {
+        rocksdb::FSReadRequest req;
+        req.offset = i * 512;
+        req.len = 512;
+        req.scratch = scratches[i].data();
+        auto callback = [&statuses, &results, i](rocksdb::FSReadRequest& completed, void*) {
+            statuses[i] = completed.status;
+            results[i].assign(completed.result.data(), completed.result.size());
+        };
+        ASSERT_TRUE(
+            file.ReadAsync(req, rocksdb::IOOptions{}, callback, nullptr, &handles[i], &deleters[i], nullptr).ok());
+    }
+    ASSERT_TRUE(AVEVA::RocksDB::Plugin::Azure::PollAsyncReads(handles).ok());
+    for (size_t i = 0; i < Count; ++i) {
+        deleters[i](handles[i]);
+    }
+
+    // Assert
+    for (size_t i = 0; i < Count; ++i) {
+        EXPECT_TRUE(statuses[i].ok()) << statuses[i].ToString();
+        EXPECT_EQ(std::string(512, static_cast<char>('a' + i)), results[i]);
+    }
 
     // Cleanup
     EXPECT_TRUE(m_filesystem->DeleteFile(blobName));

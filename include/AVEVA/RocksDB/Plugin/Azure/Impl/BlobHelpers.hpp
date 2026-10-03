@@ -20,6 +20,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 struct BlobHelpers {
     static void SetFileSize(AzureClient::BlobClient& client, int64_t size);
     static int64_t GetFileSize(AzureClient::BlobClient& client);
+    // The logical file size recorded in the blob's metadata (0 when absent).
+    static int64_t FileSizeFromProperties(const AzureClient::Models::BlobProperties& properties);
     static int64_t GetBlobCapacity(AzureClient::BlobClient& client);
     // Creates the page blob with the given capacity unless it already exists. Returns true if it was created.
     static bool CreateIfNotExists(AzureClient::PageBlobClient& client, int64_t capacity);

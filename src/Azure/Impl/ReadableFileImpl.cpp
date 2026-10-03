@@ -14,7 +14,8 @@ ReadableFileImpl::ReadableFileImpl(
     std::string_view name, std::shared_ptr<Core::BlobClient> blobClient, std::shared_ptr<Core::FileCache> fileCache,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
     : m_name(name), m_blobClient(std::move(blobClient)), m_fileCache(std::move(fileCache)), m_offset(0),
-      m_size(m_blobClient ? m_blobClient->GetSize() : 0LL), m_logger(std::move(logger)) {
+      m_metadataMutex(std::make_unique<std::mutex>()), m_size(m_blobClient ? m_blobClient->GetSize() : 0LL),
+      m_logger(std::move(logger)) {
     m_etag = m_blobClient->GetEtag();
 }
 
@@ -31,7 +32,7 @@ int64_t ReadableFileImpl::SequentialRead(const int64_t bytesToRead, char* buffer
         }
     }
 
-    assert(m_size >= m_offset && "m_size needs to be bigger than m_offset or else we will overflow");
+    assert(GetMetadata().first >= m_offset && "m_size needs to be bigger than m_offset or else we will overflow");
 
     auto bytesRead = DownloadWithRetry(m_offset, bytesToRead, buffer);
     bytesRead = std::max<int64_t>(bytesRead, 0);
@@ -65,18 +66,119 @@ void ReadableFileImpl::Skip(const int64_t n) { m_offset += n; }
 int64_t ReadableFileImpl::GetSize() const {
     RefreshBlobMetadata();
 
-    return m_size;
+    return GetMetadata().first;
 }
 
+std::pair<int64_t, std::string> ReadableFileImpl::GetMetadata() const {
+    std::scoped_lock lock(*m_metadataMutex);
+    return {m_size, m_etag};
+}
+
+void ReadableFileImpl::SetMetadata(const int64_t size, std::string etag) const {
+    BOOST_LOG_SEV(*m_logger, debug) << "Blob metadata refreshed for file '" << m_name << "' :size = " << size
+                                    << " bytes, etag = " << etag;
+    std::scoped_lock lock(*m_metadataMutex);
+    m_size = size;
+    m_etag = std::move(etag);
+}
+
+std::optional<size_t> ReadableFileImpl::TryReadFromCache(const int64_t offset, const int64_t bytesToRead,
+                                                         char* buffer) const {
+    if (!m_fileCache || offset < 0 || bytesToRead <= 0) {
+        return std::nullopt;
+    }
+
+    return m_fileCache->ReadFile(m_name, offset, bytesToRead, buffer);
+}
+
+// Async counterpart of DownloadWithRetry: every step (ETag check, conditional download, metadata refresh) is chained
+// through completion callbacks so no thread ever blocks on the io_context.
+void ReadableFileImpl::ReadAsync(std::shared_ptr<const ReadableFileImpl> self, const int64_t offset,
+                                 const int64_t bytesToRead, ReadCallback callback) {
+    if (offset < 0 || bytesToRead <= 0) {
+        callback(nullptr, {});
+        return;
+    }
+
+    const auto [size, etag] = self->GetMetadata();
+    const auto remaining = std::max<int64_t>(0, size - offset);
+    if (remaining == 0) {
+        // At the cached end of the blob: only re-read if another writer moved the blob on.
+        auto* blobClient = self->m_blobClient.get();
+        blobClient->GetMetadataAsync(
+            [self = std::move(self), offset, bytesToRead, callback = std::move(callback),
+             etag](std::exception_ptr error, int64_t latestSize, std::string latestEtag) mutable {
+                if (error) {
+                    callback(error, {});
+                    return;
+                }
+                if (latestEtag == etag) {
+                    callback(nullptr, {});
+                    return;
+                }
+
+                self->SetMetadata(latestSize, std::move(latestEtag));
+                ReadAsync(std::move(self), offset, bytesToRead, std::move(callback));
+            });
+        return;
+    }
+
+    const auto toRead = std::min(bytesToRead, remaining);
+    auto* blobClient = self->m_blobClient.get();
+    blobClient->DownloadAsync(offset, toRead, etag,
+                              [self = std::move(self), offset, bytesToRead, remaining,
+                               callback = std::move(callback)](std::exception_ptr error, std::string data) mutable {
+                                  if (error) {
+                                      try {
+                                          std::rethrow_exception(error);
+                                      } catch (const RequestFailedException& ex) {
+                                          if (ex.StatusCode == HttpStatus::PreconditionFailed) {
+                                              RefreshMetadataAndReadAsync(std::move(self), offset, bytesToRead,
+                                                                          std::move(callback));
+                                              return;
+                                          }
+                                      } catch (...) {
+                                      }
+                                      callback(error, {});
+                                      return;
+                                  }
+
+                                  if (static_cast<int64_t>(data.size()) > remaining) {
+                                      data.resize(static_cast<size_t>(remaining));
+                                  }
+                                  callback(nullptr, std::move(data));
+                              });
+}
+
+void ReadableFileImpl::RefreshMetadataAndReadAsync(std::shared_ptr<const ReadableFileImpl> self, const int64_t offset,
+                                                   const int64_t bytesToRead,
+                                                   Core::BlobClient::DownloadCallback callback) {
+    auto* blobClient = self->m_blobClient.get();
+    blobClient->GetMetadataAsync([self = std::move(self), offset, bytesToRead, callback = std::move(callback)](
+                                     std::exception_ptr error, int64_t size, std::string etag) mutable {
+        if (error) {
+            callback(error, {});
+            return;
+        }
+
+        self->SetMetadata(size, std::move(etag));
+        ReadAsync(std::move(self), offset, bytesToRead, std::move(callback));
+    });
+}
+
+// Downloads from the blob conditioned on the cached ETag. When the blob changed underneath us (precondition
+// failure, or reading at the cached end of a blob whose ETag moved on) the metadata is refreshed and the read
+// retried, so readers observe data appended by other writers.
 int64_t ReadableFileImpl::DownloadWithRetry(const int64_t offset, const int64_t bytesToRead, char* buffer) const {
     int64_t bytesRead = 0;
 
     bool success = false;
     do {
-        auto remaining = std::max<int64_t>(0, m_size - offset);
+        const auto [size, etag] = GetMetadata();
+        auto remaining = std::max<int64_t>(0, size - offset);
         if (remaining == 0) {
             auto latestEtag = m_blobClient->GetEtag();
-            if (latestEtag != m_etag) {
+            if (latestEtag != etag) {
                 RefreshBlobMetadata();
                 continue;
             }
@@ -87,7 +189,7 @@ int64_t ReadableFileImpl::DownloadWithRetry(const int64_t offset, const int64_t 
         auto toRead = std::min(bytesToRead, remaining);
         try {
             bytesRead =
-                m_blobClient->Download(std::span<char>(buffer, static_cast<size_t>(toRead)), offset, toRead, m_etag);
+                m_blobClient->Download(std::span<char>(buffer, static_cast<size_t>(toRead)), offset, toRead, etag);
             bytesRead = std::min(bytesRead, remaining);
             success = true;
         } catch (const RequestFailedException& ex) {
@@ -103,9 +205,8 @@ int64_t ReadableFileImpl::DownloadWithRetry(const int64_t offset, const int64_t 
 }
 
 void ReadableFileImpl::RefreshBlobMetadata() const {
-    m_size = m_blobClient->GetSize();
-    m_etag = m_blobClient->GetEtag();
-    BOOST_LOG_SEV(*m_logger, debug) << "Blob metadata refreshed for file '" << m_name << "' :size = " << m_size
-                                    << " bytes, etag = " << m_etag;
+    // Query outside the lock so concurrent readers are not serialized behind network round trips.
+    auto size = m_blobClient->GetSize();
+    SetMetadata(size, m_blobClient->GetEtag());
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

@@ -59,9 +59,12 @@ void BlobHelpers::SetFileSize(AzureClient::BlobClient& client, int64_t size) {
 }
 
 int64_t BlobHelpers::GetFileSize(AzureClient::BlobClient& client) {
-    const auto props = Unwrap(client.GetPropertiesAsync(boost::asio::use_future).get());
-    auto metaIter = props.Metadata.find(g_sizeMetadata);
-    return metaIter != props.Metadata.end() ? static_cast<int64_t>(std::stoll(metaIter->second)) : 0;
+    return FileSizeFromProperties(Unwrap(client.GetPropertiesAsync(boost::asio::use_future).get()));
+}
+
+int64_t BlobHelpers::FileSizeFromProperties(const AzureClient::Models::BlobProperties& properties) {
+    auto metaIter = properties.Metadata.find(g_sizeMetadata);
+    return metaIter != properties.Metadata.end() ? static_cast<int64_t>(std::stoll(metaIter->second)) : 0;
 }
 
 int64_t BlobHelpers::GetBlobCapacity(AzureClient::BlobClient& client) {
