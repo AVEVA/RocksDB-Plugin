@@ -29,6 +29,11 @@ namespace AVEVA
         return m_caDirectory;
     }
 
+    const std::string& HttpClientOptions::GetCaPem() const noexcept
+    {
+        return m_caPem;
+    }
+
     std::size_t HttpClientOptions::GetMaxIdleConnectionsPerHost() const noexcept
     {
         return m_maxIdleConnectionsPerHost;
@@ -57,6 +62,11 @@ namespace AVEVA
     void HttpClientOptions::SetCaDirectory(std::string caDirectory)
     {
         m_caDirectory = std::move(caDirectory);
+    }
+
+    void HttpClientOptions::SetCaPem(std::string caPem)
+    {
+        m_caPem = std::move(caPem);
     }
 
     void HttpClientOptions::SetMaxIdleConnectionsPerHost(std::size_t maxIdleConnectionsPerHost) noexcept

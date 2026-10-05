@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlockOn.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
 
@@ -35,9 +36,8 @@ int64_t PageBlob::GetCapacity() { return BlobHelpers::GetBlobCapacity(m_client);
 
 void PageBlob::SetCapacity(int64_t capacity) {
     Unwrap(
-        m_client
-            .ResizeAsync(static_cast<uint64_t>(capacity), AzureClient::ResizePageBlobOptions{}, boost::asio::use_future)
-            .get());
+        BlockOn(m_client.get_executor(), m_client
+            .ResizeAsync(static_cast<uint64_t>(capacity), AzureClient::ResizePageBlobOptions{}, boost::asio::use_future)));
 }
 
 void PageBlob::DownloadTo(const std::string& path, int64_t offset, int64_t length) {
@@ -54,7 +54,7 @@ void PageBlob::DownloadTo(const std::string& path, int64_t offset, int64_t lengt
     options.Range = ToRange(offset, length);
     options.ChunkSize = g_downloadChunkSize;
     options.Concurrency = g_downloadConcurrency;
-    Unwrap(m_client.DownloadToAsync(std::filesystem::path(path), std::move(options), boost::asio::use_future).get());
+    Unwrap(BlockOn(m_client.get_executor(), m_client.DownloadToAsync(std::filesystem::path(path), std::move(options), boost::asio::use_future)));
 }
 
 int64_t PageBlob::DownloadTo(std::span<char> buffer, int64_t offset, int64_t length) {
@@ -62,45 +62,41 @@ int64_t PageBlob::DownloadTo(std::span<char> buffer, int64_t offset, int64_t len
         return 0;
     }
 
-    AzureClient::DownloadBlobOptions options;
-    options.Range = ToRange(offset, length);
-    auto result = Unwrap(m_client
-                             .DownloadAsync(std::move(options), boost::asio::use_future,
-                                            RequestOptionsForTransfer(m_client.GetDefaultRequestOptions(),
-                                                                      static_cast<uint64_t>(length)))
-                             .get());
-
-    if (!result.ContentRange.has_value() || !result.ContentRange->Length.has_value()) {
-        return -1;
-    }
-
-    const auto bytes = std::min(result.Content.size(), buffer.size());
-    std::memcpy(buffer.data(), result.Content.data(), bytes);
-    return static_cast<int64_t>(bytes);
+    return Download(buffer, offset, length, std::string());
 }
 
 void PageBlob::UploadPages(const std::span<char> buffer, const int64_t blobOffset) {
-    Unwrap(m_client
+    Unwrap(BlockOn(m_client.get_executor(), m_client
                .UploadPagesAsync(static_cast<uint64_t>(blobOffset), std::as_bytes(buffer), boost::asio::use_future,
-                                 RequestOptionsForTransfer(m_client.GetDefaultRequestOptions(), buffer.size()))
-               .get());
+                                 RequestOptionsForTransfer(m_client.GetDefaultRequestOptions(), buffer.size()))));
 }
 
 Core::BlobMetadata PageBlob::GetMetadata() {
-    auto properties = Unwrap(m_client.GetPropertiesAsync(boost::asio::use_future).get());
+    auto properties = Unwrap(BlockOn(m_client.get_executor(), m_client.GetPropertiesAsync(boost::asio::use_future)));
     return {BlobHelpers::FileSizeFromProperties(properties), std::move(properties.ETag)};
 }
 
 std::string PageBlob::GetEtag() {
-    auto properties = Unwrap(m_client.GetPropertiesAsync(boost::asio::use_future).get());
+    auto properties = Unwrap(BlockOn(m_client.get_executor(), m_client.GetPropertiesAsync(boost::asio::use_future)));
     return std::move(properties.ETag);
 }
 
 void PageBlob::DownloadAsync(int64_t blobOffset, int64_t readLength, const std::string& ifMatch,
                              DownloadCallback callback) {
+    DownloadAsync(blobOffset, readLength, ifMatch, std::chrono::milliseconds::zero(), std::move(callback));
+}
+
+void PageBlob::DownloadAsync(int64_t blobOffset, int64_t readLength, const std::string& ifMatch,
+                             std::chrono::milliseconds timeout, DownloadCallback callback) {
     AzureClient::DownloadBlobOptions options;
     options.Range = ToRange(blobOffset, readLength);
     options.Conditions.IfMatch = ifMatch;
+    // The transfer-scaled default timeout can be minutes; a caller-supplied deadline only ever shortens it.
+    auto requestOptions =
+        RequestOptionsForTransfer(m_client.GetDefaultRequestOptions(), static_cast<uint64_t>(readLength));
+    if (timeout.count() > 0 && timeout < requestOptions.GetTimeout()) {
+        requestOptions.SetTimeout(timeout);
+    }
     m_client.DownloadAsync(
         std::move(options),
         [callback = std::move(callback)](auto result) mutable {
@@ -113,7 +109,7 @@ void PageBlob::DownloadAsync(int64_t blobOffset, int64_t readLength, const std::
             }
             callback(error, std::move(content));
         },
-        RequestOptionsForTransfer(m_client.GetDefaultRequestOptions(), static_cast<uint64_t>(readLength)));
+        std::move(requestOptions));
 }
 
 void PageBlob::GetMetadataAsync(MetadataCallback callback) {
@@ -132,15 +128,17 @@ void PageBlob::GetMetadataAsync(MetadataCallback callback) {
     });
 }
 
+// A successful ranged response without Content-Range is accepted; the body length is the source of truth.
 int64_t PageBlob::Download(std::span<char> buffer, int64_t offset, int64_t length, const std::string& ifMatch) {
     AzureClient::DownloadBlobOptions options;
     options.Range = ToRange(offset, length);
-    options.Conditions.IfMatch = ifMatch;
-    const auto result = Unwrap(m_client
+    if (!ifMatch.empty()) {
+        options.Conditions.IfMatch = ifMatch;
+    }
+    const auto result = Unwrap(BlockOn(m_client.get_executor(), m_client
                                    .DownloadAsync(std::move(options), boost::asio::use_future,
                                                   RequestOptionsForTransfer(m_client.GetDefaultRequestOptions(),
-                                                                            static_cast<uint64_t>(length)))
-                                   .get());
+                                                                            static_cast<uint64_t>(length)))));
 
     // TODO(backlog): AzureClient only returns the body as std::string, so every download is copied once more into
     // the caller's buffer. Writing the response body straight into a caller-provided span needs support in
@@ -149,8 +147,8 @@ int64_t PageBlob::Download(std::span<char> buffer, int64_t offset, int64_t lengt
     std::memcpy(buffer.data(), result.Content.data(), bytesRead);
 
     assert((!result.ContentRange.has_value() || !result.ContentRange->Length.has_value() ||
-            *result.ContentRange->Length == static_cast<uint64_t>(bytesRead)) &&
-           "Bytes read differ from server ContentRange");
+            *result.ContentRange->Length == static_cast<uint64_t>(result.Content.size())) &&
+           "Body size differs from server ContentRange");
     return static_cast<int64_t>(bytesRead);
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

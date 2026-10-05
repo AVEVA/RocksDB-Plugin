@@ -10,7 +10,7 @@
     "boost-url",
     "boost-uuid",
     "boost-algorithm",
-    "boost-property-tree",
+    "boost-json",
     {
       "name": "libxml2",
       "default-features": false

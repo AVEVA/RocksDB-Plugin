@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -369,6 +370,7 @@ namespace
         Tcp::socket socket(context);
         beast::flat_buffer buffer;
         bool requestRead = false;
+        asio::cancellation_signal cancellation;
 
         acceptor.async_accept(socket,
             [&](boost::system::error_code error)
@@ -382,24 +384,17 @@ namespace
             {
                 ASSERT_FALSE(readError);
                 requestRead = true;
+                // The server has the request and never answers: cancel now rather than after a fixed delay.
+                cancellation.emit(asio::cancellation_type::terminal);
             });
         });
 
-        asio::cancellation_signal cancellation;
         AVEVA::HttpRequestOptions options;
         options.SetCancellationSlot(cancellation.slot());
         options.SetTimeout(std::chrono::seconds(5));
 
         AVEVA::HttpRequest request;
         request.SetUrl("http://127.0.0.1:" + std::to_string(acceptor.local_endpoint().port()) + "/");
-
-        asio::steady_timer timer(context);
-        timer.expires_after(std::chrono::milliseconds(20));
-        timer.async_wait([&](boost::system::error_code error)
-        {
-            ASSERT_FALSE(error);
-            cancellation.emit(asio::cancellation_type::terminal);
-        });
 
         int completions = 0;
         client->SendAsync(request,
@@ -491,5 +486,45 @@ namespace
         context.restart();
         context.run();
         EXPECT_EQ(completions, 1);
+    }
+    TEST(HttpClientRequest, ReleaseBodyMovesTheOwnedBodyOut)
+    {
+        AVEVA::HttpRequest request;
+        request.SetBody("payload");
+
+        EXPECT_EQ(request.ReleaseBody(), "payload");
+        EXPECT_TRUE(request.GetBody().empty());
+        EXPECT_EQ(request.GetBodySize(), 0u);
+    }
+
+    TEST(HttpClientRequest, BodyViewKeepAliveIsSharedByCopiesAndDroppedByReplacingTheBody)
+    {
+        auto owner = std::make_shared<const std::string>("shared payload");
+        const std::weak_ptr<const std::string> weak = owner;
+        AVEVA::HttpRequest request;
+        request.SetBodyView(std::as_bytes(std::span{owner->data(), owner->size()}), owner);
+        owner.reset();
+
+        AVEVA::HttpRequest copy = request;
+        request.SetBody("other");
+        EXPECT_FALSE(weak.expired());
+        EXPECT_EQ(copy.GetBodySize(), 14u);
+
+        copy.SetBody({});
+        EXPECT_TRUE(weak.expired());
+    }
+
+    TEST(HttpClientRequest, SharedBodyViewIsTransmitted)
+    {
+        auto owner = std::make_shared<const std::string>("shared payload");
+        AVEVA::HttpRequest request;
+        request.SetMethod(AVEVA::HttpMethod::Post);
+        request.SetBodyView(std::as_bytes(std::span{owner->data(), owner->size()}), owner);
+        owner.reset();
+
+        auto result = Exchange(request, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+
+        EXPECT_FALSE(result.error);
+        EXPECT_EQ(result.received.body(), "shared payload");
     }
 } // namespace

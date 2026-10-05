@@ -221,6 +221,30 @@ namespace AVEVA::AzureClient::Private
     constexpr std::size_t EstimatedCanonicalizedHeaderLength = 32U;
     constexpr std::size_t EstimatedCanonicalizedQueryLength = 24U;
 
+    namespace
+    {
+        // The service canonicalizes a header value by trimming it and replacing each run of linear whitespace with
+        // one space.
+        [[nodiscard]] std::string CollapseWhitespace(std::string_view value)
+        {
+            value = TrimWhitespace(value);
+            std::string result;
+            result.reserve(value.size());
+            bool inRun = false;
+            for (const char character : value)
+            {
+                const bool space = character == ' ' || character == '\t';
+                if (space && inRun)
+                {
+                    continue;
+                }
+                inRun = space;
+                result.push_back(space ? ' ' : character);
+            }
+            return result;
+        }
+    } // namespace
+
     std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpRequest& request)
     {
         // `parsedUrl` is a fresh local value (not shared with the caller), so its Query vector can be
@@ -238,11 +262,10 @@ namespace AVEVA::AzureClient::Private
             }
         }
         // Names are lowercased before comparing because the culture-aware tables only rank lowercase letters.
-        std::vector<std::string> lowercaseNames;
-        lowercaseNames.reserve(headers.size());
-        for (const HttpHeader& header : headers)
+        std::vector<std::string> lowercaseNames(headers.size());
+        for (const std::size_t index : canonicalizedHeaderIndices)
         {
-            lowercaseNames.push_back(ToLowerAscii(header.GetName()));
+            lowercaseNames.at(index) = ToLowerAscii(headers.at(index).GetName());
         }
         std::ranges::stable_sort(canonicalizedHeaderIndices,
             [&lowercaseNames](std::size_t lhs, std::size_t rhs)
@@ -265,12 +288,14 @@ namespace AVEVA::AzureClient::Private
                 }
                 std::format_to(std::back_inserter(canonicalizedHeadersText),
                     "{}:{}",
-                    ToLowerAscii(header.GetName()),
-                    TrimWhitespace(header.GetValue()));
+                    lowercaseNames.at(canonicalizedHeaderIndices.at(position)),
+                    CollapseWhitespace(header.GetValue()));
             }
             else
             {
-                std::format_to(std::back_inserter(canonicalizedHeadersText), ",{}", TrimWhitespace(header.GetValue()));
+                std::format_to(std::back_inserter(canonicalizedHeadersText),
+                    ",{}",
+                    CollapseWhitespace(header.GetValue()));
             }
         }
         if (!canonicalizedHeadersText.empty())

@@ -640,7 +640,8 @@ TEST(BlobRequestHelpersTests, XmlParsers_HandleNamespacedBlockListsPageRangesAnd
     ASSERT_TRUE(failure.Details.has_value());
     EXPECT_EQ(failure.Error, make_error_code(BlobStorageErrorCode::AuthenticationFailed));
     EXPECT_EQ(ValueOrFail(failure.Details).ErrorCode, "AuthenticationFailed");
-    EXPECT_EQ(ValueOrFail(failure.Details).Message, "Auth <failed> More detail&info");
+    EXPECT_EQ(ValueOrFail(failure.Details).Message, "Auth <failed>");
+    EXPECT_EQ(ValueOrFail(failure.Details).AuthenticationDetail, "More detail&info");
     EXPECT_EQ(ValueOrFail(failure.Details).RequestId, "request-id");
 }
 
@@ -1067,6 +1068,17 @@ TEST(SharedKeyCanonicalizationTests, RepeatedHeadersAndQueryParametersAreGrouped
     const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
     EXPECT_NE(toSign.find("x-ms-a:first\nx-ms-meta-k:v1,v2\n"), std::string::npos) << toSign;
     EXPECT_NE(toSign.find("/account/container/blob\na:y,z\nb:2\ncomp:list"), std::string::npos) << toSign;
+}
+
+TEST(SharedKeyCanonicalizationTests, InternalWhitespaceRunsInHeaderValuesAreCollapsed)
+{
+    AVEVA::HttpRequest request;
+    request.SetMethod(HttpMethod::Get);
+    request.SetUrl("https://account.blob.core.windows.net/container/blob");
+    request.AddHeader(AVEVA::HttpHeader{"x-ms-meta-k", "  a  \t b   c "});
+
+    const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
+    EXPECT_NE(toSign.find("x-ms-meta-k:a b c\n"), std::string::npos) << toSign;
 }
 
 TEST(SharedKeyCanonicalizationTests, HeadersAreOrderedWithCultureAwareRules)

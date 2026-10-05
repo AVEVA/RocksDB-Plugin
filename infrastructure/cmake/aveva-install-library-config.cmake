@@ -60,7 +60,7 @@ function(aveva_install_library name)
 
   option(
     ${project_prefix}_INSTALL_CONFIG_FILE_PACKAGE
-    "Enable building examples. Default: ${PROJECT_IS_TOP_LEVEL}. Values: { ON, OFF }."
+    "Install the CMake config package. Default: ${PROJECT_IS_TOP_LEVEL}. Values: { ON, OFF }."
     ${PROJECT_IS_TOP_LEVEL}
   )
 
@@ -107,13 +107,11 @@ function(aveva_install_library name)
       "${CMAKE_CURRENT_BINARY_DIR}/${package_name}-config.cmake"
     )
 
-    set(package_install_dir "${name}")
-    set(package_install_dir "share/${package_install_dir}")
+    set(package_install_dir "${CMAKE_INSTALL_DATADIR}/${name}")
     configure_package_config_file(
       "${config_file_template}"
       "${config_package_file}"
       INSTALL_DESTINATION "${package_install_dir}"
-      PATH_VARS PROJECT_NAME PROJECT_VERSION
     )
 
     set(config_version_file

@@ -3,7 +3,7 @@ find_package(aveva-install-library CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(boost_algorithm CONFIG REQUIRED)
 find_package(boost_asio CONFIG REQUIRED)
-find_package(boost_property_tree CONFIG REQUIRED)
+find_package(boost_json CONFIG REQUIRED)
 find_package(boost_url CONFIG REQUIRED)
 find_package(boost_uuid CONFIG REQUIRED)
 find_package(LibXml2 CONFIG REQUIRED)
@@ -32,13 +32,14 @@ add_library(aveva-azure-client
 
 set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../include")
 
-# Only static linking is expected/supported for consumers of this library.
-# If a shared build is ever produced (e.g. BUILD_SHARED_LIBS=ON), export all
-# symbols on Windows via CMake's generated .def file, matching the default
-# behavior on Linux/other platforms where symbols are visible by default.
-set_target_properties(aveva-azure-client PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
-
 add_library(aveva::azure-client ALIAS aveva-azure-client)
+if(BUILD_SHARED_LIBS)
+    message(FATAL_ERROR "aveva-azure-client supports static linking only.")
+endif()
+# Upload-buffer counters in TestHooks.hpp are compiled in only when the tests are built.
+if(AVEVA_AZURE_CLIENT_TESTS)
+    target_compile_definitions(aveva-azure-client PRIVATE AVEVA_AZURE_CLIENT_TESTING)
+endif()
 aveva_azure_client_enable_clang_tidy(aveva-azure-client)
 aveva_azure_client_instrument(aveva-azure-client)
 target_sources(aveva-azure-client
@@ -74,11 +75,6 @@ target_include_directories(aveva-azure-client
         "$<INSTALL_INTERFACE:include>"
 )
 
-install(TARGETS aveva-azure-client
-    EXPORT aveva-azure-client-targets
-    FILE_SET HEADERS DESTINATION include
-)
-
 target_compile_features(aveva-azure-client PUBLIC cxx_std_23)
 if(MSVC)
     target_compile_options(aveva-azure-client PRIVATE /W4 /permissive-)
@@ -93,7 +89,7 @@ target_link_libraries(aveva-azure-client
     PRIVATE
         OpenSSL::Crypto
         Boost::algorithm
-        Boost::property_tree
+        Boost::json
         Boost::url
         Boost::uuid
         LibXml2::LibXml2

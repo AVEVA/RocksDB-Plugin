@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlockOn.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 
@@ -39,7 +40,7 @@ LockFileImpl::LockFileImpl(
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     std::string fileName)
     : m_runtime(std::move(runtime)), m_file(std::move(file)), m_lastRenewalTime(std::chrono::steady_clock::now()),
-      m_leaseLength(leaseLength), m_logger(logger), m_fileName(std::move(fileName)) {
+      m_leaseLength(leaseLength), m_logger(std::move(logger)), m_fileName(std::move(fileName)) {
     if (m_logger == nullptr) {
         throw std::runtime_error("logger cannot be null.");
     }
@@ -60,17 +61,20 @@ bool LockFileImpl::Lock() {
 
     BOOST_LOG_SEV(*m_logger, severity_level::debug)
         << "Attempting to acquire blob lease for '" << m_fileName << "' (timeout: " << m_leaseLength.count() << "s)";
-    auto start = std::chrono::high_resolution_clock::now();
-    auto end = std::chrono::high_resolution_clock::now();
+    auto start = std::chrono::steady_clock::now();
+    auto end = start;
+    // The service starts the lease clock when it receives the request, so the renewal time is taken before sending.
+    auto attemptStart = start;
     std::optional<std::string> lastError;
     // The proposed ID is reused on every attempt: if an acquire succeeded but its response was lost, the retry
     // with the same ID is accepted by the service instead of failing with a conflict until the lease expires.
     const auto leaseId = NewLeaseId();
     while ((end - start) < m_leaseLength) {
+        attemptStart = std::chrono::steady_clock::now();
         AzureClient::AcquireLeaseOptions options;
         options.ProposedLeaseId = leaseId;
         options.Duration = m_leaseLength;
-        auto result = m_file->AcquireLeaseAsync(std::move(options), boost::asio::use_future).get();
+        auto result = BlockOn(m_file->get_executor(), m_file->AcquireLeaseAsync(std::move(options), boost::asio::use_future));
         if (result.has_value()) {
             m_leaseId = leaseId;
             lastError.reset();
@@ -79,14 +83,14 @@ bool LockFileImpl::Lock() {
 
         lastError = result.error().Message.empty() ? result.error().Code.message() : result.error().Message;
         if (!ShouldRetryAcquire(result.error())) {
-            end = std::chrono::high_resolution_clock::now();
+            end = std::chrono::steady_clock::now();
             break;
         }
 
         // Avoid hammering the service while another owner holds the lease.
         static const constexpr auto retryDelay = std::chrono::milliseconds(250);
         std::this_thread::sleep_for(retryDelay);
-        end = std::chrono::high_resolution_clock::now();
+        end = std::chrono::steady_clock::now();
     }
 
     if (lastError.has_value()) {
@@ -97,8 +101,7 @@ bool LockFileImpl::Lock() {
         return false;
     }
 
-    // Set the initial renewal time when lock is acquired
-    m_lastRenewalTime = std::chrono::steady_clock::now();
+    m_lastRenewalTime = attemptStart;
     BOOST_LOG_SEV(*m_logger, severity_level::info) << "Successfully acquired blob lease for '" << m_fileName << "'";
     return true;
 }
@@ -134,8 +137,9 @@ void LockFileImpl::RenewLocked() const {
         << "s)";
     AzureClient::RenewLeaseOptions options;
     options.LeaseId = *m_leaseId;
-    Unwrap(m_file->RenewLeaseAsync(std::move(options), boost::asio::use_future).get());
-    m_lastRenewalTime = std::chrono::steady_clock::now();
+    const auto requestStart = std::chrono::steady_clock::now();
+    Unwrap(BlockOn(m_file->get_executor(), m_file->RenewLeaseAsync(std::move(options), boost::asio::use_future)));
+    m_lastRenewalTime = requestStart;
 }
 
 void LockFileImpl::Unlock() {
@@ -147,7 +151,7 @@ void LockFileImpl::Unlock() {
     BOOST_LOG_SEV(*m_logger, severity_level::debug) << "Releasing blob lease for '" << m_fileName << "'";
     AzureClient::ReleaseLeaseOptions options;
     options.LeaseId = *m_leaseId;
-    Unwrap(m_file->ReleaseLeaseAsync(std::move(options), boost::asio::use_future).get());
+    Unwrap(BlockOn(m_file->get_executor(), m_file->ReleaseLeaseAsync(std::move(options), boost::asio::use_future)));
     m_leaseId.reset();
     BOOST_LOG_SEV(*m_logger, severity_level::debug) << "Successfully released blob lease for '" << m_fileName << "'";
 }

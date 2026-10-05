@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <stdexcept>
 #include <atomic>
 #include <deque>
 #include <memory>
@@ -43,16 +44,25 @@ class DeferredBlobClient : public NiceMock<BlobClientMock> {
         int64_t Length;
         std::string IfMatch;
         DownloadCallback Callback;
+        std::chrono::milliseconds Timeout{};
     };
 
     void DownloadAsync(int64_t blobOffset, int64_t readLength, const std::string& ifMatch,
                        DownloadCallback callback) override {
+        DownloadAsync(blobOffset, readLength, ifMatch, std::chrono::milliseconds::zero(), std::move(callback));
+    }
+
+    void DownloadAsync(int64_t blobOffset, int64_t readLength, const std::string& ifMatch,
+                       std::chrono::milliseconds timeout, DownloadCallback callback) override {
         std::scoped_lock lock(m_mutex);
-        m_pending.push_back({blobOffset, readLength, ifMatch, std::move(callback)});
+        m_pending.push_back({blobOffset, readLength, ifMatch, std::move(callback), timeout});
     }
 
     PendingDownload Take() {
         std::scoped_lock lock(m_mutex);
+        if (m_pending.empty()) {
+            throw std::logic_error("DeferredBlobClient::Take called with no pending download");
+        }
         auto download = std::move(m_pending.front());
         m_pending.pop_front();
         return download;
@@ -154,7 +164,7 @@ TEST_F(AsyncReadTests, ReadAsync_DoesNotBlockAndPollDeliversOnCallerThread) {
     EXPECT_EQ(100, download.Offset);
     EXPECT_EQ(128, download.Length);
     EXPECT_EQ("etag", download.IfMatch);
-    std::thread network([&download] { download.Callback(nullptr, std::string(128, 'A')); });
+    std::jthread network([&download] { download.Callback(nullptr, std::string(128, 'A')); });
     std::vector<void*> handles{handle.Handle};
     ASSERT_TRUE(PollAsyncReads(handles).ok());
     network.join();
@@ -163,6 +173,39 @@ TEST_F(AsyncReadTests, ReadAsync_DoesNotBlockAndPollDeliversOnCallerThread) {
     EXPECT_EQ(std::this_thread::get_id(), record.Thread);
     EXPECT_TRUE(record.Status.ok()) << record.Status.ToString();
     EXPECT_EQ(std::string(128, 'A'), record.Data);
+}
+
+TEST_F(AsyncReadTests, ReadAsync_PassesIoOptionsTimeoutToTheDownload) {
+    auto file = CreateFile(m_deferred);
+    std::vector<char> scratch(64);
+    auto req = MakeRequest(0, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+    rocksdb::IOOptions options;
+    options.timeout = std::chrono::microseconds(2500);
+
+    ASSERT_TRUE(file.ReadAsync(req, options, RecordCallback, &record, &handle.Handle, &handle.Deleter, nullptr).ok());
+    ASSERT_EQ(1U, m_deferred->PendingCount());
+    auto download = m_deferred->Take();
+    EXPECT_EQ(std::chrono::milliseconds(3), download.Timeout);
+    download.Callback(nullptr, std::string(64, 'C'));
+    std::vector<void*> handles{handle.Handle};
+    ASSERT_TRUE(PollAsyncReads(handles).ok());
+}
+
+TEST_F(AsyncReadTests, ReadAsync_WithoutIoOptionsTimeoutRequestsNoDeadline) {
+    auto file = CreateFile(m_deferred);
+    std::vector<char> scratch(64);
+    auto req = MakeRequest(0, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+
+    ASSERT_TRUE(Submit(file, req, record, handle).ok());
+    auto download = m_deferred->Take();
+    EXPECT_EQ(std::chrono::milliseconds::zero(), download.Timeout);
+    download.Callback(nullptr, std::string(64, 'C'));
+    std::vector<void*> handles{handle.Handle};
+    ASSERT_TRUE(PollAsyncReads(handles).ok());
 }
 
 TEST_F(AsyncReadTests, ReadAsync_InlineCompletion_PollDeliversData) {
@@ -341,7 +384,7 @@ TEST_F(AsyncReadTests, ReadAsync_ManyRequests_CompletedConcurrentlyFromOtherThre
         rawHandles.push_back(handles[i].Handle);
     }
 
-    std::vector<std::thread> network;
+    std::vector<std::jthread> network;
     for (size_t i = 0; i < Count; ++i) {
         network.emplace_back([download = m_deferred->Take()]() mutable {
             download.Callback(nullptr, std::string(64, static_cast<char>('a' + download.Offset / 64)));

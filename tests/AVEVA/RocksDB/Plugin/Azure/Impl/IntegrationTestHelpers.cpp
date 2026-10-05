@@ -85,7 +85,7 @@ void AzureIntegrationTestBase::TearDown() { CleanupBlob(); }
 void AzureIntegrationTestBase::CreateContainerClient() {
     try {
         m_runtime = std::make_shared<ClientRuntime>(m_ioContext.Get());
-        const auto serviceClient = BlobHelpers::CreateServiceClient(*m_runtime, *m_credentials);
+        const auto serviceClient = BlobHelpers::CreateServiceClient(m_runtime, *m_credentials);
 
         m_containerClient = std::make_shared<AzureClient::BlobContainerClient>(
             serviceClient.GetBlobContainerClient(m_credentials->GetDbName()));
@@ -94,13 +94,13 @@ void AzureIntegrationTestBase::CreateContainerClient() {
         TryCreateContainer();
     } catch (const RequestFailedException& e) {
         HandleAuthenticationError(e);
-        GTEST_SKIP() << "Failed to connect to Azure: " << e.what();
+        FAIL() << "Failed to connect to Azure: " << e.what();
     } catch (const std::exception& e) {
         if (IsAuthenticationError(e)) {
-            GTEST_SKIP() << "Azure authentication failed: " << e.what()
-                         << ". Please check your service principal credentials are valid and not expired.";
+            FAIL() << "Azure authentication failed: " << e.what()
+                   << ". Please check your service principal credentials are valid and not expired.";
         }
-        GTEST_SKIP() << "Failed to connect to Azure: " << e.what();
+        FAIL() << "Failed to connect to Azure: " << e.what();
     }
 }
 
@@ -109,11 +109,14 @@ void AzureIntegrationTestBase::TryCreateContainer() {
         Unwrap(m_containerClient->CreateIfNotExistsAsync(boost::asio::use_future).get());
     } catch (const RequestFailedException& e) {
         HandleAuthenticationError(e);
+        if (HasFatalFailure()) {
+            return;
+        }
         // Container might already exist or other non-auth error, continue
     } catch (const std::exception& e) {
         if (IsAuthenticationError(e)) {
-            GTEST_SKIP() << "Azure authentication failed: " << e.what()
-                         << ". Please check your service principal credentials are valid and not expired.";
+            FAIL() << "Azure authentication failed: " << e.what()
+                   << ". Please check your service principal credentials are valid and not expired.";
         }
         // Otherwise, continue - might be a transient error
     }
@@ -124,8 +127,8 @@ void AzureIntegrationTestBase::HandleAuthenticationError(const RequestFailedExce
     static const constexpr unsigned int forbidden = 403;
     if (e.StatusCode == unauthorized || e.StatusCode == forbidden ||
         e.Code == AzureClient::make_error_code(AzureClient::BlobStorageErrorCode::AuthenticationFailed)) {
-        GTEST_SKIP() << "Azure authentication failed: " << e.what()
-                     << ". Please check your service principal credentials are valid and not expired.";
+        FAIL() << "Azure authentication failed: " << e.what()
+               << ". Please check your service principal credentials are valid and not expired.";
     }
 }
 

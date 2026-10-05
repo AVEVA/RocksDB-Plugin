@@ -10,7 +10,7 @@
     "boost-interprocess",
     "boost-intrusive",
     "boost-log",
-    "boost-property-tree",
+    "boost-json",
     "boost-scope",
     "boost-static-string",
     "boost-thread",

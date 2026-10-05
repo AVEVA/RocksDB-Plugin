@@ -1,5 +1,8 @@
 # Contributing
 
+> **Vendored copy:** this file describes the standalone upstream repository. `CMakePresets.json`, `pipelines/` and
+> `CHANGELOG.md` are not part of the copy vendored into this repository; build it through the root `CMakeLists.txt`.
+
 ## Build locally
 
 Use the checked-in CMake presets:

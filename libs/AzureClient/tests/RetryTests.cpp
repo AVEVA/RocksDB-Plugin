@@ -7,6 +7,7 @@
 #include "TestHelpers.hpp"
 #include "ValueOrFail.hpp"
 
+#include <AVEVA/AzureClient/AppendBlobClient.hpp>
 #include <AVEVA/AzureClient/BlockBlobClient.hpp>
 #include <AVEVA/HttpClient/HttpClientError.hpp>
 #include <AVEVA/HttpClient/HttpHeader.hpp>
@@ -247,6 +248,29 @@ TEST(RetryTests, RetriesTransientTransportErrors)
     }
 }
 
+TEST(RetryTests, UnconditionalAppendBlockIsNotReplayedAfterAmbiguousTransportFailure)
+{
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{}, std::make_error_code(std::errc::connection_reset));
+    httpClient.EnqueueResponse(HttpResponse{201, {}, ""});
+    AppendBlobClient client{httpClient, MakeRetryOptions(1)};
+
+    bool done = false;
+    bool succeeded = true;
+    client.AppendBlockAsync(std::string{"data"}, AppendBlockOptions{}, [&](auto result)
+    {
+        succeeded = result.has_value();
+        done = true;
+    });
+
+    ASSERT_TRUE(PollUntil(httpClient, [&]
+    {
+        return done;
+    }));
+    EXPECT_EQ(httpClient.RequestCount(), 1U);
+    EXPECT_FALSE(succeeded);
+}
+
 TEST(RetryTests, GivesUpAfterMaxRetriesAndReportsLastResponse)
 {
     FakeHttpClient httpClient;
@@ -299,6 +323,28 @@ TEST(RetryTests, HonorsServerRetryAfterHeadersOverLongBackoff)
         EXPECT_EQ(httpClient.RequestCount(), 2U) << header;
         EXPECT_TRUE(ValueOrFail(observed).has_value()) << header;
     }
+}
+
+TEST(RetryTests, RetryAfterHttpDateInThePastRetriesImmediately)
+{
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{503, {{"Retry-After", "Wed, 21 Oct 2015 07:28:00 GMT"}}, ""});
+    httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
+    BlockBlobClient client{httpClient, MakeRetryOptions(1, std::chrono::minutes{1})};
+
+    std::optional<DeleteResult> observed;
+    client.DeleteAsync([&](DeleteResult result)
+    {
+        observed = std::move(result);
+    });
+
+    ASSERT_TRUE(PollUntil(httpClient,
+        [&]
+    {
+        return observed.has_value();
+    },
+        std::chrono::seconds{2}));
+    EXPECT_EQ(httpClient.RequestCount(), 2U);
 }
 
 TEST(RetryTests, ComputedBackoffIsCappedByMaxDelay)

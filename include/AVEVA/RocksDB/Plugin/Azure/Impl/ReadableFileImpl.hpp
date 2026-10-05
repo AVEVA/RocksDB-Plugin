@@ -7,6 +7,7 @@
 
 #include <boost/log/trivial.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -32,7 +33,7 @@ class ReadableFileImpl {
     void SetMetadata(int64_t size, std::string etag) const;
     static void RefreshMetadataAndReadAsync(std::shared_ptr<const ReadableFileImpl> self, int64_t offset,
                                             int64_t bytesToRead, Core::BlobClient::DownloadCallback callback,
-                                            int attemptsLeft);
+                                            int attemptsLeft, std::chrono::milliseconds timeout);
 
   public:
     // A blob that keeps changing underneath the reader fails with an IOError after this many metadata refreshes.
@@ -55,8 +56,10 @@ class ReadableFileImpl {
     // Non-blocking random read from the blob (bypassing the file cache), with the same ETag/size refresh and retry
     // semantics as RandomRead. `self` keeps the file alive until `callback` has run; the callback may run on an
     // io_context thread or inline, so it must not block on blob I/O.
+    // A non-zero `timeout` caps each blob download of the read (see Core::BlobClient::DownloadAsync).
     static void ReadAsync(std::shared_ptr<const ReadableFileImpl> self, int64_t offset, int64_t bytesToRead,
-                          ReadCallback callback, int attemptsLeft = kMaxStaleReadRetries);
+                          ReadCallback callback, int attemptsLeft = kMaxStaleReadRetries,
+                          std::chrono::milliseconds timeout = std::chrono::milliseconds::zero());
 
     int64_t GetOffset() const;
     void Skip(int64_t n);

@@ -69,7 +69,17 @@ namespace AVEVA::AzureClient
             AccessToken{.Token = m_token, .ExpiresOn = m_expiresOn});
     }
 
-    CachingTokenCredential::CachingTokenCredential(std::shared_ptr<ITokenCredential> inner,
+    std::shared_ptr<CachingTokenCredential> CachingTokenCredential::Create(std::shared_ptr<ITokenCredential> inner,
+        std::chrono::seconds refreshWindow,
+        std::optional<boost::asio::any_io_executor> executor,
+        Clock clock)
+    {
+        return std::make_shared<CachingTokenCredential>(
+            CreateKey{}, std::move(inner), refreshWindow, std::move(executor), std::move(clock));
+    }
+
+    CachingTokenCredential::CachingTokenCredential(CreateKey,
+        std::shared_ptr<ITokenCredential> inner,
         std::chrono::seconds refreshWindow,
         std::optional<boost::asio::any_io_executor> executor,
         Clock clock)

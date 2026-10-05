@@ -667,6 +667,12 @@ namespace AVEVA::AzureClient
             return *m_target;
         }
 
+        // For operations that outlive the call and must keep the target alive.
+        [[nodiscard]] const std::shared_ptr<const Private::BlobTarget>& SharedTarget() const noexcept
+        {
+            return m_target;
+        }
+
       private:
         IHttpClient* m_httpClient = nullptr;
         std::shared_ptr<const Private::BlobTarget> m_target;

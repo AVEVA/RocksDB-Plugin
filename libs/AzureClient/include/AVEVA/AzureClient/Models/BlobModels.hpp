@@ -588,6 +588,8 @@ namespace AVEVA::AzureClient::Models
     struct GetPageRangesResult
     {
         std::vector<PageRange> PageRanges;
+        // Always empty on a completed GetPageRangesAsync result; every page has been merged.
+        std::string NextMarker;
     };
 
     struct CreateAppendBlobResult

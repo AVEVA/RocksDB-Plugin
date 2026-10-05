@@ -72,7 +72,7 @@ support, CMake, clang-format/clang-tidy, gitleaks, vcpkg, and git hook configura
 
 ## Conventions
 
-- Follow modern C++ (C++17 or newer) idioms.
+- Follow modern C++ (C++23 is required) idioms.
 - Use RAII for resource management — avoid raw pointers with manual `delete`.
 - Map Azure client errors (`RequestFailedException`) to meaningful `rocksdb::Status` codes; do not swallow errors silently.
 - New source files must be added to the owning `CMakeLists.txt`.

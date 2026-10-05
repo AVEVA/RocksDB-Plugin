@@ -1,8 +1,9 @@
 # HTTP client
 
 The public header is `AVEVA/HttpClient/HttpClient.hpp`. Request, response, header,
-and error types use the standard library. Boost.Asio's `io_context` is only
-forward-declared; Beast, Boost.URL, and OpenSSL remain implementation details.
+and error types use the standard library. The public headers include some Boost.Asio
+headers (for example `io_context` and the executor types); Beast, Boost.URL, and
+OpenSSL remain implementation details.
 
 ## Usage
 
@@ -19,7 +20,7 @@ int main()
 
     AVEVA::HttpRequest request;
     request.SetUrl("https://example.com/");
-    client->AsyncSend(std::move(request),
+    client->SendAsync(std::move(request),
         [](std::error_code error, AVEVA::HttpResponse response)
         {
             if (error)
@@ -35,8 +36,7 @@ int main()
 ```
 
 Consumers that create an Asio runtime must link their own `Boost::asio` target
-alongside `aveva::http-client`. The public API requires C++14; the implementation
-requires C++17 or later.
+alongside `aveva::http-client`. The library requires C++23.
 
 `IHttpClient::Create` accepts optional `HttpClientOptions`. The default requires
 peer and hostname verification, trusts the platform OpenSSL paths, and permits
@@ -48,10 +48,10 @@ testing.
 
 ## Callback contract
 
-- Requests and callbacks are taken by value. Callbacks must be copyable.
+- Requests and callbacks are taken by value. Callbacks may be move-only.
 - Completion is dispatched through the supplied runtime, never inline on the
-  `AsyncSend` call stack. Another runtime thread may execute it before
-  `AsyncSend` returns. Keep running the runtime until requests finish.
+  `SendAsync` call stack. Another runtime thread may execute it before
+  `SendAsync` returns. Keep running the runtime until requests finish.
 - Each accepted request completes once. Invalid URLs and request data also
   complete asynchronously. An empty callback throws `std::invalid_argument`
   synchronously. Allocation or runtime-resource failures can throw.
@@ -60,10 +60,11 @@ testing.
 - The client does not run, stop, or restart the runtime. The runtime must outlive
   the client and outstanding work. Request state retains its TLS context, so
   destroying the client does not cancel requests already submitted.
-- Each request has its own connection and strand. Separate requests can complete
+- Each request runs on its own strand (a pooled connection is used by one request at a time). Separate requests can complete
   concurrently when multiple threads run the runtime.
 - HTTP statuses, including 4xx and 5xx, are successful transport results. Failures
-  return an empty response and a library-owned `std::error_code`, comparable to
+  return an empty response and a library-owned `std::error_code`. Cancellation reports
+  `std::errc::operation_canceled`. Codes are comparable to
   `AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut)` and the other enum values.
 
 ## Request handling
@@ -75,7 +76,7 @@ Use HTTPS for production traffic.
 
 Headers preserve duplicate entries. The client owns `Host`, `Content-Length`,
 `Transfer-Encoding`, and `Connection`; supplied values for these are replaced by
-URL-derived authority and fixed-length, connection-close framing. Bodies can
+URL-derived authority and fixed-length, keep-alive framing. Bodies can
 contain binary bytes, including nulls. Responses are buffered rather than streamed.
 
 `HttpRequest::SetBody(std::string)` copies its argument synchronously; the caller's
@@ -101,7 +102,8 @@ the same origin skip resolution, connection, and the TLS handshake.
 pooling. Reuse prefers the most recently released connection, and an origin over its
 cap drops its oldest idle connection.
 
-There is no automatic retry, redirect following, proxy support, content
+Idempotent requests are retried once on a new connection when a reused pooled connection turns out to be
+stale; other requests are not retried. There is no redirect following, proxy support, content
 decompression, protocol upgrade, or CONNECT tunneling.
 
 ## TLS trust

@@ -50,7 +50,7 @@ namespace AVEVA
         virtual executor_type get_executor() const = 0;
 
         // Type-erased send operation. Implementations must never invoke `completion`
-        // synchronously/re-entrantly from within this call (see Task 8), and must honor
+        // synchronously/re-entrantly from within this call, and must honor
         // `options.GetCancellationSlot()` if set.
         virtual void SendAsyncErased(HttpRequest request, CompletionHandler completion, HttpRequestOptions options) = 0;
 
@@ -79,21 +79,31 @@ namespace AVEVA
                     // run() return) before the completion is dispatched.
                     auto work = boost::asio::make_work_guard(executor);
                     auto cancellationSlot = boost::asio::get_associated_cancellation_slot(handler, boost::asio::cancellation_slot());
-                    if (cancellationSlot.is_connected() && !opts.GetCancellationSlot().is_connected())
+                    const bool ownsSlot = cancellationSlot.is_connected() && !opts.GetCancellationSlot().is_connected();
+                    if (ownsSlot)
                     {
                         opts.SetCancellationSlot(cancellationSlot);
                     }
 
                     SendAsyncErased(std::move(req),
                         CompletionHandler(
-                            [executor, allocator, work = std::move(work), handler = std::forward<decltype(handler)>(handler)](
+                            [executor, allocator, work = std::move(work), cancellationSlot, ownsSlot,
+                                handler = std::forward<decltype(handler)>(handler)](
                                 std::error_code ec, HttpResponse response) mutable
                             {
                                 boost::asio::dispatch(executor,
                                     boost::asio::bind_allocator(allocator,
                                         [handler = std::move(handler), ec, response = std::move(response),
-                                            work = std::move(work)]() mutable
-                                        { std::move(handler)(ec, std::move(response)); }));
+                                            work = std::move(work), cancellationSlot, ownsSlot]() mutable
+                                        {
+                                            // Cleared here, on the handler's executor, so that it is serialized with
+                                            // emissions from the caller; clearing on the transport thread would race.
+                                            if (ownsSlot)
+                                            {
+                                                cancellationSlot.clear();
+                                            }
+                                            std::move(handler)(ec, std::move(response));
+                                        }));
                             }),
                         std::move(opts));
                 },

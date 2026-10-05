@@ -1,9 +1,9 @@
 // Manual allocation benchmark for Task 12 (HttpRequest::SetBodyView).
 //
 // This is intentionally not built on a benchmarking framework: it exists purely to demonstrate,
-// via a global operator new/delete override, that sending a large request body through
-// SetBodyView() incurs no incremental heap allocation proportional to the payload size, whereas
-// the equivalent SetBody() call (which owns/copies the body) does. Run the produced executable
+// via a global operator new/delete override, that sending a large request body with SetBodyView() or
+// SetBody() makes the client allocate nothing proportional to the payload size (an owned body is moved
+// into the operation, not copied). Run the produced executable
 // directly; it prints byte counts and exits non-zero if the expectation is violated.
 
 #include "AVEVA/HttpClient/HttpClient.hpp"
@@ -123,16 +123,16 @@ int main()
     std::printf("SetBody:     %zu bytes allocated for a %zu byte payload\n", bytesWithSetBody, payloadSize);
     std::printf("SetBodyView: %zu bytes allocated for a %zu byte payload\n", bytesWithSetBodyView, payloadSize);
 
-    // SetBody() must copy the payload at least once (module bookkeeping such as the socket
-    // buffers). SetBodyView() must not allocate anything proportional to the payload -- allow a
+    // The client moves an owned body out of the request instead of copying it, so neither representation
+    // may allocate anything proportional to the payload once the request has been handed over -- allow a
     // generous fixed slack for unrelated bookkeeping allocations (resolver/socket internals).
     constexpr std::size_t slack = 64u * 1024u;
-    const bool ok = bytesWithSetBody >= payloadSize && bytesWithSetBodyView < slack;
+    const bool ok = bytesWithSetBody < slack && bytesWithSetBodyView < slack;
     if (!ok)
     {
-        std::fprintf(stderr, "FAILED: expected SetBodyView to avoid a payload-sized allocation\n");
+        std::fprintf(stderr, "FAILED: expected the client to send the body without a payload-sized allocation\n");
         return 1;
     }
-    std::printf("OK: SetBodyView avoided the payload-sized heap allocation incurred by SetBody\n");
+    std::printf("OK: neither SetBody nor SetBodyView allocated a payload-sized buffer inside the client\n");
     return 0;
 }

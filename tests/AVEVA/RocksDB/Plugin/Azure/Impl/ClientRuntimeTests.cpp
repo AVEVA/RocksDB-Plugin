@@ -30,7 +30,6 @@ TEST(ClientRuntimeTests, DoesNotRunContext) {
 
     bool ran = false;
     boost::asio::post(runtime.HttpClient().get_executor(), [&ran]() { ran = true; });
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
     ASSERT_FALSE(ran);
 
     context.run();
@@ -40,7 +39,11 @@ TEST(ClientRuntimeTests, DoesNotRunContext) {
 TEST(ClientRuntimeTests, ContextKeepsRunningAfterRuntimeDestruction) {
     boost::asio::io_context context;
     auto workGuard = boost::asio::make_work_guard(context);
-    std::thread worker([&context]() { context.run(); });
+    // If an assertion fails, releasing the guard on stop lets the jthread join instead of hanging.
+    std::jthread worker([&context, &workGuard](std::stop_token stop) {
+        std::stop_callback release(stop, [&workGuard]() { workGuard.reset(); });
+        context.run();
+    });
 
     std::make_unique<ClientRuntime>(context).reset();
 

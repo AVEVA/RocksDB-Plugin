@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
+#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <functional>
@@ -122,6 +123,16 @@ class BlobClient {
             data.clear();
         }
         callback(error, std::move(data));
+    }
+
+    /// <summary>
+    /// As above, but a non-zero `timeout` caps how long the request may take (RocksDB's IOOptions::timeout). The
+    /// default implementation ignores the timeout and forwards to the overload without one.
+    /// </summary>
+    virtual void DownloadAsync(int64_t blobOffset, int64_t readLength, const std::string& ifMatch,
+                               std::chrono::milliseconds timeout, DownloadCallback callback) {
+        static_cast<void>(timeout);
+        DownloadAsync(blobOffset, readLength, ifMatch, std::move(callback));
     }
 
     /// <summary>

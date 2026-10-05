@@ -551,6 +551,16 @@ namespace AVEVA::AzureClient::Private
                     Fail(MakeInvalidResponse("The download response has an unexpected length."));
                     return;
                 }
+                // A server that answers a different range would otherwise be written at the wrong offset.
+                if (const std::string_view header = FindHeaderValue(response, "Content-Range"); !header.empty())
+                {
+                    const auto parsed = ParseContentRange(header);
+                    if (!parsed.has_value() || parsed->Unsatisfied || parsed->Start != offset)
+                    {
+                        Fail(MakeInvalidResponse("The download response has an unexpected Content-Range."));
+                        return;
+                    }
+                }
                 Deliver(offset, std::move(body));
             }
 
@@ -649,10 +659,6 @@ namespace AVEVA::AzureClient::Private
             void Finish(SummaryResult result)
             {
                 m_done = true;
-                if (m_parentSlot.is_connected())
-                {
-                    m_parentSlot.clear();
-                }
                 Completion completion = std::move(m_completion);
                 if (m_initiating)
                 {

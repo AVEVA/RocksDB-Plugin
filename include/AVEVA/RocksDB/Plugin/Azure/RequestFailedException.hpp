@@ -11,6 +11,7 @@ namespace AVEVA::RocksDB::Plugin::Azure {
 /// </summary>
 struct HttpStatus {
     static const constexpr unsigned int BadRequest = 400;
+    static const constexpr unsigned int Unauthorized = 401;
     static const constexpr unsigned int Forbidden = 403;
     static const constexpr unsigned int NotFound = 404;
     static const constexpr unsigned int RequestTimeout = 408;
@@ -31,8 +32,12 @@ class RequestFailedException : public std::runtime_error {
   public:
     RequestFailedException(unsigned int statusCode, std::string errorCode, std::string message, std::string requestId,
                            std::error_code code)
-        : std::runtime_error(FormatWhat(statusCode, errorCode, message, code)), StatusCode(statusCode),
+        : std::runtime_error(FormatWhat(statusCode, errorCode, message, requestId, code)), StatusCode(statusCode),
           ErrorCode(std::move(errorCode)), Message(std::move(message)), RequestId(std::move(requestId)), Code(code) {}
+
+    /// Describes the failure as "<status> <ErrorCode>: <message> (request id: <id>)"; the request id is what Azure
+    /// support asks for.
+    std::string Describe() const { return FormatWhat(StatusCode, ErrorCode, Message, RequestId, Code); }
 
     unsigned int StatusCode;
     std::string ErrorCode;
@@ -42,7 +47,7 @@ class RequestFailedException : public std::runtime_error {
 
   private:
     static std::string FormatWhat(unsigned int statusCode, const std::string& errorCode, const std::string& message,
-                                  const std::error_code& code) {
+                                  const std::string& requestId, const std::error_code& code) {
         std::string what = message.empty() ? code.message() : message;
         if (!errorCode.empty()) {
             what = errorCode + ": " + what;
@@ -50,6 +55,10 @@ class RequestFailedException : public std::runtime_error {
 
         if (statusCode != 0) {
             what = std::to_string(statusCode) + " " + what;
+        }
+
+        if (!requestId.empty()) {
+            what += " (request id: " + requestId + ")";
         }
 
         return what;

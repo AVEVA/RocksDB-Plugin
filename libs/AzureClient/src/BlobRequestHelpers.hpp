@@ -45,10 +45,12 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <array>
 #include <string_view>
 #include <system_error>
 #include <type_traits>
 #include <utility>
+#include <unordered_set>
 #include <vector>
 
 namespace AVEVA::AzureClient::Private
@@ -104,7 +106,7 @@ namespace AVEVA::AzureClient::Private
         }
     };
 
-    // Shared Key request signer, created once per connection (T12): the account key is decoded and
+    // Shared Key request signer, created once per connection: the account key is decoded and
     // an HMAC-SHA256 context keyed with it is initialised at construction, so each signature only
     // duplicates that context instead of re-decoding the key and re-fetching the algorithm (which
     // takes global locks in OpenSSL 3). Thread-safe; shared by every client of a connection.
@@ -139,7 +141,7 @@ namespace AVEVA::AzureClient::Private
     [[nodiscard]] std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpRequest& request);
 
     // Normalised, validated, immutable connection settings shared by a service client and every
-    // container/blob client derived from it (T14).
+    // container/blob client derived from it.
     struct ConnectionState
     {
         std::string ServiceEndpoint;
@@ -268,11 +270,17 @@ namespace AVEVA::AzureClient::Private
     [[nodiscard]] std::string_view TrimTrailingSlashes(std::string_view value) noexcept;
     [[nodiscard]] std::string_view TrimLeadingQuestionMark(std::string_view value) noexcept;
     [[nodiscard]] std::string CreateClientRequestId();
+    // RFC 7231 date name tables shared by the request formatter and the response parsers.
+    inline constexpr std::array<std::string_view, 12>
+        MonthNames{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    inline constexpr std::array<std::string_view, 7> ShortWeekdayNames{"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    inline constexpr std::array<std::string_view, 7>
+        LongWeekdayNames{"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+
     [[nodiscard]] std::span<char> AsChars(std::span<std::byte> bytes) noexcept;
     [[nodiscard]] std::string_view AsChars(std::span<const std::byte> bytes) noexcept;
     [[nodiscard]] std::span<const std::byte> AsBytes(std::string_view value) noexcept;
     [[nodiscard]] std::string BytesToString(std::span<const std::byte> bytes);
-    [[nodiscard]] std::vector<std::byte> StringToBytes(std::string_view bytes);
     [[nodiscard]] std::string Base64Encode(std::span<const std::byte> bytes);
     [[nodiscard]] std::string UrlEncode(std::string_view value, std::string_view extraSafeChars);
     [[nodiscard]] std::string BuildQueryString(const std::vector<std::pair<std::string, std::string>>& parameters);
@@ -288,6 +296,8 @@ namespace AVEVA::AzureClient::Private
         std::uint64_t Start = 0;
         std::uint64_t End = 0;
         std::optional<std::uint64_t> Total;
+        // True for "bytes */total" (an unsatisfied range); Start and End carry no meaning then.
+        bool Unsatisfied = false;
     };
 
     [[nodiscard]] std::optional<ParsedContentRange> ParseContentRange(std::string_view header) noexcept;
@@ -853,7 +863,7 @@ namespace AVEVA::AzureClient::Private
 
         void Start(std::string marker)
         {
-            m_markers.push_back(marker);
+            m_markers.insert(marker);
             m_fetchPage(std::move(marker),
                 [self = this->shared_from_this()](std::expected<Response<TResult>, BlobStorageError> page) mutable
             {
@@ -871,20 +881,23 @@ namespace AVEVA::AzureClient::Private
             }
             std::string nextMarker = page->Value().NextMarker;
             HttpResponse raw = std::move(*page).RawResponse();
-            if (m_markers.size() == 1U)
-            {
-                m_accumulated = std::move(page->Value());
-            }
-            else
-            {
-                m_merge(m_accumulated, std::move(page->Value()));
-            }
-            if (m_maxItems.has_value() && m_countItems != nullptr && m_countItems(m_accumulated) > *m_maxItems)
+            // Checked before merging so an oversized page is never appended to the accumulator.
+            if (m_maxItems.has_value() && m_countItems != nullptr &&
+                m_countItems(m_accumulated) + m_countItems(page->Value()) > *m_maxItems)
             {
                 BlobStorageError details = MakeClientError(std::make_error_code(std::errc::value_too_large),
                     "The listing exceeded the configured MaxItems limit.");
                 m_completion(std::unexpected(std::move(details)));
                 return;
+            }
+            if (m_firstPage)
+            {
+                m_firstPage = false;
+                m_accumulated = std::move(page->Value());
+            }
+            else
+            {
+                m_merge(m_accumulated, std::move(page->Value()));
             }
             if (nextMarker.empty())
             {
@@ -892,7 +905,7 @@ namespace AVEVA::AzureClient::Private
                 m_completion(Response<TResult>{std::move(m_accumulated), std::move(raw)});
                 return;
             }
-            if (std::ranges::find(m_markers, nextMarker) != m_markers.end())
+            if (m_markers.contains(nextMarker))
             {
                 RequestFailure failure =
                     MakeInvalidResponseFailure(raw, "List response repeated a previous NextMarker.");
@@ -909,7 +922,8 @@ namespace AVEVA::AzureClient::Private
         CountItems m_countItems;
         std::optional<std::size_t> m_maxItems;
         TResult m_accumulated;
-        std::vector<std::string> m_markers;
+        std::unordered_set<std::string> m_markers;
+        bool m_firstPage = true;
     };
 
     // Sends `request` to `target` and completes with the TModel produced by `parser`.
@@ -1118,9 +1132,10 @@ namespace AVEVA::AzureClient::Private
             {
                 exists = true;
             }
-            else if (failure.Error == BlobStorageErrorCode::BlobNotFound ||
-                     failure.Error == BlobStorageErrorCode::ResourceNotFound)
+            else if (!error && response.GetStatus() == 404)
             {
+                // A HEAD 404 carries no body, so the error code may be absent; any 404 (including a missing
+                // container) means the blob does not exist.
                 failure.Error = {};
             }
 

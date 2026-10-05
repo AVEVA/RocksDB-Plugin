@@ -174,10 +174,8 @@ namespace AVEVA::AzureClient::Private
                     return;
                 }
 
-                m_inParentHandler = true;
                 m_timer.cancel();
                 m_attemptSignal.emit(type);
-                m_inParentHandler = false;
 
                 // ITokenCredential has no cancellation hook, so don't wait for a slow credential:
                 // complete now and ignore the token when it eventually arrives.
@@ -200,11 +198,21 @@ namespace AVEVA::AzureClient::Private
                 attempt.SetHeaders(m_request.GetHeaders());
                 if (m_request.HasBodyView())
                 {
-                    attempt.SetBodyView(m_request.GetBodyView());
+                    attempt.SetBodyView(m_request.GetBodyView(), m_request.GetBodyKeepAlive());
                 }
-                else if (!m_request.GetBody().empty())
+                else
                 {
-                    attempt.SetBody(std::string{m_request.GetBody()});
+                    // An owned body is moved into shared storage once; every attempt then views it instead of
+                    // copying it, and the HTTP operation of a timed-out attempt keeps it alive until it is done.
+                    if (!m_sharedBody && !m_request.GetBody().empty())
+                    {
+                        m_sharedBody = std::make_shared<const std::string>(m_request.ReleaseBody());
+                    }
+                    if (m_sharedBody)
+                    {
+                        attempt.SetBodyView(std::as_bytes(std::span{m_sharedBody->data(), m_sharedBody->size()}),
+                            m_sharedBody);
+                    }
                 }
 
                 if (m_attempt > 1)
@@ -366,6 +374,24 @@ namespace AVEVA::AzureClient::Private
                        (response.GetStatus() == NotFound || response.GetStatus() == Gone);
             }
 
+            // After a connect failure nothing reached the server; any later transport error may follow a delivered request.
+            [[nodiscard]] static bool IsDeliveryUncertain(std::error_code error) noexcept
+            {
+                return !(error == HttpClientError::ResolveFailed || error == HttpClientError::ConnectFailed ||
+                         error == std::errc::connection_refused);
+            }
+
+            // An unconditional AppendBlock would append twice if replayed after the first copy was applied.
+            [[nodiscard]] bool IsSafeToReplay() const
+            {
+                if (m_request.GetUrl().find("comp=appendblock") == std::string::npos)
+                {
+                    return true;
+                }
+                return std::ranges::any_of(m_request.GetHeaders(),
+                    [](const HttpHeader& header) { return IEquals(header.GetName(), XMsBlobConditionAppendPosHeaderName); });
+            }
+
             void OnAttemptCompleteOnStrand(std::error_code error, HttpResponse response)
             {
                 if (m_cancelled)
@@ -374,19 +400,20 @@ namespace AVEVA::AzureClient::Private
                     return;
                 }
 
-                if (m_attempt >= m_maxAttempts ||
+                if (m_attempt >= m_maxAttempts || (error && IsDeliveryUncertain(error) && !IsSafeToReplay()) ||
                     !(IsRetriableFailure(error, response) || IsRetriableNotFoundOrGone(error, response)))
                 {
                     Finish(error, std::move(response));
                     return;
                 }
 
-                // A server hint is honoured as given (ParseRetryAfter bounds it to 24 h); only the computed
-                // backoff is capped at MaxDelay.
+                // A server hint may exceed MaxDelay (the service knows when it will recover) but is capped so a
+                // bogus value cannot stall a request for hours.
+                constexpr std::chrono::milliseconds maxHint{std::chrono::minutes{1}};
                 std::chrono::milliseconds delay;
                 if (const auto hint = ParseRetryAfter(response); hint.has_value())
                 {
-                    delay = *hint;
+                    delay = std::min(*hint, std::max(m_retry.MaxDelay, maxHint));
                 }
                 else
                 {
@@ -431,13 +458,9 @@ namespace AVEVA::AzureClient::Private
                     return;
                 }
 
-                // Inside the parent's cancellation handler the slot's handler is the one currently
-                // executing, so it must not be destroyed here; it only holds a weak_ptr and is inert.
-                if (m_parentSlot.is_connected() && !m_inParentHandler)
-                {
-                    m_parentSlot.clear();
-                }
-
+                // The parent slot is deliberately not cleared here: clearing on the transport thread would race with
+                // the caller emitting on its own executor. Its handler only holds a weak_ptr and is inert once
+                // finished; the caller's slot is cleared on its executor when the completion is dispatched.
                 IHttpClient::CompletionHandler completion = std::move(m_completion);
                 completion(error, std::move(response));
             }
@@ -446,6 +469,7 @@ namespace AVEVA::AzureClient::Private
             RequestAuth m_auth;
             RetryOptions m_retry;
             HttpRequest m_request;
+            std::shared_ptr<const std::string> m_sharedBody;
             IHttpClient::CompletionHandler m_completion;
             HttpRequestOptions m_requestOptions;
             bool m_retryNotFoundAndGone;
@@ -461,7 +485,6 @@ namespace AVEVA::AzureClient::Private
             std::atomic<bool> m_awaitingToken{false};
             std::atomic<bool> m_cancelled{false};
             std::atomic<bool> m_finished{false};
-            bool m_inParentHandler = false;
         };
     } // namespace
 
@@ -508,6 +531,14 @@ namespace AVEVA::AzureClient::Private
         {
             return std::chrono::milliseconds{static_cast<std::chrono::milliseconds::rep>(
                 std::min<std::uint64_t>(*seconds, MaxMilliseconds / MillisecondsPerSecond) * MillisecondsPerSecond)};
+        }
+        // The HTTP-date form; a date in the past means "retry now".
+        if (const auto date = ParseHttpDateHeader(FindHeaderValue(response, "Retry-After")); date.has_value())
+        {
+            const auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(*date - std::chrono::system_clock::now());
+            return std::clamp(wait,
+                std::chrono::milliseconds{0},
+                std::chrono::milliseconds{static_cast<std::chrono::milliseconds::rep>(MaxMilliseconds)});
         }
         return std::nullopt;
     }

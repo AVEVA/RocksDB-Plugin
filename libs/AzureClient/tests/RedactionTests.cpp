@@ -33,6 +33,7 @@ TEST(RedactionTests, UrlSasSignatureIsRedactedAndOtherParametersAreKept)
     EXPECT_EQ(RedactUrlForDiagnostics("https://a/c/b?SIG=x#frag"), "https://a/c/b?SIG=[REDACTED]#frag");
     EXPECT_EQ(RedactUrlForDiagnostics("https://a/c/b"), "https://a/c/b");
     EXPECT_EQ(RedactUrlForDiagnostics("https://a/c/b?signature=keep"), "https://a/c/b?signature=keep");
+    EXPECT_EQ(RedactUrlForDiagnostics("https://a/c/b?%73ig=abc&se=1"), "https://a/c/b?%73ig=[REDACTED]&se=1");
 }
 
 TEST(RedactionTests, FormBodySecretsAreRedacted)

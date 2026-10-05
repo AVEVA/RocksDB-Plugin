@@ -10,11 +10,11 @@
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 #include <boost/asio/post.hpp>
-#include <boost/property_tree/json_parser.hpp>
-#include <boost/property_tree/ptree.hpp>
+#include <boost/json/parse.hpp>
+#include <boost/json/serialize.hpp>
+#include <boost/json/value.hpp>
 
 #include <algorithm>
-#include <boost/property_tree/ptree_fwd.hpp>
 #include <cctype>
 #include <charconv>
 #include <chrono>
@@ -76,6 +76,47 @@ namespace AVEVA::AzureClient
             return value;
         }
 
+        // Managed identity requests carry a secret header, so the endpoint must be https or a local/link-local
+        // address (App Service uses loopback, IMDS uses 169.254.169.254).
+        [[nodiscard]] bool IsAcceptableIdentityEndpoint(std::string_view endpoint) noexcept
+        {
+            if (endpoint.starts_with("https://"))
+            {
+                return true;
+            }
+            if (!endpoint.starts_with("http://"))
+            {
+                return false;
+            }
+            std::string_view host = endpoint.substr(7);
+            host = host.substr(0, host.find_first_of("/?#"));
+            if (host.starts_with("["))
+            {
+                return host.starts_with("[::1]");
+            }
+            host = host.substr(0, host.find(':'));
+            return host == "localhost" || host.starts_with("127.") || host.starts_with("169.254.");
+        }
+
+        // Returns a scalar member as text (numbers are serialized) or an empty string.
+        [[nodiscard]] std::string JsonText(const boost::json::object& object, std::string_view key)
+        {
+            const auto it = object.find(key);
+            if (it == object.end())
+            {
+                return {};
+            }
+            if (it->value().is_string())
+            {
+                return std::string{it->value().as_string()};
+            }
+            if (it->value().is_number())
+            {
+                return boost::json::serialize(it->value());
+            }
+            return {};
+        }
+
         // Entra ID returns {"access_token", "expires_in": seconds}; managed identity endpoints return
         // "expires_on" (Unix seconds) and possibly a string "expires_in".
         [[nodiscard]] std::expected<AccessToken, std::error_code> ParseTokenResponse(std::error_code error,
@@ -92,29 +133,26 @@ namespace AVEVA::AzureClient
                 return std::unexpected(make_error_code(BlobStorageErrorCode::AuthenticationFailed));
             }
             const auto invalid = std::unexpected(make_error_code(BlobStorageErrorCode::InvalidResponse));
-            boost::property_tree::ptree tree;
-            try
-            {
-                std::istringstream body{std::string{response.GetBody()}};
-                boost::property_tree::read_json(body, tree);
-            }
-            catch (const boost::property_tree::json_parser_error&)
+            boost::system::error_code parseError;
+            const boost::json::value root = boost::json::parse(std::string_view{response.GetBody()}, parseError);
+            if (parseError || !root.is_object())
             {
                 return invalid;
             }
+            const boost::json::object& tree = root.as_object();
             AccessToken token;
-            token.Token = tree.get<std::string>("access_token", "");
+            token.Token = JsonText(tree, "access_token");
             if (token.Token.empty())
             {
                 return invalid;
             }
-            if (const auto expiresIn = ParseInteger(tree.get<std::string>("expires_in", ""));
+            if (const auto expiresIn = ParseInteger(JsonText(tree, "expires_in"));
                 expiresIn.has_value() && *expiresIn >= MinTokenLifetimeSeconds && *expiresIn <= MaxTokenLifetimeSeconds)
             {
                 token.ExpiresOn =
                     std::chrono::time_point_cast<Clock::duration>(Clock::now() + std::chrono::seconds{*expiresIn});
             }
-            else if (const auto expiresOn = ParseInteger(tree.get<std::string>("expires_on", ""));
+            else if (const auto expiresOn = ParseInteger(JsonText(tree, "expires_on"));
                 expiresOn.has_value() && *expiresOn >= 0)
             {
                 const auto now = Clock::now();
@@ -373,7 +411,8 @@ namespace AVEVA::AzureClient
         const bool appService = !m_options.IdentityEndpoint.empty();
         if (scopes.size() != 1U || scopes.front().empty() ||
             (!m_options.ClientId.empty() && !m_options.ResourceId.empty()) ||
-            (appService && m_options.IdentityHeader.empty()) || (!appService && m_options.ImdsEndpoint.empty()))
+            (appService && m_options.IdentityHeader.empty()) || (!appService && m_options.ImdsEndpoint.empty()) ||
+            !IsAcceptableIdentityEndpoint(appService ? m_options.IdentityEndpoint : m_options.ImdsEndpoint))
         {
             Fail(*m_httpClient, std::move(completion), std::make_error_code(std::errc::invalid_argument));
             return;

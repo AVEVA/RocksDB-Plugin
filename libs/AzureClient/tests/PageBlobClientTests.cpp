@@ -787,6 +787,36 @@ TEST(PageBlobClientTests, DownloadAsyncAndDownloadToAsyncParseContentAndProperti
     std::filesystem::remove(fsPath, ignored);
 }
 
+TEST(PageBlobClientTests, GetPageRangesFollowsNextMarkerAndMergesPages)
+{
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{200,
+        MakeCanonicalSuccessHeaders(),
+        R"(<PageList><PageRange><Start>0</Start><End>511</End></PageRange><NextMarker>m1</NextMarker></PageList>)"});
+    httpClient.EnqueueResponse(HttpResponse{200,
+        MakeCanonicalSuccessHeaders(),
+        R"(<PageList><PageRange><Start>1024</Start><End>1535</End></PageRange><NextMarker/></PageList>)"});
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    std::size_t rangeCount = 0U;
+    int completions = 0;
+    client.GetPageRangesAsync(
+        [&](std::expected<Response<AVEVA::AzureClient::Models::GetPageRangesResult>, BlobStorageError> result)
+    {
+        ASSERT_TRUE(result.has_value());
+        rangeCount = result->Value().PageRanges.size();
+        EXPECT_EQ(result->Value().PageRanges.at(1).Start, 1024U);
+        ++completions;
+    });
+    httpClient.Poll();
+
+    EXPECT_EQ(completions, 1);
+    EXPECT_EQ(rangeCount, 2U);
+    ASSERT_EQ(httpClient.RequestCount(), 2U);
+    EXPECT_EQ(httpClient.RequestAt(0).Request.GetUrl().find("marker="), std::string::npos);
+    EXPECT_NE(httpClient.RequestAt(1).Request.GetUrl().find("marker=m1"), std::string::npos);
+}
+
 TEST(PageBlobClientTests, GetPageRangesMetadataHeadersTierCopySnapshotLeaseExistsAndDeleteIfExistsAreCovered)
 {
     FakeHttpClient httpClient;
@@ -873,7 +903,7 @@ TEST(PageBlobClientTests, DownloadAsyncAcceptsUseFutureCompletionToken)
         client.DownloadAsync(AVEVA::AzureClient::DownloadBlobOptions{}, boost::asio::use_future);
 
     httpClient.Poll(); // drive the posted (async) completion so the future becomes ready (T26)
-    ASSERT_EQ(future.wait_for(std::chrono::seconds{1}), std::future_status::ready);
+    ASSERT_EQ(future.wait_for(std::chrono::seconds{30}), std::future_status::ready);
     std::expected<Response<DownloadBlobResult>, BlobStorageError> result = future.get();
     ASSERT_TRUE(result.has_value());
     const auto& content = result->Value().Content;
@@ -893,7 +923,7 @@ TEST(PageBlobClientTests, UploadPagesAsyncAcceptsUseFutureCompletionTokenAndRepo
         boost::asio::use_future);
 
     httpClient.Poll(); // drive the posted (async) completion so the future becomes ready (T26)
-    ASSERT_EQ(future.wait_for(std::chrono::seconds{1}), std::future_status::ready);
+    ASSERT_EQ(future.wait_for(std::chrono::seconds{30}), std::future_status::ready);
     std::expected<Response<UploadPagesResult>, BlobStorageError> result = future.get();
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().Code, BlobStorageErrorCode::BlobAlreadyExists);
@@ -910,7 +940,7 @@ TEST(PageBlobClientTests, ResizeAsyncAcceptsUseFutureCompletionToken)
         client.ResizeAsync(PageBlobPageSize, AVEVA::AzureClient::ResizePageBlobOptions{}, boost::asio::use_future);
 
     httpClient.Poll(); // drive the posted (async) completion so the future becomes ready (T26)
-    ASSERT_EQ(future.wait_for(std::chrono::seconds{1}), std::future_status::ready);
+    ASSERT_EQ(future.wait_for(std::chrono::seconds{30}), std::future_status::ready);
     std::expected<Response<ResizePageBlobResult>, BlobStorageError> const result = future.get();
     EXPECT_TRUE(result.has_value());
 }

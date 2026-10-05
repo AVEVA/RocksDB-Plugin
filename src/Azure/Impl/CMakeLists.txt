@@ -48,7 +48,7 @@ install(TARGETS aveva-rocksdb-plugin-azure-impl
 )
 find_package(boost_asio CONFIG REQUIRED)
 find_package(boost_log CONFIG REQUIRED)
-find_package(boost_property_tree CONFIG REQUIRED)
+find_package(boost_json CONFIG REQUIRED)
 find_package(aveva-install-library CONFIG REQUIRED)
 target_link_libraries(aveva-rocksdb-plugin-azure-impl PUBLIC
     aveva-rocksdb-plugin-core
@@ -59,7 +59,7 @@ target_link_libraries(aveva-rocksdb-plugin-azure-impl PUBLIC
     Boost::log
 )
 target_link_libraries(aveva-rocksdb-plugin-azure-impl PRIVATE
-    Boost::property_tree
+    Boost::json
     $<$<PLATFORM_ID:Windows>:crypt32>
 )
 # Boost.Asio/Winapi/Atomic must agree on the target Windows version across every TU.

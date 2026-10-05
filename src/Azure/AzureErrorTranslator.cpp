@@ -11,21 +11,12 @@ rocksdb::IOStatus Retryable(rocksdb::IOStatus status) {
 }
 
 bool IsTransportTimeout(const std::error_code& code) {
-    return code == std::errc::timed_out || code == std::errc::operation_canceled;
+    return code == std::errc::timed_out;
 }
 
-// The Azure error code and message are always part of the text so that logs identify the failure.
+// The Azure error code, message and request id are always part of the text so that logs identify the failure.
 std::string DescribeFailure(const RequestFailedException& error) {
-    std::string text = error.Message.empty() ? error.Code.message() : error.Message;
-    if (!error.ErrorCode.empty()) {
-        text = error.ErrorCode + ": " + text;
-    }
-
-    if (error.StatusCode != 0) {
-        text = "HTTP " + std::to_string(error.StatusCode) + " " + text;
-    }
-
-    return text;
+    return error.StatusCode != 0 ? "HTTP " + error.Describe() : error.Describe();
 }
 } // namespace
 
@@ -47,6 +38,10 @@ rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const std::string& con
     case HttpStatus::GatewayTimeout:
         return Retryable(IOStatus::IOError(context));
     default:
+        // Matches IsTransient: every 5xx is retried internally, so it is reported as retryable too.
+        if (statusCode >= 500 && statusCode <= 599) {
+            return Retryable(IOStatus::IOError(context));
+        }
         return IOStatus::IOError(context);
     }
 }
@@ -61,6 +56,10 @@ rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const RequestFailedExc
         if (IsTransportTimeout(code)) {
             return Retryable(IOStatus::TimedOut(text));
         }
+        // Raised by AbortIO or shutdown, so retrying would only fight the cancellation.
+        if (code == std::errc::operation_canceled) {
+            return IOStatus::Aborted(text);
+        }
         if (code == std::errc::invalid_argument) {
             return IOStatus::InvalidArgument("Invalid request or configuration: " + text);
         }
@@ -71,6 +70,8 @@ rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const RequestFailedExc
             return IOStatus::IOError("Request failed: " + text);
         }
         return Retryable(IOStatus::IOError("Connection failure: " + text));
+    case HttpStatus::Unauthorized:
+        return IOStatus::IOError("Authentication failed: " + text);
     case HttpStatus::Forbidden:
         return IOStatus::IOError("Authorization failed: " + text);
     case HttpStatus::Conflict:
@@ -90,7 +91,7 @@ bool AzureErrorTranslator::IsTransient(unsigned int statusCode, const std::error
     case 0:
         // Status 0 also covers requests rejected client-side (bad arguments, unparsable responses) and
         // credential failures (a rejected secret maps to permission_denied), which would fail the same way again.
-        return code != std::errc::invalid_argument && code != std::errc::bad_message &&
+        return code != std::errc::operation_canceled && code != std::errc::state_not_recoverable && code != std::errc::invalid_argument && code != std::errc::bad_message &&
                code != std::errc::value_too_large && code != std::errc::permission_denied;
     case HttpStatus::RequestTimeout:
     case HttpStatus::TooManyRequests:

@@ -3,6 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/TokenCredentials.hpp"
 
+#include "FakeHttpPump.hpp"
 #include "FakeHttpClient.hpp"
 
 #include <gtest/gtest.h>
@@ -28,21 +29,19 @@ class TokenCredentialsTests : public ::testing::Test {
   protected:
     void SetUp() override {
         m_httpClient.CompleteInline() = true;
-        m_pump = std::jthread([this](const std::stop_token& stop) {
-            while (!stop.stop_requested()) {
-                m_httpClient.Poll();
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-        });
+        m_pump = AVEVA::RocksDB::Plugin::Azure::Impl::Tests::StartFakeHttpPump(m_httpClient);
     }
 
     std::pair<std::error_code, AccessToken> GetToken(AVEVA::AzureClient::ITokenCredential& credential) {
-        std::promise<std::pair<std::error_code, AccessToken>> promise;
-        auto future = promise.get_future();
+        auto promise = std::make_shared<std::promise<std::pair<std::error_code, AccessToken>>>();
+        auto future = promise->get_future();
         credential.GetTokenAsync(
             {"https://storage.azure.com/.default"},
-            [&promise](std::error_code error, AccessToken token) { promise.set_value({error, std::move(token)}); });
-        EXPECT_EQ(future.wait_for(std::chrono::seconds(20)), std::future_status::ready);
+            [promise](std::error_code error, AccessToken token) { promise->set_value({error, std::move(token)}); });
+        if (future.wait_for(std::chrono::seconds(20)) != std::future_status::ready) {
+            ADD_FAILURE() << "token request did not complete";
+            return {std::make_error_code(std::errc::timed_out), AccessToken{}};
+        }
         return future.get();
     }
 
@@ -91,7 +90,7 @@ TEST_F(TokenCredentialsTests, ChainReportsLastErrorWhenAllSourcesFail) {
 }
 
 TEST_F(TokenCredentialsTests, RetryAfterIsHonoredOn429) {
-    m_httpClient.EnqueueResponse(HttpResponse{429, {HttpHeader{"Retry-After", "2"}}, ""});
+    m_httpClient.EnqueueResponse(HttpResponse{429, {HttpHeader{"Retry-After", "1"}}, ""});
     m_httpClient.EnqueueResponse(OidcResponse());
     m_httpClient.EnqueueResponse(TokenResponse());
     auto credential = std::make_shared<AzurePipelinesCredential>(m_httpClient, PipelineOptions());
@@ -102,7 +101,7 @@ TEST_F(TokenCredentialsTests, RetryAfterIsHonoredOn429) {
 
     EXPECT_FALSE(error);
     EXPECT_EQ(token.Token, "tok");
-    EXPECT_GE(elapsed, std::chrono::milliseconds(1900));
+    EXPECT_GE(elapsed, std::chrono::milliseconds(900));
 }
 
 class DeferredCredential final : public AVEVA::AzureClient::ITokenCredential {

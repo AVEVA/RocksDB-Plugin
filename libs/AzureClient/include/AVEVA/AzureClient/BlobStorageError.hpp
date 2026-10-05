@@ -28,6 +28,10 @@ namespace AVEVA::AzureClient
         // timeout) or a client-side validation error such as std::errc::invalid_argument. Formerly
         // named TransportError.
         std::error_code Code;
+
+        // The service's AuthenticationErrorDetail, which may echo the string-to-sign. It is kept out of Message so
+        // it does not end up in logs and exception text; read it only when diagnosing a signature mismatch.
+        std::string AuthenticationDetail;
     };
 
     // True when retrying the same request may succeed: transport failures such as timeouts and

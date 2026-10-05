@@ -6,6 +6,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
+#include <chrono>
 #include <cassert>
 #include <limits>
 #include <utility>
@@ -81,6 +82,8 @@ rocksdb::IOStatus ReadableFile::ReadAsync(rocksdb::FSReadRequest& req, const roc
         auto handle = std::make_unique<AsyncReadHandle>(AsyncReadHandle{request});
         const auto offset = static_cast<int64_t>(req.offset);
         const auto length = static_cast<int64_t>(req.len);
+        // IOOptions::timeout is in microseconds; zero means "no deadline". Round up so a tiny deadline is not lost.
+        const auto timeout = std::chrono::ceil<std::chrono::milliseconds>(opts.timeout);
 
         if (const auto cached = m_file->TryReadFromCache(offset, length, req.scratch)) {
             // The cache wrote straight into scratch; Complete only records the length.
@@ -89,7 +92,8 @@ rocksdb::IOStatus ReadableFile::ReadAsync(rocksdb::FSReadRequest& req, const roc
             Impl::ReadableFileImpl::ReadAsync(
                 m_file, offset, length, [request](std::exception_ptr error, std::string data) {
                     request->Complete(error ? StatusFromException(error) : rocksdb::IOStatus::OK(), data);
-                });
+                },
+                Impl::ReadableFileImpl::kMaxStaleReadRetries, timeout);
         }
 
         *io_handle = handle.release();

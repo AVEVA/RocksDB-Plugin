@@ -22,6 +22,7 @@ namespace AVEVA
         bool GetVerifyPeer() const noexcept;
         const std::string& GetCaFile() const noexcept;
         const std::string& GetCaDirectory() const noexcept;
+        const std::string& GetCaPem() const noexcept;
         std::size_t GetMaxIdleConnectionsPerHost() const noexcept;
         std::chrono::seconds GetIdleConnectionTimeout() const noexcept;
 
@@ -29,6 +30,8 @@ namespace AVEVA
         void SetVerifyPeer(bool verifyPeer) noexcept;
         void SetCaFile(std::string caFile);
         void SetCaDirectory(std::string caDirectory);
+        // Trusted CA certificates as concatenated PEM text, used in addition to SetCaFile/SetCaDirectory.
+        void SetCaPem(std::string caPem);
         void SetMaxIdleConnectionsPerHost(std::size_t maxIdleConnectionsPerHost) noexcept;
         void SetIdleConnectionTimeout(std::chrono::seconds idleConnectionTimeout) noexcept;
 
@@ -37,6 +40,7 @@ namespace AVEVA
         bool m_verifyPeer;
         std::string m_caFile;
         std::string m_caDirectory;
+        std::string m_caPem;
         std::size_t m_maxIdleConnectionsPerHost = 6;
         std::chrono::seconds m_idleConnectionTimeout{30};
     };

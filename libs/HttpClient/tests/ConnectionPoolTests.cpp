@@ -45,7 +45,23 @@ namespace
         int* liveCount;
     };
 
+    // A manually advanced clock so idle-timeout behaviour does not depend on real time.
+    struct FakeClock
+    {
+        using rep = std::chrono::steady_clock::rep;
+        using period = std::chrono::steady_clock::period;
+        using duration = std::chrono::steady_clock::duration;
+        using time_point = std::chrono::time_point<FakeClock>;
+        static constexpr bool is_steady = true;
+
+        static time_point now() noexcept { return time_point{Offset}; }
+        static void Advance(duration amount) noexcept { Offset += amount; }
+
+        static inline duration Offset{};
+    };
+
     using Pool = ConnectionPool<TrackedStream>;
+    using FakePool = ConnectionPool<TrackedStream, FakeClock>;
     using Key = ConnectionKey<TrackedStream>;
 
     PooledConnection<TrackedStream> MakeConnection(int identity, int& liveCount)
@@ -59,7 +75,7 @@ namespace
     }
 
     constexpr std::chrono::seconds LongTimeout{300};
-    constexpr std::chrono::seconds ImmediateTimeout{0};
+    constexpr std::chrono::seconds ShortTimeout{30};
 
     TEST(ConnectionPool, AcquireOnEmptyPoolReturnsNothing)
     {
@@ -146,12 +162,12 @@ namespace
     TEST(ConnectionPool, ExpiredConnectionsAreClosedInsteadOfReused)
     {
         int live = 0;
-        Pool pool(4, ImmediateTimeout);
+        FakePool pool(4, ShortTimeout);
         const auto key = MakeKey("example.com");
         pool.Release(key, MakeConnection(1, live));
         ASSERT_EQ(live, 1);
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        FakeClock::Advance(ShortTimeout * 2);
 
         EXPECT_FALSE(pool.Acquire(key).has_value());
         EXPECT_EQ(live, 0);
@@ -160,11 +176,11 @@ namespace
     TEST(ConnectionPool, ExpiredConnectionsOfOtherOriginsAreReclaimed)
     {
         int live = 0;
-        Pool pool(4, ImmediateTimeout);
+        FakePool pool(4, ShortTimeout);
         pool.Release(MakeKey("stale.com"), MakeConnection(1, live));
         ASSERT_EQ(live, 1);
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        FakeClock::Advance(ShortTimeout * 2);
 
         // Touching an unrelated origin still sweeps the pool-wide LRU list.
         pool.Release(MakeKey("fresh.com"), MakeConnection(2, live));

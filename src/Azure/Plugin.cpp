@@ -10,7 +10,9 @@
 
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 namespace AVEVA::RocksDB::Plugin::Azure {
@@ -63,6 +65,36 @@ std::shared_ptr<Registration> GetOrAddRegistration(const std::string& pluginName
 }
 
 /// <summary>
+/// Builds the RocksDB registry name for a primary/backup pair. Each part is length-prefixed and the whole is
+/// hex-encoded, so distinct (account, database) pairs can never collide ("ab"+"c" vs "a"+"bc") and the result
+/// contains only characters that are safe in a RocksDB object-registry identifier.
+/// </summary>
+template <class StorageInfo>
+std::string PluginNameFor(const StorageInfo& primary, const std::optional<StorageInfo>& backup) {
+    std::string canonical;
+    const auto append = [&canonical](const std::string& part) {
+        canonical += std::to_string(part.size());
+        canonical += ':';
+        canonical += part;
+    };
+    append(primary.GetStorageAccountUrl());
+    append(primary.GetDbName());
+    if (backup) {
+        append(backup->GetStorageAccountUrl());
+        append(backup->GetDbName());
+    }
+
+    static constexpr std::string_view digits = "0123456789abcdef";
+    std::string name(Plugin::Name);
+    name += '-';
+    for (const unsigned char c : canonical) {
+        name += digits[c >> 4U];
+        name += digits[c & 0x0FU];
+    }
+    return name;
+}
+
+/// <summary>
 /// Records the settings for the given storage accounts' plugin name, then creates the Env from it. Every
 /// filesystem created borrows `ioContext`, which is never owned by the plugin.
 /// </summary>
@@ -73,10 +105,7 @@ RegisterImpl(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::sha
              std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
              int64_t dataFileBufferSize, int64_t dataFileInitialSize, std::optional<std::string_view> cachePath,
              size_t maxCacheSize) {
-    auto pluginName = std::string(Plugin::Name) + primary.GetDbName();
-    if (backup) {
-        pluginName += backup->GetDbName();
-    }
+    auto pluginName = PluginNameFor(primary, backup);
 
     // Own a copy of the cache path: the factory may run long after the caller's string is gone.
     std::optional<std::string> ownedCachePath;

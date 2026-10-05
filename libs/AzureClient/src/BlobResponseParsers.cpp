@@ -69,11 +69,6 @@ namespace AVEVA::AzureClient::Private
 {
     namespace
     {
-        constexpr std::array<std::string_view, 12>
-            MonthNames{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-        constexpr std::array<std::string_view, 7> ShortWeekdayNames{"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-        constexpr std::array<std::string_view, 7>
-            LongWeekdayNames{"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
 
         [[nodiscard]] Models::BlobType ParseBlobTypeValue(std::string_view value)
         {
@@ -963,8 +958,12 @@ namespace AVEVA::AzureClient::Private
 
         if (rangePart == "*")
         {
-            // Start/End unknown
-            return ParsedContentRange{.Start = 0, .End = 0, .Total = total};
+            // "bytes */*" carries no information and is invalid.
+            if (!total.has_value())
+            {
+                return std::nullopt;
+            }
+            return ParsedContentRange{.Start = 0, .End = 0, .Total = total, .Unsatisfied = true};
         }
 
         const std::size_t dash = rangePart.find('-');
@@ -1067,13 +1066,10 @@ namespace AVEVA::AzureClient::Private
         return result;
     }
 
-    // Task 3 (Option A, now that Task 5's HttpResponse::GetBody() && move accessor exists): moves
-    // the body out of `response` into `result.Content` instead of copying it, so the HttpResponse
-    // retained inside the caller's Response<T> no longer also holds a full duplicate copy of the
-    // blob for the remainder of its lifetime (previously both copies persisted for as long as the
-    // caller kept the Response<T> alive). The transient std::string -> std::vector<std::byte>
-    // conversion is still a copy (Content's element type differs from std::string's), but it is
-    // now the *only* extra copy, and it is freed once this function returns.
+    // Moves the body out of `response` into `result.Content` instead of copying it, so the HttpResponse
+    // retained inside the caller's Response<T> does not also hold a duplicate of the blob. The transient
+    // std::string -> std::vector<std::byte> conversion is still a copy (the element types differ), but it is the
+    // only extra one and is freed when this function returns.
     Models::DownloadBlobResult ParseDownloadBlobResult(HttpResponse& response)
     {
         Models::DownloadBlobResult result;
@@ -1454,6 +1450,7 @@ namespace AVEVA::AzureClient::Private
             }
             result.PageRanges.push_back(range);
         }
+        result.NextMarker = GetChildTextOrEmpty(*root, "NextMarker");
         return result;
     }
 } // namespace AVEVA::AzureClient::Private

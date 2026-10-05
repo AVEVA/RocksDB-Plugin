@@ -63,11 +63,6 @@ namespace AVEVA::AzureClient::Private
         constexpr std::size_t MinContainerNameLength = 3U;
         constexpr std::size_t MaxContainerNameLength = 63U;
         constexpr std::size_t MaxBlockIdDecodedBytes = 64U;
-        constexpr std::array<std::string_view, 12>
-            MonthNames{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-        constexpr std::array<std::string_view, 7> ShortWeekdayNames{"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-        constexpr std::array<std::string_view, 7>
-            LongWeekdayNames{"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
 
         [[nodiscard]] constexpr bool IsAsciiWhitespace(char value) noexcept
         {
@@ -206,19 +201,6 @@ namespace AVEVA::AzureClient::Private
                 .AuthenticationDetail = GetChildTextOrEmpty(*root, "AuthenticationErrorDetail")};
         }
 
-        [[nodiscard]] std::string ExtractErrorMessage(const ParsedErrorBody& errorBody)
-        {
-            if (errorBody.AuthenticationDetail.empty())
-            {
-                return errorBody.Message;
-            }
-            if (errorBody.Message.empty())
-            {
-                return errorBody.AuthenticationDetail;
-            }
-            return errorBody.Message + ' ' + errorBody.AuthenticationDetail;
-        }
-
         void NormalizeTokenFields(std::shared_ptr<ITokenCredential>& tokenCredential,
             std::vector<std::string>& scopes,
             std::string& bearerToken)
@@ -230,7 +212,7 @@ namespace AVEVA::AzureClient::Private
             if (!tokenCredential && !bearerToken.empty())
             {
                 tokenCredential =
-                    std::make_shared<CachingTokenCredential>(std::make_shared<StaticTokenCredential>(bearerToken));
+                    CachingTokenCredential::Create(std::make_shared<StaticTokenCredential>(bearerToken));
                 bearerToken.clear();
             }
         }
@@ -282,6 +264,11 @@ namespace AVEVA::AzureClient::Private
 
             // Allow an optional path component (for Azurite or proxy endpoints), but reject query/fragment.
             const std::string_view remainder = endpoint.substr(schemePos + 3U);
+            const std::string_view authority = remainder.substr(0, remainder.find('/'));
+            if (authority.empty() || authority.front() == ':' || authority.front() == '@')
+            {
+                throw std::invalid_argument("ServiceEndpoint must contain a host.");
+            }
             if (remainder.empty() || remainder.contains('?') || remainder.contains('#'))
             {
                 throw std::invalid_argument("ServiceEndpoint must contain at least a host and may include a path but "
@@ -291,6 +278,11 @@ namespace AVEVA::AzureClient::Private
 
         void ValidateContainerName(std::string_view name)
         {
+            // The service's special containers; their names would otherwise fail the length and character rules.
+            if (name == "$root" || name == "$logs" || name == "$web")
+            {
+                return;
+            }
             if (name.size() < MinContainerNameLength || name.size() > MaxContainerNameLength)
             {
                 throw std::invalid_argument("ContainerName must be between 3 and 63 characters.");
@@ -351,13 +343,13 @@ namespace AVEVA::AzureClient::Private
             return host == "localhost" || host == "127.0.0.1" || host == "[::1]";
         }
 
-        // Authorization: Bearer tokens must not travel in clear text, except to a loopback emulator/proxy.
+        // Credentials (bearer tokens, SAS and SharedKey signatures) must not travel in clear text, except to a loopback emulator/proxy.
         void ValidateTokenTransport(std::string_view endpoint)
         {
             const std::string scheme = ToLowerAscii(endpoint.substr(0, endpoint.find("://")));
             if (scheme == "http" && !IsLoopbackEndpoint(endpoint))
             {
-                throw std::invalid_argument("Token credentials require an https ServiceEndpoint.");
+                throw std::invalid_argument("Credentials require an https ServiceEndpoint (http is only allowed for loopback).");
             }
         }
 
@@ -376,7 +368,7 @@ namespace AVEVA::AzureClient::Private
                 throw std::invalid_argument(
                     "Specify at most one credential type: SasToken, SharedKey, TokenCredential, or BearerToken.");
             }
-            if (options.TokenCredential || !options.BearerToken.empty())
+            if (credentialCount > 0U)
             {
                 ValidateTokenTransport(options.ServiceEndpoint);
             }
@@ -526,11 +518,11 @@ namespace AVEVA::AzureClient::Private
         }
         catch (const std::exception& e)
         {
-            return MakeClientError(std::make_error_code(std::errc::invalid_argument), e.what());
+            return MakeClientError(std::make_error_code(std::errc::state_not_recoverable), e.what());
         }
         catch (...)
         {
-            return MakeClientError(std::make_error_code(std::errc::invalid_argument), "Unknown error.");
+            return MakeClientError(std::make_error_code(std::errc::state_not_recoverable), "Unknown error.");
         }
     }
 
@@ -552,11 +544,6 @@ namespace AVEVA::AzureClient::Private
     std::string BytesToString(std::span<const std::byte> bytes)
     {
         return std::string{AsChars(bytes)};
-    }
-
-    std::vector<std::byte> StringToBytes(std::string_view bytes)
-    {
-        return {AsBytes(bytes).begin(), AsBytes(bytes).end()};
     }
 
     std::string Base64Encode(std::span<const std::byte> bytes)
@@ -611,7 +598,8 @@ namespace AVEVA::AzureClient::Private
         BlobStorageError details;
         details.StatusCode = response.GetStatus();
         details.ErrorCode = errorCode;
-        details.Message = ExtractErrorMessage(errorBody);
+        details.Message = errorBody.Message;
+        details.AuthenticationDetail = errorBody.AuthenticationDetail;
         details.RequestId = std::string{FindHeaderValue(response, XMsRequestIdHeaderName)};
         BlobStorageErrorCode code =
             errorCode.empty() ? BlobStorageErrorCode::ServiceError : ParseBlobStorageErrorCode(errorCode);

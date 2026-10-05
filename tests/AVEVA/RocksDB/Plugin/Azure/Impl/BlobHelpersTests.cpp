@@ -4,6 +4,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
+#include "FakeHttpPump.hpp"
 #include "FakeHttpClient.hpp"
 #include "TestFixtures.hpp"
 
@@ -32,12 +33,7 @@ class BlobHelpersTests : public ::testing::Test {
   protected:
     void SetUp() override {
         m_httpClient.CompleteInline() = true;
-        m_pump = std::jthread([this](const std::stop_token& stop) {
-            while (!stop.stop_requested()) {
-                m_httpClient.Poll();
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-        });
+        m_pump = AVEVA::RocksDB::Plugin::Azure::Impl::Tests::StartFakeHttpPump(m_httpClient);
     }
 
     FakeHttpClient m_httpClient;
@@ -53,9 +49,9 @@ TEST_F(BlobHelpersTests, ForbiddenIsNotRetried) {
     EXPECT_EQ(m_httpClient.RequestCount(), 1U);
 }
 
-TEST_F(BlobHelpersTests, ServerBusyIsRetriedUntilSuccess) {
-    m_httpClient.EnqueueResponse(MakeAzureErrorResponse(503, "ServerBusy", "busy", "id"));
-    m_httpClient.EnqueueResponse(MakeAzureErrorResponse(503, "ServerBusy", "busy", "id"));
+TEST_F(BlobHelpersTests, ConflictIsRetriedUntilSuccess) {
+    m_httpClient.EnqueueResponse(MakeAzureErrorResponse(409, "ContainerBeingDeleted", "busy", "id"));
+    m_httpClient.EnqueueResponse(MakeAzureErrorResponse(409, "ContainerBeingDeleted", "busy", "id"));
     m_httpClient.EnqueueResponse(HttpResponse{201, MakeCanonicalSuccessHeaders({}), ""});
     BlobContainerClient client(m_httpClient, MakeBlobContainerClientOptions("cont"));
 
@@ -65,7 +61,7 @@ TEST_F(BlobHelpersTests, ServerBusyIsRetriedUntilSuccess) {
 
 TEST_F(BlobHelpersTests, RetriesAreBounded) {
     for (int i = 0; i < 3; ++i) {
-        m_httpClient.EnqueueResponse(MakeAzureErrorResponse(503, "ServerBusy", "busy", "id"));
+        m_httpClient.EnqueueResponse(MakeAzureErrorResponse(409, "ContainerBeingDeleted", "busy", "id"));
     }
     BlobContainerClient client(m_httpClient, MakeBlobContainerClientOptions("cont"));
 
@@ -73,10 +69,37 @@ TEST_F(BlobHelpersTests, RetriesAreBounded) {
                  RequestFailedException);
     EXPECT_EQ(m_httpClient.RequestCount(), 3U);
 }
+TEST(FileSizeMetadataTests, ParsesValidAndMissingValues) {
+    AVEVA::AzureClient::Models::BlobProperties properties;
+    EXPECT_EQ(0, BlobHelpers::FileSizeFromProperties(properties));
+    properties.Metadata.emplace("filesize", "4096");
+    EXPECT_EQ(4096, BlobHelpers::FileSizeFromProperties(properties));
+}
+
+TEST(FileSizeMetadataTests, MalformedValuesThrowDescriptiveError) {
+    for (const char* value : {"abc", "12x", "", "-5", "99999999999999999999"}) {
+        AVEVA::AzureClient::Models::BlobProperties properties;
+        properties.Metadata.emplace("filesize", value);
+        try {
+            BlobHelpers::FileSizeFromProperties(properties, "000001.sst");
+            ADD_FAILURE() << "expected throw for '" << value << "'";
+        } catch (const std::runtime_error& ex) {
+            EXPECT_NE(std::string(ex.what()).find(value), std::string::npos);
+            EXPECT_NE(std::string(ex.what()).find("000001.sst"), std::string::npos);
+        }
+    }
+}
+
 class ScopedEnv {
   public:
-    ScopedEnv(const char* name, const char* value) : m_name(name) { Set(value); }
-    ~ScopedEnv() { Set(nullptr); }
+    ScopedEnv(const char* name, const char* value) : m_name(name) {
+        // Restore the previous value on exit so later tests in the same process still see it.
+        if (const char* previous = std::getenv(name)) {
+            m_previous = previous;
+        }
+        Set(value);
+    }
+    ~ScopedEnv() { Set(m_previous ? m_previous->c_str() : nullptr); }
     ScopedEnv(const ScopedEnv&) = delete;
     ScopedEnv& operator=(const ScopedEnv&) = delete;
 
@@ -93,11 +116,12 @@ class ScopedEnv {
 #endif
     }
     const char* m_name;
+    std::optional<std::string> m_previous;
 };
 
 std::vector<const std::type_info*> SourceTypes(const std::optional<std::string>& managedIdentityId) {
     boost::asio::io_context context;
-    AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime runtime(context);
+    const auto runtime = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime>(context);
     const AVEVA::RocksDB::Plugin::Azure::Models::ChainedCredentialInfo info(
         "db", "https://acct.blob.core.windows.net", "sp", "secret", "tenant", managedIdentityId);
     std::vector<const std::type_info*> types;
@@ -147,7 +171,7 @@ TEST(BlobHelpersCredentialLifetimeTests, ServicePrincipalCredentialKeepsRuntimeA
     boost::asio::io_context context;
     auto runtime = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime>(context);
     const std::weak_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime> weak = runtime;
-    auto credential = BlobHelpers::CreateClientSecretCredential(*runtime, "tenant", "client", "secret");
+    auto credential = BlobHelpers::CreateClientSecretCredential(runtime, "tenant", "client", "secret");
 
     runtime.reset();
     EXPECT_FALSE(weak.expired());
@@ -160,7 +184,7 @@ TEST(BlobHelpersCredentialLifetimeTests, PipelinesCredentialKeepsRuntimeAlive) {
     boost::asio::io_context context;
     auto runtime = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime>(context);
     const std::weak_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime> weak = runtime;
-    auto credential = BlobHelpers::CreatePipelinesCredential(*runtime, "tenant", "client", "connection", "token");
+    auto credential = BlobHelpers::CreatePipelinesCredential(runtime, "tenant", "client", "connection", "token");
 
     runtime.reset();
     EXPECT_FALSE(weak.expired());
@@ -169,10 +193,4 @@ TEST(BlobHelpersCredentialLifetimeTests, PipelinesCredentialKeepsRuntimeAlive) {
     EXPECT_TRUE(weak.expired());
 }
 
-TEST(BlobHelpersCredentialLifetimeTests, BindingToRuntimeNotOwnedBySharedPtrThrows) {
-    boost::asio::io_context context;
-    AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime runtime{context};
-
-    EXPECT_THROW(BlobHelpers::CreateClientSecretCredential(runtime, "tenant", "client", "secret"), std::logic_error);
-}
 } // namespace

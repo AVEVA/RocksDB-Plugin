@@ -19,12 +19,15 @@ namespace AVEVA::RocksDB::Plugin::Azure {
 class BlobFilesystem final : public rocksdb::FileSystemWrapper {
     std::unique_ptr<Impl::BlobFilesystemImpl> m_filesystem;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
-    std::vector<Azure::LockFile*> m_lockFiles;
+    std::vector<std::unique_ptr<Azure::LockFile>> m_lockFiles;
     Impl::LogRateLimiter m_blobNotFoundRateLimiter;
 
     // Logs a RequestFailedException, suppressing repeated BlobNotFound (404) messages
     // during the rate-limit cooldown window.
     void LogRequestFailed(const RequestFailedException& ex, std::string_view path = {});
+
+    // Runs f, translating and logging any exception as a rocksdb::IOStatus. Defined in the .cpp (only used there).
+    template <class F> rocksdb::IOStatus Guard(std::string_view operation, std::string_view path, F&& f);
 
   public:
     BlobFilesystem(

@@ -3,10 +3,11 @@ set(AVEVA_HTTP_CLIENT_VERSION @PROJECT_VERSION@)
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
-find_dependency(boost_asio REQUIRED)
-find_dependency(boost_beast REQUIRED)
-find_dependency(boost_url REQUIRED)
-find_dependency(boost_unordered REQUIRED)
+find_dependency(boost_asio CONFIG REQUIRED)
+find_dependency(boost_beast CONFIG REQUIRED)
+find_dependency(boost_intrusive CONFIG REQUIRED)
+find_dependency(boost_url CONFIG REQUIRED)
+find_dependency(boost_unordered CONFIG REQUIRED)
 find_dependency(OpenSSL REQUIRED)
 
 include(${CMAKE_CURRENT_LIST_DIR}/aveva-http-client-targets.cmake)

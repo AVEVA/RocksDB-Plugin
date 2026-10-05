@@ -25,6 +25,7 @@ TEST(ParseContentRangeTests, ParsesAsteriskRangeWithTotal)
     EXPECT_EQ(ValueOrFail(r).End, 0U);
     ASSERT_TRUE(ValueOrFail(r).Total.has_value());
     EXPECT_EQ(*ValueOrFail(r).Total, 1234U);
+    EXPECT_TRUE(ValueOrFail(r).Unsatisfied);
 }
 
 TEST(ParseContentRangeTests, ParsesRangeWithoutTotal)

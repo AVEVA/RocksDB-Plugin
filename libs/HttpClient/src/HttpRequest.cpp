@@ -60,6 +60,7 @@ namespace AVEVA
     {
         m_body = std::move(body);
         m_bodyView = {};
+        m_bodyKeepAlive.reset();
         m_hasBodyView = false;
     }
 
@@ -67,7 +68,24 @@ namespace AVEVA
     {
         m_bodyView = content;
         m_hasBodyView = true;
+        m_bodyKeepAlive.reset();
         m_body.clear();
+    }
+
+    void HttpRequest::SetBodyView(std::span<const std::byte> content, std::shared_ptr<const void> keepAlive) noexcept
+    {
+        SetBodyView(content);
+        m_bodyKeepAlive = std::move(keepAlive);
+    }
+
+    const std::shared_ptr<const void>& HttpRequest::GetBodyKeepAlive() const noexcept
+    {
+        return m_bodyKeepAlive;
+    }
+
+    std::string HttpRequest::ReleaseBody() noexcept
+    {
+        return std::exchange(m_body, std::string{});
     }
 
     bool HttpRequest::HasBodyView() const noexcept

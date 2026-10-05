@@ -82,7 +82,7 @@ namespace AVEVA::Private
     // Because the lists are intrusive, linking, unlinking, and moving a connection between them
     // costs a few pointer writes and never allocates, and retired nodes are recycled rather than
     // freed so a steady request stream performs no node allocation at all.
-    template <typename Stream> class ConnectionPool
+    template <typename Stream, typename Clock = std::chrono::steady_clock> class ConnectionPool
     {
       public:
         ConnectionPool(std::size_t maxIdlePerKey, std::chrono::seconds idleTimeout)
@@ -101,13 +101,27 @@ namespace AVEVA::Private
             m_recycled.clear_and_dispose(NodeDisposer{});
         }
 
+        // Returns a connection the peer has not closed. A server may drop an idle keep-alive socket at any time,
+        // and a non-idempotent request sent on it could not be retried safely, so dead ones are discarded here.
         std::optional<PooledConnection<Stream>> Acquire(const ConnectionKey<Stream>& key)
+        {
+            while (auto connection = AcquireUnchecked(key))
+            {
+                if (IsAlive(*connection))
+                {
+                    return connection;
+                }
+            }
+            return std::nullopt;
+        }
+
+        std::optional<PooledConnection<Stream>> AcquireUnchecked(const ConnectionKey<Stream>& key)
         {
             LruList retired;
             std::optional<PooledConnection<Stream>> connection;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
-                DropExpired(std::chrono::steady_clock::now(), retired);
+                DropExpired(Clock::now(), retired);
                 auto it = m_origins.find(key);
                 if (it != m_origins.end())
                 {
@@ -139,7 +153,7 @@ namespace AVEVA::Private
             LruList retired;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
-                const auto now = std::chrono::steady_clock::now();
+                const auto now = Clock::now();
                 DropExpired(now, retired);
 
                 Node& node = *Obtain();
@@ -170,12 +184,44 @@ namespace AVEVA::Private
         }
 
       private:
+        // An idle socket must have nothing to read: pending data or EOF both mean the peer closed or misbehaved.
+        static bool IsAlive(PooledConnection<Stream>& connection) noexcept
+        {
+            if constexpr (!requires { beast::get_lowest_layer(*connection.stream).socket(); })
+            {
+                return true; // Stream types without a real socket (test doubles) cannot be probed.
+            }
+            else try
+            {
+                auto& socket = beast::get_lowest_layer(*connection.stream).socket();
+                if (!socket.is_open())
+                {
+                    return false;
+                }
+                boost::system::error_code ec;
+                socket.non_blocking(true, ec);
+                if (ec)
+                {
+                    return false;
+                }
+                char probe = 0;
+                socket.receive(boost::asio::buffer(&probe, 1), boost::asio::socket_base::message_peek, ec);
+                boost::system::error_code ignored;
+                socket.non_blocking(false, ignored);
+                return ec == boost::asio::error::would_block || ec == boost::asio::error::try_again;
+            }
+            catch (...)
+            {
+                return false;
+            }
+        }
+
         struct Origin;
 
         struct Node : ConnectionPoolDetail::IdleHook, ConnectionPoolDetail::LruHook
         {
             PooledConnection<Stream> connection;
-            std::chrono::steady_clock::time_point idleSince{};
+            typename Clock::time_point idleSince{};
             Origin* origin = nullptr;
         };
 
@@ -203,7 +249,7 @@ namespace AVEVA::Private
         // Unlinks every connection that has been idle past the timeout and hands it to the caller
         // for destruction outside the lock. The LRU list is ordered oldest-first, so the walk stops
         // at the first live node.
-        void DropExpired(std::chrono::steady_clock::time_point now, LruList& retired)
+        void DropExpired(typename Clock::time_point now, LruList& retired)
         {
             while (!m_lru.empty())
             {

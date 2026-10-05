@@ -5,6 +5,8 @@ vcpkg_cmake_configure(
     OPTIONS
         -DAVEVA_AZURE_CLIENT_TESTS=OFF
         -DAVEVA_AZURE_CLIENT_BENCHMARKS=OFF
+        -DAVEVA_AZURE_CLIENT_EXAMPLES=OFF
+        -DAVEVA_AZURE_CLIENT_INSTALL_TEST=OFF
 )
 
 vcpkg_cmake_install()
@@ -13,4 +15,4 @@ vcpkg_copy_pdbs()
 
 file(REMOVE_RECURSE "${CURRENT_PACKAGES_DIR}/debug/include")
 
-file(WRITE "${CURRENT_PACKAGES_DIR}/share/${PORT}/copyright" "Proprietary - AVEVA Solutions Limited. Internal use only.\n")
+vcpkg_install_copyright(FILE_LIST "${SOURCE_PATH}/LICENSE")

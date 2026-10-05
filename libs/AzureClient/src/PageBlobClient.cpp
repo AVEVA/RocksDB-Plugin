@@ -12,9 +12,11 @@
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -24,6 +26,7 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 namespace AVEVA::AzureClient
 {
@@ -304,42 +307,83 @@ namespace AVEVA::AzureClient
             requestOptions);
     }
 
+    namespace
+    {
+        using PageRangesHandler =
+            std::move_only_function<void(std::expected<Response<Models::GetPageRangesResult>, BlobStorageError>)>;
+
+        // Requests a single page of the page list, starting at options.Marker.
+        void GetPageRangesPage(IHttpClient& httpClient,
+            const std::shared_ptr<const Private::BlobTarget>& target,
+            const GetPageRangesOptions& options,
+            PageRangesHandler completion,
+            HttpRequestOptions requestOptions)
+        {
+            std::vector<std::pair<std::string, std::string>> queryParameters{{"comp", "pagelist"}};
+            if (!options.Marker.empty())
+            {
+                queryParameters.emplace_back("marker", options.Marker);
+            }
+            if (options.MaxResults.has_value())
+            {
+                queryParameters.emplace_back("maxresults", std::to_string(*options.MaxResults));
+            }
+            HttpRequest request =
+                Private::BuildBlobRequest(*target, HttpMethod::Get, Private::BuildQueryString(queryParameters));
+            if (options.Range.has_value())
+            {
+                try
+                {
+                    Private::AddHeader(request,
+                        Private::XMsRangeHeaderName,
+                        Private::BuildRangeHeaderValue(*options.Range));
+                }
+                catch (const std::invalid_argument&)
+                {
+                    Private::PostCompletion(httpClient,
+                        std::move(completion),
+                        Private::MakeError<Models::GetPageRangesResult>(
+                            std::make_error_code(std::errc::invalid_argument)));
+                    return;
+                }
+            }
+            Private::ApplyBlobRequestConditions(request, options.Conditions);
+
+            Private::SendAuthorizedRequestAsync(httpClient,
+                *target,
+                std::move(request),
+                [completion = std::move(completion)](std::error_code error, HttpResponse response) mutable
+            {
+                Private::CompleteParsed<Models::GetPageRangesResult>(error,
+                    std::move(response),
+                    [](const HttpResponse& value)
+                {
+                    return Private::ParseGetPageRangesResultXml(value.GetBody());
+                },
+                    std::move(completion));
+            },
+                requestOptions);
+        }
+    } // namespace
+
+    // Follows NextMarker so a fragmented blob never yields a silently truncated page list.
     void PageBlobClient::GetPageRangesAsyncImpl(GetPageRangesOptions options,
         GetPageRangesCompletionHandler completion,
         HttpRequestOptions requestOptions)
     {
-        HttpRequest request = Private::BuildBlobRequest(Target(), HttpMethod::Get, "comp=pagelist");
-        if (options.Range.has_value())
+        std::string marker = options.Marker;
+        auto collector = std::make_shared<Private::PageCollector<Models::GetPageRangesResult>>(
+            [httpClient = &HttpClient(), target = SharedTarget(), options = std::move(options), requestOptions](
+                std::string pageMarker, PageRangesHandler pageCompletion) mutable
         {
-            try
-            {
-                Private::AddHeader(request,
-                    Private::XMsRangeHeaderName,
-                    Private::BuildRangeHeaderValue(*options.Range));
-            }
-            catch (const std::invalid_argument&)
-            {
-                Private::PostCompletion(HttpClient(),
-                    std::move(completion),
-                    Private::MakeError<Models::GetPageRangesResult>(std::make_error_code(std::errc::invalid_argument)));
-                return;
-            }
-        }
-        Private::ApplyBlobRequestConditions(request, options.Conditions);
-
-        Private::SendAuthorizedRequestAsync(HttpClient(),
-            Target(),
-            std::move(request),
-            [completion = std::move(completion)](std::error_code error, HttpResponse response) mutable
-        {
-            Private::CompleteParsed<Models::GetPageRangesResult>(error,
-                std::move(response),
-                [](const HttpResponse& value)
-            {
-                return Private::ParseGetPageRangesResultXml(value.GetBody());
-            },
-                std::move(completion));
+            options.Marker = std::move(pageMarker);
+            GetPageRangesPage(*httpClient, target, options, std::move(pageCompletion), requestOptions);
         },
-            requestOptions);
+            [](Models::GetPageRangesResult& accumulated, Models::GetPageRangesResult page)
+        {
+            std::ranges::move(page.PageRanges, std::back_inserter(accumulated.PageRanges));
+        },
+            std::move(completion));
+        collector->Start(std::move(marker));
     }
 } // namespace AVEVA::AzureClient

@@ -38,6 +38,13 @@ TEST(AzureErrorTranslatorTests, ForbiddenIsNonRetryableAuthorizationFailure) {
     EXPECT_NE(status.ToString().find("AuthorizationFailure"), std::string::npos);
 }
 
+TEST(AzureErrorTranslatorTests, UnauthorizedIsNonRetryableAuthenticationFailure) {
+    auto status = AzureErrorTranslator::IOStatusFromError(Failure(401, "InvalidAuthenticationInfo"));
+    EXPECT_TRUE(status.IsIOError());
+    EXPECT_FALSE(status.GetRetryable());
+    EXPECT_NE(status.ToString().find("Authentication failed"), std::string::npos);
+}
+
 TEST(AzureErrorTranslatorTests, ConflictAndPreconditionFailedPreserveErrorCode) {
     for (unsigned int code : {409u, 412u}) {
         auto status = AzureErrorTranslator::IOStatusFromError(Failure(code, "LeaseAlreadyPresent"));
@@ -57,7 +64,7 @@ TEST(AzureErrorTranslatorTests, ThrottlingAndUnavailableAreRetryableBusy) {
 }
 
 TEST(AzureErrorTranslatorTests, ServerErrorsAreRetryableIOError) {
-    for (unsigned int code : {500u, 502u, 504u}) {
+    for (unsigned int code : {500u, 501u, 502u, 504u, 505u, 507u}) {
         auto status = AzureErrorTranslator::IOStatusFromError(Failure(code));
         EXPECT_TRUE(status.IsIOError());
         EXPECT_TRUE(status.GetRetryable());
@@ -76,11 +83,12 @@ TEST(AzureErrorTranslatorTests, TransportTimeoutIsRetryableTimedOut) {
     EXPECT_TRUE(status.GetRetryable());
 }
 
-TEST(AzureErrorTranslatorTests, TransportCancellationIsRetryableTimedOut) {
-    auto status =
-        AzureErrorTranslator::IOStatusFromError(Failure(0, "", std::make_error_code(std::errc::operation_canceled)));
-    EXPECT_TRUE(status.IsTimedOut());
-    EXPECT_TRUE(status.GetRetryable());
+TEST(AzureErrorTranslatorTests, TransportCancellationIsNonRetryableAborted) {
+    const auto code = std::make_error_code(std::errc::operation_canceled);
+    auto status = AzureErrorTranslator::IOStatusFromError(Failure(0, "", code));
+    EXPECT_TRUE(status.IsAborted());
+    EXPECT_FALSE(status.GetRetryable());
+    EXPECT_FALSE(AzureErrorTranslator::IsTransient(0, code));
 }
 
 TEST(AzureErrorTranslatorTests, ConnectionFailureIsRetryableIOError) {
@@ -129,11 +137,11 @@ TEST(AzureErrorTranslatorTests, LegacyOverloadKeepsRetryableTimeout) {
 }
 
 TEST(AzureErrorTranslatorTests, TransientClassification) {
-    for (unsigned int code : {0u, 408u, 429u, 500u, 502u, 503u, 504u}) {
+    for (unsigned int code : {0u, 408u, 429u, 500u, 501u, 502u, 503u, 504u, 507u}) {
         EXPECT_TRUE(AzureErrorTranslator::IsTransient(Failure(code))) << code;
     }
 
-    for (unsigned int code : {400u, 403u, 404u, 409u, 412u}) {
+    for (unsigned int code : {400u, 401u, 403u, 404u, 409u, 412u}) {
         EXPECT_FALSE(AzureErrorTranslator::IsTransient(Failure(code))) << code;
     }
 }

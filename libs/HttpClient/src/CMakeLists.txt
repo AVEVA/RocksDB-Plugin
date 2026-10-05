@@ -25,10 +25,6 @@ target_sources(aveva-http-client
         "${base-include-dir}/AVEVA/HttpClient/HttpResponse.hpp"
 )
 
-install(TARGETS aveva-http-client
-    EXPORT
-)
-
 find_package(boost_asio CONFIG REQUIRED)
 find_package(boost_beast CONFIG REQUIRED)
 find_package(boost_intrusive CONFIG REQUIRED)
@@ -42,6 +38,7 @@ if(MSVC)
     target_compile_options(aveva-http-client PRIVATE /bigobj)
 endif()
 target_link_libraries(aveva-http-client
-    PRIVATE Boost::asio Boost::beast Boost::intrusive Boost::unordered Boost::url OpenSSL::SSL OpenSSL::Crypto
+    PUBLIC Boost::asio
+    PRIVATE Boost::beast Boost::intrusive Boost::unordered Boost::url OpenSSL::SSL OpenSSL::Crypto
 )
 aveva_install_library(aveva-http-client)

@@ -36,7 +36,7 @@ ctest --test-dir build/ --output-on-failure
 > Check `CMakePresets.json` for available presets. Delete the `build/` directory and reconfigure if the build behaves inconsistently after a branch switch.
 
 ## Conventions
-- Follow modern C++ (C++17 or newer) idioms.
+- Follow modern C++ (C++23 is required) idioms.
 - Use RAII for resource management — avoid raw pointers with manual `delete`.
 - Map Azure client errors (`RequestFailedException`) to meaningful RocksDB `rocksdb::Status` codes; do not swallow errors silently.
 - New source files must be added to the owning `CMakeLists.txt`.

@@ -4,8 +4,8 @@ include_guard(GLOBAL)
 
 set(AVEVA_HTTP_CLIENT_TESTS ${AVEVA_BUILD_CLIENT_LIBRARY_TESTS})
 set(AVEVA_HTTP_CLIENT_BENCHMARKS OFF)
-# Installed below with a config file template owned by this repository.
-set(AVEVA_HTTP_CLIENT_INSTALL_CONFIG_FILE_PACKAGE OFF)
+# Installed by aveva_install_library() using the library's own config template.
+set(AVEVA_HTTP_CLIENT_INSTALL_CONFIG_FILE_PACKAGE ON)
 add_subdirectory("${PROJECT_SOURCE_DIR}/libs/HttpClient" "${PROJECT_BINARY_DIR}/libs/HttpClient")
 
 # The client libraries are third-party code from this project's point of view, so do not fail the build on
@@ -35,26 +35,7 @@ add_library(aveva-azure-client-test-support INTERFACE)
 target_include_directories(aveva-azure-client-test-support INTERFACE "${PROJECT_SOURCE_DIR}/libs/AzureClient/tests")
 target_link_libraries(aveva-azure-client-test-support INTERFACE aveva::azure-client)
 
-# Installed config package for aveva-http-client (the library does not ship a config template of its own).
-include(CMakePackageConfigHelpers)
-get_directory_property(AVEVA_HTTP_CLIENT_PACKAGE_VERSION
-    DIRECTORY "${PROJECT_SOURCE_DIR}/libs/HttpClient" DEFINITION PROJECT_VERSION)
-set(_aveva_http_client_install_dir "share/aveva-http-client")
-configure_package_config_file(
-    "${CMAKE_CURRENT_LIST_DIR}/templates/aveva-http-client-config.cmake.in"
-    "${PROJECT_BINARY_DIR}/cmake/install/aveva-http-client-config.cmake"
-    INSTALL_DESTINATION "${_aveva_http_client_install_dir}")
-write_basic_package_version_file(
-    "${PROJECT_BINARY_DIR}/cmake/install/aveva-http-client-config-version.cmake"
-    VERSION "${AVEVA_HTTP_CLIENT_PACKAGE_VERSION}"
-    COMPATIBILITY ExactVersion)
-install(FILES
-    "${PROJECT_BINARY_DIR}/cmake/install/aveva-http-client-config.cmake"
-    "${PROJECT_BINARY_DIR}/cmake/install/aveva-http-client-config-version.cmake"
-    DESTINATION "${_aveva_http_client_install_dir}"
-    COMPONENT aveva-http-client)
-install(EXPORT aveva-http-client
-    DESTINATION "${_aveva_http_client_install_dir}"
-    NAMESPACE aveva::
-    FILE aveva-http-client-targets.cmake
-    COMPONENT aveva-http-client)
+# Asio types are shared across the plugin and both libraries, so they must agree on the Windows API level.
+foreach(_aveva_lib IN ITEMS aveva-http-client aveva-azure-client)
+    target_compile_definitions(${_aveva_lib} PUBLIC $<$<PLATFORM_ID:Windows>:_WIN32_WINNT=0x0A00>)
+endforeach()

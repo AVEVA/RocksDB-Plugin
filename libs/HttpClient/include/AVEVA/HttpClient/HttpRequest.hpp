@@ -4,6 +4,7 @@
 #include <AVEVA/HttpClient/HttpMethod.hpp>
 
 #include <cstddef>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
@@ -45,6 +46,16 @@ namespace AVEVA
         /// a std::shared_ptr kept alive by the caller for the duration of the operation).
         void SetBodyView(std::span<const std::byte> content) noexcept;
 
+        /// Like SetBodyView(), but the request (and every copy of it, and the HTTP operation that sends it) also
+        /// holds `keepAlive`, so the viewed memory stays valid for as long as anything can still read it.
+        void SetBodyView(std::span<const std::byte> content, std::shared_ptr<const void> keepAlive) noexcept;
+
+        /// The owner passed to SetBodyView(content, keepAlive); null otherwise.
+        [[nodiscard]] const std::shared_ptr<const void>& GetBodyKeepAlive() const noexcept;
+
+        /// Moves the owned body out of the request, leaving it empty. Has no effect on a body view.
+        [[nodiscard]] std::string ReleaseBody() noexcept;
+
         /// True if the active body was set via SetBodyView() rather than SetBody().
         [[nodiscard]] bool HasBodyView() const noexcept;
 
@@ -62,6 +73,7 @@ namespace AVEVA
         std::vector<HttpHeader> m_headers;
         std::string m_body;
         std::span<const std::byte> m_bodyView;
+        std::shared_ptr<const void> m_bodyKeepAlive;
         bool m_hasBodyView = false;
     };
 } // namespace AVEVA

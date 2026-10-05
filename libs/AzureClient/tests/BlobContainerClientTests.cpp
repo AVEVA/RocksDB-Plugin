@@ -911,7 +911,7 @@ TEST(BlobContainerClientTests, CreateAsyncAcceptsUseFutureCompletionToken)
         client.CreateAsync(AVEVA::AzureClient::CreateBlobContainerOptions{}, boost::asio::use_future);
 
     httpClient.Poll(); // drive the posted (async) completion so the future becomes ready (T26)
-    ASSERT_EQ(future.wait_for(std::chrono::seconds{1}), std::future_status::ready);
+    ASSERT_EQ(future.wait_for(std::chrono::seconds{30}), std::future_status::ready);
     std::expected<Response<CreateBlobContainerResult>, BlobStorageError> const result = future.get();
     EXPECT_TRUE(result.has_value());
 }

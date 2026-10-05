@@ -29,54 +29,46 @@ namespace AVEVA::AzureClient::Private
 {
     // Preserves the associated executor/allocator and adopts the handler's cancellation slot
     // unless requestOptions already carries an explicit one.
+    //
+    // The work guard on the handler's executor is taken here, at initiation: if that executor belongs to a
+    // different io_context, its run() could otherwise return before the completion is dispatched. An adopted
+    // slot is cleared on the handler's executor, immediately before the handler runs, so the clear is serialized
+    // with the caller emitting on that executor instead of racing on the transport thread.
     template <class THandler, class RawHandler>
     [[nodiscard]] THandler BindAssociationsAndAdoptCancellationOn(RawHandler& handler,
         const IHttpClient::executor_type& defaultExecutor,
         HttpRequestOptions& requestOptions)
     {
-        if (auto slot = boost::asio::get_associated_cancellation_slot(handler, boost::asio::cancellation_slot());
-            slot.is_connected() && !requestOptions.GetCancellationSlot().is_connected())
+        auto slot = boost::asio::get_associated_cancellation_slot(handler, boost::asio::cancellation_slot());
+        const bool adoptedSlot = slot.is_connected() && !requestOptions.GetCancellationSlot().is_connected();
+        if (adoptedSlot)
         {
             requestOptions.SetCancellationSlot(slot);
         }
 
         auto executor = boost::asio::get_associated_executor(handler, defaultExecutor);
-        if (executor == defaultExecutor)
+        if (executor == defaultExecutor && !adoptedSlot)
         {
             return THandler{std::move(handler)};
         }
 
         auto allocator = boost::asio::get_associated_allocator(handler);
-        if constexpr (std::is_same_v<decltype(allocator), std::allocator<void>>)
+        return THandler{[executor, allocator, slot, adoptedSlot, work = boost::asio::make_work_guard(executor),
+                            handler = std::move(handler)](auto result) mutable
         {
-            // No explicit allocator association: dispatch onto associated executor with a
-            // work guard to preserve executor lifetime until the handler runs.
-            return THandler{[executor, handler = std::move(handler)](auto result) mutable
+            boost::asio::dispatch(executor,
+                boost::asio::bind_allocator(allocator,
+                    [handler = std::move(handler), result = std::move(result), work = std::move(work), slot,
+                        adoptedSlot]() mutable
             {
-                auto work = boost::asio::make_work_guard(executor);
-                boost::asio::dispatch(executor,
-                    [handler = std::move(handler), result = std::move(result), work = std::move(work)]() mutable
+                if (adoptedSlot)
                 {
-                    std::move(handler)(std::move(result));
-                });
-            }};
-        }
-        else
-        {
-            // Allocator explicitly associated: ensure bound allocator is used for the dispatched call.
-            return THandler{[executor, allocator, handler = std::move(handler)](auto result) mutable
-            {
-                auto work = boost::asio::make_work_guard(executor);
-                boost::asio::dispatch(executor,
-                    boost::asio::bind_allocator(allocator,
-                        [handler = std::move(handler), result = std::move(result), work = std::move(work)]() mutable
-                {
-                    std::move(handler)(std::move(result));
-                }));
-            }};
-        }
+                    slot.clear();
+                }
+                std::move(handler)(std::move(result));
+            }));
+        }};
     }
-
     template <class THandler, class RawHandler>
     [[nodiscard]] THandler BindAssociationsAndAdoptCancellation(RawHandler& handler,
         IHttpClient& httpClient,

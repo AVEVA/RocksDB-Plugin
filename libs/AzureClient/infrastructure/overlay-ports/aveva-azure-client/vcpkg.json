@@ -4,6 +4,11 @@
   "dependencies": [
     "aveva-http-client",
     "openssl",
+    "boost-asio",
+    "boost-url",
+    "boost-uuid",
+    "boost-algorithm",
+    "boost-json",
     {
       "name": "libxml2",
       "default-features": false

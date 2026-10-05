@@ -34,6 +34,43 @@ namespace AVEVA::AzureClient::Private
             });
         }
 
+        // Decodes %XX escapes so an encoded name such as `%73ig` cannot slip past the comparison.
+        [[nodiscard]] inline std::string PercentDecode(std::string_view text)
+        {
+            const auto hexValue = [](char c) noexcept -> int
+            {
+                if (c >= '0' && c <= '9')
+                {
+                    return c - '0';
+                }
+                if (c >= 'a' && c <= 'f')
+                {
+                    return c - 'a' + 10;
+                }
+                if (c >= 'A' && c <= 'F')
+                {
+                    return c - 'A' + 10;
+                }
+                return -1;
+            };
+            std::string decoded;
+            decoded.reserve(text.size());
+            for (std::size_t i = 0; i < text.size(); ++i)
+            {
+                if (text[i] == '%' && i + 2 < text.size() && hexValue(text[i + 1]) >= 0 &&
+                    hexValue(text[i + 2]) >= 0)
+                {
+                    decoded.push_back(static_cast<char>(hexValue(text[i + 1]) * 16 + hexValue(text[i + 2])));
+                    i += 2;
+                }
+                else
+                {
+                    decoded.push_back(text[i]);
+                }
+            }
+            return decoded;
+        }
+
         // Replaces the value of every `name=value` pair (separated by '&') whose name is in `names`.
         template <std::size_t N>
         [[nodiscard]] std::string RedactPairs(std::string_view text, const std::array<std::string_view, N>& names)
@@ -45,7 +82,7 @@ namespace AVEVA::AzureClient::Private
                 std::size_t end = std::min(text.find('&'), text.size());
                 const std::string_view pair = text.substr(0, end);
                 const std::size_t equals = pair.find('=');
-                if (equals != std::string_view::npos && IsOneOf(pair.substr(0, equals), names))
+                if (equals != std::string_view::npos && IsOneOf(PercentDecode(pair.substr(0, equals)), names))
                 {
                     result.append(pair.substr(0, equals + 1)).append(RedactedValue);
                 }
@@ -87,7 +124,7 @@ namespace AVEVA::AzureClient::Private
 
     // Header values that carry credentials are replaced. `x-ms-copy-source` and any value that is itself an
     // http(s) URL (which usually carries a SAS `sig`) have their query secrets redacted; every other header is
-    // returned unchanged. Percent-encoded parameter names such as `%73ig` are not decoded (out of scope).
+    // returned unchanged. Percent-encoded parameter names such as `%73ig` are decoded before matching.
     [[nodiscard]] inline std::string RedactHeaderForDiagnostics(std::string_view name, std::string_view value)
     {
         constexpr std::array<std::string_view, 5> SecretHeaders{"authorization",

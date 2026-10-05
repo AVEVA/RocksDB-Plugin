@@ -14,16 +14,19 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/log/trivial.hpp>
-#include <boost/property_tree/json_parser.hpp>
-#include <boost/property_tree/ptree.hpp>
+#include <boost/json/parse.hpp>
+#include <boost/json/serialize.hpp>
+#include <boost/json/value.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <expected>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <string_view>
 #include <utility>
@@ -33,6 +36,7 @@ namespace {
 using Clock = std::chrono::system_clock;
 
 constexpr unsigned int g_tooManyRequests = 429;
+constexpr unsigned int g_serviceUnavailable = 503;
 constexpr unsigned int g_firstServerError = 500;
 constexpr std::chrono::milliseconds g_initialRetryDelay{800};
 constexpr std::chrono::milliseconds g_maxRetryDelay{std::chrono::seconds(30)};
@@ -59,15 +63,28 @@ std::string UrlEncode(std::string_view value) {
 
 bool IsSuccess(const HttpResponse& response) { return response.GetStatus() >= 200 && response.GetStatus() <= 299; }
 
-std::optional<boost::property_tree::ptree> ParseJson(const std::string& body) {
-    try {
-        boost::property_tree::ptree tree;
-        std::istringstream stream{body};
-        boost::property_tree::read_json(stream, tree);
-        return tree;
-    } catch (const boost::property_tree::json_parser_error&) {
+std::optional<boost::json::object> ParseJson(const std::string& body) {
+    boost::system::error_code ec;
+    boost::json::value value = boost::json::parse(body, ec);
+    if (ec || !value.is_object()) {
         return std::nullopt;
     }
+    return std::move(value.as_object());
+}
+
+// Returns a scalar member as text (numbers are serialized) or an empty string.
+std::string JsonText(const boost::json::object& object, std::string_view key) {
+    const auto it = object.find(key);
+    if (it == object.end()) {
+        return {};
+    }
+    if (it->value().is_string()) {
+        return std::string{it->value().as_string()};
+    }
+    if (it->value().is_number()) {
+        return boost::json::serialize(it->value());
+    }
+    return {};
 }
 
 std::error_code AuthenticationFailed() {
@@ -84,6 +101,14 @@ void CompleteOnExecutor(IHttpClient& httpClient, AzureClient::ITokenCredential::
                       [completion = std::move(completion), error, token = std::move(token)]() mutable {
                           completion(error, std::move(token));
                       });
+}
+
+// Adds up to +-20% so many clients retrying one outage do not move in lock-step.
+std::chrono::milliseconds WithJitter(std::chrono::milliseconds delay) {
+    thread_local std::mt19937 generator{std::random_device{}()};
+    std::uniform_real_distribution<double> factor(0.8, 1.2);
+    return std::chrono::milliseconds(
+        static_cast<std::chrono::milliseconds::rep>(static_cast<double>(delay.count()) * factor(generator)));
 }
 
 // Parses a delta-seconds Retry-After header; HTTP-date values are ignored.
@@ -105,8 +130,8 @@ std::optional<std::chrono::milliseconds> RetryAfter(const HttpResponse& response
     return std::nullopt;
 }
 
-// Sends a request and retries transport failures, throttling (429) and server errors (5xx) with exponential
-// backoff; any other response is passed to the completion handler.
+// Sends a request and retries transport failures, throttling (429) and server errors (5xx) with jittered
+// exponential backoff (honouring Retry-After on 429 and 503); any other response is passed to the completion handler.
 void SendWithRetry(IHttpClient& httpClient, HttpRequest request, HttpRequestOptions options, int retriesLeft,
                    std::chrono::milliseconds delay, IHttpClient::CompletionHandler completion) {
     auto attempt = request;
@@ -122,9 +147,9 @@ void SendWithRetry(IHttpClient& httpClient, HttpRequest request, HttpRequestOpti
                 return;
             }
 
-            auto wait = delay;
-            if (!error && response.GetStatus() == g_tooManyRequests) {
-                wait = std::clamp(RetryAfter(response).value_or(delay), delay, g_maxRetryDelay);
+            auto wait = WithJitter(delay);
+            if (!error && (response.GetStatus() == g_tooManyRequests || response.GetStatus() == g_serviceUnavailable)) {
+                wait = std::clamp(RetryAfter(response).value_or(wait), wait, g_maxRetryDelay);
             }
 
             auto timer = std::make_shared<boost::asio::steady_timer>(httpClient.get_executor(), wait);
@@ -157,8 +182,8 @@ std::expected<AzureClient::AccessToken, std::error_code> ParseAccessToken(std::e
     }
 
     AzureClient::AccessToken token;
-    token.Token = tree->get<std::string>("access_token", "");
-    const auto expiresInText = tree->get<std::string>("expires_in", "");
+    token.Token = JsonText(*tree, "access_token");
+    const auto expiresInText = JsonText(*tree, "expires_in");
     std::int64_t expiresIn = 0;
     const auto [end, ec] =
         std::from_chars(expiresInText.data(), expiresInText.data() + expiresInText.size(), expiresIn);
@@ -198,8 +223,14 @@ void ChainedTokenCredential::TryGetToken(std::size_t index, std::vector<std::str
             return;
         }
 
-        BOOST_LOG_TRIVIAL(warning) << "Token credential source #" << index << " failed: " << error.message()
-                                   << "; trying next source";
+        // Only the last failure is surfaced to the caller; earlier ones are routine when probing sources.
+        if (index + 1 < self->m_sources.size()) {
+            BOOST_LOG_TRIVIAL(debug) << "Token credential source #" << index << " failed: " << error.message()
+                                     << "; trying next source";
+        } else {
+            BOOST_LOG_TRIVIAL(warning) << "Token credential source #" << index << " failed: " << error.message()
+                                       << "; no more sources";
+        }
         self->TryGetToken(index + 1, std::move(scopes), std::move(completion), error);
     });
 }
@@ -214,6 +245,8 @@ void RuntimeBoundCredential::GetTokenAsync(std::vector<std::string> scopes, GetT
                                std::error_code error, AzureClient::AccessToken token) mutable {
             completion(error, std::move(token));
             auto executor = runtime->HttpClient().get_executor();
+            // Keeps the runtime and inner credential alive until the completion above has returned, then releases
+            // them from a fresh executor task rather than from inside the token completion's own stack.
             boost::asio::post(executor, [runtime = std::move(runtime), inner = std::move(inner)]() {});
         });
 }
@@ -256,7 +289,7 @@ void AzurePipelinesCredential::GetTokenAsync(std::vector<std::string> scopes, Ge
                       }
 
                       const auto tree = ParseJson(response.GetBody());
-                      const auto oidcToken = tree ? tree->get<std::string>("oidcToken", "") : std::string{};
+                      const auto oidcToken = tree ? JsonText(*tree, "oidcToken") : std::string{};
                       if (oidcToken.empty()) {
                           completion(InvalidResponse(), AzureClient::AccessToken{});
                           return;

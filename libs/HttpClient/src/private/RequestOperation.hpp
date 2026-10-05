@@ -19,6 +19,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <type_traits>
@@ -120,7 +121,7 @@ namespace AVEVA::Private
         }
 
       private:
-        bool BuildRequest(const HttpRequest& request)
+        bool BuildRequest(HttpRequest& request)
         {
             auto parsed = urls::parse_uri(request.GetUrl());
             if (!parsed || !parsed->has_authority() || parsed->host().empty() || parsed->has_userinfo() ||
@@ -198,12 +199,14 @@ namespace AVEVA::Private
             {
                 const auto view = request.GetBodyView();
                 m_ownedBodyStorage.clear();
+                m_bodyKeepAlive = request.GetBodyKeepAlive();
                 m_request.body().data = const_cast<void*>(static_cast<const void*>(view.data()));
                 m_request.body().size = view.size();
             }
             else
             {
-                m_ownedBodyStorage = request.GetBody();
+                m_bodyKeepAlive.reset();
+                m_ownedBodyStorage = request.ReleaseBody();
                 m_request.body().data = m_ownedBodyStorage.empty()
                                             ? nullptr
                                             : const_cast<void*>(static_cast<const void*>(m_ownedBodyStorage.data()));
@@ -439,12 +442,18 @@ namespace AVEVA::Private
                 {
                     return Fail(HttpClientError::ResponseTooLarge);
                 }
+                if (error == http::error::header_limit)
+                {
+                    return Fail(HttpClientError::ResponseTooLarge);
+                }
                 // The request was fully written before the read started.
                 if (MaybeRetryAfterReuseFailure(true))
                 {
                     return;
                 }
-                return Fail(error.category() == make_error_code(http::error::bad_status).category()
+                // A connection that ends mid-message is a transport failure, not a malformed response.
+                const bool truncated = error == http::error::end_of_stream || error == http::error::partial_message;
+                return Fail(!truncated && error.category() == make_error_code(http::error::bad_status).category()
                                 ? HttpClientError::ProtocolError
                                 : HttpClientError::ReadFailed);
             }
@@ -462,40 +471,67 @@ namespace AVEVA::Private
             // The parser-level check also rejects EOF-delimited bodies; leftover bytes would be mistaken for the
             // next response on a pooled connection.
             const bool keepAlive = m_parser->keep_alive() && m_buffer.size() == 0;
-            auto message = m_parser->release();
-            HttpResponse response;
-            response = HttpResponse(message.result_int(), {}, std::move(message.body()));
-            for (const auto& header : message.base())
+            std::optional<HttpResponse> built;
+            try
             {
-                response.AddHeader({std::string(header.name_string()), std::string(header.value())});
+                auto message = m_parser->release();
+                std::vector<HttpHeader> headers;
+                headers.reserve(
+                    static_cast<std::size_t>(std::distance(message.base().begin(), message.base().end())));
+                for (const auto& header : message.base())
+                {
+                    headers.push_back({std::string(header.name_string()), std::string(header.value())});
+                }
+                built.emplace(message.result_int(), std::move(headers), std::move(message.body()));
             }
+            catch (const std::exception&)
+            {
+                // Without this the handler would never be called (e.g. bad_alloc while copying headers).
+                return Fail(HttpClientError::ReadFailed);
+            }
+            HttpResponse response = std::move(*built);
 
             m_timer.cancel();
             m_resolver.cancel();
             finished_ = true;
-            ClearCancellationSlot();
             auto completion = std::move(m_completion);
+            bool pooled = false;
             if (keepAlive)
             {
-                m_pool->Release(m_key, PooledConnection<Stream>{std::move(m_stream), std::move(m_buffer)});
-            }
-            else if constexpr (std::is_same_v<Stream, TlsStream>)
-            {
-                beast::get_lowest_layer(*m_stream).expires_after(std::chrono::seconds(1));
-                m_stream->async_shutdown([self = this->shared_from_this()](boost::system::error_code)
+                try
                 {
-                    self->Close();
-                });
+                    m_pool->Release(m_key, PooledConnection<Stream>{std::move(m_stream), std::move(m_buffer)});
+                    pooled = true;
+                }
+                catch (const std::exception&)
+                {
+                    // The completion must still run; drop the connection if it could not be pooled.
+                }
             }
-            else
+            if (!pooled && m_stream)
             {
-                Close();
+                if constexpr (std::is_same_v<Stream, TlsStream>)
+                {
+                    beast::get_lowest_layer(*m_stream).expires_after(std::chrono::seconds(1));
+                    m_stream->async_shutdown([self = this->shared_from_this()](boost::system::error_code)
+                    {
+                        self->Close();
+                    });
+                }
+                else
+                {
+                    Close();
+                }
             }
             completion({}, std::move(response));
         }
 
         void Close()
         {
+            if (!m_stream)
+            {
+                return;
+            }
             boost::system::error_code ignored;
             auto& socket = beast::get_lowest_layer(*m_stream).socket();
             socket.shutdown(Tcp::socket::shutdown_both, ignored);
@@ -521,7 +557,6 @@ namespace AVEVA::Private
             finished_ = true;
             m_timer.cancel();
             m_resolver.cancel();
-            ClearCancellationSlot();
             Close();
             auto completion = std::move(m_completion);
             completion(error, std::move(response));
@@ -544,15 +579,6 @@ namespace AVEVA::Private
             return m_cancellationRequested.load();
         }
 
-        void ClearCancellationSlot()
-        {
-            auto slot = m_options.GetCancellationSlot();
-            if (slot.is_connected())
-            {
-                slot.clear();
-            }
-        }
-
         std::shared_ptr<asio::ssl::context> m_tlsContext;
         // The operation's strand, fixed at construction so that threads other than the strand (the
         // cancellation handler) can post to it without touching m_stream, which is replaced and moved on it.
@@ -571,6 +597,8 @@ namespace AVEVA::Private
         // write; for a SetBodyView() body the caller owns that storage instead (see the
         // lifetime contract on HttpRequest::SetBodyView()).
         std::string m_ownedBodyStorage;
+        // Keeps a shared body view alive for as long as this operation can still read it.
+        std::shared_ptr<const void> m_bodyKeepAlive;
         std::unique_ptr<http::response_parser<http::string_body>> m_parser;
         bool finished_ = false;
         bool m_reused = false;

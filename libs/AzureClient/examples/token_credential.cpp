@@ -73,7 +73,7 @@ int main()
         const auto httpClient = AVEVA::IHttpClient::Create(context, httpOptions);
 
         // The credential borrows *httpClient, so it must not outlive it.
-        auto credential = std::make_shared<AVEVA::AzureClient::CachingTokenCredential>(
+        auto credential = AVEVA::AzureClient::CachingTokenCredential::Create(
             std::make_shared<AVEVA::AzureClient::ClientSecretCredential>(*httpClient,
                 AVEVA::AzureClient::ClientSecretCredentialOptions{.TenantId = tenant,
                     .ClientId = clientId,

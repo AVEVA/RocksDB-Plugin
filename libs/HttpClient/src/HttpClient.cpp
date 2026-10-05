@@ -2,6 +2,7 @@
 
 #include "private/ConnectionPool.hpp"
 #include "private/RequestOperation.hpp"
+#include "private/RequestValidation.hpp"
 #include "private/StreamTypes.hpp"
 #include "private/TlsContextConfigurator.hpp"
 
@@ -60,8 +61,11 @@ namespace AVEVA
                     throw std::invalid_argument("AsyncSend requires a completion handler");
                 }
 
+                // Invalid requests take the fresh-connection path, which fails them without closing a healthy
+                // pooled connection.
                 auto parsed = urls::parse_uri(request.GetUrl());
-                if (parsed && parsed->has_authority() && !parsed->host().empty() &&
+                if (parsed && IsPoolableRequest(request, options) && parsed->has_authority() &&
+                    !parsed->host().empty() &&
                     (parsed->scheme_id() == urls::scheme::http || parsed->scheme_id() == urls::scheme::https))
                 {
                     const bool isTls = parsed->scheme_id() == urls::scheme::https;
@@ -133,6 +137,28 @@ namespace AVEVA
             }
 
           private:
+            static bool IsPoolableRequest(const HttpRequest& request, const HttpRequestOptions& options)
+            {
+                const HttpMethod method = request.GetMethod();
+                if (ToString(method).empty() || method == HttpMethod::Connect ||
+                    (method == HttpMethod::Trace && request.GetBodySize() != 0) || options.GetTimeout().count() <= 0)
+                {
+                    return false;
+                }
+                return std::all_of(request.GetHeaders().begin(),
+                    request.GetHeaders().end(),
+                    [](const HttpHeader& header)
+                {
+                    return Private::IsToken(header.GetName()) &&
+                        std::none_of(header.GetValue().begin(),
+                            header.GetValue().end(),
+                            [](unsigned char character)
+                    {
+                        return (character < 32 && character != '\t') || character == 127;
+                    });
+                });
+            }
+
             template <typename Stream>
             void ResumeWithPooledConnection(PooledConnection<Stream> pooled,
                 ConnectionKey<Stream> key,

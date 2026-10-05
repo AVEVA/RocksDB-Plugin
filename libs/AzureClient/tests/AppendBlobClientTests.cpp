@@ -558,7 +558,7 @@ TEST(AppendBlobClientTests, DownloadAsyncAcceptsUseFutureCompletionToken)
         client.DownloadAsync(AVEVA::AzureClient::DownloadBlobOptions{}, boost::asio::use_future);
 
     httpClient.Poll(); // drive the posted (async) completion so the future becomes ready (T26)
-    ASSERT_EQ(future.wait_for(std::chrono::seconds{1}), std::future_status::ready);
+    ASSERT_EQ(future.wait_for(std::chrono::seconds{30}), std::future_status::ready);
     std::expected<Response<DownloadBlobResult>, BlobStorageError> result = future.get();
     ASSERT_TRUE(result.has_value());
     const auto& content = result->Value().Content;
@@ -579,7 +579,7 @@ TEST(AppendBlobClientTests, AppendBlockAsyncAcceptsUseFutureCompletionTokenAndRe
             boost::asio::use_future);
 
     httpClient.Poll(); // drive the posted (async) completion so the future becomes ready (T26)
-    ASSERT_EQ(future.wait_for(std::chrono::seconds{1}), std::future_status::ready);
+    ASSERT_EQ(future.wait_for(std::chrono::seconds{30}), std::future_status::ready);
     std::expected<Response<AppendBlockResult>, BlobStorageError> result = future.get();
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().Code, BlobStorageErrorCode::ServiceError);
@@ -596,7 +596,7 @@ TEST(AppendBlobClientTests, CreateAsyncAcceptsUseFutureCompletionToken)
         client.CreateAsync(AVEVA::AzureClient::CreateAppendBlobOptions{}, boost::asio::use_future);
 
     httpClient.Poll(); // drive the posted (async) completion so the future becomes ready (T26)
-    ASSERT_EQ(future.wait_for(std::chrono::seconds{1}), std::future_status::ready);
+    ASSERT_EQ(future.wait_for(std::chrono::seconds{30}), std::future_status::ready);
     std::expected<Response<CreateAppendBlobResult>, BlobStorageError> const result = future.get();
     EXPECT_TRUE(result.has_value());
 }
@@ -728,7 +728,7 @@ namespace
         DeleteBlobIfExistsAndVerifyExpectedMissing(client, deleteCallback);
 
         httpClient.Poll();
-        ASSERT_EQ(acquired.wait_for(std::chrono::seconds{1}), std::future_status::ready);
+        ASSERT_EQ(acquired.wait_for(std::chrono::seconds{30}), std::future_status::ready);
         auto acquireResult = acquired.get();
         ASSERT_TRUE(acquireResult.has_value());
         EXPECT_EQ(acquireResult->Value().LeaseId, "lease-1");

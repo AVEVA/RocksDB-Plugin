@@ -37,10 +37,11 @@ class PluginSecondaryCacheIntegrationTests : public AzureIntegrationTestBase {
 
     void SetUp() override {
         AzureIntegrationTestBase::SetUp();
-        if (!m_credentials)
-            return; // already GTEST_SKIP'd by the base
+        if (IsSkipped() || HasFatalFailure())
+            return; // the base already skipped or failed
 
-        m_cacheDir = std::filesystem::temp_directory_path() / ("aveva_plugin_sc_test_" + m_credentials->GetDbName());
+        // The blob name is random per test, so the cache directory is unique per test and process.
+        m_cacheDir = std::filesystem::temp_directory_path() / ("aveva_plugin_sc_test_" + m_blobName);
         m_dbPath = m_containerPrefix + "/" + m_blobName;
 
         std::filesystem::create_directories(m_cacheDir);
@@ -50,8 +51,7 @@ class PluginSecondaryCacheIntegrationTests : public AzureIntegrationTestBase {
                                        std::nullopt, m_logger, Configuration::PageBlob::DefaultBufferSize,
                                        Configuration::PageBlob::DefaultSize);
 
-        if (!status.ok())
-            GTEST_SKIP() << "Plugin::Register failed (Azure may be unavailable): " << status.ToString();
+        ASSERT_TRUE(status.ok()) << "Plugin::Register failed: " << status.ToString();
     }
 
     void TearDown() override {

@@ -131,6 +131,7 @@ namespace AVEVA::AzureClient
             return result;
         }
 
+#ifdef AVEVA_AZURE_CLIENT_TESTING
         [[nodiscard]] std::atomic<std::size_t>& TotalUploadBufferAllocations() noexcept
         {
             static std::atomic<std::size_t> value{0};
@@ -149,13 +150,16 @@ namespace AVEVA::AzureClient
             return value;
         }
 
+#endif
+
         // Fixed-capacity, uninitialized upload block buffer. Construction/destruction feed the
-        // TestHooks counters so tests can verify the bounded-pool guarantees of UploadFromAsync.
+        // TestHooks counters (test builds only) so tests can verify the bounded-pool guarantees of UploadFromAsync.
         class UploadBuffer
         {
           public:
             explicit UploadBuffer(std::size_t capacity) : m_data(Allocator{}.allocate(capacity)), m_capacity(capacity)
             {
+#ifdef AVEVA_AZURE_CLIENT_TESTING
                 TotalUploadBufferAllocations().fetch_add(1, std::memory_order_acq_rel);
                 const std::size_t current =
                     CurrentUploadBufferBytes().fetch_add(capacity, std::memory_order_acq_rel) + capacity;
@@ -164,12 +168,15 @@ namespace AVEVA::AzureClient
                        !PeakUploadBufferBytes().compare_exchange_weak(peak, current, std::memory_order_acq_rel))
                 {
                 }
+#endif
             }
 
             ~UploadBuffer()
             {
                 Allocator{}.deallocate(m_data, m_capacity);
+#ifdef AVEVA_AZURE_CLIENT_TESTING
                 CurrentUploadBufferBytes().fetch_sub(m_capacity, std::memory_order_acq_rel);
+#endif
             }
 
             UploadBuffer(const UploadBuffer&) = delete;
@@ -266,6 +273,7 @@ namespace AVEVA::AzureClient
 
     } // namespace
 
+#ifdef AVEVA_AZURE_CLIENT_TESTING
     // Test hooks to observe internal allocation behaviour during unit tests.
     namespace TestHooks
     {
@@ -292,6 +300,7 @@ namespace AVEVA::AzureClient
             return PeakUploadBufferBytes().load(std::memory_order_acquire);
         }
     } // namespace TestHooks
+#endif
 
     BlockBlobClient::BlockBlobClient(IHttpClient& httpClient, const BlobClientOptions& options)
         : BlobClient(httpClient, options)
@@ -649,7 +658,9 @@ namespace AVEVA::AzureClient
                     {
                         auto buffer = std::make_unique<UploadBuffer>(static_cast<std::size_t>(*m_knownSize));
                         const std::size_t read = ReadInto(m_stream, buffer->Span());
-                        if (HasReadError(m_stream))
+                        // A short read means the file shrank after its size was captured; uploading it would
+                        // silently store a truncated blob.
+                        if (HasReadError(m_stream) || read != buffer->Span().size())
                         {
                             FailEarly(lock, std::errc::io_error);
                             return;
@@ -962,10 +973,6 @@ namespace AVEVA::AzureClient
                     return;
                 }
                 m_done = true;
-                if (m_parentSlot.is_connected())
-                {
-                    m_parentSlot.clear();
-                }
                 m_freeBuffers.clear();
                 Completion completion = std::move(m_completion);
                 const bool starting = m_starting;
@@ -1024,12 +1031,20 @@ namespace AVEVA::AzureClient
             return;
         }
 
-        errno = 0;
         auto file = std::make_shared<std::ifstream>(path, std::ios::binary);
         if (!*file)
         {
-            const std::error_code openError = errno != 0 ? std::error_code{errno, std::generic_category()}
-                                                         : std::make_error_code(std::errc::no_such_file_or_directory);
+            // errno is not guaranteed to be set by ifstream, so ask the filesystem why the open failed.
+            std::error_code openError;
+            const auto status = std::filesystem::status(path, openError);
+            if (status.type() == std::filesystem::file_type::not_found)
+            {
+                openError = std::make_error_code(std::errc::no_such_file_or_directory);
+            }
+            else if (!openError)
+            {
+                openError = std::make_error_code(std::errc::permission_denied);
+            }
             Private::PostCompletion(HttpClient(),
                 std::move(completion),
                 Private::MakeError<Models::UploadBlockBlobResult>(openError, "Failed to open the upload source file."));

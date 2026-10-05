@@ -4,7 +4,10 @@
 
 ### Breaking changes
 - `Plugin::Register` now takes a required `boost::asio::io_context&` (after the `guard` argument). The application owns the context, must keep it alive and running while the filesystem is in use, and must not run it on threads that call into RocksDB. Migration: create an `io_context`, run it on dedicated threads, and pass it to `Register`.
-- The Azure SDK for C++ was replaced by the vendored `libs/AzureClient` and `libs/HttpClient` (Apache-2.0, see `libs/README.md`). Error mapping to `rocksdb::Status` was reworked: 403 is a non-retryable IOError, 408/429/5xx and transport failures are retryable.
+- The Azure SDK for C++ was replaced by the vendored `libs/AzureClient` and `libs/HttpClient` (Apache-2.0, see `libs/README.md`). Error mapping to `rocksdb::Status` was reworked: 401 and 403 are non-retryable IOErrors, 408/429, every 5xx status and transport failures are retryable IOErrors, and cancellation maps to `Aborted`. Unexpected exceptions map to a non-retryable `state_not_recoverable` error.
+- The project now requires C++23 (vendored libraries included).
+- `BindToRuntime` and the credential helpers (`CreateCredentialSources`, `CreateServiceClient`, ...) take `const std::shared_ptr<ClientRuntime>&`. `CachingTokenCredential` must be created with `CachingTokenCredential::Create(...)` (the constructor is no longer usable directly).
+- Blocking on an Azure future from a thread running the injected `io_context` now throws `std::logic_error` instead of risking a deadlock.
 
 ### Behavior changes
 - Async IO is now advertised (`SupportedOps` returns `1 << kAsyncIO`; previously async IO was effectively off) and `ReadAsync`/`Poll`/`AbortIO` are implemented.

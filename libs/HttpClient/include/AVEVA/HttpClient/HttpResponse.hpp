@@ -15,9 +15,9 @@ namespace AVEVA
 
         unsigned int GetStatus() const noexcept;
         const std::vector<HttpHeader>& GetHeaders() const& noexcept;
-        std::vector<HttpHeader>&& GetHeaders() && noexcept;
+        std::vector<HttpHeader> GetHeaders() && noexcept;
         const std::string& GetBody() const& noexcept;
-        std::string&& GetBody() && noexcept;
+        std::string GetBody() && noexcept;
         void AddHeader(HttpHeader header);
 
       private:

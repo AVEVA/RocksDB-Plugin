@@ -79,7 +79,7 @@ TEST(ITokenCredentialTests, CachingTokenCredential_ReusesCachedTokenOutsideRefre
 {
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate({}, MakeToken("cached-token", std::chrono::hours(1)));
-    auto credential = std::make_shared<CachingTokenCredential>(inner, std::chrono::minutes(5));
+    auto credential = CachingTokenCredential::Create(inner, std::chrono::minutes(5));
 
     std::vector<std::string> receivedTokens;
     CallbackExpectation firstCallback;
@@ -108,7 +108,7 @@ TEST(ITokenCredentialTests, CachingTokenCredential_ServesCachedTokenAndRefreshes
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate({}, MakeToken("old-token", std::chrono::seconds(30)));
     inner->EnqueueDeferred({}, MakeToken("new-token", std::chrono::hours(1)));
-    auto credential = std::make_shared<CachingTokenCredential>(inner, std::chrono::minutes(5));
+    auto credential = CachingTokenCredential::Create(inner, std::chrono::minutes(5));
 
     PrimeTokenRequest(credential, {"scope-a"});
 
@@ -135,7 +135,7 @@ TEST(ITokenCredentialTests, CachingTokenCredential_ExpiredTokenWaitsForTheRefres
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate({}, MakeToken("expired-token", -std::chrono::seconds(1)));
     inner->EnqueueDeferred({}, MakeToken("new-token", std::chrono::hours(1)));
-    auto credential = std::make_shared<CachingTokenCredential>(inner, std::chrono::minutes(5));
+    auto credential = CachingTokenCredential::Create(inner, std::chrono::minutes(5));
 
     credential->GetTokenAsync({"scope-a"}, [](std::error_code, const AVEVA::AzureClient::AccessToken&) {});
 
@@ -160,7 +160,7 @@ TEST(ITokenCredentialTests, CachingTokenCredential_InvalidatesCacheWhenScopesCha
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate({}, MakeToken("token-a", std::chrono::hours(1)));
     inner->EnqueueImmediate({}, MakeToken("token-b", std::chrono::hours(1)));
-    auto credential = std::make_shared<CachingTokenCredential>(inner, std::chrono::minutes(5));
+    auto credential = CachingTokenCredential::Create(inner, std::chrono::minutes(5));
 
     std::string secondToken;
     PrimeTokenRequest(credential, {"scope-a"});
@@ -179,7 +179,7 @@ TEST(ITokenCredentialTests, CachingTokenCredential_RefreshFailureDoesNotDiscardP
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate({}, MakeToken("token-a", std::chrono::hours(1)));
     inner->EnqueueImmediate(std::make_error_code(std::errc::permission_denied), {});
-    auto credential = std::make_shared<CachingTokenCredential>(inner, std::chrono::minutes(5));
+    auto credential = CachingTokenCredential::Create(inner, std::chrono::minutes(5));
 
     std::error_code refreshError;
     std::string cachedTokenAfterFailure;
@@ -210,7 +210,7 @@ TEST(ITokenCredentialTests, CachingTokenCredential_ServesStaleTokenDuringRefresh
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate({}, MakeToken("token-a", std::chrono::seconds(30)));
     inner->EnqueueImmediate(std::make_error_code(std::errc::permission_denied), {});
-    auto credential = std::make_shared<CachingTokenCredential>(inner, std::chrono::minutes(5));
+    auto credential = CachingTokenCredential::Create(inner, std::chrono::minutes(5));
 
     credential->GetTokenAsync({"scope-a"}, [](std::error_code, const AVEVA::AzureClient::AccessToken&) {});
 
@@ -246,7 +246,7 @@ TEST(ITokenCredentialTests, CachingTokenCredential_ConcurrentInWindowCallersShar
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate({}, MakeToken("old-token", std::chrono::seconds(10)));
     inner->EnqueueDeferred({}, MakeToken("refreshed-token", std::chrono::hours(1)));
-    auto credential = std::make_shared<CachingTokenCredential>(inner, std::chrono::minutes(5));
+    auto credential = CachingTokenCredential::Create(inner, std::chrono::minutes(5));
 
     std::vector<std::string> receivedTokens;
     PrimeTokenRequest(credential, {"scope-a"});
@@ -266,7 +266,7 @@ TEST(ITokenCredentialTests, CachingTokenCredential_CoalescesConcurrentCallersWit
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate({}, MakeToken("expired-token", -std::chrono::seconds(1)));
     inner->EnqueueDeferred({}, MakeToken("refreshed-token", std::chrono::hours(1)));
-    auto credential = std::make_shared<CachingTokenCredential>(inner, std::chrono::minutes(5));
+    auto credential = CachingTokenCredential::Create(inner, std::chrono::minutes(5));
 
     std::vector<std::string> receivedTokens;
     PrimeTokenRequest(credential, {"scope-a"});
@@ -286,7 +286,7 @@ TEST(ITokenCredentialTests, CachingTokenCredential_CoalescesConcurrentCallersWit
 
 TEST(ITokenCredentialTests, CachingTokenCredential_NullInnerCompletesAllConcurrentWaiters)
 {
-    auto credential = std::make_shared<CachingTokenCredential>(nullptr, std::chrono::minutes(5));
+    auto credential = CachingTokenCredential::Create(nullptr, std::chrono::minutes(5));
 
     std::error_code firstError;
     std::error_code secondError;
@@ -311,7 +311,7 @@ TEST(ITokenCredentialTests, CachingTokenCredential_NullInnerCompletesAllConcurre
 
 TEST(ITokenCredentialTests, CachingTokenCredential_NullInnerResetsInFlightStateForSubsequentCalls)
 {
-    auto credential = std::make_shared<CachingTokenCredential>(nullptr, std::chrono::minutes(5));
+    auto credential = CachingTokenCredential::Create(nullptr, std::chrono::minutes(5));
 
     std::error_code firstError;
     credential->GetTokenAsync({"scope-a"},
@@ -339,7 +339,7 @@ TEST(ITokenCredentialTests, CachingTokenCredential_FanOutDeliversSameTokenToAllW
 {
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueDeferred({}, MakeToken("shared-token", std::chrono::hours(1)));
-    auto credential = std::make_shared<CachingTokenCredential>(inner, std::chrono::minutes(5));
+    auto credential = CachingTokenCredential::Create(inner, std::chrono::minutes(5));
 
     constexpr int WaiterCount = 5;
     std::vector<std::string> receivedTokens;
@@ -366,7 +366,7 @@ TEST(ITokenCredentialTests, CachingTokenCredential_CompletesOutstandingRequestAf
     CallbackExpectation callback;
 
     {
-        auto credential = std::make_shared<CachingTokenCredential>(inner, std::chrono::minutes(5));
+        auto credential = CachingTokenCredential::Create(inner, std::chrono::minutes(5));
         weakCredential = credential;
         credential->GetTokenAsync({"scope-a"},
             [&](std::error_code error, AVEVA::AzureClient::AccessToken token)
@@ -393,7 +393,7 @@ TEST(ITokenCredentialTests, CachingTokenCredential_DeliversToCoalescedWaitersAft
     CallbackExpectation first;
     CallbackExpectation second;
     {
-        auto credential = std::make_shared<CachingTokenCredential>(inner, std::chrono::minutes(5));
+        auto credential = CachingTokenCredential::Create(inner, std::chrono::minutes(5));
         RequestTokenAppendingValue(credential, {"scope-a"}, receivedTokens, first);
         RequestTokenAppendingValue(credential, {"scope-a"}, receivedTokens, second);
     }
@@ -407,7 +407,7 @@ TEST(ITokenCredentialTests, CachingTokenCredential_DoesNotDeadlockWhenHandlerRee
 {
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate({}, MakeToken("cached-token", std::chrono::hours(1)));
-    auto credential = std::make_shared<CachingTokenCredential>(inner, std::chrono::minutes(5));
+    auto credential = CachingTokenCredential::Create(inner, std::chrono::minutes(5));
 
     credential->GetTokenAsync({"scope-a"}, [](std::error_code, const AVEVA::AzureClient::AccessToken&) {});
 
@@ -444,7 +444,7 @@ TEST(ITokenCredentialTests, CachingTokenCredential_FixedClockDrivesRefreshWindow
     AVEVA::AzureClient::AccessToken second{.Token = "second", .ExpiresOn = start + std::chrono::hours(2)};
     inner->EnqueueImmediate({}, first);
     inner->EnqueueImmediate({}, second);
-    auto credential = std::make_shared<CachingTokenCredential>(inner,
+    auto credential = CachingTokenCredential::Create(inner,
         std::chrono::minutes(5),
         std::nullopt,
         [&now]

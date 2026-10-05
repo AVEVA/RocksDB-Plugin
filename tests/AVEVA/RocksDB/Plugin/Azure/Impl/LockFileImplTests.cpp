@@ -3,6 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 
+#include "FakeHttpPump.hpp"
 #include "FakeHttpClient.hpp"
 #include "TestFixtures.hpp"
 
@@ -31,12 +32,7 @@ class LockFileImplTests : public ::testing::Test {
     void SetUp() override {
         m_httpClient.CompleteInline() = true;
         // Some completions are posted to the fake's own io_context while Lock() blocks on a future.
-        m_pump = std::jthread([this](const std::stop_token& stop) {
-            while (!stop.stop_requested()) {
-                m_httpClient.Poll();
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-        });
+        m_pump = AVEVA::RocksDB::Plugin::Azure::Impl::Tests::StartFakeHttpPump(m_httpClient);
         m_runtime = std::make_shared<ClientRuntime>(m_context);
         m_logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
     }
@@ -103,5 +99,38 @@ TEST_F(LockFileImplTests, LeaseHeldByAnotherOwnerIsRetried) {
 
     auto lock = CreateLock(std::chrono::seconds(20));
     EXPECT_TRUE(lock->Lock());
+    EXPECT_EQ(m_httpClient.RequestCount(), 2U);
+}
+
+TEST_F(LockFileImplTests, RenewAndUnlockBeforeLockThrowAndSendNothing) {
+    auto lock = CreateLock(std::chrono::seconds(20));
+    EXPECT_THROW(lock->Renew(), std::runtime_error);
+    EXPECT_THROW(lock->Unlock(), std::runtime_error);
+    EXPECT_FALSE(lock->RenewIfLocked());
+    EXPECT_EQ(m_httpClient.RequestCount(), 0U);
+}
+
+TEST_F(LockFileImplTests, RenewSendsTheAcquiredLeaseId) {
+    m_httpClient.EnqueueResponse(Acquired());
+    m_httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders({{"x-ms-lease-id", "lease"}}), ""});
+
+    auto lock = CreateLock(std::chrono::seconds(20));
+    ASSERT_TRUE(lock->Lock());
+    EXPECT_TRUE(lock->RenewIfLocked());
+
+    ASSERT_EQ(m_httpClient.RequestCount(), 2U);
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(m_httpClient.RequestAt(1).Request, "x-ms-lease-id"), ProposedLeaseId(0));
+}
+
+TEST_F(LockFileImplTests, UnlockReleasesTheLeaseAndStopsFurtherRenewal) {
+    m_httpClient.EnqueueResponse(Acquired());
+    m_httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders({}), ""});
+
+    auto lock = CreateLock(std::chrono::seconds(20));
+    ASSERT_TRUE(lock->Lock());
+    EXPECT_NO_THROW(lock->Unlock());
+
+    EXPECT_FALSE(lock->RenewIfLocked());
+    EXPECT_THROW(lock->Unlock(), std::runtime_error);
     EXPECT_EQ(m_httpClient.RequestCount(), 2U);
 }

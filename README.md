@@ -46,9 +46,12 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
     ```cpp
     #include <AVEVA/RocksDB/Plugin/Azure/Plugin.hpp>
     #include <AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp>
+    #include <boost/asio/executor_work_guard.hpp>
     #include <boost/asio/io_context.hpp>
-    #include <boost/log/sources/logger.hpp>
+    #include <boost/log/sources/severity_logger.hpp>
+    #include <boost/log/trivial.hpp>
     #include <memory>
+    #include <thread>
 
     using AVEVA::RocksDB::Plugin::Azure::Plugin;
     using AVEVA::RocksDB::Plugin::Azure::Models::ServicePrincipalStorageInfo;
@@ -56,6 +59,9 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
     // The application owns the io_context the plugin performs its Azure I/O on. Keep it alive and running
     // (on threads that never call into RocksDB) for as long as the filesystem is in use.
     boost::asio::io_context ioContext;
+    auto workGuard = boost::asio::make_work_guard(ioContext);
+    std::jthread ioThread{[&ioContext] { ioContext.run(); }};
+    // On shutdown: close the database, then workGuard.reset() so ioContext.run() can return.
 
     rocksdb::Env* env = nullptr;
     std::shared_ptr<rocksdb::Env> guard = nullptr;
@@ -74,7 +80,7 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
         ioContext,
         storageCredentials,
         std::nullopt, /* backup credentials */
-        std::make_shared<boost::log::sources::logger_mt>(),
+        std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>(),
         MbToBytes(2), /* dataFileBufferSize */
         MbToBytes(4) /* dataFileInitialSize */);
     ```

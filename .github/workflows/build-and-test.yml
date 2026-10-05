@@ -1,0 +1,41 @@
+name: Build and test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            preset: WindowsDebug
+          - os: ubuntu-latest
+            preset: LinuxDebug
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Point VCPKG_ROOT at the preinstalled vcpkg
+        shell: bash
+        run: echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
+
+      # Plugin tests, the vendored AzureClient/HttpClient test suites and the installed-package consumer test.
+      - name: Configure
+        run: >
+          cmake --preset ${{ matrix.preset }}
+          -DAVEVA_BUILD_CLIENT_LIBRARY_TESTS=ON
+          -DAVEVA_ROCKSDB_PACKAGE_TEST=ON
+
+      - name: Build
+        run: cmake --build build/${{ matrix.preset }} --config Debug
+
+      # Integration tests skip themselves when no Azure credentials are present.
+      - name: Test
+        run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure --build-config Debug --parallel 4

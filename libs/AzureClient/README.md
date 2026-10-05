@@ -244,7 +244,9 @@ The exported package currently uses exact-version matching via the shared `aveva
 
 API reference (HTML) can be generated with Doxygen: configure with `-DAVEVA_AZURE_CLIENT_DOCS=ON`, then `cmake --build <build dir> --target docs`; output goes to `<build dir>/docs/html`.
 
-This repository uses `CMakePresets.json` plus a vcpkg manifest.
+> **Vendored copy:** the sections below (Building, Repository layout) and `CONTRIBUTING.md` describe the standalone upstream repository. Files such as `CMakePresets.json`, `pipelines/` and `CHANGELOG.md` were not vendored into this repository; here the library is built through the root `CMakeLists.txt` (`-DAVEVA_BUILD_CLIENT_LIBRARY_TESTS=ON` for its tests) and the root presets.
+
+The standalone repository uses `CMakePresets.json` plus a vcpkg manifest.
 The default registry baseline is pinned in `vcpkg-configuration.json`.
 
 ```powershell
@@ -280,6 +282,8 @@ cmake --build build\WindowsDebugBench --config Debug
 Live Azure tests are opt-in: configure with `-DAVEVA_AZURE_CLIENT_RUN_INTEGRATION_TESTS=ON`. They need a storage account and a Microsoft Entra ID service principal, supplied through `AZURE_STORAGE_ACCOUNT_NAME`, `AZURE_TENANT_ID`, `AZURE_SERVICE_PRINCIPAL_ID` and `AZURE_SERVICE_PRINCIPAL_SECRET` (optionally `AZURE_CA_FILE`). Without them each test is reported as skipped with that list. Run them with `ctest -L integration`; they carry the `integration` and `azure-credentials` labels. The CI coverage stage does not build or run them (it only runs `-L unit`) because it has no credentials.
 
 ## Repository layout
+
+(Upstream layout; `pipelines/` is not vendored here.)
 
 - `include/AVEVA/AzureClient/` public headers
 - `src/` library implementation and package config template

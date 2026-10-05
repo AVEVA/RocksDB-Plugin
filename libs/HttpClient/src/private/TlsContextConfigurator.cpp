@@ -43,7 +43,12 @@ namespace AVEVA::Private
             {
                 tlsContext.add_verify_path(options.GetCaDirectory());
             }
-            if (options.GetCaFile().empty() && options.GetCaDirectory().empty())
+            if (!options.GetCaPem().empty())
+            {
+                const auto& pem = options.GetCaPem();
+                tlsContext.add_certificate_authority(boost::asio::buffer(pem.data(), pem.size()));
+            }
+            if (options.GetCaFile().empty() && options.GetCaDirectory().empty() && options.GetCaPem().empty())
             {
                 tlsContext.set_default_verify_paths();
             }

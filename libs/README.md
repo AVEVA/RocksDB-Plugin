@@ -17,6 +17,13 @@ inside the libraries are kept for reference and standalone builds only.
    files (CI pipelines, `CMakePresets.json`, `vcpkg-configuration.json`, `CHANGELOG.md`, backlog files).
 2. Keep the Apache-2.0 `LICENSE` file.
 3. Update the version column above, rebuild and run `ctest -E Integration`.
+
+## Building the library tests
+
+The libraries' own test suites are off by default. Enable them with
+`-DAVEVA_BUILD_CLIENT_LIBRARY_TESTS=ON` when configuring the root project, e.g.
+`cmake --preset WindowsDebug -DAVEVA_BUILD_CLIENT_LIBRARY_TESTS=ON`. CI
+(`.github/workflows/build-and-test.yml`) builds with this option and `-DAVEVA_ROCKSDB_PACKAGE_TEST=ON`.
 4. The plugin tests reuse `FakeHttpClient.hpp` and `TestFixtures.hpp` from `libs/AzureClient/tests` through the
    `aveva-azure-client-test-support` INTERFACE target (`infrastructure/cmake/AvevaClientLibraries.cmake`). Check
    that both headers still exist after a sync.

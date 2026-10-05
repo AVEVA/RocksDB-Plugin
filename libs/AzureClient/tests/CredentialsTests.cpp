@@ -191,6 +191,8 @@ TEST(CredentialsTests, InvalidConfigurationFailsWithoutSendingARequest)
     expectInvalid(both);
     ManagedIdentityCredential missingHeader{httpClient, ManagedOptions({}, {}, "http://localhost:8081/msi/token")};
     expectInvalid(missingHeader);
+    ManagedIdentityCredential remotePlainHttp{httpClient, ManagedOptions({}, {}, "http://example.com/msi/token", "secret")};
+    expectInvalid(remotePlainHttp);
 
     EXPECT_TRUE(httpClient.Requests().empty());
 }

@@ -220,8 +220,8 @@ namespace
             {"LoopbackIpv6BearerOk", "http://[::1]:10000/devstoreaccount1", false, true, false, false, false},
             {"HttpsTokenCredentialOk", "https://account.blob.core.windows.net", true, false, false, false, false},
             {"HttpsBearerOk", "https://account.blob.core.windows.net", false, true, false, false, false},
-            {"HttpSharedKeyOk", "http://account.blob.core.windows.net", false, false, true, false, false},
-            {"HttpSasOk", "http://account.blob.core.windows.net", false, false, false, true, false},
+            {"HttpSharedKeyThrows", "http://account.blob.core.windows.net", false, false, true, false, true},
+            {"HttpSasThrows", "http://account.blob.core.windows.net", false, false, false, true, true},
         };
     }
 

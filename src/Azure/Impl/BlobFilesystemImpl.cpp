@@ -4,6 +4,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AzureContainerClient.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlockOn.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
@@ -15,9 +16,14 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
+#include <deque>
 #include <functional>
 #include <future>
+#include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -42,7 +48,8 @@ const constexpr int64_t g_maxCopyChunkSize = static_cast<int64_t>(4) * 1024 * 10
 void ForEachBlobUntil(AzureClient::BlobContainerClient& container, AzureClient::ListBlobsOptions options,
                       const std::function<bool(const AzureClient::Models::BlobItem&)>& onBlob) {
     while (true) {
-        auto page = Unwrap(container.ListBlobsAsync(options, boost::asio::use_future).get());
+        auto page =
+            Unwrap(BlockOn(container.get_executor(), container.ListBlobsAsync(options, boost::asio::use_future)));
         for (const auto& blob : page.Blobs) {
             if (onBlob(blob)) {
                 return;
@@ -90,7 +97,7 @@ BlobFilesystemImpl::BlobFilesystemImpl(
     : BlobFilesystemImpl(std::move(logger), ioContext, dataFileInitialSize, dataFileBufferSize) {
     auto options = BlobHelpers::CreateServiceClientOptions(storageAccountUrl);
     options.TokenCredential =
-        BlobHelpers::CreateClientSecretCredential(*m_runtime, tenantId, servicePrincipalId, servicePrincipalSecret);
+        BlobHelpers::CreateClientSecretCredential(m_runtime, tenantId, servicePrincipalId, servicePrincipalSecret);
     AddContainer(AzureClient::BlobServiceClient{m_runtime->HttpClient(), std::move(options)}, storageAccountUrl, name,
                  cachePath, maxCacheSize);
 }
@@ -104,7 +111,7 @@ BlobFilesystemImpl::BlobFilesystemImpl(
     : BlobFilesystemImpl(std::move(logger), ioContext, dataFileInitialSize, dataFileBufferSize) {
     auto options = BlobHelpers::CreateServiceClientOptions(storageAccountUrl);
     options.TokenCredential =
-        BlobHelpers::CreatePipelinesCredential(*m_runtime, tenantId, clientId, serviceConnectionId, accessToken);
+        BlobHelpers::CreatePipelinesCredential(m_runtime, tenantId, clientId, serviceConnectionId, accessToken);
     AddContainer(AzureClient::BlobServiceClient{m_runtime->HttpClient(), std::move(options)}, storageAccountUrl, name,
                  cachePath, maxCacheSize);
 }
@@ -115,11 +122,11 @@ BlobFilesystemImpl::BlobFilesystemImpl(
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     std::optional<std::string_view> cachePath, size_t maxCacheSize)
     : BlobFilesystemImpl(std::move(logger), ioContext, dataFileInitialSize, dataFileBufferSize) {
-    AddContainer(BlobHelpers::CreateServiceClient(*m_runtime, primary), primary.GetStorageAccountUrl(),
+    AddContainer(BlobHelpers::CreateServiceClient(m_runtime, primary), primary.GetStorageAccountUrl(),
                  primary.GetDbName(), cachePath, maxCacheSize);
 
     if (backup) {
-        AddContainer(BlobHelpers::CreateServiceClient(*m_runtime, *backup), backup->GetStorageAccountUrl(),
+        AddContainer(BlobHelpers::CreateServiceClient(m_runtime, *backup), backup->GetStorageAccountUrl(),
                      backup->GetDbName(), std::nullopt, maxCacheSize);
     }
 }
@@ -130,11 +137,11 @@ BlobFilesystemImpl::BlobFilesystemImpl(
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     std::optional<std::string_view> cachePath, size_t maxCacheSize)
     : BlobFilesystemImpl(std::move(logger), ioContext, dataFileInitialSize, dataFileBufferSize) {
-    AddContainer(BlobHelpers::CreateServiceClient(*m_runtime, primary), primary.GetStorageAccountUrl(),
+    AddContainer(BlobHelpers::CreateServiceClient(m_runtime, primary), primary.GetStorageAccountUrl(),
                  primary.GetDbName(), cachePath, maxCacheSize);
 
     if (backup) {
-        AddContainer(BlobHelpers::CreateServiceClient(*m_runtime, *backup), backup->GetStorageAccountUrl(),
+        AddContainer(BlobHelpers::CreateServiceClient(m_runtime, *backup), backup->GetStorageAccountUrl(),
                      backup->GetDbName(), std::nullopt, maxCacheSize);
     }
 }
@@ -158,28 +165,41 @@ void BlobFilesystemImpl::AddContainer(AzureClient::BlobServiceClient serviceClie
     m_clients.emplace(uniquePrefix, ServiceContainer{std::move(serviceClient), std::move(containerClient)});
 }
 
+namespace {
+struct FileSizing {
+    int64_t InitialSize;
+    int64_t BufferSize;
+};
+
+// Only WAL and SST files get the configurable (larger) sizes; everything else uses the small defaults.
+FileSizing SizingFor(const std::string& path, int64_t dataInitialSize, int64_t dataBufferSize) {
+    const auto fileType = Core::RocksDBHelpers::GetFileType(path);
+    const auto isData =
+        fileType == Core::RocksDBHelpers::FileClass::WAL || fileType == Core::RocksDBHelpers::FileClass::SST;
+    return isData ? FileSizing{dataInitialSize, dataBufferSize}
+                  : FileSizing{Configuration::PageBlob::DefaultSize, Configuration::PageBlob::DefaultBufferSize};
+}
+
+// Returns the container's file cache, or nullptr when none is configured for that prefix.
+template <class Map> std::shared_ptr<Core::FileCache> FindCache(const Map& caches, std::string_view prefix) {
+    const auto cache = caches.find(prefix);
+    return cache != caches.end() ? cache->second : nullptr;
+}
+} // namespace
+
 ReadableFileImpl BlobFilesystemImpl::CreateReadableFile(const std::string& filePath) {
     EnsureLiveness();
 
     const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
     const auto& container = GetContainer(prefix);
     auto blobClient = std::make_shared<PageBlob>(m_runtime, container->GetPageBlobClient(std::string(realPath)));
-    auto cache = m_fileCaches.find(prefix);
-    if (cache != m_fileCaches.end()) {
-        return ReadableFileImpl{realPath, std::move(blobClient), cache->second, m_logger};
-    } else {
-        return ReadableFileImpl{realPath, std::move(blobClient), nullptr, m_logger};
-    }
+    return ReadableFileImpl{realPath, std::move(blobClient), FindCache(m_fileCaches, prefix), m_logger};
 }
 
 WriteableFileImpl BlobFilesystemImpl::CreateWriteableFile(const std::string& filePath) {
     EnsureLiveness();
 
-    const auto fileType = Core::RocksDBHelpers::GetFileType(filePath);
-    const auto isData =
-        fileType == Core::RocksDBHelpers::FileClass::WAL || fileType == Core::RocksDBHelpers::FileClass::SST;
-    const auto initialSize = isData ? m_dataFileInitialSize : Configuration::PageBlob::DefaultSize;
-    const auto bufferSize = isData ? m_dataFileBufferSize : Configuration::PageBlob::DefaultBufferSize;
+    const auto [initialSize, bufferSize] = SizingFor(filePath, m_dataFileInitialSize, m_dataFileBufferSize);
 
     const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
     const auto& container = GetContainer(prefix);
@@ -193,20 +213,14 @@ WriteableFileImpl BlobFilesystemImpl::CreateWriteableFile(const std::string& fil
     if (!created) {
         BlobHelpers::SetFileSize(client, 0);
         if (BlobHelpers::GetBlobCapacity(client) > initialSize) {
-            Unwrap(client
-                       .ResizeAsync(static_cast<uint64_t>(initialSize), AzureClient::ResizePageBlobOptions{},
-                                    boost::asio::use_future)
-                       .get());
+            Unwrap(BlockOn(client.get_executor(),
+                           client.ResizeAsync(static_cast<uint64_t>(initialSize), AzureClient::ResizePageBlobOptions{},
+                                              boost::asio::use_future)));
         }
     }
 
-    auto cache = m_fileCaches.find(prefix);
     auto blobClient = std::make_unique<PageBlob>(m_runtime, std::move(client));
-    if (cache != m_fileCaches.end()) {
-        return WriteableFileImpl{realPath, std::move(blobClient), cache->second, m_logger, bufferSize};
-    } else {
-        return WriteableFileImpl{realPath, std::move(blobClient), nullptr, m_logger, bufferSize};
-    }
+    return WriteableFileImpl{realPath, std::move(blobClient), FindCache(m_fileCaches, prefix), m_logger, bufferSize};
 }
 
 ReadWriteFileImpl BlobFilesystemImpl::CreateReadWriteFile(const std::string& filePath) {
@@ -220,12 +234,7 @@ ReadWriteFileImpl BlobFilesystemImpl::CreateReadWriteFile(const std::string& fil
 
     auto blobClient = std::make_shared<PageBlob>(m_runtime, std::move(client));
 
-    auto cache = m_fileCaches.find(prefix);
-    if (cache != m_fileCaches.end()) {
-        return ReadWriteFileImpl{realPath, std::move(blobClient), cache->second, m_logger};
-    } else {
-        return ReadWriteFileImpl{realPath, std::move(blobClient), nullptr, m_logger};
-    }
+    return ReadWriteFileImpl{realPath, std::move(blobClient), FindCache(m_fileCaches, prefix), m_logger};
 }
 
 WriteableFileImpl BlobFilesystemImpl::ReopenWriteableFile(const std::string& filePath) {
@@ -233,19 +242,11 @@ WriteableFileImpl BlobFilesystemImpl::ReopenWriteableFile(const std::string& fil
 
     const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
     const auto& container = GetContainer(prefix);
-    const auto fileType = Core::RocksDBHelpers::GetFileType(filePath);
-    const auto isData =
-        fileType == Core::RocksDBHelpers::FileClass::WAL || fileType == Core::RocksDBHelpers::FileClass::SST;
-    const auto bufferSize = isData ? m_dataFileBufferSize : Configuration::PageBlob::DefaultBufferSize;
+    const auto [initialSize, bufferSize] = SizingFor(filePath, m_dataFileInitialSize, m_dataFileBufferSize);
 
     auto client = std::make_shared<PageBlob>(m_runtime, container->GetPageBlobClient(std::string(realPath)));
-    auto cache = m_fileCaches.find(prefix);
-    if (cache != m_fileCaches.end()) {
-        return WriteableFileImpl{realPath, std::move(client), cache->second, m_logger,
-                                 static_cast<int64_t>(bufferSize)};
-    } else {
-        return WriteableFileImpl{realPath, std::move(client), nullptr, m_logger, static_cast<int64_t>(bufferSize)};
-    }
+    return WriteableFileImpl{realPath, std::move(client), FindCache(m_fileCaches, prefix), m_logger,
+                             static_cast<int64_t>(bufferSize)};
 }
 
 WriteableFileImpl BlobFilesystemImpl::ReuseWritableFile(const std::string& filePath) {
@@ -253,25 +254,16 @@ WriteableFileImpl BlobFilesystemImpl::ReuseWritableFile(const std::string& fileP
 
     const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
     const auto& container = GetContainer(prefix);
-    const auto fileType = Core::RocksDBHelpers::GetFileType(filePath);
-    const auto isData =
-        fileType == Core::RocksDBHelpers::FileClass::WAL || fileType == Core::RocksDBHelpers::FileClass::SST;
-    const auto initialSize = isData ? m_dataFileInitialSize : Configuration::PageBlob::DefaultSize;
-    const auto bufferSize = isData ? m_dataFileBufferSize : Configuration::PageBlob::DefaultBufferSize;
+    const auto [initialSize, bufferSize] = SizingFor(filePath, m_dataFileInitialSize, m_dataFileBufferSize);
 
     // TODO: figure out what the intent here is for now just delete and recreate
     auto client = container->GetPageBlobClient(std::string(realPath));
-    UnwrapResponse(client.DeleteIfExistsAsync(boost::asio::use_future).get());
+    UnwrapResponse(BlockOn(client.get_executor(), client.DeleteIfExistsAsync(boost::asio::use_future)));
     BlobHelpers::CreateIfNotExists(client, initialSize);
 
-    auto cache = m_fileCaches.find(prefix);
     auto blobClient = std::make_shared<PageBlob>(m_runtime, std::move(client));
-    if (cache != m_fileCaches.end()) {
-        return WriteableFileImpl{realPath, std::move(blobClient), cache->second, m_logger,
-                                 static_cast<int64_t>(bufferSize)};
-    } else {
-        return WriteableFileImpl{realPath, std::move(blobClient), nullptr, m_logger, static_cast<int64_t>(bufferSize)};
-    }
+    return WriteableFileImpl{realPath, std::move(blobClient), FindCache(m_fileCaches, prefix), m_logger,
+                             static_cast<int64_t>(bufferSize)};
 }
 
 LoggerImpl BlobFilesystemImpl::CreateLogger(const std::string& filePath, const int logLevel,
@@ -344,7 +336,7 @@ bool BlobFilesystemImpl::FileExists(const std::string& name) {
     const auto& container = GetContainer(prefix);
 
     auto client = container->GetPageBlobClient(std::string(realPath));
-    auto props = client.GetPropertiesAsync(boost::asio::use_future).get();
+    auto props = BlockOn(client.get_executor(), client.GetPropertiesAsync(boost::asio::use_future));
     if (props.has_value()) {
         return true;
     }
@@ -434,7 +426,8 @@ std::vector<BlobAttributes> BlobFilesystemImpl::GetChildrenFileAttributes(const 
             return;
         }
 
-        attributes.emplace_back(BlobHelpers::FileSizeFromProperties(blob.Properties), blob.Name.substr(index));
+        attributes.emplace_back(BlobHelpers::FileSizeFromProperties(blob.Properties, blob.Name),
+                                blob.Name.substr(index));
     });
 
     return attributes;
@@ -446,7 +439,8 @@ bool BlobFilesystemImpl::DeleteFile(const std::string& filePath) const {
     const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
     const auto& container = GetContainer(prefix);
     auto client = container->GetPageBlobClient(std::string(realPath));
-    const auto res = UnwrapResponse(client.DeleteIfExistsAsync(boost::asio::use_future).get());
+    const auto res =
+        UnwrapResponse(BlockOn(client.get_executor(), client.DeleteIfExistsAsync(boost::asio::use_future)));
 
     auto cache = m_fileCaches.find(prefix);
     if (cache != m_fileCaches.end()) {
@@ -475,32 +469,38 @@ size_t BlobFilesystemImpl::DeleteDir(const std::string& directoryPath) const {
     // Delete with a bounded number of requests in flight. Every blob is attempted, then the first failure (if any)
     // is thrown so callers never mistake a partial delete for success.
     std::optional<AzureClient::BlobStorageError> firstFailure;
-    for (size_t i = 0; i < blobs.size(); i += g_maxConcurrentDeletes) {
-        std::vector<AzureClient::PageBlobClient> clients;
-        std::vector<std::future<
-            std::expected<AzureClient::Response<AzureClient::Models::DeleteBlobResult>, AzureClient::BlobStorageError>>>
-            deletes;
-        const auto batchEnd = std::min(i + g_maxConcurrentDeletes, blobs.size());
-        clients.reserve(batchEnd - i);
-        deletes.reserve(batchEnd - i);
-        for (size_t j = i; j < batchEnd; j++) {
-            clients.push_back(container->GetPageBlobClient(blobs[j]));
-        }
-
-        for (auto& client : clients) {
-            deletes.push_back(client.DeleteIfExistsAsync(boost::asio::use_future));
-        }
-
-        for (size_t j = 0; j < deletes.size(); j++) {
-            auto result = deletes[j].get();
-            if (!result.has_value()) {
-                BOOST_LOG_SEV(*m_logger, severity_level::warning)
-                    << "Failed to delete blob '" << blobs[i + j] << "': " << result.error().Message;
-                if (!firstFailure) {
-                    firstFailure = result.error();
-                }
+    // A sliding window: as soon as the oldest delete finishes, the next one starts, so one slow request does not
+    // hold back a whole batch.
+    struct PendingDelete {
+        AzureClient::PageBlobClient client;
+        std::future<
+            std::expected<AzureClient::Response<AzureClient::Models::DeleteBlobResult>, AzureClient::BlobStorageError>>
+            result;
+        size_t index;
+    };
+    std::deque<PendingDelete> window;
+    const auto finishOldest = [&] {
+        auto& oldest = window.front();
+        auto result = BlockOn(oldest.client.get_executor(), std::move(oldest.result));
+        if (!result.has_value()) {
+            BOOST_LOG_SEV(*m_logger, severity_level::warning)
+                << "Failed to delete blob '" << blobs[oldest.index] << "': " << result.error().Message;
+            if (!firstFailure) {
+                firstFailure = result.error();
             }
         }
+        window.pop_front();
+    };
+    for (size_t i = 0; i < blobs.size(); i++) {
+        if (window.size() >= g_maxConcurrentDeletes) {
+            finishOldest();
+        }
+        auto client = container->GetPageBlobClient(blobs[i]);
+        auto result = client.DeleteIfExistsAsync(boost::asio::use_future);
+        window.push_back(PendingDelete{std::move(client), std::move(result), i});
+    }
+    while (!window.empty()) {
+        finishOldest();
     }
 
     if (firstFailure) {
@@ -523,10 +523,9 @@ void BlobFilesystemImpl::Truncate(const std::string& filePath, int64_t size) con
     const auto fileSize = BlobHelpers::GetFileSize(client);
     if (fileSize > size) {
         BlobHelpers::SetFileSize(client, size);
-        Unwrap(
-            client
-                .ResizeAsync(static_cast<uint64_t>(size), AzureClient::ResizePageBlobOptions{}, boost::asio::use_future)
-                .get());
+        Unwrap(BlockOn(client.get_executor(),
+                       client.ResizeAsync(static_cast<uint64_t>(size), AzureClient::ResizePageBlobOptions{},
+                                          boost::asio::use_future)));
     }
 }
 
@@ -547,7 +546,7 @@ uint64_t BlobFilesystemImpl::GetFileModificationTime(const std::string& filePath
     const auto& container = GetContainer(prefix);
 
     auto client = container->GetPageBlobClient(std::string(realPath));
-    const auto props = Unwrap(client.GetPropertiesAsync(boost::asio::use_future).get());
+    const auto props = Unwrap(BlockOn(client.get_executor(), client.GetPropertiesAsync(boost::asio::use_future)));
     return static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::seconds>(props.LastModified.time_since_epoch()).count());
 }
@@ -587,41 +586,59 @@ void BlobFilesystemImpl::RenameFile(const std::string& fromFilePath, const std::
     const auto cap = BlobHelpers::GetBlobCapacity(srcClient);
     BlobHelpers::CreateIfNotExists(destClient, cap);
 
-    int64_t uploadOffset = 0;
-    while (uploadOffset < size) {
-        const auto readSize = std::min(size - uploadOffset, g_maxCopyChunkSize);
-
+    const auto startDownload = [&srcClient, size](int64_t offset) {
+        const auto readSize = std::min(size - offset, g_maxCopyChunkSize);
         AzureClient::DownloadBlobOptions options;
         options.Range =
-            AzureClient::Models::BlobByteRange{static_cast<uint64_t>(uploadOffset), static_cast<uint64_t>(readSize)};
-        auto chunk = Unwrap(srcClient
-                                .DownloadAsync(std::move(options), boost::asio::use_future,
-                                               RequestOptionsForTransfer(srcClient.GetDefaultRequestOptions(),
-                                                                         static_cast<uint64_t>(readSize)))
-                                .get());
-        auto& buffer = chunk.Content;
-        const auto bytesRead = static_cast<int64_t>(buffer.size());
-        if (bytesRead == 0) {
-            throw std::runtime_error("Unexpected end of blob while renaming '" + std::string(realPathFrom) + "'");
+            AzureClient::Models::BlobByteRange{static_cast<uint64_t>(offset), static_cast<uint64_t>(readSize)};
+        return srcClient.DownloadAsync(
+            std::move(options), boost::asio::use_future,
+            RequestOptionsForTransfer(srcClient.GetDefaultRequestOptions(), static_cast<uint64_t>(readSize)));
+    };
+
+    // The next chunk is downloaded while the current one is being uploaded, so the two transfers overlap.
+    std::optional<decltype(startDownload(0))> pendingDownload;
+    if (size > 0) {
+        pendingDownload.emplace(startDownload(0));
+    }
+    try {
+        int64_t uploadOffset = 0;
+        while (pendingDownload) {
+            auto chunk = Unwrap(BlockOn(srcClient.get_executor(), std::move(*pendingDownload)));
+            pendingDownload.reset();
+            auto& buffer = chunk.Content;
+            const auto bytesRead = static_cast<int64_t>(buffer.size());
+            if (bytesRead == 0) {
+                throw std::runtime_error("Unexpected end of blob while renaming '" + std::string(realPathFrom) + "'");
+            }
+            if (uploadOffset + bytesRead < size) {
+                pendingDownload.emplace(startDownload(uploadOffset + bytesRead));
+            }
+
+            // this must be aligned to page size so in some cases need dummy data
+            const auto remaining = buffer.size() % Configuration::PageBlob::PageSize;
+            if (remaining != 0) {
+                buffer.resize(buffer.size() + (Configuration::PageBlob::PageSize - remaining), '\0');
+            }
+
+            Unwrap(BlockOn(destClient.get_executor(),
+                           destClient.UploadPagesAsync(
+                               static_cast<uint64_t>(uploadOffset), std::as_bytes(std::span<const char>(buffer)),
+                               boost::asio::use_future,
+                               RequestOptionsForTransfer(destClient.GetDefaultRequestOptions(), buffer.size()))));
+
+            uploadOffset += bytesRead;
         }
-
-        // this must be aligned to page size so in some cases need dummy data
-        const auto remaining = buffer.size() % Configuration::PageBlob::PageSize;
-        if (remaining != 0) {
-            buffer.resize(buffer.size() + (Configuration::PageBlob::PageSize - remaining), '\0');
+    } catch (...) {
+        // The in-flight download references srcClient, so wait for it before the clients go out of scope.
+        if (pendingDownload && pendingDownload->valid()) {
+            pendingDownload->wait();
         }
-
-        Unwrap(destClient
-                   .UploadPagesAsync(static_cast<uint64_t>(uploadOffset), std::as_bytes(std::span<const char>(buffer)),
-                                     boost::asio::use_future,
-                                     RequestOptionsForTransfer(destClient.GetDefaultRequestOptions(), buffer.size()))
-                   .get());
-
-        uploadOffset += bytesRead;
+        throw;
     }
 
     BlobHelpers::SetFileSize(destClient, size);
-    UnwrapResponse(srcClient.DeleteIfExistsAsync(boost::asio::use_future).get());
+    UnwrapResponse(BlockOn(srcClient.get_executor(), srcClient.DeleteIfExistsAsync(boost::asio::use_future)));
 }
 
 BlobFilesystemImpl::BlobFilesystemImpl(
@@ -639,28 +656,23 @@ BlobFilesystemImpl::GetContainer(const std::string_view prefix) const {
     if (client != m_clients.end()) {
         return client->second.ContainerClient;
     } else {
-        std::stringstream ss;
-        ss << "Client not found for '" << prefix << "'";
-        throw std::runtime_error(ss.str());
+        throw std::runtime_error("Client not found for '" + std::string(prefix) + "'");
     }
 }
 
 void BlobFilesystemImpl::RenewLease(std::stop_token stopToken) {
     BOOST_LOG_SEV(*m_logger, severity_level::info) << "Starting blob lease renewal thread";
     try {
+        // Waiting on a condition variable with the stop token wakes the thread as soon as a stop is requested.
+        std::mutex wakeMutex;
+        std::condition_variable_any wake;
+        const auto interruptibleSleep = [&](std::chrono::milliseconds duration) {
+            std::unique_lock lock(wakeMutex);
+            wake.wait_for(lock, stopToken, duration, [] { return false; });
+        };
+
         while (!stopToken.stop_requested()) {
-            if (stopToken.stop_requested()) {
-                break;
-            }
-
-            // Sleep before attempting renewal
-            static const constexpr auto sleepInterval = std::chrono::milliseconds(100);
-            static const constexpr auto maxSleepIterations = 50;
-            static_assert(sleepInterval * maxSleepIterations == Configuration::RenewalDelay);
-            for (int i = 0; i < maxSleepIterations && !stopToken.stop_requested(); ++i) {
-                std::this_thread::sleep_for(sleepInterval);
-            }
-
+            interruptibleSleep(std::chrono::duration_cast<std::chrono::milliseconds>(Configuration::RenewalDelay));
             if (stopToken.stop_requested()) {
                 break;
             }
@@ -704,7 +716,7 @@ void BlobFilesystemImpl::RenewLease(std::stop_token stopToken) {
 
                     retries++;
                     if (needsRetry.size() > 0) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        interruptibleSleep(std::chrono::milliseconds(100));
                     }
                 }
             }

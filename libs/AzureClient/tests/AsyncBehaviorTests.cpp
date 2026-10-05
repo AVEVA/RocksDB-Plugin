@@ -1188,6 +1188,29 @@ TEST(AsyncBehaviorTests, ExplicitAssociatedExecutorReceivesTheCompletionInsteadO
     EXPECT_TRUE(completedOnStrand);
 }
 
+// The handler's executor must be kept busy from initiation, so run() on a separate io_context does not return
+// before the (still pending) operation completes.
+TEST(AsyncBehaviorTests, HandlerExecutorWorkGuardIsTakenAtInitiation)
+{
+    FakeHttpClient httpClient;
+    httpClient.DeferByDefault() = true;
+    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+
+    boost::asio::io_context strandContext;
+    auto strand = boost::asio::make_strand(strandContext);
+
+    bool completedOnStrand = false;
+    CallbackExpectation callback;
+    StartDeleteBoundToStrand(client, strand, completedOnStrand, callback);
+
+    strandContext.run_for(std::chrono::milliseconds{50});
+    EXPECT_FALSE(strandContext.stopped());
+
+    ASSERT_TRUE(httpClient.CompleteNext());
+    strandContext.run();
+    EXPECT_TRUE(completedOnStrand);
+}
+
 // Task 6 verification: an explicitly-set HttpRequestOptions cancellation slot must win over a
 // cancellation slot merely associated with the completion token (explicit wins, matching
 // BindAssociationsAndAdoptCancellation's documented contract).

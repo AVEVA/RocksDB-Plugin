@@ -60,9 +60,31 @@ void BlobFilesystem::LogRequestFailed(const RequestFailedException& ex, std::str
 }
 
 BlobFilesystem::~BlobFilesystem() {
-    for (auto lock : m_lockFiles) {
-        m_filesystem->UnlockFile(lock->GetImpl());
-        delete lock;
+    // A destructor must not throw: a failed release is logged and the lease simply expires on the service.
+    for (auto& lock : m_lockFiles) {
+        try {
+            m_filesystem->UnlockFile(lock->GetImpl());
+        } catch (const std::exception& ex) {
+            BOOST_LOG_SEV(*m_logger, error) << "Failed to release lock file during shutdown: " << ex.what();
+        } catch (...) {
+            BOOST_LOG_SEV(*m_logger, error) << "Failed to release lock file during shutdown: unknown error";
+        }
+    }
+}
+
+// Runs an operation, converting any exception into a logged rocksdb::IOStatus so that nothing escapes into RocksDB.
+template <class F> rocksdb::IOStatus BlobFilesystem::Guard(std::string_view operation, std::string_view path, F&& f) {
+    try {
+        return f();
+    } catch (const RequestFailedException& ex) {
+        LogRequestFailed(ex, path);
+        return AzureErrorTranslator::IOStatusFromError(ex);
+    } catch (const std::exception& ex) {
+        BOOST_LOG_SEV(*m_logger, error) << operation << " failed: " << ex.what();
+        return rocksdb::IOStatus::IOError(ex.what());
+    } catch (...) {
+        BOOST_LOG_SEV(*m_logger, error) << operation << " failed with an unknown error";
+        return rocksdb::IOStatus::IOError(std::string("Unknown error when calling ") + std::string(operation));
     }
 }
 
@@ -71,108 +93,60 @@ const char* BlobFilesystem::Name() const { return "AzureBlobFileSystem"; }
 rocksdb::IOStatus BlobFilesystem::NewSequentialFile(const std::string& f, const rocksdb::FileOptions&,
                                                     std::unique_ptr<rocksdb::FSSequentialFile>* r,
                                                     rocksdb::IODebugContext*) {
-    try {
-        *r = std::unique_ptr<rocksdb::FSSequentialFile>(new ReadableFile(m_filesystem->CreateReadableFile(f)));
-        return rocksdb::IOStatus::OK();
-    } catch (const RequestFailedException& ex) {
-        LogRequestFailed(ex, f);
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when creating NewSequentialFile");
-    }
+    return Guard("NewSequentialFile", f, [&]() -> rocksdb::IOStatus {
+            *r = std::unique_ptr<rocksdb::FSSequentialFile>(new ReadableFile(m_filesystem->CreateReadableFile(f)));
+            return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::NewRandomAccessFile(const std::string& f, const rocksdb::FileOptions&,
                                                       std::unique_ptr<rocksdb::FSRandomAccessFile>* r,
                                                       rocksdb::IODebugContext*) {
-    try {
-        *r = std::unique_ptr<rocksdb::FSRandomAccessFile>(new ReadableFile(m_filesystem->CreateReadableFile(f)));
-        return rocksdb::IOStatus::OK();
-    } catch (const RequestFailedException& ex) {
-        LogRequestFailed(ex, f);
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when creating NewRandomAccessFile");
-    }
+    return Guard("NewRandomAccessFile", f, [&]() -> rocksdb::IOStatus {
+            *r = std::unique_ptr<rocksdb::FSRandomAccessFile>(new ReadableFile(m_filesystem->CreateReadableFile(f)));
+            return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::NewWritableFile(const std::string& f, const rocksdb::FileOptions&,
                                                   std::unique_ptr<rocksdb::FSWritableFile>* r,
                                                   rocksdb::IODebugContext*) {
-    try {
-        *r =
-            std::unique_ptr<rocksdb::FSWritableFile>(new WriteableFile(m_filesystem->CreateWriteableFile(f), m_logger));
-        return rocksdb::IOStatus::OK();
-    } catch (const RequestFailedException& ex) {
-        LogRequestFailed(ex, f);
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when creating NewWritableFile");
-    }
+    return Guard("NewWritableFile", f, [&]() -> rocksdb::IOStatus {
+            *r =
+                std::unique_ptr<rocksdb::FSWritableFile>(new WriteableFile(m_filesystem->CreateWriteableFile(f), m_logger));
+            return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::ReopenWritableFile(const std::string& fname, const rocksdb::FileOptions&,
                                                      std::unique_ptr<rocksdb::FSWritableFile>* result,
                                                      rocksdb::IODebugContext*) {
-    try {
-        *result = std::unique_ptr<rocksdb::FSWritableFile>(
-            new WriteableFile(m_filesystem->ReopenWriteableFile(fname), m_logger));
-        return rocksdb::IOStatus::OK();
-    } catch (const RequestFailedException& ex) {
-        LogRequestFailed(ex, fname);
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when calling ReopenWritableFile");
-    }
+    return Guard("ReopenWritableFile", fname, [&]() -> rocksdb::IOStatus {
+            *result = std::unique_ptr<rocksdb::FSWritableFile>(
+                new WriteableFile(m_filesystem->ReopenWriteableFile(fname), m_logger));
+            return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::ReuseWritableFile(const std::string& fname, const std::string&,
                                                     const rocksdb::FileOptions&,
                                                     std::unique_ptr<rocksdb::FSWritableFile>* r,
                                                     rocksdb::IODebugContext*) {
-    try {
-        *r = std::unique_ptr<rocksdb::FSWritableFile>(
-            new WriteableFile(m_filesystem->ReuseWritableFile(fname), m_logger));
-        return rocksdb::IOStatus::OK();
-    } catch (const RequestFailedException& ex) {
-        LogRequestFailed(ex, fname);
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when calling ReuseWritableFile");
-    }
+    return Guard("ReuseWritableFile", fname, [&]() -> rocksdb::IOStatus {
+            *r = std::unique_ptr<rocksdb::FSWritableFile>(
+                new WriteableFile(m_filesystem->ReuseWritableFile(fname), m_logger));
+            return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::NewRandomRWFile(const std::string& fname, const rocksdb::FileOptions&,
                                                   std::unique_ptr<rocksdb::FSRandomRWFile>* result,
                                                   rocksdb::IODebugContext*) {
-    try {
-        *result = std::unique_ptr<rocksdb::FSRandomRWFile>(
-            new ReadWriteFile(m_filesystem->CreateReadWriteFile(fname), m_logger));
-        return rocksdb::IOStatus::OK();
-    } catch (const RequestFailedException& ex) {
-        LogRequestFailed(ex, fname);
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when calling NewRandomRWFile");
-    }
+    return Guard("NewRandomRWFile", fname, [&]() -> rocksdb::IOStatus {
+            *result = std::unique_ptr<rocksdb::FSRandomRWFile>(
+                new ReadWriteFile(m_filesystem->CreateReadWriteFile(fname), m_logger));
+            return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::NewMemoryMappedFileBuffer(const std::string&,
@@ -183,113 +157,65 @@ rocksdb::IOStatus BlobFilesystem::NewMemoryMappedFileBuffer(const std::string&,
 rocksdb::IOStatus BlobFilesystem::NewDirectory(const std::string& name, const rocksdb::IOOptions&,
                                                std::unique_ptr<rocksdb::FSDirectory>* result,
                                                rocksdb::IODebugContext*) {
-    try {
-        *result = std::unique_ptr<rocksdb::FSDirectory>(new Directory(m_filesystem->CreateDirectory(name)));
-        return rocksdb::IOStatus::OK();
-    } catch (const RequestFailedException& ex) {
-        LogRequestFailed(ex, name);
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when creating NewDirectory");
-    }
+    return Guard("NewDirectory", name, [&]() -> rocksdb::IOStatus {
+            *result = std::unique_ptr<rocksdb::FSDirectory>(new Directory(m_filesystem->CreateDirectory(name)));
+            return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::FileExists(const std::string& f, const rocksdb::IOOptions&,
                                              rocksdb::IODebugContext*) {
-    try {
-        if (m_filesystem->FileExists(f)) {
-            return rocksdb::IOStatus::OK();
-        } else {
-            return rocksdb::IOStatus::NotFound();
-        }
-    } catch (const RequestFailedException& ex) {
-        LogRequestFailed(ex, f);
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when calling FileExists");
-    }
+    return Guard("FileExists", f, [&]() -> rocksdb::IOStatus {
+            if (m_filesystem->FileExists(f)) {
+                return rocksdb::IOStatus::OK();
+            } else {
+                return rocksdb::IOStatus::NotFound();
+            }
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::GetChildren(const std::string& dir, const rocksdb::IOOptions&,
                                               std::vector<std::string>* r, rocksdb::IODebugContext*) {
-    try {
-        *r = m_filesystem->GetChildren(dir);
-        return rocksdb::IOStatus::OK();
-    } catch (const RequestFailedException& ex) {
-        LogRequestFailed(ex, dir);
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when calling GetChildren");
-    }
+    return Guard("GetChildren", dir, [&]() -> rocksdb::IOStatus {
+            *r = m_filesystem->GetChildren(dir);
+            return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::GetChildrenFileAttributes(const std::string& dir, const rocksdb::IOOptions&,
                                                             std::vector<rocksdb::FileAttributes>* result,
                                                             rocksdb::IODebugContext*) {
-    try {
-        const auto attributes = m_filesystem->GetChildrenFileAttributes(dir);
-        for (const auto& attr : attributes) {
-            result->push_back({
-                .name = attr.GetName(),
-                .size_bytes = attr.GetSize(),
-            });
-        }
+    return Guard("GetChildrenFileAttributes", dir, [&]() -> rocksdb::IOStatus {
+            const auto attributes = m_filesystem->GetChildrenFileAttributes(dir);
+            for (const auto& attr : attributes) {
+                result->push_back({
+                    .name = attr.GetName(),
+                    .size_bytes = attr.GetSize(),
+                });
+            }
 
-        return rocksdb::IOStatus::OK();
-    } catch (const RequestFailedException& ex) {
-        LogRequestFailed(ex, dir);
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when calling GetChildrenFileAttributes");
-    }
+            return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::DeleteFile(const std::string& f, const rocksdb::IOOptions&,
                                              rocksdb::IODebugContext*) {
-    try {
-        if (m_filesystem->DeleteFile(f)) {
-            return rocksdb::IOStatus::OK();
-        } else {
-            return rocksdb::IOStatus::NotFound();
-        }
-    } catch (const RequestFailedException& ex) {
-        LogRequestFailed(ex, f);
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when calling DeleteFile");
-    }
+    return Guard("DeleteFile", f, [&]() -> rocksdb::IOStatus {
+            if (m_filesystem->DeleteFile(f)) {
+                return rocksdb::IOStatus::OK();
+            } else {
+                return rocksdb::IOStatus::NotFound();
+            }
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::Truncate(const std::string& fname, size_t size, const rocksdb::IOOptions&,
                                            rocksdb::IODebugContext*) {
-    try {
-        assert(size < static_cast<size_t>(std::numeric_limits<int64_t>::max()));
-        m_filesystem->Truncate(fname, static_cast<int64_t>(size));
-        return rocksdb::IOStatus::OK();
-    } catch (const RequestFailedException& ex) {
-        LogRequestFailed(ex, fname);
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when calling Truncate");
-    }
+    return Guard("Truncate", fname, [&]() -> rocksdb::IOStatus {
+            assert(size < static_cast<size_t>(std::numeric_limits<int64_t>::max()));
+            m_filesystem->Truncate(fname, static_cast<int64_t>(size));
+            return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::CreateDir(const std::string&, const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
@@ -302,58 +228,34 @@ rocksdb::IOStatus BlobFilesystem::CreateDirIfMissing(const std::string&, const r
 }
 
 rocksdb::IOStatus BlobFilesystem::DeleteDir(const std::string& d, const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    try {
-        const auto remainingFiles = m_filesystem->DeleteDir(d);
-        if (remainingFiles == 0) {
-            return rocksdb::IOStatus::OK();
-        } else {
-            BOOST_LOG_SEV(*m_logger, error)
-                << "Failed to delete all contents within directory. " << remainingFiles << " remaining.";
-            return rocksdb::IOStatus::IOError("Failed to delete all contents within directory");
-        }
-    } catch (const RequestFailedException& ex) {
-        LogRequestFailed(ex, d);
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when calling DeleteDir");
-    }
+    return Guard("DeleteDir", d, [&]() -> rocksdb::IOStatus {
+            const auto remainingFiles = m_filesystem->DeleteDir(d);
+            if (remainingFiles == 0) {
+                return rocksdb::IOStatus::OK();
+            } else {
+                BOOST_LOG_SEV(*m_logger, error)
+                    << "Failed to delete all contents within directory. " << remainingFiles << " remaining.";
+                return rocksdb::IOStatus::IOError("Failed to delete all contents within directory");
+            }
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::GetFileSize(const std::string& f, const rocksdb::IOOptions&, uint64_t* s,
                                               rocksdb::IODebugContext*) {
-    try {
-        const auto fileSize = m_filesystem->GetFileSize(f);
-        assert(fileSize >= 0);
-        *s = static_cast<uint64_t>(fileSize);
-        return rocksdb::IOStatus::OK();
-    } catch (const RequestFailedException& ex) {
-        LogRequestFailed(ex, f);
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when calling GetFileSize");
-    }
+    return Guard("GetFileSize", f, [&]() -> rocksdb::IOStatus {
+            const auto fileSize = m_filesystem->GetFileSize(f);
+            assert(fileSize >= 0);
+            *s = static_cast<uint64_t>(fileSize);
+            return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::GetFileModificationTime(const std::string& fname, const rocksdb::IOOptions&,
                                                           uint64_t* file_mtime, rocksdb::IODebugContext*) {
-    try {
-        *file_mtime = m_filesystem->GetFileModificationTime(fname);
-        return rocksdb::IOStatus::OK();
-    } catch (const RequestFailedException& ex) {
-        LogRequestFailed(ex, fname);
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when calling GetFileModificationTime");
-    }
+    return Guard("GetFileModificationTime", fname, [&]() -> rocksdb::IOStatus {
+            *file_mtime = m_filesystem->GetFileModificationTime(fname);
+            return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::GetAbsolutePath(const std::string& db_path, const rocksdb::IOOptions&,
@@ -365,18 +267,10 @@ rocksdb::IOStatus BlobFilesystem::GetAbsolutePath(const std::string& db_path, co
 
 rocksdb::IOStatus BlobFilesystem::RenameFile(const std::string& s, const std::string& t, const rocksdb::IOOptions&,
                                              rocksdb::IODebugContext*) {
-    try {
-        m_filesystem->RenameFile(s, t);
-        return rocksdb::IOStatus::OK();
-    } catch (const RequestFailedException& ex) {
-        LogRequestFailed(ex, s + " -> " + t);
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when calling RenameFile");
-    }
+    return Guard("RenameFile", s + " -> " + t, [&]() -> rocksdb::IOStatus {
+            m_filesystem->RenameFile(s, t);
+            return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::LinkFile(const std::string&, const std::string&, const rocksdb::IOOptions&,
@@ -397,46 +291,29 @@ rocksdb::IOStatus BlobFilesystem::AreFilesSame(const std::string& first, const s
 
 rocksdb::IOStatus BlobFilesystem::LockFile(const std::string& f, const rocksdb::IOOptions&, rocksdb::FileLock** l,
                                            rocksdb::IODebugContext*) {
-    try {
-        *l = nullptr;
-        auto lock = m_filesystem->LockFile(f);
-        auto lockFileWrapper = new Plugin::Azure::LockFile(lock);
-        m_lockFiles.push_back(lockFileWrapper);
-        *l = lockFileWrapper;
-        return rocksdb::IOStatus::OK();
-    } catch (const RequestFailedException& ex) {
-        LogRequestFailed(ex, f);
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when calling LockFile");
-    }
+    return Guard("LockFile", f, [&]() -> rocksdb::IOStatus {
+            *l = nullptr;
+            auto lock = m_filesystem->LockFile(f);
+            auto lockFileWrapper = std::make_unique<Plugin::Azure::LockFile>(lock);
+            *l = lockFileWrapper.get();
+            m_lockFiles.push_back(std::move(lockFileWrapper));
+            return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::UnlockFile(rocksdb::FileLock* l, const rocksdb::IOOptions&,
                                              rocksdb::IODebugContext*) {
-    try {
-        auto lockFile = dynamic_cast<Plugin::Azure::LockFile*>(l);
-        if (lockFile == nullptr) {
-            BOOST_LOG_SEV(*m_logger, error) << "Unable to cast file lock to Azure::LockFile";
-            return rocksdb::IOStatus::InvalidArgument();
-        }
+    return Guard("UnlockFile", {}, [&]() -> rocksdb::IOStatus {
+            auto lockFile = dynamic_cast<Plugin::Azure::LockFile*>(l);
+            if (lockFile == nullptr) {
+                BOOST_LOG_SEV(*m_logger, error) << "Unable to cast file lock to Azure::LockFile";
+                return rocksdb::IOStatus::InvalidArgument();
+            }
 
-        m_filesystem->UnlockFile(lockFile->GetImpl());
-        std::erase_if(m_lockFiles, [lockFile](const auto& entry) { return entry == lockFile; });
-        delete lockFile;
-        return rocksdb::IOStatus::OK();
-    } catch (const RequestFailedException& ex) {
-        LogRequestFailed(ex);
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when calling UnlockFile");
-    }
+            m_filesystem->UnlockFile(lockFile->GetImpl());
+            std::erase_if(m_lockFiles, [lockFile](const auto& entry) { return entry.get() == lockFile; });
+            return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::GetTestDirectory(const rocksdb::IOOptions& options, std::string* path,
@@ -446,19 +323,11 @@ rocksdb::IOStatus BlobFilesystem::GetTestDirectory(const rocksdb::IOOptions& opt
 
 rocksdb::IOStatus BlobFilesystem::NewLogger(const std::string& fname, const rocksdb::IOOptions&,
                                             std::shared_ptr<rocksdb::Logger>* result, rocksdb::IODebugContext*) {
-    try {
-        auto impl = m_filesystem->CreateLogger(fname, rocksdb::Logger::kDefaultLogLevel);
-        *result = std::shared_ptr<rocksdb::Logger>(new Plugin::Azure::Logger(std::move(impl)));
-        return rocksdb::IOStatus::OK();
-    } catch (const RequestFailedException& ex) {
-        LogRequestFailed(ex, fname);
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when creating NewLogger");
-    }
+    return Guard("NewLogger", fname, [&]() -> rocksdb::IOStatus {
+            auto impl = m_filesystem->CreateLogger(fname, rocksdb::Logger::kDefaultLogLevel);
+            *result = std::shared_ptr<rocksdb::Logger>(new Plugin::Azure::Logger(std::move(impl)));
+            return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::GetFreeSpace(const std::string&, const rocksdb::IOOptions&, uint64_t* diskfree,

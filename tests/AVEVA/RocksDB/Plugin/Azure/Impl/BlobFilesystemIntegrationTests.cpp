@@ -35,7 +35,10 @@ class BlobFilesystemIntegrationTests : public AzureIntegrationTestBase {
     void SetUp() override {
         AzureIntegrationTestBase::SetUp();
 
-        if (m_credentials) {
+        if (IsSkipped() || HasFatalFailure()) {
+            return;
+        }
+        {
             m_filesystem = std::make_unique<BlobFilesystemImpl>(m_ioContext.Get(), *m_credentials,
                                                                 std::nullopt, // No backup credentials for tests
                                                                 Configuration::PageBlob::DefaultSize,

@@ -285,6 +285,10 @@ namespace AVEVA::AzureClient
     {
         std::optional<Models::BlobByteRange> Range;
         Models::BlobRequestConditions Conditions;
+        // The service paginates large page lists. GetPageRangesAsync follows NextMarker until the list is
+        // complete; Marker and MaxResults only select where to start and the size of each page requested.
+        std::string Marker;
+        std::optional<std::uint32_t> MaxResults;
     };
 
     struct CreateAppendBlobOptions

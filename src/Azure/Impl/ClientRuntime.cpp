@@ -6,13 +6,8 @@
 #include <AVEVA/HttpClient/HttpClientOptions.hpp>
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <optional>
-#include <random>
 #include <stdexcept>
 #include <string>
 
@@ -37,7 +32,7 @@ bool HasEnvironmentVariable(const char* name) {
 
 // OpenSSL does not consult the Windows certificate store, so unless SSL_CERT_FILE / SSL_CERT_DIR point it at
 // a CA bundle, export the trusted root certificates of the current user (which include the machine roots) into
-// a temporary PEM file that the HTTP client loads while it is being constructed.
+// a PEM string that is handed to the HTTP client in memory.
 //
 // Limits: only the ROOT store is exported (intermediate CAs and certificates added after the first call are not
 // seen) and revocation is not checked. Set SSL_CERT_FILE/SSL_CERT_DIR to override.
@@ -68,27 +63,9 @@ std::string BuildWindowsRootCertificatePem() {
 }
 
 // Enumerating the store is the expensive part, so it happens once per process (thread-safe static).
-std::optional<std::filesystem::path> ExportWindowsRootCertificates() {
+const std::string& WindowsRootCertificatePem() {
     static const std::string pem = BuildWindowsRootCertificatePem();
-    if (pem.empty()) {
-        return std::nullopt;
-    }
-
-    static std::atomic<uint64_t> counter{0};
-    std::random_device random;
-    const auto path = std::filesystem::temp_directory_path() /
-                      ("aveva-rocksdb-plugin-ca-" + std::to_string(GetCurrentProcessId()) + "-" +
-                       std::to_string(counter++) + "-" + std::to_string(random()) + ".pem");
-    std::ofstream file(path, std::ios::binary | std::ios::trunc);
-    file << pem;
-    file.close();
-    if (!file) {
-        std::error_code ignored;
-        std::filesystem::remove(path, ignored);
-        return std::nullopt;
-    }
-
-    return path;
+    return pem;
 }
 #endif
 
@@ -96,22 +73,8 @@ std::unique_ptr<::AVEVA::IHttpClient> CreateHttpClient(boost::asio::io_context& 
     ::AVEVA::HttpClientOptions options;
 #ifdef _WIN32
     if (!HasEnvironmentVariable("SSL_CERT_FILE") && !HasEnvironmentVariable("SSL_CERT_DIR")) {
-        if (const auto caFile = ExportWindowsRootCertificates()) {
-            options.SetCaFile(caFile->string());
-            std::unique_ptr<::AVEVA::IHttpClient> client;
-            try {
-                // The CA file is read while the client is constructed, so it can be removed straight after.
-                client = ::AVEVA::IHttpClient::Create(context, std::move(options));
-            } catch (...) {
-                std::error_code ignored;
-                std::filesystem::remove(*caFile, ignored);
-                throw;
-            }
-
-            std::error_code ignored;
-            std::filesystem::remove(*caFile, ignored);
-            return client;
-        }
+        // Passed in memory: a temporary file could be swapped by another local process between write and read.
+        options.SetCaPem(WindowsRootCertificatePem());
     }
 #endif
 

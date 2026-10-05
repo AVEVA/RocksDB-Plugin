@@ -78,10 +78,25 @@ namespace AVEVA::AzureClient
         // std::chrono::system_clock::now and exists so tests can use fixed timestamps.
         using Clock = std::function<std::chrono::system_clock::time_point()>;
 
-        explicit CachingTokenCredential(std::shared_ptr<ITokenCredential> inner,
+      private:
+        // Keeps the constructor unusable outside Create while still allowing std::make_shared.
+        struct CreateKey
+        {
+            explicit CreateKey() = default;
+        };
+
+      public:
+        // The cache relies on shared ownership, so instances can only be created through this factory.
+        [[nodiscard]] static std::shared_ptr<CachingTokenCredential> Create(std::shared_ptr<ITokenCredential> inner,
             std::chrono::seconds refreshWindow = DefaultTokenCredentialRefreshWindow,
             std::optional<boost::asio::any_io_executor> executor = std::nullopt,
             Clock clock = {});
+
+        CachingTokenCredential(CreateKey,
+            std::shared_ptr<ITokenCredential> inner,
+            std::chrono::seconds refreshWindow,
+            std::optional<boost::asio::any_io_executor> executor,
+            Clock clock);
 
         void GetTokenAsync(std::vector<std::string> scopes, GetTokenCompletionHandler completion) override;
 

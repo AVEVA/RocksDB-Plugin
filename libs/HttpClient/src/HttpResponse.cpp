@@ -21,7 +21,7 @@ namespace AVEVA
         return m_headers;
     }
 
-    std::vector<HttpHeader>&& HttpResponse::GetHeaders() && noexcept
+    std::vector<HttpHeader> HttpResponse::GetHeaders() && noexcept
     {
         return std::move(m_headers);
     }
@@ -31,7 +31,7 @@ namespace AVEVA
         return m_body;
     }
 
-    std::string&& HttpResponse::GetBody() && noexcept
+    std::string HttpResponse::GetBody() && noexcept
     {
         return std::move(m_body);
     }
