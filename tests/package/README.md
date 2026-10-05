@@ -14,4 +14,7 @@ cmake -S tests/package -B build/package-test `
 cmake --build build/package-test --config Debug
 ```
 
-Adjust the vcpkg triplet directory to the one the preset uses. To run the executable, put the vcpkg\n`bin` and `debug/bin` directories of that triplet on `PATH`; it prints `ok`.
+Adjust the vcpkg triplet directory to the one the preset uses. To run the executable, put the vcpkg `bin` and `debug/bin` directories of that triplet on `PATH`; it prints `ok`.
+
+The same install-and-build flow is available as a CTest test: configure with `-DAVEVA_ROCKSDB_PACKAGE_TEST=ON` and run
+`ctest -L install` after a full build. It builds the consumer but does not run it.

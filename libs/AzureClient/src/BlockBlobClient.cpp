@@ -459,7 +459,7 @@ namespace AVEVA::AzureClient
         StageBlockCompletionHandler completion,
         HttpRequestOptions requestOptions)
     {
-        const bool invalidRange =
+        bool invalidRange =
             options.SourceLength.has_value() && (*options.SourceLength == 0 || !options.SourceOffset.has_value());
         bool invalidBlockId = false;
         try
@@ -469,6 +469,19 @@ namespace AVEVA::AzureClient
         catch (const std::invalid_argument&)
         {
             invalidBlockId = true;
+        }
+        std::string sourceRange;
+        if (!invalidRange && options.SourceOffset.has_value())
+        {
+            try
+            {
+                sourceRange = Private::BuildRangeHeaderValue(
+                    Models::BlobByteRange{.Offset = *options.SourceOffset, .Length = options.SourceLength});
+            }
+            catch (const std::invalid_argument&)
+            {
+                invalidRange = true;
+            }
         }
         if (invalidBlockId || invalidRange || sourceUri.empty())
         {
@@ -490,14 +503,9 @@ namespace AVEVA::AzureClient
 
         HttpRequest request = BuildStageBlockRequest(Target(), blockId, options.Conditions);
         Private::AddHeader(request, Private::XMsCopySourceHeaderName, sourceUri);
-        if (options.SourceOffset.has_value())
+        if (!sourceRange.empty())
         {
-            std::string range = "bytes=" + std::to_string(*options.SourceOffset) + "-";
-            if (options.SourceLength.has_value())
-            {
-                range += std::to_string(*options.SourceOffset + *options.SourceLength - 1U);
-            }
-            Private::AddHeader(request, Private::XMsSourceRangeHeaderName, range);
+            Private::AddHeader(request, Private::XMsSourceRangeHeaderName, sourceRange);
         }
         Private::AddHeaderIfNotEmpty(request, Private::XMsSourceContentMd5HeaderName, options.SourceContentMd5);
         SendStageBlockRequest(std::move(request), std::move(completion), requestOptions);

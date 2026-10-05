@@ -2,7 +2,7 @@
 # and makes them consumable both in the build tree and from an installed package.
 include_guard(GLOBAL)
 
-set(AVEVA_HTTP_CLIENT_TESTS OFF)
+set(AVEVA_HTTP_CLIENT_TESTS ${AVEVA_BUILD_CLIENT_LIBRARY_TESTS})
 set(AVEVA_HTTP_CLIENT_BENCHMARKS OFF)
 # Installed below with a config file template owned by this repository.
 set(AVEVA_HTTP_CLIENT_INSTALL_CONFIG_FILE_PACKAGE OFF)
@@ -21,13 +21,19 @@ file(WRITE "${_aveva_http_client_shim_dir}/aveva-http-client-config.cmake"
     "endif()\n")
 set(aveva-http-client_DIR "${_aveva_http_client_shim_dir}" CACHE INTERNAL "In-tree aveva-http-client package shim")
 
-set(AVEVA_AZURE_CLIENT_TESTS OFF)
+set(AVEVA_AZURE_CLIENT_TESTS ${AVEVA_BUILD_CLIENT_LIBRARY_TESTS})
 set(AVEVA_AZURE_CLIENT_EXAMPLES OFF)
 set(AVEVA_AZURE_CLIENT_BENCHMARKS OFF)
 set(AVEVA_AZURE_CLIENT_INSTALL_TEST OFF)
 set(AVEVA_AZURE_CLIENT_INSTALL_CONFIG_FILE_PACKAGE ON)
 add_subdirectory("${PROJECT_SOURCE_DIR}/libs/AzureClient" "${PROJECT_BINARY_DIR}/libs/AzureClient")
 set_target_properties(aveva-azure-client PROPERTIES COMPILE_WARNING_AS_ERROR OFF)
+
+# Header-only test support (FakeHttpClient.hpp, TestFixtures.hpp) of the vendored AzureClient tests, shared with
+# the plugin tests. All dependence on the library's test layout is confined to this target.
+add_library(aveva-azure-client-test-support INTERFACE)
+target_include_directories(aveva-azure-client-test-support INTERFACE "${PROJECT_SOURCE_DIR}/libs/AzureClient/tests")
+target_link_libraries(aveva-azure-client-test-support INTERFACE aveva::azure-client)
 
 # Installed config package for aveva-http-client (the library does not ship a config template of its own).
 include(CMakePackageConfigHelpers)

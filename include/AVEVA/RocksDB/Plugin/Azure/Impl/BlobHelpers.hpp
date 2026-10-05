@@ -34,6 +34,10 @@ struct BlobHelpers {
     static std::pair<int64_t, int64_t> RoundToBeginningOfNearestPage(int64_t size);
     static AzureClient::RetryOptions CreateRetryOptions();
     static AzureClient::BlobServiceClientOptions CreateServiceClientOptions(const std::string& storageAccountUrl);
+    // Wraps `credential` so that in-flight token refreshes keep `runtime` (and its IHttpClient) alive. Throws
+    // std::logic_error when `runtime` is not owned by a shared_ptr, since the guarantee could not be provided.
+    static std::shared_ptr<AzureClient::ITokenCredential>
+    BindToRuntime(ClientRuntime& runtime, std::shared_ptr<AzureClient::ITokenCredential> credential);
     static std::shared_ptr<AzureClient::ITokenCredential> CreateClientSecretCredential(ClientRuntime& runtime,
                                                                                        const std::string& tenantId,
                                                                                        const std::string& clientId,

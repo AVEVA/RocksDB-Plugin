@@ -115,7 +115,7 @@ git config --system core.longpaths true
 ### Azure client (OpenSSL) build failures on Linux
 Ensure OpenSSL development headers are installed:
 ```bash
-sudo apt-get install libssl-dev libcurl4-openssl-dev
+sudo apt-get install libssl-dev
 ```
 
 ---

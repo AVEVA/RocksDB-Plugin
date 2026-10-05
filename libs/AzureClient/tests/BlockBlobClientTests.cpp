@@ -30,6 +30,7 @@
 #include <future>
 #include <ios>
 #include <istream>
+#include <limits>
 #include <optional>
 #include <regex>
 #include <span>
@@ -1668,8 +1669,16 @@ namespace
             "https://src.example.com/c/b",
             zeroLength,
             rejected);
+        AVEVA::AzureClient::StageBlockFromUriOptions overflow;
+        overflow.SourceOffset = std::numeric_limits<std::uint64_t>::max() - 3U;
+        overflow.SourceLength = 8;
+        StartStageBlockFromUriAsyncExpectingInvalidArgument(client,
+            blockId,
+            "https://src.example.com/c/b",
+            overflow,
+            rejected);
         httpClient.Poll();
-        EXPECT_EQ(rejected, 4);
+        EXPECT_EQ(rejected, 5);
         EXPECT_EQ(httpClient.RequestCount(), sent);
     }
 

@@ -13,6 +13,9 @@
 - Reads of a blob that keeps changing now fail with an IOError after 5 refreshes instead of looping forever.
 - Lease IDs are random UUIDs generated once per acquisition; lease renewal no longer blocks `LockFile`/`UnlockFile`.
 - Directory listings read file sizes from blob metadata in the listing instead of one request per blob.
+- `aveva-rocksdb-plugin-azure-impl` exports `_WIN32_WINNT=0x0A00` as a PUBLIC compile definition on Windows (Boost.Asio is part of its public headers). Consumers must not target an older Windows version; `ClientRuntime.hpp` fails with `#error` if `_WIN32_WINNT` is lower than `0x0A00`.
+- The TLS trust store can be overridden with the standard `SSL_CERT_FILE` / `SSL_CERT_DIR` environment variables; when set, they are used instead of the exported Windows root certificates.
+- Shared Key signing now signs the percent-encoded request path as sent and orders `x-ms-*` headers with the service's culture-aware comparison. Status-0 transport failures that cannot succeed on retry (invalid arguments, authentication failures, malformed responses) map to non-retryable errors.
 
 ### Dependency updates
 - vcpkg `builtin-baseline` `9e593bb` -> `c748cb4`: rocksdb 11.1.2 -> 11.8.1, boost 1.91.0 -> 1.92.0, openssl 3.6.3 -> 3.6.5, gtest 1.17.0 -> 1.18.0, libxml2 2.15.3 -> 2.15.4 (zstd unchanged at 1.5.7). Dropped `azure-identity-cpp` and `azure-storage-blobs-cpp`.

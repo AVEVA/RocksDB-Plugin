@@ -17,3 +17,6 @@ inside the libraries are kept for reference and standalone builds only.
    files (CI pipelines, `CMakePresets.json`, `vcpkg-configuration.json`, `CHANGELOG.md`, backlog files).
 2. Keep the Apache-2.0 `LICENSE` file.
 3. Update the version column above, rebuild and run `ctest -E Integration`.
+4. The plugin tests reuse `FakeHttpClient.hpp` and `TestFixtures.hpp` from `libs/AzureClient/tests` through the
+   `aveva-azure-client-test-support` INTERFACE target (`infrastructure/cmake/AvevaClientLibraries.cmake`). Check
+   that both headers still exist after a sync.

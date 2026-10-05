@@ -37,8 +37,8 @@ namespace AVEVA::Private
             std::shared_ptr<ConnectionPool<Stream>> pool,
             ConnectionKey<Stream> key,
             beast::flat_buffer buffer = {})
-            : m_tlsContext(std::move(tlsContext)), m_stream(std::move(stream)),
-              m_resolver(m_stream->get_executor()), m_timer(m_stream->get_executor()),
+            : m_tlsContext(std::move(tlsContext)), m_executor(stream->get_executor()), m_stream(std::move(stream)),
+              m_resolver(m_executor), m_timer(m_executor),
               m_completion(std::move(completion)), m_options(options), m_pool(std::move(pool)),
               m_key(std::move(key)), m_buffer(std::move(buffer))
         {
@@ -51,6 +51,8 @@ namespace AVEVA::Private
             {
                 return;
             }
+            // The handler runs on whichever thread emits the signal, so it must only touch immutable or
+            // atomic state: it posts to the operation's strand, where Cancel() may safely use the stream.
             slot.assign([weak = this->weak_from_this()](asio::cancellation_type cancellationType)
             {
                 if (cancellationType == asio::cancellation_type::none)
@@ -245,9 +247,12 @@ namespace AVEVA::Private
 
         // A pooled connection may have been closed by the peer while idle. If nothing has been
         // parsed yet, it is safe to silently retry once on a brand-new connection.
-        bool MaybeRetryAfterReuseFailure()
+        // Because the request may already have been processed by the time the failure is seen, a request
+        // that could have reached the server is only re-sent when its method is idempotent.
+        bool MaybeRetryAfterReuseFailure(bool requestMayHaveBeenSent)
         {
-            if (IsCancellationRequested() || !m_reused || m_retried || m_parser->got_some())
+            if (IsCancellationRequested() || !m_reused || m_retried || m_parser->got_some() ||
+                (requestMayHaveBeenSent && !IsIdempotentMethod(m_request.method())))
             {
                 return false;
             }
@@ -256,10 +261,9 @@ namespace AVEVA::Private
 
             boost::system::error_code ignored;
             beast::get_lowest_layer(*m_stream).socket().close(ignored);
-            auto executor = m_stream->get_executor();
             if constexpr (std::is_same_v<Stream, TlsStream>)
             {
-                m_stream = std::make_unique<TlsStream>(executor, *m_tlsContext);
+                m_stream = std::make_unique<TlsStream>(m_executor, *m_tlsContext);
                 if (!ConfigureTlsForHost())
                 {
                     return true;
@@ -267,7 +271,7 @@ namespace AVEVA::Private
             }
             else
             {
-                m_stream = std::make_unique<PlainStream>(executor);
+                m_stream = std::make_unique<PlainStream>(m_executor);
             }
             m_buffer.consume(m_buffer.size());
             ResetParser();
@@ -280,6 +284,22 @@ namespace AVEVA::Private
                 self->OnResolve(error, std::move(results));
             });
             return true;
+        }
+
+        static bool IsIdempotentMethod(http::verb method) noexcept
+        {
+            switch (method)
+            {
+            case http::verb::get:
+            case http::verb::head:
+            case http::verb::options:
+            case http::verb::trace:
+            case http::verb::put:
+            case http::verb::delete_:
+                return true;
+            default:
+                return false;
+            }
         }
 
         void ResetParser()
@@ -362,7 +382,7 @@ namespace AVEVA::Private
             }
             http::async_write(*m_stream,
                 m_request,
-                [self = this->shared_from_this()](boost::system::error_code error, std::size_t)
+                [self = this->shared_from_this()](boost::system::error_code error, std::size_t bytesWritten)
             {
                 if (self->finished_)
                 {
@@ -374,7 +394,7 @@ namespace AVEVA::Private
                 }
                 if (error)
                 {
-                    if (self->MaybeRetryAfterReuseFailure())
+                    if (self->MaybeRetryAfterReuseFailure(bytesWritten != 0))
                     {
                         return;
                     }
@@ -419,7 +439,8 @@ namespace AVEVA::Private
                 {
                     return Fail(HttpClientError::ResponseTooLarge);
                 }
-                if (MaybeRetryAfterReuseFailure())
+                // The request was fully written before the read started.
+                if (MaybeRetryAfterReuseFailure(true))
                 {
                     return;
                 }
@@ -438,7 +459,9 @@ namespace AVEVA::Private
                 return Read();
             }
 
-            const bool keepAlive = m_parser->get().keep_alive();
+            // The parser-level check also rejects EOF-delimited bodies; leftover bytes would be mistaken for the
+            // next response on a pooled connection.
+            const bool keepAlive = m_parser->keep_alive() && m_buffer.size() == 0;
             auto message = m_parser->release();
             HttpResponse response;
             response = HttpResponse(message.result_int(), {}, std::move(message.body()));
@@ -510,8 +533,7 @@ namespace AVEVA::Private
             {
                 return;
             }
-            auto executor = m_stream->get_executor();
-            asio::post(executor, [self = this->shared_from_this()]()
+            asio::post(m_executor, [self = this->shared_from_this()]()
             {
                 self->Cancel();
             });
@@ -532,6 +554,9 @@ namespace AVEVA::Private
         }
 
         std::shared_ptr<asio::ssl::context> m_tlsContext;
+        // The operation's strand, fixed at construction so that threads other than the strand (the
+        // cancellation handler) can post to it without touching m_stream, which is replaced and moved on it.
+        typename Stream::executor_type m_executor;
         std::unique_ptr<Stream> m_stream;
         Tcp::resolver m_resolver;
         asio::steady_timer m_timer;

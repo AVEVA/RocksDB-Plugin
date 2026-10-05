@@ -40,6 +40,96 @@ namespace AVEVA::AzureClient::Private
             std::vector<std::pair<std::string, std::string>> Query;
         };
 
+        // The storage service sorts canonicalized x-ms-* headers with .NET en-US culture-aware ordering, which
+        // is not byte order ('-' is ignored at the primary level, '_' sorts before digits). These sort-key
+        // tables and the comparator are ported from the Azure SDK for C++ (MIT, Microsoft Corporation),
+        // sdk/storage/azure-storage-common/src/shared_key_policy.cpp.
+        constexpr std::array<int, 128> CultureTableLevel0{
+            0x0,   0x0,   0x0,   0x0,   0x0,   0x0,   0x0,   0x0,   0x0,   0x0,   0x0,   0x0,   0x0,   0x0,
+            0x0,   0x0,   0x0,   0x0,   0x0,   0x0,   0x0,   0x0,   0x0,   0x0,   0x0,   0x0,   0x0,   0x0,
+            0x0,   0x0,   0x0,   0x0,   0x0,   0x71c, 0x0,   0x71f, 0x721, 0x723, 0x725, 0x0,   0x0,   0x0,
+            0x72d, 0x803, 0x0,   0x0,   0x733, 0x0,   0xd03, 0xd1a, 0xd1c, 0xd1e, 0xd20, 0xd22, 0xd24, 0xd26,
+            0xd28, 0xd2a, 0x0,   0x0,   0x0,   0x0,   0x0,   0x0,   0x0,   0xe02, 0xe09, 0xe0a, 0xe1a, 0xe21,
+            0xe23, 0xe25, 0xe2c, 0xe32, 0xe35, 0xe36, 0xe48, 0xe51, 0xe70, 0xe7c, 0xe7e, 0xe89, 0xe8a, 0xe91,
+            0xe99, 0xe9f, 0xea2, 0xea4, 0xea6, 0xea7, 0xea9, 0x0,   0x0,   0x0,   0x743, 0x744, 0x748, 0xe02,
+            0xe09, 0xe0a, 0xe1a, 0xe21, 0xe23, 0xe25, 0xe2c, 0xe32, 0xe35, 0xe36, 0xe48, 0xe51, 0xe70, 0xe7c,
+            0xe7e, 0xe89, 0xe8a, 0xe91, 0xe99, 0xe9f, 0xea2, 0xea4, 0xea6, 0xea7, 0xea9, 0x0,   0x74c, 0x0,
+            0x750, 0x0};
+
+        [[nodiscard]] constexpr std::array<int, 128> MakeCultureTableLevel2()
+        {
+            std::array<int, 128> table{};
+            for (std::size_t index = 0x41; index <= 0x5a; ++index)
+            {
+                table.at(index) = 0x12;
+            }
+            return table;
+        }
+
+        [[nodiscard]] constexpr std::array<int, 128> MakeCultureTableLevel4()
+        {
+            std::array<int, 128> table{};
+            table.at(0x27) = 0x8012;
+            table.at(0x2d) = 0x8212;
+            return table;
+        }
+
+        constexpr std::array<int, 128> CultureTableLevel2 = MakeCultureTableLevel2();
+        constexpr std::array<int, 128> CultureTableLevel4 = MakeCultureTableLevel4();
+
+        [[nodiscard]] bool CultureAwareLess(std::string_view lhs, std::string_view rhs)
+        {
+            const std::array<const std::array<int, 128>*, 3> tables{&CultureTableLevel0,
+                &CultureTableLevel2,
+                &CultureTableLevel4};
+            const auto weightAt = [](const std::array<int, 128>& table, std::string_view text, std::size_t position)
+            {
+                if (position >= text.size())
+                {
+                    return 0x1;
+                }
+                const auto byte = static_cast<unsigned char>(text[position]);
+                return byte < table.size() ? table.at(byte) : 0;
+            };
+
+            std::size_t level = 0;
+            std::size_t i = 0;
+            std::size_t j = 0;
+            while (level < tables.size())
+            {
+                if (level == tables.size() - 1 && i != j)
+                {
+                    return i > j;
+                }
+                const int weight1 = weightAt(*tables.at(level), lhs, i);
+                const int weight2 = weightAt(*tables.at(level), rhs, j);
+                if (weight1 == 0x1 && weight2 == 0x1)
+                {
+                    i = 0;
+                    j = 0;
+                    ++level;
+                }
+                else if (weight1 == weight2)
+                {
+                    ++i;
+                    ++j;
+                }
+                else if (weight1 == 0)
+                {
+                    ++i;
+                }
+                else if (weight2 == 0)
+                {
+                    ++j;
+                }
+                else
+                {
+                    return weight1 < weight2;
+                }
+            }
+            return false;
+        }
+
         [[nodiscard]] ParsedUrl ParseUrl(std::string_view url)
         {
             ParsedUrl parsed;
@@ -51,7 +141,7 @@ namespace AVEVA::AzureClient::Private
             }
 
             const boost::urls::url_view& parsedUrl = parseResult.value();
-            parsed.Path = parsedUrl.encoded_path().empty() ? "/" : parsedUrl.encoded_path().decode({true});
+            parsed.Path = parsedUrl.encoded_path().empty() ? "/" : std::string{parsedUrl.encoded_path()};
             for (const auto& parameter : parsedUrl.encoded_params())
             {
                 parsed.Query.emplace_back(ToLowerAscii(parameter.key.decode({true})),
@@ -147,14 +237,17 @@ namespace AVEVA::AzureClient::Private
                 canonicalizedHeaderIndices.push_back(index);
             }
         }
-        // Sorting indices by a case-insensitive comparator on the original header names yields the same
-        // order as sorting lowercased copies would, without allocating a lowercase copy of every name.
-        std::ranges::stable_sort(canonicalizedHeaderIndices,
-            [&headers](std::size_t lhs, std::size_t rhs)
+        // Names are lowercased before comparing because the culture-aware tables only rank lowercase letters.
+        std::vector<std::string> lowercaseNames;
+        lowercaseNames.reserve(headers.size());
+        for (const HttpHeader& header : headers)
         {
-            return boost::algorithm::ilexicographical_compare(headers.at(lhs).GetName(),
-                headers.at(rhs).GetName(),
-                std::locale::classic());
+            lowercaseNames.push_back(ToLowerAscii(header.GetName()));
+        }
+        std::ranges::stable_sort(canonicalizedHeaderIndices,
+            [&lowercaseNames](std::size_t lhs, std::size_t rhs)
+        {
+            return CultureAwareLess(lowercaseNames.at(lhs), lowercaseNames.at(rhs));
         });
 
         std::string canonicalizedHeadersText;

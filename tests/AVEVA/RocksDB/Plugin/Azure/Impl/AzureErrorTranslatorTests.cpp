@@ -90,6 +90,32 @@ TEST(AzureErrorTranslatorTests, ConnectionFailureIsRetryableIOError) {
     EXPECT_TRUE(status.GetRetryable());
 }
 
+TEST(AzureErrorTranslatorTests, InvalidArgumentWithoutStatusIsNonRetryableInvalidArgument) {
+    auto status =
+        AzureErrorTranslator::IOStatusFromError(Failure(0, "", std::make_error_code(std::errc::invalid_argument)));
+    EXPECT_TRUE(status.IsInvalidArgument());
+    EXPECT_FALSE(status.GetRetryable());
+    EXPECT_EQ(status.ToString().find("Connection failure"), std::string::npos);
+}
+
+TEST(AzureErrorTranslatorTests, PermanentClientSideFailuresWithoutStatusAreNonRetryable) {
+    for (auto errc : {std::errc::bad_message, std::errc::value_too_large}) {
+        auto status = AzureErrorTranslator::IOStatusFromError(Failure(0, "", std::make_error_code(errc)));
+        EXPECT_TRUE(status.IsIOError());
+        EXPECT_FALSE(status.GetRetryable());
+        EXPECT_EQ(status.ToString().find("Connection failure"), std::string::npos);
+    }
+}
+
+TEST(AzureErrorTranslatorTests, RejectedCredentialsWithoutStatusAreNonRetryable) {
+    auto status =
+        AzureErrorTranslator::IOStatusFromError(Failure(0, "", std::make_error_code(std::errc::permission_denied)));
+    EXPECT_TRUE(status.IsIOError());
+    EXPECT_FALSE(status.GetRetryable());
+    EXPECT_NE(status.ToString().find("Authentication failed"), std::string::npos);
+    EXPECT_FALSE(AzureErrorTranslator::IsTransient(0, std::make_error_code(std::errc::permission_denied)));
+}
+
 TEST(AzureErrorTranslatorTests, StatusTextIncludesCodeAndMessage) {
     auto text = AzureErrorTranslator::IOStatusFromError(Failure(500, "InternalError")).ToString();
     EXPECT_NE(text.find("InternalError"), std::string::npos);

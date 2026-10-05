@@ -728,7 +728,7 @@ TEST(BlobRequestHelpersTests, SharedKeyAuthorization_KnownAnswerVectorsMatchInde
                     {"Range", "bytes=1-3"},
                 },
             .Body = "",
-            .ExpectedAuthorization = "SharedKey storageaccount:pdXXrBUZyE2qjcRUSf6NX3KB4v/tJVMLd0dHWFbtKZ8=",
+            .ExpectedAuthorization = "SharedKey storageaccount:RRz8HIx1QCyRXmSRoclBHAGSviMjbDbPzYyxnnl72VA=",
         },
         {
             .Name = "PUT",
@@ -776,7 +776,7 @@ TEST(BlobRequestHelpersTests, SharedKeyAuthorization_KnownAnswerVectorsMatchInde
                     {"If-Modified-Since", "Sat, 05 Nov 1994 08:49:37 GMT"},
                 },
             .Body = "",
-            .ExpectedAuthorization = "SharedKey storageaccount:qNFQoQmPOxfKk/+i1zuXvQCnM5PDSujWD/rozWAf9jI=",
+            .ExpectedAuthorization = "SharedKey storageaccount:/jcIn141mdTeJVNSo/mDdDy0DesOllUXRHbgKkBWAZA=",
         },
     };
 
@@ -944,7 +944,7 @@ namespace
 TEST(BlobRequestHelpersTests, SharedKeySigner_IsReusableAndThreadSafe)
 {
     using AVEVA::AzureClient::Private::SharedKeySigner;
-    constexpr std::string_view Expected = "SharedKey storageaccount:pdXXrBUZyE2qjcRUSf6NX3KB4v/tJVMLd0dHWFbtKZ8=";
+    constexpr std::string_view Expected = "SharedKey storageaccount:RRz8HIx1QCyRXmSRoclBHAGSviMjbDbPzYyxnnl72VA=";
 
     const SharedKeySigner signer{"storageaccount", "MDEyMzQ1Njc4OWFiY2RlZg=="};
     const AVEVA::HttpRequest request = MakeGoldenGetRequest();
@@ -1067,4 +1067,29 @@ TEST(SharedKeyCanonicalizationTests, RepeatedHeadersAndQueryParametersAreGrouped
     const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
     EXPECT_NE(toSign.find("x-ms-a:first\nx-ms-meta-k:v1,v2\n"), std::string::npos) << toSign;
     EXPECT_NE(toSign.find("/account/container/blob\na:y,z\nb:2\ncomp:list"), std::string::npos) << toSign;
+}
+
+TEST(SharedKeyCanonicalizationTests, HeadersAreOrderedWithCultureAwareRules)
+{
+    AVEVA::HttpRequest request;
+    request.SetMethod(HttpMethod::Get);
+    request.SetUrl("https://account.blob.core.windows.net/container/blob");
+    for (const char* name : {"x-ms-meta-a1", "x-ms-meta-b-c", "x-ms-meta-a_", "x-ms-meta-bc"})
+    {
+        request.AddHeader(AVEVA::HttpHeader{name, "v"});
+    }
+
+    const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
+    EXPECT_NE(toSign.find("x-ms-meta-a_:v\nx-ms-meta-a1:v\nx-ms-meta-bc:v\nx-ms-meta-b-c:v\n"), std::string::npos)
+        << toSign;
+}
+
+TEST(SharedKeyCanonicalizationTests, ResourcePathIsUsedAsSentOnTheWire)
+{
+    AVEVA::HttpRequest request;
+    request.SetMethod(HttpMethod::Get);
+    request.SetUrl("https://account.blob.core.windows.net/c/a%2Bb%20c.txt?x=1%202");
+
+    const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
+    EXPECT_NE(toSign.find("/account/c/a%2Bb%20c.txt\nx:1 2"), std::string::npos) << toSign;
 }

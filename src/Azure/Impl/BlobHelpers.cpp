@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <memory>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
@@ -110,6 +111,16 @@ AzureClient::BlobServiceClientOptions BlobHelpers::CreateServiceClientOptions(co
 }
 
 std::shared_ptr<AzureClient::ITokenCredential>
+BlobHelpers::BindToRuntime(ClientRuntime& runtime, std::shared_ptr<AzureClient::ITokenCredential> credential) {
+    // Token refreshes can still be in flight when the filesystem goes away; they must keep the HTTP client alive.
+    auto owner = runtime.weak_from_this().lock();
+    if (!owner) {
+        throw std::logic_error("ClientRuntime must be owned by a shared_ptr to bind credentials to it.");
+    }
+    return std::make_shared<RuntimeBoundCredential>(std::move(owner), std::move(credential));
+}
+
+std::shared_ptr<AzureClient::ITokenCredential>
 BlobHelpers::CreateClientSecretCredential(ClientRuntime& runtime, const std::string& tenantId,
                                           const std::string& clientId, const std::string& clientSecret) {
     AzureClient::ClientSecretCredentialOptions options;
@@ -117,8 +128,8 @@ BlobHelpers::CreateClientSecretCredential(ClientRuntime& runtime, const std::str
     options.ClientId = clientId;
     options.ClientSecret = clientSecret;
     options.Retry = CreateRetryOptions();
-    return std::make_shared<AzureClient::CachingTokenCredential>(
-        std::make_shared<AzureClient::ClientSecretCredential>(runtime.HttpClient(), std::move(options)));
+    return std::make_shared<AzureClient::CachingTokenCredential>(BindToRuntime(
+        runtime, std::make_shared<AzureClient::ClientSecretCredential>(runtime.HttpClient(), std::move(options))));
 }
 
 std::shared_ptr<AzureClient::ITokenCredential>
@@ -131,18 +142,13 @@ BlobHelpers::CreatePipelinesCredential(ClientRuntime& runtime, const std::string
     options.SystemAccessToken = systemAccessToken;
     options.MaxRetries = Configuration::MaxClientRetries;
     return std::make_shared<AzureClient::CachingTokenCredential>(
-        std::make_shared<AzurePipelinesCredential>(runtime.HttpClient(), std::move(options)));
+        BindToRuntime(runtime, std::make_shared<AzurePipelinesCredential>(runtime.HttpClient(), std::move(options))));
 }
 
 std::shared_ptr<AzureClient::ITokenCredential>
 BlobHelpers::CreateChainedCredential(ClientRuntime& runtime, const Models::ChainedCredentialInfo& chainedCredential) {
-    std::shared_ptr<AzureClient::ITokenCredential> chain =
-        std::make_shared<ChainedTokenCredential>(CreateCredentialSources(runtime, chainedCredential));
-    // Token refreshes can still be in flight when the filesystem goes away; they must keep the HTTP client alive.
-    if (auto owner = runtime.weak_from_this().lock()) {
-        chain = std::make_shared<RuntimeBoundCredential>(std::move(owner), std::move(chain));
-    }
-    return std::make_shared<AzureClient::CachingTokenCredential>(std::move(chain));
+    return std::make_shared<AzureClient::CachingTokenCredential>(BindToRuntime(
+        runtime, std::make_shared<ChainedTokenCredential>(CreateCredentialSources(runtime, chainedCredential))));
 }
 
 std::vector<std::shared_ptr<AzureClient::ITokenCredential>>

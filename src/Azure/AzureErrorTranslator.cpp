@@ -55,10 +55,20 @@ rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const RequestFailedExc
     using rocksdb::IOStatus;
 
     const std::string text = DescribeFailure(error);
+    const std::error_code& code = error.Code;
     switch (error.StatusCode) {
     case 0:
-        if (IsTransportTimeout(error.Code)) {
+        if (IsTransportTimeout(code)) {
             return Retryable(IOStatus::TimedOut(text));
+        }
+        if (code == std::errc::invalid_argument) {
+            return IOStatus::InvalidArgument("Invalid request or configuration: " + text);
+        }
+        if (code == std::errc::permission_denied) {
+            return IOStatus::IOError("Authentication failed: " + text);
+        }
+        if (!IsTransient(error.StatusCode, code)) {
+            return IOStatus::IOError("Request failed: " + text);
         }
         return Retryable(IOStatus::IOError("Connection failure: " + text));
     case HttpStatus::Forbidden:
@@ -78,10 +88,10 @@ bool AzureErrorTranslator::IsTransient(const RequestFailedException& error) {
 bool AzureErrorTranslator::IsTransient(unsigned int statusCode, const std::error_code& code) {
     switch (statusCode) {
     case 0:
-        // Status 0 also covers requests rejected client-side (bad arguments, unparsable responses), which
-        // would fail the same way again.
+        // Status 0 also covers requests rejected client-side (bad arguments, unparsable responses) and
+        // credential failures (a rejected secret maps to permission_denied), which would fail the same way again.
         return code != std::errc::invalid_argument && code != std::errc::bad_message &&
-               code != std::errc::value_too_large;
+               code != std::errc::value_too_large && code != std::errc::permission_denied;
     case HttpStatus::RequestTimeout:
     case HttpStatus::TooManyRequests:
         return true;

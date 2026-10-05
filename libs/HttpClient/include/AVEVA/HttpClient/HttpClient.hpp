@@ -75,6 +75,9 @@ namespace AVEVA
                 {
                     auto executor = boost::asio::get_associated_executor(handler, get_executor());
                     auto allocator = boost::asio::get_associated_allocator(handler);
+                    // Held for the whole operation so the handler's executor cannot run out of work (and let
+                    // run() return) before the completion is dispatched.
+                    auto work = boost::asio::make_work_guard(executor);
                     auto cancellationSlot = boost::asio::get_associated_cancellation_slot(handler, boost::asio::cancellation_slot());
                     if (cancellationSlot.is_connected() && !opts.GetCancellationSlot().is_connected())
                     {
@@ -83,10 +86,9 @@ namespace AVEVA
 
                     SendAsyncErased(std::move(req),
                         CompletionHandler(
-                            [executor, allocator, handler = std::forward<decltype(handler)>(handler)](
+                            [executor, allocator, work = std::move(work), handler = std::forward<decltype(handler)>(handler)](
                                 std::error_code ec, HttpResponse response) mutable
                             {
-                                auto work = boost::asio::make_work_guard(executor);
                                 boost::asio::dispatch(executor,
                                     boost::asio::bind_allocator(allocator,
                                         [handler = std::move(handler), ec, response = std::move(response),

@@ -15,6 +15,8 @@ namespace AVEVA
         boost::asio::cancellation_slot GetCancellationSlot() const noexcept;
         void SetTimeout(std::chrono::milliseconds timeout) noexcept;
         void SetResponseBodyLimit(std::uint64_t responseBodyLimit) noexcept;
+        // Asio does not synchronize signal emission with slot clearing. The signal must therefore be emitted on
+        // the completion executor, or otherwise serialized with the completion of the request.
         void SetCancellationSlot(boost::asio::cancellation_slot cancellationSlot) noexcept;
 
       private:

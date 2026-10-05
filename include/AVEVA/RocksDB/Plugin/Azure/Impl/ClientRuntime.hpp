@@ -18,6 +18,10 @@
 #include <utility>
 
 #ifdef _WIN32
+// The target is built with _WIN32_WINNT=0x0A00 (exported publicly) and Boost.Asio's ABI depends on it.
+#if defined(_WIN32_WINNT) && _WIN32_WINNT < 0x0A00
+#error "aveva-rocksdb-plugin-azure-impl requires _WIN32_WINNT >= 0x0A00 (Windows 10)."
+#endif
 // Boost.Asio pulls in <windows.h>, whose macros clash with RocksDB method names (mirrors rocksdb/env.h).
 #undef DeleteFile
 #undef GetCurrentTime
