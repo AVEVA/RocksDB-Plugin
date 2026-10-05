@@ -14,6 +14,7 @@ add_library(aveva-rocksdb-plugin-azure-impl
     AzureContainerClient.cpp
     ClientRuntime.cpp
     TokenCredentials.cpp
+    Environment.cpp
 )
 add_library(aveva::rocksdb-plugin-azure-impl ALIAS aveva-rocksdb-plugin-azure-impl)
 set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../../../include")
@@ -39,6 +40,7 @@ target_sources(aveva-rocksdb-plugin-azure-impl
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/AzureContainerClient.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/TokenCredentials.hpp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/Environment.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 )
 install(TARGETS aveva-rocksdb-plugin-azure-impl

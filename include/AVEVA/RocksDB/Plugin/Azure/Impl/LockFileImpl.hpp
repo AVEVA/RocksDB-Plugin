@@ -8,6 +8,7 @@
 #include <boost/log/trivial.hpp>
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
@@ -20,6 +21,10 @@ class LockFileImpl
     std::chrono::seconds m_leaseLength;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
     std::string m_fileName;
+    // Serializes Lock/Renew/Unlock so the renewal thread can renew without holding the filesystem's lock list mutex.
+    mutable std::mutex m_ioMutex;
+
+    void RenewLocked() const;
 
   public:
     LockFileImpl(std::shared_ptr<ClientRuntime> runtime, std::unique_ptr<AzureClient::PageBlobClient> file,
@@ -28,6 +33,8 @@ class LockFileImpl
                  std::string fileName);
     bool Lock();
     void Renew() const;
+    // Renews the lease unless it was released concurrently; returns false when there was nothing to renew.
+    [[nodiscard]] bool RenewIfLocked() const;
     void Unlock();
 
     [[nodiscard]] std::chrono::seconds TimeSinceLastRenewal() const;

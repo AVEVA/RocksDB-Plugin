@@ -38,10 +38,13 @@ bool HasEnvironmentVariable(const char* name) {
 // OpenSSL does not consult the Windows certificate store, so unless SSL_CERT_FILE / SSL_CERT_DIR point it at
 // a CA bundle, export the trusted root certificates of the current user (which include the machine roots) into
 // a temporary PEM file that the HTTP client loads while it is being constructed.
-std::optional<std::filesystem::path> ExportWindowsRootCertificates() {
+//
+// Limits: only the ROOT store is exported (intermediate CAs and certificates added after the first call are not
+// seen) and revocation is not checked. Set SSL_CERT_FILE/SSL_CERT_DIR to override.
+std::string BuildWindowsRootCertificatePem() {
     HCERTSTORE store = CertOpenSystemStoreW(0, L"ROOT");
     if (store == nullptr) {
-        return std::nullopt;
+        return {};
     }
 
     std::string pem;
@@ -61,7 +64,12 @@ std::optional<std::filesystem::path> ExportWindowsRootCertificates() {
         }
     }
     CertCloseStore(store, 0);
+    return pem;
+}
 
+// Enumerating the store is the expensive part, so it happens once per process (thread-safe static).
+std::optional<std::filesystem::path> ExportWindowsRootCertificates() {
+    static const std::string pem = BuildWindowsRootCertificatePem();
     if (pem.empty()) {
         return std::nullopt;
     }

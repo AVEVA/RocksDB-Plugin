@@ -57,6 +57,8 @@ class BlobFilesystemImpl {
     std::unordered_map<std::string, std::shared_ptr<Core::FileCache>, Core::StringHash, Core::StringEqual> m_fileCaches;
     std::mutex m_lockFilesMutex;
     boost::intrusive::list<LockFileImpl, boost::intrusive::constant_time_size<false>> m_locks;
+    // Parallel to m_locks; lets the renewal thread keep locks alive while it renews outside m_lockFilesMutex.
+    std::vector<std::weak_ptr<LockFileImpl>> m_renewableLocks;
     std::stop_source m_filesystemStopSource;
     std::jthread m_lockRenewalThread;
 

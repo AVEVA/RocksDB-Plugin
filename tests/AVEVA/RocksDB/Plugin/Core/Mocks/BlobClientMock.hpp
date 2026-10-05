@@ -18,6 +18,7 @@ class BlobClientMock : public BlobClient {
     MOCK_METHOD(int64_t, DownloadTo, (std::span<char> buffer, int64_t blobOffset, int64_t length), (override));
     MOCK_METHOD(void, UploadPages, (const std::span<char> buffer, int64_t blobOffset), (override));
     MOCK_METHOD(std::string, GetEtag, (), (override));
+    MOCK_METHOD(BlobMetadata, GetMetadata, (), (override));
     MOCK_METHOD(int64_t, Download,
                 (std::span<char> buffer, int64_t blobOffset, int64_t length, const std::string& ifMatch), (override));
 };

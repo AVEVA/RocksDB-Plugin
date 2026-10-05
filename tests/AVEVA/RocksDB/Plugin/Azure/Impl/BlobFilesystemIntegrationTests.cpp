@@ -3,17 +3,22 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/AsyncReadRequest.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
 #include "IntegrationTestHelpers.hpp"
 
+#include <AVEVA/AzureClient/PageBlobClient.hpp>
 #include <boost/asio/use_future.hpp>
 #include <gtest/gtest.h>
 
 #include <algorithm>
-
+#include <chrono>
+#include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 using AVEVA::RocksDB::Plugin::Azure::Impl::BlobFilesystemImpl;
@@ -1283,4 +1288,56 @@ TEST_F(BlobFilesystemIntegrationTests, ReadAsync_MultipleRequests_PollDeliversDa
 
     // Cleanup
     EXPECT_TRUE(m_filesystem->DeleteFile(blobName));
+}
+
+TEST_F(BlobFilesystemIntegrationTests, ReadableFile_CachedSst_IsServedFromCacheAfterBlobDeleted) {
+    // Arrange - Only SST files are cached, and the cache downloads a file in the background on its second access.
+    const auto cacheDir = std::filesystem::temp_directory_path() / ("aveva_cache_hit_" + GenerateRandomBlobName());
+    std::filesystem::create_directories(cacheDir);
+    struct CacheDirCleanup {
+        std::filesystem::path Path;
+        ~CacheDirCleanup() {
+            std::error_code ec;
+            std::filesystem::remove_all(Path, ec);
+        }
+    } cleanup{cacheDir};
+
+    const auto cacheDirString = cacheDir.string();
+    BlobFilesystemImpl filesystem(m_ioContext.Get(), *m_credentials, std::nullopt, Configuration::PageBlob::DefaultSize,
+                                  Configuration::PageBlob::DefaultBufferSize, m_logger,
+                                  std::string_view(cacheDirString));
+
+    const auto blobName = GenerateRandomBlobName("cache-hit") + ".sst";
+    const auto path = m_containerPrefix + "/" + blobName;
+    const std::vector<char> data(1024, 'C');
+    {
+        auto writer = filesystem.CreateWriteableFile(path);
+        writer.Append(data);
+        writer.Sync();
+    }
+    auto file = filesystem.CreateReadableFile(path);
+
+    // Act - Poll until the background download has made the file available.
+    std::vector<char> buffer(data.size());
+    std::optional<size_t> hit;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (!hit && std::chrono::steady_clock::now() < deadline) {
+        hit = file.TryReadFromCache(0, static_cast<int64_t>(buffer.size()), buffer.data());
+        if (!hit) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+    }
+
+    // Assert
+    ASSERT_TRUE(hit.has_value()) << "File was not cached within the timeout";
+    EXPECT_EQ(data.size(), *hit);
+    EXPECT_EQ(data, buffer);
+
+    // The blob is gone, so a further hit proves the data comes from the local cache and not from a download.
+    AVEVA::RocksDB::Plugin::Azure::Impl::Unwrap(
+        m_containerClient->GetPageBlobClient(blobName).DeleteAsync(boost::asio::use_future).get());
+    std::fill(buffer.begin(), buffer.end(), '\0');
+    const auto again = file.TryReadFromCache(0, static_cast<int64_t>(buffer.size()), buffer.data());
+    ASSERT_TRUE(again.has_value());
+    EXPECT_EQ(data, buffer);
 }

@@ -28,6 +28,11 @@ struct Plugin {
     /// (filesystem calls block until their I/O completes on `ioContext`).
     /// Registering the same storage accounts again replaces the previous settings, including the io_context,
     /// for filesystems created afterwards.
+    ///
+    /// WARNING: the registered factory holds a reference to `ioContext`. Destroying the context while it can
+    /// still create a filesystem (i.e. before the next Register call or process exit) leaves that reference
+    /// dangling; this cannot be detected. Token refreshes still in flight when a filesystem is destroyed keep
+    /// that filesystem's HTTP client alive until they complete, so keep the context running until they drain.
     /// </summary>
     static rocksdb::Status
     Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::shared_ptr<rocksdb::Env>* guard,

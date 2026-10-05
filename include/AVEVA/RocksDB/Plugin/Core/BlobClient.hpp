@@ -9,6 +9,14 @@
 #include <string>
 #include <utility>
 namespace AVEVA::RocksDB::Plugin::Core {
+/// <summary>
+/// Size and ETag of a blob, read together so that they describe the same version of the blob.
+/// </summary>
+struct BlobMetadata {
+    int64_t Size = 0;
+    std::string ETag;
+};
+
 class BlobClient {
   public:
     virtual ~BlobClient() = default;
@@ -68,6 +76,12 @@ class BlobClient {
     virtual std::string GetEtag() = 0;
 
     /// <summary>
+    /// Retrieves the blob's size and ETag. Implementations should use a single request; the default calls
+    /// GetSize and GetEtag, which may observe two different versions of the blob.
+    /// </summary>
+    virtual BlobMetadata GetMetadata() { return {GetSize(), GetEtag()}; }
+
+    /// <summary>
     /// Downloads a portion of the blob into the provided buffer, performing an ETag match check.
     /// </summary>
     /// <param name="buffer">A span of bytes where the downloaded data will be stored.</param>
@@ -116,16 +130,14 @@ class BlobClient {
     /// </summary>
     /// <param name="callback">Invoked exactly once with the outcome.</param>
     virtual void GetMetadataAsync(MetadataCallback callback) {
-        int64_t size = 0;
-        std::string etag;
+        BlobMetadata metadata;
         std::exception_ptr error;
         try {
-            size = GetSize();
-            etag = GetEtag();
+            metadata = GetMetadata();
         } catch (...) {
             error = std::current_exception();
         }
-        callback(error, size, std::move(etag));
+        callback(error, metadata.Size, std::move(metadata.ETag));
     }
 };
 } // namespace AVEVA::RocksDB::Plugin::Core

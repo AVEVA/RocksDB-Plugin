@@ -219,6 +219,28 @@ TEST_F(FileCacheTests, ReadFileFromCache) {
     ASSERT_EQ(std::string_view(buffer.begin(), buffer.end()), fileData);
 }
 
+TEST_F(FileCacheTests, EmptyBlobIsDownloadedWithZeroLength) {
+    // Arrange
+    std::atomic<int64_t> lastLength{-1};
+    EXPECT_CALL(*m_containerClient, GetBlobClient("1.sst")).WillRepeatedly([&lastLength](const std::string&) {
+        auto blob = std::make_unique<BlobClientMock>();
+        ON_CALL(*blob, GetSize()).WillByDefault(Return(0));
+        ON_CALL(*blob, DownloadTo(Matcher<const std::string&>(_), _, _))
+            .WillByDefault([&lastLength](const std::string&, int64_t, int64_t length) { lastLength = length; });
+        return blob;
+    });
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
+        return std::make_unique<FileMock>();
+    });
+
+    // Act
+    EnsureReadFromCache("1.sst");
+
+    // Assert
+    EXPECT_EQ(0, lastLength);
+    EXPECT_EQ(0U, m_cache.CacheSize());
+}
+
 TEST_F(FileCacheTests, CacheSizeExceeded) {
     // Arrange
     const auto fileSize = static_cast<size_t>(20000);

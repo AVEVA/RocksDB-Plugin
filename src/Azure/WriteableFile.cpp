@@ -22,7 +22,7 @@ rocksdb::IOStatus WriteableFile::Append(const rocksdb::Slice& data, const rocksd
     } catch (const RequestFailedException& ex) {
         BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
                                         << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -39,7 +39,7 @@ rocksdb::IOStatus WriteableFile::Close(const rocksdb::IOOptions&, rocksdb::IODeb
     } catch (const RequestFailedException& ex) {
         BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
                                         << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -56,7 +56,7 @@ rocksdb::IOStatus WriteableFile::Flush(const rocksdb::IOOptions&, rocksdb::IODeb
     } catch (const RequestFailedException& ex) {
         BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
                                         << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -73,7 +73,7 @@ rocksdb::IOStatus WriteableFile::Sync(const rocksdb::IOOptions&, rocksdb::IODebu
     } catch (const RequestFailedException& ex) {
         BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
                                         << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());

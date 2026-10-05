@@ -11,11 +11,16 @@ namespace AVEVA::RocksDB::Plugin::Azure {
 /// </summary>
 struct HttpStatus {
     static const constexpr unsigned int BadRequest = 400;
+    static const constexpr unsigned int Forbidden = 403;
     static const constexpr unsigned int NotFound = 404;
     static const constexpr unsigned int RequestTimeout = 408;
     static const constexpr unsigned int Conflict = 409;
     static const constexpr unsigned int PreconditionFailed = 412;
+    static const constexpr unsigned int TooManyRequests = 429;
+    static const constexpr unsigned int InternalServerError = 500;
+    static const constexpr unsigned int BadGateway = 502;
     static const constexpr unsigned int ServiceUnavailable = 503;
+    static const constexpr unsigned int GatewayTimeout = 504;
 };
 
 /// <summary>

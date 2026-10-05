@@ -3,6 +3,8 @@ set(AVEVA_ROCKSDB_PLUGIN_AZURE_IMPL_VERSION @PROJECT_VERSION@)
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
+find_dependency(aveva-rocksdb-plugin-core CONFIG REQUIRED)
+find_dependency(aveva-rocksdb-plugin-azure-models CONFIG REQUIRED)
 find_dependency(aveva-http-client CONFIG REQUIRED)
 find_dependency(aveva-azure-client CONFIG REQUIRED)
 find_dependency(boost_asio CONFIG REQUIRED)

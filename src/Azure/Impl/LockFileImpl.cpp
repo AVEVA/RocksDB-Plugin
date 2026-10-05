@@ -4,16 +4,15 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 
+#include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
 #include <boost/asio/use_future.hpp>
+#include <boost/uuid/random_generator.hpp>
+#include <boost/uuid/uuid_io.hpp>
 
-#include <array>
 #include <cassert>
-#include <cstdint>
-#include <cstdio>
 #include <optional>
-#include <random>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -22,21 +21,16 @@ using boost::log::trivial::severity_level;
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 namespace {
-// Azure requires proposed lease IDs to be GUID-formatted; build a random (version 4) GUID.
+// Azure requires proposed lease IDs to be GUID-formatted.
 std::string NewLeaseId() {
-    thread_local std::mt19937_64 engine{std::random_device{}()};
-    std::array<std::uint8_t, 16> bytes{};
-    for (auto& value : bytes) {
-        value = static_cast<std::uint8_t>(engine());
-    }
-    bytes[6] = static_cast<std::uint8_t>((bytes[6] & 0x0FU) | 0x40U);
-    bytes[8] = static_cast<std::uint8_t>((bytes[8] & 0x3FU) | 0x80U);
+    thread_local boost::uuids::random_generator generator;
+    return boost::uuids::to_string(generator());
+}
 
-    std::array<char, 37> text{};
-    std::snprintf(text.data(), text.size(), "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-                  bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9],
-                  bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
-    return std::string{text.data()};
+// A held lease (409) is ordinary contention that this loop exists to wait out, so it is retried like a transient
+// failure; every other client error (for example 403) cannot succeed on retry and fails fast.
+bool ShouldRetryAcquire(const AzureClient::BlobStorageError& error) {
+    return error.StatusCode == HttpStatus::Conflict || AzureErrorTranslator::IsTransient(error.StatusCode, error.Code);
 }
 } // namespace
 LockFileImpl::LockFileImpl(
@@ -56,6 +50,7 @@ LockFileImpl::LockFileImpl(
 }
 
 bool LockFileImpl::Lock() {
+    const std::scoped_lock lock(m_ioMutex);
     // Do not attempt to lock again when you already have a lock aquired.
     if (m_leaseId.has_value()) {
         BOOST_LOG_SEV(*m_logger, severity_level::debug)
@@ -68,20 +63,25 @@ bool LockFileImpl::Lock() {
     auto start = std::chrono::high_resolution_clock::now();
     auto end = std::chrono::high_resolution_clock::now();
     std::optional<std::string> lastError;
+    // The proposed ID is reused on every attempt: if an acquire succeeded but its response was lost, the retry
+    // with the same ID is accepted by the service instead of failing with a conflict until the lease expires.
+    const auto leaseId = NewLeaseId();
     while ((end - start) < m_leaseLength) {
         AzureClient::AcquireLeaseOptions options;
-        options.ProposedLeaseId = NewLeaseId();
+        options.ProposedLeaseId = leaseId;
         options.Duration = m_leaseLength;
-        const auto leaseId = options.ProposedLeaseId;
         auto result = m_file->AcquireLeaseAsync(std::move(options), boost::asio::use_future).get();
         if (result.has_value()) {
-            assert(result->Value().LeaseId == leaseId);
             m_leaseId = leaseId;
             lastError.reset();
             break;
         }
 
         lastError = result.error().Message.empty() ? result.error().Code.message() : result.error().Message;
+        if (!ShouldRetryAcquire(result.error())) {
+            end = std::chrono::high_resolution_clock::now();
+            break;
+        }
 
         // Avoid hammering the service while another owner holds the lease.
         static const constexpr auto retryDelay = std::chrono::milliseconds(250);
@@ -104,6 +104,20 @@ bool LockFileImpl::Lock() {
 }
 
 void LockFileImpl::Renew() const {
+    const std::scoped_lock lock(m_ioMutex);
+    RenewLocked();
+}
+
+bool LockFileImpl::RenewIfLocked() const {
+    const std::scoped_lock lock(m_ioMutex);
+    if (!m_leaseId.has_value()) {
+        return false;
+    }
+    RenewLocked();
+    return true;
+}
+
+void LockFileImpl::RenewLocked() const {
     if (!m_leaseId.has_value()) {
         throw std::runtime_error("Cannot renew lease that has not been acquired");
     }
@@ -125,6 +139,7 @@ void LockFileImpl::Renew() const {
 }
 
 void LockFileImpl::Unlock() {
+    const std::scoped_lock lock(m_ioMutex);
     if (!m_leaseId.has_value()) {
         throw std::runtime_error("Cannot release lease that has not been acquired");
     }

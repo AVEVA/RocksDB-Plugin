@@ -2,7 +2,9 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/Environment.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/TokenCredentials.hpp"
 
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
@@ -18,23 +20,11 @@
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 static const std::string g_sizeMetadata = "filesize";
 
-namespace {
-std::string GetEnvironmentValue(const char* name) {
-#ifdef _WIN32
-    char* buffer = nullptr;
-    std::size_t size = 0;
-    if (_dupenv_s(&buffer, &size, name) != 0 || buffer == nullptr) {
-        return {};
-    }
-    const std::unique_ptr<char, decltype(&std::free)> owner{buffer, &std::free};
-    return std::string{buffer};
-#else
-    const char* value = std::getenv(name); // NOLINT(concurrency-mt-unsafe)
-    return value == nullptr ? std::string{} : std::string{value};
-#endif
-}
+namespace {} // namespace
 
-void CreateIfNotExistsWithRetry(AzureClient::BlobContainerClient& client, int maxRetries = 5) {
+// Non-transient failures (e.g. 403) are rethrown immediately: retrying cannot fix them and only delays the error.
+void BlobHelpers::CreateContainerIfNotExists(AzureClient::BlobContainerClient& client, int maxRetries,
+                                             std::chrono::milliseconds baseDelay) {
     int retries = 1;
     while (true) {
         auto result = client.CreateIfNotExistsAsync(boost::asio::use_future).get();
@@ -42,15 +32,15 @@ void CreateIfNotExistsWithRetry(AzureClient::BlobContainerClient& client, int ma
             return;
         }
 
-        if (retries == maxRetries) {
-            ThrowRequestFailed(result.error());
+        const auto& error = result.error();
+        if (retries >= maxRetries || !AzureErrorTranslator::IsTransient(error.StatusCode, error.Code)) {
+            ThrowRequestFailed(error);
         }
 
         retries++;
-        std::this_thread::sleep_for(std::chrono::seconds(retries));
+        std::this_thread::sleep_for(baseDelay * retries);
     }
 }
-} // namespace
 
 void BlobHelpers::SetFileSize(AzureClient::BlobClient& client, int64_t size) {
     AzureClient::SetBlobMetadataOptions options;
@@ -146,6 +136,17 @@ BlobHelpers::CreatePipelinesCredential(ClientRuntime& runtime, const std::string
 
 std::shared_ptr<AzureClient::ITokenCredential>
 BlobHelpers::CreateChainedCredential(ClientRuntime& runtime, const Models::ChainedCredentialInfo& chainedCredential) {
+    std::shared_ptr<AzureClient::ITokenCredential> chain =
+        std::make_shared<ChainedTokenCredential>(CreateCredentialSources(runtime, chainedCredential));
+    // Token refreshes can still be in flight when the filesystem goes away; they must keep the HTTP client alive.
+    if (auto owner = runtime.weak_from_this().lock()) {
+        chain = std::make_shared<RuntimeBoundCredential>(std::move(owner), std::move(chain));
+    }
+    return std::make_shared<AzureClient::CachingTokenCredential>(std::move(chain));
+}
+
+std::vector<std::shared_ptr<AzureClient::ITokenCredential>>
+BlobHelpers::CreateCredentialSources(ClientRuntime& runtime, const Models::ChainedCredentialInfo& chainedCredential) {
     std::vector<std::shared_ptr<AzureClient::ITokenCredential>> sources;
 
     // Try to use user specified credentials to try to authenticate first.
@@ -159,9 +160,14 @@ BlobHelpers::CreateChainedCredential(ClientRuntime& runtime, const Models::Chain
             std::make_shared<AzureClient::ClientSecretCredential>(runtime.HttpClient(), std::move(options)));
     }
 
-    if (const auto managedIdentityId = chainedCredential.GetManagedIdentityId()) {
+    // Managed identity is always tried: the user-assigned identity when an id is supplied, otherwise the
+    // system-assigned one (the effective behavior before the SDK replacement). It only runs when the service
+    // principal above failed, so off-Azure hosts pay one failed IMDS probe at most.
+    {
         auto options = AzureClient::ManagedIdentityCredentialOptions::FromEnvironment();
-        options.ClientId = std::string(*managedIdentityId);
+        if (const auto managedIdentityId = chainedCredential.GetManagedIdentityId()) {
+            options.ClientId = std::string(*managedIdentityId);
+        }
         options.Retry = CreateRetryOptions();
         sources.push_back(
             std::make_shared<AzureClient::ManagedIdentityCredential>(runtime.HttpClient(), std::move(options)));
@@ -193,8 +199,7 @@ BlobHelpers::CreateChainedCredential(ClientRuntime& runtime, const Models::Chain
         }
     }
 
-    return std::make_shared<AzureClient::CachingTokenCredential>(
-        std::make_shared<ChainedTokenCredential>(std::move(sources)));
+    return sources;
 }
 
 std::string BlobHelpers::AccountNameFromUrl(const std::string& storageAccountUrl) {
@@ -224,7 +229,7 @@ std::shared_ptr<AzureClient::BlobContainerClient>
 BlobHelpers::GetContainerClient(const AzureClient::BlobServiceClient& blobServiceClient, const std::string& name) {
     auto blobContainerClient =
         std::make_shared<AzureClient::BlobContainerClient>(blobServiceClient.GetBlobContainerClient(name));
-    CreateIfNotExistsWithRetry(*blobContainerClient);
+    CreateContainerIfNotExists(*blobContainerClient);
     return blobContainerClient;
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

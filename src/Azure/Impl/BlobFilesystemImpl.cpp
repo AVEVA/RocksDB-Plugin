@@ -39,12 +39,14 @@ const constexpr int64_t g_maxCopyChunkSize = static_cast<int64_t>(4) * 1024 * 10
 /// Lists every blob in the container whose name starts with `options.Prefix`, following continuation markers,
 /// and invokes `onBlob` for each.
 /// </summary>
-void ForEachBlob(AzureClient::BlobContainerClient& container, AzureClient::ListBlobsOptions options,
-                 const std::function<void(const AzureClient::Models::BlobItem&)>& onBlob) {
+void ForEachBlobUntil(AzureClient::BlobContainerClient& container, AzureClient::ListBlobsOptions options,
+                      const std::function<bool(const AzureClient::Models::BlobItem&)>& onBlob) {
     while (true) {
         auto page = Unwrap(container.ListBlobsAsync(options, boost::asio::use_future).get());
         for (const auto& blob : page.Blobs) {
-            onBlob(blob);
+            if (onBlob(blob)) {
+                return;
+            }
         }
 
         if (page.NextMarker.empty()) {
@@ -53,6 +55,14 @@ void ForEachBlob(AzureClient::BlobContainerClient& container, AzureClient::ListB
 
         options.Marker = std::move(page.NextMarker);
     }
+}
+
+void ForEachBlob(AzureClient::BlobContainerClient& container, AzureClient::ListBlobsOptions options,
+                 const std::function<void(const AzureClient::Models::BlobItem&)>& onBlob) {
+    ForEachBlobUntil(container, std::move(options), [&onBlob](const AzureClient::Models::BlobItem& blob) {
+        onBlob(blob);
+        return false;
+    });
 }
 
 uint32_t ToListPageSize(int32_t sizeHint) { return static_cast<uint32_t>(std::clamp(sizeHint, 1, g_maxListPageSize)); }
@@ -297,6 +307,7 @@ std::shared_ptr<LockFileImpl> BlobFilesystemImpl::LockFile(const std::string& fi
                                                    std::string(realPath));
     if (lockFile->Lock()) {
         m_locks.push_back(*lockFile);
+        m_renewableLocks.push_back(lockFile);
         assert(lockFile->is_linked());
         return lockFile;
     } else {
@@ -307,9 +318,16 @@ std::shared_ptr<LockFileImpl> BlobFilesystemImpl::LockFile(const std::string& fi
 void BlobFilesystemImpl::UnlockFile(LockFileImpl& lock) {
     EnsureLiveness();
 
-    std::scoped_lock _(m_lockFilesMutex);
+    {
+        std::scoped_lock _(m_lockFilesMutex);
+        lock.unlink();
+        std::erase_if(m_renewableLocks, [&lock](const std::weak_ptr<LockFileImpl>& weak) {
+            const auto shared = weak.lock();
+            return !shared || shared.get() == &lock;
+        });
+    }
+    // Released outside the list mutex; LockFileImpl serializes this against an in-flight renewal.
     lock.Unlock();
-    lock.unlink();
 }
 
 DirectoryImpl BlobFilesystemImpl::CreateDirectory(const std::string& directoryPath) {
@@ -338,7 +356,17 @@ bool BlobFilesystemImpl::FileExists(const std::string& name) {
     // Fallback: check if this is a directory
     // NOTE: This doesn't map 100% to how a filesystem would work because you can have empty
     // directories in any respectable fs. This probably won't matter for our use case.
-    return !GetChildren(name, 1).empty();
+    // Stop at the first child instead of walking every page, which would cost a request per blob.
+    AzureClient::ListBlobsOptions options;
+    options.Prefix = std::string(realPath);
+    options.MaxResults = 1;
+    bool found = false;
+    ForEachBlobUntil(*container, std::move(options), [&](const AzureClient::Models::BlobItem& blob) {
+        found = blob.Name.size() > realPath.length() && blob.Name.starts_with(realPath) &&
+                !(blob.Name.size() == realPath.length() + 1 && blob.Name[realPath.length()] == '/');
+        return found;
+    });
+    return found;
 }
 
 std::vector<std::string> BlobFilesystemImpl::GetChildren(const std::string& directoryPath, int32_t sizeHint) {
@@ -389,6 +417,8 @@ std::vector<BlobAttributes> BlobFilesystemImpl::GetChildrenFileAttributes(const 
     AzureClient::ListBlobsOptions opts;
     opts.Prefix = realPath;
     opts.MaxResults = static_cast<uint32_t>(g_maxListPageSize);
+    // The file size lives in blob metadata, so list it instead of issuing a GetProperties per blob.
+    opts.IncludeMetadata = true;
 
     // Process all pages of results
     ForEachBlob(*container, std::move(opts), [&](const AzureClient::Models::BlobItem& blob) {
@@ -404,8 +434,7 @@ std::vector<BlobAttributes> BlobFilesystemImpl::GetChildrenFileAttributes(const 
             return;
         }
 
-        auto client = container->GetPageBlobClient(blob.Name);
-        attributes.emplace_back(BlobHelpers::GetFileSize(client), blob.Name.substr(index));
+        attributes.emplace_back(BlobHelpers::FileSizeFromProperties(blob.Properties), blob.Name.substr(index));
     });
 
     return attributes;
@@ -443,8 +472,9 @@ size_t BlobFilesystemImpl::DeleteDir(const std::string& directoryPath) const {
     ForEachBlob(*container, options,
                 [&blobs](const AzureClient::Models::BlobItem& blob) { blobs.push_back(blob.Name); });
 
-    // Delete with a bounded number of requests in flight. Individual failures are logged rather than thrown;
-    // the listing below reports how many blobs remain.
+    // Delete with a bounded number of requests in flight. Every blob is attempted, then the first failure (if any)
+    // is thrown so callers never mistake a partial delete for success.
+    std::optional<AzureClient::BlobStorageError> firstFailure;
     for (size_t i = 0; i < blobs.size(); i += g_maxConcurrentDeletes) {
         std::vector<AzureClient::PageBlobClient> clients;
         std::vector<std::future<
@@ -466,14 +496,21 @@ size_t BlobFilesystemImpl::DeleteDir(const std::string& directoryPath) const {
             if (!result.has_value()) {
                 BOOST_LOG_SEV(*m_logger, severity_level::warning)
                     << "Failed to delete blob '" << blobs[i + j] << "': " << result.error().Message;
+                if (!firstFailure) {
+                    firstFailure = result.error();
+                }
             }
         }
     }
 
-    // Listing blobs to ensure everything is deleted.
-    options.Marker.clear();
-    const auto remaining = Unwrap(container->ListBlobsAsync(options, boost::asio::use_future).get());
-    return remaining.Blobs.size();
+    if (firstFailure) {
+        ThrowRequestFailed(*firstFailure);
+    }
+
+    // Count what is left across every page, not just the first.
+    size_t remaining = 0;
+    ForEachBlob(*container, options, [&remaining](const AzureClient::Models::BlobItem&) { ++remaining; });
+    return remaining;
 }
 
 void BlobFilesystemImpl::Truncate(const std::string& filePath, int64_t size) const {
@@ -629,11 +666,17 @@ void BlobFilesystemImpl::RenewLease(std::stop_token stopToken) {
             }
 
             {
-                std::scoped_lock lock(m_lockFilesMutex);
-                std::vector<const LockFileImpl*> needsRetry;
-                needsRetry.reserve(m_locks.size());
-                for (const auto& l : m_locks) {
-                    needsRetry.push_back(&l);
+                // Snapshot under the mutex but renew outside it, so LockFile/UnlockFile are not blocked behind
+                // network round trips and their retries. The shared_ptrs keep the locks alive meanwhile.
+                std::vector<std::shared_ptr<LockFileImpl>> needsRetry;
+                {
+                    std::scoped_lock lock(m_lockFilesMutex);
+                    std::erase_if(m_renewableLocks, [](const auto& weak) { return weak.expired(); });
+                    for (const auto& weak : m_renewableLocks) {
+                        if (auto shared = weak.lock()) {
+                            needsRetry.push_back(std::move(shared));
+                        }
+                    }
                 }
 
                 // Attempt to renew all locks with retries
@@ -643,7 +686,7 @@ void BlobFilesystemImpl::RenewLease(std::stop_token stopToken) {
                 while (needsRetry.size() > 0 && retries < 5 && !stopToken.stop_requested()) {
                     std::erase_if(needsRetry, [this](const auto& client) -> bool {
                         try {
-                            client->Renew();
+                            [[maybe_unused]] const bool renewed = client->RenewIfLocked();
                             return true;
                         } catch (const RequestFailedException& e) {
                             if (e.StatusCode == HttpStatus::Conflict) {

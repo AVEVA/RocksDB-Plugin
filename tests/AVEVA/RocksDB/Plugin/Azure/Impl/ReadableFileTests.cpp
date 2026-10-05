@@ -3,11 +3,13 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Mocks/BlobClientMock.hpp"
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+using AVEVA::RocksDB::Plugin::Azure::RequestFailedException;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Configuration;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ReadableFileImpl;
 using AVEVA::RocksDB::Plugin::Core::Mocks::BlobClientMock;
@@ -386,4 +388,39 @@ TEST_F(ReadableFileTests, SequentialRead_InterleavedWithSkip_MaintainsCorrectOff
 
     // Assert
     EXPECT_EQ(readSize + skipAmount + readSize, file.GetOffset());
+}
+
+TEST_F(ReadableFileTests, Constructor_FetchesSizeAndEtagWithOneMetadataCall) {
+    using AVEVA::RocksDB::Plugin::Core::BlobMetadata;
+    EXPECT_CALL(*m_blobClient, GetMetadata()).Times(1).WillOnce(Return(BlobMetadata{1024, "etag-1"}));
+    EXPECT_CALL(*m_blobClient, GetSize()).Times(0);
+    EXPECT_CALL(*m_blobClient, GetEtag()).Times(0);
+
+    ReadableFileImpl file{"test.sst", m_blobClient, nullptr, m_logger};
+
+    EXPECT_EQ(0, file.GetOffset());
+}
+
+TEST_F(ReadableFileTests, GetSize_RefreshesWithOneMetadataCall) {
+    using AVEVA::RocksDB::Plugin::Core::BlobMetadata;
+    EXPECT_CALL(*m_blobClient, GetMetadata())
+        .Times(2)
+        .WillOnce(Return(BlobMetadata{1024, "etag-1"}))
+        .WillOnce(Return(BlobMetadata{2048, "etag-2"}));
+    EXPECT_CALL(*m_blobClient, GetSize()).Times(0);
+    EXPECT_CALL(*m_blobClient, GetEtag()).Times(0);
+
+    ReadableFileImpl file{"test.sst", m_blobClient, nullptr, m_logger};
+
+    EXPECT_EQ(2048, file.GetSize());
+}
+TEST_F(ReadableFileTests, RandomRead_GivesUpWhenBlobKeepsChanging) {
+    using AVEVA::RocksDB::Plugin::Core::BlobMetadata;
+    ON_CALL(*m_blobClient, GetMetadata()).WillByDefault(Return(BlobMetadata{1024, "etag"}));
+    ON_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), _, _, _))
+        .WillByDefault(::testing::Throw(RequestFailedException(412, "ConditionNotMet", "changed", "", {})));
+    ReadableFileImpl file{"test.sst", m_blobClient, nullptr, m_logger};
+    std::vector<char> buffer(16);
+
+    EXPECT_THROW([[maybe_unused]] auto n = file.RandomRead(0, 16, buffer.data()), RequestFailedException);
 }

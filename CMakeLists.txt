@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(aveva-rocksdb-plugin LANGUAGES CXX VERSION 0.0.1)
+project(aveva-rocksdb-plugin LANGUAGES CXX VERSION 0.1.0)
 option(AVEVA_ROCKSDB_TESTS "Build tests for plugins" ON)
 list(APPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/infrastructure/cmake")
 

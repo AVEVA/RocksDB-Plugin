@@ -17,9 +17,14 @@
     },
     {
       "name": "openssl"
-    },
-    {
-      "name": "gtest"
     }
-  ]
+  ],
+  "features": {
+    "tests": {
+      "description": "Dependencies needed for the test targets.",
+      "dependencies": [
+        "gtest"
+      ]
+    }
+  }
 }

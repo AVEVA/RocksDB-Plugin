@@ -34,7 +34,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// Operations are started with boost::asio::use_future and waited for on the caller's thread, which
 /// must never be one of the threads running the io_context.
 /// </summary>
-class ClientRuntime {
+class ClientRuntime : public std::enable_shared_from_this<ClientRuntime> {
     std::unique_ptr<::AVEVA::IHttpClient> m_httpClient;
 
   public:

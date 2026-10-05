@@ -31,9 +31,12 @@ class ReadableFileImpl {
     [[nodiscard]] std::pair<int64_t, std::string> GetMetadata() const;
     void SetMetadata(int64_t size, std::string etag) const;
     static void RefreshMetadataAndReadAsync(std::shared_ptr<const ReadableFileImpl> self, int64_t offset,
-                                            int64_t bytesToRead, Core::BlobClient::DownloadCallback callback);
+                                            int64_t bytesToRead, Core::BlobClient::DownloadCallback callback,
+                                            int attemptsLeft);
 
   public:
+    // A blob that keeps changing underneath the reader fails with an IOError after this many metadata refreshes.
+    static constexpr int kMaxStaleReadRetries = 5;
     ReadableFileImpl(
         std::string_view name, std::shared_ptr<Core::BlobClient> blobClient, std::shared_ptr<Core::FileCache> fileCache,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
@@ -53,7 +56,7 @@ class ReadableFileImpl {
     // semantics as RandomRead. `self` keeps the file alive until `callback` has run; the callback may run on an
     // io_context thread or inline, so it must not block on blob I/O.
     static void ReadAsync(std::shared_ptr<const ReadableFileImpl> self, int64_t offset, int64_t bytesToRead,
-                          ReadCallback callback);
+                          ReadCallback callback, int attemptsLeft = kMaxStaleReadRetries);
 
     int64_t GetOffset() const;
     void Skip(int64_t n);

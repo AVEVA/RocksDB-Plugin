@@ -94,8 +94,20 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
 
 3. **Use RocksDB Normally**: Once configured, use RocksDB APIs as you normally would - all data will be transparently stored in Azure Blob Storage.
 
-###### Configuration Options
+###### Credential chain
 
+`ChainedCredentialInfo` authenticates with the first source below that yields a token (each failure is logged at warning level):
+
+1. **Service principal** (client id/secret/tenant from `ChainedCredentialInfo`), always tried first.
+2. **Managed identity**, always tried: the user-assigned identity when a managed identity id is supplied, otherwise the system-assigned identity (IMDS or the `IDENTITY_ENDPOINT` of App Service/Functions/Container Apps).
+3. **Environment**, only when `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET` are all set.
+4. **Workload identity**, only when `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_FEDERATED_TOKEN_FILE` are all set.
+
+###### Building consumers on Windows
+
+Public headers include Boost.Asio, which must see the same `_WIN32_WINNT` in every translation unit. The plugin targets therefore export `_WIN32_WINNT=0x0A00` (Windows 10) as a PUBLIC compile definition; consumers that set their own value must use the same one.
+
+###### Configuration Options
 - **Caching**: Enable local caching for frequently accessed data. SSTs are cached on repeat access, which avoids eager one-time startup scans downloading every SST.
 - **Bounded stale metadata**: Never-downloaded stale SST entries are capped and oldest metadata-only entries are pruned to prevent unbounded cache index growth.
 - **Async IO**: The filesystem advertises `FSSupportedOps::kAsyncIO` and implements `ReadAsync`/`Poll`/`AbortIO`, so setting `rocksdb::ReadOptions::async_io = true` overlaps blob downloads with RocksDB's work (iterator readahead, `MultiGet`). Async reads are issued directly on the host `io_context` (no extra threads); completion handlers only copy bytes into RocksDB's buffer, and RocksDB's callbacks are delivered from `Poll`/`AbortIO` on the calling thread.

@@ -108,7 +108,7 @@ function(aveva_install_library name)
     )
 
     set(package_install_dir "${name}")
-    set(package_install_dir "${CMAKE_INSTALL_PREFIX}/share/${package_install_dir}")
+    set(package_install_dir "share/${package_install_dir}")
     configure_package_config_file(
       "${config_file_template}"
       "${config_package_file}"

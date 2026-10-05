@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/TokenCredentials.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/Environment.hpp"
 
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 #include <AVEVA/HttpClient/HttpHeader.hpp>
@@ -9,8 +10,10 @@
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 
+#include <boost/asio/error.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/log/trivial.hpp>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 
@@ -34,21 +37,6 @@ constexpr unsigned int g_firstServerError = 500;
 constexpr std::chrono::milliseconds g_initialRetryDelay{800};
 constexpr std::chrono::milliseconds g_maxRetryDelay{std::chrono::seconds(30)};
 constexpr std::int64_t g_maxTokenLifetimeSeconds = 24 * 60 * 60;
-
-std::string GetEnvironmentValue(const char* name) {
-#ifdef _WIN32
-    char* buffer = nullptr;
-    std::size_t size = 0;
-    if (_dupenv_s(&buffer, &size, name) != 0 || buffer == nullptr) {
-        return {};
-    }
-    const std::unique_ptr<char, decltype(&std::free)> owner{buffer, &std::free};
-    return std::string{buffer};
-#else
-    const char* value = std::getenv(name); // NOLINT(concurrency-mt-unsafe)
-    return value == nullptr ? std::string{} : std::string{value};
-#endif
-}
 
 // application/x-www-form-urlencoded / query component encoding (RFC 3986 unreserved characters pass through).
 std::string UrlEncode(std::string_view value) {
@@ -98,6 +86,25 @@ void CompleteOnExecutor(IHttpClient& httpClient, AzureClient::ITokenCredential::
                       });
 }
 
+// Parses a delta-seconds Retry-After header; HTTP-date values are ignored.
+std::optional<std::chrono::milliseconds> RetryAfter(const HttpResponse& response) {
+    for (const auto& header : response.GetHeaders()) {
+        const auto& name = header.GetName();
+        if (name.size() != 11 || !std::equal(name.begin(), name.end(), "retry-after", [](char a, char b) {
+                return std::tolower(static_cast<unsigned char>(a)) == b;
+            })) {
+            continue;
+        }
+        const auto& value = header.GetValue();
+        std::int64_t seconds = 0;
+        const auto [end, ec] = std::from_chars(value.data(), value.data() + value.size(), seconds);
+        if (ec == std::errc{} && seconds >= 0 && seconds <= g_maxTokenLifetimeSeconds) {
+            return std::chrono::milliseconds(std::chrono::seconds(seconds));
+        }
+    }
+    return std::nullopt;
+}
+
 // Sends a request and retries transport failures, throttling (429) and server errors (5xx) with exponential
 // backoff; any other response is passed to the completion handler.
 void SendWithRetry(IHttpClient& httpClient, HttpRequest request, HttpRequestOptions options, int retriesLeft,
@@ -115,9 +122,18 @@ void SendWithRetry(IHttpClient& httpClient, HttpRequest request, HttpRequestOpti
                 return;
             }
 
-            auto timer = std::make_shared<boost::asio::steady_timer>(httpClient.get_executor(), delay);
+            auto wait = delay;
+            if (!error && response.GetStatus() == g_tooManyRequests) {
+                wait = std::clamp(RetryAfter(response).value_or(delay), delay, g_maxRetryDelay);
+            }
+
+            auto timer = std::make_shared<boost::asio::steady_timer>(httpClient.get_executor(), wait);
             timer->async_wait([timer, &httpClient, request = std::move(request), options, retriesLeft, delay,
-                               completion = std::move(completion)](boost::system::error_code) mutable {
+                               completion = std::move(completion)](boost::system::error_code waitError) mutable {
+                if (waitError == boost::asio::error::operation_aborted) {
+                    completion(std::make_error_code(std::errc::operation_canceled), HttpResponse{});
+                    return;
+                }
                 SendWithRetry(httpClient, std::move(request), options, retriesLeft - 1,
                               std::min(delay * 2, g_maxRetryDelay), std::move(completion));
             });
@@ -182,8 +198,24 @@ void ChainedTokenCredential::TryGetToken(std::size_t index, std::vector<std::str
             return;
         }
 
+        BOOST_LOG_TRIVIAL(warning) << "Token credential source #" << index << " failed: " << error.message()
+                                   << "; trying next source";
         self->TryGetToken(index + 1, std::move(scopes), std::move(completion), error);
     });
+}
+
+RuntimeBoundCredential::RuntimeBoundCredential(std::shared_ptr<ClientRuntime> runtime,
+                                               std::shared_ptr<AzureClient::ITokenCredential> inner)
+    : m_runtime(std::move(runtime)), m_inner(std::move(inner)) {}
+
+void RuntimeBoundCredential::GetTokenAsync(std::vector<std::string> scopes, GetTokenCompletionHandler completion) {
+    m_inner->GetTokenAsync(
+        std::move(scopes), [runtime = m_runtime, inner = m_inner, completion = std::move(completion)](
+                               std::error_code error, AzureClient::AccessToken token) mutable {
+            completion(error, std::move(token));
+            auto executor = runtime->HttpClient().get_executor();
+            boost::asio::post(executor, [runtime = std::move(runtime), inner = std::move(inner)]() {});
+        });
 }
 
 AzurePipelinesCredential::AzurePipelinesCredential(IHttpClient& httpClient, AzurePipelinesCredentialOptions options)

@@ -10,6 +10,9 @@
 #include <cassert>
 #include <cstddef>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <stdexcept>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 namespace {
 // Chunking used when downloading a range of a blob into a local file.
@@ -38,6 +41,15 @@ void PageBlob::SetCapacity(int64_t capacity) {
 }
 
 void PageBlob::DownloadTo(const std::string& path, int64_t offset, int64_t length) {
+    // An explicit zero-length range is rejected by the client, and there is nothing to fetch for an empty blob.
+    if (length <= 0) {
+        std::ofstream file(std::filesystem::path(path), std::ios::binary | std::ios::trunc);
+        if (!file) {
+            throw std::runtime_error("Could not create empty file '" + path + "'");
+        }
+        return;
+    }
+
     AzureClient::DownloadToOptions options;
     options.Range = ToRange(offset, length);
     options.ChunkSize = g_downloadChunkSize;
@@ -46,6 +58,10 @@ void PageBlob::DownloadTo(const std::string& path, int64_t offset, int64_t lengt
 }
 
 int64_t PageBlob::DownloadTo(std::span<char> buffer, int64_t offset, int64_t length) {
+    if (length <= 0) {
+        return 0;
+    }
+
     AzureClient::DownloadBlobOptions options;
     options.Range = ToRange(offset, length);
     auto result = Unwrap(m_client
@@ -60,7 +76,7 @@ int64_t PageBlob::DownloadTo(std::span<char> buffer, int64_t offset, int64_t len
 
     const auto bytes = std::min(result.Content.size(), buffer.size());
     std::memcpy(buffer.data(), result.Content.data(), bytes);
-    return static_cast<int64_t>(*result.ContentRange->Length);
+    return static_cast<int64_t>(bytes);
 }
 
 void PageBlob::UploadPages(const std::span<char> buffer, const int64_t blobOffset) {
@@ -68,6 +84,11 @@ void PageBlob::UploadPages(const std::span<char> buffer, const int64_t blobOffse
                .UploadPagesAsync(static_cast<uint64_t>(blobOffset), std::as_bytes(buffer), boost::asio::use_future,
                                  RequestOptionsForTransfer(m_client.GetDefaultRequestOptions(), buffer.size()))
                .get());
+}
+
+Core::BlobMetadata PageBlob::GetMetadata() {
+    auto properties = Unwrap(m_client.GetPropertiesAsync(boost::asio::use_future).get());
+    return {BlobHelpers::FileSizeFromProperties(properties), std::move(properties.ETag)};
 }
 
 std::string PageBlob::GetEtag() {
@@ -121,6 +142,9 @@ int64_t PageBlob::Download(std::span<char> buffer, int64_t offset, int64_t lengt
                                                                             static_cast<uint64_t>(length)))
                                    .get());
 
+    // TODO(backlog): AzureClient only returns the body as std::string, so every download is copied once more into
+    // the caller's buffer. Writing the response body straight into a caller-provided span needs support in
+    // AzureClient's DownloadBlobOptions/HttpClient; track as an AzureClient enhancement.
     const auto bytesRead = std::min(result.Content.size(), buffer.size());
     std::memcpy(buffer.data(), result.Content.data(), bytesRead);
 

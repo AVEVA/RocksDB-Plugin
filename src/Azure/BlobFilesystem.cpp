@@ -76,7 +76,7 @@ rocksdb::IOStatus BlobFilesystem::NewSequentialFile(const std::string& f, const 
         return rocksdb::IOStatus::OK();
     } catch (const RequestFailedException& ex) {
         LogRequestFailed(ex, f);
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -93,7 +93,7 @@ rocksdb::IOStatus BlobFilesystem::NewRandomAccessFile(const std::string& f, cons
         return rocksdb::IOStatus::OK();
     } catch (const RequestFailedException& ex) {
         LogRequestFailed(ex, f);
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -111,7 +111,7 @@ rocksdb::IOStatus BlobFilesystem::NewWritableFile(const std::string& f, const ro
         return rocksdb::IOStatus::OK();
     } catch (const RequestFailedException& ex) {
         LogRequestFailed(ex, f);
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -129,7 +129,7 @@ rocksdb::IOStatus BlobFilesystem::ReopenWritableFile(const std::string& fname, c
         return rocksdb::IOStatus::OK();
     } catch (const RequestFailedException& ex) {
         LogRequestFailed(ex, fname);
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -148,7 +148,7 @@ rocksdb::IOStatus BlobFilesystem::ReuseWritableFile(const std::string& fname, co
         return rocksdb::IOStatus::OK();
     } catch (const RequestFailedException& ex) {
         LogRequestFailed(ex, fname);
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -166,7 +166,7 @@ rocksdb::IOStatus BlobFilesystem::NewRandomRWFile(const std::string& fname, cons
         return rocksdb::IOStatus::OK();
     } catch (const RequestFailedException& ex) {
         LogRequestFailed(ex, fname);
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -188,7 +188,7 @@ rocksdb::IOStatus BlobFilesystem::NewDirectory(const std::string& name, const ro
         return rocksdb::IOStatus::OK();
     } catch (const RequestFailedException& ex) {
         LogRequestFailed(ex, name);
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -207,7 +207,7 @@ rocksdb::IOStatus BlobFilesystem::FileExists(const std::string& f, const rocksdb
         }
     } catch (const RequestFailedException& ex) {
         LogRequestFailed(ex, f);
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -223,7 +223,7 @@ rocksdb::IOStatus BlobFilesystem::GetChildren(const std::string& dir, const rock
         return rocksdb::IOStatus::OK();
     } catch (const RequestFailedException& ex) {
         LogRequestFailed(ex, dir);
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -247,7 +247,7 @@ rocksdb::IOStatus BlobFilesystem::GetChildrenFileAttributes(const std::string& d
         return rocksdb::IOStatus::OK();
     } catch (const RequestFailedException& ex) {
         LogRequestFailed(ex, dir);
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -266,7 +266,7 @@ rocksdb::IOStatus BlobFilesystem::DeleteFile(const std::string& f, const rocksdb
         }
     } catch (const RequestFailedException& ex) {
         LogRequestFailed(ex, f);
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -283,7 +283,7 @@ rocksdb::IOStatus BlobFilesystem::Truncate(const std::string& fname, size_t size
         return rocksdb::IOStatus::OK();
     } catch (const RequestFailedException& ex) {
         LogRequestFailed(ex, fname);
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -313,7 +313,7 @@ rocksdb::IOStatus BlobFilesystem::DeleteDir(const std::string& d, const rocksdb:
         }
     } catch (const RequestFailedException& ex) {
         LogRequestFailed(ex, d);
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -331,7 +331,7 @@ rocksdb::IOStatus BlobFilesystem::GetFileSize(const std::string& f, const rocksd
         return rocksdb::IOStatus::OK();
     } catch (const RequestFailedException& ex) {
         LogRequestFailed(ex, f);
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -347,7 +347,7 @@ rocksdb::IOStatus BlobFilesystem::GetFileModificationTime(const std::string& fna
         return rocksdb::IOStatus::OK();
     } catch (const RequestFailedException& ex) {
         LogRequestFailed(ex, fname);
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -370,7 +370,7 @@ rocksdb::IOStatus BlobFilesystem::RenameFile(const std::string& s, const std::st
         return rocksdb::IOStatus::OK();
     } catch (const RequestFailedException& ex) {
         LogRequestFailed(ex, s + " -> " + t);
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -406,7 +406,7 @@ rocksdb::IOStatus BlobFilesystem::LockFile(const std::string& f, const rocksdb::
         return rocksdb::IOStatus::OK();
     } catch (const RequestFailedException& ex) {
         LogRequestFailed(ex, f);
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -430,7 +430,7 @@ rocksdb::IOStatus BlobFilesystem::UnlockFile(rocksdb::FileLock* l, const rocksdb
         return rocksdb::IOStatus::OK();
     } catch (const RequestFailedException& ex) {
         LogRequestFailed(ex);
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -452,7 +452,7 @@ rocksdb::IOStatus BlobFilesystem::NewLogger(const std::string& fname, const rock
         return rocksdb::IOStatus::OK();
     } catch (const RequestFailedException& ex) {
         LogRequestFailed(ex, fname);
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());

@@ -11,7 +11,7 @@ rocksdb::IOStatus Directory::Fsync(const rocksdb::IOOptions&, rocksdb::IODebugCo
         m_directory.Fsync();
         return rocksdb::IOStatus::OK();
     } catch (const RequestFailedException& e) {
-        return AzureErrorTranslator::IOStatusFromError(e.Message, e.StatusCode);
+        return AzureErrorTranslator::IOStatusFromError(e);
     } catch (const std::exception& e) {
         return rocksdb::IOStatus::IOError(e.what());
     } catch (...) {

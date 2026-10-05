@@ -10,6 +10,7 @@
 #include <rocksdb/cache.h>
 #include <rocksdb/convenience.h>
 #include <rocksdb/db.h>
+#include <rocksdb/file_system.h>
 #include <rocksdb/options.h>
 #include <rocksdb/secondary_cache.h>
 #include <rocksdb/table.h>
@@ -173,4 +174,32 @@ TEST_F(PluginSecondaryCacheIntegrationTests, DataReadable_AfterDbReopenWithSameS
             EXPECT_EQ(val, expectedVal) << "Data mismatch for reopen_key_" << i;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Registering again replaces the settings of the earlier registration: the second io_context is used even though
+// the first one has already been destroyed.
+// ---------------------------------------------------------------------------
+TEST_F(PluginSecondaryCacheIntegrationTests, Register_Twice_UsesLatestIoContext) {
+    {
+        AVEVA::RocksDB::Plugin::Azure::Impl::Testing::TestIoContext firstContext(1);
+        rocksdb::Env* firstEnv = nullptr;
+        std::shared_ptr<rocksdb::Env> firstGuard;
+        rocksdb::ConfigOptions configOptions;
+        ASSERT_TRUE(Plugin::Register(configOptions, &firstEnv, &firstGuard, firstContext.Get(), *m_credentials,
+                                     std::nullopt, m_logger, Configuration::PageBlob::DefaultBufferSize,
+                                     Configuration::PageBlob::DefaultSize)
+                        .ok());
+    }
+
+    rocksdb::Env* env = nullptr;
+    std::shared_ptr<rocksdb::Env> guard;
+    rocksdb::ConfigOptions configOptions;
+    ASSERT_TRUE(Plugin::Register(configOptions, &env, &guard, m_ioContext.Get(), *m_credentials, std::nullopt, m_logger,
+                                 Configuration::PageBlob::DefaultBufferSize, Configuration::PageBlob::DefaultSize)
+                    .ok());
+
+    // Any request reaches Azure through the registered io_context, so this would crash or hang on the old one.
+    const auto status = env->GetFileSystem()->FileExists(m_dbPath + "/CURRENT", rocksdb::IOOptions{}, nullptr);
+    EXPECT_TRUE(status.ok() || status.IsNotFound()) << status.ToString();
 }

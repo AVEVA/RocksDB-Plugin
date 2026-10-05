@@ -12,10 +12,12 @@
 #include <AVEVA/AzureClient/ITokenCredential.hpp>
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 struct BlobHelpers {
     static void SetFileSize(AzureClient::BlobClient& client, int64_t size);
@@ -25,6 +27,9 @@ struct BlobHelpers {
     static int64_t GetBlobCapacity(AzureClient::BlobClient& client);
     // Creates the page blob with the given capacity unless it already exists. Returns true if it was created.
     static bool CreateIfNotExists(AzureClient::PageBlobClient& client, int64_t capacity);
+    // Creates the container, retrying transient failures up to maxRetries attempts with a linearly growing delay.
+    static void CreateContainerIfNotExists(AzureClient::BlobContainerClient& client, int maxRetries = 5,
+                                           std::chrono::milliseconds baseDelay = std::chrono::seconds(1));
     static std::pair<int64_t, int64_t> RoundToEndOfNearestPage(int64_t size);
     static std::pair<int64_t, int64_t> RoundToBeginningOfNearestPage(int64_t size);
     static AzureClient::RetryOptions CreateRetryOptions();
@@ -36,6 +41,10 @@ struct BlobHelpers {
     static std::shared_ptr<AzureClient::ITokenCredential>
     CreatePipelinesCredential(ClientRuntime& runtime, const std::string& tenantId, const std::string& clientId,
                               const std::string& serviceConnectionId, const std::string& systemAccessToken);
+    // The ordered credential sources behind CreateChainedCredential: service principal, managed identity
+    // (system-assigned when no id is given), then environment and workload identity when their variables are set.
+    static std::vector<std::shared_ptr<AzureClient::ITokenCredential>>
+    CreateCredentialSources(ClientRuntime& runtime, const Models::ChainedCredentialInfo& chainedCredential);
     static std::shared_ptr<AzureClient::ITokenCredential>
     CreateChainedCredential(ClientRuntime& runtime, const Models::ChainedCredentialInfo& chainedCredential);
     static std::string AccountNameFromUrl(const std::string& storageAccountUrl);

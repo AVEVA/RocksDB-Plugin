@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
+
 #include <AVEVA/AzureClient/Credentials.hpp>
 #include <AVEVA/AzureClient/ITokenCredential.hpp>
 #include <AVEVA/HttpClient/HttpClient.hpp>
@@ -24,6 +26,22 @@ class ChainedTokenCredential final : public AzureClient::ITokenCredential,
 
   public:
     explicit ChainedTokenCredential(std::vector<std::shared_ptr<AzureClient::ITokenCredential>> sources);
+    void GetTokenAsync(std::vector<std::string> scopes, GetTokenCompletionHandler completion) override;
+};
+
+/// <summary>
+/// Keeps a ClientRuntime (and thus the IHttpClient the wrapped credential borrows) alive until every in-flight
+/// GetTokenAsync has completed, so a token refresh that outlives the filesystem cannot touch a destroyed client.
+/// The runtime is released from a handler posted to its own executor rather than from inside the HTTP client's
+/// completion callback, so the client is never destroyed while it is still running that callback.
+/// </summary>
+class RuntimeBoundCredential final : public AzureClient::ITokenCredential {
+    std::shared_ptr<ClientRuntime> m_runtime;
+    std::shared_ptr<AzureClient::ITokenCredential> m_inner;
+
+  public:
+    RuntimeBoundCredential(std::shared_ptr<ClientRuntime> runtime,
+                           std::shared_ptr<AzureClient::ITokenCredential> inner);
     void GetTokenAsync(std::vector<std::string> scopes, GetTokenCompletionHandler completion) override;
 };
 
