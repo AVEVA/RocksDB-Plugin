@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.22)
 project(aveva-rocksdb-plugin LANGUAGES CXX VERSION 0.1.0)
 option(AVEVA_ROCKSDB_TESTS "Build tests for plugins" ON)
-option(AVEVA_BUILD_CLIENT_LIBRARY_TESTS "Build the vendored AzureClient/HttpClient test suites" OFF)
+option(AVEVA_BUILD_CLIENT_LIBRARY_TESTS "Build the vendored AzureClient/HttpClient test suites" ON)
 list(APPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/infrastructure/cmake")
 
 # In-tree Azure Blob Storage client libraries (libs/). Their own tests are built only with
-# AVEVA_BUILD_CLIENT_LIBRARY_TESTS=ON; examples and benchmarks never are.
+# AVEVA_BUILD_CLIENT_LIBRARY_TESTS (ON by default); examples and benchmarks never are.
 include(infrastructure/cmake/AvevaClientLibraries.cmake)
 
 add_subdirectory(src)

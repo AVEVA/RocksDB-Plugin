@@ -227,7 +227,7 @@ The exported package currently uses exact-version matching via the shared `aveva
 
 ## Building
 
-This copy is trimmed to what the RocksDB plugin needs (no examples, benchmarks, docs, fuzzing, install test or live integration tests). It is built through the root `CMakeLists.txt` (`-DAVEVA_BUILD_CLIENT_LIBRARY_TESTS=ON` for its unit tests) and the root presets.
+This copy is trimmed to what the RocksDB plugin needs (no examples, benchmarks, docs, fuzzing, install test or live integration tests). It is built through the root `CMakeLists.txt` (`-DAVEVA_BUILD_CLIENT_LIBRARY_TESTS=OFF` skips its unit tests, which are on by default) and the root presets.
 
 ## Repository layout
 

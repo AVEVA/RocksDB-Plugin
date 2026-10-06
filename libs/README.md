@@ -38,7 +38,7 @@ Do not copy an upstream tree over these directories: that would silently revert 
 
 ## Building the library tests
 
-The libraries' own test suites are off by default. Enable them with
-`-DAVEVA_BUILD_CLIENT_LIBRARY_TESTS=ON` when configuring the root project, e.g.
-`cmake --preset WindowsDebug -DAVEVA_BUILD_CLIENT_LIBRARY_TESTS=ON`. CI
-(`.github/workflows/build-and-test.yml`) builds with this option and `-DAVEVA_ROCKSDB_PACKAGE_TEST=ON`.
+The libraries' own test suites are built by default. Disable them with
+`-DAVEVA_BUILD_CLIENT_LIBRARY_TESTS=OFF` when configuring the root project, e.g.
+`cmake --preset WindowsDebug -DAVEVA_BUILD_CLIENT_LIBRARY_TESTS=OFF`. CI
+(`.github/workflows/build-and-test.yml`) builds with this option on and `-DAVEVA_ROCKSDB_PACKAGE_TEST=ON`.
