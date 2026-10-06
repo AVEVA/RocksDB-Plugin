@@ -147,13 +147,7 @@ namespace AVEVA
                     request.GetHeaders().end(),
                     [](const HttpHeader& header)
                 {
-                    return Private::IsToken(header.GetName()) &&
-                        std::none_of(header.GetValue().begin(),
-                            header.GetValue().end(),
-                            [](unsigned char character)
-                    {
-                        return (character < 32 && character != '\t') || character == 127;
-                    });
+                    return Private::IsValidHeader(header.GetName(), header.GetValue());
                 });
             }
 

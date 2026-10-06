@@ -3,6 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 
+#include <AVEVA/HttpClient/HttpClientError.hpp>
 #include <gtest/gtest.h>
 
 #include <cerrno>
@@ -81,6 +82,31 @@ TEST(AzureErrorTranslatorTests, TransportTimeoutIsRetryableTimedOut) {
     auto status = AzureErrorTranslator::IOStatusFromError(Failure(0, "", std::make_error_code(std::errc::timed_out)));
     EXPECT_TRUE(status.IsTimedOut());
     EXPECT_TRUE(status.GetRetryable());
+}
+
+TEST(AzureErrorTranslatorTests, HttpClientTimeoutIsRetryableTimedOut) {
+    const std::error_code code = AVEVA::HttpClientError::TimedOut;
+    auto status = AzureErrorTranslator::IOStatusFromError(Failure(0, "", code));
+    EXPECT_TRUE(status.IsTimedOut());
+    EXPECT_TRUE(status.GetRetryable());
+}
+
+TEST(AzureErrorTranslatorTests, PermanentHttpClientErrorsAreNonRetryable) {
+    for (auto error : {AVEVA::HttpClientError::InvalidUrl, AVEVA::HttpClientError::InvalidRequest,
+                       AVEVA::HttpClientError::TlsFailed, AVEVA::HttpClientError::ResponseTooLarge,
+                       AVEVA::HttpClientError::ProtocolError}) {
+        const std::error_code code = error;
+        EXPECT_FALSE(AzureErrorTranslator::IsTransient(0, code)) << code.message();
+        EXPECT_FALSE(AzureErrorTranslator::IOStatusFromError(Failure(0, "", code)).GetRetryable()) << code.message();
+    }
+}
+
+TEST(AzureErrorTranslatorTests, TransientHttpClientErrorsAreRetryable) {
+    for (auto error : {AVEVA::HttpClientError::ResolveFailed, AVEVA::HttpClientError::ConnectFailed,
+                       AVEVA::HttpClientError::WriteFailed, AVEVA::HttpClientError::ReadFailed}) {
+        const std::error_code code = error;
+        EXPECT_TRUE(AzureErrorTranslator::IsTransient(0, code)) << code.message();
+    }
 }
 
 TEST(AzureErrorTranslatorTests, TransportCancellationIsNonRetryableAborted) {

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
+#include <AVEVA/HttpClient/HttpClientError.hpp>
 #include <system_error>
 namespace AVEVA::RocksDB::Plugin::Azure {
 namespace {
@@ -11,7 +12,14 @@ rocksdb::IOStatus Retryable(rocksdb::IOStatus status) {
 }
 
 bool IsTransportTimeout(const std::error_code& code) {
-    return code == std::errc::timed_out;
+    return code == std::errc::timed_out || code == HttpClientError::TimedOut;
+}
+
+// These fail identically on every attempt, so retrying (or reporting them as retryable) only delays the error.
+bool IsPermanentHttpClientError(const std::error_code& code) {
+    return code == HttpClientError::InvalidUrl || code == HttpClientError::InvalidRequest ||
+           code == HttpClientError::TlsFailed || code == HttpClientError::ResponseTooLarge ||
+           code == HttpClientError::ProtocolError;
 }
 
 // The Azure error code, message and request id are always part of the text so that logs identify the failure.
@@ -91,8 +99,10 @@ bool AzureErrorTranslator::IsTransient(unsigned int statusCode, const std::error
     case 0:
         // Status 0 also covers requests rejected client-side (bad arguments, unparsable responses) and
         // credential failures (a rejected secret maps to permission_denied), which would fail the same way again.
-        return code != std::errc::operation_canceled && code != std::errc::state_not_recoverable && code != std::errc::invalid_argument && code != std::errc::bad_message &&
-               code != std::errc::value_too_large && code != std::errc::permission_denied;
+        return code != std::errc::operation_canceled && code != std::errc::state_not_recoverable &&
+               code != std::errc::invalid_argument && code != std::errc::bad_message &&
+               code != std::errc::value_too_large && code != std::errc::permission_denied &&
+               !IsPermanentHttpClientError(code);
     case HttpStatus::RequestTimeout:
     case HttpStatus::TooManyRequests:
         return true;

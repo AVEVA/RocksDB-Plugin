@@ -92,6 +92,32 @@ namespace
         EXPECT_EQ(completions, invalidUrls.size() + 3);
     }
 
+    TEST(HttpClientRequest, OversizedHeadersFailWithInvalidRequest)
+    {
+        boost::asio::io_context context;
+        auto client = AVEVA::IHttpClient::Create(context);
+        std::size_t completions = 0;
+
+        AVEVA::HttpRequest longValue;
+        longValue.SetUrl("http://127.0.0.1/");
+        longValue.AddHeader({"X-Test", std::string(70000, 'a')});
+        AVEVA::HttpRequest longName;
+        longName.SetUrl("http://127.0.0.1/");
+        longName.AddHeader({std::string(70000, 'a'), "value"});
+        for (auto* request : {&longValue, &longName})
+        {
+            client->SendAsync(std::move(*request),
+                [&](std::error_code error, AVEVA::HttpResponse)
+            {
+                ++completions;
+                EXPECT_EQ(error, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidRequest));
+            });
+        }
+
+        context.run();
+        EXPECT_EQ(completions, 2u);
+    }
+
     TEST(HttpClientRequest, TokenBasedSendAsyncSupportsUseFutureAndReportsErrors)
     {
         boost::asio::io_context context;

@@ -8,6 +8,7 @@
 #include <future>
 #include <memory>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
@@ -18,11 +19,12 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 template <typename Executor, typename T>
 T BlockOn(const Executor& executor, std::future<T> future) {
     // any_io_executor cannot be asked running_in_this_thread() directly, but dispatch runs the handler inline
-    // exactly when the calling thread is already running the executor. If it was queued instead, the no-op runs
-    // later and only touches the shared flag.
-    auto ranInline = std::make_shared<std::atomic<bool>>(false);
-    boost::asio::dispatch(executor, [ranInline] { ranInline->store(true); });
-    if (ranInline->load()) {
+    // exactly when the calling thread is already running the executor. Otherwise it is queued and some other host
+    // thread may run it at any moment (even before the check below), so the handler records which thread ran it and
+    // only a run on the calling thread proves misuse.
+    auto ranOn = std::make_shared<std::atomic<std::thread::id>>(std::thread::id{});
+    boost::asio::dispatch(executor, [ranOn] { ranOn->store(std::this_thread::get_id()); });
+    if (ranOn->load() == std::this_thread::get_id()) {
         throw std::logic_error("Blocking Azure calls must not be made from a thread running the io_context; "
                                "call them from a RocksDB thread instead.");
     }

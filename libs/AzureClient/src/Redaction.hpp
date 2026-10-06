@@ -127,9 +127,11 @@ namespace AVEVA::AzureClient::Private
     // returned unchanged. Percent-encoded parameter names such as `%73ig` are decoded before matching.
     [[nodiscard]] inline std::string RedactHeaderForDiagnostics(std::string_view name, std::string_view value)
     {
-        constexpr std::array<std::string_view, 5> SecretHeaders{"authorization",
+        constexpr std::array<std::string_view, 7> SecretHeaders{"authorization",
             "proxy-authorization",
             "x-ms-copy-source-authorization",
+            "x-identity-header",
+            "x-ms-encryption-key",
             "cookie",
             "set-cookie"};
         if (RedactionDetail::IsOneOf(name, SecretHeaders))

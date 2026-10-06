@@ -8,6 +8,7 @@
 - The project now requires C++23 (vendored libraries included).
 - `BindToRuntime` and the credential helpers (`CreateCredentialSources`, `CreateServiceClient`, ...) take `const std::shared_ptr<ClientRuntime>&`. `CachingTokenCredential` must be created with `CachingTokenCredential::Create(...)` (the constructor is no longer usable directly).
 - Blocking on an Azure future from a thread running the injected `io_context` now throws `std::logic_error` instead of risking a deadlock.
+- The public `Core::BlobClient` interface no longer uses `Azure::ETag` (`<azure/core/etag.hpp>` is no longer included). `GetEtag()` returns `std::string` and `Download(..., ifMatch)` takes `const std::string&`; a `BlobMetadata` struct and the virtuals `GetMetadata`, `DownloadAsync` (two overloads) and `GetMetadataAsync` were added (all with default implementations). Migration: change ETag parameters and return types to `std::string` in your implementations and mocks; the new virtuals need no override, but override them for truly asynchronous I/O.
 
 ### Behavior changes
 - Async IO is now advertised (`SupportedOps` returns `1 << kAsyncIO`; previously async IO was effectively off) and `ReadAsync`/`Poll`/`AbortIO` are implemented.

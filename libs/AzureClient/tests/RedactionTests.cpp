@@ -12,6 +12,8 @@ TEST(RedactionTests, AuthorizationLikeHeadersAreRedactedCaseInsensitively)
     EXPECT_EQ(RedactHeaderForDiagnostics("Authorization", "SharedKey a:b"), "[REDACTED]");
     EXPECT_EQ(RedactHeaderForDiagnostics("AUTHORIZATION", "Bearer t"), "[REDACTED]");
     EXPECT_EQ(RedactHeaderForDiagnostics("x-ms-copy-source-authorization", "Bearer t"), "[REDACTED]");
+    EXPECT_EQ(RedactHeaderForDiagnostics("X-IDENTITY-HEADER", "secret"), "[REDACTED]");
+    EXPECT_EQ(RedactHeaderForDiagnostics("x-ms-encryption-key", "secret"), "[REDACTED]");
     EXPECT_EQ(RedactHeaderForDiagnostics("x-ms-version", "2023-11-03"), "2023-11-03");
 }
 

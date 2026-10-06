@@ -121,7 +121,22 @@ namespace AVEVA::Private
         }
 
       private:
+        // Anything that still throws (for example an oversized Host authority) must complete the request exactly
+        // once instead of escaping onto the host's io_context thread and dropping the completion handler.
         bool BuildRequest(HttpRequest& request)
+        {
+            try
+            {
+                return BuildRequestUnchecked(request);
+            }
+            catch (const std::exception&)
+            {
+                Fail(HttpClientError::InvalidRequest);
+                return false;
+            }
+        }
+
+        bool BuildRequestUnchecked(HttpRequest& request)
         {
             auto parsed = urls::parse_uri(request.GetUrl());
             if (!parsed || !Private::IsValidRequestUrl(*parsed))
@@ -156,12 +171,7 @@ namespace AVEVA::Private
             m_request.target(target);
             for (const auto& header : request.GetHeaders())
             {
-                if (!IsToken(header.GetName()) || std::any_of(header.GetValue().begin(),
-                                                      header.GetValue().end(),
-                                                      [](unsigned char character)
-                {
-                    return (character < 32 && character != '\t') || character == 127;
-                }))
+                if (!Private::IsValidHeader(header.GetName(), header.GetValue()))
                 {
                     Fail(HttpClientError::InvalidRequest);
                     return false;

@@ -22,6 +22,7 @@
 
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <system_error>
 #include <thread>
@@ -60,6 +61,36 @@ TEST(RetryTests, NoRetries_DoesNotRetryOnTransientFailure)
 
     EXPECT_EQ(httpClient.RequestCount(), 1U);
     EXPECT_TRUE(observedError.has_value());
+}
+
+TEST(RetryTests, MaxRetriesAtIntMaxDoesNotOverflow)
+{
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
+    httpClient.EnqueueResponse(HttpResponse{200, {}, ""});
+
+    BlobClientOptions options = MakeBlobClientOptions("container", "blob.txt");
+    options.Retry.MaxRetries = std::numeric_limits<int>::max();
+    options.Retry.InitialDelay = std::chrono::milliseconds{0};
+
+    BlockBlobClient client{httpClient, options};
+
+    CallbackExpectation cb;
+    std::optional<BlobStorageError> observedError;
+    client.DeleteAsync([&](std::expected<Response<Models::DeleteBlobResult>, BlobStorageError> result) mutable
+    {
+        if (!result.has_value())
+        {
+            observedError = std::move(result).error();
+        }
+        cb.MarkInvoked();
+    });
+
+    EXPECT_TRUE(httpClient.WaitForRequest(2));
+    httpClient.Poll();
+
+    EXPECT_EQ(httpClient.RequestCount(), 2U);
+    EXPECT_FALSE(observedError.has_value());
 }
 
 TEST(RetryTests, Retries_OnTransientThenSucceeds)

@@ -7,6 +7,7 @@ add_executable(aveva-rocksdb-plugin-azure-impl-tests
     BufferChunkInfoTests.cpp
     LogRateLimiterTests.cpp
     ClientRuntimeTests.cpp
+    BlockOnTests.cpp
     AzureErrorTranslatorTests.cpp
     LockFileImplTests.cpp
     PageBlobTests.cpp

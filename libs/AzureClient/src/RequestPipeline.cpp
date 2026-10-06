@@ -17,6 +17,7 @@
 #include <boost/asio/steady_timer.hpp>
 
 #include <algorithm>
+#include <limits>
 #include <atomic>
 #include <boost/system/error_code.hpp> // IWYU pragma: keep (symbol is defined in a Boost impl/ header)
 #include <charconv>
@@ -94,7 +95,10 @@ namespace AVEVA::AzureClient::Private
                 : m_httpClient(httpClient), m_auth(std::move(auth)), m_retry(retry), m_request(std::move(request)),
                   m_completion(std::move(completion)), m_requestOptions(requestOptions),
                   m_retryNotFoundAndGone(retryNotFoundAndGone), m_parentSlot(m_requestOptions.GetCancellationSlot()),
-                  m_timer(httpClient.get_executor()), m_maxAttempts(std::max(1, retry.MaxRetries + 1))
+                  m_timer(httpClient.get_executor()),
+                  m_maxAttempts(retry.MaxRetries >= std::numeric_limits<int>::max() - 1
+                                    ? std::numeric_limits<int>::max()
+                                    : std::max(0, retry.MaxRetries) + 1)
             {
             }
 

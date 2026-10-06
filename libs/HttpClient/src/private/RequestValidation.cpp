@@ -1,6 +1,7 @@
 #include "RequestValidation.hpp"
 
 #include <algorithm>
+#include <boost/beast/http/fields.hpp>
 #include <boost/url/scheme.hpp>
 #include <string_view>
 
@@ -15,6 +16,18 @@ namespace AVEVA::Private
             return (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
                    (character >= '0' && character <= '9') ||
                    std::string_view("!#$%&'*+-.^_`|~").find(character) != std::string_view::npos;
+        });
+    }
+
+    bool IsValidHeader(const std::string& name, const std::string& value)
+    {
+        return IsToken(name) && name.size() <= boost::beast::http::fields::max_name_size &&
+               value.size() <= boost::beast::http::fields::max_value_size &&
+               std::none_of(value.begin(),
+                   value.end(),
+                   [](unsigned char character)
+        {
+            return (character < 32 && character != '\t') || character == 127;
         });
     }
 

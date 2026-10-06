@@ -5,3 +5,17 @@ path = "libs/**"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "Copyright (c) 2026 AVEVA Solutions Limited."
 SPDX-License-Identifier = "Apache-2.0"
+
+# Culture-ordering tables and comparator ported from the Azure SDK for C++.
+[[annotations]]
+path = "libs/AzureClient/src/SharedKeySigner.cpp"
+precedence = "override"
+SPDX-FileCopyrightText = ["Copyright (c) Microsoft Corporation.", "Copyright (c) 2026 AVEVA Solutions Limited."]
+SPDX-License-Identifier = "MIT AND Apache-2.0"
+
+# Derived from bemanproject/exemplar.
+[[annotations]]
+path = "libs/*/infrastructure/cmake/aveva-install-library-config.cmake"
+precedence = "override"
+SPDX-FileCopyrightText = ["Copyright (c) Beman Project contributors", "Copyright (c) 2026 AVEVA Solutions Limited."]
+SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"

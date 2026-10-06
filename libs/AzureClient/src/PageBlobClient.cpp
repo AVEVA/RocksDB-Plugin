@@ -13,12 +13,15 @@
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 #include <algorithm>
+#include <boost/asio/cancellation_signal.hpp>
+#include <boost/asio/cancellation_type.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -351,17 +354,72 @@ namespace AVEVA::AzureClient
     } // namespace
 
     // Follows NextMarker so a fragmented blob never yields a silently truncated page list.
+    //
+    // Later pages start on the transport thread, so each page gets its own cancellation signal instead of
+    // re-assigning the caller's slot (which the caller may emit on at the same time). One handler on the caller's
+    // slot forwards to the signal of the page in flight.
     void PageBlobClient::GetPageRangesAsyncImpl(GetPageRangesOptions options,
         GetPageRangesCompletionHandler completion,
         HttpRequestOptions requestOptions)
     {
+        struct CancellationRelay
+        {
+            std::mutex Mutex;
+            bool Cancelled = false;
+            boost::asio::cancellation_type_t Type = boost::asio::cancellation_type::none;
+            std::shared_ptr<boost::asio::cancellation_signal> Current;
+        };
+
+        std::shared_ptr<CancellationRelay> relay;
+        if (auto parentSlot = requestOptions.GetCancellationSlot(); parentSlot.is_connected())
+        {
+            relay = std::make_shared<CancellationRelay>();
+            parentSlot.assign([relay](boost::asio::cancellation_type_t type)
+            {
+                std::shared_ptr<boost::asio::cancellation_signal> current;
+                {
+                    const std::scoped_lock lock(relay->Mutex);
+                    relay->Cancelled = true;
+                    relay->Type = type;
+                    current = relay->Current;
+                }
+                if (current)
+                {
+                    current->emit(type);
+                }
+            });
+        }
+
         std::string marker = options.Marker;
         auto collector = std::make_shared<Private::PageCollector<Models::GetPageRangesResult>>(
-            [httpClient = &HttpClient(), target = SharedTarget(), options = std::move(options), requestOptions](
+            [httpClient = &HttpClient(), target = SharedTarget(), options = std::move(options), requestOptions, relay](
                 std::string pageMarker, PageRangesHandler pageCompletion) mutable
         {
             options.Marker = std::move(pageMarker);
-            GetPageRangesPage(*httpClient, target, options, std::move(pageCompletion), requestOptions);
+            if (!relay)
+            {
+                GetPageRangesPage(*httpClient, target, options, std::move(pageCompletion), requestOptions);
+                return;
+            }
+
+            auto pageSignal = std::make_shared<boost::asio::cancellation_signal>();
+            HttpRequestOptions pageOptions = requestOptions;
+            pageOptions.SetCancellationSlot(pageSignal->slot());
+            GetPageRangesPage(*httpClient, target, options, std::move(pageCompletion), pageOptions);
+
+            // Published only after the page installed its handler, so emitting never races with that assignment.
+            bool cancelled = false;
+            boost::asio::cancellation_type_t type = boost::asio::cancellation_type::none;
+            {
+                const std::scoped_lock lock(relay->Mutex);
+                relay->Current = pageSignal;
+                cancelled = relay->Cancelled;
+                type = relay->Type;
+            }
+            if (cancelled)
+            {
+                pageSignal->emit(type);
+            }
         },
             [](Models::GetPageRangesResult& accumulated, Models::GetPageRangesResult page)
         {
