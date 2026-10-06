@@ -1,0 +1,57 @@
+From: AVEVA <noreply@aveva.com>
+Subject: [PATCH] Install db_bench_tool as a static library so plugins can
+ register a custom Env/FileSystem before invoking db_bench_tool().
+
+The upstream RocksDB build compiles the db_bench sources directly into the
+db_bench executable, which prevents downstream wrappers from calling
+rocksdb::db_bench_tool() after registering a custom FileSystem plugin.
+
+This patch installs db_bench's non-main sources as a standalone static
+library `db_bench_tool`, exported via RocksDBTargets, gated only on
+WITH_GFLAGS (db_bench_tool.cc compiles to a stub without GFLAGS defined).
+It intentionally does NOT hook into WITH_BENCHMARK_TOOLS: that option also
+builds table_reader_bench, memtablerep_bench, hash_table_bench, etc., which
+pull in RocksDB's `testharness`/gtest on Windows. RocksDB's fused gtest
+CMakeLists builds gtest as a shared library there but exports no symbols,
+so link.exe produces no import lib (gtestd.lib), breaking those targets.
+Keeping WITH_BENCHMARK_TOOLS/WITH_TOOLS OFF (as this port already does)
+avoids that unrelated breakage entirely.
+
+Downstream consumers can link `RocksDB::db_bench_tool` and call
+`rocksdb::db_bench_tool(argc, argv)` from their own main.
+
+---
+ CMakeLists.txt | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1625,6 +1625,27 @@
+   endif()
+ endif()
+ 
++if(WITH_GFLAGS)
++  # AVEVA: expose db_bench's guts as an installed static library so downstream
++  # wrappers can register custom FileSystem plugins before invoking
++  # rocksdb::db_bench_tool(argc, argv). Deliberately independent of
++  # WITH_BENCHMARK_TOOLS/WITH_TOOLS -- see commit message for why.
++  add_library(db_bench_tool STATIC
++    tools/simulated_hybrid_file_system.cc
++    tools/tool_hooks.cc
++    tools/db_bench_tool.cc)
++  target_link_libraries(db_bench_tool
++    PUBLIC ${ROCKSDB_LIB} ${THIRDPARTY_LIBS})
++  target_include_directories(db_bench_tool PUBLIC
++    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
++    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
++  install(TARGETS db_bench_tool
++    EXPORT RocksDBTargets
++    COMPONENT devel
++    ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
++    INCLUDES DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
++endif()
++
+ if(WITH_BENCHMARK_TOOLS)
+   add_executable(db_bench${ARTIFACT_SUFFIX}
+     tools/simulated_hybrid_file_system.cc
