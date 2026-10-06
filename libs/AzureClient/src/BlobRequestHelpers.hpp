@@ -189,10 +189,6 @@ namespace AVEVA::AzureClient::Private
     inline constexpr std::string_view XMsErrorCodeHeaderName = "x-ms-error-code";
     inline constexpr std::string_view XMsContentCrc64HeaderName = "x-ms-content-crc64";
     inline constexpr std::string_view XMsBlobConditionAppendPosHeaderName = "x-ms-blob-condition-appendpos";
-    inline constexpr std::string_view XMsBlobConditionMaxSizeHeaderName = "x-ms-blob-condition-maxsize";
-    inline constexpr std::string_view XMsBlobAppendOffsetHeaderName = "x-ms-blob-append-offset";
-    inline constexpr std::string_view XMsBlobCommittedBlockCountHeaderName = "x-ms-blob-committed-block-count";
-    inline constexpr std::string_view XMsBlobSealedHeaderName = "x-ms-blob-sealed";
     inline constexpr std::string_view XMsDeleteTypePermanentHeaderName = "x-ms-delete-type-permanent";
     inline constexpr std::string_view AuthorizationHeaderName = "Authorization";
     inline constexpr std::string_view XMsMetaHeaderPrefix = "x-ms-meta-";
@@ -207,18 +203,10 @@ namespace AVEVA::AzureClient::Private
     inline constexpr std::string_view XMsPageWriteHeaderName = "x-ms-page-write";
     inline constexpr std::string_view XMsRangeHeaderName = "x-ms-range";
     inline constexpr std::string_view XMsAccessTierHeaderName = "x-ms-access-tier";
-    inline constexpr std::string_view XMsCopySourceHeaderName = "x-ms-copy-source";
-    inline constexpr std::string_view XMsCopyActionHeaderName = "x-ms-copy-action";
-    inline constexpr std::string_view XMsRequiresSyncHeaderName = "x-ms-requires-sync";
-    inline constexpr std::string_view XMsSourceRangeHeaderName = "x-ms-source-range";
-    inline constexpr std::string_view XMsSourceContentMd5HeaderName = "x-ms-source-content-md5";
     inline constexpr std::string_view XMsLeaseIdHeaderName = "x-ms-lease-id";
-    inline constexpr std::string_view XMsIfTagsHeaderName = "x-ms-if-tags";
     inline constexpr std::string_view XMsLeaseActionHeaderName = "x-ms-lease-action";
     inline constexpr std::string_view XMsLeaseDurationHeaderName = "x-ms-lease-duration";
     inline constexpr std::string_view XMsProposedLeaseIdHeaderName = "x-ms-proposed-lease-id";
-    inline constexpr std::string_view XMsCopyIdHeaderName = "x-ms-copy-id";
-    inline constexpr std::string_view XMsCopyStatusHeaderName = "x-ms-copy-status";
     inline constexpr std::string_view ETagHeaderName = "ETag";
     inline constexpr std::string_view LastModifiedHeaderName = "Last-Modified";
     inline constexpr std::string_view ContentLengthHeaderName = "Content-Length";
@@ -344,7 +332,6 @@ namespace AVEVA::AzureClient::Private
     void AddHeaderIfNotEmpty(HttpRequest& request, std::string_view name, std::string_view value);
     void ApplyBlobRequestConditions(HttpRequest& request, const Models::BlobRequestConditions& conditions);
     void ApplyBlobHttpHeadersForUpload(HttpRequest& request, const Models::BlobHttpHeaders& headers);
-    void ApplyBlobHttpHeadersForProperties(HttpRequest& request, const Models::BlobHttpHeaders& headers);
     void ApplyMetadata(HttpRequest& request, const Models::MetadataMap& metadata);
     // Azure requires metadata names to be C# identifiers: [A-Za-z_][A-Za-z0-9_]*.
     [[nodiscard]] bool IsValidMetadataName(std::string_view name) noexcept;
@@ -352,10 +339,6 @@ namespace AVEVA::AzureClient::Private
     void AuthorizeRequest(const SharedKeyCredentialOptions& options, HttpRequest& request);
     void AuthorizeRequest(const SharedKeySigner& signer, HttpRequest& request);
     void ValidateBlockId(std::string_view blockId);
-    // A random per-upload prefix (32 hex chars) that keeps block IDs of concurrent uploads to one blob disjoint.
-    [[nodiscard]] std::string CreateUploadBlockIdPrefix();
-    // base64(prefix + zero-padded index); all IDs of one upload have the same length.
-    [[nodiscard]] std::string EncodeUploadBlockId(std::string_view prefix, std::uint64_t index);
 
     // Maps the exception being handled to a BlobStorageError; must be called from a catch handler.
     [[nodiscard]] BlobStorageError MakeFailureFromCurrentException();

@@ -40,7 +40,6 @@ namespace
     using AVEVA::AzureClient::ResizePageBlobOptions;
     using AVEVA::AzureClient::UploadBlockBlobOptions;
     using AVEVA::AzureClient::Models::AccessTier;
-    using AVEVA::AzureClient::Models::CopyStatus;
     using AVEVA::AzureClient::Models::LeaseDurationType;
     using AVEVA::AzureClient::Models::LeaseState;
     using AVEVA::AzureClient::Models::LeaseStatus;
@@ -121,10 +120,6 @@ TEST(ModelTests, GetPropertiesParsesExtendedHeaders)
             {"x-ms-lease-status", "locked"},
             {"x-ms-lease-state", "leased"},
             {"x-ms-lease-duration", "infinite"},
-            {"x-ms-copy-id", "copy-1"},
-            {"x-ms-copy-status", "pending"},
-            {"x-ms-copy-source", "https://src/blob"},
-            {"x-ms-copy-progress", "5/10"},
             {"x-ms-server-encrypted", "true"},
             {"x-ms-version-id", "2025-10-01T10:00:00.0000000Z"},
             {"x-ms-is-current-version", "false"},
@@ -144,10 +139,6 @@ TEST(ModelTests, GetPropertiesParsesExtendedHeaders)
     EXPECT_EQ(properties.LeaseStatus, LeaseStatus::Locked);
     EXPECT_EQ(properties.LeaseState, LeaseState::Leased);
     EXPECT_EQ(properties.LeaseDuration, LeaseDurationType::Infinite);
-    EXPECT_EQ(properties.CopyId, "copy-1");
-    EXPECT_EQ(properties.CopyStatus, CopyStatus::Pending());
-    EXPECT_EQ(properties.CopySource, "https://src/blob");
-    EXPECT_EQ(properties.CopyProgress, "5/10");
     EXPECT_EQ(properties.ServerEncrypted, std::optional<bool>{true});
     EXPECT_EQ(properties.VersionId, "2025-10-01T10:00:00.0000000Z");
     EXPECT_EQ(properties.IsCurrentVersion, std::optional<bool>{false});
@@ -163,7 +154,6 @@ TEST(ModelTests, GetPropertiesLeavesAbsentExtendedFieldsUnset)
     EXPECT_TRUE(properties.AccessTier.empty());
     EXPECT_FALSE(properties.AccessTierInferred.has_value());
     EXPECT_EQ(properties.LeaseStatus, LeaseStatus::Unknown);
-    EXPECT_TRUE(properties.CopyStatus.empty());
     EXPECT_FALSE(properties.ServerEncrypted.has_value());
     EXPECT_FALSE(properties.IsCurrentVersion.has_value());
     EXPECT_FALSE(properties.CommittedBlockCount.has_value());
@@ -193,8 +183,6 @@ TEST(ModelTests, ListBlobsParsesExtendedPropertiesAndVersionSiblings)
     <AccessTierInferred>false</AccessTierInferred>
     <LeaseStatus>unlocked</LeaseStatus>
     <LeaseState>available</LeaseState>
-    <CopyId>c</CopyId>
-    <CopyStatus>success</CopyStatus>
     <ServerEncrypted>true</ServerEncrypted>
   </Properties>
 </Blob></Blobs></EnumerationResults>)");
@@ -212,7 +200,6 @@ TEST(ModelTests, ListBlobsParsesExtendedPropertiesAndVersionSiblings)
     EXPECT_EQ(properties.AccessTierInferred, std::optional<bool>{false});
     EXPECT_EQ(properties.LeaseStatus, LeaseStatus::Unlocked);
     EXPECT_EQ(properties.LeaseState, LeaseState::Available);
-    EXPECT_EQ(properties.CopyStatus, CopyStatus::Success());
     EXPECT_EQ(properties.ServerEncrypted, std::optional<bool>{true});
 }
 

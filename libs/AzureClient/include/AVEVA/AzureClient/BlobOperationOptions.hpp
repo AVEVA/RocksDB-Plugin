@@ -9,8 +9,6 @@
 
 namespace AVEVA::AzureClient
 {
-    inline constexpr std::size_t DefaultUploadBlockSize = std::size_t{4} * 1024U * 1024U;
-
     struct CreateBlobContainerOptions
     {
         Models::MetadataMap Metadata;

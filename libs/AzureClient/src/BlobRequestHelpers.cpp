@@ -481,19 +481,6 @@ namespace AVEVA::AzureClient::Private
         return boost::uuids::to_string(generator());
     }
 
-    std::string CreateUploadBlockIdPrefix()
-    {
-        std::string prefix = CreateClientRequestId();
-        std::erase(prefix, '-');
-        return prefix;
-    }
-
-    std::string EncodeUploadBlockId(std::string_view prefix, std::uint64_t index)
-    {
-        const std::string value = std::format("{}{:016}", prefix, index);
-        return Base64Encode(AsBytes(value));
-    }
-
     BlobStorageError MakeFailureFromCurrentException()
     {
         try
@@ -865,17 +852,6 @@ namespace AVEVA::AzureClient::Private
         AddHeaderIfNotEmpty(request, XMsBlobContentEncodingHeaderName, headers.ContentEncoding);
         AddHeaderIfNotEmpty(request, XMsBlobContentLanguageHeaderName, headers.ContentLanguage);
         AddHeaderIfNotEmpty(request, XMsBlobContentDispositionHeaderName, headers.ContentDisposition);
-    }
-
-    void ApplyBlobHttpHeadersForProperties(HttpRequest& request, const Models::BlobHttpHeaders& headers)
-    {
-        // Set Blob Properties clears any omitted property, so send the full supported header set explicitly.
-        AddHeader(request, XMsBlobContentTypeHeaderName, headers.ContentType);
-        AddHeader(request, XMsBlobContentMd5HeaderName, headers.ContentMd5);
-        AddHeader(request, XMsBlobCacheControlHeaderName, headers.CacheControl);
-        AddHeader(request, XMsBlobContentEncodingHeaderName, headers.ContentEncoding);
-        AddHeader(request, XMsBlobContentLanguageHeaderName, headers.ContentLanguage);
-        AddHeader(request, XMsBlobContentDispositionHeaderName, headers.ContentDisposition);
     }
 
     bool IsValidMetadataName(std::string_view name) noexcept

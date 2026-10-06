@@ -171,10 +171,6 @@ namespace AVEVA::AzureClient::Private
             std::string_view LeaseStatus;
             std::string_view LeaseState;
             std::string_view LeaseDuration;
-            std::string_view CopyId;
-            std::string_view CopyStatus;
-            std::string_view CopySource;
-            std::string_view CopyProgress;
             std::string_view ServerEncrypted;
             std::string_view CommittedBlockCount;
             std::string_view SequenceNumber;
@@ -189,10 +185,6 @@ namespace AVEVA::AzureClient::Private
             .LeaseStatus = "x-ms-lease-status",
             .LeaseState = "x-ms-lease-state",
             .LeaseDuration = "x-ms-lease-duration",
-            .CopyId = "x-ms-copy-id",
-            .CopyStatus = "x-ms-copy-status",
-            .CopySource = "x-ms-copy-source",
-            .CopyProgress = "x-ms-copy-progress",
             .ServerEncrypted = "x-ms-server-encrypted",
             .CommittedBlockCount = "x-ms-blob-committed-block-count",
             .SequenceNumber = "x-ms-blob-sequence-number"};
@@ -206,10 +198,6 @@ namespace AVEVA::AzureClient::Private
             .LeaseStatus = "LeaseStatus",
             .LeaseState = "LeaseState",
             .LeaseDuration = "LeaseDuration",
-            .CopyId = "CopyId",
-            .CopyStatus = "CopyStatus",
-            .CopySource = "CopySource",
-            .CopyProgress = "CopyProgress",
             .ServerEncrypted = "ServerEncrypted",
             .CommittedBlockCount = "CommittedBlockCount",
             .SequenceNumber = "x-ms-blob-sequence-number"};
@@ -229,10 +217,6 @@ namespace AVEVA::AzureClient::Private
             properties.LeaseStatus = ParseLeaseStatus(get(names.LeaseStatus));
             properties.LeaseState = ParseLeaseState(get(names.LeaseState));
             properties.LeaseDuration = ParseLeaseDurationType(get(names.LeaseDuration));
-            properties.CopyId = std::string{get(names.CopyId)};
-            properties.CopyStatus = std::string{get(names.CopyStatus)};
-            properties.CopySource = std::string{get(names.CopySource)};
-            properties.CopyProgress = std::string{get(names.CopyProgress)};
             properties.ServerEncrypted = ParseOptionalBool(get(names.ServerEncrypted), names.ServerEncrypted);
             properties.CommittedBlockCount =
                 ParseOptionalUnsigned(get(names.CommittedBlockCount), names.CommittedBlockCount);

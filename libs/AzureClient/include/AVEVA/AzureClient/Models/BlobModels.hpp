@@ -245,47 +245,6 @@ namespace AVEVA::AzureClient::Models
         return Value;
     }
 
-    class CopyStatus : public ExtensibleEnum<CopyStatus>
-    {
-      public:
-        CopyStatus() = default;
-
-        template <class T>
-            requires std::convertible_to<const T&, std::string_view>
-        CopyStatus(const T& value) : ExtensibleEnum(std::string{std::string_view{value}})
-        {
-        }
-
-        [[nodiscard]] static const CopyStatus& Pending();
-        [[nodiscard]] static const CopyStatus& Success();
-        [[nodiscard]] static const CopyStatus& Aborted();
-        [[nodiscard]] static const CopyStatus& Failed();
-    };
-
-    inline const CopyStatus& CopyStatus::Pending()
-    {
-        static const CopyStatus Value{"pending"};
-        return Value;
-    }
-
-    inline const CopyStatus& CopyStatus::Success()
-    {
-        static const CopyStatus Value{"success"};
-        return Value;
-    }
-
-    inline const CopyStatus& CopyStatus::Aborted()
-    {
-        static const CopyStatus Value{"aborted"};
-        return Value;
-    }
-
-    inline const CopyStatus& CopyStatus::Failed()
-    {
-        static const CopyStatus Value{"failed"};
-        return Value;
-    }
-
     struct BlobRequestConditions
     {
         std::string LeaseId;
@@ -338,10 +297,6 @@ namespace AVEVA::AzureClient::Models
         Models::LeaseStatus LeaseStatus = Models::LeaseStatus::Unknown;
         Models::LeaseState LeaseState = Models::LeaseState::Unknown;
         Models::LeaseDurationType LeaseDuration = Models::LeaseDurationType::Unknown;
-        std::string CopyId;
-        Models::CopyStatus CopyStatus;
-        std::string CopySource;
-        std::string CopyProgress; // "<bytes copied>/<total bytes>"
         std::optional<bool> ServerEncrypted;
         std::string VersionId;
         std::optional<bool> IsCurrentVersion;
@@ -402,12 +357,6 @@ namespace AVEVA::AzureClient::Models
     {
         std::string ETag;
         std::chrono::system_clock::time_point LastModified;
-    };
-
-    struct BlockListBlock
-    {
-        std::string Name;
-        std::uint64_t Size = 0;
     };
 
     struct SetBlobMetadataResult
