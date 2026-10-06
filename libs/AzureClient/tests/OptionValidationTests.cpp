@@ -28,7 +28,6 @@ namespace
     using AVEVA::AzureClient::BlobClient;
     using AVEVA::AzureClient::BlockBlobClient;
     using AVEVA::AzureClient::PageBlobClient;
-    using AVEVA::AzureClient::UploadFromOptions;
     using AVEVA::AzureClient::Tests::FakeHttpClient;
     using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 
@@ -122,21 +121,6 @@ namespace
             BlockBlobClient client{http, MakeBlobClientOptions()};
             const std::vector<std::string> ids{"YmxvY2swMQ==", "YmI="};
             client.CommitBlockListAsync(ids,
-                [report](auto result)
-            {
-                report(result.has_value() ? std::error_code{} : result.error().Code);
-            });
-        },
-            std::errc::invalid_argument});
-        cases.push_back({"UploadFromZeroBlockSize",
-            [](FakeHttpClient& http, auto report)
-        {
-            BlockBlobClient client{http, MakeBlobClientOptions()};
-            static std::istringstream stream{"payload"};
-            UploadFromOptions options;
-            options.BlockSize = 0;
-            client.UploadFromAsync(stream,
-                options,
                 [report](auto result)
             {
                 report(result.has_value() ? std::error_code{} : result.error().Code);

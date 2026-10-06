@@ -18,12 +18,7 @@ add_executable(aveva-azure-client-tests
     UploadConcurrencyTests.cpp
     DownloadToFileTests.cpp
     EndpointValidationTests.cpp
-    SharedKeyUploadTests.cpp
-    ConcurrentUploadTests.cpp
-    UploadRobustnessTests.cpp
     HeaderInjectionTests.cpp
-    UploadBufferTests.cpp
-    UploadMemoryTests.cpp
     ParallelDownloadTests.cpp
     TestEventListener.cpp
     BlobServiceClientTests.cpp

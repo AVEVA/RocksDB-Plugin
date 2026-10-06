@@ -1307,50 +1307,6 @@ namespace AVEVA::AzureClient::Private
         return result;
     }
 
-    Models::GetBlockListResult ParseGetBlockListResultXml(std::string_view xml)
-    {
-        auto parseBlocks = [](const XmlNode& blockList)
-        {
-            std::vector<Models::BlockListBlock> blocks;
-            for (const XmlNode* block : GetChildrenByLocalName(blockList, "Block"))
-            {
-                Models::BlockListBlock item;
-                item.Name = GetChildTextOrEmpty(*block, "Name");
-                if (const std::string size = GetChildTextOrEmpty(*block, "Size"); !size.empty())
-                {
-                    const auto parsed = ParseUnsigned(size);
-                    if (!parsed.has_value())
-                    {
-                        throw std::invalid_argument("Block Size must be an unsigned integer.");
-                    }
-
-                    item.Size = *parsed;
-                }
-                blocks.push_back(std::move(item));
-            }
-            return blocks;
-        };
-
-        Models::GetBlockListResult result;
-        const auto tree = TryReadXmlOrThrow(xml, "Get block list response", "BlockList");
-        const XmlNode* root = tree ? tree->Root() : nullptr;
-        if (root == nullptr)
-        {
-            return result;
-        }
-
-        if (const XmlNode* committed = FindChildByLocalName(*root, "CommittedBlocks"); committed != nullptr)
-        {
-            result.CommittedBlocks = parseBlocks(*committed);
-        }
-        if (const XmlNode* uncommitted = FindChildByLocalName(*root, "UncommittedBlocks"); uncommitted != nullptr)
-        {
-            result.UncommittedBlocks = parseBlocks(*uncommitted);
-        }
-
-        return result;
-    }
-
     Models::GetPageRangesResult ParseGetPageRangesResultXml(std::string_view xml)
     {
         Models::GetPageRangesResult result;

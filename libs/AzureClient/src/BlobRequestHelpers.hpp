@@ -330,7 +330,6 @@ namespace AVEVA::AzureClient::Private
     [[nodiscard]] Models::ChangeBlobLeaseResult ParseChangeBlobLeaseResult(const HttpResponse& response);
     [[nodiscard]] Models::ListBlobsResult ParseListBlobsResultXml(std::string_view xml);
     [[nodiscard]] Models::ListBlobContainersResult ParseListBlobContainersResultXml(std::string_view xml);
-    [[nodiscard]] Models::GetBlockListResult ParseGetBlockListResultXml(std::string_view xml);
     [[nodiscard]] Models::GetPageRangesResult ParseGetPageRangesResultXml(std::string_view xml);
 
     [[nodiscard]] HttpRequest BuildBlobRequest(const BlobTarget& target,

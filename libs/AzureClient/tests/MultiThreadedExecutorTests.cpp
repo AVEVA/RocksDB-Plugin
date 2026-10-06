@@ -291,7 +291,6 @@ namespace
     {
         std::vector<BlockBlobClient> Clients;
         std::vector<std::string> Contents;
-        std::vector<std::istringstream> Sources;
     };
 
     [[nodiscard]] ConcurrentBlobData MakeConcurrentBlobData(const BlobContainerClient& container,
@@ -306,23 +305,18 @@ namespace
             data.Clients.push_back(container.GetBlockBlobClient("blob-" + std::to_string(i)));
             data.Contents.push_back(MakeContent(i, blobSize.Value));
         }
-        data.Sources.reserve(blobCount.Value);
-        for (const std::string& content : data.Contents)
-        {
-            data.Sources.emplace_back(content);
-        }
         return data;
     }
 
     void UploadAllBlobs(std::vector<BlockBlobClient>& clients,
-        std::vector<std::istringstream>& sources,
-        const UploadFromOptions& uploadOptions)
+        const std::vector<std::string>& contents,
+        const UploadBlockBlobOptions& uploadOptions)
     {
         std::vector<std::future<std::expected<Response<Models::UploadBlockBlobResult>, BlobStorageError>>> uploads;
         uploads.reserve(clients.size());
         for (std::size_t i = 0; i < clients.size(); ++i)
         {
-            uploads.push_back(clients.at(i).UploadFromAsync(sources.at(i), uploadOptions, boost::asio::use_future));
+            uploads.push_back(clients.at(i).UploadAsync(contents.at(i), uploadOptions, boost::asio::use_future));
         }
         for (auto& upload : uploads)
         {
@@ -360,10 +354,8 @@ TEST(MultiThreadedExecutorTests, ConcurrentChunkedUploadsAndDownloadsOnAThreadPo
     const BlobContainerClient container{service, SharedKeyContainerOptions()};
     ConcurrentBlobData data = MakeConcurrentBlobData(container, BlobCountValue{BlobCount}, BlobSizeValue{BlobSize});
 
-    UploadFromOptions uploadOptions;
-    uploadOptions.BlockSize = 4096U;
-    uploadOptions.Concurrency = 4U;
-    UploadAllBlobs(data.Clients, data.Sources, uploadOptions);
+    UploadBlockBlobOptions uploadOptions;
+    UploadAllBlobs(data.Clients, data.Contents, uploadOptions);
 
     DownloadToOptions downloadOptions;
     downloadOptions.ChunkSize = 4096U;

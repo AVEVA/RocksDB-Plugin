@@ -35,7 +35,6 @@ add_library(aveva::azure-client ALIAS aveva-azure-client)
 if(BUILD_SHARED_LIBS)
     message(FATAL_ERROR "aveva-azure-client supports static linking only.")
 endif()
-# Upload-buffer counters in TestHooks.hpp are compiled in only when the tests are built.
 if(AVEVA_AZURE_CLIENT_TESTS)
     target_compile_definitions(aveva-azure-client PRIVATE AVEVA_AZURE_CLIENT_TESTING)
 endif()

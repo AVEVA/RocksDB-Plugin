@@ -438,12 +438,6 @@ namespace AVEVA::AzureClient::Models
         std::uint64_t Size = 0;
     };
 
-    struct GetBlockListResult
-    {
-        std::vector<BlockListBlock> CommittedBlocks;
-        std::vector<BlockListBlock> UncommittedBlocks;
-    };
-
     struct SetBlobMetadataResult
     {
         std::string ETag;

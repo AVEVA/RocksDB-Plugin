@@ -92,19 +92,6 @@ namespace AVEVA::AzureClient
         std::string TransactionalContentCrc64;
     };
 
-    // Put Block From URL. SourceOffset/SourceLength select a range of the source (whole source when unset);
-    // only Conditions.LeaseId applies to the destination.
-    struct StageBlockFromUriOptions
-    {
-        // Bytes; offset into the source blob (0-based). Unset means the start.
-        std::optional<std::uint64_t> SourceOffset;
-        // Bytes; length of the source range. Unset means to the end of the source.
-        std::optional<std::uint64_t> SourceLength;
-        // Base64-encoded MD5 the service verifies against the source range.
-        std::string SourceContentMd5;
-        Models::BlobRequestConditions Conditions;
-    };
-
     struct FindBlobsByTagsOptions
     {
         std::string Marker;
@@ -236,24 +223,4 @@ namespace AVEVA::AzureClient
         std::optional<std::uint32_t> MaxResults;
     };
 
-    // UploadFromAsync stages the source as blocks of BlockSize bytes with up to Concurrency Put Block
-    // requests in flight (peak buffer memory is Concurrency * BlockSize), then commits them in order
-    // with one Put Block List. A source that fits in a single block is sent as one Put Blob instead.
-    // UploadOptions' access conditions apply to the final commit / Put Blob; stage requests carry
-    // only the lease ID.
-    struct UploadFromOptions
-    {
-        // Count of concurrent Put Block requests; 0 is treated as 1; no upper bound.
-        std::size_t Concurrency = 1;
-        // Bytes per block; must be 1 byte to 4000 MiB (anything else fails with std::errc::invalid_argument before
-        // any request). The service allows at most 50,000 blocks per blob.
-        std::size_t BlockSize = DefaultUploadBlockSize;
-        // Bytes. File uploads only (the size must be known up front): files of at most this many bytes are
-        // uploaded with a single Put Blob request, buffering the whole file (capped at 5000 MiB).
-        // 0 (the default) means only sources that fit in one block use a single Put Blob.
-        // For file uploads that would need more than 50,000 blocks, BlockSize is increased
-        // automatically (up to 4000 MiB); stream uploads fail with invalid_argument instead.
-        std::uint64_t SingleUploadThreshold = 0;
-        UploadBlockBlobOptions UploadOptions;
-    };
 } // namespace AVEVA::AzureClient

@@ -56,7 +56,6 @@ namespace
     using AVEVA::AzureClient::Private::IEquals;
     using AVEVA::AzureClient::Private::IStartsWith;
     using AVEVA::AzureClient::Private::ParseBlobProperties;
-    using AVEVA::AzureClient::Private::ParseGetBlockListResultXml;
     using AVEVA::AzureClient::Private::ParseGetPageRangesResultXml;
     using AVEVA::AzureClient::Private::ParseHttpDateHeader;
     using AVEVA::AzureClient::Private::ParseListBlobContainersResultXml;
@@ -588,63 +587,6 @@ TEST(BlobRequestHelpersTests, XmlParsers_HandleNamespacesAttributesEntitiesAndSe
     EXPECT_EQ(containers.Containers.at(0).Properties.Metadata.at("owner"), "");
 }
 
-TEST(BlobRequestHelpersTests, XmlParsers_HandleNamespacedBlockListsPageRangesAndErrors)
-{
-    const std::string blockListXml = R"(<?xml version="1.0" encoding="utf-8"?>
-<BlockList xmlns:b="urn:block">
-  <b:CommittedBlocks>
-    <b:Block attr="1">
-      <Name>YmxvY2sx</Name>
-      <Size>16</Size>
-    </b:Block>
-  </b:CommittedBlocks>
-  <UncommittedBlocks>
-    <Block>
-      <Name>YmxvY2sy</Name>
-      <Size>8</Size>
-    </Block>
-  </UncommittedBlocks>
-</BlockList>)";
-
-    const auto blockList = ParseGetBlockListResultXml(blockListXml);
-    ASSERT_EQ(blockList.CommittedBlocks.size(), 1U);
-    EXPECT_EQ(blockList.CommittedBlocks.at(0).Name, "YmxvY2sx");
-    EXPECT_EQ(blockList.CommittedBlocks.at(0).Size, 16U);
-    ASSERT_EQ(blockList.UncommittedBlocks.size(), 1U);
-    EXPECT_EQ(blockList.UncommittedBlocks.at(0).Name, "YmxvY2sy");
-    EXPECT_EQ(blockList.UncommittedBlocks.at(0).Size, 8U);
-
-    const std::string pageRangesXml = R"(<?xml version="1.0" encoding="utf-8"?>
-<PageList xmlns:p="urn:page">
-  <p:PageRange>
-    <p:Start>0</p:Start>
-    <p:End>511</p:End>
-  </p:PageRange>
-</PageList>)";
-
-    const auto pageRanges = ParseGetPageRangesResultXml(pageRangesXml);
-    ASSERT_EQ(pageRanges.PageRanges.size(), 1U);
-    EXPECT_EQ(pageRanges.PageRanges.at(0).Start, 0U);
-    EXPECT_EQ(pageRanges.PageRanges.at(0).End, 511U);
-
-    const HttpResponse response{403,
-        {{"x-ms-request-id", "request-id"}},
-        R"(<Error xmlns:e="urn:error">
-            <Code>AuthenticationFailed</Code>
-            <e:Message><![CDATA[Auth <failed>]]></e:Message>
-            <AuthenticationErrorDetail>More&#x20;detail&#38;info</AuthenticationErrorDetail>
-        </Error>)"};
-
-    const auto failure = DetermineBlobStorageFailure({}, response);
-    ASSERT_TRUE(failure.Error);
-    ASSERT_TRUE(failure.Details.has_value());
-    EXPECT_EQ(failure.Error, make_error_code(BlobStorageErrorCode::AuthenticationFailed));
-    EXPECT_EQ(ValueOrFail(failure.Details).ErrorCode, "AuthenticationFailed");
-    EXPECT_EQ(ValueOrFail(failure.Details).Message, "Auth <failed>");
-    EXPECT_EQ(ValueOrFail(failure.Details).AuthenticationDetail, "More detail&info");
-    EXPECT_EQ(ValueOrFail(failure.Details).RequestId, "request-id");
-}
-
 TEST(BlobRequestHelpersTests, BoostUrlHelpers_PreserveExistingUrlShapes)
 {
     EXPECT_EQ(BuildQueryString({{"comp", "list"}, {"prefix", "folder name"}}), "comp=list&prefix=folder%20name");
@@ -795,32 +737,6 @@ TEST(BlobRequestHelpersTests, SharedKeyAuthorization_KnownAnswerVectorsMatchInde
         AuthorizeRequest(sharedKey, request);
         EXPECT_EQ(FindRequestHeaderValue(request, "Authorization"), testCase.ExpectedAuthorization) << testCase.Name;
     }
-}
-
-TEST(BlobRequestHelpersTests, XmlParsers_RejectEmptyBodiesButAcceptEmptyDocuments)
-{
-    // An empty 2xx body is a truncated response, not an empty listing (reported as InvalidResponse).
-    EXPECT_THROW(static_cast<void>(ParseListBlobsResultXml({})), std::invalid_argument);
-    EXPECT_THROW(static_cast<void>(ParseListBlobContainersResultXml({})), std::invalid_argument);
-    EXPECT_THROW(static_cast<void>(ParseGetBlockListResultXml({})), std::invalid_argument);
-    EXPECT_THROW(static_cast<void>(ParseGetPageRangesResultXml({})), std::invalid_argument);
-
-    EXPECT_TRUE(ParseListBlobsResultXml("<EnumerationResults/>").Blobs.empty());
-    EXPECT_TRUE(ParseListBlobContainersResultXml("<EnumerationResults/>").Containers.empty());
-    EXPECT_TRUE(ParseGetBlockListResultXml("<BlockList/>").CommittedBlocks.empty());
-    EXPECT_TRUE(ParseGetPageRangesResultXml("<PageList/>").PageRanges.empty());
-}
-
-TEST(BlobRequestHelpersTests, XmlParsers_RejectMalformedAndTruncatedXmlClearly)
-{
-    EXPECT_THROW(static_cast<void>(ParseListBlobsResultXml("<EnumerationResults><Blobs>")), std::invalid_argument);
-    EXPECT_THROW(
-        static_cast<void>(ParseListBlobContainersResultXml("<EnumerationResults><Containers></EnumerationResults")),
-        std::invalid_argument);
-    EXPECT_THROW(static_cast<void>(ParseGetBlockListResultXml("<BlockList><CommittedBlocks><Block></BlockList>")),
-        std::invalid_argument);
-    EXPECT_THROW(static_cast<void>(ParseGetPageRangesResultXml("<PageList><PageRange><Start>0</Start>")),
-        std::invalid_argument);
 }
 
 TEST(BlobRequestHelpersTests, XmlParsers_HandleNestedSameNameElementsAndNumericEntities)

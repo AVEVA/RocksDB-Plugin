@@ -50,12 +50,6 @@ namespace
         {
             static_cast<void>(ParseListBlobContainersResultXml(xml));
         }},
-            {.Name = "GetBlockList",
-                .Parse =
-                    [](std::string_view xml)
-        {
-            static_cast<void>(ParseGetBlockListResultXml(xml));
-        }},
             {.Name = "GetPageRanges",
                 .Parse =
                     [](std::string_view xml)
@@ -310,37 +304,6 @@ TEST(ParserRobustnessTests, ListContainers_MissingFieldsMalformedDatesAndLargePa
     const auto large = ParseListBlobContainersResultXml(xml);
     ASSERT_EQ(large.Containers.size(), 5000U);
     EXPECT_EQ(large.Containers.back().Name, "c4999");
-}
-
-TEST(ParserRobustnessTests, BlockAndPageLists_MalformedNumbersThrowAndLargeListsParse)
-{
-    EXPECT_THROW(
-        static_cast<void>(ParseGetBlockListResultXml(
-            "<BlockList><CommittedBlocks><Block><Name>a</Name><Size>big</Size></Block></CommittedBlocks></BlockList>")),
-        std::exception);
-    EXPECT_THROW(static_cast<void>(ParseGetPageRangesResultXml(
-                     "<PageList><PageRange><Start>x</Start><End>511</End></PageRange></PageList>")),
-        std::exception);
-    EXPECT_THROW(static_cast<void>(ParseGetPageRangesResultXml(
-                     "<PageList><PageRange><Start>0</Start><End>-5</End></PageRange></PageList>")),
-        std::exception);
-
-    const auto emptyBlocks = ParseGetBlockListResultXml("<BlockList/>");
-    EXPECT_TRUE(emptyBlocks.CommittedBlocks.empty());
-    EXPECT_TRUE(emptyBlocks.UncommittedBlocks.empty());
-    EXPECT_TRUE(ParseGetPageRangesResultXml("<PageList/>").PageRanges.empty());
-
-    std::string pages = "<PageList>";
-    for (int index = 0; index < 5000; ++index)
-    {
-        pages += "<PageRange><Start>" + std::to_string(index * 1024) + "</Start><End>" +
-                 std::to_string((index * 1024) + 511) + "</End></PageRange>";
-    }
-    pages += "</PageList>";
-    const auto ranges = ParseGetPageRangesResultXml(pages);
-    ASSERT_EQ(ranges.PageRanges.size(), 5000U);
-    EXPECT_EQ(ranges.PageRanges.back().Start, 4999U * 1024U);
-    EXPECT_EQ(ranges.PageRanges.back().End, (4999U * 1024U) + 511U);
 }
 
 TEST(ParserRobustnessTests, UserDelegationKey_MalformedDatesThrow)

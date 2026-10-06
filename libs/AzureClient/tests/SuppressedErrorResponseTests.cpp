@@ -3,7 +3,7 @@
 
 #include <AVEVA/AzureClient/BlobClient.hpp>
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>
-#include <AVEVA/AzureClient/BlockBlobClient.hpp>
+#include <AVEVA/AzureClient/PageBlobClient.hpp>
 
 #include <gtest/gtest.h>
 
@@ -15,7 +15,7 @@ namespace
 {
     using AVEVA::AzureClient::BlobClient;
     using AVEVA::AzureClient::BlobContainerClient;
-    using AVEVA::AzureClient::BlockBlobClient;
+    using AVEVA::AzureClient::PageBlobClient;
     using AVEVA::AzureClient::Tests::FakeHttpClient;
     using AVEVA::AzureClient::Tests::MakeAzureErrorResponse;
     using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
@@ -73,7 +73,7 @@ namespace
 TEST(SuppressedErrorResponseTests, OtherFailuresAreStillReported)
 {
     FakeHttpClient httpClient;
-    BlockBlobClient blockBlob{httpClient, MakeBlobClientOptions()};
+    PageBlobClient blockBlob{httpClient, MakeBlobClientOptions()};
     BlobContainerClient container{httpClient, MakeBlobContainerClientOptions()};
 
     EXPECT_FALSE(RunSuppressed(httpClient,
@@ -81,7 +81,7 @@ TEST(SuppressedErrorResponseTests, OtherFailuresAreStillReported)
         "AuthorizationFailure",
         [&](auto completion)
     {
-        blockBlob.CreateIfNotExistsAsync(std::move(completion));
+        blockBlob.DeleteIfExistsAsync(std::move(completion));
     }).Succeeded);
     EXPECT_FALSE(RunSuppressed(httpClient,
         409,

@@ -310,37 +310,6 @@ namespace
         throw std::runtime_error("callback boom");
     }
 
-    void HandleUploadFromPathCompletion(CallbackExpectation& callback, UploadBlockBlobAsyncResult result)
-    {
-        ASSERT_TRUE(result.has_value());
-        const Response<UploadBlockBlobResult>& response = *result;
-        EXPECT_EQ(response.Value().ETag, AVEVA::AzureClient::Tests::DefaultETag);
-        callback.MarkInvoked();
-    }
-
-    void StartUploadFromPathAndVerifySuccess(BlockBlobClient& client,
-        const std::filesystem::path& path,
-        const AVEVA::AzureClient::UploadFromOptions& options,
-        CallbackExpectation& callback)
-    {
-        client.UploadFromAsync(path, options, std::bind_front(HandleUploadFromPathCompletion, std::ref(callback)));
-    }
-
-    void HandleUploadFromFailure(int& callbackCount, UploadBlockBlobAsyncResult result)
-    {
-        ++callbackCount;
-        ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::connection_reset));
-    }
-
-    void StartUploadFromStreamAndExpectFailure(BlockBlobClient& client,
-        std::istream& stream,
-        const AVEVA::AzureClient::UploadFromOptions& options,
-        int& callbackCount)
-    {
-        client.UploadFromAsync(stream, options, std::bind_front(HandleUploadFromFailure, std::ref(callbackCount)));
-    }
-
     void HandleSuccessfulDeleteInvocation(bool& callbackInvoked, DeleteResult result)
     {
         ASSERT_TRUE(result.has_value());
@@ -590,7 +559,6 @@ namespace
         TransportRequest,
         PostedCompletion,
         RetryBackoff,
-        MultiBlockUpload,
         DownloadTo,
     };
 
@@ -624,7 +592,6 @@ namespace
     void StartPendingWork(PendingWork pending,
         BlockBlobClient& client,
         FakeHttpClient& httpClient,
-        const std::filesystem::path& uploadPath,
         std::ostringstream& downloadTarget,
         InvocationObserver handler)
     {
@@ -638,19 +605,13 @@ namespace
             client.DeleteAsync(std::move(handler));
             httpClient.Poll(); // deliver the 503; the operation now waits on its backoff timer
             break;
-        case PendingWork::MultiBlockUpload: {
-            AVEVA::AzureClient::UploadFromOptions uploadOptions;
-            uploadOptions.BlockSize = 4U;
-            client.UploadFromAsync(uploadPath, uploadOptions, std::move(handler));
-            break;
-        }
         case PendingWork::DownloadTo:
             client.DownloadToAsync(downloadTarget, std::move(handler));
             break;
         }
     }
 
-    void VerifyPendingWorkHandlerIsReleased(PendingWork pending, const std::filesystem::path& uploadPath)
+    void VerifyPendingWorkHandlerIsReleased(PendingWork pending)
     {
         SCOPED_TRACE(static_cast<int>(pending));
 
@@ -668,7 +629,6 @@ namespace
             StartPendingWork(pending,
                 client,
                 *httpClient,
-                uploadPath,
                 downloadTarget,
                 InvocationObserver{.Invoked = &invoked, .KeepAlive = std::move(sentinel)});
             ASSERT_EQ(httpClient->RequestCount(), 1U);
@@ -679,15 +639,14 @@ namespace
         EXPECT_TRUE(watch.expired());
     }
 
-    void VerifyPendingWorkHandlersAreReleased(const std::filesystem::path& uploadPath)
+    void VerifyPendingWorkHandlersAreReleased()
     {
         for (const PendingWork pending : {PendingWork::TransportRequest,
                  PendingWork::PostedCompletion,
                  PendingWork::RetryBackoff,
-                 PendingWork::MultiBlockUpload,
                  PendingWork::DownloadTo})
         {
-            VerifyPendingWorkHandlerIsReleased(pending, uploadPath);
+            VerifyPendingWorkHandlerIsReleased(pending);
         }
     }
 } // namespace
@@ -990,81 +949,6 @@ TEST(AsyncBehaviorTests, ExceptionsFromUserCallbacksPropagateWithoutCorruptingLa
     EXPECT_TRUE(httpClient.CompleteNext());
 }
 
-TEST(AsyncBehaviorTests, UploadFromAsyncPathKeepsOwnedStateAliveAcrossDeferredMultiBlockCompletion)
-{
-    FakeHttpClient httpClient;
-    httpClient.DeferByDefault() = true;
-    httpClient.DefaultResponse() = HttpResponse{201, MakeCanonicalSuccessHeaders(), ""};
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
-
-    const std::filesystem::path tempPath =
-        std::filesystem::temp_directory_path() / "azure-client-upload-from-async-behavior.bin";
-    {
-        std::ofstream output(tempPath, std::ios::binary | std::ios::trunc);
-        output << "ABCDEFGHI";
-    }
-
-    AVEVA::AzureClient::UploadFromOptions options;
-    options.BlockSize = 4U;
-
-    CallbackExpectation callback;
-    StartUploadFromPathAndVerifySuccess(client, tempPath, options, callback);
-
-    ASSERT_EQ(httpClient.RequestCount(), 1U);
-    EXPECT_EQ(httpClient.RequestAt(0).Body, "ABCD");
-    EXPECT_TRUE(httpClient.CompleteRequest(0U));
-    httpClient.Poll();
-
-    ASSERT_EQ(httpClient.RequestCount(), 2U);
-    EXPECT_EQ(httpClient.RequestAt(1).Body, "EFGH");
-    EXPECT_TRUE(httpClient.CompleteRequest(1U));
-    httpClient.Poll();
-
-    ASSERT_EQ(httpClient.RequestCount(), 3U);
-    EXPECT_EQ(httpClient.RequestAt(2).Body, "I");
-    EXPECT_TRUE(httpClient.CompleteRequest(2U));
-    httpClient.Poll();
-
-    ASSERT_EQ(httpClient.RequestCount(), 4U);
-    EXPECT_NE(httpClient.RequestAt(3).Request.GetUrl().find("comp=blocklist"), std::string::npos);
-    const std::string body = httpClient.RequestAt(3).Body;
-    ASSERT_EQ(httpClient.StagedBlockIds().size(), 3U);
-    std::string expectedList;
-    for (const std::string& id : httpClient.StagedBlockIds())
-    {
-        expectedList += "<Latest>" + id + "</Latest>";
-    }
-    EXPECT_NE(body.find(expectedList), std::string::npos) << body;
-    EXPECT_TRUE(httpClient.CompleteRequest(3U));
-    httpClient.Poll();
-
-    std::error_code ignored;
-    std::filesystem::remove(tempPath, ignored);
-}
-
-TEST(AsyncBehaviorTests, UploadFromAsyncStopsAfterMidUploadFailureAndDoesNotCommit)
-{
-    FakeHttpClient httpClient;
-    httpClient.DeferByDefault() = true;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
-
-    std::istringstream stream("ABCDEFGHI");
-    AVEVA::AzureClient::UploadFromOptions options;
-    options.BlockSize = 4U;
-
-    int callbackCount = 0;
-    StartUploadFromStreamAndExpectFailure(client, stream, options, callbackCount);
-
-    ASSERT_EQ(httpClient.RequestCount(), 1U);
-    EXPECT_TRUE(httpClient.CompleteRequest(0U));
-    httpClient.Poll();
-    ASSERT_EQ(httpClient.RequestCount(), 2U);
-    EXPECT_TRUE(httpClient.FailPending(0U, std::make_error_code(std::errc::connection_reset)));
-    httpClient.Poll();
-    EXPECT_EQ(callbackCount, 1);
-    EXPECT_EQ(httpClient.RequestCount(), 2U);
-}
-
 // Task 16 verification: an ITokenCredential that completes GetTokenAsync synchronously (the
 // default for the built-in StaticTokenCredential/CachingTokenCredential when no executor is
 // supplied, and for any third-party implementation that simply calls the handler inline) must
@@ -1328,15 +1212,6 @@ namespace
                 invoked = true;
             });
         }});
-        cases.push_back({.Name = "BlockBlobClient.GetBlockListAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
-            client->GetBlockListAsync([client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
         cases.push_back({.Name = "BlockBlobClient.DownloadAsync",
             .Invoke = [](FakeHttpClient& http, bool& invoked)
         {
@@ -1413,15 +1288,6 @@ namespace
                 invoked = true;
             });
         }});
-        cases.push_back({.Name = "BlockBlobClient.CreateIfNotExistsAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
-            client->CreateIfNotExistsAsync([client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
         cases.push_back({.Name = "BlockBlobClient.DeleteIfExistsAsync",
             .Invoke = [](FakeHttpClient& http, bool& invoked)
         {
@@ -1431,18 +1297,6 @@ namespace
                 invoked = true;
             });
         }});
-        cases.push_back({.Name = "BlockBlobClient.UploadFromAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
-            auto stream = std::make_shared<std::istringstream>("data");
-            client->UploadFromAsync(*stream,
-                [client, stream, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
-
         // --- AppendBlobClient ---
 
         // --- PageBlobClient ---
@@ -1804,17 +1658,7 @@ TEST(AsyncBehaviorTests, MidFlightCancellationThroughAnAssociatedSlotWorksForCon
 // catch use-after-free or leaks in the engines' teardown.
 TEST(AsyncBehaviorTests, DestroyingTheIoContextWithPendingWorkReleasesTheHandlerWithoutInvokingIt)
 {
-    const std::filesystem::path uploadPath =
-        std::filesystem::temp_directory_path() / "azure-client-io-context-teardown.bin";
-    {
-        std::ofstream output(uploadPath, std::ios::binary | std::ios::trunc);
-        output << "ABCDEFGHI";
-    }
-
-    VerifyPendingWorkHandlersAreReleased(uploadPath);
-
-    std::error_code ignored;
-    std::filesystem::remove(uploadPath, ignored);
+    VerifyPendingWorkHandlersAreReleased();
 }
 
 // Supported cancellation pattern: the signal is emitted from the handler's executor, so it cannot race

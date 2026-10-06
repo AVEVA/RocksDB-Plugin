@@ -21,12 +21,6 @@ namespace AVEVA::AzureClient::Private
     // Azure Blob Storage size limits and client transfer defaults.
     struct BlobTransferLimits
     {
-        // Service limit: a block blob may have at most 50,000 committed blocks.
-        static constexpr std::size_t MaxBlocksPerBlob = 50'000U;
-        // Service limit: Put Block accepts at most 4000 MiB per block (service version 2019-12-12 and later).
-        static constexpr std::uint64_t MaxStageBlockBytes = 4000ULL * 1024ULL * 1024ULL;
-        // Service limit: single-request Put Blob accepts at most 5000 MiB (service version 2016-05-31 and later).
-        static constexpr std::uint64_t MaxPutBlobBytes = 5000ULL * 1024ULL * 1024ULL;
         // Client default: parallel download chunk size when DownloadToOptions::ChunkSize is 0.
         static constexpr std::size_t DefaultDownloadChunkSize = std::size_t{4} * 1024U * 1024U;
         // Client policy: headroom on top of the requested range length for each response body limit.

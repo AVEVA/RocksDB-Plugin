@@ -164,16 +164,10 @@ effective request options carry none.
 | --- | --- | --- |
 | Per-request timeout | 30 s | `HttpRequestOptions::SetTimeout`, `DefaultRequestOptions` |
 | Response body limit | 8 MiB | `HttpRequestOptions`; downloads raise it per request to the chunk size + 64 KiB, so large blobs download with default options |
-| Upload block size / concurrency | 4 MiB / 1 | `UploadFromOptions::BlockSize` / `Concurrency` |
-| Single Put Blob threshold (file uploads) | 0 (only sources that fit in one block) | `UploadFromOptions::SingleUploadThreshold` |
 | Download chunk size / concurrency | 4 MiB / 1 | `DownloadToOptions::ChunkSize` / `Concurrency` |
 | Retries | 3 retries, 800 ms initial delay, 60 s max delay | `RetryOptions` (`Retry` member of the client options) |
 
 ### Parallel transfers
-
-`UploadFromAsync` stages up to `Concurrency` blocks at once, each read into one of at most `Concurrency`
-reusable `BlockSize` buffers, and commits them in order. File uploads that would need more than 50,000
-blocks grow `BlockSize` automatically; stream uploads fail with `std::errc::invalid_argument` instead.
 
 `DownloadToAsync(..., DownloadToOptions{...})` first fetches one `ChunkSize` range to learn the blob size and
 ETag, then fetches the rest with up to `Concurrency` ranged GETs in flight. Chunks are written in order (the
@@ -207,10 +201,10 @@ preserved, and container and blob segments are appended without duplicate slashe
 
 - `IHttpClient` is borrowed, not owned. Each client stores a non-owning reference/pointer to the `IHttpClient` passed at construction, so keep the HTTP client alive until the client object and every in-flight `...Async` operation have finished.
 - Operations taking `std::span<const std::byte>` (for example `UploadAsync`, `StageBlockAsync`, `AppendBlockAsync`) read the span when the operation is *initiated*, not when the call returns. With a callback or `use_future` that is during the call, but with the default deferred token it is when the returned operation is `co_await`ed or otherwise launched, so the bytes must stay valid until then. Overloads taking `std::string` copy the content and have no such constraint.
-- `std::istream&` passed to `UploadFromAsync(...)` and `std::ostream&` passed to `DownloadToAsync(...)` are also borrowed. Keep the stream alive, open, and otherwise stable until the completion handler runs.
+- `std::ostream&` passed to `DownloadToAsync(...)` are also borrowed. Keep the stream alive, open, and otherwise stable until the completion handler runs.
 - Treat `ITokenCredential` the same way: keep the supplied `std::shared_ptr<ITokenCredential>` and any state it depends on alive until any in-flight token acquisition or request waiting on that token has completed.
 - The library does not provide its own executor or thread-affinity guarantee. Completion handlers run on whatever thread the supplied `IHttpClient` / `ITokenCredential` uses, and they may run inline before the initiating `...Async` call returns if the dependency completes synchronously. Write callbacks to tolerate both immediate and deferred invocation.
-- Stream and file I/O of `DownloadToAsync(...)` / `UploadFromAsync(...)` (`ostream::write`, `istream::read`, file reads and writes) runs on the threads that complete HTTP requests, i.e. the client's executor. A slow disk or a stream that blocks stalls every other in-flight request on that executor; use a dedicated `io_context` for the HTTP client or a fast stream.
+- Stream and file I/O of `DownloadToAsync(...)` (`ostream::write`, file writes) runs on the threads that complete HTTP requests, i.e. the client's executor. A slow disk or a stream that blocks stalls every other in-flight request on that executor; use a dedicated `io_context` for the HTTP client or a fast stream.
 - Cancellation: Asio cancellation slots are not thread-safe. Emit a `cancellation_signal` from the same executor (or strand) the completion handler runs on, for example `boost::asio::post(handlerExecutor, [&signal] { signal.emit(boost::asio::cancellation_type::terminal); })`. Emitting from an arbitrary thread can race with the library releasing the slot when the operation completes.
 - Constructor-time option validation still throws synchronously (`std::invalid_argument`) for invalid endpoints, invalid option values, or conflicting credentials. Per-operation validation that used to throw synchronously (for example invalid block IDs, invalid page alignment, or zero-length download ranges) is now reported through the completion handler as `std::errc::invalid_argument`. One exception remains: a Shared Key request can still throw `std::runtime_error` synchronously if OpenSSL cannot initialize or finalize the HMAC operation while signing the request.
 

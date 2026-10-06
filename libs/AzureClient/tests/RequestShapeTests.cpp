@@ -460,26 +460,6 @@ namespace
             .Headers = {{"x-ms-lease-id", "lease-1"}, {"x-ms-content-crc64", "Y3JjNjQ="}},
             .AbsentHeaders = {"If-Match", "If-None-Match", "x-ms-blob-type"},
             .Body = std::string{"data"}});
-        cases.push_back({.Name = "Block_StageBlockFromUri",
-            .Start =
-                [](Clients& c)
-        {
-            StageBlockFromUriOptions o;
-            o.SourceOffset = 5;
-            o.SourceLength = 10;
-            o.SourceContentMd5 = "c3Jj";
-            o.Conditions = FullConditions();
-            c.Block.StageBlockFromUriAsync("YmxvY2s=", "https://src.example/c/b", std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = blob,
-            .Query = {{"comp", "block"}, {"blockid", "YmxvY2s%3D"}},
-            .Headers = {{"x-ms-copy-source", "https://src.example/c/b"},
-                {"x-ms-source-range", "bytes=5-14"},
-                {"x-ms-source-content-md5", "c3Jj"},
-                {"x-ms-lease-id", "lease-1"}},
-            .AbsentHeaders = {"If-Match"},
-            .Body = std::nullopt});
         cases.push_back({.Name = "Block_CommitBlockList",
             .Start =
                 [](Clients& c)
@@ -501,43 +481,6 @@ namespace
             .AbsentHeaders = {"x-ms-blob-type"},
             .Body = std::string{
                 R"(<?xml version="1.0" encoding="utf-8"?><BlockList><Latest>YQ==</Latest><Latest>Yg==</Latest></BlockList>)"}});
-        cases.push_back({.Name = "Block_GetBlockList",
-            .Start =
-                [](Clients& c)
-        {
-            c.Block.GetBlockListAsync(Ignore);
-        },
-            .Method = HttpMethod::Get,
-            .Path = blob,
-            .Query = {{"comp", "blocklist"}, {"blocklisttype", "all"}},
-            .Headers = {},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Block_CreateIfNotExists",
-            .Start =
-                [](Clients& c)
-        {
-            c.Block.CreateIfNotExistsAsync(Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = blob,
-            .Query = {},
-            .Headers = {{"x-ms-blob-type", "BlockBlob"}, {"If-None-Match", "*"}},
-            .AbsentHeaders = {},
-            .Body = std::string{}});
-        cases.push_back({.Name = "Block_UploadFromStream",
-            .Start =
-                [](Clients& c)
-        {
-            c.Block.UploadFromAsync(c.Source, Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = blob,
-            .Query = {},
-            .Headers = {{"x-ms-blob-type", "BlockBlob"}},
-            .AbsentHeaders = {},
-            .Body = std::string{"hello"}});
-
         cases.push_back({.Name = "Page_Create",
             .Start =
                 [](Clients& c)
