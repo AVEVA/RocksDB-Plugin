@@ -626,20 +626,6 @@ namespace AVEVA::AzureClient::Private
         AddHeaderIfNotEmpty(request, XMsContentCrc64HeaderName, crc64.Value);
     }
 
-    std::string BuildFindBlobsByTagsQuery(std::string_view where, const FindBlobsByTagsOptions& options)
-    {
-        std::vector<std::pair<std::string, std::string>> parameters{{"comp", "blobs"}, {"where", std::string{where}}};
-        if (!options.Marker.empty())
-        {
-            parameters.emplace_back("marker", options.Marker);
-        }
-        if (options.MaxResults.has_value())
-        {
-            parameters.emplace_back("maxresults", std::to_string(*options.MaxResults));
-        }
-        return BuildQueryString(parameters);
-    }
-
     std::shared_ptr<const ConnectionState> MakeConnectionState(BlobServiceClientOptions options)
     {
         return BuildConnection(options);
@@ -663,24 +649,16 @@ namespace AVEVA::AzureClient::Private
 
     BlobTarget MakeBlobTarget(std::shared_ptr<const ConnectionState> connection,
         std::string containerName,
-        std::string blobName,
-        std::string snapshot,
-        std::string versionId)
+        std::string blobName)
     {
         ValidateContainerName(containerName);
         if (blobName.empty())
         {
             throw std::invalid_argument("BlobName must not be empty.");
         }
-        if (!snapshot.empty() && !versionId.empty())
-        {
-            throw std::invalid_argument("Snapshot and VersionId are mutually exclusive.");
-        }
         return BlobTarget{.Connection = std::move(connection),
             .ContainerName = std::move(containerName),
-            .BlobName = std::move(blobName),
-            .Snapshot = std::move(snapshot),
-            .VersionId = std::move(versionId)};
+            .BlobName = std::move(blobName)};
     }
 
     ContainerTarget MakeContainerTarget(const BlobContainerClientOptions& options)
@@ -692,9 +670,7 @@ namespace AVEVA::AzureClient::Private
     {
         return MakeBlobTarget(MakeConnectionState(options),
             options.ContainerName,
-            options.BlobName,
-            options.Snapshot,
-            options.VersionId);
+            options.BlobName);
     }
 
     RequestAuth MakeRequestAuth(const ConnectionState& connection)
@@ -788,16 +764,6 @@ namespace AVEVA::AzureClient::Private
     std::string BuildBlobUrl(const BlobTarget& target, std::string_view queryString)
     {
         std::string query;
-        if (!target.Snapshot.empty())
-        {
-            query += "snapshot=";
-            query += UrlEncode(target.Snapshot, {});
-        }
-        if (!target.VersionId.empty())
-        {
-            query += "versionid=";
-            query += UrlEncode(target.VersionId, {});
-        }
         AppendQueryParts(query, *target.Connection, queryString);
         return ComposeUrl(*target.Connection,
             {UrlEncode(target.ContainerName, {}), UrlEncode(target.BlobName, "/")},

@@ -245,34 +245,6 @@ namespace AVEVA::AzureClient::Models
         return Value;
     }
 
-    // x-ms-delete-snapshots: Include deletes the base blob and its snapshots, OnlySnapshots only the snapshots.
-    class DeleteSnapshotsOption : public ExtensibleEnum<DeleteSnapshotsOption>
-    {
-      public:
-        DeleteSnapshotsOption() = default;
-
-        template <class T>
-            requires std::convertible_to<const T&, std::string_view>
-        DeleteSnapshotsOption(const T& value) : ExtensibleEnum(std::string{std::string_view{value}})
-        {
-        }
-
-        [[nodiscard]] static const DeleteSnapshotsOption& Include();
-        [[nodiscard]] static const DeleteSnapshotsOption& OnlySnapshots();
-    };
-
-    inline const DeleteSnapshotsOption& DeleteSnapshotsOption::Include()
-    {
-        static const DeleteSnapshotsOption Value{"include"};
-        return Value;
-    }
-
-    inline const DeleteSnapshotsOption& DeleteSnapshotsOption::OnlySnapshots()
-    {
-        static const DeleteSnapshotsOption Value{"only"};
-        return Value;
-    }
-
     class CopyStatus : public ExtensibleEnum<CopyStatus>
     {
       public:
@@ -444,21 +416,6 @@ namespace AVEVA::AzureClient::Models
         std::chrono::system_clock::time_point LastModified;
     };
 
-    // One match of Find Blobs by Tags; Tags holds only the tags referenced by the filter expression.
-    struct TaggedBlobItem
-    {
-        std::string BlobName;
-        std::string ContainerName;
-        BlobTags Tags;
-    };
-
-    struct FindBlobsByTagsResult
-    {
-        std::vector<TaggedBlobItem> Blobs;
-        std::string Where;
-        std::string NextMarker;
-    };
-
     struct AcquireBlobLeaseResult
     {
         std::string LeaseId;
@@ -474,22 +431,8 @@ namespace AVEVA::AzureClient::Models
         std::chrono::system_clock::time_point LastModified;
     };
 
-    struct ChangeBlobLeaseResult
-    {
-        std::string LeaseId;
-        std::string ETag;
-        std::chrono::system_clock::time_point LastModified;
-    };
-
     struct ReleaseBlobLeaseResult
     {
-        std::string ETag;
-        std::chrono::system_clock::time_point LastModified;
-    };
-
-    struct BreakBlobLeaseResult
-    {
-        std::optional<int> LeaseTimeSeconds;
         std::string ETag;
         std::chrono::system_clock::time_point LastModified;
     };

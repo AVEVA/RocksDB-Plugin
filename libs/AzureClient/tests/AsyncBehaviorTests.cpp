@@ -510,21 +510,7 @@ namespace
         bool& canceled)
     {
         auto client = std::make_shared<BlobContainerClient>(httpClient, MakeBlobContainerClientOptions());
-        client->DeleteAsync(boost::asio::bind_cancellation_slot(signal.slot(),
-            [client, &completions, &canceled](auto result)
-        {
-            RecordCancellationResult(CancellationObservation{.Completions = &completions, .Canceled = &canceled},
-                std::move(result));
-        }));
-    }
-
-    void StartServiceGetPropertiesWithCancellation(FakeHttpClient& httpClient,
-        boost::asio::cancellation_signal& signal,
-        int& completions,
-        bool& canceled)
-    {
-        auto client = std::make_shared<BlobServiceClient>(httpClient, MakeBlobServiceClientOptions());
-        client->GetPropertiesAsync(boost::asio::bind_cancellation_slot(signal.slot(),
+        client->CreateAsync(boost::asio::bind_cancellation_slot(signal.slot(),
             [client, &completions, &canceled](auto result)
         {
             RecordCancellationResult(CancellationObservation{.Completions = &completions, .Canceled = &canceled},
@@ -725,8 +711,8 @@ TEST(AsyncBehaviorTests, BlobContainerClientMoveOnlyCompletionTokenSurvivesDefer
 
     std::string observed;
     CallbackExpectation callback;
-    client.ExistsAsync([state = std::make_unique<std::string>("container-move-only-state"), &observed, &callback](
-                           std::expected<Response<bool>, BlobStorageError>) mutable
+    client.CreateAsync([state = std::make_unique<std::string>("container-move-only-state"), &observed, &callback](
+                           std::expected<Response<AVEVA::AzureClient::Models::CreateBlobContainerResult>, BlobStorageError>) mutable
     {
         ASSERT_TRUE(state);
         observed = *state;
@@ -737,29 +723,6 @@ TEST(AsyncBehaviorTests, BlobContainerClientMoveOnlyCompletionTokenSurvivesDefer
     EXPECT_TRUE(observed.empty());
     ASSERT_TRUE(httpClient.CompleteNext());
     EXPECT_EQ(observed, "container-move-only-state");
-}
-
-TEST(AsyncBehaviorTests, BlobServiceClientMoveOnlyCompletionTokenSurvivesDeferredCompletion)
-{
-    FakeHttpClient httpClient;
-    httpClient.DeferByDefault() = true;
-    BlobServiceClient client{httpClient, MakeBlobServiceClientOptions()};
-
-    std::string observed;
-    CallbackExpectation callback;
-    client.ListBlobContainersAsync(
-        [state = std::make_unique<std::string>("service-move-only-state"), &observed, &callback](
-            std::expected<Response<AVEVA::AzureClient::Models::ListBlobContainersResult>, BlobStorageError>) mutable
-    {
-        ASSERT_TRUE(state);
-        observed = *state;
-        state.reset();
-        callback.MarkInvoked();
-    });
-
-    EXPECT_TRUE(observed.empty());
-    ASSERT_TRUE(httpClient.CompleteNext());
-    EXPECT_EQ(observed, "service-move-only-state");
 }
 
 TEST(AsyncBehaviorTests, BlockBlobClientCanBeDestroyedAfterRequestIsInFlight)
@@ -1447,24 +1410,6 @@ namespace
                 invoked = true;
             });
         }});
-        cases.push_back({.Name = "BlobContainerClient.DeleteAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<BlobContainerClient>(http, MakeBlobContainerClientOptions());
-            client->DeleteAsync([client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
-        cases.push_back({.Name = "BlobContainerClient.GetPropertiesAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<BlobContainerClient>(http, MakeBlobContainerClientOptions());
-            client->GetPropertiesAsync([client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
         cases.push_back({.Name = "BlobContainerClient.ListBlobsAsync",
             .Invoke = [](FakeHttpClient& http, bool& invoked)
         {
@@ -1474,40 +1419,11 @@ namespace
                 invoked = true;
             });
         }});
-        cases.push_back({.Name = "BlobContainerClient.ExistsAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<BlobContainerClient>(http, MakeBlobContainerClientOptions());
-            client->ExistsAsync([client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
         cases.push_back({.Name = "BlobContainerClient.CreateIfNotExistsAsync",
             .Invoke = [](FakeHttpClient& http, bool& invoked)
         {
             auto client = std::make_shared<BlobContainerClient>(http, MakeBlobContainerClientOptions());
             client->CreateIfNotExistsAsync([client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
-        cases.push_back({.Name = "BlobContainerClient.DeleteIfExistsAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<BlobContainerClient>(http, MakeBlobContainerClientOptions());
-            client->DeleteIfExistsAsync([client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
-
-        // --- BlobServiceClient ---
-        cases.push_back({.Name = "BlobServiceClient.ListBlobContainersAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<BlobServiceClient>(http, MakeBlobServiceClientOptions());
-            client->ListBlobContainersAsync([client, &invoked](auto)
             {
                 invoked = true;
             });
@@ -1640,16 +1556,9 @@ TEST(AsyncBehaviorTests, CancellationDuringTokenAcquisitionCompletesPromptlyAndN
     EXPECT_EQ(completions, 1);
 }
 
-TEST(AsyncBehaviorTests, MidFlightCancellationThroughAnAssociatedSlotWorksForContainerAndServiceClients)
+TEST(AsyncBehaviorTests, MidFlightCancellationThroughAnAssociatedSlotWorksForContainerClients)
 {
-    {
-        SCOPED_TRACE("BlobContainerClient::DeleteAsync");
-        ExpectMidFlightCancellation(StartContainerDeleteWithCancellation);
-    }
-    {
-        SCOPED_TRACE("BlobServiceClient::GetPropertiesAsync");
-        ExpectMidFlightCancellation(StartServiceGetPropertiesWithCancellation);
-    }
+    ExpectMidFlightCancellation(StartContainerDeleteWithCancellation);
 }
 
 // Destroying the transport -- and with it the io_context that owns every pending handler, timer and

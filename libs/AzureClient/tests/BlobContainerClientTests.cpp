@@ -50,14 +50,8 @@ namespace
     using AVEVA::AzureClient::BlobStorageError;
     using AVEVA::AzureClient::BlobStorageErrorCode;
     using AVEVA::AzureClient::Response;
-    using AVEVA::AzureClient::Models::BlobContainerProperties;
     using AVEVA::AzureClient::Models::CreateBlobContainerResult;
-    using AVEVA::AzureClient::Models::DeleteBlobContainerResult;
-    using AVEVA::AzureClient::Models::LeaseDurationType;
-    using AVEVA::AzureClient::Models::LeaseState;
-    using AVEVA::AzureClient::Models::LeaseStatus;
     using AVEVA::AzureClient::Models::ListBlobsResult;
-    using AVEVA::AzureClient::Models::PublicAccessType;
     using AVEVA::AzureClient::Private::ParseHttpDateHeader;
     using AVEVA::AzureClient::Tests::CallbackExpectation;
     using AVEVA::AzureClient::Tests::DefaultETag;
@@ -72,69 +66,6 @@ namespace
         return MakeBlobContainerClientOptions();
     }
 
-    void VerifyLeaseAccessType(const BlobContainerProperties& properties,
-        unsigned int& statusCode,
-        unsigned int responseStatus)
-    {
-        statusCode = responseStatus;
-        EXPECT_EQ(properties.AccessType, PublicAccessType::Blob);
-    }
-
-    void VerifyLeasePolicyFlags(const BlobContainerProperties& properties)
-    {
-        EXPECT_TRUE(properties.HasImmutabilityPolicy);
-        EXPECT_TRUE(properties.HasLegalHold);
-    }
-
-    void VerifyLeaseStateProperties(const BlobContainerProperties& properties)
-    {
-        EXPECT_EQ(properties.Status, LeaseStatus::Locked);
-        EXPECT_EQ(properties.State, LeaseState::Breaking);
-        EXPECT_EQ(properties.DurationType, LeaseDurationType::Fixed);
-    }
-
-    void VerifyEncryptionScopeProperties(const BlobContainerProperties& properties)
-    {
-        EXPECT_EQ(properties.DefaultEncryptionScope, "scope-a");
-        EXPECT_TRUE(properties.PreventEncryptionScopeOverride);
-    }
-
-    void VerifyLeaseMetadataEntries(const BlobContainerProperties& properties)
-    {
-        EXPECT_EQ(properties.Metadata.at("project"), "aveva");
-        EXPECT_EQ(properties.Metadata.at("owner"), "storage");
-    }
-
-    void VerifyLeaseMetadataResult(const Response<BlobContainerProperties>& response,
-        unsigned int& statusCode,
-        CallbackExpectation& callback)
-    {
-        VerifyLeaseAccessType(response.Value(), statusCode, response.RawResponse().GetStatus());
-        VerifyLeasePolicyFlags(response.Value());
-        VerifyLeaseStateProperties(response.Value());
-        VerifyEncryptionScopeProperties(response.Value());
-        VerifyLeaseMetadataEntries(response.Value());
-        callback.MarkInvoked();
-    }
-
-    void VerifyUnknownAccessAndStatus(const BlobContainerProperties& properties)
-    {
-        EXPECT_EQ(properties.AccessType, PublicAccessType::Unknown);
-        EXPECT_EQ(properties.Status, LeaseStatus::Unknown);
-    }
-
-    void VerifyUnknownStateAndDuration(const BlobContainerProperties& properties)
-    {
-        EXPECT_EQ(properties.State, LeaseState::Unknown);
-        EXPECT_EQ(properties.DurationType, LeaseDurationType::Unknown);
-    }
-
-    void VerifyUnknownEnumPropertiesResult(const Response<BlobContainerProperties>& response)
-    {
-        VerifyUnknownAccessAndStatus(response.Value());
-        VerifyUnknownStateAndDuration(response.Value());
-    }
-
     void VerifyMalformedListBlobsErrorCode(const BlobStorageError& error)
     {
         EXPECT_EQ(error.Code, BlobStorageErrorCode::InvalidResponse);
@@ -146,33 +77,6 @@ namespace
         EXPECT_EQ(error.StatusCode, 200U);
         EXPECT_FALSE(error.Message.empty());
         callbackInvoked = true;
-    }
-
-    void VerifyDeleteMalformedXmlFallbackStatus(const BlobStorageError& error)
-    {
-        EXPECT_EQ(error.Code, BlobStorageErrorCode::ServiceError);
-        EXPECT_EQ(error.StatusCode, 500U);
-    }
-
-    void VerifyDeleteMalformedXmlFallbackPayload(const BlobStorageError& error, CallbackExpectation& callback)
-    {
-        EXPECT_TRUE(error.ErrorCode.empty());
-        EXPECT_TRUE(error.Message.empty());
-        EXPECT_TRUE(error.RequestId.empty());
-        callback.MarkInvoked();
-    }
-
-    void VerifyDeleteUnknownCodeFallbackCodeAndId(const BlobStorageError& error)
-    {
-        EXPECT_EQ(error.Code, BlobStorageErrorCode::ServiceError);
-        EXPECT_EQ(error.RequestId, "container-409");
-    }
-
-    void VerifyDeleteUnknownCodeFallbackDetails(const BlobStorageError& error, CallbackExpectation& callback)
-    {
-        EXPECT_EQ(error.ErrorCode, "OddContainerProblem");
-        EXPECT_EQ(error.Message, "Unexpected detail");
-        callback.MarkInvoked();
     }
 
     void VerifyListBlobsWithOptionsMarkers(const ListBlobsResult& result)
@@ -217,26 +121,6 @@ namespace
             requestOptions);
     }
 
-    void GetPropertiesAndVerifyLeaseMetadata(BlobContainerClient& client,
-        unsigned int& statusCode,
-        CallbackExpectation& callback)
-    {
-        client.GetPropertiesAsync([&](std::expected<Response<BlobContainerProperties>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            VerifyLeaseMetadataResult(*result, statusCode, callback);
-        });
-    }
-
-    void GetPropertiesAndVerifyUnknownEnums(BlobContainerClient& client)
-    {
-        client.GetPropertiesAsync([&](std::expected<Response<BlobContainerProperties>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            VerifyUnknownEnumPropertiesResult(*result);
-        });
-    }
-
     void CreateContainerAndVerifyMappedServiceError(BlobContainerClient& client, bool& callbackInvoked)
     {
         client.CreateAsync([&](std::expected<Response<CreateBlobContainerResult>, BlobStorageError> result)
@@ -257,55 +141,12 @@ namespace
         });
     }
 
-    void DeleteContainerAndVerifyTransportError(BlobContainerClient& client, CallbackExpectation& callback)
-    {
-        client.DeleteAsync([&](std::expected<Response<DeleteBlobContainerResult>, BlobStorageError> result)
-        {
-            ASSERT_FALSE(result.has_value());
-            EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::connection_reset));
-            EXPECT_TRUE(result.error().ErrorCode.empty());
-            callback.MarkInvoked();
-        });
-    }
-
-    void DeleteContainerAndVerifyRedirect(BlobContainerClient& client, CallbackExpectation& callback)
-    {
-        client.DeleteAsync([&](std::expected<Response<DeleteBlobContainerResult>, BlobStorageError> result)
-        {
-            ASSERT_FALSE(result.has_value());
-            EXPECT_EQ(result.error().Code, BlobStorageErrorCode::ServiceError);
-            EXPECT_EQ(result.error().StatusCode, 307U);
-            EXPECT_EQ(result.error().RequestId, "container-redirect");
-            callback.MarkInvoked();
-        });
-    }
-
-    void DeleteContainerAndVerifyMalformedXmlFallback(BlobContainerClient& client, CallbackExpectation& callback)
-    {
-        client.DeleteAsync([&](std::expected<Response<DeleteBlobContainerResult>, BlobStorageError> result)
-        {
-            ASSERT_FALSE(result.has_value());
-            VerifyDeleteMalformedXmlFallbackStatus(result.error());
-            VerifyDeleteMalformedXmlFallbackPayload(result.error(), callback);
-        });
-    }
-
-    void DeleteContainerAndVerifyUnknownCodeFallback(BlobContainerClient& client, CallbackExpectation& callback)
-    {
-        client.DeleteAsync([&](std::expected<Response<DeleteBlobContainerResult>, BlobStorageError> result)
-        {
-            ASSERT_FALSE(result.has_value());
-            VerifyDeleteUnknownCodeFallbackCodeAndId(result.error());
-            VerifyDeleteUnknownCodeFallbackDetails(result.error(), callback);
-        });
-    }
-
     void VerifyBlobClientAndContainerOperations(BlobContainerClient& container,
         BlobClient& blob,
         FakeHttpClient& httpClient,
         int& completions)
     {
-        container.ExistsAsync([&](auto result)
+        container.CreateAsync([&](auto result)
         {
             EXPECT_TRUE(result.has_value());
             ++completions;
@@ -358,30 +199,6 @@ namespace
         });
     }
 
-    void VerifyContainerExists(BlobContainerClient& client, CallbackExpectation& callback)
-    {
-        client.ExistsAsync([&](std::expected<Response<bool>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            const Response<bool>& response = *result;
-            EXPECT_TRUE(response.Value());
-            callback.MarkInvoked();
-        });
-    }
-
-    void VerifyMissingContainerExists(BlobContainerClient& client, CallbackExpectation& callback)
-    {
-        client.ExistsAsync([&](std::expected<Response<bool>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            const Response<bool>& response = *result;
-            EXPECT_FALSE(response.Value());
-            ASSERT_TRUE(response.Error().has_value());
-            EXPECT_EQ(response.Error()->RequestId, "missing-request");
-            callback.MarkInvoked();
-        });
-    }
-
     void CreateContainerIfMissingAndVerifyExpectedConflict(BlobContainerClient& client, CallbackExpectation& callback)
     {
         AVEVA::AzureClient::CreateBlobContainerOptions createOptions;
@@ -398,50 +215,6 @@ namespace
         });
     }
 
-    void DeleteContainerIfExistsAndVerifyExpectedMissing(BlobContainerClient& client, CallbackExpectation& callback)
-    {
-        client.DeleteIfExistsAsync({},
-            [&](std::expected<Response<DeleteBlobContainerResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            const Response<DeleteBlobContainerResult>& response = *result;
-            ASSERT_TRUE(response.Error().has_value());
-            EXPECT_EQ(response.Error()->RequestId, "delete-request");
-            callback.MarkInvoked();
-        });
-    }
-
-    void ListBlobsAndCaptureResult(BlobContainerClient& client, std::optional<ListBlobsResult>& listed)
-    {
-        client.ListBlobsAsync([&](std::expected<Response<ListBlobsResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            listed = result->Value();
-        });
-    }
-
-    void ListAllBlobsAndCaptureResult(BlobContainerClient& client,
-        const AVEVA::AzureClient::ListBlobsOptions& options,
-        std::optional<ListBlobsResult>& listed,
-        int& completions)
-    {
-        client.ListBlobsAllAsync(options,
-            [&](std::expected<Response<ListBlobsResult>, BlobStorageError> result)
-        {
-            ++completions;
-            ASSERT_TRUE(result.has_value());
-            listed = result->Value();
-        });
-    }
-
-    void ExpectPagedListRequestsUseSharedPrefixAndMaxResults(const FakeHttpClient& httpClient)
-    {
-        for (std::size_t index = 0; index < 3U; ++index)
-        {
-            EXPECT_NE(httpClient.RequestAt(index).Request.GetUrl().find("prefix=x"), std::string::npos);
-            EXPECT_NE(httpClient.RequestAt(index).Request.GetUrl().find("maxresults=2"), std::string::npos);
-        }
-    }
 } // namespace
 
 TEST(BlobContainerClientTests, CreateAsync_BuildsPutRequestAndParsesResult)
@@ -487,66 +260,6 @@ TEST(BlobContainerClientTests, CreateAsync_BuildsUrlWhenEndpointHasNoTrailingSla
 
     EXPECT_EQ(httpClient.LastRequest().GetUrl(),
         "https://storageaccount.blob.core.windows.net/images?restype=container&sv=2025-01-05&sig=fakesig");
-}
-
-TEST(BlobContainerClientTests, DeleteAsync_UsesDeleteMethod)
-{
-    FakeHttpClient httpClient;
-    BlobContainerClient client{httpClient, BuildOptions()};
-
-    client.DeleteAsync([](std::expected<Response<DeleteBlobContainerResult>, BlobStorageError>) {});
-
-    EXPECT_EQ(httpClient.LastRequest().GetMethod(), HttpMethod::Delete);
-    EXPECT_EQ(httpClient.LastRequest().GetUrl(),
-        "https://storageaccount.blob.core.windows.net/images?restype=container&sv=2025-01-05&sig=fakesig");
-}
-
-TEST(BlobContainerClientTests, GetPropertiesAsync_ParsesLeaseMetadataAndEncryptionScopeFields)
-{
-    FakeHttpClient httpClient;
-    httpClient.DefaultResponse() = HttpResponse{200,
-        {
-            {"ETag", "\"0x8D1234\""},
-            {"Last-Modified", "Fri, 26 Jun 2015 18:59:17 GMT"},
-            {"x-ms-blob-public-access", "blob"},
-            {"x-ms-lease-status", "locked"},
-            {"x-ms-lease-state", "breaking"},
-            {"x-ms-lease-duration", "fixed"},
-            {"x-ms-has-immutability-policy", "true"},
-            {"x-ms-has-legal-hold", "true"},
-            {"x-ms-default-encryption-scope", "scope-a"},
-            {"x-ms-deny-encryption-scope-override", "true"},
-            {"x-ms-meta-Project", "aveva"},
-            {"X-Ms-MeTa-OWNER", "storage"},
-        },
-        ""};
-
-    BlobContainerClient client{httpClient, BuildOptions()};
-
-    unsigned int statusCode = 0;
-    CallbackExpectation callback;
-    GetPropertiesAndVerifyLeaseMetadata(client, statusCode, callback);
-
-    httpClient.Poll(); // drive the posted (async) completion (T26)
-    EXPECT_EQ(httpClient.LastRequest().GetMethod(), HttpMethod::Head);
-    EXPECT_EQ(statusCode, 200U);
-}
-
-TEST(BlobContainerClientTests, GetPropertiesAsync_PreservesUnknownProtocolEnumValues)
-{
-    FakeHttpClient httpClient;
-    httpClient.DefaultResponse() = HttpResponse{200,
-        {
-            {"x-ms-blob-public-access", "mystery-access"},
-            {"x-ms-lease-status", "half-locked"},
-            {"x-ms-lease-state", "teleporting"},
-            {"x-ms-lease-duration", "elastic"},
-        },
-        ""};
-
-    BlobContainerClient client{httpClient, BuildOptions()};
-
-    GetPropertiesAndVerifyUnknownEnums(client);
 }
 
 TEST(BlobContainerClientTests, CreateAsync_MapsServiceErrorCodeWithoutParsingResult)
@@ -721,57 +434,6 @@ TEST(BlobContainerClientTests, ListBlobsAsync_ReportsMalformedXmlAsInvalidRespon
     EXPECT_TRUE(callbackInvoked);
 }
 
-TEST(BlobContainerClientTests, DeleteAsync_PropagatesTransportErrorWithoutInspectingHttpStatus)
-{
-    FakeHttpClient httpClient;
-    httpClient.DefaultError() = std::make_error_code(std::errc::connection_reset);
-    httpClient.DefaultResponse() = HttpResponse{404, {{"x-ms-error-code", "ContainerNotFound"}}, ""};
-    BlobContainerClient client{httpClient, BuildOptions()};
-
-    CallbackExpectation callback;
-    DeleteContainerAndVerifyTransportError(client, callback);
-
-    httpClient.Poll(); // drive the posted (async) completion (T26)
-}
-
-TEST(BlobContainerClientTests, DeleteAsync_TreatsRedirectAsServiceError)
-{
-    FakeHttpClient httpClient;
-    httpClient.DefaultResponse() = HttpResponse{307, {{"x-ms-request-id", "container-redirect"}}, ""};
-    BlobContainerClient client{httpClient, BuildOptions()};
-
-    CallbackExpectation callback;
-    DeleteContainerAndVerifyRedirect(client, callback);
-
-    httpClient.Poll(); // drive the posted (async) completion (T26)
-}
-
-TEST(BlobContainerClientTests, DeleteAsync_FallsBackToServiceErrorForMalformedXmlAndMissingRequestId)
-{
-    FakeHttpClient httpClient;
-    httpClient.DefaultResponse() = HttpResponse{500, {}, "<Error><Message>broken"};
-    BlobContainerClient client{httpClient, BuildOptions()};
-
-    CallbackExpectation callback;
-    DeleteContainerAndVerifyMalformedXmlFallback(client, callback);
-
-    httpClient.Poll(); // drive the posted (async) completion (T26)
-}
-
-TEST(BlobContainerClientTests, DeleteAsync_UnrecognizedStorageCodeFallsBackToServiceErrorButPreservesDetails)
-{
-    FakeHttpClient httpClient;
-    httpClient.DefaultResponse() = HttpResponse{409,
-        {{"x-ms-error-code", "OddContainerProblem"}, {"x-ms-request-id", "container-409"}},
-        "<Error><Message>Unexpected detail</Message></Error>"};
-    BlobContainerClient client{httpClient, BuildOptions()};
-
-    CallbackExpectation callback;
-    DeleteContainerAndVerifyUnknownCodeFallback(client, callback);
-
-    httpClient.Poll(); // drive the posted (async) completion (T26)
-}
-
 TEST(BlobContainerClientTests, GetBlockBlobClient_BuildsBlobScopedClient)
 {
     FakeHttpClient httpClient;
@@ -876,29 +538,17 @@ TEST(BlobContainerClientTests, ListBlobsAsync_OptionsOverloadIncludesAllSupporte
         "sv=2025-01-05&sig=fakesig");
 }
 
-TEST(BlobContainerClientTests, ExistsCreateIfNotExistsAndDeleteIfExistsTreatExpectedStatusesAsNonFatal)
+TEST(BlobContainerClientTests, CreateIfNotExists_TreatsAlreadyExistsAsNonFatal)
 {
     FakeHttpClient httpClient;
-    httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders(), ""});
-    httpClient.EnqueueResponse(MakeAzureErrorResponse(404, "ContainerNotFound", "", "missing-request"));
     httpClient.EnqueueResponse(MakeAzureErrorResponse(409, "ContainerAlreadyExists", "", "create-request"));
-    httpClient.EnqueueResponse(MakeAzureErrorResponse(404, "ContainerNotFound", "", "delete-request"));
     BlobContainerClient client{httpClient, BuildOptions()};
-
-    CallbackExpectation existsCallback;
-    VerifyContainerExists(client, existsCallback);
-
-    CallbackExpectation missingExistsCallback;
-    VerifyMissingContainerExists(client, missingExistsCallback);
 
     CallbackExpectation createCallback;
     CreateContainerIfMissingAndVerifyExpectedConflict(client, createCallback);
 
-    CallbackExpectation deleteCallback;
-    DeleteContainerIfExistsAndVerifyExpectedMissing(client, deleteCallback);
-
-    httpClient.Poll(); // drive the four posted (async) completions (T26)
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(2).Request, "x-ms-meta-project"), "tests");
+    httpClient.Poll();
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(0).Request, "x-ms-meta-project"), "tests");
 }
 
 TEST(BlobContainerClientTests, CreateAsyncAcceptsUseFutureCompletionToken)
@@ -947,267 +597,15 @@ namespace
     [[maybe_unused]] void BlobContainerClientNoTokenOverloadsCompile(BlobContainerClient& client)
     {
         using AVEVA::AzureClient::CreateBlobContainerOptions;
-        using AVEVA::AzureClient::DeleteBlobContainerOptions;
-        using AVEVA::AzureClient::GetBlobContainerPropertiesOptions;
         using AVEVA::AzureClient::ListBlobsOptions;
 
         static_cast<void>(client.CreateAsync());
         static_cast<void>(client.CreateAsync(CreateBlobContainerOptions{}));
 
-        static_cast<void>(client.DeleteAsync());
-        static_cast<void>(client.DeleteAsync(DeleteBlobContainerOptions{}));
-
-        static_cast<void>(client.GetPropertiesAsync());
-        static_cast<void>(client.GetPropertiesAsync(GetBlobContainerPropertiesOptions{}));
-
         static_cast<void>(client.ListBlobsAsync());
         static_cast<void>(client.ListBlobsAsync(ListBlobsOptions{}));
 
-        static_cast<void>(client.ExistsAsync());
         static_cast<void>(client.CreateIfNotExistsAsync());
         static_cast<void>(client.CreateIfNotExistsAsync(CreateBlobContainerOptions{}));
-        static_cast<void>(client.DeleteIfExistsAsync());
-        static_cast<void>(client.DeleteIfExistsAsync(DeleteBlobContainerOptions{}));
-    }
-
-    TEST(BlobContainerClientTests, ListBlobsSendsIncludeFlagsInServiceOrder)
-    {
-        FakeHttpClient httpClient;
-        BlobContainerClient client{httpClient, MakeBlobContainerClientOptions()};
-
-        AVEVA::AzureClient::ListBlobsOptions options;
-        options.IncludeVersions = true;
-        options.IncludeMetadata = true;
-        options.IncludeTags = true;
-        options.IncludeDeleted = true;
-        options.IncludeSnapshots = true;
-        options.IncludeUncommittedBlobs = true;
-        options.IncludeCopy = true;
-        client.ListBlobsAsync(options, [](auto) {});
-        httpClient.Poll();
-        const std::string url = httpClient.LastRequest().GetUrl();
-        const bool encodedCommas =
-            url.contains("include=copy%2Cdeleted%2Cmetadata%2Csnapshots%2Ctags%2Cuncommittedblobs%2Cversions");
-        const bool plainCommas = url.contains("include=copy,deleted,metadata,snapshots,tags,uncommittedblobs,versions");
-        EXPECT_TRUE(encodedCommas || plainCommas) << url;
-
-        client.ListBlobsAsync([](auto) {});
-        httpClient.Poll();
-        EXPECT_EQ(httpClient.LastRequest().GetUrl().find("include="), std::string::npos);
-    }
-
-    TEST(BlobContainerClientTests, ListBlobsParsesEncodedNamesDeletedFlagTagsAndVersions)
-    {
-        FakeHttpClient httpClient;
-        httpClient.EnqueueResponse(AVEVA::HttpResponse{200,
-            MakeCanonicalSuccessHeaders(),
-            R"(<?xml version="1.0" encoding="utf-8"?>
-<EnumerationResults ServiceEndpoint="https://storageaccount.blob.core.windows.net/" ContainerName="images">
-  <Blobs>
-    <Blob>
-      <Name Encoded="true">dir%2Fodd%01name.txt</Name>
-      <VersionId>2024-01-01T00:00:00.0000000Z</VersionId>
-      <IsCurrentVersion>true</IsCurrentVersion>
-      <Deleted>true</Deleted>
-      <Properties><Content-Length>4</Content-Length></Properties>
-      <Tags><TagSet><Tag><Key>project</Key><Value>alpha</Value></Tag><Tag><Key>Stage</Key><Value>raw</Value></Tag></TagSet></Tags>
-    </Blob>
-    <Blob>
-      <Name>plain.txt</Name>
-      <Properties><Content-Length>1</Content-Length></Properties>
-    </Blob>
-    <BlobPrefix><Name Encoded="false">dir%2F</Name></BlobPrefix>
-  </Blobs>
-  <NextMarker />
-</EnumerationResults>)"});
-        BlobContainerClient client{httpClient, MakeBlobContainerClientOptions()};
-
-        std::optional<ListBlobsResult> listed;
-        ListBlobsAndCaptureResult(client, listed);
-        httpClient.Poll();
-
-        ASSERT_TRUE(listed.has_value());
-        ASSERT_EQ(ValueOrFail(listed).Blobs.size(), 2U);
-        const auto& odd = ValueOrFail(listed).Blobs.at(0);
-        EXPECT_EQ(odd.Name, std::string{"dir/odd\x01name.txt"});
-        EXPECT_TRUE(odd.Deleted);
-        EXPECT_EQ(odd.Properties.VersionId, "2024-01-01T00:00:00.0000000Z");
-        EXPECT_EQ(odd.Properties.IsCurrentVersion, true);
-        ASSERT_EQ(odd.Tags.size(), 2U);
-        EXPECT_EQ(odd.Tags.at("project"), "alpha");
-        EXPECT_EQ(odd.Tags.at("Stage"), "raw");
-        EXPECT_EQ(ValueOrFail(listed).Blobs.at(1).Name, "plain.txt");
-        EXPECT_FALSE(ValueOrFail(listed).Blobs.at(1).Deleted);
-        EXPECT_TRUE(ValueOrFail(listed).Blobs.at(1).Tags.empty());
-        ASSERT_EQ(ValueOrFail(listed).BlobPrefixes.size(), 1U);
-        EXPECT_EQ(ValueOrFail(listed).BlobPrefixes.at(0), "dir%2F");
-    }
-
-    TEST(BlobContainerClientTests, ListBlobsRejectsInvalidEncodedName)
-    {
-        FakeHttpClient httpClient;
-        httpClient.EnqueueResponse(AVEVA::HttpResponse{200,
-            MakeCanonicalSuccessHeaders(),
-            R"(<EnumerationResults><Blobs><Blob><Name Encoded="true">bad%zz</Name></Blob></Blobs></EnumerationResults>)"});
-        BlobContainerClient client{httpClient, MakeBlobContainerClientOptions()};
-
-        bool failed = false;
-        client.ListBlobsAsync([&](auto result)
-        {
-            ASSERT_FALSE(result.has_value());
-            failed = true;
-        });
-        httpClient.Poll();
-        EXPECT_TRUE(failed);
-    }
-
-    namespace
-    {
-        // Tags the next-marker with its own type so it's never adjacent-and-same-type with the
-        // comma-separated blob names parameter (see bugprone-easily-swappable-parameters).
-        struct NextMarker
-        {
-            std::string_view Value;
-
-            constexpr NextMarker(const char* value) noexcept : Value(value)
-            {
-            }
-
-            constexpr NextMarker(std::string_view value) noexcept : Value(value)
-            {
-            }
-        };
-
-        [[nodiscard]] AVEVA::HttpResponse ListBlobsPage(std::string_view names, NextMarker nextMarker)
-        {
-            std::string body = "<EnumerationResults><Blobs>";
-            for (const auto part : std::views::split(names, ','))
-            {
-                body += "<Blob><Name>" + std::string{std::string_view{part}} + "</Name></Blob>";
-            }
-            body += "<BlobPrefix><Name>p-" + std::string{nextMarker.Value} + "</Name></BlobPrefix>";
-            body += "</Blobs><NextMarker>" + std::string{nextMarker.Value} + "</NextMarker></EnumerationResults>";
-            return AVEVA::HttpResponse{200, MakeCanonicalSuccessHeaders(), body};
-        }
-    } // namespace
-
-    TEST(BlobContainerClientTests, ListBlobsAllFollowsNextMarkerAndMergesPages)
-    {
-        FakeHttpClient httpClient;
-        httpClient.EnqueueResponse(ListBlobsPage("a,b", "m1"));
-        httpClient.EnqueueResponse(ListBlobsPage("c", "m2"));
-        httpClient.EnqueueResponse(ListBlobsPage("d", ""));
-        BlobContainerClient client{httpClient, MakeBlobContainerClientOptions()};
-
-        AVEVA::AzureClient::ListBlobsOptions options;
-        options.Prefix = "x";
-        options.MaxResults = 2;
-        std::optional<ListBlobsResult> listed;
-        int completions = 0;
-        ListAllBlobsAndCaptureResult(client, options, listed, completions);
-        httpClient.Poll();
-
-        EXPECT_EQ(completions, 1);
-        ASSERT_EQ(httpClient.RequestCount(), 3U);
-        EXPECT_EQ(httpClient.RequestAt(0).Request.GetUrl().find("marker="), std::string::npos);
-        EXPECT_NE(httpClient.RequestAt(1).Request.GetUrl().find("marker=m1"), std::string::npos);
-        EXPECT_NE(httpClient.RequestAt(2).Request.GetUrl().find("marker=m2"), std::string::npos);
-        ExpectPagedListRequestsUseSharedPrefixAndMaxResults(httpClient);
-        ASSERT_TRUE(listed.has_value());
-        ASSERT_EQ(ValueOrFail(listed).Blobs.size(), 4U);
-        EXPECT_EQ(ValueOrFail(listed).Blobs.at(0).Name, "a");
-        EXPECT_EQ(ValueOrFail(listed).Blobs.at(3).Name, "d");
-        EXPECT_EQ(ValueOrFail(listed).BlobPrefixes, (std::vector<std::string>{"p-m1", "p-m2", "p-"}));
-        EXPECT_TRUE(ValueOrFail(listed).NextMarker.empty());
-    }
-
-    TEST(BlobContainerClientTests, ListBlobsAllFailsAndStopsWhenMaxItemsExceeded)
-    {
-        FakeHttpClient httpClient;
-        httpClient.EnqueueResponse(ListBlobsPage("a,b", "m1"));
-        httpClient.EnqueueResponse(ListBlobsPage("c", "m2"));
-        httpClient.EnqueueResponse(ListBlobsPage("d", ""));
-        BlobContainerClient client{httpClient, MakeBlobContainerClientOptions()};
-
-        AVEVA::AzureClient::ListBlobsOptions options;
-        options.MaxItems = 3;
-        std::optional<std::error_code> error;
-        client.ListBlobsAllAsync(options,
-            [&](auto result)
-        {
-            ASSERT_FALSE(result.has_value());
-            error = result.error().Code;
-        });
-        httpClient.Poll();
-        EXPECT_EQ(error, std::make_error_code(std::errc::value_too_large));
-        EXPECT_EQ(httpClient.RequestCount(), 2U);
-    }
-
-    TEST(BlobContainerClientTests, ListBlobsAllStopsAtFirstPageError)
-    {
-        FakeHttpClient httpClient;
-        httpClient.EnqueueResponse(ListBlobsPage("a", "m1"));
-        httpClient.EnqueueResponse(MakeAzureErrorResponse(403, "AuthorizationFailure", "denied", "req-2"));
-        BlobContainerClient client{httpClient, MakeBlobContainerClientOptions()};
-
-        std::optional<std::error_code> error;
-        client.ListBlobsAllAsync([&](auto result)
-        {
-            ASSERT_FALSE(result.has_value());
-            error = result.error().Code;
-        });
-        httpClient.Poll();
-        EXPECT_EQ(error, std::error_code{BlobStorageErrorCode::AuthorizationFailure});
-        EXPECT_EQ(httpClient.RequestCount(), 2U);
-    }
-
-    TEST(BlobContainerClientTests, ListBlobsAllRejectsRepeatedMarker)
-    {
-        FakeHttpClient httpClient;
-        httpClient.EnqueueResponse(ListBlobsPage("a", "m1"));
-        httpClient.EnqueueResponse(ListBlobsPage("b", "m1"));
-        BlobContainerClient client{httpClient, MakeBlobContainerClientOptions()};
-
-        bool failed = false;
-        client.ListBlobsAllAsync([&](auto result)
-        {
-            ASSERT_FALSE(result.has_value());
-            failed = true;
-        });
-        httpClient.Poll();
-        EXPECT_TRUE(failed);
-        EXPECT_EQ(httpClient.RequestCount(), 2U);
-    }
-
-    TEST(BlobContainerClientTests, ListBlobsAllSurvivesClientDestructionMidEnumeration)
-    {
-        FakeHttpClient httpClient;
-        httpClient.EnqueueResponse(ListBlobsPage("a", "m1"));
-        httpClient.EnqueueResponse(ListBlobsPage("b", ""));
-        std::optional<std::size_t> count;
-        {
-            auto client = std::make_unique<BlobContainerClient>(httpClient, MakeBlobContainerClientOptions());
-            client->ListBlobsAllAsync([&](auto result)
-            {
-                ASSERT_TRUE(result.has_value());
-                count = result->Value().Blobs.size();
-            });
-        }
-        httpClient.Poll();
-        EXPECT_EQ(count, 2U);
-    }
-
-    TEST(BlobContainerClientTests, ListBlobsAllWorksWithUseFuture)
-    {
-        FakeHttpClient httpClient;
-        httpClient.EnqueueResponse(ListBlobsPage("a", "m1"));
-        httpClient.EnqueueResponse(ListBlobsPage("b", ""));
-        BlobContainerClient client{httpClient, MakeBlobContainerClientOptions()};
-
-        auto future = client.ListBlobsAllAsync(boost::asio::use_future);
-        httpClient.Poll();
-        auto result = future.get();
-        ASSERT_TRUE(result.has_value());
-        EXPECT_EQ(result->Value().Blobs.size(), 2U);
     }
 } // namespace

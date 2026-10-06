@@ -74,25 +74,8 @@ namespace AVEVA::AzureClient
       public:
         using CreateCompletionHandler =
             std::move_only_function<void(std::expected<Response<Models::CreateBlobContainerResult>, BlobStorageError>)>;
-        using DeleteCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::DeleteBlobContainerResult>, BlobStorageError>)>;
-        using GetPropertiesCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::BlobContainerProperties>, BlobStorageError>)>;
         using ListBlobsCompletionHandler =
             std::move_only_function<void(std::expected<Response<Models::ListBlobsResult>, BlobStorageError>)>;
-        using ExistsCompletionHandler = std::move_only_function<void(std::expected<Response<bool>, BlobStorageError>)>;
-        using FindBlobsByTagsCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::FindBlobsByTagsResult>, BlobStorageError>)>;
-        using AcquireLeaseCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::AcquireBlobLeaseResult>, BlobStorageError>)>;
-        using RenewLeaseCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::RenewBlobLeaseResult>, BlobStorageError>)>;
-        using ChangeLeaseCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::ChangeBlobLeaseResult>, BlobStorageError>)>;
-        using ReleaseLeaseCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::ReleaseBlobLeaseResult>, BlobStorageError>)>;
-        using BreakLeaseCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::BreakBlobLeaseResult>, BlobStorageError>)>;
 
         BlobContainerClient(IHttpClient& httpClient, const BlobContainerClientOptions& options);
         BlobContainerClient(const BlobContainerClient&) = delete;
@@ -144,54 +127,6 @@ namespace AVEVA::AzureClient
         }
 
         template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, DeleteBlobContainerOptions>)
-        [[nodiscard]] auto DeleteAsync(CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::DeleteBlobContainerResult>(this,
-                &BlobContainerClient::DeleteAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                DeleteBlobContainerOptions{});
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto DeleteAsync(DeleteBlobContainerOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::DeleteBlobContainerResult>(this,
-                &BlobContainerClient::DeleteAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(options));
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, GetBlobContainerPropertiesOptions>)
-        [[nodiscard]] auto GetPropertiesAsync(CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::BlobContainerProperties>(this,
-                &BlobContainerClient::GetPropertiesAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                GetBlobContainerPropertiesOptions{});
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto GetPropertiesAsync(GetBlobContainerPropertiesOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::BlobContainerProperties>(this,
-                &BlobContainerClient::GetPropertiesAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(options));
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
             requires(!std::same_as<std::remove_cvref_t<CompletionToken>, ListBlobsOptions>)
         [[nodiscard]] auto ListBlobsAsync(CompletionToken&& token = CompletionToken{},
             std::optional<HttpRequestOptions> requestOptions = std::nullopt)
@@ -213,18 +148,6 @@ namespace AVEVA::AzureClient
                 std::forward<CompletionToken>(token),
                 std::move(requestOptions),
                 std::move(options));
-        }
-
-        // Resolves to `true`/`false`. Only a not-found response yields `false`; authentication, throttling,
-        // timeout and transport failures still produce `unexpected(BlobStorageError)`.
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto ExistsAsync(CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<bool>(this,
-                &BlobContainerClient::ExistsAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions));
         }
 
         // Suppressed-error contract (applies to every *IfNotExists / *IfExists method): when the target already
@@ -255,174 +178,6 @@ namespace AVEVA::AzureClient
                 std::move(options));
         }
 
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, DeleteBlobContainerOptions>)
-        [[nodiscard]] auto DeleteIfExistsAsync(CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::DeleteBlobContainerResult>(this,
-                &BlobContainerClient::DeleteIfExistsAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                DeleteBlobContainerOptions{});
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto DeleteIfExistsAsync(DeleteBlobContainerOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::DeleteBlobContainerResult>(this,
-                &BlobContainerClient::DeleteIfExistsAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(options));
-        }
-
-        // Lists every page by following NextMarker from options.Marker and completes once with all blobs and prefixes
-        // (NextMarker empty; RawResponse() is the last page's). The whole listing is held in memory; use
-        // ListBlobsAsync with Marker/NextMarker to stream large listings page by page. Request options apply per page.
-        // WARNING: memory use grows with the container size; set ListBlobsOptions::MaxItems to cap it (the
-        // operation then fails with std::errc::value_too_large and stops requesting further pages).
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, ListBlobsOptions>)
-        [[nodiscard]] auto ListBlobsAllAsync(CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::ListBlobsResult>(this,
-                &BlobContainerClient::ListBlobsAllAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                ListBlobsOptions{});
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto ListBlobsAllAsync(ListBlobsOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::ListBlobsResult>(this,
-                &BlobContainerClient::ListBlobsAllAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(options));
-        }
-
-        // Find Blobs by Tags. `where` is the tag filter expression, e.g. "\"status\" = 'ready'"; follow NextMarker
-        // via options.Marker for further pages.
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, FindBlobsByTagsOptions>)
-        [[nodiscard]] auto FindBlobsByTagsAsync(std::string where,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::FindBlobsByTagsResult>(this,
-                &BlobContainerClient::FindBlobsByTagsAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(where),
-                FindBlobsByTagsOptions{});
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto FindBlobsByTagsAsync(std::string where,
-            FindBlobsByTagsOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::FindBlobsByTagsResult>(this,
-                &BlobContainerClient::FindBlobsByTagsAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(where),
-                std::move(options));
-        }
-
-        // Container leases (Lease Container). Only IfModifiedSince/IfUnmodifiedSince conditions apply.
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, AcquireLeaseOptions>)
-        [[nodiscard]] auto AcquireLeaseAsync(CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::AcquireBlobLeaseResult>(this,
-                &BlobContainerClient::AcquireLeaseAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                AcquireLeaseOptions{});
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto AcquireLeaseAsync(AcquireLeaseOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::AcquireBlobLeaseResult>(this,
-                &BlobContainerClient::AcquireLeaseAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(options));
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto RenewLeaseAsync(RenewLeaseOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::RenewBlobLeaseResult>(this,
-                &BlobContainerClient::RenewLeaseAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(options));
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto ChangeLeaseAsync(ChangeLeaseOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::ChangeBlobLeaseResult>(this,
-                &BlobContainerClient::ChangeLeaseAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(options));
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto ReleaseLeaseAsync(ReleaseLeaseOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::ReleaseBlobLeaseResult>(this,
-                &BlobContainerClient::ReleaseLeaseAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(options));
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, BreakLeaseOptions>)
-        [[nodiscard]] auto BreakLeaseAsync(CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::BreakBlobLeaseResult>(this,
-                &BlobContainerClient::BreakLeaseAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                BreakLeaseOptions{});
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto BreakLeaseAsync(BreakLeaseOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::BreakBlobLeaseResult>(this,
-                &BlobContainerClient::BreakLeaseAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(options));
-        }
-
         [[nodiscard]] BlobClient GetBlobClient(std::string blobName) const;
         [[nodiscard]] BlockBlobClient GetBlockBlobClient(std::string blobName) const;
         [[nodiscard]] PageBlobClient GetPageBlobClient(std::string blobName) const;
@@ -437,12 +192,6 @@ namespace AVEVA::AzureClient
         void CreateAsyncImpl(const CreateBlobContainerOptions& options,
             CreateCompletionHandler completion,
             HttpRequestOptions requestOptions = {});
-        void DeleteAsyncImpl(const DeleteBlobContainerOptions& options,
-            DeleteCompletionHandler completion,
-            HttpRequestOptions requestOptions = {});
-        void GetPropertiesAsyncImpl(const GetBlobContainerPropertiesOptions& options,
-            GetPropertiesCompletionHandler completion,
-            HttpRequestOptions requestOptions = {});
         void ListBlobsAsyncImpl(ListBlobsOptions options,
             ListBlobsCompletionHandler completion,
             HttpRequestOptions requestOptions = {});
@@ -451,37 +200,9 @@ namespace AVEVA::AzureClient
             ListBlobsOptions options,
             ListBlobsCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void ListBlobsAllAsyncImpl(ListBlobsOptions options,
-            ListBlobsCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        void FindBlobsByTagsAsyncImpl(const std::string& where,
-            const FindBlobsByTagsOptions& options,
-            FindBlobsByTagsCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        void ExistsAsyncImpl(ExistsCompletionHandler completion, HttpRequestOptions requestOptions = {});
         void CreateIfNotExistsAsyncImpl(const CreateBlobContainerOptions& options,
             CreateCompletionHandler completion,
             HttpRequestOptions requestOptions = {});
-        void DeleteIfExistsAsyncImpl(const DeleteBlobContainerOptions& options,
-            DeleteCompletionHandler completion,
-            HttpRequestOptions requestOptions = {});
-
-        void AcquireLeaseAsyncImpl(AcquireLeaseOptions options,
-            AcquireLeaseCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        void RenewLeaseAsyncImpl(RenewLeaseOptions options,
-            RenewLeaseCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        void ChangeLeaseAsyncImpl(ChangeLeaseOptions options,
-            ChangeLeaseCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        void ReleaseLeaseAsyncImpl(ReleaseLeaseOptions options,
-            ReleaseLeaseCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        void BreakLeaseAsyncImpl(BreakLeaseOptions options,
-            BreakLeaseCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-
         IHttpClient* m_httpClient = nullptr;
         std::shared_ptr<const Private::ContainerTarget> m_target;
     };

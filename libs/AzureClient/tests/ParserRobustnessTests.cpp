@@ -44,29 +44,11 @@ namespace
         {
             static_cast<void>(ParseListBlobsResultXml(xml));
         }},
-            {.Name = "ListContainers",
-                .Parse =
-                    [](std::string_view xml)
-        {
-            static_cast<void>(ParseListBlobContainersResultXml(xml));
-        }},
             {.Name = "GetPageRanges",
                 .Parse =
                     [](std::string_view xml)
         {
             static_cast<void>(ParseGetPageRangesResultXml(xml));
-        }},
-            {.Name = "FindBlobsByTags",
-                .Parse =
-                    [](std::string_view xml)
-        {
-            static_cast<void>(ParseFindBlobsByTagsResultXml(xml));
-        }},
-            {.Name = "ServiceProperties",
-                .Parse =
-                    [](std::string_view xml)
-        {
-            static_cast<void>(ParseBlobServicePropertiesXml(xml));
         }},
             {.Name = "UserDelegationKey",
                 .Parse =
@@ -283,29 +265,6 @@ TEST(ParserRobustnessTests, ListBlobs_FullPageOf5000Items)
     EXPECT_EQ(result.NextMarker, "next");
 }
 
-TEST(ParserRobustnessTests, ListContainers_MissingFieldsMalformedDatesAndLargePages)
-{
-    const auto minimal = ParseListBlobContainersResultXml("<EnumerationResults><Containers><Container><Name>c&amp;d</"
-                                                          "Name></Container></Containers></EnumerationResults>");
-    ASSERT_EQ(minimal.Containers.size(), 1U);
-    EXPECT_EQ(minimal.Containers.at(0).Name, "c&d");
-    EXPECT_TRUE(minimal.Containers.at(0).Properties.ETag.empty());
-
-    EXPECT_THROW(
-        static_cast<void>(ParseListBlobContainersResultXml(ContainerXml("<Last-Modified>soon</Last-Modified>"))),
-        std::exception);
-
-    std::string xml = "<EnumerationResults><Containers>";
-    for (int index = 0; index < 5000; ++index)
-    {
-        xml += "<Container><Name>c" + std::to_string(index) + "</Name></Container>";
-    }
-    xml += "</Containers></EnumerationResults>";
-    const auto large = ParseListBlobContainersResultXml(xml);
-    ASSERT_EQ(large.Containers.size(), 5000U);
-    EXPECT_EQ(large.Containers.back().Name, "c4999");
-}
-
 TEST(ParserRobustnessTests, UserDelegationKey_MalformedDatesThrow)
 {
     EXPECT_THROW(
@@ -315,13 +274,6 @@ TEST(ParserRobustnessTests, UserDelegationKey_MalformedDatesThrow)
     EXPECT_THROW(static_cast<void>(ParseUserDelegationKeyXml("<UserDelegationKey><SignedExpiry>2024-13-01T00:00:00Z</"
                                                              "SignedExpiry><Value>dg==</Value></UserDelegationKey>")),
         std::exception);
-}
-
-TEST(ParserRobustnessTests, ServiceProperties_MissingSectionsUseDefaults)
-{
-    const auto properties = ParseBlobServicePropertiesXml("<StorageServiceProperties/>");
-    EXPECT_TRUE(properties.Cors.empty());
-    EXPECT_TRUE(properties.DefaultServiceVersion.empty());
 }
 
 TEST(ParserRobustnessTests, HttpDate_RejectsOutOfRangeAndTrailingInput)

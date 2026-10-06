@@ -70,7 +70,6 @@ namespace AVEVA::AzureClient::Private
     // Lease duration limits defined by the Blob service.
     inline constexpr std::chrono::seconds MinFixedLeaseDuration{15};
     inline constexpr std::chrono::seconds MaxFixedLeaseDuration{60};
-    inline constexpr std::chrono::seconds MaxLeaseBreakPeriod{60};
 
     // Gives an otherwise-plain string-like parameter a distinct type (tagged by `Tag`, an empty
     // caller-defined struct) so it is never adjacent-and-same-type with another string-like
@@ -169,8 +168,6 @@ namespace AVEVA::AzureClient::Private
         std::shared_ptr<const ConnectionState> Connection;
         std::string ContainerName;
         std::string BlobName;
-        std::string Snapshot;
-        std::string VersionId;
     };
 
     // Normalise and validate client options (throw std::invalid_argument on invalid settings).
@@ -181,9 +178,7 @@ namespace AVEVA::AzureClient::Private
         std::string containerName);
     [[nodiscard]] BlobTarget MakeBlobTarget(std::shared_ptr<const ConnectionState> connection,
         std::string containerName,
-        std::string blobName,
-        std::string snapshot = {},
-        std::string versionId = {});
+        std::string blobName);
     [[nodiscard]] ContainerTarget MakeContainerTarget(const BlobContainerClientOptions& options);
     [[nodiscard]] BlobTarget MakeBlobTarget(const BlobClientOptions& options);
 
@@ -221,13 +216,9 @@ namespace AVEVA::AzureClient::Private
     inline constexpr std::string_view XMsIfTagsHeaderName = "x-ms-if-tags";
     inline constexpr std::string_view XMsLeaseActionHeaderName = "x-ms-lease-action";
     inline constexpr std::string_view XMsLeaseDurationHeaderName = "x-ms-lease-duration";
-    inline constexpr std::string_view XMsLeaseBreakPeriodHeaderName = "x-ms-lease-break-period";
     inline constexpr std::string_view XMsProposedLeaseIdHeaderName = "x-ms-proposed-lease-id";
-    inline constexpr std::string_view XMsLeaseTimeHeaderName = "x-ms-lease-time";
-    inline constexpr std::string_view XMsSnapshotHeaderName = "x-ms-snapshot";
     inline constexpr std::string_view XMsCopyIdHeaderName = "x-ms-copy-id";
     inline constexpr std::string_view XMsCopyStatusHeaderName = "x-ms-copy-status";
-    inline constexpr std::string_view XMsDeleteSnapshotsHeaderName = "x-ms-delete-snapshots";
     inline constexpr std::string_view ETagHeaderName = "ETag";
     inline constexpr std::string_view LastModifiedHeaderName = "Last-Modified";
     inline constexpr std::string_view ContentLengthHeaderName = "Content-Length";
@@ -259,8 +250,6 @@ namespace AVEVA::AzureClient::Private
     [[nodiscard]] std::size_t ValidateBase64AndGetDecodedLength(std::string_view value, bool allowEmpty);
     [[nodiscard]] std::string_view FindHeaderValue(const HttpResponse& response, std::string_view headerName) noexcept;
     [[nodiscard]] bool ParseBoolHeader(std::string_view value) noexcept;
-    // Header/XML enum values; an empty PublicAccessType value means private (None).
-    [[nodiscard]] Models::PublicAccessType ParsePublicAccessType(std::string_view value);
     [[nodiscard]] Models::LeaseStatus ParseLeaseStatus(std::string_view value);
     [[nodiscard]] Models::LeaseState ParseLeaseState(std::string_view value);
     [[nodiscard]] Models::LeaseDurationType ParseLeaseDurationType(std::string_view value);
@@ -307,18 +296,13 @@ namespace AVEVA::AzureClient::Private
     [[nodiscard]] Models::DownloadBlobResult ParseDownloadBlobResult(HttpResponse& response);
     [[nodiscard]] Models::AcquireBlobLeaseResult ParseAcquireBlobLeaseResult(const HttpResponse& response);
     [[nodiscard]] Models::ReleaseBlobLeaseResult ParseReleaseBlobLeaseResult(const HttpResponse& response);
-    [[nodiscard]] Models::BreakBlobLeaseResult ParseBreakBlobLeaseResult(const HttpResponse& response);
     [[nodiscard]] Models::RenewBlobLeaseResult ParseRenewBlobLeaseResult(const HttpResponse& response);
-    [[nodiscard]] Models::AccountInfo ParseAccountInfo(const HttpResponse& response);
-    [[nodiscard]] Models::BlobServiceProperties ParseBlobServicePropertiesXml(std::string_view xml);
     [[nodiscard]] Models::UserDelegationKey ParseUserDelegationKeyXml(std::string_view xml);
     // "YYYY-MM-DDThh:mm:ssZ" (ISO 8601 UTC, whole seconds), as used by SAS and Key Info.
     [[nodiscard]] std::string FormatIso8601Utc(std::chrono::system_clock::time_point value);
     // Parses "YYYY-MM-DDThh:mm:ss[.fffffff]Z"; std::nullopt if malformed.
     [[nodiscard]] std::optional<std::chrono::system_clock::time_point> ParseIso8601Utc(std::string_view value) noexcept;
-    [[nodiscard]] Models::FindBlobsByTagsResult ParseFindBlobsByTagsResultXml(std::string_view xml);
     // "comp=blobs&where=...[&marker=...][&maxresults=...]" for Find Blobs by Tags.
-    [[nodiscard]] std::string BuildFindBlobsByTagsQuery(std::string_view where, const FindBlobsByTagsOptions& options);
 
     // Tag for StringLabel to give the CRC64 parameter of ApplyTransactionalHashes its own type.
     struct TransactionalCrc64Tag
@@ -327,9 +311,7 @@ namespace AVEVA::AzureClient::Private
 
     // Content-MD5 / x-ms-content-crc64 request headers for service-side body verification.
     void ApplyTransactionalHashes(HttpRequest& request, std::string_view md5, StringLabel<TransactionalCrc64Tag> crc64);
-    [[nodiscard]] Models::ChangeBlobLeaseResult ParseChangeBlobLeaseResult(const HttpResponse& response);
     [[nodiscard]] Models::ListBlobsResult ParseListBlobsResultXml(std::string_view xml);
-    [[nodiscard]] Models::ListBlobContainersResult ParseListBlobContainersResultXml(std::string_view xml);
     [[nodiscard]] Models::GetPageRangesResult ParseGetPageRangesResultXml(std::string_view xml);
 
     [[nodiscard]] HttpRequest BuildBlobRequest(const BlobTarget& target,
@@ -616,7 +598,6 @@ namespace AVEVA::AzureClient::Private
         HttpRequestOptions requestOptions)
     {
         HttpRequest request = BuildBlobRequest(options, HttpMethod::Delete);
-        AddHeaderIfNotEmpty(request, XMsDeleteSnapshotsHeaderName, operationOptions.DeleteSnapshotsOption.ToString());
         ApplyBlobRequestConditions(request, operationOptions.Conditions);
 
         SendAuthorizedRequestAsync(httpClient,
@@ -868,34 +849,6 @@ namespace AVEVA::AzureClient::Private
     }
 
     template <class TTarget, class TCompletion>
-    void ChangeLeaseAsync(IHttpClient& httpClient,
-        const TTarget& target,
-        ChangeLeaseOptions operationOptions,
-        TCompletion&& completion,
-        HttpRequestOptions requestOptions)
-    {
-        if (operationOptions.LeaseId.empty() || operationOptions.ProposedLeaseId.empty())
-        {
-            PostCompletion(httpClient,
-                std::forward<TCompletion>(completion),
-                MakeError<Models::ChangeBlobLeaseResult>(std::make_error_code(std::errc::invalid_argument),
-                    "LeaseId and ProposedLeaseId must not be empty."));
-            return;
-        }
-
-        HttpRequest request = BuildLeaseRequest(target, "change");
-        AddHeader(request, XMsLeaseIdHeaderName, operationOptions.LeaseId);
-        AddHeader(request, XMsProposedLeaseIdHeaderName, operationOptions.ProposedLeaseId);
-        ApplyLeaseRequestConditions(request, std::move(operationOptions.Conditions));
-        SendAndParse<Models::ChangeBlobLeaseResult>(httpClient,
-            target,
-            std::move(request),
-            ParseChangeBlobLeaseResult,
-            std::forward<TCompletion>(completion),
-            std::move(requestOptions));
-    }
-
-    template <class TTarget, class TCompletion>
     void ReleaseLeaseAsync(IHttpClient& httpClient,
         const TTarget& target,
         ReleaseLeaseOptions operationOptions,
@@ -918,37 +871,6 @@ namespace AVEVA::AzureClient::Private
             target,
             std::move(request),
             ParseReleaseBlobLeaseResult,
-            std::forward<TCompletion>(completion),
-            std::move(requestOptions));
-    }
-
-    template <class TTarget, class TCompletion>
-    void BreakLeaseAsync(IHttpClient& httpClient,
-        const TTarget& target,
-        BreakLeaseOptions operationOptions,
-        TCompletion&& completion,
-        HttpRequestOptions requestOptions)
-    {
-        if (operationOptions.BreakPeriod.has_value() && (*operationOptions.BreakPeriod < std::chrono::seconds{0} ||
-                                                            *operationOptions.BreakPeriod > MaxLeaseBreakPeriod))
-        {
-            PostCompletion(httpClient,
-                std::forward<TCompletion>(completion),
-                MakeError<Models::BreakBlobLeaseResult>(std::make_error_code(std::errc::invalid_argument),
-                    "Lease break period must be between 0 and 60 seconds."));
-            return;
-        }
-
-        HttpRequest request = BuildLeaseRequest(target, "break");
-        if (operationOptions.BreakPeriod.has_value())
-        {
-            AddHeader(request, XMsLeaseBreakPeriodHeaderName, std::to_string(operationOptions.BreakPeriod->count()));
-        }
-        ApplyLeaseRequestConditions(request, std::move(operationOptions.Conditions));
-        SendAndParse<Models::BreakBlobLeaseResult>(httpClient,
-            target,
-            std::move(request),
-            ParseBreakBlobLeaseResult,
             std::forward<TCompletion>(completion),
             std::move(requestOptions));
     }

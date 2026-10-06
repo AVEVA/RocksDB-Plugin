@@ -172,18 +172,6 @@ TEST(PublicHeaderSelfContainedTests, BlobContainerClient)
     });
 }
 
-TEST(PublicHeaderSelfContainedTests, BlobServiceClient)
-{
-    LoopbackHttpClient http;
-    BlobServiceClient client{http, BlobServiceClientOptions{.ServiceEndpoint = Endpoint, .SasToken = TestSasToken}};
-    ExerciseAllTokenKinds(http,
-        client,
-        [](BlobServiceClient& c, auto&& token)
-    {
-        return c.ListBlobContainersAsync(std::forward<decltype(token)>(token));
-    });
-}
-
 TEST(PublicHeaderSelfContainedTests, SasBuilder)
 {
     Sas::BlobSasBuilder builder;

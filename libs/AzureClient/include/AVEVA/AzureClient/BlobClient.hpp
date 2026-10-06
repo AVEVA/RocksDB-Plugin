@@ -93,11 +93,6 @@ namespace AVEVA::AzureClient
 
         using DefaultCompletionToken = boost::asio::default_completion_token<executor_type>::type;
 
-        // A client for the same blob scoped to a snapshot or version (an empty value targets the base blob).
-        // Shares this client's connection; read operations and Delete act on that snapshot/version.
-        [[nodiscard]] BlobClient WithSnapshot(std::string snapshot) const;
-        [[nodiscard]] BlobClient WithVersionId(std::string versionId) const;
-
         template <class CompletionToken = DefaultCompletionToken>
             requires(!std::same_as<std::remove_cvref_t<CompletionToken>, DownloadBlobOptions>)
         [[nodiscard]] auto DownloadAsync(CompletionToken&& token = CompletionToken{},

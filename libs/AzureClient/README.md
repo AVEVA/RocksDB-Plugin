@@ -4,12 +4,10 @@
 
 ## Features
 
-- Containers: create, delete, head/properties, exists helpers, flat/hierarchical listing
-- Block blobs: create/upload, stage blocks, commit block lists, download/read, delete, head, snapshots, copy, leases, metadata, HTTP headers, access tier, large-upload helper
-- Page blobs: create, upload/clear pages, resize, download/read, delete, head, page ranges, snapshots, copy, leases, metadata, HTTP headers, access tier
-- Append blobs: create, append blocks, seal
-- All blobs: index tags and find-by-tags, versions, undelete, parallel chunked upload/download
-- Service: container listing, account info, service properties (read), user delegation keys
+- Containers: create, create-if-not-exists, flat/hierarchical listing
+- Block blobs: create/upload, stage blocks, commit block lists, download/read, delete, head, leases, metadata
+- Page blobs: create, upload/clear pages, resize, download/read, delete, head, page ranges, leases, metadata
+- Service: container client factory, user delegation keys
 - Auth: Shared Key, SAS, bearer token, and refreshable `ITokenCredential`; Microsoft Entra ID credentials
   (`ClientSecretCredential`, `WorkloadIdentityCredential`, `ManagedIdentityCredential`); service/account SAS builders
 - Errors: typed `BlobStorageError` details plus raw `Response<T>` access
@@ -20,13 +18,11 @@ Paths are relative to `include/AVEVA/AzureClient/`; `AzureClient.hpp` includes e
 
 | Class | Header | Principal operations |
 |---|---|---|
-| `BlobServiceClient` | [BlobServiceClient.hpp](include/AVEVA/AzureClient/BlobServiceClient.hpp) | List containers, account info, service properties, user delegation key |
-| `BlobContainerClient` | [BlobContainerClient.hpp](include/AVEVA/AzureClient/BlobContainerClient.hpp) | Create/delete/properties/exists, list blobs, blob-client factories |
-| `BlobClient` | [BlobClient.hpp](include/AVEVA/AzureClient/BlobClient.hpp) | Download, delete, properties, snapshots, copy, leases, metadata, tags, versions |
-| `BlockBlobClient` | [BlockBlobClient.hpp](include/AVEVA/AzureClient/BlockBlobClient.hpp) | Upload, stage block, commit block list, parallel upload/download |
-| `PageBlobClient` | [PageBlobClient.hpp](include/AVEVA/AzureClient/PageBlobClient.hpp) | Create, upload/clear pages, resize, page ranges |
-| `AppendBlobClient` | [AppendBlobClient.hpp](include/AVEVA/AzureClient/AppendBlobClient.hpp) | Create, append block, seal |
-| Credentials | [Credentials.hpp](include/AVEVA/AzureClient/Credentials.hpp), [ITokenCredential.hpp](include/AVEVA/AzureClient/ITokenCredential.hpp) | Shared Key, bearer token, Entra ID credentials |
+| `BlobServiceClient` | [BlobServiceClient.hpp](include/AVEVA/AzureClient/BlobServiceClient.hpp) | Container-client factory, user delegation key |
+| `BlobContainerClient` | [BlobContainerClient.hpp](include/AVEVA/AzureClient/BlobContainerClient.hpp) | Create, create-if-not-exists, list blobs, blob-client factories |
+| `BlobClient` | [BlobClient.hpp](include/AVEVA/AzureClient/BlobClient.hpp) | Download, delete, properties, leases, metadata |
+| `BlockBlobClient` | [BlockBlobClient.hpp](include/AVEVA/AzureClient/BlockBlobClient.hpp) | Upload, stage block, commit block list |
+| `PageBlobClient` | [PageBlobClient.hpp](include/AVEVA/AzureClient/PageBlobClient.hpp) | Create, upload/clear pages, resize, page ranges || Credentials | [Credentials.hpp](include/AVEVA/AzureClient/Credentials.hpp), [ITokenCredential.hpp](include/AVEVA/AzureClient/ITokenCredential.hpp) | Shared Key, bearer token, Entra ID credentials |
 | SAS builders | [Sas.hpp](include/AVEVA/AzureClient/Sas.hpp) | Service and account SAS generation |
 | Options | [BlobClientOptions.hpp](include/AVEVA/AzureClient/BlobClientOptions.hpp), [BlobOperationOptions.hpp](include/AVEVA/AzureClient/BlobOperationOptions.hpp), [WithRequestOptions.hpp](include/AVEVA/AzureClient/WithRequestOptions.hpp) | Client construction, per-operation and per-request options |
 | Results and errors | [Response.hpp](include/AVEVA/AzureClient/Response.hpp), [BlobStorageError.hpp](include/AVEVA/AzureClient/BlobStorageError.hpp), [BlobStorageErrorCode.hpp](include/AVEVA/AzureClient/BlobStorageErrorCode.hpp) | `Response<T>`, `BlobStorageError`, error codes |
@@ -187,10 +183,6 @@ exponential backoff and jitter, capped at `RetryOptions::MaxDelay`, and honours 
 `x-ms-client-request-id`. Set `MaxRetries = 0` to disable retries. `IsTransient(const BlobStorageError&)`
 exposes the same classification.
 
-**Append duplication:** `AppendBlockAsync` without an append-position condition may append a block twice if a
-retried attempt follows one that actually succeeded. Use `AppendBlockOptions::IfAppendPositionEqual` (or set
-`MaxRetries = 0`) when duplicates are unacceptable.
-
 ### Endpoints
 
 `ServiceEndpoint` may be a standard account URL (`https://<account>.blob.core.windows.net`) or a path-style
@@ -200,7 +192,7 @@ preserved, and container and blob segments are appended without duplicate slashe
 ## Lifetime, threading, and synchronous throws
 
 - `IHttpClient` is borrowed, not owned. Each client stores a non-owning reference/pointer to the `IHttpClient` passed at construction, so keep the HTTP client alive until the client object and every in-flight `...Async` operation have finished.
-- Operations taking `std::span<const std::byte>` (for example `UploadAsync`, `StageBlockAsync`, `AppendBlockAsync`) read the span when the operation is *initiated*, not when the call returns. With a callback or `use_future` that is during the call, but with the default deferred token it is when the returned operation is `co_await`ed or otherwise launched, so the bytes must stay valid until then. Overloads taking `std::string` copy the content and have no such constraint.
+- Operations taking `std::span<const std::byte>` (for example `UploadAsync`, `StageBlockAsync`) read the span when the operation is *initiated*, not when the call returns. With a callback or `use_future` that is during the call, but with the default deferred token it is when the returned operation is `co_await`ed or otherwise launched, so the bytes must stay valid until then. Overloads taking `std::string` copy the content and have no such constraint.
 - `std::ostream&` passed to `DownloadToAsync(...)` are also borrowed. Keep the stream alive, open, and otherwise stable until the completion handler runs.
 - Treat `ITokenCredential` the same way: keep the supplied `std::shared_ptr<ITokenCredential>` and any state it depends on alive until any in-flight token acquisition or request waiting on that token has completed.
 - The library does not provide its own executor or thread-affinity guarantee. Completion handlers run on whatever thread the supplied `IHttpClient` / `ITokenCredential` uses, and they may run inline before the initiating `...Async` call returns if the dependency completes synchronously. Write callbacks to tolerate both immediate and deferred invocation.

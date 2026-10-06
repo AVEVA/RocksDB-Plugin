@@ -47,10 +47,6 @@ namespace AVEVA::AzureClient
 
         PageBlobClient(IHttpClient& httpClient, const BlobClientOptions& options);
 
-        // Type-preserving equivalents of BlobClient::WithSnapshot / WithVersionId (see BlobClient).
-        [[nodiscard]] PageBlobClient WithSnapshot(std::string snapshot) const;
-        [[nodiscard]] PageBlobClient WithVersionId(std::string versionId) const;
-
         template <class CompletionToken = DefaultCompletionToken>
             requires(!std::same_as<std::remove_cvref_t<CompletionToken>, CreatePageBlobOptions>)
         [[nodiscard]] auto CreateAsync(std::uint64_t contentLength,

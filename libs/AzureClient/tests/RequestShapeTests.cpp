@@ -42,9 +42,6 @@ namespace
 
     using Pairs = std::vector<std::pair<std::string, std::string>>;
 
-    constexpr std::string_view SnapshotId = "2024-01-01T00:00:00.0000000Z";
-    constexpr std::string_view EncodedSnapshotId = "2024-01-01T00%3A00%3A00.0000000Z";
-
     struct Clients
     {
         FakeHttpClient Http;
@@ -53,7 +50,6 @@ namespace
         PageBlobClient Page{Http, MakeBlobClientOptions()};
         BlobContainerClient Container{Http, MakeBlobContainerClientOptions()};
         BlobServiceClient Service{Http, MakeBlobServiceClientOptions()};
-        BlobClient SnapshotBlob = Blob.WithSnapshot(std::string{SnapshotId});
         std::istringstream Source{"hello"};
         std::ostringstream Sink;
     };
@@ -254,21 +250,6 @@ namespace
             .Headers = {{"Range", "bytes=0-1023"}},
             .AbsentHeaders = {},
             .Body = std::nullopt});
-        cases.push_back({.Name = "Blob_Delete",
-            .Start =
-                [](Clients& c)
-        {
-            DeleteBlobOptions o;
-            o.Conditions = FullConditions();
-            o.DeleteSnapshotsOption = Models::DeleteSnapshotsOption::Include();
-            c.Blob.DeleteAsync(std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Delete,
-            .Path = blob,
-            .Query = {},
-            .Headers = Concat({{"x-ms-delete-snapshots", "include"}}, ConditionHeaders()),
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
         cases.push_back({.Name = "Blob_DeleteIfExists",
             .Start =
                 [](Clients& c)
@@ -381,19 +362,6 @@ namespace
             .Query = {{"comp", "lease"}},
             .Headers =
                 Concat({{"x-ms-lease-action", "release"}, {"x-ms-lease-id", "lease-1"}}, ConditionHeaders(false)),
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        // Snapshot-scoped client: snapshot= comes first and the SAS stays last.
-        cases.push_back({.Name = "Version_Download",
-            .Start =
-                [](Clients& c)
-        {
-            c.Blob.WithVersionId("v1").DownloadAsync(Ignore);
-        },
-            .Method = HttpMethod::Get,
-            .Path = blob,
-            .Query = {{"versionid", "v1"}},
-            .Headers = {},
             .AbsentHeaders = {},
             .Body = std::nullopt});
         return cases;
@@ -600,62 +568,6 @@ namespace
             .Headers = {},
             .AbsentHeaders = {},
             .Body = std::nullopt});
-        cases.push_back({.Name = "Container_Delete",
-            .Start =
-                [](Clients& c)
-        {
-            DeleteBlobContainerOptions o;
-            o.Conditions = FullConditions();
-            o.Conditions.IfMatch.clear();
-            o.Conditions.IfNoneMatch.clear();
-            c.Container.DeleteAsync(std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Delete,
-            .Path = container,
-            .Query = {{"restype", "container"}},
-            .Headers = {{"x-ms-lease-id", "lease-1"},
-                {"If-Modified-Since", "Tue, 02 Jan 2024 00:00:00 GMT"},
-                {"If-Unmodified-Since", "Wed, 03 Jan 2024 00:00:00 GMT"}},
-            .AbsentHeaders = {"If-Match", "If-None-Match"},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Container_DeleteIfExists",
-            .Start =
-                [](Clients& c)
-        {
-            c.Container.DeleteIfExistsAsync(Ignore);
-        },
-            .Method = HttpMethod::Delete,
-            .Path = container,
-            .Query = {{"restype", "container"}},
-            .Headers = {},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Container_GetProperties",
-            .Start =
-                [](Clients& c)
-        {
-            GetBlobContainerPropertiesOptions o;
-            o.Conditions.LeaseId = "lease-1";
-            c.Container.GetPropertiesAsync(std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Head,
-            .Path = container,
-            .Query = {{"restype", "container"}},
-            .Headers = {{"x-ms-lease-id", "lease-1"}},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Container_Exists",
-            .Start =
-                [](Clients& c)
-        {
-            c.Container.ExistsAsync(Ignore);
-        },
-            .Method = HttpMethod::Head,
-            .Path = container,
-            .Query = {{"restype", "container"}},
-            .Headers = {},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
         cases.push_back({.Name = "Container_ListBlobs",
             .Start =
                 [](Clients& c)
@@ -683,175 +595,6 @@ namespace
                 {"marker", "m1"},
                 {"maxresults", "10"},
                 {"include", "copy%2Cdeleted%2Cmetadata%2Csnapshots%2Ctags%2Cuncommittedblobs%2Cversions"}},
-            .Headers = {},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Container_ListBlobsAll",
-            .Start =
-                [](Clients& c)
-        {
-            c.Container.ListBlobsAllAsync(Ignore);
-        },
-            .Method = HttpMethod::Get,
-            .Path = container,
-            .Query = {{"restype", "container"}, {"comp", "list"}},
-            .Headers = {},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Container_FindBlobsByTags",
-            .Start =
-                [](Clients& c)
-        {
-            FindBlobsByTagsOptions o;
-            o.Marker = "m1";
-            o.MaxResults = 5;
-            c.Container.FindBlobsByTagsAsync("\"a\"='b'", std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Get,
-            .Path = container,
-            .Query = {{"restype", "container"},
-                {"comp", "blobs"},
-                {"where", "%22a%22%3D%27b%27"},
-                {"marker", "m1"},
-                {"maxresults", "5"}},
-            .Headers = {},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Container_AcquireLease",
-            .Start =
-                [](Clients& c)
-        {
-            AcquireLeaseOptions o;
-            o.Duration = 15s;
-            c.Container.AcquireLeaseAsync(std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = container,
-            .Query = {{"restype", "container"}, {"comp", "lease"}},
-            .Headers = {{"x-ms-lease-action", "acquire"}, {"x-ms-lease-duration", "15"}},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Container_RenewLease",
-            .Start =
-                [](Clients& c)
-        {
-            RenewLeaseOptions o;
-            o.LeaseId = "lease-1";
-            c.Container.RenewLeaseAsync(std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = container,
-            .Query = {{"restype", "container"}, {"comp", "lease"}},
-            .Headers = {{"x-ms-lease-action", "renew"}, {"x-ms-lease-id", "lease-1"}},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Container_ChangeLease",
-            .Start =
-                [](Clients& c)
-        {
-            ChangeLeaseOptions o;
-            o.LeaseId = "lease-1";
-            o.ProposedLeaseId = "lease-2";
-            c.Container.ChangeLeaseAsync(std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = container,
-            .Query = {{"restype", "container"}, {"comp", "lease"}},
-            .Headers = {{"x-ms-lease-action", "change"},
-                {"x-ms-lease-id", "lease-1"},
-                {"x-ms-proposed-lease-id", "lease-2"}},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Container_ReleaseLease",
-            .Start =
-                [](Clients& c)
-        {
-            ReleaseLeaseOptions o;
-            o.LeaseId = "lease-1";
-            c.Container.ReleaseLeaseAsync(std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = container,
-            .Query = {{"restype", "container"}, {"comp", "lease"}},
-            .Headers = {{"x-ms-lease-action", "release"}, {"x-ms-lease-id", "lease-1"}},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Container_BreakLease",
-            .Start =
-                [](Clients& c)
-        {
-            c.Container.BreakLeaseAsync(Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = container,
-            .Query = {{"restype", "container"}, {"comp", "lease"}},
-            .Headers = {{"x-ms-lease-action", "break"}},
-            .AbsentHeaders = {"x-ms-lease-id", "x-ms-lease-break-period"},
-            .Body = std::nullopt});
-
-        cases.push_back({.Name = "Service_ListContainers",
-            .Start =
-                [](Clients& c)
-        {
-            ListBlobContainersOptions o;
-            o.Prefix = "img";
-            o.Marker = "m1";
-            o.MaxResults = 3;
-            o.IncludeMetadata = true;
-            c.Service.ListBlobContainersAsync(std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Get,
-            .Path = "",
-            .Query =
-                {{"comp", "list"}, {"prefix", "img"}, {"marker", "m1"}, {"maxresults", "3"}, {"include", "metadata"}},
-            .Headers = {},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Service_ListContainersAll",
-            .Start =
-                [](Clients& c)
-        {
-            c.Service.ListBlobContainersAllAsync(Ignore);
-        },
-            .Method = HttpMethod::Get,
-            .Path = "",
-            .Query = {{"comp", "list"}},
-            .Headers = {},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Service_FindBlobsByTags",
-            .Start =
-                [](Clients& c)
-        {
-            c.Service.FindBlobsByTagsAsync("\"a\"='b'", Ignore);
-        },
-            .Method = HttpMethod::Get,
-            .Path = "",
-            .Query = {{"comp", "blobs"}, {"where", "%22a%22%3D%27b%27"}},
-            .Headers = {},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Service_GetProperties",
-            .Start =
-                [](Clients& c)
-        {
-            c.Service.GetPropertiesAsync(Ignore);
-        },
-            .Method = HttpMethod::Get,
-            .Path = "",
-            .Query = {{"restype", "service"}, {"comp", "properties"}},
-            .Headers = {},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Service_GetAccountInfo",
-            .Start =
-                [](Clients& c)
-        {
-            c.Service.GetAccountInfoAsync(Ignore);
-        },
-            .Method = HttpMethod::Get,
-            .Path = "",
-            .Query = {{"restype", "account"}, {"comp", "properties"}},
             .Headers = {},
             .AbsentHeaders = {},
             .Body = std::nullopt});

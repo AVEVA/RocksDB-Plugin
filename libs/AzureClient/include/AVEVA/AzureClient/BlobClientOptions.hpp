@@ -60,8 +60,5 @@ namespace AVEVA::AzureClient
         HttpRequestOptions DefaultRequestOptions;
 
         std::string ApiVersion = std::string(DefaultApiVersion);
-        std::string Snapshot;
-        // Targets a blob version (?versionid=); mutually exclusive with Snapshot.
-        std::string VersionId;
     };
 } // namespace AVEVA::AzureClient

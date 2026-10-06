@@ -56,7 +56,6 @@ namespace
     using AVEVA::AzureClient::Models::AcquireBlobLeaseResult;
     using AVEVA::AzureClient::Models::BlobProperties;
     using AVEVA::AzureClient::Models::BlobType;
-    using AVEVA::AzureClient::Models::BreakBlobLeaseResult;
     using AVEVA::AzureClient::Models::CommitBlockListResult;
     using AVEVA::AzureClient::Models::DeleteBlobResult;
     using AVEVA::AzureClient::Models::DownloadBlobResult;

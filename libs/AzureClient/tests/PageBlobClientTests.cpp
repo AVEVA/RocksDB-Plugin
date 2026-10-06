@@ -52,7 +52,6 @@ namespace
     using AVEVA::AzureClient::Models::AcquireBlobLeaseResult;
     using AVEVA::AzureClient::Models::BlobProperties;
     using AVEVA::AzureClient::Models::BlobType;
-    using AVEVA::AzureClient::Models::BreakBlobLeaseResult;
     using AVEVA::AzureClient::Models::ClearPagesResult;
     using AVEVA::AzureClient::Models::CreatePageBlobResult;
     using AVEVA::AzureClient::Models::DeleteBlobResult;
@@ -538,18 +537,6 @@ TEST(PageBlobClientTests, Constructor_ThrowsForConflictingCredentials)
     EXPECT_THROW((PageBlobClient{httpClient, options}), std::invalid_argument);
 }
 
-TEST(PageBlobClientTests, Constructor_ThrowsWhenSnapshotAndVersionIdAreBothSet)
-{
-    FakeHttpClient httpClient;
-    BlobClientOptions options = BuildOptions();
-    options.Snapshot = "2020-01-01T00:00:00.0000000Z";
-    EXPECT_NO_THROW((PageBlobClient{httpClient, options}));
-    options.VersionId = "2020-01-02T00:00:00.0000000Z";
-    EXPECT_THROW((PageBlobClient{httpClient, options}), std::invalid_argument);
-    options.Snapshot.clear();
-    EXPECT_NO_THROW((PageBlobClient{httpClient, options}));
-}
-
 TEST(PageBlobClientTests, Constructor_ThrowsForInvalidSharedKeyBase64)
 {
     FakeHttpClient httpClient;
@@ -823,7 +810,6 @@ namespace
     [[maybe_unused]] void PageBlobClientNoTokenOverloadsCompile(PageBlobClient& client)
     {
         using AVEVA::AzureClient::AcquireLeaseOptions;
-        using AVEVA::AzureClient::BreakLeaseOptions;
         using AVEVA::AzureClient::ClearPagesOptions;
         using AVEVA::AzureClient::CreatePageBlobOptions;
         using AVEVA::AzureClient::DeleteBlobOptions;

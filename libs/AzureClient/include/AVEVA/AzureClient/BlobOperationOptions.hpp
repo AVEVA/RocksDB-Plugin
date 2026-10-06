@@ -17,16 +17,6 @@ namespace AVEVA::AzureClient
         Models::BlobRequestConditions Conditions;
     };
 
-    struct DeleteBlobContainerOptions
-    {
-        Models::BlobRequestConditions Conditions;
-    };
-
-    struct GetBlobContainerPropertiesOptions
-    {
-        Models::BlobRequestConditions Conditions;
-    };
-
     struct ListBlobsOptions
     {
         std::string Prefix;
@@ -35,10 +25,6 @@ namespace AVEVA::AzureClient
         // Count of items per page (not a total cap); the service allows 1..5000 and rejects larger values
         // with a service error; unset uses the service default (5000).
         std::optional<std::uint32_t> MaxResults;
-        // Used only by ListBlobsAllAsync, which buffers the whole listing in memory: fails with
-        // std::errc::value_too_large (and stops enumerating) once more than this many blobs plus prefixes have
-        // been collected. Unset (the default) is unlimited.
-        std::optional<std::size_t> MaxItems;
         // Datasets to include in the listing (the `include` query parameter).
         bool IncludeMetadata = false;
         bool IncludeSnapshots = false;
@@ -55,18 +41,6 @@ namespace AVEVA::AzureClient
     {
         std::optional<std::chrono::system_clock::time_point> StartsOn;
         std::chrono::system_clock::time_point ExpiresOn;
-    };
-
-    struct ListBlobContainersOptions
-    {
-        std::string Prefix;
-        std::string Marker;
-        // Count of containers per page; the service allows 1..5000; unset uses the service default (5000).
-        std::optional<std::uint32_t> MaxResults;
-        // Used only by ListBlobContainersAllAsync, which buffers every container in memory: fails with
-        // std::errc::value_too_large once more than this many have been collected. Unset is unlimited.
-        std::optional<std::size_t> MaxItems;
-        bool IncludeMetadata = false;
     };
 
     struct UploadBlockBlobOptions
@@ -90,13 +64,6 @@ namespace AVEVA::AzureClient
         // Base64-encoded MD5 / CRC64 of the block, verified by the service.
         std::string TransactionalContentMd5;
         std::string TransactionalContentCrc64;
-    };
-
-    struct FindBlobsByTagsOptions
-    {
-        std::string Marker;
-        // Count of blobs per page; the service allows 1..5000; unset uses the service default (5000).
-        std::optional<std::uint32_t> MaxResults;
     };
 
     struct CommitBlockListOptions
@@ -131,7 +98,6 @@ namespace AVEVA::AzureClient
     struct DeleteBlobOptions
     {
         Models::BlobRequestConditions Conditions;
-        Models::DeleteSnapshotsOption DeleteSnapshotsOption;
     };
 
     struct GetBlobPropertiesOptions
@@ -178,18 +144,10 @@ namespace AVEVA::AzureClient
         std::optional<std::chrono::seconds> Duration;
     };
 
-    // Lease options are shared by blob and container leases. Containers only honour the
-    // IfModifiedSince/IfUnmodifiedSince conditions, and Conditions.LeaseId is ignored by every lease operation.
+    // Conditions.LeaseId is ignored by every lease operation.
     struct RenewLeaseOptions
     {
         std::string LeaseId;
-        Models::BlobRequestConditions Conditions;
-    };
-
-    struct ChangeLeaseOptions
-    {
-        std::string LeaseId;
-        std::string ProposedLeaseId;
         Models::BlobRequestConditions Conditions;
     };
 
@@ -197,14 +155,6 @@ namespace AVEVA::AzureClient
     {
         std::string LeaseId;
         Models::BlobRequestConditions Conditions;
-    };
-
-    struct BreakLeaseOptions
-    {
-        Models::BlobRequestConditions Conditions;
-        // How long the lease stays in the Breaking state (0 to 60 seconds, validated client-side);
-        // std::nullopt uses the remaining lease period (fixed leases) or breaks immediately (infinite).
-        std::optional<std::chrono::seconds> BreakPeriod;
     };
 
     // Set Blob Properties with x-ms-blob-content-length: only the access conditions apply.

@@ -68,22 +68,6 @@ namespace AVEVA::AzureClient
     {
     }
 
-    PageBlobClient PageBlobClient::WithSnapshot(std::string snapshot) const
-    {
-        Private::BlobTarget target = Target();
-        target.Snapshot = std::move(snapshot);
-        target.VersionId.clear();
-        return PageBlobClient{HttpClient(), std::make_shared<const Private::BlobTarget>(std::move(target))};
-    }
-
-    PageBlobClient PageBlobClient::WithVersionId(std::string versionId) const
-    {
-        Private::BlobTarget target = Target();
-        target.VersionId = std::move(versionId);
-        target.Snapshot.clear();
-        return PageBlobClient{HttpClient(), std::make_shared<const Private::BlobTarget>(std::move(target))};
-    }
-
     PageBlobClient::PageBlobClient(IHttpClient& httpClient, std::shared_ptr<const Private::BlobTarget> target)
         : BlobClient(httpClient, std::move(target))
     {

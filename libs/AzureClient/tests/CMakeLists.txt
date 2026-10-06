@@ -8,7 +8,6 @@ include(GoogleTest)
 add_executable(aveva-azure-client-tests
     AsyncBehaviorTests.cpp
     BlobContainerClientTests.cpp
-    BlobFeatureSmokeTests.cpp
     BlobRequestHelpersTests.cpp
     RetryTests.cpp
     ParseContentRangeTests.cpp
@@ -33,7 +32,6 @@ add_executable(aveva-azure-client-tests
     RequestShapeTests.cpp
     SasTests.cpp
     SuppressedErrorResponseTests.cpp
-    TagsAndVersionsTests.cpp
     PageBlobClientTests.cpp
     ResponseTests.cpp
 )

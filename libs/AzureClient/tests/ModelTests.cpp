@@ -35,18 +35,15 @@ namespace
     using AVEVA::HttpResponse;
     using AVEVA::AzureClient::AcquireLeaseOptions;
     using AVEVA::AzureClient::BlockBlobClient;
-    using AVEVA::AzureClient::BreakLeaseOptions;
     using AVEVA::AzureClient::DeleteBlobOptions;
     using AVEVA::AzureClient::PageBlobClient;
     using AVEVA::AzureClient::ResizePageBlobOptions;
     using AVEVA::AzureClient::UploadBlockBlobOptions;
     using AVEVA::AzureClient::Models::AccessTier;
     using AVEVA::AzureClient::Models::CopyStatus;
-    using AVEVA::AzureClient::Models::DeleteSnapshotsOption;
     using AVEVA::AzureClient::Models::LeaseDurationType;
     using AVEVA::AzureClient::Models::LeaseState;
     using AVEVA::AzureClient::Models::LeaseStatus;
-    using AVEVA::AzureClient::Models::PublicAccessType;
     using AVEVA::AzureClient::Tests::FakeHttpClient;
     using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
     namespace Private = AVEVA::AzureClient::Private;
@@ -108,26 +105,6 @@ namespace
         }
     }
 } // namespace
-
-TEST(ModelTests, ExtensibleEnumsCompareWithConstantsAndStringsAndKeepUnknownValues)
-{
-    AccessTier tier = "Hot";
-    EXPECT_EQ(tier, AccessTier::Hot());
-    EXPECT_TRUE(tier == "Hot");
-    EXPECT_FALSE(tier == AccessTier::Cool());
-    EXPECT_EQ(AccessTier::P80().ToString(), "P80");
-
-    const AccessTier future{std::string{"SuperCool"}};
-    EXPECT_EQ(future.ToString(), "SuperCool");
-    EXPECT_TRUE(AccessTier{}.empty());
-
-    EXPECT_EQ(DeleteSnapshotsOption::Include().ToString(), "include");
-    EXPECT_EQ(DeleteSnapshotsOption::OnlySnapshots().ToString(), "only");
-    EXPECT_EQ(CopyStatus::Pending().ToString(), "pending");
-    EXPECT_EQ(CopyStatus::Success().ToString(), "success");
-    EXPECT_EQ(CopyStatus::Aborted().ToString(), "aborted");
-    EXPECT_EQ(CopyStatus::Failed().ToString(), "failed");
-}
 
 TEST(ModelTests, GetPropertiesParsesExtendedHeaders)
 {
@@ -237,32 +214,6 @@ TEST(ModelTests, ListBlobsParsesExtendedPropertiesAndVersionSiblings)
     EXPECT_EQ(properties.LeaseState, LeaseState::Available);
     EXPECT_EQ(properties.CopyStatus, CopyStatus::Success());
     EXPECT_EQ(properties.ServerEncrypted, std::optional<bool>{true});
-}
-
-TEST(ModelTests, ListBlobContainersParsesLeaseAndPublicAccessProperties)
-{
-    const auto result = Private::ParseListBlobContainersResultXml(R"(<?xml version="1.0" encoding="utf-8"?>
-<EnumerationResults><Containers>
-  <Container><Name>public</Name><Properties>
-    <Last-Modified>Wed, 01 Oct 2025 10:00:00 GMT</Last-Modified><Etag>"0x1"</Etag>
-    <LeaseStatus>locked</LeaseStatus><LeaseState>leased</LeaseState><LeaseDuration>fixed</LeaseDuration>
-    <PublicAccess>container</PublicAccess><HasImmutabilityPolicy>true</HasImmutabilityPolicy><HasLegalHold>true</HasLegalHold>
-    <DefaultEncryptionScope>$account-encryption-key</DefaultEncryptionScope><DenyEncryptionScopeOverride>true</DenyEncryptionScopeOverride>
-  </Properties></Container>
-  <Container><Name>private</Name><Properties><Etag>"0x2"</Etag></Properties></Container>
-</Containers></EnumerationResults>)");
-
-    ASSERT_EQ(result.Containers.size(), 2U);
-    const auto& first = result.Containers.at(0).Properties;
-    EXPECT_EQ(first.Status, LeaseStatus::Locked);
-    EXPECT_EQ(first.State, LeaseState::Leased);
-    EXPECT_EQ(first.DurationType, LeaseDurationType::Fixed);
-    EXPECT_EQ(first.AccessType, PublicAccessType::BlobContainer);
-    EXPECT_TRUE(first.HasImmutabilityPolicy);
-    EXPECT_TRUE(first.HasLegalHold);
-    EXPECT_EQ(first.DefaultEncryptionScope, "$account-encryption-key");
-    EXPECT_TRUE(first.PreventEncryptionScopeOverride);
-    EXPECT_EQ(result.Containers.at(1).Properties.AccessType, PublicAccessType::None);
 }
 
 TEST(ModelTests, UploadSendsContentEncodingLanguageAndDisposition)

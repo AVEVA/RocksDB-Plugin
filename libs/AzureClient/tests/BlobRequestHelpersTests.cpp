@@ -58,7 +58,6 @@ namespace
     using AVEVA::AzureClient::Private::ParseBlobProperties;
     using AVEVA::AzureClient::Private::ParseGetPageRangesResultXml;
     using AVEVA::AzureClient::Private::ParseHttpDateHeader;
-    using AVEVA::AzureClient::Private::ParseListBlobContainersResultXml;
     using AVEVA::AzureClient::Private::ParseListBlobsResultXml;
     using AVEVA::AzureClient::Private::TrimLeadingQuestionMark;
     using AVEVA::AzureClient::Private::TrimTrailingSlashes;
@@ -502,91 +501,6 @@ TEST(BlobRequestHelpersTests, ParseBlobProperties_ZeroContentLengthIsPresentAndN
     EXPECT_EQ(ParseBlobProperties(emptyTotal).ContentLength, 1U);
 }
 
-TEST(BlobRequestHelpersTests, XmlParsers_HandleNamespacesAttributesEntitiesAndSelfClosingElements)
-{
-    const auto expectedTime = MakeUtcTimePoint(2015, 6, 26, 18, 59, 17);
-    const std::string listBlobsXml = R"(<?xml version="1.0" encoding="utf-8"?>
-<EnumerationResults xmlns="urn:test" xmlns:a="urn:a">
-  <a:Prefix />
-  <Delimiter>/</Delimiter>
-  <Marker>ma&#x72;ker</Marker>
-  <NextMarker><![CDATA[next<marker>]]></NextMarker>
-  <Blobs>
-    <a:Blob attr="1">
-      <a:Name><![CDATA[folder/<blob>.txt]]></a:Name>
-      <Snapshot>snap&#38;1</Snapshot>
-      <Properties>
-        <Etag>"etag"</Etag>
-        <Last-Modified>Fri, 26 Jun 2015 18:59:17 GMT</Last-Modified>
-        <Content-Length>123</Content-Length>
-        <Content-Type>text/plain</Content-Type>
-        <Content-MD5>abcd</Content-MD5>
-        <Cache-Control>max-age=60</Cache-Control>
-        <BlobType>BlockBlob</BlobType>
-        <Metadata>
-          <Project><![CDATA[aveva&cloud]]></Project>
-          <Owner />
-        </Metadata>
-      </Properties>
-    </a:Blob>
-    <BlobPrefix attr="2">
-      <Name>nested&#x2F;path&#x2F;</Name>
-    </BlobPrefix>
-  </Blobs>
-</EnumerationResults>)";
-
-    const auto blobs = ParseListBlobsResultXml(listBlobsXml);
-    ASSERT_EQ(blobs.Blobs.size(), 1U);
-    EXPECT_EQ(blobs.Prefix, "");
-    EXPECT_EQ(blobs.Delimiter, "/");
-    EXPECT_EQ(blobs.Marker, "marker");
-    EXPECT_EQ(blobs.NextMarker, "next<marker>");
-    EXPECT_EQ(blobs.Blobs.at(0).Name, "folder/<blob>.txt");
-    EXPECT_EQ(blobs.Blobs.at(0).Snapshot, "snap&1");
-    EXPECT_EQ(blobs.Blobs.at(0).Properties.ETag, "\"etag\"");
-    EXPECT_EQ(blobs.Blobs.at(0).Properties.LastModified, expectedTime);
-    EXPECT_EQ(blobs.Blobs.at(0).Properties.ContentLength, 123U);
-    EXPECT_EQ(blobs.Blobs.at(0).Properties.ContentType, "text/plain");
-    EXPECT_EQ(blobs.Blobs.at(0).Properties.ContentMd5, "abcd");
-    EXPECT_EQ(blobs.Blobs.at(0).Properties.CacheControl, "max-age=60");
-    EXPECT_EQ(blobs.Blobs.at(0).Properties.Type, BlobType::BlockBlob);
-    EXPECT_EQ(blobs.Blobs.at(0).Properties.Metadata.at("project"), "aveva&cloud");
-    EXPECT_EQ(blobs.Blobs.at(0).Properties.Metadata.at("owner"), "");
-    ASSERT_EQ(blobs.BlobPrefixes.size(), 1U);
-    EXPECT_EQ(blobs.BlobPrefixes.at(0), "nested/path/");
-
-    const std::string listContainersXml = R"(<?xml version="1.0" encoding="utf-8"?>
-<EnumerationResults xmlns:c="urn:containers">
-  <Prefix>pre</Prefix>
-  <Marker />
-  <NextMarker>next</NextMarker>
-  <Containers>
-    <c:Container attr="x">
-      <c:Name>demo&#38;container</c:Name>
-      <Properties>
-        <Etag>"container-etag"</Etag>
-        <Last-Modified>Fri, 26 Jun 2015 18:59:17 GMT</Last-Modified>
-      </Properties>
-      <Metadata>
-        <Project><![CDATA[aveva]]></Project>
-        <Owner />
-      </Metadata>
-    </c:Container>
-  </Containers>
-</EnumerationResults>)";
-
-    const auto containers = ParseListBlobContainersResultXml(listContainersXml);
-    ASSERT_EQ(containers.Containers.size(), 1U);
-    EXPECT_EQ(containers.Prefix, "pre");
-    EXPECT_EQ(containers.Marker, "");
-    EXPECT_EQ(containers.NextMarker, "next");
-    EXPECT_EQ(containers.Containers.at(0).Name, "demo&container");
-    EXPECT_EQ(containers.Containers.at(0).Properties.ETag, "\"container-etag\"");
-    EXPECT_EQ(containers.Containers.at(0).Properties.LastModified, expectedTime);
-    EXPECT_EQ(containers.Containers.at(0).Properties.Metadata.at("project"), "aveva");
-    EXPECT_EQ(containers.Containers.at(0).Properties.Metadata.at("owner"), "");
-}
-
 TEST(BlobRequestHelpersTests, BoostUrlHelpers_PreserveExistingUrlShapes)
 {
     EXPECT_EQ(BuildQueryString({{"comp", "list"}, {"prefix", "folder name"}}), "comp=list&prefix=folder%20name");
@@ -595,11 +509,10 @@ TEST(BlobRequestHelpersTests, BoostUrlHelpers_PreserveExistingUrlShapes)
     blobOptions.ServiceEndpoint = "https://account.blob.core.windows.net";
     blobOptions.ContainerName = "container";
     blobOptions.BlobName = "folder name/file?.txt";
-    blobOptions.Snapshot = "2024-01-02T03:04:05.0000000Z";
     blobOptions.SasToken = "sv=1&sig=a%2Bb";
     EXPECT_EQ(BuildBlobUrl(blobOptions, "comp=blocklist"),
         "https://account.blob.core.windows.net/container/folder%20name/"
-        "file%3F.txt?snapshot=2024-01-02T03%3A04%3A05.0000000Z&comp=blocklist&sv=1&sig=a%2Bb");
+        "file%3F.txt?comp=blocklist&sv=1&sig=a%2Bb");
 
     BlobContainerClientOptions containerOptions;
     containerOptions.ServiceEndpoint = "https://account.blob.core.windows.net";
@@ -770,13 +683,11 @@ TEST(BlobRequestHelpersTests, UrlBuilders_HandlePortsUnicodeLiteralPercentsAndDu
     blobOptions.ContainerName = "container";
     blobOptions.BlobName = "emoji-\xF0\x9F\x98\x80-%2F.txt";
     blobOptions.SasToken = "sv=1&sig=a%2Bb";
-    blobOptions.Snapshot = "2024-01-02T03:04:05.0000000Z";
 
     const std::string blobUrl = BuildBlobUrl(blobOptions, "comp=metadata");
     EXPECT_TRUE(IStartsWith(blobUrl, "https://"));
     EXPECT_NE(blobUrl.find(":8443/container/emoji-%F0%9F%98%80-%252F.txt"), std::string::npos);
-    EXPECT_NE(blobUrl.find("snapshot=2024-01-02T03%3A04%3A05.0000000Z&comp=metadata&sv=1&sig=a%2Bb"),
-        std::string::npos);
+    EXPECT_NE(blobUrl.find("?comp=metadata&sv=1&sig=a%2Bb"), std::string::npos);
 
     EXPECT_EQ(
         BuildQueryString({{"comp", "list"}, {"include", "metadata"}, {"include", "snapshots"}, {"marker", "A+B&C=%"}}),

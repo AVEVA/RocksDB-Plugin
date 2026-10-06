@@ -22,20 +22,8 @@
 
 namespace AVEVA::AzureClient
 {
-    namespace
-    {
-        const Private::BlobTarget MakeValidatedTarget(const BlobClientOptions& options)
-        {
-            if (!options.Snapshot.empty() && !options.VersionId.empty())
-            {
-                throw std::invalid_argument("Snapshot and VersionId are mutually exclusive.");
-            }
-            return Private::MakeBlobTarget(options);
-        }
-    } // namespace
-
     BlobClient::BlobClient(IHttpClient& httpClient, const BlobClientOptions& options)
-        : m_httpClient(&httpClient), m_target(std::make_shared<const Private::BlobTarget>(MakeValidatedTarget(options)))
+        : m_httpClient(&httpClient), m_target(std::make_shared<const Private::BlobTarget>(Private::MakeBlobTarget(options)))
     {
     }
 
@@ -161,22 +149,6 @@ namespace AVEVA::AzureClient
         HttpRequestOptions requestOptions)
     {
         Private::ReleaseLeaseAsync(*m_httpClient, *m_target, std::move(options), std::move(completion), requestOptions);
-    }
-
-    BlobClient BlobClient::WithSnapshot(std::string snapshot) const
-    {
-        Private::BlobTarget target = *m_target;
-        target.Snapshot = std::move(snapshot);
-        target.VersionId.clear();
-        return BlobClient{*m_httpClient, std::make_shared<const Private::BlobTarget>(std::move(target))};
-    }
-
-    BlobClient BlobClient::WithVersionId(std::string versionId) const
-    {
-        Private::BlobTarget target = *m_target;
-        target.VersionId = std::move(versionId);
-        target.Snapshot.clear();
-        return BlobClient{*m_httpClient, std::make_shared<const Private::BlobTarget>(std::move(target))};
     }
 
 } // namespace AVEVA::AzureClient

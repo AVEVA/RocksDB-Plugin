@@ -591,25 +591,6 @@ namespace AVEVA::AzureClient::Private
         return {};
     }
 
-    Models::PublicAccessType ParsePublicAccessType(std::string_view value)
-    {
-        if (value.empty())
-        {
-            return Models::PublicAccessType::None;
-        }
-        if (IEquals(value, "container"))
-        {
-            return Models::PublicAccessType::BlobContainer;
-        }
-
-        if (IEquals(value, "blob"))
-        {
-            return Models::PublicAccessType::Blob;
-        }
-
-        return Models::PublicAccessType::Unknown;
-    }
-
     Models::LeaseStatus ParseLeaseStatus(std::string_view value)
     {
         if (value.empty())
@@ -788,106 +769,6 @@ namespace AVEVA::AzureClient::Private
                 std::chrono::nanoseconds{ticks * NanosecondsPerTick});
         }
         return result;
-    }
-
-    Models::AccountInfo ParseAccountInfo(const HttpResponse& response)
-    {
-        Models::AccountInfo info;
-        info.SkuName = std::string{FindHeaderValue(response, "x-ms-sku-name")};
-        info.AccountKind = std::string{FindHeaderValue(response, "x-ms-account-kind")};
-        info.IsHierarchicalNamespaceEnabled =
-            ParseOptionalBool(FindHeaderValue(response, "x-ms-is-hns-enabled"), "x-ms-is-hns-enabled").value_or(false);
-        return info;
-    }
-
-    namespace
-    {
-        [[nodiscard]] bool ChildBool(const XmlNode& node, std::string_view tag)
-        {
-            return ParseOptionalBool(GetChildTextOrEmpty(node, tag), tag).value_or(false);
-        }
-
-        [[nodiscard]] std::optional<std::int32_t> ChildInt32(const XmlNode& node, std::string_view tag)
-        {
-            const auto value = ParseOptionalUnsigned(GetChildTextOrEmpty(node, tag), tag);
-            if (value.has_value() && *value > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()))
-            {
-                throw std::invalid_argument(std::string{tag} + " is out of range.");
-            }
-            return value.has_value() ? std::optional<std::int32_t>{static_cast<std::int32_t>(*value)} : std::nullopt;
-        }
-
-        [[nodiscard]] Models::RetentionPolicy ParseRetentionPolicyXml(const XmlNode* node)
-        {
-            Models::RetentionPolicy policy;
-            if (node != nullptr)
-            {
-                policy.Enabled = ChildBool(*node, "Enabled");
-                policy.Days = ChildInt32(*node, "Days");
-            }
-            return policy;
-        }
-
-        [[nodiscard]] Models::Metrics ParseMetricsXml(const XmlNode* node)
-        {
-            Models::Metrics metrics;
-            if (node != nullptr)
-            {
-                metrics.Version = GetChildTextOrEmpty(*node, "Version");
-                metrics.Enabled = ChildBool(*node, "Enabled");
-                metrics.IncludeApis = ParseOptionalBool(GetChildTextOrEmpty(*node, "IncludeAPIs"), "IncludeAPIs");
-                metrics.RetentionPolicy = ParseRetentionPolicyXml(FindChildByLocalName(*node, "RetentionPolicy"));
-            }
-            return metrics;
-        }
-    } // namespace
-
-    Models::BlobServiceProperties ParseBlobServicePropertiesXml(std::string_view xml)
-    {
-        Models::BlobServiceProperties properties;
-        const auto tree = TryReadXmlOrThrow(xml, "Blob service properties response", "StorageServiceProperties");
-        const XmlNode* root = tree ? tree->Root() : nullptr;
-        if (root == nullptr)
-        {
-            return properties;
-        }
-
-        if (const XmlNode* logging = FindChildByLocalName(*root, "Logging"); logging != nullptr)
-        {
-            properties.Logging.Version = GetChildTextOrEmpty(*logging, "Version");
-            properties.Logging.Delete = ChildBool(*logging, "Delete");
-            properties.Logging.Read = ChildBool(*logging, "Read");
-            properties.Logging.Write = ChildBool(*logging, "Write");
-            properties.Logging.RetentionPolicy =
-                ParseRetentionPolicyXml(FindChildByLocalName(*logging, "RetentionPolicy"));
-        }
-        properties.HourMetrics = ParseMetricsXml(FindChildByLocalName(*root, "HourMetrics"));
-        properties.MinuteMetrics = ParseMetricsXml(FindChildByLocalName(*root, "MinuteMetrics"));
-        if (const XmlNode* cors = FindChildByLocalName(*root, "Cors"); cors != nullptr)
-        {
-            for (const XmlNode* rule : GetChildrenByLocalName(*cors, "CorsRule"))
-            {
-                properties.Cors.push_back(Models::CorsRule{
-                    .AllowedOrigins = GetChildTextOrEmpty(*rule, "AllowedOrigins"),
-                    .AllowedMethods = GetChildTextOrEmpty(*rule, "AllowedMethods"),
-                    .AllowedHeaders = GetChildTextOrEmpty(*rule, "AllowedHeaders"),
-                    .ExposedHeaders = GetChildTextOrEmpty(*rule, "ExposedHeaders"),
-                    .MaxAgeInSeconds = ChildInt32(*rule, "MaxAgeInSeconds").value_or(0),
-                });
-            }
-        }
-        properties.DefaultServiceVersion = GetChildTextOrEmpty(*root, "DefaultServiceVersion");
-        properties.DeleteRetentionPolicy =
-            ParseRetentionPolicyXml(FindChildByLocalName(*root, "DeleteRetentionPolicy"));
-        if (const XmlNode* website = FindChildByLocalName(*root, "StaticWebsite"); website != nullptr)
-        {
-            properties.StaticWebsite.Enabled = ChildBool(*website, "Enabled");
-            properties.StaticWebsite.IndexDocument = GetChildTextOrEmpty(*website, "IndexDocument");
-            properties.StaticWebsite.ErrorDocument404Path = GetChildTextOrEmpty(*website, "ErrorDocument404Path");
-            properties.StaticWebsite.DefaultIndexDocumentPath =
-                GetChildTextOrEmpty(*website, "DefaultIndexDocumentPath");
-        }
-        return properties;
     }
 
     Models::UserDelegationKey ParseUserDelegationKeyXml(std::string_view xml)
@@ -1106,30 +987,9 @@ namespace AVEVA::AzureClient::Private
         return result;
     }
 
-    Models::ChangeBlobLeaseResult ParseChangeBlobLeaseResult(const HttpResponse& response)
-    {
-        auto result = ParseETagAndLastModified<Models::ChangeBlobLeaseResult>(response);
-        result.LeaseId = std::string{FindHeaderValue(response, XMsLeaseIdHeaderName)};
-        return result;
-    }
-
     Models::ReleaseBlobLeaseResult ParseReleaseBlobLeaseResult(const HttpResponse& response)
     {
         return ParseETagAndLastModified<Models::ReleaseBlobLeaseResult>(response);
-    }
-
-    Models::BreakBlobLeaseResult ParseBreakBlobLeaseResult(const HttpResponse& response)
-    {
-        Models::BreakBlobLeaseResult result;
-        if (const std::string_view leaseTime = FindHeaderValue(response, XMsLeaseTimeHeaderName); !leaseTime.empty())
-        {
-            if (const auto parsed = ParseInt(leaseTime); parsed.has_value())
-            {
-                result.LeaseTimeSeconds = parsed;
-            }
-        }
-        ApplyETagAndLastModified(result, response);
-        return result;
     }
 
     namespace
@@ -1214,93 +1074,6 @@ namespace AVEVA::AzureClient::Private
             for (const XmlNode* block : GetChildrenByLocalName(*blobs, "BlobPrefix"))
             {
                 result.BlobPrefixes.push_back(GetBlobItemName(*block));
-            }
-        }
-
-        return result;
-    }
-
-    Models::FindBlobsByTagsResult ParseFindBlobsByTagsResultXml(std::string_view xml)
-    {
-        Models::FindBlobsByTagsResult result;
-        const auto tree = TryReadXmlOrThrow(xml, "Find blobs by tags response", "EnumerationResults");
-        const XmlNode* root = tree ? tree->Root() : nullptr;
-        if (root == nullptr)
-        {
-            return result;
-        }
-        result.Where = GetChildTextOrEmpty(*root, "Where");
-        result.NextMarker = GetChildTextOrEmpty(*root, "NextMarker");
-        if (const XmlNode* blobs = FindChildByLocalName(*root, "Blobs"); blobs != nullptr)
-        {
-            for (const XmlNode* blob : GetChildrenByLocalName(*blobs, "Blob"))
-            {
-                Models::TaggedBlobItem item;
-                item.BlobName = GetChildTextOrEmpty(*blob, "Name");
-                item.ContainerName = GetChildTextOrEmpty(*blob, "ContainerName");
-                if (const XmlNode* tags = FindChildByLocalName(*blob, "Tags"); tags != nullptr)
-                {
-                    item.Tags = ParseBlobTagsXml(*tags);
-                }
-                result.Blobs.push_back(std::move(item));
-            }
-        }
-        return result;
-    }
-
-    Models::ListBlobContainersResult ParseListBlobContainersResultXml(std::string_view xml)
-    {
-        Models::ListBlobContainersResult result;
-        const auto tree = TryReadXmlOrThrow(xml, "List blob containers response", "EnumerationResults");
-        const XmlNode* root = tree ? tree->Root() : nullptr;
-        if (root == nullptr)
-        {
-            return result;
-        }
-
-        result.Prefix = GetChildTextOrEmpty(*root, "Prefix");
-        result.Marker = GetChildTextOrEmpty(*root, "Marker");
-        result.NextMarker = GetChildTextOrEmpty(*root, "NextMarker");
-
-        if (const XmlNode* containers = FindChildByLocalName(*root, "Containers"); containers != nullptr)
-        {
-            for (const XmlNode* block : GetChildrenByLocalName(*containers, "Container"))
-            {
-                Models::BlobContainerItem item;
-                item.Name = GetChildTextOrEmpty(*block, "Name");
-                if (const XmlNode* properties = FindChildByLocalName(*block, "Properties"); properties != nullptr)
-                {
-                    item.Properties.ETag = GetChildTextOrEmpty(*properties, "Etag");
-                    if (const std::string lastModified = GetChildTextOrEmpty(*properties, "Last-Modified");
-                        !lastModified.empty())
-                    {
-                        const auto parsed = ParseHttpDateHeader(lastModified);
-                        if (!parsed.has_value())
-                        {
-                            throw std::invalid_argument(
-                                "Container Properties Last-Modified must contain a valid HTTP-date.");
-                        }
-
-                        item.Properties.LastModified = *parsed;
-                    }
-                    item.Properties.AccessType =
-                        ParsePublicAccessType(GetChildTextOrEmpty(*properties, "PublicAccess"));
-                    item.Properties.HasImmutabilityPolicy =
-                        ParseBoolHeader(GetChildTextOrEmpty(*properties, "HasImmutabilityPolicy"));
-                    item.Properties.HasLegalHold = ParseBoolHeader(GetChildTextOrEmpty(*properties, "HasLegalHold"));
-                    item.Properties.Status = ParseLeaseStatus(GetChildTextOrEmpty(*properties, "LeaseStatus"));
-                    item.Properties.State = ParseLeaseState(GetChildTextOrEmpty(*properties, "LeaseState"));
-                    item.Properties.DurationType =
-                        ParseLeaseDurationType(GetChildTextOrEmpty(*properties, "LeaseDuration"));
-                    item.Properties.DefaultEncryptionScope = GetChildTextOrEmpty(*properties, "DefaultEncryptionScope");
-                    item.Properties.PreventEncryptionScopeOverride =
-                        ParseBoolHeader(GetChildTextOrEmpty(*properties, "DenyEncryptionScopeOverride"));
-                }
-                if (const XmlNode* metadata = FindChildByLocalName(*block, "Metadata"); metadata != nullptr)
-                {
-                    item.Properties.Metadata = ParseMetadataXml(*metadata);
-                }
-                result.Containers.push_back(std::move(item));
             }
         }
 

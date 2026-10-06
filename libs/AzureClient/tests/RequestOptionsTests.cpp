@@ -147,7 +147,7 @@ TEST(RequestOptionsTests, ContainerDefaultsApplyToContainerAndChildBlobOperation
     options.DefaultRequestOptions = MakeRequestOptions(777ms, 5);
     BlobContainerClient container{httpClient, options};
 
-    container.ExistsAsync(IgnoreResult);
+    container.CreateAsync(IgnoreResult);
     httpClient.Poll();
     EXPECT_EQ(httpClient.LastRequestOptions().GetTimeout(), 777ms);
 
@@ -160,24 +160,6 @@ TEST(RequestOptionsTests, ContainerDefaultsApplyToContainerAndChildBlobOperation
     container.ListBlobsAsync(WithRequestOptions(MakeRequestOptions(10ms, 6), IgnoreResult));
     httpClient.Poll();
     EXPECT_EQ(httpClient.LastRequestOptions().GetTimeout(), 10ms);
-}
-
-TEST(RequestOptionsTests, ServiceDefaultsApplyToServiceAndChildContainerOperations)
-{
-    FakeHttpClient httpClient;
-    auto options = MakeBlobServiceClientOptions();
-    options.DefaultRequestOptions = MakeRequestOptions(888ms, 9);
-    BlobServiceClient service{httpClient, std::move(options)};
-
-    service.ListBlobContainersAsync(IgnoreResult);
-    httpClient.Poll();
-    EXPECT_EQ(httpClient.LastRequestOptions().GetTimeout(), 888ms);
-
-    auto container = service.GetBlobContainerClient("images");
-    container.GetPropertiesAsync(IgnoreResult);
-    httpClient.Poll();
-    EXPECT_EQ(httpClient.LastRequestOptions().GetTimeout(), 888ms);
-    EXPECT_EQ(container.GetDefaultRequestOptions().GetResponseBodyLimit(), 9U);
 }
 
 TEST(RequestOptionsTests, AllThreeLevelsPickWithRequestOptionsForEveryTokenForm)

@@ -174,22 +174,6 @@ namespace AVEVA::AzureClient
     {
     }
 
-    BlockBlobClient BlockBlobClient::WithSnapshot(std::string snapshot) const
-    {
-        Private::BlobTarget target = Target();
-        target.Snapshot = std::move(snapshot);
-        target.VersionId.clear();
-        return BlockBlobClient{HttpClient(), std::make_shared<const Private::BlobTarget>(std::move(target))};
-    }
-
-    BlockBlobClient BlockBlobClient::WithVersionId(std::string versionId) const
-    {
-        Private::BlobTarget target = Target();
-        target.VersionId = std::move(versionId);
-        target.Snapshot.clear();
-        return BlockBlobClient{HttpClient(), std::make_shared<const Private::BlobTarget>(std::move(target))};
-    }
-
     BlockBlobClient::BlockBlobClient(IHttpClient& httpClient, std::shared_ptr<const Private::BlobTarget> target)
         : BlobClient(httpClient, std::move(target))
     {

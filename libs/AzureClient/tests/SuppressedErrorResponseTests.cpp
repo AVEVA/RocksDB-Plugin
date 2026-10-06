@@ -90,11 +90,4 @@ TEST(SuppressedErrorResponseTests, OtherFailuresAreStillReported)
     {
         container.CreateIfNotExistsAsync(std::move(completion));
     }).Succeeded);
-    EXPECT_FALSE(RunSuppressed(httpClient,
-        404,
-        "BlobNotFound",
-        [&](auto completion)
-    {
-        container.DeleteIfExistsAsync(std::move(completion));
-    }).Succeeded);
 }

@@ -38,10 +38,6 @@ namespace AVEVA::AzureClient
 
         BlockBlobClient(IHttpClient& httpClient, const BlobClientOptions& options);
 
-        // Type-preserving equivalents of BlobClient::WithSnapshot / WithVersionId (see BlobClient).
-        [[nodiscard]] BlockBlobClient WithSnapshot(std::string snapshot) const;
-        [[nodiscard]] BlockBlobClient WithVersionId(std::string versionId) const;
-
         template <class CompletionToken = DefaultCompletionToken>
             requires(!std::same_as<std::remove_cvref_t<CompletionToken>, UploadBlockBlobOptions>)
         [[nodiscard]] auto UploadAsync(std::string content,

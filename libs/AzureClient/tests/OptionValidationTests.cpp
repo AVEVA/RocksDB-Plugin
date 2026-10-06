@@ -127,24 +127,6 @@ namespace
             });
         },
             std::errc::invalid_argument});
-        cases.push_back({"BlobClientSnapshotAndVersionIdTogether",
-            [](FakeHttpClient& http, auto report)
-        {
-            // Rejected at construction; the throw is translated into an error code for the table.
-            auto options = MakeBlobClientOptions();
-            options.Snapshot = "2020-01-01T00:00:00.0000000Z";
-            options.VersionId = "2020-01-02T00:00:00.0000000Z";
-            try
-            {
-                BlobClient client{http, options};
-                report({});
-            }
-            catch (const std::invalid_argument&)
-            {
-                report(std::make_error_code(std::errc::invalid_argument));
-            }
-        },
-            std::errc::invalid_argument});
 
         return cases;
     }
