@@ -2,22 +2,15 @@ cmake_minimum_required(VERSION 3.22)
 project(aveva-azure-client LANGUAGES CXX VERSION 0.0.1)
 
 option(AVEVA_AZURE_CLIENT_TESTS "Build tests" ON)
-option(AVEVA_AZURE_CLIENT_BENCHMARKS "Build benchmarks" OFF)
-option(AVEVA_AZURE_CLIENT_EXAMPLES "Build examples" ON)
-option(AVEVA_AZURE_CLIENT_FUZZ "Build the libFuzzer parser target (Clang only)" OFF)
-option(AVEVA_AZURE_CLIENT_RUN_INTEGRATION_TESTS "Build and register live Azure integration tests" OFF)
-option(AVEVA_AZURE_CLIENT_INSTALL_TEST "Register the install/find_package consumer test (ctest -L install)" ON)
 option(AVEVA_AZURE_CLIENT_ENABLE_ASAN "Enable AddressSanitizer instrumentation" OFF)
 option(AVEVA_AZURE_CLIENT_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer instrumentation" OFF)
 option(AVEVA_AZURE_CLIENT_ENABLE_TSAN "Enable ThreadSanitizer instrumentation (incompatible with AVEVA_AZURE_CLIENT_ENABLE_ASAN)" OFF)
 option(AVEVA_AZURE_CLIENT_ENABLE_COVERAGE "Enable compiler coverage instrumentation" OFF)
 option(AVEVA_AZURE_CLIENT_ENABLE_CLANG_TIDY "Enable clang-tidy analysis during compilation" OFF)
 option(AVEVA_AZURE_CLIENT_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
-option(AVEVA_AZURE_CLIENT_DOCS "Build API documentation (docs target; requires Doxygen)" OFF)
 
 # Deprecated unprefixed option names, honoured for one release.
 foreach(legacy_pair
-    "AZURE_RUN_INTEGRATION_TESTS:AVEVA_AZURE_CLIENT_RUN_INTEGRATION_TESTS"
     "ENABLE_ASAN:AVEVA_AZURE_CLIENT_ENABLE_ASAN"
     "ENABLE_UBSAN:AVEVA_AZURE_CLIENT_ENABLE_UBSAN"
     "ENABLE_TSAN:AVEVA_AZURE_CLIENT_ENABLE_TSAN"
@@ -61,14 +54,13 @@ function(aveva_azure_client_enable_clang_tidy target_name)
     set_property(TARGET "${target_name}" PROPERTY CXX_CLANG_TIDY "${AVEVA_AZURE_CLIENT_CLANG_TIDY}")
 endfunction()
 
-# Instrumentation is carried by INTERFACE targets that are linked only into the library, tests and fuzz
-# target, so examples and benchmarks are not compiled with sanitizer or coverage flags. Each target is
+# Instrumentation is carried by INTERFACE targets that are linked only into the library, tests, so
+# nothing else is compiled with sanitizer or coverage flags. Each target is
 # always defined (empty when its option is off) so consumers can link all of them unconditionally.
 add_library(aveva_azure_client_asan INTERFACE)
 add_library(aveva_azure_client_ubsan INTERFACE)
 add_library(aveva_azure_client_tsan INTERFACE)
 add_library(aveva_azure_client_coverage INTERFACE)
-add_library(aveva_azure_client_fuzz INTERFACE)
 
 if(AVEVA_AZURE_CLIENT_ENABLE_ASAN)
     if(MSVC)
@@ -116,16 +108,6 @@ if(AVEVA_AZURE_CLIENT_ENABLE_COVERAGE)
     endif()
 endif()
 
-if(AVEVA_AZURE_CLIENT_FUZZ)
-    if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
-        message(FATAL_ERROR "AVEVA_AZURE_CLIENT_FUZZ requires Clang (GNU-style driver, e.g. clang++) with libFuzzer support; "
-            "MSVC, clang-cl and GCC are not supported.")
-    endif()
-    # Instrument the library for coverage feedback; only the fuzz executable links the libFuzzer main.
-    target_compile_options(aveva_azure_client_fuzz INTERFACE -fsanitize=fuzzer-no-link,address)
-    target_link_options(aveva_azure_client_fuzz INTERFACE -fsanitize=address)
-endif()
-
 # Links every instrumentation target into `target` (a no-op for those that are disabled). BUILD_INTERFACE
 # keeps these build-only targets out of the exported/installed link interface.
 function(aveva_azure_client_instrument target_name)
@@ -133,28 +115,10 @@ function(aveva_azure_client_instrument target_name)
         "$<BUILD_INTERFACE:aveva_azure_client_asan>"
         "$<BUILD_INTERFACE:aveva_azure_client_ubsan>"
         "$<BUILD_INTERFACE:aveva_azure_client_tsan>"
-        "$<BUILD_INTERFACE:aveva_azure_client_coverage>"
-        "$<BUILD_INTERFACE:aveva_azure_client_fuzz>")
+        "$<BUILD_INTERFACE:aveva_azure_client_coverage>")
 endfunction()
-if(AVEVA_AZURE_CLIENT_DOCS)
-    find_package(Doxygen)
-    if(DOXYGEN_FOUND)
-        configure_file(docs/Doxyfile.in "${CMAKE_CURRENT_BINARY_DIR}/Doxyfile" @ONLY)
-        add_custom_target(docs
-            COMMAND ${DOXYGEN_EXECUTABLE} "${CMAKE_CURRENT_BINARY_DIR}/Doxyfile"
-            WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-            COMMENT "Generating API documentation with Doxygen"
-            VERBATIM)
-    else()
-        message(WARNING "AVEVA_AZURE_CLIENT_DOCS is ON, but Doxygen was not found; the docs target is not available.")
-    endif()
-endif()
 
 add_subdirectory(src)
-
-if(AVEVA_AZURE_CLIENT_FUZZ)
-    add_subdirectory(tests/fuzz)
-endif()
 
 if(AVEVA_AZURE_CLIENT_TESTS)
     include(CTest)
@@ -162,10 +126,3 @@ if(AVEVA_AZURE_CLIENT_TESTS)
     add_subdirectory(tests)
 endif()
 
-if(AVEVA_AZURE_CLIENT_BENCHMARKS)
-    add_subdirectory(benchmarks)
-endif()
-
-if(AVEVA_AZURE_CLIENT_EXAMPLES)
-    add_subdirectory(examples)
-endif()

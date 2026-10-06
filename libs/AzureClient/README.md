@@ -99,8 +99,6 @@ void UploadAndDownload(
 }
 ```
 
-The same sample is compiled as `aveva-azure-client-quick-start` under `examples/` so the README usage stays build-checked. Other build-checked examples: `shared_key.cpp` (Shared Key), `token_credential.cpp` (Entra ID service principal with `CachingTokenCredential`) and `cancellation.cpp` (`WithRequestOptions` with a timeout and cancellation slot).
-
 ## Callback-based API model
 
 Every operation is a Boost.Asio `async_initiate`-based `...Async` call that accepts any Boost.Asio
@@ -242,55 +240,13 @@ The exported package currently uses exact-version matching via the shared `aveva
 
 ## Building
 
-API reference (HTML) can be generated with Doxygen: configure with `-DAVEVA_AZURE_CLIENT_DOCS=ON`, then `cmake --build <build dir> --target docs`; output goes to `<build dir>/docs/html`.
-
-> **Vendored copy:** the sections below (Building, Repository layout) and `CONTRIBUTING.md` describe the standalone upstream repository. Files such as `CMakePresets.json`, `pipelines/` and `CHANGELOG.md` were not vendored into this repository; here the library is built through the root `CMakeLists.txt` (`-DAVEVA_BUILD_CLIENT_LIBRARY_TESTS=ON` for its tests) and the root presets.
-
-The standalone repository uses `CMakePresets.json` plus a vcpkg manifest.
-The default registry baseline is pinned in `vcpkg-configuration.json`.
-
-```powershell
-cmake --preset WindowsDebug
-cmake --build --preset WindowsDebug
-ctest --preset WindowsDebug
-```
-
-| Scenario | Preset |
-|---|---|
-| Day-to-day development | `WindowsDebug` / `LinuxDebug` |
-| Optimised build | `WindowsRelease` / `LinuxRelease` |
-| clang-tidy on every compile | `WindowsDebugLlvm` / `LinuxDebugLlvm` |
-| AddressSanitizer | `WindowsDebugASan`, `LinuxDebugASan` (Release variants: `WindowsReleaseASan`, `LinuxReleaseASan`) |
-| UBSan / TSan | `LinuxDebugUBSan` / `LinuxDebugTSan` |
-| Coverage | `LinuxDebug` plus `-DAVEVA_AZURE_CLIENT_ENABLE_COVERAGE=ON` (see CONTRIBUTING.md) |
-| CI | `CIWindowsDebug`, `CIWindowsRelease`, `CILinuxDebug`, `CILinuxRelease`, `CILinux{Debug,Release}CCache`, `CILinuxDebug{ASan,UBSan,TSan}` |
-
-Shared settings live in hidden base presets (`_RootConfig`, `_DebugBase`, `_LinuxBase`, ...); concrete presets only inherit them.
-Tests are provided through the manifest `tests` feature. The checked-in presets enable it automatically; for custom configure commands, enable it explicitly with `VCPKG_MANIFEST_FEATURES=tests` or `vcpkg install --x-feature=tests`.
-
-Benchmarks are optional:
-
-```powershell
-cmake -S . -B build\WindowsDebugBench `
-  -DAVEVA_AZURE_CLIENT_BENCHMARKS=ON `
-  -DVCPKG_MANIFEST_FEATURES="tests;benchmarks"
-cmake --build build\WindowsDebugBench --config Debug
-```
-
-### Integration tests
-
-Live Azure tests are opt-in: configure with `-DAVEVA_AZURE_CLIENT_RUN_INTEGRATION_TESTS=ON`. They need a storage account and a Microsoft Entra ID service principal, supplied through `AZURE_STORAGE_ACCOUNT_NAME`, `AZURE_TENANT_ID`, `AZURE_SERVICE_PRINCIPAL_ID` and `AZURE_SERVICE_PRINCIPAL_SECRET` (optionally `AZURE_CA_FILE`). Without them each test is reported as skipped with that list. Run them with `ctest -L integration`; they carry the `integration` and `azure-credentials` labels. The CI coverage stage does not build or run them (it only runs `-L unit`) because it has no credentials.
+This copy is trimmed to what the RocksDB plugin needs (no examples, benchmarks, docs, fuzzing, install test or live integration tests). It is built through the root `CMakeLists.txt` (`-DAVEVA_BUILD_CLIENT_LIBRARY_TESTS=ON` for its unit tests) and the root presets.
 
 ## Repository layout
 
-(Upstream layout; `pipelines/` is not vendored here.)
-
 - `include/AVEVA/AzureClient/` public headers
 - `src/` library implementation and package config template
-- `tests/` unit and integration tests (`integration` CTest label)
-- `benchmarks/` optional Google Benchmark targets
-- `infrastructure/overlay-ports/` overlay ports for local/CI builds
-- `pipelines/` Azure DevOps helpers
+- `tests/` unit tests
 
 ## License
 
