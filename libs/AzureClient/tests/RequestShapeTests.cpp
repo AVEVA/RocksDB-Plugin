@@ -329,7 +329,7 @@ namespace
             .Path = blob,
             .Query = {{"comp", "lease"}},
             .Headers = {{"x-ms-lease-action", "acquire"}, {"x-ms-lease-duration", "-1"}},
-            .AbsentHeaders = {"x-ms-proposed-lease-id"},
+            .AbsentHeaders = {},
             .Body = std::nullopt});
         cases.push_back({.Name = "Blob_RenewLease",
             .Start =

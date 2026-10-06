@@ -100,7 +100,10 @@ the same origin skip resolution, connection, and the TLS handshake.
 `SetMaxIdleConnectionsPerHost` caps how many idle connections each origin keeps and
 `SetIdleConnectionTimeout` bounds how long one may sit idle; a cap of zero disables
 pooling. Reuse prefers the most recently released connection, and an origin over its
-cap drops its oldest idle connection.
+cap drops its oldest idle connection. The pool also holds at most 256 idle connections across
+all origins (the oldest is closed first). While the pool holds idle connections, a background
+thread owned by the client closes expired ones even if no further request arrives; it sleeps
+when the pools are empty and does not keep the caller's `io_context` running.
 
 Idempotent requests are retried once on a new connection when a reused pooled connection turns out to be
 stale; other requests are not retried. There is no redirect following, proxy support, content

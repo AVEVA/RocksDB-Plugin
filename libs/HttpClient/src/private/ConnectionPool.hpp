@@ -8,6 +8,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -85,9 +86,41 @@ namespace AVEVA::Private
     template <typename Stream, typename Clock = std::chrono::steady_clock> class ConnectionPool
     {
       public:
-        ConnectionPool(std::size_t maxIdlePerKey, std::chrono::seconds idleTimeout)
-            : m_maxIdlePerKey(maxIdlePerKey), m_idleTimeout(idleTimeout)
+        // Bounds idle sockets across all origins, so a client that talks to many hosts cannot hold them unboundedly.
+        static constexpr std::size_t DefaultMaxTotalIdle = 256;
+
+        ConnectionPool(std::size_t maxIdlePerKey,
+            std::chrono::seconds idleTimeout,
+            std::size_t maxTotalIdle = DefaultMaxTotalIdle)
+            : m_maxIdlePerKey(maxIdlePerKey), m_idleTimeout(idleTimeout), m_maxTotalIdle(maxTotalIdle)
         {
+        }
+
+        // Called (outside the lock) when a release makes an empty pool non-empty, so an owner can schedule Sweep().
+        void SetOnBecameNonEmpty(std::function<void()> callback)
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_onBecameNonEmpty = std::move(callback);
+        }
+
+        // Closes connections idle past the timeout without needing a request to arrive; returns how many remain.
+        std::size_t Sweep()
+        {
+            LruList retired;
+            std::size_t remaining = 0;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                DropExpired(Clock::now(), retired);
+                remaining = m_lru.size();
+            }
+            retired.clear_and_dispose(NodeDisposer{});
+            return remaining;
+        }
+
+        std::size_t IdleCount()
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return m_lru.size();
         }
 
         ConnectionPool(const ConnectionPool&) = delete;
@@ -151,15 +184,15 @@ namespace AVEVA::Private
                 return;
             }
             LruList retired;
+            std::function<void()> notify;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 const auto now = Clock::now();
                 DropExpired(now, retired);
+                const bool wasEmpty = m_lru.empty();
 
-                Node& node = *Obtain();
-                node.connection = std::move(connection);
-                node.idleSince = now;
-
+                // Allocate the origin before taking ownership of the connection so a bad_alloc here
+                // leaves the socket owned by the caller's (RAII) parameter.
                 auto [it, inserted] = m_origins.try_emplace(key);
                 Origin& origin = it->second;
                 if (inserted)
@@ -176,11 +209,36 @@ namespace AVEVA::Private
                     retired.push_back(oldest);
                 }
 
+                Node& node = *Obtain();
+                node.connection = std::move(connection);
+                node.idleSince = now;
                 node.origin = &origin;
                 origin.idle.push_back(node);
                 m_lru.push_back(node); // Released with the current time, so the LRU list stays sorted.
+
+                // The global cap evicts the oldest idle connection of any origin (never the one just added).
+                while (m_lru.size() > m_maxTotalIdle && &m_lru.front() != &node)
+                {
+                    Node& oldest = m_lru.front();
+                    m_lru.pop_front();
+                    Origin& oldestOrigin = *oldest.origin;
+                    oldestOrigin.idle.erase(oldestOrigin.idle.iterator_to(oldest));
+                    if (oldestOrigin.idle.empty())
+                    {
+                        m_origins.erase(*oldestOrigin.key);
+                    }
+                    retired.push_back(oldest);
+                }
+                if (wasEmpty)
+                {
+                    notify = m_onBecameNonEmpty;
+                }
             }
             retired.clear_and_dispose(NodeDisposer{});
+            if (notify)
+            {
+                notify();
+            }
         }
 
       private:
@@ -230,7 +288,7 @@ namespace AVEVA::Private
             boost::intrusive::constant_time_size<true>>;
         using LruList = boost::intrusive::list<Node,
             boost::intrusive::base_hook<ConnectionPoolDetail::LruHook>,
-            boost::intrusive::constant_time_size<false>>;
+            boost::intrusive::constant_time_size<true>>;
 
         struct Origin
         {
@@ -296,6 +354,8 @@ namespace AVEVA::Private
 
         std::size_t m_maxIdlePerKey;
         std::chrono::seconds m_idleTimeout;
+        std::size_t m_maxTotalIdle;
+        std::function<void()> m_onBecameNonEmpty;
         std::mutex m_mutex;
         boost::unordered_node_map<ConnectionKey<Stream>, Origin, ConnectionKeyHash<Stream>, ConnectionKeyEqual<Stream>>
             m_origins;

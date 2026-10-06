@@ -118,9 +118,9 @@ namespace AVEVA::AzureClient
         }
 
         // DownloadToAsync overload set (the first argument picks the sink, the options type picks the mode):
-        //   (stream|path, DownloadToOptions)   - whole blob, chunked and optionally parallel; no Range.
-        //   (stream|path, token)               - whole blob with default DownloadToOptions; no Range.
-        //   (stream|path, DownloadBlobOptions) - honours DownloadBlobOptions::Range; a single request, not chunked.
+        //   (stream|path, DownloadToOptions)   - whole blob (or DownloadToOptions::Range), chunked and optionally parallel.
+        //   (stream|path, token)               - whole blob with default DownloadToOptions, chunked.
+        //   (stream|path, DownloadBlobOptions) - honours DownloadBlobOptions::Range; goes through the same chunked engine.
         // The std::string path overloads are deprecated forwarding wrappers for the std::filesystem::path ones.
         // Stream/file writes run on the client's executor (the threads completing HTTP requests): use a dedicated
         // io_context or a fast stream. To cancel, emit the signal from the handler's executor/strand.

@@ -190,6 +190,55 @@ namespace
         EXPECT_FALSE(pool.Acquire(MakeKey("stale.com")).has_value());
     }
 
+    TEST(ConnectionPool, SweepClosesExpiredConnectionsWithoutAnyRequest)
+    {
+        int live = 0;
+        FakePool pool(4, ShortTimeout);
+        pool.Release(MakeKey("a.com"), MakeConnection(1, live));
+        FakeClock::Advance(ShortTimeout / 2);
+        pool.Release(MakeKey("b.com"), MakeConnection(2, live));
+        FakeClock::Advance(ShortTimeout * 3 / 4);
+
+        EXPECT_EQ(pool.Sweep(), 1U);
+        EXPECT_EQ(live, 1);
+
+        FakeClock::Advance(ShortTimeout);
+        EXPECT_EQ(pool.Sweep(), 0U);
+        EXPECT_EQ(live, 0);
+    }
+
+    TEST(ConnectionPool, TotalIdleCapEvictsTheOldestAcrossOrigins)
+    {
+        int live = 0;
+        Pool pool(4, LongTimeout, 2);
+        pool.Release(MakeKey("a.com"), MakeConnection(1, live));
+        pool.Release(MakeKey("b.com"), MakeConnection(2, live));
+        pool.Release(MakeKey("c.com"), MakeConnection(3, live));
+
+        EXPECT_EQ(live, 2);
+        EXPECT_EQ(pool.IdleCount(), 2U);
+        EXPECT_FALSE(pool.Acquire(MakeKey("a.com")).has_value());
+        EXPECT_TRUE(pool.Acquire(MakeKey("b.com")).has_value());
+        EXPECT_TRUE(pool.Acquire(MakeKey("c.com")).has_value());
+    }
+
+    TEST(ConnectionPool, NotifiesWhenTheFirstIdleConnectionIsAdded)
+    {
+        int live = 0;
+        int notifications = 0;
+        Pool pool(4, LongTimeout);
+        pool.SetOnBecameNonEmpty([&] { ++notifications; });
+
+        pool.Release(MakeKey("a.com"), MakeConnection(1, live));
+        pool.Release(MakeKey("b.com"), MakeConnection(2, live));
+        EXPECT_EQ(notifications, 1);
+
+        EXPECT_TRUE(pool.Acquire(MakeKey("a.com")).has_value());
+        EXPECT_TRUE(pool.Acquire(MakeKey("b.com")).has_value());
+        pool.Release(MakeKey("a.com"), MakeConnection(3, live));
+        EXPECT_EQ(notifications, 2);
+    }
+
     TEST(ConnectionPool, DestroyingThePoolClosesIdleConnections)
     {
         int live = 0;

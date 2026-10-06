@@ -11,9 +11,16 @@
 #include <boost/asio/strand.hpp>
 #include <boost/url.hpp>
 
+#include <algorithm>
+#include <chrono>
+#include <condition_variable>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
+#include <thread>
 #include <utility>
 
 namespace AVEVA
@@ -33,6 +40,79 @@ namespace AVEVA
         namespace asio = Private::asio;
         namespace urls = Private::urls;
 
+        // Closes expired idle pooled sockets even when no request arrives. It sleeps until a pool gains an idle
+        // connection, and goes back to sleep once both pools are empty. A dedicated thread is used instead of an
+        // io_context timer so a pending timer cannot keep the caller's io_context::run() from returning.
+        class IdleSweeper
+        {
+          public:
+            using SweepFunction = std::function<std::size_t()>;
+
+            IdleSweeper(SweepFunction plainSweep, SweepFunction tlsSweep, std::chrono::seconds idleTimeout)
+                : m_plainSweep(std::move(plainSweep)), m_tlsSweep(std::move(tlsSweep)),
+                  m_interval(std::max(std::chrono::seconds{1}, idleTimeout)),
+                  m_thread([this](std::stop_token stop)
+            {
+                Run(stop);
+            })
+            {
+            }
+
+            IdleSweeper(const IdleSweeper&) = delete;
+            IdleSweeper& operator=(const IdleSweeper&) = delete;
+
+            ~IdleSweeper()
+            {
+                m_thread.request_stop();
+                m_wake.notify_all();
+            }
+
+            void Notify()
+            {
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    m_hasIdle = true;
+                }
+                m_wake.notify_all();
+            }
+
+          private:
+            void Run(std::stop_token stop)
+            {
+                std::unique_lock<std::mutex> lock(m_mutex);
+                while (!stop.stop_requested())
+                {
+                    if (!m_wake.wait(lock, stop, [this] { return m_hasIdle; }))
+                    {
+                        return;
+                    }
+                    m_hasIdle = false;
+                    lock.unlock();
+                    // Sweep after the interval; keep going while either pool still holds connections.
+                    bool remaining = true;
+                    while (remaining && !stop.stop_requested())
+                    {
+                        std::unique_lock<std::mutex> sleepLock(m_sleepMutex);
+                        if (m_wake.wait_for(sleepLock, stop, m_interval, [] { return false; }) || stop.stop_requested())
+                        {
+                            break;
+                        }
+                        remaining = m_plainSweep() + m_tlsSweep() > 0;
+                    }
+                    lock.lock();
+                }
+            }
+
+            SweepFunction m_plainSweep;
+            SweepFunction m_tlsSweep;
+            std::chrono::seconds m_interval;
+            std::mutex m_mutex;
+            std::mutex m_sleepMutex;
+            std::condition_variable_any m_wake;
+            bool m_hasIdle = false;
+            std::jthread m_thread; // Declared last so every other member exists before the thread starts.
+        };
+
         class HttpClient final : public IHttpClient
         {
           public:
@@ -41,8 +121,22 @@ namespace AVEVA
                   m_plainPool(std::make_shared<ConnectionPool<PlainStream>>(options.GetMaxIdleConnectionsPerHost(),
                       options.GetIdleConnectionTimeout())),
                   m_tlsPool(std::make_shared<ConnectionPool<TlsStream>>(options.GetMaxIdleConnectionsPerHost(),
+                      options.GetIdleConnectionTimeout())),
+                  m_sweeper(std::make_shared<IdleSweeper>(
+                      [pool = m_plainPool] { return pool->Sweep(); },
+                      [pool = m_tlsPool] { return pool->Sweep(); },
                       options.GetIdleConnectionTimeout()))
             {
+                // Weak, because a pool can outlive the client while in-flight requests still hold it.
+                const auto notify = [weak = std::weak_ptr{m_sweeper}]
+                {
+                    if (auto sweeper = weak.lock())
+                    {
+                        sweeper->Notify();
+                    }
+                };
+                m_plainPool->SetOnBecameNonEmpty(notify);
+                m_tlsPool->SetOnBecameNonEmpty(notify);
                 m_tlsContext->set_options(asio::ssl::context::default_workarounds | asio::ssl::context::no_sslv2 |
                                           asio::ssl::context::no_sslv3 | asio::ssl::context::no_tlsv1 |
                                           asio::ssl::context::no_tlsv1_1);
@@ -179,6 +273,7 @@ namespace AVEVA
             std::shared_ptr<asio::ssl::context> m_tlsContext;
             std::shared_ptr<ConnectionPool<PlainStream>> m_plainPool;
             std::shared_ptr<ConnectionPool<TlsStream>> m_tlsPool;
+            std::shared_ptr<IdleSweeper> m_sweeper; // Last: destroyed (and joined) before the pools it sweeps.
         };
     } // namespace
 

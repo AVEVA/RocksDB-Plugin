@@ -7,13 +7,18 @@
 
 ### Breaking changes
 - `Plugin::Register` now takes a required `boost::asio::io_context&` (after the `guard` argument). The application owns the context, must keep it alive and running while the filesystem is in use, and must not run it on threads that call into RocksDB. Migration: create an `io_context`, run it on dedicated threads, and pass it to `Register`.
-- The Azure SDK for C++ was replaced by the vendored `libs/AzureClient` and `libs/HttpClient` (Apache-2.0, see `libs/README.md`). Error mapping to `rocksdb::Status` was reworked: 401 and 403 are non-retryable IOErrors, 408/429, every 5xx status and transport failures are retryable IOErrors, and cancellation maps to `Aborted`. Unexpected exceptions map to a non-retryable `state_not_recoverable` error.
+- The Azure SDK for C++ was replaced by the vendored `libs/AzureClient` and `libs/HttpClient` (Apache-2.0, see `libs/README.md`). Error mapping to `rocksdb::Status` was reworked: 401 and 403 are non-retryable IOErrors, 408 and transport timeouts are retryable `TimedOut`, 429 and 503 are retryable `Busy`, other 5xx statuses and transport failures are retryable IOErrors, and cancellation maps to `Aborted`. Unexpected exceptions map to a non-retryable `state_not_recoverable` error.
 - The project now requires C++23 (vendored libraries included).
 - `BindToRuntime` and the credential helpers (`CreateCredentialSources`, `CreateServiceClient`, ...) take `const std::shared_ptr<ClientRuntime>&`. `CachingTokenCredential` must be created with `CachingTokenCredential::Create(...)` (the constructor is no longer usable directly).
 - Blocking on an Azure future from a thread running the injected `io_context` now throws `std::logic_error` instead of risking a deadlock.
 - The public `Core::BlobClient` interface no longer uses `Azure::ETag` (`<azure/core/etag.hpp>` is no longer included). `GetEtag()` returns `std::string` and `Download(..., ifMatch)` takes `const std::string&`; a `BlobMetadata` struct and the virtuals `GetMetadata`, `DownloadAsync` (two overloads) and `GetMetadataAsync` were added (all with default implementations). Migration: change ETag parameters and return types to `std::string` in your implementations and mocks; the new virtuals need no override, but override them for truly asynchronous I/O.
 
+- Other public API/ABI breaks: `AzureErrorTranslator::IOStatusFromError` takes `unsigned int` instead of `Azure::Core::Http::HttpStatusCode`; `BlobFilesystem::m_lockFiles` changed type and a mutex was added; `BlobFilesystem::LogRequestFailed` takes the plugin's `RequestFailedException`; `ReadableFile` holds a `shared_ptr` and adds `ReadAsync`; the new `Core::BlobClient` virtuals change the vtable layout, so custom implementations and mocks must be rebuilt. No `Azure::Core` / `Azure::Storage` types remain in the public API.
+- The plugin registry name changed from `"azblobfs" + dbName` to `"azblobfs-" + <hex of account URL and db name>`; anything that looked up the Env/FileSystem by the old name (options files, URIs) must use the new name.
+
 ### Behavior changes
+- `FileExists` on a directory now matches only blobs under `<path>/`, so `foo` no longer matches a sibling `foobar`.
+- Acquire Lease always sends a lease ID (a generated one when `ProposedLeaseId` is empty) so retries stay idempotent. `AuthorityHost` now rejects userinfo (`@`) and backslashes. HttpClient clamps very large timeouts to one year.
 - Async IO is now advertised (`SupportedOps` returns `1 << kAsyncIO`; previously async IO was effectively off) and `ReadAsync`/`Poll`/`AbortIO` are implemented.
 - Credential chain: a managed identity is always tried (system-assigned when no id is given); environment and workload identity credentials are only added when their variables are set. See the README.
 - `DeleteDir` throws when any blob deletion fails and counts remaining blobs across all pages.

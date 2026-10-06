@@ -687,7 +687,12 @@ namespace AVEVA::AzureClient::Private
             XMsLeaseDurationHeaderName,
             operationOptions.Duration.has_value() ? std::to_string(operationOptions.Duration->count())
                                                   : std::string{"-1"});
-        AddHeaderIfNotEmpty(request, XMsProposedLeaseIdHeaderName, operationOptions.ProposedLeaseId);
+        // A server-chosen lease ID would be lost if the response is, and the retry would hit 409 LeaseAlreadyPresent.
+        if (operationOptions.ProposedLeaseId.empty())
+        {
+            operationOptions.ProposedLeaseId = CreateClientRequestId();
+        }
+        AddHeader(request, XMsProposedLeaseIdHeaderName, operationOptions.ProposedLeaseId);
         ApplyLeaseRequestConditions(request, std::move(operationOptions.Conditions));
         SendAndParse<Models::AcquireBlobLeaseResult>(httpClient,
             target,

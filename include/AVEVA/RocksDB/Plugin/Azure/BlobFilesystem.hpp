@@ -13,6 +13,7 @@
 #include <rocksdb/file_system.h>
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 namespace AVEVA::RocksDB::Plugin::Azure {
@@ -20,6 +21,7 @@ class BlobFilesystem final : public rocksdb::FileSystemWrapper {
     std::unique_ptr<Impl::BlobFilesystemImpl> m_filesystem;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
     std::vector<std::unique_ptr<Azure::LockFile>> m_lockFiles;
+    std::mutex m_lockFilesMutex; // RocksDB may call LockFile/UnlockFile from different threads.
     Impl::LogRateLimiter m_blobNotFoundRateLimiter;
 
     // Logs a RequestFailedException, suppressing repeated BlobNotFound (404) messages

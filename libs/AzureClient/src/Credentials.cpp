@@ -285,9 +285,9 @@ namespace AVEVA::AzureClient
             {
                 throw std::invalid_argument("AuthorityHost must be an https URL with a non-empty host.");
             }
-            if (host.find_first_of("?#/ \t\r\n", Scheme.size()) != std::string_view::npos)
+            if (host.find_first_of("?#/\\@ \t\r\n", Scheme.size()) != std::string_view::npos)
             {
-                throw std::invalid_argument("AuthorityHost must not contain a path, query or fragment.");
+                throw std::invalid_argument("AuthorityHost must not contain userinfo, a path, query or fragment.");
             }
             return std::string{host};
         }

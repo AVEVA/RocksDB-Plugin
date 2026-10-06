@@ -296,6 +296,7 @@ rocksdb::IOStatus BlobFilesystem::LockFile(const std::string& f, const rocksdb::
             auto lock = m_filesystem->LockFile(f);
             auto lockFileWrapper = std::make_unique<Plugin::Azure::LockFile>(lock);
             *l = lockFileWrapper.get();
+            std::scoped_lock _(m_lockFilesMutex);
             m_lockFiles.push_back(std::move(lockFileWrapper));
             return rocksdb::IOStatus::OK();
     });
@@ -311,6 +312,7 @@ rocksdb::IOStatus BlobFilesystem::UnlockFile(rocksdb::FileLock* l, const rocksdb
             }
 
             m_filesystem->UnlockFile(lockFile->GetImpl());
+            std::scoped_lock _(m_lockFilesMutex);
             std::erase_if(m_lockFiles, [lockFile](const auto& entry) { return entry.get() == lockFile; });
             return rocksdb::IOStatus::OK();
     });

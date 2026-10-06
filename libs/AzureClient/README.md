@@ -236,4 +236,4 @@ This copy is trimmed to what the RocksDB plugin needs (no examples, benchmarks, 
 
 ## License
 
-See [LICENSE](LICENSE). This repository is currently marked for proprietary internal use and may not be redistributed outside AVEVA Group without written authorization. Dependency licenses are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) (draft, pending legal / OSS-compliance confirmation).
+Licensed under Apache-2.0; see [LICENSE](LICENSE). `src/SharedKeySigner.cpp` contains code ported from the Azure SDK for C++, which is MIT-licensed. Dependency licenses are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

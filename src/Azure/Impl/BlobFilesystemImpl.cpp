@@ -350,13 +350,17 @@ bool BlobFilesystemImpl::FileExists(const std::string& name) {
     // NOTE: This doesn't map 100% to how a filesystem would work because you can have empty
     // directories in any respectable fs. This probably won't matter for our use case.
     // Stop at the first child instead of walking every page, which would cost a request per blob.
+    // Match only children below "realPath/" so that "foo" does not match a sibling such as "foobar".
+    std::string dirPrefix(realPath);
+    if (!dirPrefix.empty() && !dirPrefix.ends_with('/')) {
+        dirPrefix += '/';
+    }
     AzureClient::ListBlobsOptions options;
-    options.Prefix = std::string(realPath);
+    options.Prefix = dirPrefix;
     options.MaxResults = 1;
     bool found = false;
     ForEachBlobUntil(*container, std::move(options), [&](const AzureClient::Models::BlobItem& blob) {
-        found = blob.Name.size() > realPath.length() && blob.Name.starts_with(realPath) &&
-                !(blob.Name.size() == realPath.length() + 1 && blob.Name[realPath.length()] == '/');
+        found = blob.Name.size() > dirPrefix.size() && blob.Name.starts_with(dirPrefix);
         return found;
     });
     return found;

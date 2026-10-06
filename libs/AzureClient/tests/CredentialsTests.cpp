@@ -414,6 +414,9 @@ TEST(CredentialsTests, InvalidAuthorityHostThrowsFromConstructor)
              "https://login.microsoftonline.com?x=1",
              "https://login.microsoftonline.com#f",
              "https://login.microsoftonline.com/path",
+             "https://login.microsoftonline.com@evil.example",
+             "https://user:pw@login.microsoftonline.com",
+             "https://login.microsoftonline.com\\@evil.example",
              "https://",
              ""})
     {
@@ -425,6 +428,12 @@ TEST(CredentialsTests, InvalidAuthorityHostThrowsFromConstructor)
         EXPECT_THROW((WorkloadIdentityCredential{httpClient, workload}), std::invalid_argument) << host;
     }
     EXPECT_NO_THROW((ClientSecretCredential{httpClient, SecretOptions()}));
+    for (const std::string host : {"https://login.microsoftonline.com:8443", "HTTPS://LOGIN.MicrosoftOnline.com"})
+    {
+        ClientSecretCredentialOptions options = SecretOptions();
+        options.AuthorityHost = host;
+        EXPECT_NO_THROW((ClientSecretCredential{httpClient, options})) << host;
+    }
 }
 
 TEST(CredentialsTests, FederatedTokenFileWhitespaceHandling)

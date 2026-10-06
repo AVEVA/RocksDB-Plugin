@@ -221,7 +221,9 @@ namespace AVEVA::Private
 
         void ArmTimer()
         {
-            m_timer.expires_after(m_options.GetTimeout());
+            // Clamp so huge timeouts (e.g. milliseconds::max()) cannot overflow the clock's duration or time_point.
+            constexpr auto MaxTimeout = std::chrono::hours{24 * 365};
+            m_timer.expires_after(std::min<std::chrono::nanoseconds>(m_options.GetTimeout(), MaxTimeout));
             auto self = this->shared_from_this();
             m_timer.async_wait([self](boost::system::error_code error)
             {
@@ -257,7 +259,7 @@ namespace AVEVA::Private
         // that could have reached the server is only re-sent when its method is idempotent.
         bool MaybeRetryAfterReuseFailure(bool requestMayHaveBeenSent)
         {
-            if (IsCancellationRequested() || !m_reused || m_retried || m_parser->got_some() ||
+            if (IsCancellationRequested() || !m_reused || m_retried || m_receivedAnyResponse || m_parser->got_some() ||
                 (requestMayHaveBeenSent && !IsIdempotentMethod(m_request.method())))
             {
                 return false;
@@ -467,6 +469,7 @@ namespace AVEVA::Private
             }
             if (status < 200)
             {
+                m_receivedAnyResponse = true; // The server has the request; ResetParser() would hide that.
                 ResetParser();
                 return Read();
             }
@@ -606,6 +609,7 @@ namespace AVEVA::Private
         bool finished_ = false;
         bool m_reused = false;
         bool m_retried = false;
+        bool m_receivedAnyResponse = false;
         bool m_hostIsName = false;
         std::atomic_bool m_cancellationRequested = false;
     };
