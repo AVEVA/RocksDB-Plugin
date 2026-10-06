@@ -31,6 +31,8 @@ class LockFileImpl
                  std::chrono::seconds leaseLength,
                  std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
                  std::string fileName);
+    // Returns false when the lease is already held (by this object or, until the lease length elapses, another
+    // owner). Any other acquire failure throws RequestFailedException.
     bool Lock();
     void Renew() const;
     // Renews the lease unless it was released concurrently; returns false when there was nothing to renew.

@@ -6,10 +6,10 @@
 
 - Containers: create, create-if-not-exists, flat/hierarchical listing
 - Block blobs: create/upload, stage blocks, commit block lists, download/read, delete, head, leases, metadata
-- Page blobs: create, upload/clear pages, resize, download/read, delete, head, page ranges, leases, metadata
-- Service: container client factory, user delegation keys
-- Auth: Shared Key, SAS, bearer token, and refreshable `ITokenCredential`; Microsoft Entra ID credentials
-  (`ClientSecretCredential`, `WorkloadIdentityCredential`, `ManagedIdentityCredential`); service/account SAS builders
+- Page blobs: create, upload/clear pages, resize, download/read, delete, head, leases, metadata
+- Service: container client factory
+- Auth: Shared Key, SAS token, bearer token, and refreshable `ITokenCredential`; Microsoft Entra ID credentials
+  (`ClientSecretCredential`, `WorkloadIdentityCredential`, `ManagedIdentityCredential`)
 - Errors: typed `BlobStorageError` details plus raw `Response<T>` access
 
 ## API map
@@ -18,16 +18,15 @@ Paths are relative to `include/AVEVA/AzureClient/`; `AzureClient.hpp` includes e
 
 | Class | Header | Principal operations |
 |---|---|---|
-| `BlobServiceClient` | [BlobServiceClient.hpp](include/AVEVA/AzureClient/BlobServiceClient.hpp) | Container-client factory, user delegation key |
+| `BlobServiceClient` | [BlobServiceClient.hpp](include/AVEVA/AzureClient/BlobServiceClient.hpp) | Container-client factory |
 | `BlobContainerClient` | [BlobContainerClient.hpp](include/AVEVA/AzureClient/BlobContainerClient.hpp) | Create, create-if-not-exists, list blobs, blob-client factories |
 | `BlobClient` | [BlobClient.hpp](include/AVEVA/AzureClient/BlobClient.hpp) | Download, delete, properties, leases, metadata |
 | `BlockBlobClient` | [BlockBlobClient.hpp](include/AVEVA/AzureClient/BlockBlobClient.hpp) | Upload, stage block, commit block list |
-| `PageBlobClient` | [PageBlobClient.hpp](include/AVEVA/AzureClient/PageBlobClient.hpp) | Create, upload/clear pages, resize, page ranges |
+| `PageBlobClient` | [PageBlobClient.hpp](include/AVEVA/AzureClient/PageBlobClient.hpp) | Create, upload/clear pages, resize |
 | Credentials | [Credentials.hpp](include/AVEVA/AzureClient/Credentials.hpp), [ITokenCredential.hpp](include/AVEVA/AzureClient/ITokenCredential.hpp) | Shared Key, bearer token, Entra ID credentials |
-| SAS builders | [Sas.hpp](include/AVEVA/AzureClient/Sas.hpp) | Service and account SAS generation |
 | Options | [BlobClientOptions.hpp](include/AVEVA/AzureClient/BlobClientOptions.hpp), [BlobOperationOptions.hpp](include/AVEVA/AzureClient/BlobOperationOptions.hpp), [WithRequestOptions.hpp](include/AVEVA/AzureClient/WithRequestOptions.hpp) | Client construction, per-operation and per-request options |
 | Results and errors | [Response.hpp](include/AVEVA/AzureClient/Response.hpp), [BlobStorageError.hpp](include/AVEVA/AzureClient/BlobStorageError.hpp), [BlobStorageErrorCode.hpp](include/AVEVA/AzureClient/BlobStorageErrorCode.hpp) | `Response<T>`, `BlobStorageError`, error codes |
-| Models | [BlobModels.hpp](include/AVEVA/AzureClient/Models/BlobModels.hpp), [BlobContainerModels.hpp](include/AVEVA/AzureClient/Models/BlobContainerModels.hpp), [BlobServiceModels.hpp](include/AVEVA/AzureClient/Models/BlobServiceModels.hpp) | Result and property types |
+| Models | [BlobModels.hpp](include/AVEVA/AzureClient/Models/BlobModels.hpp), [BlobContainerModels.hpp](include/AVEVA/AzureClient/Models/BlobContainerModels.hpp) | Result and property types |
 
 ## Quick start
 
@@ -227,7 +226,7 @@ The exported package currently uses exact-version matching via the shared `aveva
 
 ## Building
 
-This copy is trimmed to what the RocksDB plugin needs (no examples, benchmarks, docs, fuzzing, install test or live integration tests). It is built through the root `CMakeLists.txt` (`-DAVEVA_BUILD_CLIENT_LIBRARY_TESTS=OFF` skips its unit tests, which are on by default) and the root presets.
+This copy is trimmed to what the RocksDB plugin needs (no examples, benchmarks, docs, fuzzing, install test or live integration tests). It is built through the root `CMakeLists.txt` (its unit tests are built with the plugin tests and skipped by `-DAVEVA_ROCKSDB_TESTS=OFF`) and the root presets.
 
 ## Repository layout
 

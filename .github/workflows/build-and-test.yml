@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 name: Build and test
 
 on:
@@ -16,8 +19,14 @@ jobs:
         include:
           - os: windows-latest
             preset: WindowsDebug
+            tests: true
           - os: ubuntu-latest
             preset: LinuxDebug
+            tests: true
+          # Release/packaging-style configure: tests off, so GTest (vcpkg "testing" feature) must not be needed.
+          - os: ubuntu-latest
+            preset: LinuxDebug
+            tests: false
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -41,19 +50,27 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
-          key: vcpkg-${{ matrix.preset }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          key: vcpkg-${{ matrix.preset }}-tests-${{ matrix.tests }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
           restore-keys: vcpkg-${{ matrix.preset }}-
 
       # Plugin tests, the vendored AzureClient/HttpClient test suites and the installed-package consumer test.
       - name: Configure
+        if: matrix.tests
         run: >
           cmake --preset ${{ matrix.preset }}
-          -DAVEVA_BUILD_CLIENT_LIBRARY_TESTS=ON
           -DAVEVA_ROCKSDB_PACKAGE_TEST=ON
+
+      - name: Configure (tests off, no vcpkg testing feature)
+        if: ${{ !matrix.tests }}
+        run: >
+          cmake --preset ${{ matrix.preset }}
+          -DAVEVA_ROCKSDB_TESTS=OFF
+          -DVCPKG_MANIFEST_FEATURES=
 
       - name: Build
         run: cmake --build build/${{ matrix.preset }} --config Debug
 
       # Integration tests skip themselves when no Azure credentials are present.
       - name: Test
+        if: matrix.tests
         run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure --build-config Debug --parallel 4

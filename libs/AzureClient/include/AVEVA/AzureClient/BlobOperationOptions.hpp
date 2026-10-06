@@ -33,14 +33,6 @@ namespace AVEVA::AzureClient
         bool IncludeCopy = false;
     };
 
-    // Get User Delegation Key (requires TokenCredential/BearerToken authorization). ExpiresOn must be set and
-    // within seven days of now; StartsOn defaults to now.
-    struct GetUserDelegationKeyOptions
-    {
-        std::optional<std::chrono::system_clock::time_point> StartsOn;
-        std::chrono::system_clock::time_point ExpiresOn;
-    };
-
     struct UploadBlockBlobOptions
     {
         Models::BlobHttpHeaders HttpHeaders;
@@ -159,16 +151,6 @@ namespace AVEVA::AzureClient
     struct ResizePageBlobOptions
     {
         Models::BlobRequestConditions Conditions;
-    };
-
-    struct GetPageRangesOptions
-    {
-        std::optional<Models::BlobByteRange> Range;
-        Models::BlobRequestConditions Conditions;
-        // The service paginates large page lists. GetPageRangesAsync follows NextMarker until the list is
-        // complete; Marker and MaxResults only select where to start and the size of each page requested.
-        std::string Marker;
-        std::optional<std::uint32_t> MaxResults;
     };
 
 } // namespace AVEVA::AzureClient

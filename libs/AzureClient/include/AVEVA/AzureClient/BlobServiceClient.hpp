@@ -4,7 +4,6 @@
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
 #include <AVEVA/AzureClient/ITokenCredential.hpp>
 #include <AVEVA/AzureClient/Models/BlobContainerModels.hpp>
-#include <AVEVA/AzureClient/Models/BlobServiceModels.hpp>
 #include <AVEVA/AzureClient/Response.hpp>
 #include <AVEVA/HttpClient/HttpClient.hpp>
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
@@ -70,9 +69,6 @@ namespace AVEVA::AzureClient
     class BlobServiceClient final
     {
       public:
-        using GetUserDelegationKeyCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::UserDelegationKey>, BlobStorageError>)>;
-
         BlobServiceClient(IHttpClient& httpClient, BlobServiceClientOptions options);
         BlobServiceClient(const BlobServiceClient&) = delete;
         BlobServiceClient& operator=(const BlobServiceClient&) = delete;
@@ -100,26 +96,7 @@ namespace AVEVA::AzureClient
 
         [[nodiscard]] BlobContainerClient GetBlobContainerClient(std::string containerName) const;
 
-        // Get User Delegation Key, for signing user delegation SAS (see BlobSasBuilder). Requires an
-        // Entra ID (TokenCredential / BearerToken) authorized client. There is no default-options overload because
-        // the request body requires an expiry (GetUserDelegationKeyOptions::Expiry); there is no sensible default.
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto GetUserDelegationKeyAsync(GetUserDelegationKeyOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::UserDelegationKey>(this,
-                &BlobServiceClient::GetUserDelegationKeyAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(options));
-        }
-
       private:
-        void GetUserDelegationKeyAsyncImpl(GetUserDelegationKeyOptions options,
-            GetUserDelegationKeyCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-
         IHttpClient* m_httpClient = nullptr;
         // Shared immutable connection state referenced by child clients.
         std::shared_ptr<const Private::ConnectionState> m_connection;

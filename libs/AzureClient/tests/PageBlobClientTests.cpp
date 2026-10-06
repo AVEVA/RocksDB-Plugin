@@ -74,16 +74,6 @@ namespace
         return MakeBlobClientOptions("disks", "disk.vhd");
     }
 
-    void VerifyMalformedGetPageRangesResult(
-        const std::expected<Response<AVEVA::AzureClient::Models::GetPageRangesResult>, BlobStorageError>& result)
-    {
-        ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().Code, AVEVA::AzureClient::BlobStorageErrorCode::InvalidResponse);
-        EXPECT_EQ(result.error().Code, std::errc::bad_message);
-        EXPECT_EQ(result.error().StatusCode, 200U);
-        EXPECT_FALSE(result.error().Message.empty());
-    }
-
     void VerifyMalformedDeleteServiceErrorResult(
         const std::expected<Response<DeleteBlobResult>, BlobStorageError>& result)
     {
@@ -154,16 +144,6 @@ namespace
             ASSERT_FALSE(result.has_value());
             EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
             EXPECT_EQ(result.error().Message, "length must be greater than zero.");
-            callbackInvoked = true;
-        });
-    }
-
-    void StartGetPageRangesAsyncExpectingMalformedXml(PageBlobClient& client, bool& callbackInvoked)
-    {
-        client.GetPageRangesAsync(
-            [&](std::expected<Response<AVEVA::AzureClient::Models::GetPageRangesResult>, BlobStorageError> result)
-        {
-            VerifyMalformedGetPageRangesResult(result);
             callbackInvoked = true;
         });
     }
@@ -497,19 +477,6 @@ TEST(PageBlobClientTests, UploadPagesAsync_ReportsOverflowingRangeViaCompletion)
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
-TEST(PageBlobClientTests, GetPageRangesAsync_ReportsMalformedXmlAsInvalidResponse)
-{
-    FakeHttpClient httpClient;
-    httpClient.DefaultResponse() = HttpResponse{200, {}, "<PageList><PageRange><Start>0</Start>"};
-    PageBlobClient client{httpClient, BuildOptions()};
-
-    bool callbackInvoked = false;
-    StartGetPageRangesAsyncExpectingMalformedXml(client, callbackInvoked);
-
-    httpClient.Poll(); // drive the posted (async) completion (T26)
-    EXPECT_TRUE(callbackInvoked);
-}
-
 TEST(PageBlobClientTests, DeleteAsync_PropagatesTransportErrorWithoutInspectingHttpStatus)
 {
     FakeHttpClient httpClient;
@@ -608,36 +575,6 @@ TEST(PageBlobClientTests, DownloadAsyncAndDownloadToAsyncParseContentAndProperti
     std::filesystem::remove(fsPath, ignored);
 }
 
-TEST(PageBlobClientTests, GetPageRangesFollowsNextMarkerAndMergesPages)
-{
-    FakeHttpClient httpClient;
-    httpClient.EnqueueResponse(HttpResponse{200,
-        MakeCanonicalSuccessHeaders(),
-        R"(<PageList><PageRange><Start>0</Start><End>511</End></PageRange><NextMarker>m1</NextMarker></PageList>)"});
-    httpClient.EnqueueResponse(HttpResponse{200,
-        MakeCanonicalSuccessHeaders(),
-        R"(<PageList><PageRange><Start>1024</Start><End>1535</End></PageRange><NextMarker/></PageList>)"});
-    PageBlobClient client{httpClient, BuildOptions()};
-
-    std::size_t rangeCount = 0U;
-    int completions = 0;
-    client.GetPageRangesAsync(
-        [&](std::expected<Response<AVEVA::AzureClient::Models::GetPageRangesResult>, BlobStorageError> result)
-    {
-        ASSERT_TRUE(result.has_value());
-        rangeCount = result->Value().PageRanges.size();
-        EXPECT_EQ(result->Value().PageRanges.at(1).Start, 1024U);
-        ++completions;
-    });
-    httpClient.Poll();
-
-    EXPECT_EQ(completions, 1);
-    EXPECT_EQ(rangeCount, 2U);
-    ASSERT_EQ(httpClient.RequestCount(), 2U);
-    EXPECT_EQ(httpClient.RequestAt(0).Request.GetUrl().find("marker="), std::string::npos);
-    EXPECT_NE(httpClient.RequestAt(1).Request.GetUrl().find("marker=m1"), std::string::npos);
-}
-
 TEST(PageBlobClientTests, DownloadAsyncAcceptsUseFutureCompletionToken)
 {
     FakeHttpClient httpClient;
@@ -728,7 +665,6 @@ namespace
         using AVEVA::AzureClient::DeleteBlobOptions;
         using AVEVA::AzureClient::DownloadBlobOptions;
         using AVEVA::AzureClient::GetBlobPropertiesOptions;
-        using AVEVA::AzureClient::GetPageRangesOptions;
         using AVEVA::AzureClient::UploadPagesOptions;
 
         const std::vector<std::byte> bytes;
@@ -762,9 +698,6 @@ namespace
         static_cast<void>(client.DownloadToAsync(str));
         static_cast<void>(client.DownloadToAsync(str, DownloadBlobOptions{}));
         AVEVA_TEST_ALLOW_DEPRECATED_END
-
-        static_cast<void>(client.GetPageRangesAsync());
-        static_cast<void>(client.GetPageRangesAsync(GetPageRangesOptions{}));
 
         static_cast<void>(client.DeleteAsync());
         static_cast<void>(client.DeleteAsync(DeleteBlobOptions{}));

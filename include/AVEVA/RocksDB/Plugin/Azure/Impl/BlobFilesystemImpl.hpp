@@ -55,6 +55,9 @@ class BlobFilesystemImpl {
     std::shared_ptr<ClientRuntime> m_runtime;
     std::unordered_map<std::string, ServiceContainer, Core::StringHash, Core::StringEqual> m_clients;
     std::unordered_map<std::string, std::shared_ptr<Core::FileCache>, Core::StringHash, Core::StringEqual> m_fileCaches;
+    // Async reads still running on the io_context; drained by the destructor before the runtime and caches above
+    // are released (see AsyncReadTracker).
+    std::shared_ptr<AsyncReadTracker> m_asyncReads;
     std::mutex m_lockFilesMutex;
     boost::intrusive::list<LockFileImpl, boost::intrusive::constant_time_size<false>> m_locks;
     // Parallel to m_locks; lets the renewal thread keep locks alive while it renews outside m_lockFilesMutex.
@@ -94,6 +97,14 @@ class BlobFilesystemImpl {
         int64_t dataFileBufferSize,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::optional<std::string_view> cachePath = {}, size_t maxCacheSize = Configuration::MaxCacheSize);
+
+    // Blocks until reads abandoned by RocksDB mid-flight have completed, so that their completions never release
+    // the HTTP client or a file cache. Requires the host io_context to still be running.
+    ~BlobFilesystemImpl();
+    BlobFilesystemImpl(const BlobFilesystemImpl&) = delete;
+    BlobFilesystemImpl& operator=(const BlobFilesystemImpl&) = delete;
+    BlobFilesystemImpl(BlobFilesystemImpl&&) = delete;
+    BlobFilesystemImpl& operator=(BlobFilesystemImpl&&) = delete;
 
     [[nodiscard]] ReadableFileImpl CreateReadableFile(const std::string& filePath);
     [[nodiscard]] WriteableFileImpl CreateWriteableFile(const std::string& filePath);

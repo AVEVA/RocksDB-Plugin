@@ -5,7 +5,6 @@
 #include "AVEVA/AzureClient/BlobServiceClient.hpp"
 #include "AVEVA/AzureClient/BlockBlobClient.hpp"
 #include "AVEVA/AzureClient/PageBlobClient.hpp"
-#include "AVEVA/AzureClient/Sas.hpp"
 
 #include <AVEVA/HttpClient/HttpClient.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
@@ -20,7 +19,6 @@
 
 #include <gtest/gtest.h>
 
-#include <chrono>
 #include <string>
 #include <utility>
 
@@ -170,25 +168,5 @@ TEST(PublicHeaderSelfContainedTests, BlobContainerClient)
         [](BlockBlobClient& c, auto&& token)
     {
         return c.ExistsAsync(std::forward<decltype(token)>(token));
-    });
-}
-
-TEST(PublicHeaderSelfContainedTests, SasBuilder)
-{
-    Sas::BlobSasBuilder builder;
-    builder.ContainerName = "container";
-    builder.Permissions = "r";
-    builder.ExpiresOn = std::chrono::system_clock::now() + std::chrono::hours{1};
-    const std::string sasToken =
-        builder.ToSasQueryParameters(SharedKeyCredentialOptions{.AccountName = "account", .AccountKey = "a2V5"});
-
-    LoopbackHttpClient http;
-    BlobContainerClient client{http,
-        BlobContainerClientOptions{.ServiceEndpoint = Endpoint, .ContainerName = "container", .SasToken = sasToken}};
-    ExerciseAllTokenKinds(http,
-        client,
-        [](BlobContainerClient& c, auto&& token)
-    {
-        return c.ListBlobsAsync(std::forward<decltype(token)>(token));
     });
 }

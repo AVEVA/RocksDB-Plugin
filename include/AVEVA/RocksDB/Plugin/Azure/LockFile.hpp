@@ -14,6 +14,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         std::shared_ptr<Impl::LockFileImpl> m_lock;
     public:
         explicit LockFile(std::shared_ptr<Impl::LockFileImpl> lock);
+        // Returns false if the lease is already held; throws RequestFailedException on any other failure.
         bool Lock();
         void Renew() const;
         void Unlock();

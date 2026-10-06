@@ -9,7 +9,6 @@
 #include "AVEVA/AzureClient/ITokenCredential.hpp"
 #include "AVEVA/AzureClient/Models/BlobContainerModels.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
-#include "AVEVA/AzureClient/Models/BlobServiceModels.hpp"
 #include "BlobStorageErrorCategory.hpp"
 #include "BlobXmlParser.hpp"
 
@@ -48,7 +47,6 @@
 #include <charconv>
 #include <chrono>
 #include <cstring>
-#include <format>
 #include <limits>
 #include <locale>
 #include <memory>
@@ -657,21 +655,6 @@ namespace AVEVA::AzureClient::Private
         return ParseAsctimeHttpDate(value);
     }
 
-    std::string FormatIso8601Utc(std::chrono::system_clock::time_point value)
-    {
-        const auto seconds = std::chrono::floor<std::chrono::seconds>(value);
-        const auto days = std::chrono::floor<std::chrono::days>(seconds);
-        const std::chrono::year_month_day calendarDate{days};
-        const std::chrono::hh_mm_ss timeOfDay{seconds - days};
-        return std::format("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-            static_cast<int>(calendarDate.year()),
-            static_cast<unsigned>(calendarDate.month()),
-            static_cast<unsigned>(calendarDate.day()),
-            timeOfDay.hours().count(),
-            timeOfDay.minutes().count(),
-            timeOfDay.seconds().count());
-    }
-
     // "1994-11-06T08:49:37Z" with an optional fractional-second part before the 'Z'.
     namespace Iso8601Layout
     {
@@ -748,38 +731,6 @@ namespace AVEVA::AzureClient::Private
                 std::chrono::nanoseconds{ticks * NanosecondsPerTick});
         }
         return result;
-    }
-
-    Models::UserDelegationKey ParseUserDelegationKeyXml(std::string_view xml)
-    {
-        Models::UserDelegationKey key;
-        const auto tree = TryReadXmlOrThrow(xml, "User delegation key response", "UserDelegationKey");
-        const XmlNode* root = tree ? tree->Root() : nullptr;
-        if (root == nullptr)
-        {
-            throw std::invalid_argument("User delegation key response is empty.");
-        }
-        const auto parseTime = [root](std::string_view tag)
-        {
-            const auto parsed = ParseIso8601Utc(GetChildTextOrEmpty(*root, tag));
-            if (!parsed.has_value())
-            {
-                throw std::invalid_argument(std::string{tag} + " must be an ISO 8601 UTC time.");
-            }
-            return *parsed;
-        };
-        key.SignedObjectId = GetChildTextOrEmpty(*root, "SignedOid");
-        key.SignedTenantId = GetChildTextOrEmpty(*root, "SignedTid");
-        key.SignedStartsOn = parseTime("SignedStart");
-        key.SignedExpiresOn = parseTime("SignedExpiry");
-        key.SignedService = GetChildTextOrEmpty(*root, "SignedService");
-        key.SignedVersion = GetChildTextOrEmpty(*root, "SignedVersion");
-        key.Value = GetChildTextOrEmpty(*root, "Value");
-        if (key.Value.empty())
-        {
-            throw std::invalid_argument("User delegation key response has no Value.");
-        }
-        return key;
     }
 
     std::optional<ParsedContentRange> ParseContentRange(std::string_view header) noexcept
@@ -1031,47 +982,6 @@ namespace AVEVA::AzureClient::Private
             }
         }
 
-        return result;
-    }
-
-    Models::GetPageRangesResult ParseGetPageRangesResultXml(std::string_view xml)
-    {
-        Models::GetPageRangesResult result;
-        const auto tree = TryReadXmlOrThrow(xml, "Get page ranges response", "PageList");
-        const XmlNode* root = tree ? tree->Root() : nullptr;
-        if (root == nullptr)
-        {
-            return result;
-        }
-
-        for (const XmlNode* block : GetChildrenByLocalName(*root, "PageRange"))
-        {
-            const std::string start = GetChildTextOrEmpty(*block, "Start");
-            const std::string end = GetChildTextOrEmpty(*block, "End");
-            if (start.empty() || end.empty())
-            {
-                throw std::invalid_argument("PageRange requires both Start and End.");
-            }
-            const auto parsedStart = ParseUnsigned(start);
-            if (!parsedStart.has_value())
-            {
-                throw std::invalid_argument("PageRange Start must be an unsigned integer.");
-            }
-            const auto parsedEnd = ParseUnsigned(end);
-            if (!parsedEnd.has_value())
-            {
-                throw std::invalid_argument("PageRange End must be an unsigned integer.");
-            }
-            if (*parsedEnd < *parsedStart)
-            {
-                throw std::invalid_argument("PageRange End must not be less than Start.");
-            }
-            Models::PageRange range;
-            range.Start = *parsedStart;
-            range.End = *parsedEnd;
-            result.PageRanges.push_back(range);
-        }
-        result.NextMarker = GetChildTextOrEmpty(*root, "NextMarker");
         return result;
     }
 } // namespace AVEVA::AzureClient::Private

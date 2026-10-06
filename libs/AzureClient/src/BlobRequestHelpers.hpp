@@ -9,7 +9,6 @@
 #include <AVEVA/AzureClient/Detail/AsyncInitiation.hpp>
 #include <AVEVA/AzureClient/Models/BlobContainerModels.hpp>
 #include <AVEVA/AzureClient/Models/BlobModels.hpp>
-#include <AVEVA/AzureClient/Models/BlobServiceModels.hpp>
 #include <AVEVA/AzureClient/Response.hpp>
 #include <AVEVA/HttpClient/HttpClient.hpp>
 #include <AVEVA/HttpClient/HttpHeader.hpp>
@@ -50,7 +49,6 @@
 #include <system_error>
 #include <type_traits>
 #include <utility>
-#include <unordered_set>
 #include <vector>
 
 namespace AVEVA::AzureClient::Private
@@ -282,9 +280,6 @@ namespace AVEVA::AzureClient::Private
     [[nodiscard]] Models::AcquireBlobLeaseResult ParseAcquireBlobLeaseResult(const HttpResponse& response);
     [[nodiscard]] Models::ReleaseBlobLeaseResult ParseReleaseBlobLeaseResult(const HttpResponse& response);
     [[nodiscard]] Models::RenewBlobLeaseResult ParseRenewBlobLeaseResult(const HttpResponse& response);
-    [[nodiscard]] Models::UserDelegationKey ParseUserDelegationKeyXml(std::string_view xml);
-    // "YYYY-MM-DDThh:mm:ssZ" (ISO 8601 UTC, whole seconds), as used by SAS and Key Info.
-    [[nodiscard]] std::string FormatIso8601Utc(std::chrono::system_clock::time_point value);
     // Parses "YYYY-MM-DDThh:mm:ss[.fffffff]Z"; std::nullopt if malformed.
     [[nodiscard]] std::optional<std::chrono::system_clock::time_point> ParseIso8601Utc(std::string_view value) noexcept;
 
@@ -296,7 +291,6 @@ namespace AVEVA::AzureClient::Private
     // Content-MD5 / x-ms-content-crc64 request headers for service-side body verification.
     void ApplyTransactionalHashes(HttpRequest& request, std::string_view md5, StringLabel<TransactionalCrc64Tag> crc64);
     [[nodiscard]] Models::ListBlobsResult ParseListBlobsResultXml(std::string_view xml);
-    [[nodiscard]] Models::GetPageRangesResult ParseGetPageRangesResultXml(std::string_view xml);
 
     [[nodiscard]] HttpRequest BuildBlobRequest(const BlobTarget& target,
         HttpMethod method,
@@ -306,9 +300,6 @@ namespace AVEVA::AzureClient::Private
         HttpMethod method,
         std::string_view queryString = {});
     [[nodiscard]] std::string BuildContainerUrl(const ContainerTarget& target, std::string_view queryString = {});
-    [[nodiscard]] HttpRequest BuildServiceRequest(const ConnectionState& connection,
-        HttpMethod method,
-        std::string_view queryString = {});
     [[nodiscard]] std::string BuildServiceUrl(const ConnectionState& connection, std::string_view queryString = {});
 
     // Convenience overloads that normalise and validate client options first (tests/benchmarks).
@@ -638,76 +629,6 @@ namespace AVEVA::AzureClient::Private
         },
             std::move(requestOptions));
     }
-
-    // Follows NextMarker across list pages: `fetchPage(marker, pageCompletion)` requests one page and `merge`
-    // appends a later page into the accumulated result (the first page is the accumulator). Completes once with the
-    // merged result (carrying the last page's raw response) or the first page error. A repeated marker is reported as
-    // an invalid response.
-    template <class TResult> class PageCollector : public std::enable_shared_from_this<PageCollector<TResult>>
-    {
-      public:
-        using Completion = std::move_only_function<void(std::expected<Response<TResult>, BlobStorageError>)>;
-        using FetchPage = std::move_only_function<void(std::string marker, Completion pageCompletion)>;
-        using MergePage = void (*)(TResult& accumulated, TResult page);
-
-        PageCollector(FetchPage fetchPage, MergePage merge, Completion completion)
-            : m_fetchPage(std::move(fetchPage)), m_merge(merge), m_completion(std::move(completion))
-        {
-        }
-
-        void Start(std::string marker)
-        {
-            m_markers.insert(marker);
-            m_fetchPage(std::move(marker),
-                [self = this->shared_from_this()](std::expected<Response<TResult>, BlobStorageError> page) mutable
-            {
-                self->OnPage(std::move(page));
-            });
-        }
-
-      private:
-        void OnPage(std::expected<Response<TResult>, BlobStorageError> page)
-        {
-            if (!page)
-            {
-                m_completion(std::move(page));
-                return;
-            }
-            std::string nextMarker = page->Value().NextMarker;
-            HttpResponse raw = std::move(*page).RawResponse();
-            if (m_firstPage)
-            {
-                m_firstPage = false;
-                m_accumulated = std::move(page->Value());
-            }
-            else
-            {
-                m_merge(m_accumulated, std::move(page->Value()));
-            }
-            if (nextMarker.empty())
-            {
-                m_accumulated.NextMarker.clear();
-                m_completion(Response<TResult>{std::move(m_accumulated), std::move(raw)});
-                return;
-            }
-            if (m_markers.contains(nextMarker))
-            {
-                RequestFailure failure =
-                    MakeInvalidResponseFailure(raw, "List response repeated a previous NextMarker.");
-                m_completion(
-                    ToExpected(failure.Error, Response<TResult>{{}, std::move(raw), std::move(failure.Details)}));
-                return;
-            }
-            Start(std::move(nextMarker));
-        }
-
-        FetchPage m_fetchPage;
-        MergePage m_merge;
-        Completion m_completion;
-        TResult m_accumulated;
-        std::unordered_set<std::string> m_markers;
-        bool m_firstPage = true;
-    };
 
     // Sends `request` to `target` and completes with the TModel produced by `parser`.
     template <class TModel, class TTarget, class TParser, class TCompletion>

@@ -193,7 +193,7 @@ ReadableFileImpl BlobFilesystemImpl::CreateReadableFile(const std::string& fileP
     const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
     const auto& container = GetContainer(prefix);
     auto blobClient = std::make_shared<PageBlob>(m_runtime, container->GetPageBlobClient(std::string(realPath)));
-    return ReadableFileImpl{realPath, std::move(blobClient), FindCache(m_fileCaches, prefix), m_logger};
+    return ReadableFileImpl{realPath, std::move(blobClient), FindCache(m_fileCaches, prefix), m_logger, m_asyncReads};
 }
 
 WriteableFileImpl BlobFilesystemImpl::CreateWriteableFile(const std::string& filePath) {
@@ -647,7 +647,16 @@ BlobFilesystemImpl::BlobFilesystemImpl(
     boost::asio::io_context& ioContext, int64_t dataFileInitialSize, int64_t dataFileBufferSize)
     : m_logger(std::move(logger)), m_dataFileInitialSize(dataFileInitialSize), m_dataFileBufferSize(dataFileBufferSize),
       m_runtime(std::make_shared<ClientRuntime>(ioContext)),
+      m_asyncReads(std::make_shared<AsyncReadTracker>(ioContext.get_executor())),
       m_lockRenewalThread{[this](std::stop_token stopToken) { RenewLease(stopToken); }} {}
+
+BlobFilesystemImpl::~BlobFilesystemImpl() {
+    if (const auto inFlight = m_asyncReads->InFlight(); inFlight > 0) {
+        BOOST_LOG_SEV(*m_logger, severity_level::info)
+            << "Waiting for " << inFlight << " in-flight async read(s) before closing the filesystem";
+    }
+    m_asyncReads->Drain();
+}
 
 const std::shared_ptr<AzureClient::BlobContainerClient>&
 BlobFilesystemImpl::GetContainer(const std::string_view prefix) const {

@@ -3,7 +3,6 @@
 #include "AVEVA/AzureClient/BlobClient.hpp"
 #include "AVEVA/AzureClient/BlobContainerClient.hpp"
 #include "AVEVA/AzureClient/BlobOperationOptions.hpp"
-#include "AVEVA/AzureClient/BlobServiceClient.hpp"
 #include "AVEVA/AzureClient/BlockBlobClient.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
 #include "AVEVA/AzureClient/PageBlobClient.hpp"
@@ -37,7 +36,6 @@ namespace
     using AVEVA::AzureClient::Tests::FakeHttpClient;
     using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
     using AVEVA::AzureClient::Tests::MakeBlobContainerClientOptions;
-    using AVEVA::AzureClient::Tests::MakeBlobServiceClientOptions;
     using namespace std::chrono_literals;
 
     using Pairs = std::vector<std::pair<std::string, std::string>>;
@@ -49,7 +47,6 @@ namespace
         BlockBlobClient Block{Http, MakeBlobClientOptions()};
         PageBlobClient Page{Http, MakeBlobClientOptions()};
         BlobContainerClient Container{Http, MakeBlobContainerClientOptions()};
-        BlobServiceClient Service{Http, MakeBlobServiceClientOptions()};
         std::istringstream Source{"hello"};
         std::ostringstream Sink;
     };
@@ -516,32 +513,15 @@ namespace
             .Headers = Concat({{"x-ms-blob-content-length", "2048"}}, ConditionHeaders()),
             .AbsentHeaders = {"x-ms-blob-type"},
             .Body = std::nullopt});
-        cases.push_back({.Name = "Page_GetPageRanges",
-            .Start =
-                [](Clients& c)
-        {
-            GetPageRangesOptions o;
-            o.Range = Models::BlobByteRange{.Offset = 0, .Length = 1024};
-            o.Conditions = FullConditions();
-            c.Page.GetPageRangesAsync(std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Get,
-            .Path = blob,
-            .Query = {{"comp", "pagelist"}},
-            .Headers = Concat({{"x-ms-range", "bytes=0-1023"}}, ConditionHeaders()),
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
 
         return cases;
     }
 
-    std::vector<RequestShapeCase> ContainerAndServiceCases()
+    std::vector<RequestShapeCase> ContainerCases()
     {
         const std::string container = "/images";
         std::vector<RequestShapeCase> cases;
 
-        // Service operations target the account root with an empty path; the transport sends it as "/"
-        // and the Shared Key signer canonicalises it to "/<account>/".
         cases.push_back({.Name = "Container_Create",
             .Start =
                 [](Clients& c)
@@ -598,29 +578,13 @@ namespace
             .Headers = {},
             .AbsentHeaders = {},
             .Body = std::nullopt});
-        cases.push_back({.Name = "Service_GetUserDelegationKey",
-            .Start =
-                [](Clients& c)
-        {
-            GetUserDelegationKeyOptions o;
-            o.StartsOn = Day(2);
-            o.ExpiresOn = Day(3);
-            c.Service.GetUserDelegationKeyAsync(o, Ignore);
-        },
-            .Method = HttpMethod::Post,
-            .Path = "",
-            .Query = {{"restype", "service"}, {"comp", "userdelegationkey"}},
-            .Headers = {},
-            .AbsentHeaders = {},
-            .Body = std::string{
-                R"(<?xml version="1.0" encoding="utf-8"?><KeyInfo><Start>2024-01-02T00:00:00Z</Start><Expiry>2024-01-03T00:00:00Z</Expiry></KeyInfo>)"}});
         return cases;
     }
 
     std::vector<RequestShapeCase> AllCases()
     {
         std::vector<RequestShapeCase> all = BlobCases();
-        for (auto&& group : {TypedBlobCases(), ContainerAndServiceCases()})
+        for (auto&& group : {TypedBlobCases(), ContainerCases()})
         {
             all.insert(all.end(), group.begin(), group.end());
         }

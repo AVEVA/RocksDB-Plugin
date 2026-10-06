@@ -12,8 +12,6 @@
 #include <AVEVA/AzureClient/ITokenCredential.hpp>
 #include <AVEVA/AzureClient/Models/BlobContainerModels.hpp>
 #include <AVEVA/AzureClient/Models/BlobModels.hpp>
-#include <AVEVA/AzureClient/Models/BlobServiceModels.hpp>
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
 #include <AVEVA/AzureClient/Response.hpp>
-#include <AVEVA/AzureClient/Sas.hpp>
 #include <AVEVA/AzureClient/WithRequestOptions.hpp>

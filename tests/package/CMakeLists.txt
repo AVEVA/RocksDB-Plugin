@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 cmake_minimum_required(VERSION 3.25)
 project(aveva-rocksdb-plugin-package-test LANGUAGES CXX)
 

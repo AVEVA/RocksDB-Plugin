@@ -56,7 +56,6 @@ namespace
     using AVEVA::AzureClient::Private::IEquals;
     using AVEVA::AzureClient::Private::IStartsWith;
     using AVEVA::AzureClient::Private::ParseBlobProperties;
-    using AVEVA::AzureClient::Private::ParseGetPageRangesResultXml;
     using AVEVA::AzureClient::Private::ParseHttpDateHeader;
     using AVEVA::AzureClient::Private::ParseListBlobsResultXml;
     using AVEVA::AzureClient::Private::TrimLeadingQuestionMark;
@@ -333,26 +332,6 @@ TEST(BlobRequestHelpersTests, UrlEncode_EncodesReservedCharactersUtf8AndExtraSaf
     EXPECT_EQ(UrlEncode("folder name/file?.txt", "/"), "folder%20name/file%3F.txt");
     EXPECT_EQ(UrlEncode("\xF0\x9F\x98\x80", {}), "%F0%9F%98%80");
     EXPECT_EQ(UrlEncode("a+b=c", "+"), "a+b%3Dc");
-}
-
-TEST(BlobRequestHelpersTests, ParseGetPageRangesResultXml_ParsesRanges)
-{
-    const auto result = ParseGetPageRangesResultXml(
-        "<PageList><PageRange><Start>0</Start><End>511</End></PageRange></PageList>");
-    ASSERT_EQ(result.PageRanges.size(), 1U);
-    EXPECT_EQ(result.PageRanges.at(0).Start, 0U);
-    EXPECT_EQ(result.PageRanges.at(0).End, 511U);
-}
-
-TEST(BlobRequestHelpersTests, ParseGetPageRangesResultXml_RejectsMissingOrReversedBounds)
-{
-    for (const std::string_view xml : {"<PageList><PageRange><End>511</End></PageRange></PageList>",
-             "<PageList><PageRange><Start>0</Start></PageRange></PageList>",
-             "<PageList><PageRange/></PageList>",
-             "<PageList><PageRange><Start>512</Start><End>511</End></PageRange></PageList>"})
-    {
-        EXPECT_THROW(static_cast<void>(ParseGetPageRangesResultXml(xml)), std::invalid_argument) << xml;
-    }
 }
 
 TEST(BlobRequestHelpersTests, BuildAndParseHttpDateHeader_RoundTripsAndIgnoreGlobalLocale)

@@ -9,7 +9,6 @@
 #include "AVEVA/AzureClient/ITokenCredential.hpp"
 #include "AVEVA/AzureClient/Models/BlobContainerModels.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
-#include "AVEVA/AzureClient/Models/BlobServiceModels.hpp"
 #include "BlobStorageErrorCategory.hpp"
 #include "BlobXmlParser.hpp"
 
@@ -775,11 +774,6 @@ namespace AVEVA::AzureClient::Private
     HttpRequest BuildContainerRequest(const ContainerTarget& target, HttpMethod method, std::string_view queryString)
     {
         return BuildRequest(*target.Connection, method, BuildContainerUrl(target, queryString));
-    }
-
-    HttpRequest BuildServiceRequest(const ConnectionState& connection, HttpMethod method, std::string_view queryString)
-    {
-        return BuildRequest(connection, method, BuildServiceUrl(connection, queryString));
     }
 
     std::string BuildBlobUrl(const BlobClientOptions& options, std::string_view queryString)

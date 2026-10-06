@@ -42,8 +42,6 @@ namespace AVEVA::AzureClient
             std::move_only_function<void(std::expected<Response<Models::ClearPagesResult>, BlobStorageError>)>;
         using ResizeCompletionHandler =
             std::move_only_function<void(std::expected<Response<Models::ResizePageBlobResult>, BlobStorageError>)>;
-        using GetPageRangesCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::GetPageRangesResult>, BlobStorageError>)>;
 
         PageBlobClient(IHttpClient& httpClient, const BlobClientOptions& options);
 
@@ -218,30 +216,6 @@ namespace AVEVA::AzureClient
                 std::move(requestOptions));
         }
 
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, GetPageRangesOptions>)
-        [[nodiscard]] auto GetPageRangesAsync(CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::GetPageRangesResult>(this,
-                &PageBlobClient::GetPageRangesAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                GetPageRangesOptions{});
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto GetPageRangesAsync(GetPageRangesOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::GetPageRangesResult>(this,
-                &PageBlobClient::GetPageRangesAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(options));
-        }
-
       private:
         friend class BlobContainerClient;
         PageBlobClient(IHttpClient& httpClient, std::shared_ptr<const Private::BlobTarget> target);
@@ -273,9 +247,6 @@ namespace AVEVA::AzureClient
         void ResizeAsyncImpl(std::uint64_t newSize,
             const ResizePageBlobOptions& options,
             ResizeCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        void GetPageRangesAsyncImpl(GetPageRangesOptions options,
-            GetPageRangesCompletionHandler completion,
             HttpRequestOptions requestOptions);
     };
 } // namespace AVEVA::AzureClient

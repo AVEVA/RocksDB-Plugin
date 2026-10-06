@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 add_library(aveva-rocksdb-plugin-core
     FileCache.cpp
     FileCacheEntry.cpp

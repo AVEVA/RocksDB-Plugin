@@ -44,7 +44,7 @@ class AsyncReadRequest {
 
     /// <summary>
     /// Stops the request from touching the scratch buffer. Does not block: an in-flight download is left to finish
-    /// and its result is dropped.
+    /// and its result is dropped. The filesystem waits for such downloads before it is destroyed.
     /// </summary>
     void Abort();
 

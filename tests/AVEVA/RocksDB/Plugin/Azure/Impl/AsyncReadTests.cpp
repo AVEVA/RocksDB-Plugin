@@ -2,10 +2,15 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/AsyncReadRequest.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadTracker.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Mocks/BlobClientMock.hpp"
+
+#include <boost/asio/executor_work_guard.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -13,7 +18,9 @@
 #include <algorithm>
 #include <stdexcept>
 #include <atomic>
+#include <chrono>
 #include <deque>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -25,6 +32,7 @@ using AVEVA::RocksDB::Plugin::Azure::HttpStatus;
 using AVEVA::RocksDB::Plugin::Azure::PollAsyncReads;
 using AVEVA::RocksDB::Plugin::Azure::ReadableFile;
 using AVEVA::RocksDB::Plugin::Azure::RequestFailedException;
+using AVEVA::RocksDB::Plugin::Azure::Impl::AsyncReadTracker;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ReadableFileImpl;
 using AVEVA::RocksDB::Plugin::Core::Mocks::BlobClientMock;
 using boost::log::sources::severity_logger_mt;
@@ -399,4 +407,94 @@ TEST_F(AsyncReadTests, ReadAsync_ManyRequests_CompletedConcurrentlyFromOtherThre
         EXPECT_EQ(1, records[i].Calls.load());
         EXPECT_EQ(std::string(64, static_cast<char>('a' + i)), records[i].Data);
     }
+}
+
+namespace {
+// Stands in for the host: runs the io_context that HTTP completions and the tracker's deferred End() run on.
+class HostIoContext {
+  public:
+    HostIoContext() : m_work(boost::asio::make_work_guard(m_context)), m_thread([this] { m_context.run(); }) {}
+    HostIoContext(const HostIoContext&) = delete;
+    HostIoContext& operator=(const HostIoContext&) = delete;
+    ~HostIoContext() {
+        m_work.reset();
+        m_thread.join();
+    }
+
+    boost::asio::io_context& Context() { return m_context; }
+
+  private:
+    boost::asio::io_context m_context;
+    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> m_work;
+    std::thread m_thread;
+};
+} // namespace
+
+TEST_F(AsyncReadTests, Tracker_DrainWithNothingInFlightReturnsImmediately) {
+    HostIoContext host;
+    auto tracker = std::make_shared<AsyncReadTracker>(host.Context().get_executor());
+    EXPECT_EQ(0U, tracker->InFlight());
+    tracker->Drain();
+}
+
+// Mirrors the filesystem being torn down while RocksDB has abandoned a read: the handle and the file are gone, the
+// download completes later on the io_context. The filesystem (Drain) must wait for it, and by the time it stops
+// waiting the completion must already have released the file and everything the file owns.
+TEST_F(AsyncReadTests, ReadAsync_HandleAndFilesystemDroppedMidRead_DrainWaitsUntilFileReleased) {
+    HostIoContext host;
+    auto tracker = std::make_shared<AsyncReadTracker>(host.Context().get_executor());
+    auto client = std::make_shared<DeferredBlobClient>();
+    ON_CALL(*client, GetSize()).WillByDefault(Return(BlobSize));
+    ON_CALL(*client, GetEtag()).WillByDefault(Return(std::string{"etag"}));
+    std::weak_ptr<DeferredBlobClient> weakClient = client;
+
+    std::vector<char> scratch(32, 'x');
+    auto req = MakeRequest(0, scratch);
+    CallbackRecord record;
+    {
+        ReadableFile file{ReadableFileImpl{"test.sst", client, nullptr, m_logger, tracker}};
+        IoHandle handle;
+        ASSERT_TRUE(Submit(file, req, record, handle).ok());
+    }
+    auto download = client->Take();
+    client.reset();
+    ASSERT_FALSE(weakClient.expired()) << "the in-flight read must keep the file alive";
+    EXPECT_EQ(1U, tracker->InFlight());
+
+    std::atomic<bool> fileReleasedWhenDrained{false};
+    auto drained = std::async(std::launch::async, [&] {
+        tracker->Drain();
+        fileReleasedWhenDrained = weakClient.expired();
+    });
+    EXPECT_EQ(std::future_status::timeout, drained.wait_for(std::chrono::milliseconds(50)));
+
+    boost::asio::post(host.Context(),
+                      [callback = std::move(download.Callback)]() mutable { callback(nullptr, std::string(32, 'G')); });
+    ASSERT_EQ(std::future_status::ready, drained.wait_for(std::chrono::seconds(10)));
+    drained.get();
+
+    EXPECT_TRUE(fileReleasedWhenDrained.load());
+    EXPECT_EQ(0U, tracker->InFlight());
+    EXPECT_EQ(0, record.Calls.load());
+    EXPECT_EQ(std::string(32, 'x'), std::string(scratch.begin(), scratch.end()));
+}
+
+TEST_F(AsyncReadTests, ReadAsync_TrackedReadEndsAfterCompletionAndPoll) {
+    HostIoContext host;
+    auto tracker = std::make_shared<AsyncReadTracker>(host.Context().get_executor());
+    ReadableFile file{ReadableFileImpl{"test.sst", m_deferred, nullptr, m_logger, tracker}};
+    std::vector<char> scratch(16);
+    auto req = MakeRequest(0, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+    ASSERT_TRUE(Submit(file, req, record, handle).ok());
+    EXPECT_EQ(1U, tracker->InFlight());
+
+    m_deferred->Take().Callback(nullptr, std::string(16, 'T'));
+    std::vector<void*> handles{handle.Handle};
+    ASSERT_TRUE(PollAsyncReads(handles).ok());
+    EXPECT_EQ(std::string(16, 'T'), record.Data);
+
+    tracker->Drain();
+    EXPECT_EQ(0U, tracker->InFlight());
 }

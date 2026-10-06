@@ -20,6 +20,8 @@ Both libraries have diverged from the imported 0.0.1 tree. The changes are in th
   `94d4814`), for example stricter URL and identity-endpoint validation and response parsing.
 - Trimming of `libs/AzureClient` to what the plugin needs (`2cf0763`..`da22526`): AppendBlobClient, uncommon
   BlobClient/BlockBlobClient operations, container/service extras and snapshot/version scoping were removed.
+  SAS builders (`Sas.hpp`), `BlobServiceClient::GetUserDelegationKeyAsync`, `PageBlobClient::GetPageRangesAsync`
+  and the internal `Redaction.hpp` helper were later removed as well, since the plugin never used them.
 
 ## Updating
 
@@ -38,7 +40,7 @@ Do not copy an upstream tree over these directories: that would silently revert 
 
 ## Building the library tests
 
-The libraries' own test suites are built by default. Disable them with
-`-DAVEVA_BUILD_CLIENT_LIBRARY_TESTS=OFF` when configuring the root project, e.g.
-`cmake --preset WindowsDebug -DAVEVA_BUILD_CLIENT_LIBRARY_TESTS=OFF`. CI
-(`.github/workflows/build-and-test.yml`) builds with this option on and `-DAVEVA_ROCKSDB_PACKAGE_TEST=ON`.
+The libraries' own test suites are built whenever the plugin tests are (`AVEVA_ROCKSDB_TESTS`, ON by default).
+`-DAVEVA_ROCKSDB_TESTS=OFF` disables all of them, so GTest (the root vcpkg `testing` feature) is not needed.
+CI (`.github/workflows/build-and-test.yml`) builds with tests on and `-DAVEVA_ROCKSDB_PACKAGE_TEST=ON`, and also
+configures and builds a tests-off tree without the `testing` feature.

@@ -1,4 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
 add_library(aveva-rocksdb-plugin-azure-impl
+    AsyncReadTracker.cpp
     BlobHelpers.cpp
     PageBlob.cpp
     ReadableFileImpl.cpp
@@ -23,6 +27,7 @@ target_sources(aveva-rocksdb-plugin-azure-impl
   FILE_SET HEADERS
   BASE_DIRS "${base-include-dir}"
   FILES
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadTracker.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"

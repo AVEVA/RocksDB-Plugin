@@ -412,18 +412,5 @@ namespace AVEVA::AzureClient::Models
         std::chrono::system_clock::time_point LastModified;
     };
 
-    struct PageRange
-    {
-        std::uint64_t Start = 0;
-        std::uint64_t End = 0;
-    };
-
-    struct GetPageRangesResult
-    {
-        std::vector<PageRange> PageRanges;
-        // Always empty on a completed GetPageRangesAsync result; every page has been merged.
-        std::string NextMarker;
-    };
-
     std::string EncodeBlockId(std::uint64_t index);
 } // namespace AVEVA::AzureClient::Models

@@ -13,7 +13,6 @@ add_executable(aveva-azure-client-tests
     ParseContentRangeTests.cpp
     RequestOptionsTests.cpp
     OptionValidationTests.cpp
-    RedactionTests.cpp
     UploadConcurrencyTests.cpp
     DownloadToFileTests.cpp
     EndpointValidationTests.cpp
@@ -30,7 +29,6 @@ add_executable(aveva-azure-client-tests
     MetadataValidationTests.cpp
     ParserRobustnessTests.cpp
     RequestShapeTests.cpp
-    SasTests.cpp
     SuppressedErrorResponseTests.cpp
     PageBlobClientTests.cpp
     ResponseTests.cpp

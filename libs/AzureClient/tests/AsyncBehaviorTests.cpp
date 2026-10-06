@@ -1319,15 +1319,6 @@ namespace
                 invoked = true;
             });
         }});
-        cases.push_back({.Name = "PageBlobClient.GetPageRangesAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<PageBlobClient>(http, MakePageBlobOptions());
-            client->GetPageRangesAsync([client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
         cases.push_back({.Name = "PageBlobClient.DeleteAsync",
             .Invoke = [](FakeHttpClient& http, bool& invoked)
         {

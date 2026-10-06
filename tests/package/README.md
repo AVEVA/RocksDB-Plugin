@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-FileCopyrightText: Copyright 2025 AVEVA -->
+
 # Package consumer smoke test
 
 Verifies that the installed packages resolve (`find_package`), carry every transitive `find_dependency`, and link.

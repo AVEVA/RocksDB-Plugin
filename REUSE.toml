@@ -19,3 +19,26 @@ path = "libs/*/infrastructure/cmake/aveva-install-library-config.cmake"
 precedence = "override"
 SPDX-FileCopyrightText = ["Copyright (c) Beman Project contributors", "Copyright (c) 2026 AVEVA Solutions Limited."]
 SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"
+
+# Files that cannot carry an inline header: JSON has no comment syntax, and GitHub parses the
+# front matter or body of these markdown files (agents, skills, instructions, issue/PR templates).
+[[annotations]]
+path = [
+    "*.json",
+    ".vscode/*.json",
+    ".github/policies/*.json",
+    ".github/copilot-instructions.md",
+    ".github/agents/*.agent.md",
+    ".github/skills/**/SKILL.md",
+    ".github/ISSUE_TEMPLATE/*.md",
+    ".github/PULL_REQUEST_TEMPLATE.md",
+]
+SPDX-FileCopyrightText = "Copyright 2025 AVEVA"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Derived from bemanproject/exemplar.
+[[annotations]]
+path = "infrastructure/cmake/aveva-install-library-config.cmake"
+precedence = "override"
+SPDX-FileCopyrightText = ["Copyright (c) Beman Project contributors", "Copyright 2025 AVEVA"]
+SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"

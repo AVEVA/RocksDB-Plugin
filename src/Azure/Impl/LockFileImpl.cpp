@@ -65,7 +65,7 @@ bool LockFileImpl::Lock() {
     auto end = start;
     // The service starts the lease clock when it receives the request, so the renewal time is taken before sending.
     auto attemptStart = start;
-    std::optional<std::string> lastError;
+    std::optional<AzureClient::BlobStorageError> lastError;
     // The proposed ID is reused on every attempt: if an acquire succeeded but its response was lost, the retry
     // with the same ID is accepted by the service instead of failing with a conflict until the lease expires.
     const auto leaseId = NewLeaseId();
@@ -81,8 +81,8 @@ bool LockFileImpl::Lock() {
             break;
         }
 
-        lastError = result.error().Message.empty() ? result.error().Code.message() : result.error().Message;
-        if (!ShouldRetryAcquire(result.error())) {
+        lastError = result.error();
+        if (!ShouldRetryAcquire(*lastError)) {
             end = std::chrono::steady_clock::now();
             break;
         }
@@ -96,9 +96,15 @@ bool LockFileImpl::Lock() {
     if (lastError.has_value()) {
         BOOST_LOG_SEV(*m_logger, severity_level::error)
             << "Failed to acquire blob lease for '" << m_fileName << "' after "
-            << std::chrono::duration_cast<std::chrono::seconds>(end - start).count() << "s: " << *lastError;
+            << std::chrono::duration_cast<std::chrono::seconds>(end - start).count()
+            << "s: " << (lastError->Message.empty() ? lastError->Code.message() : lastError->Message);
 
-        return false;
+        // Only a lease held by another owner means "locked"; anything else (auth, TLS, invalid URL, a transient
+        // failure that outlasted the retries) is surfaced so AzureErrorTranslator can map it to the right status.
+        if (lastError->StatusCode == HttpStatus::Conflict) {
+            return false;
+        }
+        ThrowRequestFailed(*lastError);
     }
 
     m_lastRenewalTime = attemptStart;

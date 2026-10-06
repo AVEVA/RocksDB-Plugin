@@ -25,7 +25,6 @@ add_library(aveva-azure-client
     ITokenCredential.cpp
     PageBlobClient.cpp
     RequestPipeline.cpp
-    Sas.cpp
     BlobDownload.cpp
 )
 
@@ -60,11 +59,9 @@ target_sources(aveva-azure-client
         "${base-include-dir}/AVEVA/AzureClient/PageBlobClient.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Response.hpp"
         "${base-include-dir}/AVEVA/AzureClient/WithRequestOptions.hpp"
-        "${base-include-dir}/AVEVA/AzureClient/Sas.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Credentials.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Models/BlobContainerModels.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Models/BlobModels.hpp"
-        "${base-include-dir}/AVEVA/AzureClient/Models/BlobServiceModels.hpp"
 )
 target_include_directories(aveva-azure-client
     PUBLIC

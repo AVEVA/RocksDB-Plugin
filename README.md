@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-FileCopyrightText: Copyright 2025 AVEVA -->
+
 # AVEVA RocksDB Plugins
 
 This project contains AVEVA's plugins for the [RocksDB](https://rocksdb.org/) database that bring RocksDB to Azure Cloud infrastructure. This plugin leverages AVEVA's in-house Azure Blob Storage client ([libs/AzureClient](libs/AzureClient), built on [libs/HttpClient](libs/HttpClient) and Boost.Asio) and Azure Blob Storage to provide a seamless, cloud-native storage solution for RocksDB applications.

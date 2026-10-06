@@ -2,9 +2,10 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
-#include "FakeHttpPump.hpp"
 #include "FakeHttpClient.hpp"
+#include "FakeHttpPump.hpp"
 #include "TestFixtures.hpp"
 
 #include <boost/asio/io_context.hpp>
@@ -23,6 +24,7 @@ using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeAzureErrorResponse;
 using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
+using AVEVA::RocksDB::Plugin::Azure::RequestFailedException;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime;
 using AVEVA::RocksDB::Plugin::Azure::Impl::LockFileImpl;
 
@@ -84,13 +86,30 @@ TEST_F(LockFileImplTests, ProposedLeaseIdIsAUuid) {
     });
 }
 
-TEST_F(LockFileImplTests, ForbiddenFailsWithoutRetrying) {
+TEST_F(LockFileImplTests, ForbiddenThrowsWithoutRetrying) {
     m_httpClient.EnqueueResponse(MakeAzureErrorResponse(403, "AuthorizationFailure", "denied", "r1"));
     m_httpClient.EnqueueResponse(Acquired());
 
     auto lock = CreateLock(std::chrono::seconds(20));
-    EXPECT_FALSE(lock->Lock());
+    try {
+        (void)lock->Lock();
+        FAIL() << "Expected RequestFailedException";
+    } catch (const RequestFailedException& ex) {
+        EXPECT_EQ(ex.StatusCode, 403U);
+        EXPECT_EQ(ex.ErrorCode, "AuthorizationFailure");
+    }
     EXPECT_EQ(m_httpClient.RequestCount(), 1U);
+}
+
+TEST_F(LockFileImplTests, LeaseStillHeldWhenRetriesRunOutReturnsFalse) {
+    // 15s is the shortest lease the service accepts; retries run every 250ms for that long.
+    for (int i = 0; i < 100; ++i) {
+        m_httpClient.EnqueueResponse(MakeAzureErrorResponse(409, "LeaseAlreadyPresent", "held", "r1"));
+    }
+
+    auto lock = CreateLock(std::chrono::seconds(15));
+    EXPECT_FALSE(lock->Lock());
+    EXPECT_GE(m_httpClient.RequestCount(), 2U);
 }
 
 TEST_F(LockFileImplTests, LeaseHeldByAnotherOwnerIsRetried) {

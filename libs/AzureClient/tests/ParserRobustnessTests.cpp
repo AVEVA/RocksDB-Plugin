@@ -44,18 +44,6 @@ namespace
         {
             static_cast<void>(ParseListBlobsResultXml(xml));
         }},
-            {.Name = "GetPageRanges",
-                .Parse =
-                    [](std::string_view xml)
-        {
-            static_cast<void>(ParseGetPageRangesResultXml(xml));
-        }},
-            {.Name = "UserDelegationKey",
-                .Parse =
-                    [](std::string_view xml)
-        {
-            static_cast<void>(ParseUserDelegationKeyXml(xml));
-        }},
         };
     }
 
@@ -257,17 +245,6 @@ TEST(ParserRobustnessTests, ListBlobs_FullPageOf5000Items)
     EXPECT_EQ(result.Blobs.back().Name, "blob-4999");
     EXPECT_EQ(result.Blobs.back().Properties.ContentLength, 4999U);
     EXPECT_EQ(result.NextMarker, "next");
-}
-
-TEST(ParserRobustnessTests, UserDelegationKey_MalformedDatesThrow)
-{
-    EXPECT_THROW(
-        static_cast<void>(ParseUserDelegationKeyXml(
-            "<UserDelegationKey><SignedStart>not-a-date</SignedStart><Value>dg==</Value></UserDelegationKey>")),
-        std::exception);
-    EXPECT_THROW(static_cast<void>(ParseUserDelegationKeyXml("<UserDelegationKey><SignedExpiry>2024-13-01T00:00:00Z</"
-                                                             "SignedExpiry><Value>dg==</Value></UserDelegationKey>")),
-        std::exception);
 }
 
 TEST(ParserRobustnessTests, HttpDate_RejectsOutOfRangeAndTrailingInput)
