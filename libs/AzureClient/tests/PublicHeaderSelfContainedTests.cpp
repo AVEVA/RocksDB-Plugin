@@ -76,7 +76,8 @@ namespace
     // frame never outlives captured references (cppcoreguidelines-avoid-capturing-lambda-coroutines).
     template <class MakeOperation> boost::asio::awaitable<void> AwaitHasValue(bool* out, MakeOperation makeOperation)
     {
-        *out = (co_await makeOperation()).has_value();
+        const auto result = co_await makeOperation();
+        *out = result.has_value();
     }
 
     [[nodiscard]] BlobClientOptions BlobOptions()

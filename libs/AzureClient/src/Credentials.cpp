@@ -13,6 +13,9 @@
 #include <boost/json/parse.hpp>
 #include <boost/json/serialize.hpp>
 #include <boost/json/value.hpp>
+#include <boost/url/parse.hpp>
+#include <boost/url/scheme.hpp>
+#include <boost/url/url_view.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -80,22 +83,40 @@ namespace AVEVA::AzureClient
         // address (App Service uses loopback, IMDS uses 169.254.169.254).
         [[nodiscard]] bool IsAcceptableIdentityEndpoint(std::string_view endpoint) noexcept
         {
-            if (endpoint.starts_with("https://"))
-            {
-                return true;
-            }
-            if (!endpoint.starts_with("http://"))
+            // Parse rather than prefix-match: prefixes accept hosts such as "127.evil.com" and userinfo tricks
+            // such as "127.0.0.1@evil.example".
+            const auto parsed = boost::urls::parse_uri(endpoint);
+            if (!parsed)
             {
                 return false;
             }
-            std::string_view host = endpoint.substr(7);
-            host = host.substr(0, host.find_first_of("/?#"));
-            if (host.starts_with("["))
+            const boost::urls::url_view url = *parsed;
+            if (url.has_userinfo())
             {
-                return host.starts_with("[::1]");
+                return false;
             }
-            host = host.substr(0, host.find(':'));
-            return host == "localhost" || host.starts_with("127.") || host.starts_with("169.254.");
+            if (url.scheme_id() == boost::urls::scheme::https)
+            {
+                return true;
+            }
+            if (url.scheme_id() != boost::urls::scheme::http)
+            {
+                return false;
+            }
+            switch (url.host_type())
+            {
+            case boost::urls::host_type::ipv4:
+            {
+                const auto bytes = url.host_ipv4_address().to_bytes();
+                return bytes[0] == 127 || (bytes[0] == 169 && bytes[1] == 254);
+            }
+            case boost::urls::host_type::ipv6:
+                return url.host_ipv6_address().is_loopback();
+            case boost::urls::host_type::name:
+                return url.encoded_host_name() == "localhost";
+            default:
+                return false;
+            }
         }
 
         // Returns a scalar member as text (numbers are serialized) or an empty string.

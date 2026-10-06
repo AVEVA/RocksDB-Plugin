@@ -147,7 +147,7 @@ int64_t PageBlob::Download(std::span<char> buffer, int64_t offset, int64_t lengt
     std::memcpy(buffer.data(), result.Content.data(), bytesRead);
 
     assert((!result.ContentRange.has_value() || !result.ContentRange->Length.has_value() ||
-            *result.ContentRange->Length == static_cast<uint64_t>(result.Content.size())) &&
+            *result.ContentRange->Length == result.Content.size()) &&
            "Body size differs from server ContentRange");
     return static_cast<int64_t>(bytesRead);
 }

@@ -29,7 +29,8 @@ namespace AVEVA::AzureClient::Tests
     // Same idea, but only records whether the awaited result was engaged.
     template <class MakeOperation> boost::asio::awaitable<void> AwaitHasValue(bool* out, MakeOperation makeOperation)
     {
-        *out = (co_await makeOperation()).has_value();
+        const auto result = co_await makeOperation();
+        *out = result.has_value();
     }
 
     class CallbackExpectation

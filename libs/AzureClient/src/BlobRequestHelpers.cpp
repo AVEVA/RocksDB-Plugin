@@ -523,11 +523,6 @@ namespace AVEVA::AzureClient::Private
         return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
     }
 
-    std::span<const std::byte> AsBytes(std::string_view value) noexcept
-    {
-        return std::as_bytes(std::span{value.data(), value.size()});
-    }
-
     std::string BytesToString(std::span<const std::byte> bytes)
     {
         return std::string{AsChars(bytes)};

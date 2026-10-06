@@ -26,11 +26,4 @@ namespace AVEVA::AzureClient::Private
         // Client policy: headroom on top of the requested range length for each response body limit.
         static constexpr std::uint64_t ResponseBodySlack = std::uint64_t{64} * 1024U;
     };
-
-    // Shared Access Signature protocol versions.
-    struct SasProtocolConstants
-    {
-        // Signed service version (`sv`) emitted by the SAS builders.
-        static constexpr std::string_view Version = AVEVA::AzureClient::Sas::SasVersion;
-    };
 } // namespace AVEVA::AzureClient::Private

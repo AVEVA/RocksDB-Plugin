@@ -25,9 +25,8 @@ namespace AVEVA::AzureClient
     // resolve/connect/read/write failures and timeouts). Each retry re-signs the request with a fresh
     // x-ms-date (same x-ms-client-request-id) after an exponential backoff with jitter
     // (InitialDelay * 2^n, capped at MaxDelay); a server Retry-After / x-ms-retry-after-ms hint takes
-    // precedence and is honoured up to 24 hours, even above MaxDelay (which caps only the computed backoff).
-    // Cancellation stops retrying immediately. Note that a retried Append Block without an append-position condition
-    // may append twice if the first attempt reached the service. Default retry backoff bounds.
+    // precedence and is honoured up to the larger of MaxDelay and one minute (a bogus hint cannot stall a request
+    // for hours). Cancellation stops retrying immediately. Default retry backoff bounds.
     inline constexpr std::chrono::milliseconds DefaultRetryInitialDelay{800};
     inline constexpr std::chrono::milliseconds DefaultRetryMaxDelay{std::chrono::minutes{1}};
 
@@ -39,7 +38,7 @@ namespace AVEVA::AzureClient
         std::chrono::milliseconds MaxDelay = DefaultRetryMaxDelay;
     };
 
-    // Identifies a single blob (block blob, page blob, or append blob) within a container, and
+    // Identifies a single blob (block blob or page blob) within a container, and
     // carries the same connection settings as BlobContainerClientOptions.
     struct BlobClientOptions
     {

@@ -193,6 +193,20 @@ TEST(CredentialsTests, InvalidConfigurationFailsWithoutSendingARequest)
     expectInvalid(missingHeader);
     ManagedIdentityCredential remotePlainHttp{httpClient, ManagedOptions({}, {}, "http://example.com/msi/token", "secret")};
     expectInvalid(remotePlainHttp);
+    for (const std::string endpoint : {"http://127.evil.com/msi/token",
+             "http://169.254.attacker.nip.io/msi/token",
+             "http://127.0.0.1@evil.example/msi/token",
+             "http://localhost@evil.example/msi/token",
+             "http://localhost.evil.com/msi/token",
+             "http://127.0.0.1.evil.com/msi/token",
+             "http://[::2]/msi/token",
+             "http://169.255.0.1/msi/token",
+             "https://user@login.example/msi/token",
+             "ftp://localhost/msi/token"})
+    {
+        ManagedIdentityCredential bypass{httpClient, ManagedOptions({}, {}, endpoint, "secret")};
+        expectInvalid(bypass);
+    }
 
     EXPECT_TRUE(httpClient.Requests().empty());
 }

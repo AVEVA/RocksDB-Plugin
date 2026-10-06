@@ -137,11 +137,6 @@ namespace
         return MakeBlobClientOptions("images", "page.bin");
     }
 
-    [[nodiscard]] BlobClientOptions MakeAppendBlobOptions()
-    {
-        return MakeBlobClientOptions("images", "log.txt");
-    }
-
     [[nodiscard]] bool IsCanceled(const BlobStorageError& error)
     {
         return error.Code == std::make_error_code(std::errc::operation_canceled);
@@ -1260,7 +1255,6 @@ namespace
                 invoked = true;
             });
         }});
-        // --- AppendBlobClient ---
 
         // --- PageBlobClient ---
         cases.push_back({.Name = "PageBlobClient.CreateAsync",

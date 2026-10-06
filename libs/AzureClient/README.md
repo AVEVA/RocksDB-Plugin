@@ -22,7 +22,8 @@ Paths are relative to `include/AVEVA/AzureClient/`; `AzureClient.hpp` includes e
 | `BlobContainerClient` | [BlobContainerClient.hpp](include/AVEVA/AzureClient/BlobContainerClient.hpp) | Create, create-if-not-exists, list blobs, blob-client factories |
 | `BlobClient` | [BlobClient.hpp](include/AVEVA/AzureClient/BlobClient.hpp) | Download, delete, properties, leases, metadata |
 | `BlockBlobClient` | [BlockBlobClient.hpp](include/AVEVA/AzureClient/BlockBlobClient.hpp) | Upload, stage block, commit block list |
-| `PageBlobClient` | [PageBlobClient.hpp](include/AVEVA/AzureClient/PageBlobClient.hpp) | Create, upload/clear pages, resize, page ranges || Credentials | [Credentials.hpp](include/AVEVA/AzureClient/Credentials.hpp), [ITokenCredential.hpp](include/AVEVA/AzureClient/ITokenCredential.hpp) | Shared Key, bearer token, Entra ID credentials |
+| `PageBlobClient` | [PageBlobClient.hpp](include/AVEVA/AzureClient/PageBlobClient.hpp) | Create, upload/clear pages, resize, page ranges |
+| Credentials | [Credentials.hpp](include/AVEVA/AzureClient/Credentials.hpp), [ITokenCredential.hpp](include/AVEVA/AzureClient/ITokenCredential.hpp) | Shared Key, bearer token, Entra ID credentials |
 | SAS builders | [Sas.hpp](include/AVEVA/AzureClient/Sas.hpp) | Service and account SAS generation |
 | Options | [BlobClientOptions.hpp](include/AVEVA/AzureClient/BlobClientOptions.hpp), [BlobOperationOptions.hpp](include/AVEVA/AzureClient/BlobOperationOptions.hpp), [WithRequestOptions.hpp](include/AVEVA/AzureClient/WithRequestOptions.hpp) | Client construction, per-operation and per-request options |
 | Results and errors | [Response.hpp](include/AVEVA/AzureClient/Response.hpp), [BlobStorageError.hpp](include/AVEVA/AzureClient/BlobStorageError.hpp), [BlobStorageErrorCode.hpp](include/AVEVA/AzureClient/BlobStorageErrorCode.hpp) | `Response<T>`, `BlobStorageError`, error codes |

@@ -298,10 +298,11 @@ namespace AVEVA::AzureClient::Models
         Models::LeaseState LeaseState = Models::LeaseState::Unknown;
         Models::LeaseDurationType LeaseDuration = Models::LeaseDurationType::Unknown;
         std::optional<bool> ServerEncrypted;
+        // Informational only: the client neither requests nor scopes operations by version or snapshot; these are
+        // filled in when the service returns them (for example when listing with snapshots or versions included).
         std::string VersionId;
         std::optional<bool> IsCurrentVersion;
-        std::optional<std::uint64_t> CommittedBlockCount; // append blobs
-        std::optional<std::uint64_t> SequenceNumber;      // page blobs
+        std::optional<std::uint64_t> SequenceNumber; // page blobs
     };
 
     struct DownloadBlobResult
@@ -322,6 +323,7 @@ namespace AVEVA::AzureClient::Models
     struct BlobItem
     {
         std::string Name;
+        // Informational only; see BlobProperties::VersionId.
         std::string Snapshot;
         BlobProperties Properties;
         // Set when listed with ListBlobsOptions::IncludeDeleted and the blob is soft-deleted.
@@ -372,7 +374,7 @@ namespace AVEVA::AzureClient::Models
         std::chrono::system_clock::time_point LastModified;
     };
 
-    // Lease results are shared by blob and container leases.
+    // Lease results for blob leases.
     struct RenewBlobLeaseResult
     {
         std::string LeaseId;

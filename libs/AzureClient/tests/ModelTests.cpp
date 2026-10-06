@@ -79,7 +79,6 @@ namespace
                 {"x-ms-server-encrypted", "maybe"},
                 {"x-ms-access-tier-inferred", "1"},
                 {"x-ms-blob-sequence-number", "-1"},
-                {"x-ms-blob-committed-block-count", "seven"},
                 {"x-ms-is-current-version", "yes"}})
         {
             ExpectMalformedExtendedHeaderIsRejected(name, value);
@@ -123,7 +122,6 @@ TEST(ModelTests, GetPropertiesParsesExtendedHeaders)
             {"x-ms-server-encrypted", "true"},
             {"x-ms-version-id", "2025-10-01T10:00:00.0000000Z"},
             {"x-ms-is-current-version", "false"},
-            {"x-ms-blob-committed-block-count", "7"},
             {"x-ms-blob-sequence-number", "42"}},
         ""};
 
@@ -142,7 +140,6 @@ TEST(ModelTests, GetPropertiesParsesExtendedHeaders)
     EXPECT_EQ(properties.ServerEncrypted, std::optional<bool>{true});
     EXPECT_EQ(properties.VersionId, "2025-10-01T10:00:00.0000000Z");
     EXPECT_EQ(properties.IsCurrentVersion, std::optional<bool>{false});
-    EXPECT_EQ(properties.CommittedBlockCount, std::optional<std::uint64_t>{7});
     EXPECT_EQ(properties.SequenceNumber, std::optional<std::uint64_t>{42});
 }
 
@@ -156,7 +153,6 @@ TEST(ModelTests, GetPropertiesLeavesAbsentExtendedFieldsUnset)
     EXPECT_EQ(properties.LeaseStatus, LeaseStatus::Unknown);
     EXPECT_FALSE(properties.ServerEncrypted.has_value());
     EXPECT_FALSE(properties.IsCurrentVersion.has_value());
-    EXPECT_FALSE(properties.CommittedBlockCount.has_value());
     EXPECT_FALSE(properties.SequenceNumber.has_value());
 }
 

@@ -188,7 +188,6 @@ namespace AVEVA::AzureClient::Private
     inline constexpr std::string_view XMsRequestIdHeaderName = "x-ms-request-id";
     inline constexpr std::string_view XMsErrorCodeHeaderName = "x-ms-error-code";
     inline constexpr std::string_view XMsContentCrc64HeaderName = "x-ms-content-crc64";
-    inline constexpr std::string_view XMsBlobConditionAppendPosHeaderName = "x-ms-blob-condition-appendpos";
     inline constexpr std::string_view XMsDeleteTypePermanentHeaderName = "x-ms-delete-type-permanent";
     inline constexpr std::string_view AuthorizationHeaderName = "Authorization";
     inline constexpr std::string_view XMsMetaHeaderPrefix = "x-ms-meta-";
@@ -256,7 +255,6 @@ namespace AVEVA::AzureClient::Private
 
     [[nodiscard]] std::span<char> AsChars(std::span<std::byte> bytes) noexcept;
     [[nodiscard]] std::string_view AsChars(std::span<const std::byte> bytes) noexcept;
-    [[nodiscard]] std::span<const std::byte> AsBytes(std::string_view value) noexcept;
     [[nodiscard]] std::string BytesToString(std::span<const std::byte> bytes);
     [[nodiscard]] std::string Base64Encode(std::span<const std::byte> bytes);
     [[nodiscard]] std::string UrlEncode(std::string_view value, std::string_view extraSafeChars);
@@ -281,7 +279,6 @@ namespace AVEVA::AzureClient::Private
 
     [[nodiscard]] Models::BlobProperties ParseBlobProperties(const HttpResponse& response);
     [[nodiscard]] Models::DeleteBlobResult ParseDeleteBlobResult(const HttpResponse& response);
-    [[nodiscard]] Models::DownloadBlobResult ParseDownloadBlobResult(HttpResponse& response);
     [[nodiscard]] Models::AcquireBlobLeaseResult ParseAcquireBlobLeaseResult(const HttpResponse& response);
     [[nodiscard]] Models::ReleaseBlobLeaseResult ParseReleaseBlobLeaseResult(const HttpResponse& response);
     [[nodiscard]] Models::RenewBlobLeaseResult ParseRenewBlobLeaseResult(const HttpResponse& response);
@@ -290,7 +287,6 @@ namespace AVEVA::AzureClient::Private
     [[nodiscard]] std::string FormatIso8601Utc(std::chrono::system_clock::time_point value);
     // Parses "YYYY-MM-DDThh:mm:ss[.fffffff]Z"; std::nullopt if malformed.
     [[nodiscard]] std::optional<std::chrono::system_clock::time_point> ParseIso8601Utc(std::string_view value) noexcept;
-    // "comp=blobs&where=...[&marker=...][&maxresults=...]" for Find Blobs by Tags.
 
     // Tag for StringLabel to give the CRC64 parameter of ApplyTransactionalHashes its own type.
     struct TransactionalCrc64Tag
@@ -653,15 +649,9 @@ namespace AVEVA::AzureClient::Private
         using Completion = std::move_only_function<void(std::expected<Response<TResult>, BlobStorageError>)>;
         using FetchPage = std::move_only_function<void(std::string marker, Completion pageCompletion)>;
         using MergePage = void (*)(TResult& accumulated, TResult page);
-        using CountItems = std::size_t (*)(const TResult&);
 
-        PageCollector(FetchPage fetchPage,
-            MergePage merge,
-            Completion completion,
-            CountItems countItems = nullptr,
-            std::optional<std::size_t> maxItems = std::nullopt)
-            : m_fetchPage(std::move(fetchPage)), m_merge(merge), m_completion(std::move(completion)),
-              m_countItems(countItems), m_maxItems(maxItems)
+        PageCollector(FetchPage fetchPage, MergePage merge, Completion completion)
+            : m_fetchPage(std::move(fetchPage)), m_merge(merge), m_completion(std::move(completion))
         {
         }
 
@@ -685,15 +675,6 @@ namespace AVEVA::AzureClient::Private
             }
             std::string nextMarker = page->Value().NextMarker;
             HttpResponse raw = std::move(*page).RawResponse();
-            // Checked before merging so an oversized page is never appended to the accumulator.
-            if (m_maxItems.has_value() && m_countItems != nullptr &&
-                m_countItems(m_accumulated) + m_countItems(page->Value()) > *m_maxItems)
-            {
-                BlobStorageError details = MakeClientError(std::make_error_code(std::errc::value_too_large),
-                    "The listing exceeded the configured MaxItems limit.");
-                m_completion(std::unexpected(std::move(details)));
-                return;
-            }
             if (m_firstPage)
             {
                 m_firstPage = false;
@@ -723,8 +704,6 @@ namespace AVEVA::AzureClient::Private
         FetchPage m_fetchPage;
         MergePage m_merge;
         Completion m_completion;
-        CountItems m_countItems;
-        std::optional<std::size_t> m_maxItems;
         TResult m_accumulated;
         std::unordered_set<std::string> m_markers;
         bool m_firstPage = true;
@@ -757,17 +736,10 @@ namespace AVEVA::AzureClient::Private
         ApplyBlobRequestConditions(request, conditions);
     }
 
-    // Lease requests (Lease Blob / Lease Container share the same headers and semantics).
+    // Lease requests (Lease Blob).
     [[nodiscard]] inline HttpRequest BuildLeaseRequest(const BlobTarget& target, std::string_view action)
     {
         HttpRequest request = BuildBlobRequest(target, HttpMethod::Put, "comp=lease");
-        AddHeader(request, XMsLeaseActionHeaderName, action);
-        return request;
-    }
-
-    [[nodiscard]] inline HttpRequest BuildLeaseRequest(const ContainerTarget& target, std::string_view action)
-    {
-        HttpRequest request = BuildContainerRequest(target, HttpMethod::Put, "comp=lease");
         AddHeader(request, XMsLeaseActionHeaderName, action);
         return request;
     }

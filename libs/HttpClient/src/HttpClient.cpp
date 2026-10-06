@@ -64,9 +64,7 @@ namespace AVEVA
                 // Invalid requests take the fresh-connection path, which fails them without closing a healthy
                 // pooled connection.
                 auto parsed = urls::parse_uri(request.GetUrl());
-                if (parsed && IsPoolableRequest(request, options) && parsed->has_authority() &&
-                    !parsed->host().empty() &&
-                    (parsed->scheme_id() == urls::scheme::http || parsed->scheme_id() == urls::scheme::https))
+                if (parsed && IsPoolableRequest(request, options) && Private::IsValidRequestUrl(*parsed))
                 {
                     const bool isTls = parsed->scheme_id() == urls::scheme::https;
                     if (isTls)

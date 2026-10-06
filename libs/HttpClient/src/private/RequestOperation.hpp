@@ -124,9 +124,7 @@ namespace AVEVA::Private
         bool BuildRequest(HttpRequest& request)
         {
             auto parsed = urls::parse_uri(request.GetUrl());
-            if (!parsed || !parsed->has_authority() || parsed->host().empty() || parsed->has_userinfo() ||
-                (parsed->scheme_id() != urls::scheme::http && parsed->scheme_id() != urls::scheme::https) ||
-                (parsed->has_port() && parsed->port_number() == 0))
+            if (!parsed || !Private::IsValidRequestUrl(*parsed))
             {
                 Fail(HttpClientError::InvalidUrl);
                 return false;
@@ -134,16 +132,6 @@ namespace AVEVA::Private
 
             const auto& url = *parsed;
             const std::string host = url.host_address();
-            if (std::any_of(host.begin(),
-                    host.end(),
-                    [](unsigned char character)
-            {
-                return character <= 32 || character >= 127;
-            }))
-            {
-                Fail(HttpClientError::InvalidUrl);
-                return false;
-            }
             const std::string method = ToString(request.GetMethod());
             if (method.empty() || request.GetMethod() == HttpMethod::Connect ||
                 (request.GetMethod() == HttpMethod::Trace && request.GetBodySize() != 0) ||

@@ -172,7 +172,6 @@ namespace AVEVA::AzureClient::Private
             std::string_view LeaseState;
             std::string_view LeaseDuration;
             std::string_view ServerEncrypted;
-            std::string_view CommittedBlockCount;
             std::string_view SequenceNumber;
         };
 
@@ -186,7 +185,6 @@ namespace AVEVA::AzureClient::Private
             .LeaseState = "x-ms-lease-state",
             .LeaseDuration = "x-ms-lease-duration",
             .ServerEncrypted = "x-ms-server-encrypted",
-            .CommittedBlockCount = "x-ms-blob-committed-block-count",
             .SequenceNumber = "x-ms-blob-sequence-number"};
 
         constexpr BlobPropertyNames XmlPropertyNames{.ContentEncoding = "Content-Encoding",
@@ -199,7 +197,6 @@ namespace AVEVA::AzureClient::Private
             .LeaseState = "LeaseState",
             .LeaseDuration = "LeaseDuration",
             .ServerEncrypted = "ServerEncrypted",
-            .CommittedBlockCount = "CommittedBlockCount",
             .SequenceNumber = "x-ms-blob-sequence-number"};
 
         // `get(name)` returns the raw value (empty when absent). Throws std::invalid_argument on malformed values.
@@ -218,8 +215,6 @@ namespace AVEVA::AzureClient::Private
             properties.LeaseState = ParseLeaseState(get(names.LeaseState));
             properties.LeaseDuration = ParseLeaseDurationType(get(names.LeaseDuration));
             properties.ServerEncrypted = ParseOptionalBool(get(names.ServerEncrypted), names.ServerEncrypted);
-            properties.CommittedBlockCount =
-                ParseOptionalUnsigned(get(names.CommittedBlockCount), names.CommittedBlockCount);
             properties.SequenceNumber = ParseOptionalUnsigned(get(names.SequenceNumber), names.SequenceNumber);
         }
 
@@ -931,31 +926,6 @@ namespace AVEVA::AzureClient::Private
         return result;
     }
 
-    // Moves the body out of `response` into `result.Content` instead of copying it, so the HttpResponse
-    // retained inside the caller's Response<T> does not also hold a duplicate of the blob. The transient
-    // std::string -> std::vector<std::byte> conversion is still a copy (the element types differ), but it is the
-    // only extra one and is freed when this function returns.
-    Models::DownloadBlobResult ParseDownloadBlobResult(HttpResponse& response)
-    {
-        Models::DownloadBlobResult result;
-        result.Properties = ParseBlobProperties(response);
-        // Prefer to populate ContentRange when present on the response
-        const std::string_view contentRangeHeader = FindHeaderValue(response, "Content-Range");
-        if (!contentRangeHeader.empty())
-        {
-            if (const auto parsed = ParseContentRange(contentRangeHeader); parsed.has_value())
-            {
-                Models::BlobByteRange r;
-                r.Offset = parsed->Start;
-                r.Length = (parsed->End - parsed->Start) + 1;
-                result.ContentRange = r;
-            }
-        }
-        // Move the response body into the result to avoid an extra persistent duplicate copy.
-        result.Content = std::move(response).GetBody();
-        return result;
-    }
-
     Models::AcquireBlobLeaseResult ParseAcquireBlobLeaseResult(const HttpResponse& response)
     {
         Models::AcquireBlobLeaseResult result;
@@ -1076,27 +1046,29 @@ namespace AVEVA::AzureClient::Private
 
         for (const XmlNode* block : GetChildrenByLocalName(*root, "PageRange"))
         {
+            const std::string start = GetChildTextOrEmpty(*block, "Start");
+            const std::string end = GetChildTextOrEmpty(*block, "End");
+            if (start.empty() || end.empty())
+            {
+                throw std::invalid_argument("PageRange requires both Start and End.");
+            }
+            const auto parsedStart = ParseUnsigned(start);
+            if (!parsedStart.has_value())
+            {
+                throw std::invalid_argument("PageRange Start must be an unsigned integer.");
+            }
+            const auto parsedEnd = ParseUnsigned(end);
+            if (!parsedEnd.has_value())
+            {
+                throw std::invalid_argument("PageRange End must be an unsigned integer.");
+            }
+            if (*parsedEnd < *parsedStart)
+            {
+                throw std::invalid_argument("PageRange End must not be less than Start.");
+            }
             Models::PageRange range;
-            if (const std::string start = GetChildTextOrEmpty(*block, "Start"); !start.empty())
-            {
-                const auto parsed = ParseUnsigned(start);
-                if (!parsed.has_value())
-                {
-                    throw std::invalid_argument("PageRange Start must be an unsigned integer.");
-                }
-
-                range.Start = *parsed;
-            }
-            if (const std::string end = GetChildTextOrEmpty(*block, "End"); !end.empty())
-            {
-                const auto parsed = ParseUnsigned(end);
-                if (!parsed.has_value())
-                {
-                    throw std::invalid_argument("PageRange End must be an unsigned integer.");
-                }
-
-                range.End = *parsed;
-            }
+            range.Start = *parsedStart;
+            range.End = *parsedEnd;
             result.PageRanges.push_back(range);
         }
         result.NextMarker = GetChildTextOrEmpty(*root, "NextMarker");

@@ -374,24 +374,6 @@ namespace AVEVA::AzureClient::Private
                        (response.GetStatus() == NotFound || response.GetStatus() == Gone);
             }
 
-            // After a connect failure nothing reached the server; any later transport error may follow a delivered request.
-            [[nodiscard]] static bool IsDeliveryUncertain(std::error_code error) noexcept
-            {
-                return !(error == HttpClientError::ResolveFailed || error == HttpClientError::ConnectFailed ||
-                         error == std::errc::connection_refused);
-            }
-
-            // An unconditional AppendBlock would append twice if replayed after the first copy was applied.
-            [[nodiscard]] bool IsSafeToReplay() const
-            {
-                if (m_request.GetUrl().find("comp=appendblock") == std::string::npos)
-                {
-                    return true;
-                }
-                return std::ranges::any_of(m_request.GetHeaders(),
-                    [](const HttpHeader& header) { return IEquals(header.GetName(), XMsBlobConditionAppendPosHeaderName); });
-            }
-
             void OnAttemptCompleteOnStrand(std::error_code error, HttpResponse response)
             {
                 if (m_cancelled)
@@ -400,7 +382,7 @@ namespace AVEVA::AzureClient::Private
                     return;
                 }
 
-                if (m_attempt >= m_maxAttempts || (error && IsDeliveryUncertain(error) && !IsSafeToReplay()) ||
+                if (m_attempt >= m_maxAttempts ||
                     !(IsRetriableFailure(error, response) || IsRetriableNotFoundOrGone(error, response)))
                 {
                     Finish(error, std::move(response));

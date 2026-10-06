@@ -288,8 +288,6 @@ LoggerImpl BlobFilesystemImpl::CreateLogger(const std::string& filePath, const i
 std::shared_ptr<LockFileImpl> BlobFilesystemImpl::LockFile(const std::string& filePath) {
     EnsureLiveness();
 
-    std::scoped_lock _(m_lockFilesMutex);
-
     const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
     const auto& container = GetContainer(prefix);
 
@@ -297,7 +295,10 @@ std::shared_ptr<LockFileImpl> BlobFilesystemImpl::LockFile(const std::string& fi
     BlobHelpers::CreateIfNotExists(*client, Configuration::PageBlob::DefaultSize);
     auto lockFile = std::make_shared<LockFileImpl>(m_runtime, std::move(client), Configuration::LeaseLength, m_logger,
                                                    std::string(realPath));
+    // Lock() can retry for the full lease length. The mutex must not be held across it, or the renewal thread
+    // would stall and the leases this Env already holds would expire.
     if (lockFile->Lock()) {
+        std::scoped_lock _(m_lockFilesMutex);
         m_locks.push_back(*lockFile);
         m_renewableLocks.push_back(lockFile);
         assert(lockFile->is_linked());

@@ -87,7 +87,8 @@ std::string PluginNameFor(const StorageInfo& primary, const std::optional<Storag
     static constexpr std::string_view digits = "0123456789abcdef";
     std::string name(Plugin::Name);
     name += '-';
-    for (const unsigned char c : canonical) {
+    for (const char ch : canonical) {
+        const auto c = static_cast<unsigned char>(ch);
         name += digits[c >> 4U];
         name += digits[c & 0x0FU];
     }

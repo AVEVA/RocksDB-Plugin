@@ -189,7 +189,7 @@ std::vector<char> AzureIntegrationTestBase::DownloadBlobData(size_t maxSize) {
     std::vector<char> data(std::min(static_cast<size_t>(actualSize), maxSize));
     if (!data.empty()) {
         AzureClient::DownloadBlobOptions options;
-        options.Range = AzureClient::Models::BlobByteRange{0, static_cast<uint64_t>(data.size())};
+        options.Range = AzureClient::Models::BlobByteRange{0, data.size()};
 
         const auto result =
             Unwrap(pageBlobClient

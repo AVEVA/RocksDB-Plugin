@@ -170,30 +170,6 @@ namespace
         return {};
     }
 
-    struct CompletedDownloadBlobResult
-    {
-        std::optional<std::error_code> ObservedError;
-        std::optional<AVEVA::AzureClient::Response<AVEVA::AzureClient::Models::DownloadBlobResult>> ObservedResponse;
-    };
-
-    [[nodiscard]] CompletedDownloadBlobResult CompleteDownloadBlobResultForNonSuccess(HttpResponse response)
-    {
-        using AVEVA::AzureClient::Models::DownloadBlobResult;
-        using AVEVA::AzureClient::Private::CompleteParsed;
-        using AVEVA::AzureClient::Private::ParseDownloadBlobResult;
-
-        CompletedDownloadBlobResult completed;
-        CompleteParsed<DownloadBlobResult>({},
-            std::move(response),
-            ParseDownloadBlobResult,
-            [&](std::error_code error, AVEVA::AzureClient::Response<DownloadBlobResult> parsedResponse)
-        {
-            completed.ObservedError = error;
-            completed.ObservedResponse = std::move(parsedResponse);
-        });
-        return completed;
-    }
-
     [[nodiscard]] bool IsWellFormedPercentEncodedText(std::string_view encoded)
     {
         for (std::size_t index = 0; index < encoded.size(); ++index)
@@ -359,53 +335,24 @@ TEST(BlobRequestHelpersTests, UrlEncode_EncodesReservedCharactersUtf8AndExtraSaf
     EXPECT_EQ(UrlEncode("a+b=c", "+"), "a+b%3Dc");
 }
 
-// Task 3 (Option A): ParseDownloadBlobResult must move the body out of the response into
-// Content rather than copying it, so the response no longer also retains a full duplicate of
-// the blob after parsing.
-TEST(BlobRequestHelpersTests, ParseDownloadBlobResult_MovesBodyOutOfResponseInsteadOfCopyingIt)
+TEST(BlobRequestHelpersTests, ParseGetPageRangesResultXml_ParsesRanges)
 {
-    using AVEVA::HttpResponse;
-    using AVEVA::AzureClient::Private::AsChars;
-    using AVEVA::AzureClient::Private::ParseDownloadBlobResult;
-
-    HttpResponse response{200, {{"Content-Length", "5"}}, "hello"};
-
-    const auto result = ParseDownloadBlobResult(response);
-
-    EXPECT_EQ(result.Content, "hello");
-    // The response's body was moved out, not copied: it must now be empty.
-    EXPECT_TRUE(response.GetBody().empty());
+    const auto result = ParseGetPageRangesResultXml(
+        "<PageList><PageRange><Start>0</Start><End>511</End></PageRange></PageList>");
+    ASSERT_EQ(result.PageRanges.size(), 1U);
+    EXPECT_EQ(result.PageRanges.at(0).Start, 0U);
+    EXPECT_EQ(result.PageRanges.at(0).End, 511U);
 }
 
-// Task 16 (Round 1 loose end): ParseDownloadBlobResult now takes HttpResponse& instead of
-// const HttpResponse&, since it moves the body out on success. CompleteParsed only ever invokes
-// the parser on the success path (!failure.Error) — on a non-2xx response the parser must not run
-// at all, and the resulting BlobStorageError must still be populated correctly from
-// DetermineBlobStorageFailure, exactly as it was before ParseDownloadBlobResult's signature
-// changed.
-TEST(BlobRequestHelpersTests, CompleteParsed_DownloadBlobResult_NonSuccessResponseSkipsParserAndReportsBlobStorageError)
+TEST(BlobRequestHelpersTests, ParseGetPageRangesResultXml_RejectsMissingOrReversedBounds)
 {
-    using AVEVA::HttpResponse;
-    using AVEVA::AzureClient::Response;
-    using AVEVA::AzureClient::Models::DownloadBlobResult;
-    using AVEVA::AzureClient::Private::CompleteParsed;
-    using AVEVA::AzureClient::Private::ParseDownloadBlobResult;
-
-    HttpResponse response{403,
-        {{"x-ms-request-id", "request-id"}},
-        R"(<Error><Code>AuthenticationFailed</Code><Message>Auth failed</Message></Error>)"};
-
-    const CompletedDownloadBlobResult completed = CompleteDownloadBlobResultForNonSuccess(std::move(response));
-
-    ASSERT_TRUE(completed.ObservedError.has_value());
-    EXPECT_EQ(*completed.ObservedError, make_error_code(BlobStorageErrorCode::AuthenticationFailed));
-    ASSERT_TRUE(completed.ObservedResponse.has_value());
-    // The parser must not have run: Content stays default-constructed (empty) rather than
-    // reflecting the error response's XML body.
-    EXPECT_TRUE(ValueOrFail(completed.ObservedResponse).Value().Content.empty());
-    ASSERT_TRUE(ValueOrFail(completed.ObservedResponse).Error().has_value());
-    EXPECT_EQ(ValueOrFail(ValueOrFail(completed.ObservedResponse).Error()).ErrorCode, "AuthenticationFailed");
-    EXPECT_EQ(ValueOrFail(ValueOrFail(completed.ObservedResponse).Error()).RequestId, "request-id");
+    for (const std::string_view xml : {"<PageList><PageRange><End>511</End></PageRange></PageList>",
+             "<PageList><PageRange><Start>0</Start></PageRange></PageList>",
+             "<PageList><PageRange/></PageList>",
+             "<PageList><PageRange><Start>512</Start><End>511</End></PageRange></PageList>"})
+    {
+        EXPECT_THROW(static_cast<void>(ParseGetPageRangesResultXml(xml)), std::invalid_argument) << xml;
+    }
 }
 
 TEST(BlobRequestHelpersTests, BuildAndParseHttpDateHeader_RoundTripsAndIgnoreGlobalLocale)

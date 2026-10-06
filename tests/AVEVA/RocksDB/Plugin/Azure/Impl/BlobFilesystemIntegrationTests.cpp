@@ -912,6 +912,25 @@ TEST_F(BlobFilesystemIntegrationTests, LockFile_AlreadyLocked_ThrowsException) {
     EXPECT_TRUE(m_filesystem->DeleteFile(lockFileName));
 }
 
+TEST_F(BlobFilesystemIntegrationTests, LockFile_ContendedAttempt_DoesNotStallRenewalOfHeldLeases) {
+    // Arrange - Hold a lock, then contend for it. The contended attempt retries 409s for up to the lease length,
+    // which must not block the renewal thread from renewing the lease that is already held.
+    std::string lockFileName = m_containerPrefix + "/contended-lock-" + m_blobName;
+    auto firstLock = m_filesystem->LockFile(lockFileName);
+    ASSERT_NE(nullptr, firstLock);
+
+    // Act
+    EXPECT_THROW({ auto secondLock = m_filesystem->LockFile(lockFileName); }, std::exception);
+
+    // Assert - The filesystem is still live and the first lease was not lost
+    EXPECT_EQ(1, m_filesystem->GetLeaseClientCount());
+    EXPECT_TRUE(m_filesystem->FileExists(lockFileName));
+
+    // Cleanup
+    m_filesystem->UnlockFile(*firstLock);
+    EXPECT_TRUE(m_filesystem->DeleteFile(lockFileName));
+}
+
 TEST_F(BlobFilesystemIntegrationTests, LockFile_AfterUnlock_SucceedsOnSecondAttempt) {
     // Arrange - Lock and then unlock a file
     std::string lockFileName = m_containerPrefix + "/relock-" + m_blobName;
