@@ -1,7 +1,6 @@
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 
-#include "AVEVA/AzureClient/AppendBlobClient.hpp"
 #include "AVEVA/AzureClient/BlobClient.hpp"
 #include "AVEVA/AzureClient/BlobOperationOptions.hpp"
 #include "AVEVA/AzureClient/BlockBlobClient.hpp"
@@ -331,13 +330,6 @@ namespace AVEVA::AzureClient
     PageBlobClient BlobContainerClient::GetPageBlobClient(std::string blobName) const
     {
         return PageBlobClient{*m_httpClient,
-            std::make_shared<const Private::BlobTarget>(
-                Private::MakeBlobTarget(m_target->Connection, m_target->ContainerName, std::move(blobName)))};
-    }
-
-    AppendBlobClient BlobContainerClient::GetAppendBlobClient(std::string blobName) const
-    {
-        return AppendBlobClient{*m_httpClient,
             std::make_shared<const Private::BlobTarget>(
                 Private::MakeBlobTarget(m_target->Connection, m_target->ContainerName, std::move(blobName)))};
     }

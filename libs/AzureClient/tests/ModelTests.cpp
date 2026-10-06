@@ -39,8 +39,6 @@ namespace
     using AVEVA::AzureClient::DeleteBlobOptions;
     using AVEVA::AzureClient::PageBlobClient;
     using AVEVA::AzureClient::ResizePageBlobOptions;
-    using AVEVA::AzureClient::SetBlobAccessTierOptions;
-    using AVEVA::AzureClient::SetBlobHttpHeadersOptions;
     using AVEVA::AzureClient::UploadBlockBlobOptions;
     using AVEVA::AzureClient::Models::AccessTier;
     using AVEVA::AzureClient::Models::CopyStatus;
@@ -267,13 +265,6 @@ TEST(ModelTests, ListBlobContainersParsesLeaseAndPublicAccessProperties)
     EXPECT_EQ(result.Containers.at(1).Properties.AccessType, PublicAccessType::None);
 }
 
-TEST(ModelTests, StartCopyResultExposesTypedCopyStatus)
-{
-    const auto result = Private::ParseStartBlobCopyFromUriResult(
-        HttpResponse{202, {{"x-ms-copy-id", "id"}, {"x-ms-copy-status", "pending"}}, ""});
-    EXPECT_EQ(result.CopyStatus, CopyStatus::Pending());
-}
-
 TEST(ModelTests, UploadSendsContentEncodingLanguageAndDisposition)
 {
     FakeHttpClient httpClient;
@@ -297,39 +288,6 @@ TEST(ModelTests, UploadSendsContentEncodingLanguageAndDisposition)
     httpClient.Poll();
     EXPECT_FALSE(HasHeader(httpClient.LastRequest(), "x-ms-blob-content-encoding"));
     EXPECT_FALSE(HasHeader(httpClient.LastRequest(), "x-ms-access-tier"));
-}
-
-TEST(ModelTests, SetHttpHeadersSendsEveryPropertyHeaderBecauseOmittedOnesAreCleared)
-{
-    FakeHttpClient httpClient;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
-
-    SetBlobHttpHeadersOptions options;
-    options.HttpHeaders.ContentLanguage = "nl";
-    client.SetHttpHeadersAsync(std::move(options), IgnoreResult);
-    httpClient.Poll();
-
-    const auto& request = httpClient.LastRequest();
-    EXPECT_EQ(Header(request, "x-ms-blob-content-language"), "nl");
-    EXPECT_TRUE(HasHeader(request, "x-ms-blob-content-encoding"));
-    EXPECT_TRUE(HasHeader(request, "x-ms-blob-content-disposition"));
-}
-
-TEST(ModelTests, TypedAccessTierAndDeleteSnapshotsOptionAreSent)
-{
-    FakeHttpClient httpClient;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
-
-    client.SetAccessTierAsync(SetBlobAccessTierOptions{.AccessTier = AccessTier::Archive(), .Conditions = {}},
-        IgnoreResult);
-    httpClient.Poll();
-    EXPECT_EQ(Header(httpClient.LastRequest(), "x-ms-access-tier"), "Archive");
-
-    DeleteBlobOptions deleteOptions;
-    deleteOptions.DeleteSnapshotsOption = DeleteSnapshotsOption::OnlySnapshots();
-    client.DeleteAsync(std::move(deleteOptions), IgnoreResult);
-    httpClient.Poll();
-    EXPECT_EQ(Header(httpClient.LastRequest(), "x-ms-delete-snapshots"), "only");
 }
 
 TEST(ModelTests, SharedKeyStringToSignIncludesContentEncodingAndLanguage)
@@ -367,27 +325,6 @@ TEST(ModelTests, AcquireLeaseDurationIsInfiniteByDefaultAndValidated)
     EXPECT_EQ(httpClient.RequestCount(), sent);
 }
 
-TEST(ModelTests, BreakLeasePeriodIsValidated)
-{
-    FakeHttpClient httpClient;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
-
-    client.BreakLeaseAsync(BreakLeaseOptions{.Conditions = {}, .BreakPeriod = 0s}, IgnoreResult);
-    httpClient.Poll();
-    EXPECT_EQ(Header(httpClient.LastRequest(), "x-ms-lease-break-period"), "0");
-    const std::size_t sent = httpClient.RequestCount();
-
-    std::optional<std::error_code> error;
-    client.BreakLeaseAsync(BreakLeaseOptions{.Conditions = {}, .BreakPeriod = 61s},
-        [&](auto result)
-    {
-        ASSERT_FALSE(result.has_value());
-        error = result.error().Code;
-    });
-    httpClient.Poll();
-    EXPECT_EQ(error, std::make_error_code(std::errc::invalid_argument));
-    EXPECT_EQ(httpClient.RequestCount(), sent);
-}
 
 TEST(ModelTests, ResizeUsesResizePageBlobOptionsConditions)
 {

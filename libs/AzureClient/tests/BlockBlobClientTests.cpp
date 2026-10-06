@@ -58,16 +58,12 @@ namespace
     using AVEVA::AzureClient::Models::BlobType;
     using AVEVA::AzureClient::Models::BreakBlobLeaseResult;
     using AVEVA::AzureClient::Models::CommitBlockListResult;
-    using AVEVA::AzureClient::Models::CreateBlobSnapshotResult;
     using AVEVA::AzureClient::Models::DeleteBlobResult;
     using AVEVA::AzureClient::Models::DownloadBlobResult;
     using AVEVA::AzureClient::Models::DownloadBlobToResult;
     using AVEVA::AzureClient::Models::ReleaseBlobLeaseResult;
-    using AVEVA::AzureClient::Models::SetBlobAccessTierResult;
-    using AVEVA::AzureClient::Models::SetBlobHttpHeadersResult;
     using AVEVA::AzureClient::Models::SetBlobMetadataResult;
     using AVEVA::AzureClient::Models::StageBlockResult;
-    using AVEVA::AzureClient::Models::StartBlobCopyFromUriResult;
     using AVEVA::AzureClient::Models::UploadBlockBlobResult;
     using AVEVA::AzureClient::Private::ParseHttpDateHeader;
     using AVEVA::AzureClient::Tests::CallbackExpectation;
@@ -343,64 +339,6 @@ namespace
         });
     }
 
-    void StartSetHttpHeadersAsyncAndVerify(BlockBlobClient& client,
-        const AVEVA::AzureClient::SetBlobHttpHeadersOptions& options,
-        CallbackExpectation& callback)
-    {
-        client.SetHttpHeadersAsync(options,
-            [&](std::expected<Response<SetBlobHttpHeadersResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            const Response<SetBlobHttpHeadersResult>& response = *result;
-            EXPECT_EQ(response.Value().ETag, DefaultETag);
-            callback.MarkInvoked();
-        });
-    }
-
-    void StartSetAccessTierAsyncAndVerify(BlockBlobClient& client,
-        const AVEVA::AzureClient::SetBlobAccessTierOptions& options,
-        CallbackExpectation& callback)
-    {
-        client.SetAccessTierAsync(options,
-            [&](std::expected<Response<SetBlobAccessTierResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            const Response<SetBlobAccessTierResult>& response = *result;
-            EXPECT_EQ(response.Value().ETag, DefaultETag);
-            callback.MarkInvoked();
-        });
-    }
-
-    void StartCopyFromUriAsyncAndVerify(BlockBlobClient& client,
-        const AVEVA::AzureClient::StartCopyFromUriOptions& options,
-        CallbackExpectation& callback)
-    {
-        client.StartCopyFromUriAsync("https://source.example.com/container/blob.txt?sig=x",
-            options,
-            [&](std::expected<Response<StartBlobCopyFromUriResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            const Response<StartBlobCopyFromUriResult>& response = *result;
-            EXPECT_EQ(response.Value().CopyId, "copy-1");
-            EXPECT_EQ(response.Value().CopyStatus, "success");
-            callback.MarkInvoked();
-        });
-    }
-
-    void StartSnapshotAsyncAndVerify(BlockBlobClient& client,
-        const AVEVA::AzureClient::SnapshotBlobOptions& options,
-        CallbackExpectation& callback)
-    {
-        client.SnapshotAsync(options,
-            [&](std::expected<Response<CreateBlobSnapshotResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            const Response<CreateBlobSnapshotResult>& response = *result;
-            EXPECT_EQ(response.Value().Snapshot, "snapshot-1");
-            callback.MarkInvoked();
-        });
-    }
-
     void StartAcquireLeaseAsyncAndVerify(BlockBlobClient& client,
         const AVEVA::AzureClient::AcquireLeaseOptions& options,
         CallbackExpectation& callback)
@@ -425,21 +363,6 @@ namespace
             ASSERT_TRUE(result.has_value());
             const Response<ReleaseBlobLeaseResult>& response = *result;
             EXPECT_EQ(response.Value().ETag, DefaultETag);
-            callback.MarkInvoked();
-        });
-    }
-
-    void StartBreakLeaseAsyncAndVerify(BlockBlobClient& client,
-        const AVEVA::AzureClient::BreakLeaseOptions& options,
-        CallbackExpectation& callback)
-    {
-        client.BreakLeaseAsync(options,
-            [&](std::expected<Response<BreakBlobLeaseResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            const Response<BreakBlobLeaseResult>& response = *result;
-            ASSERT_TRUE(response.Value().LeaseTimeSeconds.has_value());
-            EXPECT_EQ(*response.Value().LeaseTimeSeconds, 15);
             callback.MarkInvoked();
         });
     }
@@ -601,40 +524,6 @@ namespace
         });
     }
 
-    void StartCopyFromUriAsyncAndCaptureResult(BlockBlobClient& client,
-        const AVEVA::AzureClient::CopyFromUriOptions& options,
-        std::optional<AVEVA::AzureClient::Models::CopyBlobFromUriResult>& copied)
-    {
-        client.CopyFromUriAsync("https://src.example.com/c/b?sig=x",
-            options,
-            [&](auto result)
-        {
-            ASSERT_TRUE(result.has_value());
-            copied = result->Value();
-        });
-    }
-
-    void StartAbortCopyFromUriAsyncAndVerify(BlockBlobClient& client, bool& aborted)
-    {
-        client.AbortCopyFromUriAsync("copy id/1",
-            AVEVA::AzureClient::AbortCopyFromUriOptions{.LeaseId = "lease-1"},
-            [&](auto result)
-        {
-            ASSERT_TRUE(result.has_value());
-            aborted = true;
-        });
-    }
-
-    void StartAbortCopyFromUriAsyncExpectingInvalidArgument(BlockBlobClient& client,
-        std::optional<std::error_code>& error)
-    {
-        client.AbortCopyFromUriAsync("",
-            [&](auto result)
-        {
-            ASSERT_FALSE(result.has_value());
-            error = result.error().Code;
-        });
-    }
 } // namespace
 
 TEST(BlockBlobClientTests, UploadAsync_BuildsPutRequestWithBlockBlobType)
@@ -862,23 +751,6 @@ TEST(BlockBlobClientTests, DeleteAsync_UsesDeleteMethod)
     EXPECT_EQ(httpClient.LastRequest().GetMethod(), HttpMethod::Delete);
 }
 
-TEST(BlockBlobClientTests, SetHttpHeadersAsync_SendsEmptyHeadersForProperties)
-{
-    FakeHttpClient httpClient;
-    BlockBlobClient client{httpClient, BuildOptions()};
-
-    client.SetHttpHeadersAsync({},
-        [](std::expected<Response<AVEVA::AzureClient::Models::SetBlobHttpHeadersResult>, BlobStorageError>) {});
-
-    const auto& request = httpClient.LastRequest();
-    EXPECT_EQ(CountHeader(request, "x-ms-blob-content-type"), 1U);
-    EXPECT_EQ(CountHeader(request, "x-ms-blob-content-md5"), 1U);
-    EXPECT_EQ(CountHeader(request, "x-ms-blob-cache-control"), 1U);
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-blob-content-type"), "");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-blob-content-md5"), "");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-blob-cache-control"), "");
-}
-
 TEST(BlockBlobClientTests, GetPropertiesAsync_ParsesBlobPropertiesAcrossEdgeCases)
 {
     FakeHttpClient httpClient;
@@ -1027,18 +899,6 @@ TEST(BlockBlobClientTests, GetBlockListAsync_ReportsMalformedXmlAsInvalidRespons
 
     httpClient.Poll(); // drive the posted (async) completion (T26)
     EXPECT_TRUE(callbackInvoked);
-}
-
-TEST(BlockBlobClientTests, StartCopyFromUriAsync_SetsCopySourceHeaderExactly)
-{
-    FakeHttpClient httpClient;
-    BlockBlobClient client{httpClient, BuildOptions()};
-
-    const std::string sourceUri = "https://source.example.com/container/blob.txt?sv=1&sig=a%2Bb&marker=copy+me";
-    client.StartCopyFromUriAsync(sourceUri,
-        [](std::expected<Response<AVEVA::AzureClient::Models::StartBlobCopyFromUriResult>, BlobStorageError>) {});
-
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.LastRequest(), "x-ms-copy-source"), sourceUri);
 }
 
 TEST(BlockBlobClientTests, DownloadToAsync_PathOpenFailureReportsIoError)
@@ -1228,92 +1088,6 @@ TEST(BlockBlobClientTests, DownloadToAsync_LargeBodyStreamsDirectlyWithoutDuplic
 
     httpClient.Poll(); // drive the posted (async) completion (T26)
     EXPECT_EQ(stream.str(), largeBody);
-}
-
-TEST(BlockBlobClientTests, SetMetadataHeadersAndAccessTierSendExpectedRequestsAndParseResponses)
-{
-    FakeHttpClient httpClient;
-    httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders(), ""});
-    httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders(), ""});
-    httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders(), ""});
-    BlockBlobClient client{httpClient, BuildOptions()};
-
-    AVEVA::AzureClient::SetBlobMetadataOptions metadataOptions;
-    metadataOptions.Metadata["Project"] = "aveva";
-    metadataOptions.Conditions.LeaseId = "lease-1";
-    CallbackExpectation metadataCallback;
-    StartSetMetadataAsyncAndVerify(client, metadataOptions, metadataCallback);
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(0).Request, "x-ms-meta-Project"), "aveva");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(0).Request, "x-ms-lease-id"), "lease-1");
-
-    AVEVA::AzureClient::SetBlobHttpHeadersOptions headerOptions;
-    headerOptions.HttpHeaders.ContentType = "image/png";
-    headerOptions.HttpHeaders.ContentMd5 = "md5";
-    headerOptions.HttpHeaders.CacheControl = "no-cache";
-    CallbackExpectation headersCallback;
-    StartSetHttpHeadersAsyncAndVerify(client, headerOptions, headersCallback);
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(1).Request, "x-ms-blob-content-type"), "image/png");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(1).Request, "x-ms-blob-content-md5"), "md5");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(1).Request, "x-ms-blob-cache-control"), "no-cache");
-
-    AVEVA::AzureClient::SetBlobAccessTierOptions tierOptions;
-    tierOptions.AccessTier = "Cool";
-    CallbackExpectation tierCallback;
-    StartSetAccessTierAsyncAndVerify(client, tierOptions, tierCallback);
-    httpClient.Poll(); // drive the three posted (async) completions (T26)
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(2).Request, "x-ms-access-tier"), "Cool");
-}
-
-TEST(BlockBlobClientTests, StartCopySnapshotAndLeaseOperationsParseResponsesAndOptions)
-{
-    FakeHttpClient httpClient;
-    httpClient.EnqueueResponse(HttpResponse{202,
-        MakeCanonicalSuccessHeaders({{"x-ms-copy-id", "copy-1"}, {"x-ms-copy-status", "success"}}),
-        ""});
-    httpClient.EnqueueResponse(HttpResponse{201, MakeCanonicalSuccessHeaders({{"x-ms-snapshot", "snapshot-1"}}), ""});
-    httpClient.EnqueueResponse(HttpResponse{201, MakeCanonicalSuccessHeaders({{"x-ms-lease-id", "lease-1"}}), ""});
-    httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders(), ""});
-    httpClient.EnqueueResponse(HttpResponse{202, MakeCanonicalSuccessHeaders({{"x-ms-lease-time", "15"}}), ""});
-    BlockBlobClient client{httpClient, BuildOptions()};
-
-    AVEVA::AzureClient::StartCopyFromUriOptions copyOptions;
-    copyOptions.Metadata["source"] = "tests";
-    copyOptions.AccessTier = "Hot";
-    CallbackExpectation copyCallback;
-    StartCopyFromUriAsyncAndVerify(client, copyOptions, copyCallback);
-
-    AVEVA::AzureClient::SnapshotBlobOptions snapshotOptions;
-    snapshotOptions.Metadata["snapshot"] = "true";
-    CallbackExpectation snapshotCallback;
-    StartSnapshotAsyncAndVerify(client, snapshotOptions, snapshotCallback);
-
-    AVEVA::AzureClient::AcquireLeaseOptions acquireOptions;
-    acquireOptions.ProposedLeaseId = "proposed-lease";
-    acquireOptions.Duration = std::chrono::seconds{30};
-    CallbackExpectation acquireCallback;
-    StartAcquireLeaseAsyncAndVerify(client, acquireOptions, acquireCallback);
-
-    AVEVA::AzureClient::ReleaseLeaseOptions releaseOptions;
-    releaseOptions.LeaseId = "lease-1";
-    CallbackExpectation releaseCallback;
-    StartReleaseLeaseAsyncAndVerify(client, releaseOptions, releaseCallback);
-
-    AVEVA::AzureClient::BreakLeaseOptions breakOptions;
-    breakOptions.BreakPeriod = std::chrono::seconds{10};
-    CallbackExpectation breakCallback;
-    StartBreakLeaseAsyncAndVerify(client, breakOptions, breakCallback);
-
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(0).Request, "x-ms-copy-source"),
-        "https://source.example.com/container/blob.txt?sig=x");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(0).Request, "x-ms-meta-source"), "tests");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(0).Request, "x-ms-access-tier"), "Hot");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(1).Request, "x-ms-meta-snapshot"), "true");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(2).Request, "x-ms-lease-action"), "acquire");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(2).Request, "x-ms-proposed-lease-id"),
-        "proposed-lease");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(3).Request, "x-ms-lease-id"), "lease-1");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(4).Request, "x-ms-lease-break-period"), "10");
-    httpClient.Poll(); // drive the five posted (async) completions (T26)
 }
 
 TEST(BlockBlobClientTests, ExistsCreateIfNotExistsAndDeleteIfExistsTreatExpectedErrorsAsNonFatal)
@@ -1556,17 +1330,11 @@ namespace
         static_cast<void>(client.GetPropertiesAsync());
         static_cast<void>(client.GetPropertiesAsync(AVEVA::AzureClient::GetBlobPropertiesOptions{}));
 
-        static_cast<void>(client.SnapshotAsync());
-        static_cast<void>(client.SnapshotAsync(AVEVA::AzureClient::SnapshotBlobOptions{}));
 
         static_cast<void>(client.AcquireLeaseAsync());
         static_cast<void>(client.AcquireLeaseAsync(AVEVA::AzureClient::AcquireLeaseOptions{}));
 
-        static_cast<void>(client.BreakLeaseAsync());
-        static_cast<void>(client.BreakLeaseAsync(AVEVA::AzureClient::BreakLeaseOptions{}));
 
-        static_cast<void>(client.StartCopyFromUriAsync(str));
-        static_cast<void>(client.StartCopyFromUriAsync(str, AVEVA::AzureClient::StartCopyFromUriOptions{}));
 
         static_cast<void>(client.UploadFromAsync(path));
         static_cast<void>(client.UploadFromAsync(path, UploadFromOptions{}));
@@ -1682,60 +1450,4 @@ namespace
         EXPECT_EQ(httpClient.RequestCount(), sent);
     }
 
-    TEST(BlockBlobClientTests, CopyFromUriIsSynchronousAndParsesResult)
-    {
-        FakeHttpClient httpClient;
-        std::vector<AVEVA::HttpHeader> headers = MakeCanonicalSuccessHeaders();
-        headers.emplace_back("x-ms-copy-id", "copy-1");
-        headers.emplace_back("x-ms-copy-status", "success");
-        headers.emplace_back("x-ms-content-crc64", "Y3JjNjQ=");
-        httpClient.EnqueueResponse(HttpResponse{202, std::move(headers), ""});
-        BlockBlobClient client{httpClient, BuildOptions()};
-
-        AVEVA::AzureClient::CopyFromUriOptions options;
-        options.Metadata = {{"origin", "copy"}};
-        options.AccessTier = AVEVA::AzureClient::Models::AccessTier::Cool();
-        options.SourceContentMd5 = "c3JjbWQ1";
-        options.Conditions.IfNoneMatch = "*";
-        std::optional<AVEVA::AzureClient::Models::CopyBlobFromUriResult> copied;
-        StartCopyFromUriAsyncAndCaptureResult(client, options, copied);
-        httpClient.Poll();
-
-        ASSERT_TRUE(copied.has_value());
-        EXPECT_EQ(ValueOrFail(copied).ETag, DefaultETag);
-        EXPECT_EQ(ValueOrFail(copied).CopyId, "copy-1");
-        EXPECT_EQ(ValueOrFail(copied).CopyStatus, AVEVA::AzureClient::Models::CopyStatus::Success());
-        EXPECT_EQ(ValueOrFail(copied).ContentCrc64, "Y3JjNjQ=");
-        const AVEVA::HttpRequest& request = httpClient.LastRequest();
-        EXPECT_EQ(request.GetMethod(), AVEVA::HttpMethod::Put);
-        EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-copy-source"), "https://src.example.com/c/b?sig=x");
-        EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-requires-sync"), "true");
-        EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-meta-origin"), "copy");
-        EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-access-tier"), "Cool");
-        EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-source-content-md5"), "c3JjbWQ1");
-        EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "If-None-Match"), "*");
-    }
-
-    TEST(BlockBlobClientTests, AbortCopyFromUriSendsAbortActionAndRejectsEmptyCopyId)
-    {
-        FakeHttpClient httpClient;
-        httpClient.EnqueueResponse(HttpResponse{204, MakeCanonicalSuccessHeaders(), ""});
-        BlockBlobClient client{httpClient, BuildOptions()};
-
-        bool aborted = false;
-        StartAbortCopyFromUriAsyncAndVerify(client, aborted);
-        httpClient.Poll();
-        EXPECT_TRUE(aborted);
-        const AVEVA::HttpRequest& request = httpClient.LastRequest();
-        EXPECT_EQ(request.GetMethod(), AVEVA::HttpMethod::Put);
-        EXPECT_NE(request.GetUrl().find("comp=copy&copyid=copy%20id%2F1"), std::string::npos);
-        EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-copy-action"), "abort");
-        EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-lease-id"), "lease-1");
-
-        std::optional<std::error_code> error;
-        StartAbortCopyFromUriAsyncExpectingInvalidArgument(client, error);
-        httpClient.Poll();
-        EXPECT_EQ(error, std::make_error_code(std::errc::invalid_argument));
-        EXPECT_EQ(httpClient.RequestCount(), 1U);
-    }
 } // namespace

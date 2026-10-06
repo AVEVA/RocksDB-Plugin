@@ -1,6 +1,5 @@
 #pragma once
 
-#include <AVEVA/AzureClient/AppendBlobClient.hpp>
 #include <AVEVA/AzureClient/BlobClient.hpp>
 #include <AVEVA/AzureClient/BlobClientOptions.hpp>
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>

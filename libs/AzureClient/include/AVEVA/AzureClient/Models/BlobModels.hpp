@@ -450,54 +450,6 @@ namespace AVEVA::AzureClient::Models
         std::chrono::system_clock::time_point LastModified;
     };
 
-    struct SetBlobHttpHeadersResult
-    {
-        std::string ETag;
-        std::chrono::system_clock::time_point LastModified;
-    };
-
-    struct SetBlobAccessTierResult
-    {
-        std::string ETag;
-        std::chrono::system_clock::time_point LastModified;
-    };
-
-    struct StartBlobCopyFromUriResult
-    {
-        std::string CopyId;
-        Models::CopyStatus CopyStatus;
-    };
-
-    struct CopyBlobFromUriResult
-    {
-        std::string ETag;
-        std::chrono::system_clock::time_point LastModified;
-        std::string CopyId;
-        Models::CopyStatus CopyStatus;
-        std::string ContentMd5;
-        std::string ContentCrc64;
-    };
-
-    struct AbortCopyBlobFromUriResult
-    {
-        std::string RequestId;
-    };
-
-    struct GetBlobTagsResult
-    {
-        BlobTags Tags;
-    };
-
-    struct SetBlobTagsResult
-    {
-        std::string RequestId;
-    };
-
-    struct UndeleteBlobResult
-    {
-        std::string RequestId;
-    };
-
     // One match of Find Blobs by Tags; Tags holds only the tags referenced by the filter expression.
     struct TaggedBlobItem
     {
@@ -511,13 +463,6 @@ namespace AVEVA::AzureClient::Models
         std::vector<TaggedBlobItem> Blobs;
         std::string Where;
         std::string NextMarker;
-    };
-
-    struct CreateBlobSnapshotResult
-    {
-        std::string Snapshot;
-        std::string ETag;
-        std::chrono::system_clock::time_point LastModified;
     };
 
     struct AcquireBlobLeaseResult
@@ -590,29 +535,6 @@ namespace AVEVA::AzureClient::Models
         std::vector<PageRange> PageRanges;
         // Always empty on a completed GetPageRangesAsync result; every page has been merged.
         std::string NextMarker;
-    };
-
-    struct CreateAppendBlobResult
-    {
-        std::string ETag;
-        std::chrono::system_clock::time_point LastModified;
-    };
-
-    struct AppendBlockResult
-    {
-        std::string ETag;
-        std::chrono::system_clock::time_point LastModified;
-        // Offset at which the block was committed (x-ms-blob-append-offset).
-        std::uint64_t AppendOffset = 0;
-        // Number of committed blocks after the append (x-ms-blob-committed-block-count).
-        std::uint64_t CommittedBlockCount = 0;
-    };
-
-    struct SealAppendBlobResult
-    {
-        std::string ETag;
-        std::chrono::system_clock::time_point LastModified;
-        bool IsSealed = false;
     };
 
     std::string EncodeBlockId(std::uint64_t index);

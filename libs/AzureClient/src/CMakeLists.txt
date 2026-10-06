@@ -9,7 +9,6 @@ find_package(boost_uuid CONFIG REQUIRED)
 find_package(LibXml2 CONFIG REQUIRED)
 
 add_library(aveva-azure-client
-    AppendBlobClient.cpp
     BlobClient.cpp
     BlobClientOptions.cpp
     BlobContainerClient.cpp
@@ -48,7 +47,6 @@ target_sources(aveva-azure-client
     BASE_DIRS
         "${base-include-dir}"
     FILES
-        "${base-include-dir}/AVEVA/AzureClient/AppendBlobClient.hpp"
         "${base-include-dir}/AVEVA/AzureClient/AzureClient.hpp"
         "${base-include-dir}/AVEVA/AzureClient/BlobClient.hpp"
         "${base-include-dir}/AVEVA/AzureClient/BlobClientOptions.hpp"

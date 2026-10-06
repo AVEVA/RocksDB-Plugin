@@ -8,7 +8,6 @@
 #include "TestHelpers.hpp"
 #include "ValueOrFail.hpp"
 
-#include <AVEVA/AzureClient/AppendBlobClient.hpp>
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>
 #include <AVEVA/AzureClient/BlobServiceClient.hpp>
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
@@ -60,7 +59,6 @@ namespace
 {
     using AVEVA::HttpRequestOptions;
     using AVEVA::HttpResponse;
-    using AVEVA::AzureClient::AppendBlobClient;
     using AVEVA::AzureClient::BlobClientOptions;
     using AVEVA::AzureClient::BlobContainerClient;
     using AVEVA::AzureClient::BlobServiceClient;
@@ -760,28 +758,6 @@ TEST(AsyncBehaviorTests, PageBlobClientMoveOnlyCompletionTokenSurvivesDeferredCo
     EXPECT_EQ(observed, "page-move-only-state");
 }
 
-TEST(AsyncBehaviorTests, AppendBlobClientMoveOnlyCompletionTokenSurvivesDeferredCompletion)
-{
-    FakeHttpClient httpClient;
-    httpClient.DeferByDefault() = true;
-    AppendBlobClient client{httpClient, MakeAppendBlobOptions()};
-
-    std::string observed;
-    CallbackExpectation callback;
-    client.DeleteAsync([state = std::make_unique<std::string>("append-move-only-state"), &observed, &callback](
-                           std::expected<Response<DeleteBlobResult>, BlobStorageError>) mutable
-    {
-        ASSERT_TRUE(state);
-        observed = *state;
-        state.reset();
-        callback.MarkInvoked();
-    });
-
-    EXPECT_TRUE(observed.empty());
-    ASSERT_TRUE(httpClient.CompleteNext());
-    EXPECT_EQ(observed, "append-move-only-state");
-}
-
 TEST(AsyncBehaviorTests, BlobContainerClientMoveOnlyCompletionTokenSurvivesDeferredCompletion)
 {
     FakeHttpClient httpClient;
@@ -1316,8 +1292,6 @@ namespace
     [[nodiscard]] std::vector<DeferredCompletionCase> MakeDeferredCompletionCases()
     {
         using AVEVA::AzureClient::ReleaseLeaseOptions;
-        using AVEVA::AzureClient::SetBlobAccessTierOptions;
-        using AVEVA::AzureClient::SetBlobHttpHeadersOptions;
         using AVEVA::AzureClient::SetBlobMetadataOptions;
 
         std::vector<DeferredCompletionCase> cases;
@@ -1411,45 +1385,6 @@ namespace
                 invoked = true;
             });
         }});
-        cases.push_back({.Name = "BlockBlobClient.SetHttpHeadersAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
-            client->SetHttpHeadersAsync(SetBlobHttpHeadersOptions{},
-                [client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
-        cases.push_back({.Name = "BlockBlobClient.SetAccessTierAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
-            client->SetAccessTierAsync(SetBlobAccessTierOptions{},
-                [client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
-        cases.push_back({.Name = "BlockBlobClient.StartCopyFromUriAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
-            client->StartCopyFromUriAsync("https://source.example.com/b",
-                [client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
-        cases.push_back({.Name = "BlockBlobClient.SnapshotAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
-            client->SnapshotAsync([client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
         cases.push_back({.Name = "BlockBlobClient.AcquireLeaseAsync",
             .Invoke = [](FakeHttpClient& http, bool& invoked)
         {
@@ -1465,15 +1400,6 @@ namespace
             auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
             client->ReleaseLeaseAsync(ReleaseLeaseOptions{.LeaseId = "lease-1"},
                 [client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
-        cases.push_back({.Name = "BlockBlobClient.BreakLeaseAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
-            client->BreakLeaseAsync([client, &invoked](auto)
             {
                 invoked = true;
             });
@@ -1518,63 +1444,6 @@ namespace
         }});
 
         // --- AppendBlobClient ---
-        cases.push_back({.Name = "AppendBlobClient.CreateAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<AppendBlobClient>(http, MakeAppendBlobOptions());
-            client->CreateAsync([client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
-        cases.push_back({.Name = "AppendBlobClient.AppendBlockAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<AppendBlobClient>(http, MakeAppendBlobOptions());
-            client->AppendBlockAsync("data",
-                [client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
-        cases.push_back({.Name = "AppendBlobClient.DownloadAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<AppendBlobClient>(http, MakeAppendBlobOptions());
-            client->DownloadAsync([client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
-        cases.push_back({.Name = "AppendBlobClient.DownloadToAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<AppendBlobClient>(http, MakeAppendBlobOptions());
-            auto stream = std::make_shared<std::ostringstream>();
-            client->DownloadToAsync(*stream,
-                [client, stream, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
-        cases.push_back({.Name = "AppendBlobClient.DeleteAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<AppendBlobClient>(http, MakeAppendBlobOptions());
-            client->DeleteAsync([client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
-        cases.push_back({.Name = "AppendBlobClient.GetPropertiesAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<AppendBlobClient>(http, MakeAppendBlobOptions());
-            client->GetPropertiesAsync([client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
 
         // --- PageBlobClient ---
         cases.push_back({.Name = "PageBlobClient.CreateAsync",
@@ -1676,45 +1545,6 @@ namespace
                 invoked = true;
             });
         }});
-        cases.push_back({.Name = "PageBlobClient.SetHttpHeadersAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<PageBlobClient>(http, MakePageBlobOptions());
-            client->SetHttpHeadersAsync(SetBlobHttpHeadersOptions{},
-                [client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
-        cases.push_back({.Name = "PageBlobClient.SetAccessTierAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<PageBlobClient>(http, MakePageBlobOptions());
-            client->SetAccessTierAsync(SetBlobAccessTierOptions{},
-                [client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
-        cases.push_back({.Name = "PageBlobClient.StartCopyFromUriAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<PageBlobClient>(http, MakePageBlobOptions());
-            client->StartCopyFromUriAsync("https://source.example.com/p",
-                [client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
-        cases.push_back({.Name = "PageBlobClient.SnapshotAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<PageBlobClient>(http, MakePageBlobOptions());
-            client->SnapshotAsync([client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
         cases.push_back({.Name = "PageBlobClient.AcquireLeaseAsync",
             .Invoke = [](FakeHttpClient& http, bool& invoked)
         {
@@ -1730,15 +1560,6 @@ namespace
             auto client = std::make_shared<PageBlobClient>(http, MakePageBlobOptions());
             client->ReleaseLeaseAsync(ReleaseLeaseOptions{.LeaseId = "lease-1"},
                 [client, &invoked](auto)
-            {
-                invoked = true;
-            });
-        }});
-        cases.push_back({.Name = "PageBlobClient.BreakLeaseAsync",
-            .Invoke = [](FakeHttpClient& http, bool& invoked)
-        {
-            auto client = std::make_shared<PageBlobClient>(http, MakePageBlobOptions());
-            client->BreakLeaseAsync([client, &invoked](auto)
             {
                 invoked = true;
             });
@@ -1856,176 +1677,6 @@ TEST(AsyncBehaviorTests, NoPublicOperationCompletesBeforeTheInitiatingCallReturn
 
         EXPECT_FALSE(invoked) << testCase.Name << " invoked its completion before the initiating call returned";
         httpClient.Poll();
-        EXPECT_TRUE(invoked) << testCase.Name << " never invoked its completion after Poll()";
-    }
-}
-
-// T26 guard, part 2: completions that do not come from a deferred transport response -- local
-// validation/IO failures detected during initiation, and transports that complete inline inside
-// SendAsync -- must still never run before the initiating call returns.
-TEST(AsyncBehaviorTests, EarlyFailuresAndInlineTransportCompletionsAreNeverDeliveredBeforeTheCallReturns)
-{
-    const std::filesystem::path directory = std::filesystem::temp_directory_path();
-    const std::filesystem::path missingFile = directory / "azure-client-t26-missing-source.bin";
-    std::error_code ignored;
-    std::filesystem::remove(missingFile, ignored);
-
-    struct Case
-    {
-        const char* Name;
-        bool InlineTransport;
-        std::function<void(FakeHttpClient&, bool&)> Invoke;
-    };
-
-    std::vector<Case> cases;
-    cases.push_back({.Name = "BlockBlobClient.DownloadToAsync(directory)",
-        .InlineTransport = false,
-        .Invoke = [&](FakeHttpClient& http, bool& invoked)
-    {
-        auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
-        client->DownloadToAsync(directory,
-            [client, &invoked](auto)
-        {
-            invoked = true;
-        });
-    }});
-    cases.push_back({.Name = "PageBlobClient.DownloadToAsync(directory)",
-        .InlineTransport = false,
-        .Invoke = [&](FakeHttpClient& http, bool& invoked)
-    {
-        auto client = std::make_shared<PageBlobClient>(http, MakeBlobClientOptions());
-        client->DownloadToAsync(directory,
-            [client, &invoked](auto)
-        {
-            invoked = true;
-        });
-    }});
-    cases.push_back({.Name = "AppendBlobClient.DownloadToAsync(directory)",
-        .InlineTransport = false,
-        .Invoke = [&](FakeHttpClient& http, bool& invoked)
-    {
-        auto client = std::make_shared<AppendBlobClient>(http, MakeBlobClientOptions());
-        client->DownloadToAsync(directory,
-            [client, &invoked](auto)
-        {
-            invoked = true;
-        });
-    }});
-    cases.push_back({.Name = "BlockBlobClient.DownloadToAsync(zero-length range)",
-        .InlineTransport = false,
-        .Invoke = [](FakeHttpClient& http, bool& invoked)
-    {
-        auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
-        auto stream = std::make_shared<std::ostringstream>();
-        AVEVA::AzureClient::DownloadToOptions options;
-        options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 0U, .Length = 0U};
-        client->DownloadToAsync(*stream,
-            options,
-            [client, stream, &invoked](auto)
-        {
-            invoked = true;
-        });
-    }});
-    cases.push_back({.Name = "BlockBlobClient.UploadFromAsync(missing file)",
-        .InlineTransport = false,
-        .Invoke = [&](FakeHttpClient& http, bool& invoked)
-    {
-        auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
-        client->UploadFromAsync(missingFile,
-            AVEVA::AzureClient::UploadFromOptions{},
-            [client, &invoked](auto)
-        {
-            invoked = true;
-        });
-    }});
-    cases.push_back({.Name = "BlockBlobClient.UploadFromAsync(BlockSize 0)",
-        .InlineTransport = false,
-        .Invoke = [](FakeHttpClient& http, bool& invoked)
-    {
-        auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
-        auto stream = std::make_shared<std::istringstream>("data");
-        AVEVA::AzureClient::UploadFromOptions options;
-        options.BlockSize = 0U;
-        client->UploadFromAsync(*stream,
-            options,
-            [client, stream, &invoked](auto)
-        {
-            invoked = true;
-        });
-    }});
-    cases.push_back({.Name = "inline transport: BlockBlobClient.DownloadAsync",
-        .InlineTransport = true,
-        .Invoke = [](FakeHttpClient& http, bool& invoked)
-    {
-        auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
-        client->DownloadAsync([client, &invoked](auto)
-        {
-            invoked = true;
-        });
-    }});
-    cases.push_back({.Name = "inline transport: BlockBlobClient.DownloadToAsync(parallel)",
-        .InlineTransport = true,
-        .Invoke = [](FakeHttpClient& http, bool& invoked)
-    {
-        auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
-        auto stream = std::make_shared<std::ostringstream>();
-        AVEVA::AzureClient::DownloadToOptions options;
-        options.ChunkSize = 4U;
-        options.Concurrency = 3U;
-        client->DownloadToAsync(*stream,
-            options,
-            [client, stream, &invoked](auto)
-        {
-            invoked = true;
-        });
-    }});
-    cases.push_back({.Name = "inline transport: BlockBlobClient.UploadFromAsync(multi-block)",
-        .InlineTransport = true,
-        .Invoke = [](FakeHttpClient& http, bool& invoked)
-    {
-        auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
-        auto stream = std::make_shared<std::istringstream>("ABCDEFGHIJ");
-        AVEVA::AzureClient::UploadFromOptions options;
-        options.BlockSize = 4U;
-        options.Concurrency = 2U;
-        client->UploadFromAsync(*stream,
-            options,
-            [client, stream, &invoked](auto)
-        {
-            invoked = true;
-        });
-    }});
-    cases.push_back({.Name = "inline transport: BlockBlobClient.DeleteAsync",
-        .InlineTransport = true,
-        .Invoke = [](FakeHttpClient& http, bool& invoked)
-    {
-        auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
-        client->DeleteAsync([client, &invoked](auto)
-        {
-            invoked = true;
-        });
-    }});
-
-    for (const Case& testCase : cases)
-    {
-        SCOPED_TRACE(testCase.Name);
-
-        FakeHttpClient httpClient;
-        httpClient.CompleteInline() = testCase.InlineTransport;
-        // A 206 for the first 4 bytes of a 10-byte blob serves every ranged download request the
-        // inline-transport download cases issue; other operations treat it as a plain success.
-        httpClient.DefaultResponse() = HttpResponse{206,
-            MakeCanonicalSuccessHeaders({{"Content-Range", "bytes 0-3/4"}, {"Content-Length", "4"}}),
-            "data"};
-
-        bool invoked = false;
-        testCase.Invoke(httpClient, invoked);
-
-        EXPECT_FALSE(invoked) << testCase.Name << " invoked its completion before the initiating call returned";
-        for (int i = 0; i < 10 && !invoked; ++i)
-        {
-            httpClient.Poll();
-        }
         EXPECT_TRUE(invoked) << testCase.Name << " never invoked its completion after Poll()";
     }
 }

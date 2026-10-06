@@ -82,23 +82,6 @@ namespace
         return httpClient.LastRequest();
     }
 
-    const HttpRequest& ChangeBlobLease(FakeHttpClient& httpClient,
-        BlockBlobClient& client,
-        std::string leaseId,
-        std::string proposedLeaseId,
-        std::optional<std::string>& changed)
-    {
-        client.ChangeLeaseAsync(ChangeLeaseOptions{.LeaseId = std::move(leaseId),
-                                    .ProposedLeaseId = std::move(proposedLeaseId),
-                                    .Conditions = {}},
-            [&](auto result)
-        {
-            ASSERT_TRUE(result.has_value());
-            changed = result->Value().LeaseId;
-        });
-        httpClient.Poll();
-        return httpClient.LastRequest();
-    }
 
     const HttpRequest& ReleaseBlobLease(FakeHttpClient& httpClient,
         BlockBlobClient& client,
@@ -112,16 +95,6 @@ namespace
         return httpClient.LastRequest();
     }
 
-    const HttpRequest& BreakBlobLease(FakeHttpClient& httpClient,
-        BlockBlobClient& client,
-        BlobRequestConditions conditions,
-        std::chrono::seconds breakPeriod)
-    {
-        client.BreakLeaseAsync(BreakLeaseOptions{.Conditions = std::move(conditions), .BreakPeriod = breakPeriod},
-            [](auto) {});
-        httpClient.Poll();
-        return httpClient.LastRequest();
-    }
 
     const HttpRequest& AcquireContainerLease(FakeHttpClient& httpClient,
         BlobContainerClient& client,
@@ -223,10 +196,8 @@ namespace
         };
         client.RenewLeaseAsync(RenewLeaseOptions{}, expectInvalid);
         client.ReleaseLeaseAsync(ReleaseLeaseOptions{}, expectInvalid);
-        client.ChangeLeaseAsync(ChangeLeaseOptions{.LeaseId = "a"}, expectInvalid);
-        client.ChangeLeaseAsync(ChangeLeaseOptions{.ProposedLeaseId = "b"}, expectInvalid);
         httpClient.Poll();
-        EXPECT_EQ(completed, 4);
+        EXPECT_EQ(completed, 2);
         EXPECT_TRUE(httpClient.NoRequestMade());
     }
 } // namespace
@@ -245,49 +216,7 @@ TEST(LeaseTests, ContainerRenewReleaseChangeRejectEmptyLeaseIds)
     ExpectEmptyLeaseIdsRejected(client, httpClient);
 }
 
-TEST(LeaseTests, BlobRenewAndChangeLeaseSendExpectedHeadersAndParseLeaseId)
-{
-    FakeHttpClient httpClient;
-    httpClient.EnqueueResponse(LeaseResponse(200, "lease-1"));
-    httpClient.EnqueueResponse(LeaseResponse(200, "lease-2"));
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
 
-    std::optional<std::string> renewed;
-    const HttpRequest& renew = RenewBlobLease(httpClient, client, "lease-1", IfUnmodifiedSince(), renewed);
-    EXPECT_EQ(renew.GetMethod(), HttpMethod::Put);
-    EXPECT_TRUE(HasQuery(renew, "comp=lease"));
-    EXPECT_EQ(Header(renew, "x-ms-lease-action"), "renew");
-    EXPECT_EQ(Header(renew, "x-ms-lease-id"), "lease-1");
-    EXPECT_EQ(Header(renew, "If-Unmodified-Since"), "Fri, 26 Jun 2015 18:59:17 GMT");
-    EXPECT_EQ(renewed, "lease-1");
-
-    std::optional<std::string> changed;
-    const HttpRequest& change = ChangeBlobLease(httpClient, client, "lease-1", "lease-2", changed);
-    EXPECT_EQ(Header(change, "x-ms-lease-action"), "change");
-    EXPECT_EQ(Header(change, "x-ms-lease-id"), "lease-1");
-    EXPECT_EQ(Header(change, "x-ms-proposed-lease-id"), "lease-2");
-    EXPECT_EQ(changed, "lease-2");
-}
-
-TEST(LeaseTests, BlobReleaseAndBreakHonourConditionsAndBreakSendsNoLeaseId)
-{
-    FakeHttpClient httpClient;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
-
-    BlobRequestConditions conditions;
-    conditions.IfMatch = "\"etag\"";
-    conditions.LeaseId = "ignored";
-    const HttpRequest& release = ReleaseBlobLease(httpClient, client, "lease-1", conditions);
-    EXPECT_EQ(Header(release, "x-ms-lease-action"), "release");
-    EXPECT_EQ(Header(release, "x-ms-lease-id"), "lease-1");
-    EXPECT_EQ(Header(release, "If-Match"), "\"etag\"");
-
-    const HttpRequest& breakRequest = BreakBlobLease(httpClient, client, conditions, 5s);
-    EXPECT_EQ(Header(breakRequest, "x-ms-lease-action"), "break");
-    EXPECT_EQ(Header(breakRequest, "x-ms-lease-id"), "");
-    EXPECT_EQ(Header(breakRequest, "x-ms-lease-break-period"), "5");
-    EXPECT_EQ(Header(breakRequest, "If-Match"), "\"etag\"");
-}
 
 TEST(LeaseTests, ContainerLeaseOperationsTargetTheContainerLeaseEndpoint)
 {

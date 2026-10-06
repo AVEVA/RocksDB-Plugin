@@ -7,7 +7,7 @@
 #include "TestFixtures.hpp"
 #include "ValueOrFail.hpp"
 
-#include <AVEVA/AzureClient/AppendBlobClient.hpp>
+#include <AVEVA/AzureClient/PageBlobClient.hpp>
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
 #include <AVEVA/AzureClient/BlockBlobClient.hpp>
 
@@ -36,7 +36,7 @@ namespace
 {
     using AVEVA::HttpRequestOptions;
     using AVEVA::HttpResponse;
-    using AVEVA::AzureClient::AppendBlobClient;
+    using AVEVA::AzureClient::PageBlobClient;
     using AVEVA::AzureClient::BlobClientOptions;
     using AVEVA::AzureClient::BlobStorageError;
     using AVEVA::AzureClient::BlockBlobClient;
@@ -102,7 +102,7 @@ namespace
         VerifySequentialChunksETag(result.value());
     }
 
-    void StartDownloadToAndVerifySequentialChunks(AppendBlobClient& client,
+    void StartDownloadToAndVerifySequentialChunks(PageBlobClient& client,
         std::ostringstream& out,
         DownloadToOptions options,
         int& callbackCount)
@@ -270,7 +270,7 @@ TEST(T04_ConcurrencyTests, SequentialChunksAreRequestedOneAtATimeWithTheProbeETa
     FakeHttpClient httpClient;
     const std::string content = MakeContent(10);
     EnqueueChunks(httpClient, content, 4U, "\"etag-1\"");
-    AppendBlobClient client{httpClient, BuildOptions()};
+    PageBlobClient client{httpClient, BuildOptions()};
 
     std::ostringstream out;
     int callbackCount = 0;

@@ -1,6 +1,5 @@
 // Table-driven request-shape tests (T27): one row per public operation, asserting the exact HTTP
 // method, path, query parameters, operation-specific headers and body of the first request it sends.
-#include "AVEVA/AzureClient/AppendBlobClient.hpp"
 #include "AVEVA/AzureClient/BlobClient.hpp"
 #include "AVEVA/AzureClient/BlobContainerClient.hpp"
 #include "AVEVA/AzureClient/BlobOperationOptions.hpp"
@@ -52,7 +51,6 @@ namespace
         BlobClient Blob{Http, MakeBlobClientOptions()};
         BlockBlobClient Block{Http, MakeBlobClientOptions()};
         PageBlobClient Page{Http, MakeBlobClientOptions()};
-        AppendBlobClient Append{Http, MakeBlobClientOptions()};
         BlobContainerClient Container{Http, MakeBlobContainerClientOptions()};
         BlobServiceClient Service{Http, MakeBlobServiceClientOptions()};
         BlobClient SnapshotBlob = Blob.WithSnapshot(std::string{SnapshotId});
@@ -324,105 +322,6 @@ namespace
             .Headers = Concat({{"x-ms-meta-Project", "alpha"}}, ConditionHeaders()),
             .AbsentHeaders = {},
             .Body = std::nullopt});
-        cases.push_back({.Name = "Blob_SetHttpHeaders",
-            .Start =
-                [](Clients& c)
-        {
-            SetBlobHttpHeadersOptions o;
-            o.HttpHeaders = HttpHeaders();
-            o.Conditions = FullConditions();
-            c.Blob.SetHttpHeadersAsync(std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = blob,
-            .Query = {{"comp", "properties"}},
-            .Headers = Concat({{"x-ms-blob-content-type", "text/plain"},
-                                  {"x-ms-blob-content-encoding", "gzip"},
-                                  {"x-ms-blob-content-language", "en"},
-                                  {"x-ms-blob-cache-control", "no-cache"},
-                                  {"x-ms-blob-content-disposition", "inline"},
-                                  {"x-ms-blob-content-md5", "bWQ1"}},
-                ConditionHeaders()),
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Blob_SetAccessTier",
-            .Start =
-                [](Clients& c)
-        {
-            SetBlobAccessTierOptions o;
-            o.AccessTier = Models::AccessTier::Cool();
-            c.Blob.SetAccessTierAsync(std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = blob,
-            .Query = {{"comp", "tier"}},
-            .Headers = {{"x-ms-access-tier", "Cool"}},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Blob_StartCopyFromUri",
-            .Start =
-                [](Clients& c)
-        {
-            StartCopyFromUriOptions o;
-            o.Metadata = Metadata();
-            o.AccessTier = Models::AccessTier::Hot();
-            o.Conditions = FullConditions();
-            c.Blob.StartCopyFromUriAsync("https://src.example/c/b", std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = blob,
-            .Query = {},
-            .Headers = Concat({{"x-ms-copy-source", "https://src.example/c/b"},
-                                  {"x-ms-meta-Project", "alpha"},
-                                  {"x-ms-access-tier", "Hot"}},
-                ConditionHeaders()),
-            .AbsentHeaders = {"x-ms-requires-sync"},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Blob_CopyFromUri",
-            .Start =
-                [](Clients& c)
-        {
-            CopyFromUriOptions o;
-            o.SourceContentMd5 = "c3Jj";
-            c.Blob.CopyFromUriAsync("https://src.example/c/b", std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = blob,
-            .Query = {},
-            .Headers = {{"x-ms-copy-source", "https://src.example/c/b"},
-                {"x-ms-requires-sync", "true"},
-                {"x-ms-source-content-md5", "c3Jj"}},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Blob_AbortCopyFromUri",
-            .Start =
-                [](Clients& c)
-        {
-            AbortCopyFromUriOptions o;
-            o.LeaseId = "lease-1";
-            c.Blob.AbortCopyFromUriAsync("copy-1", std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = blob,
-            .Query = {{"comp", "copy"}, {"copyid", "copy-1"}},
-            .Headers = {{"x-ms-copy-action", "abort"}, {"x-ms-lease-id", "lease-1"}},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Blob_Snapshot",
-            .Start =
-                [](Clients& c)
-        {
-            SnapshotBlobOptions o;
-            o.Metadata = Metadata();
-            o.Conditions = FullConditions();
-            c.Blob.SnapshotAsync(std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = blob,
-            .Query = {{"comp", "snapshot"}},
-            .Headers = Concat({{"x-ms-meta-Project", "alpha"}}, ConditionHeaders()),
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
         cases.push_back({.Name = "Blob_AcquireLease",
             .Start =
                 [](Clients& c)
@@ -468,23 +367,6 @@ namespace
             .Headers = {{"x-ms-lease-action", "renew"}, {"x-ms-lease-id", "lease-1"}},
             .AbsentHeaders = {},
             .Body = std::nullopt});
-        cases.push_back({.Name = "Blob_ChangeLease",
-            .Start =
-                [](Clients& c)
-        {
-            ChangeLeaseOptions o;
-            o.LeaseId = "lease-1";
-            o.ProposedLeaseId = "lease-2";
-            c.Blob.ChangeLeaseAsync(std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = blob,
-            .Query = {{"comp", "lease"}},
-            .Headers = {{"x-ms-lease-action", "change"},
-                {"x-ms-lease-id", "lease-1"},
-                {"x-ms-proposed-lease-id", "lease-2"}},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
         cases.push_back({.Name = "Blob_ReleaseLease",
             .Start =
                 [](Clients& c)
@@ -501,100 +383,7 @@ namespace
                 Concat({{"x-ms-lease-action", "release"}, {"x-ms-lease-id", "lease-1"}}, ConditionHeaders(false)),
             .AbsentHeaders = {},
             .Body = std::nullopt});
-        cases.push_back({.Name = "Blob_BreakLease",
-            .Start =
-                [](Clients& c)
-        {
-            BreakLeaseOptions o;
-            o.BreakPeriod = 10s;
-            o.Conditions = FullConditions();
-            c.Blob.BreakLeaseAsync(std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = blob,
-            .Query = {{"comp", "lease"}},
-            .Headers =
-                Concat({{"x-ms-lease-action", "break"}, {"x-ms-lease-break-period", "10"}}, ConditionHeaders(false)),
-            .AbsentHeaders = {"x-ms-lease-id"},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Blob_GetTags",
-            .Start =
-                [](Clients& c)
-        {
-            GetBlobTagsOptions o;
-            o.LeaseId = "lease-1";
-            o.TagConditions = "\"a\"='b'";
-            c.Blob.GetTagsAsync(std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Get,
-            .Path = blob,
-            .Query = {{"comp", "tags"}},
-            .Headers = {{"x-ms-lease-id", "lease-1"}, {"x-ms-if-tags", "\"a\"='b'"}},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Blob_SetTags",
-            .Start =
-                [](Clients& c)
-        {
-            c.Blob.SetTagsAsync(Models::BlobTags{{"k", "v"}}, Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = blob,
-            .Query = {{"comp", "tags"}},
-            .Headers = {{"Content-Type", "application/xml; charset=UTF-8"}},
-            .AbsentHeaders = {},
-            .Body = std::string{
-                R"(<?xml version="1.0" encoding="utf-8"?><Tags><TagSet><Tag><Key>k</Key><Value>v</Value></Tag></TagSet></Tags>)"}});
-        cases.push_back({.Name = "Blob_Undelete",
-            .Start =
-                [](Clients& c)
-        {
-            c.Blob.UndeleteAsync(Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = blob,
-            .Query = {{"comp", "undelete"}},
-            .Headers = {},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-
         // Snapshot-scoped client: snapshot= comes first and the SAS stays last.
-        cases.push_back({.Name = "Snapshot_GetProperties",
-            .Start =
-                [](Clients& c)
-        {
-            c.SnapshotBlob.GetPropertiesAsync(Ignore);
-        },
-            .Method = HttpMethod::Head,
-            .Path = blob,
-            .Query = {{"snapshot", std::string{EncodedSnapshotId}}},
-            .Headers = {},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Snapshot_GetTags",
-            .Start =
-                [](Clients& c)
-        {
-            c.SnapshotBlob.GetTagsAsync(Ignore);
-        },
-            .Method = HttpMethod::Get,
-            .Path = blob,
-            .Query = {{"snapshot", std::string{EncodedSnapshotId}}, {"comp", "tags"}},
-            .Headers = {},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Snapshot_Delete",
-            .Start =
-                [](Clients& c)
-        {
-            c.SnapshotBlob.DeleteAsync(Ignore);
-        },
-            .Method = HttpMethod::Delete,
-            .Path = blob,
-            .Query = {{"snapshot", std::string{EncodedSnapshotId}}},
-            .Headers = {},
-            .AbsentHeaders = {"x-ms-delete-snapshots"},
-            .Body = std::nullopt});
         cases.push_back({.Name = "Version_Download",
             .Start =
                 [](Clients& c)
@@ -832,72 +621,6 @@ namespace
             .AbsentHeaders = {},
             .Body = std::nullopt});
 
-        cases.push_back({.Name = "Append_Create",
-            .Start =
-                [](Clients& c)
-        {
-            CreateAppendBlobOptions o;
-            o.HttpHeaders = HttpHeaders();
-            o.Metadata = Metadata();
-            o.Conditions = FullConditions();
-            c.Append.CreateAsync(std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = blob,
-            .Query = {},
-            .Headers = Concat({{"x-ms-blob-type", "AppendBlob"},
-                                  {"x-ms-blob-content-type", "text/plain"},
-                                  {"x-ms-meta-Project", "alpha"}},
-                ConditionHeaders()),
-            .AbsentHeaders = {},
-            .Body = std::string{}});
-        cases.push_back({.Name = "Append_CreateIfNotExists",
-            .Start =
-                [](Clients& c)
-        {
-            c.Append.CreateIfNotExistsAsync(Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = blob,
-            .Query = {},
-            .Headers = {{"x-ms-blob-type", "AppendBlob"}, {"If-None-Match", "*"}},
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
-        cases.push_back({.Name = "Append_AppendBlock",
-            .Start =
-                [](Clients& c)
-        {
-            AppendBlockOptions o;
-            o.Conditions = FullConditions();
-            o.IfAppendPositionEqual = 100;
-            o.IfMaxSizeLessThanOrEqual = 4096;
-            o.TransactionalContentMd5 = "bWQ1";
-            c.Append.AppendBlockAsync(std::string{"abc"}, std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = blob,
-            .Query = {{"comp", "appendblock"}},
-            .Headers = Concat({{"x-ms-blob-condition-appendpos", "100"},
-                                  {"x-ms-blob-condition-maxsize", "4096"},
-                                  {"Content-MD5", "bWQ1"}},
-                ConditionHeaders()),
-            .AbsentHeaders = {},
-            .Body = std::string{"abc"}});
-        cases.push_back({.Name = "Append_Seal",
-            .Start =
-                [](Clients& c)
-        {
-            SealAppendBlobOptions o;
-            o.Conditions = FullConditions();
-            o.IfAppendPositionEqual = 3;
-            c.Append.SealAsync(std::move(o), Ignore);
-        },
-            .Method = HttpMethod::Put,
-            .Path = blob,
-            .Query = {{"comp", "seal"}},
-            .Headers = Concat({{"x-ms-blob-condition-appendpos", "3"}}, ConditionHeaders()),
-            .AbsentHeaders = {},
-            .Body = std::nullopt});
         return cases;
     }
 

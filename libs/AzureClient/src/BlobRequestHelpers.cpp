@@ -626,54 +626,6 @@ namespace AVEVA::AzureClient::Private
         AddHeaderIfNotEmpty(request, XMsContentCrc64HeaderName, crc64.Value);
     }
 
-    std::string ValidateBlobTags(const Models::BlobTags& tags)
-    {
-        constexpr std::size_t MaxTags = 10;
-        constexpr std::size_t MaxKeyLength = 128;
-        constexpr std::size_t MaxValueLength = 256;
-        const auto validChars = [](std::string_view text)
-        {
-            return std::ranges::all_of(text,
-                [](char c)
-            {
-                return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-                       std::string_view{" +-./:=_"}.contains(c);
-            });
-        };
-        if (tags.size() > MaxTags)
-        {
-            return "A blob can have at most 10 tags.";
-        }
-        for (const auto& [key, value] : tags)
-        {
-            if (key.empty() || key.size() > MaxKeyLength || !validChars(key))
-            {
-                return "Tag key '" + key + "' must be 1-128 characters of [A-Za-z0-9 +-./:=_].";
-            }
-            if (value.size() > MaxValueLength || !validChars(value))
-            {
-                return "Tag value for '" + key + "' must be 0-256 characters of [A-Za-z0-9 +-./:=_].";
-            }
-        }
-        return {};
-    }
-
-    std::string BuildBlobTagsXml(const Models::BlobTags& tags)
-    {
-        // Validated tags contain no XML-special characters, so no escaping is needed.
-        std::string xml = R"(<?xml version="1.0" encoding="utf-8"?><Tags><TagSet>)";
-        for (const auto& [key, value] : tags)
-        {
-            xml += "<Tag><Key>";
-            xml += key;
-            xml += "</Key><Value>";
-            xml += value;
-            xml += "</Value></Tag>";
-        }
-        xml += "</TagSet></Tags>";
-        return xml;
-    }
-
     std::string BuildFindBlobsByTagsQuery(std::string_view where, const FindBlobsByTagsOptions& options)
     {
         std::vector<std::pair<std::string, std::string>> parameters{{"comp", "blobs"}, {"where", std::string{where}}};

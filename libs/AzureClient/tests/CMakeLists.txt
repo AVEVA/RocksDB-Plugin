@@ -6,7 +6,6 @@ find_package(OpenSSL REQUIRED)
 include(GoogleTest)
 
 add_executable(aveva-azure-client-tests
-    AppendBlobClientTests.cpp
     AsyncBehaviorTests.cpp
     BlobContainerClientTests.cpp
     BlobFeatureSmokeTests.cpp

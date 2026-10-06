@@ -1091,22 +1091,6 @@ namespace AVEVA::AzureClient::Private
         return result;
     }
 
-    Models::StartBlobCopyFromUriResult ParseStartBlobCopyFromUriResult(const HttpResponse& response)
-    {
-        Models::StartBlobCopyFromUriResult result;
-        result.CopyId = std::string{FindHeaderValue(response, XMsCopyIdHeaderName)};
-        result.CopyStatus = std::string{FindHeaderValue(response, XMsCopyStatusHeaderName)};
-        return result;
-    }
-
-    Models::CreateBlobSnapshotResult ParseCreateBlobSnapshotResult(const HttpResponse& response)
-    {
-        Models::CreateBlobSnapshotResult result;
-        result.Snapshot = std::string{FindHeaderValue(response, XMsSnapshotHeaderName)};
-        ApplyETagAndLastModified(result, response);
-        return result;
-    }
-
     Models::AcquireBlobLeaseResult ParseAcquireBlobLeaseResult(const HttpResponse& response)
     {
         Models::AcquireBlobLeaseResult result;
@@ -1120,43 +1104,6 @@ namespace AVEVA::AzureClient::Private
         auto result = ParseETagAndLastModified<Models::RenewBlobLeaseResult>(response);
         result.LeaseId = std::string{FindHeaderValue(response, XMsLeaseIdHeaderName)};
         return result;
-    }
-
-    Models::AppendBlockResult ParseAppendBlockResult(const HttpResponse& response)
-    {
-        auto result = ParseETagAndLastModified<Models::AppendBlockResult>(response);
-        result.AppendOffset = ParseOptionalUnsigned(FindHeaderValue(response, XMsBlobAppendOffsetHeaderName),
-            XMsBlobAppendOffsetHeaderName)
-                                  .value_or(0);
-        result.CommittedBlockCount =
-            ParseOptionalUnsigned(FindHeaderValue(response, XMsBlobCommittedBlockCountHeaderName),
-                XMsBlobCommittedBlockCountHeaderName)
-                .value_or(0);
-        return result;
-    }
-
-    Models::SealAppendBlobResult ParseSealAppendBlobResult(const HttpResponse& response)
-    {
-        auto result = ParseETagAndLastModified<Models::SealAppendBlobResult>(response);
-        result.IsSealed = ParseOptionalBool(FindHeaderValue(response, XMsBlobSealedHeaderName), XMsBlobSealedHeaderName)
-                              .value_or(true);
-        return result;
-    }
-
-    Models::CopyBlobFromUriResult ParseCopyBlobFromUriResult(const HttpResponse& response)
-    {
-        auto result = ParseETagAndLastModified<Models::CopyBlobFromUriResult>(response);
-        result.CopyId = std::string{FindHeaderValue(response, XMsCopyIdHeaderName)};
-        result.CopyStatus = std::string{FindHeaderValue(response, XMsCopyStatusHeaderName)};
-        result.ContentMd5 = std::string{FindHeaderValue(response, ContentMd5HeaderName)};
-        result.ContentCrc64 = std::string{FindHeaderValue(response, XMsContentCrc64HeaderName)};
-        return result;
-    }
-
-    Models::AbortCopyBlobFromUriResult ParseAbortCopyBlobFromUriResult(const HttpResponse& response)
-    {
-        return Models::AbortCopyBlobFromUriResult{
-            .RequestId = std::string{FindHeaderValue(response, XMsRequestIdHeaderName)}};
     }
 
     Models::ChangeBlobLeaseResult ParseChangeBlobLeaseResult(const HttpResponse& response)
@@ -1270,17 +1217,6 @@ namespace AVEVA::AzureClient::Private
             }
         }
 
-        return result;
-    }
-
-    Models::GetBlobTagsResult ParseGetBlobTagsResultXml(std::string_view xml)
-    {
-        Models::GetBlobTagsResult result;
-        const auto tree = TryReadXmlOrThrow(xml, "Get blob tags response", "Tags");
-        if (const XmlNode* root = tree ? tree->Root() : nullptr; root != nullptr)
-        {
-            result.Tags = ParseBlobTagsXml(*root);
-        }
         return result;
     }
 

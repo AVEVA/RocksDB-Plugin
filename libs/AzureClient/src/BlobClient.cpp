@@ -142,66 +142,6 @@ namespace AVEVA::AzureClient
         Private::SetBlobMetadataAsync(*m_httpClient, *m_target, options, std::move(completion), requestOptions);
     }
 
-    void BlobClient::SetHttpHeadersAsyncImpl(const SetBlobHttpHeadersOptions& options,
-        SetHttpHeadersCompletionHandler completion,
-        HttpRequestOptions requestOptions)
-    {
-        Private::SetBlobHttpHeadersAsync(*m_httpClient, *m_target, options, std::move(completion), requestOptions);
-    }
-
-    void BlobClient::SetAccessTierAsyncImpl(const SetBlobAccessTierOptions& options,
-        SetAccessTierCompletionHandler completion,
-        HttpRequestOptions requestOptions)
-    {
-        Private::SetBlobAccessTierAsync(*m_httpClient, *m_target, options, std::move(completion), requestOptions);
-    }
-
-    void BlobClient::StartCopyFromUriAsyncImpl(const std::string& sourceUri,
-        const StartCopyFromUriOptions& options,
-        StartCopyFromUriCompletionHandler completion,
-        HttpRequestOptions requestOptions)
-    {
-        Private::StartBlobCopyFromUriAsync(*m_httpClient,
-            *m_target,
-            sourceUri,
-            options,
-            std::move(completion),
-            requestOptions);
-    }
-
-    void BlobClient::CopyFromUriAsyncImpl(const std::string& sourceUri,
-        const CopyFromUriOptions& options,
-        CopyFromUriCompletionHandler completion,
-        HttpRequestOptions requestOptions)
-    {
-        Private::CopyBlobFromUriAsync(*m_httpClient,
-            *m_target,
-            sourceUri,
-            options,
-            std::move(completion),
-            requestOptions);
-    }
-
-    void BlobClient::AbortCopyFromUriAsyncImpl(const std::string& copyId,
-        const AbortCopyFromUriOptions& options,
-        AbortCopyFromUriCompletionHandler completion,
-        HttpRequestOptions requestOptions)
-    {
-        Private::AbortCopyBlobFromUriAsync(*m_httpClient,
-            *m_target,
-            copyId,
-            options,
-            std::move(completion),
-            requestOptions);
-    }
-
-    void BlobClient::SnapshotAsyncImpl(const SnapshotBlobOptions& options,
-        SnapshotCompletionHandler completion,
-        HttpRequestOptions requestOptions)
-    {
-        Private::SnapshotBlobAsync(*m_httpClient, *m_target, options, std::move(completion), requestOptions);
-    }
-
     void BlobClient::AcquireLeaseAsyncImpl(AcquireLeaseOptions options,
         AcquireLeaseCompletionHandler completion,
         HttpRequestOptions requestOptions)
@@ -216,25 +156,11 @@ namespace AVEVA::AzureClient
         Private::RenewLeaseAsync(*m_httpClient, *m_target, std::move(options), std::move(completion), requestOptions);
     }
 
-    void BlobClient::ChangeLeaseAsyncImpl(ChangeLeaseOptions options,
-        ChangeLeaseCompletionHandler completion,
-        HttpRequestOptions requestOptions)
-    {
-        Private::ChangeLeaseAsync(*m_httpClient, *m_target, std::move(options), std::move(completion), requestOptions);
-    }
-
     void BlobClient::ReleaseLeaseAsyncImpl(ReleaseLeaseOptions options,
         ReleaseLeaseCompletionHandler completion,
         HttpRequestOptions requestOptions)
     {
         Private::ReleaseLeaseAsync(*m_httpClient, *m_target, std::move(options), std::move(completion), requestOptions);
-    }
-
-    void BlobClient::BreakLeaseAsyncImpl(BreakLeaseOptions options,
-        BreakLeaseCompletionHandler completion,
-        HttpRequestOptions requestOptions)
-    {
-        Private::BreakLeaseAsync(*m_httpClient, *m_target, std::move(options), std::move(completion), requestOptions);
     }
 
     BlobClient BlobClient::WithSnapshot(std::string snapshot) const
@@ -253,67 +179,4 @@ namespace AVEVA::AzureClient
         return BlobClient{*m_httpClient, std::make_shared<const Private::BlobTarget>(std::move(target))};
     }
 
-    void BlobClient::GetTagsAsyncImpl(const GetBlobTagsOptions& options,
-        GetTagsCompletionHandler completion,
-        HttpRequestOptions requestOptions)
-    {
-        HttpRequest request = Private::BuildBlobRequest(*m_target, HttpMethod::Get, "comp=tags");
-        Private::AddHeaderIfNotEmpty(request, Private::XMsLeaseIdHeaderName, options.LeaseId);
-        Private::AddHeaderIfNotEmpty(request, Private::XMsIfTagsHeaderName, options.TagConditions);
-        Private::SendAndParse<Models::GetBlobTagsResult>(*m_httpClient,
-            *m_target,
-            std::move(request),
-            [](const HttpResponse& response)
-        {
-            return Private::ParseGetBlobTagsResultXml(response.GetBody());
-        },
-            std::move(completion),
-            requestOptions);
-    }
-
-    void BlobClient::SetTagsAsyncImpl(const Models::BlobTags& tags,
-        const SetBlobTagsOptions& options,
-        SetTagsCompletionHandler completion,
-        HttpRequestOptions requestOptions)
-    {
-        if (std::string problem = Private::ValidateBlobTags(tags); !problem.empty())
-        {
-            Private::PostCompletion(*m_httpClient,
-                std::move(completion),
-                Private::MakeError<Models::SetBlobTagsResult>(std::make_error_code(std::errc::invalid_argument),
-                    std::move(problem)));
-            return;
-        }
-        HttpRequest request = Private::BuildBlobRequest(*m_target, HttpMethod::Put, "comp=tags");
-        Private::AddHeader(request, Private::ContentTypeHeaderName, "application/xml; charset=UTF-8");
-        Private::AddHeaderIfNotEmpty(request, Private::XMsLeaseIdHeaderName, options.LeaseId);
-        Private::AddHeaderIfNotEmpty(request, Private::XMsIfTagsHeaderName, options.TagConditions);
-        Private::ApplyTransactionalHashes(request, options.TransactionalContentMd5, {});
-        request.SetBody(Private::BuildBlobTagsXml(tags));
-        Private::SendAndParse<Models::SetBlobTagsResult>(*m_httpClient,
-            *m_target,
-            std::move(request),
-            [](const HttpResponse& response)
-        {
-            return Models::SetBlobTagsResult{
-                .RequestId = std::string{Private::FindHeaderValue(response, Private::XMsRequestIdHeaderName)}};
-        },
-            std::move(completion),
-            requestOptions);
-    }
-
-    void BlobClient::UndeleteAsyncImpl(UndeleteCompletionHandler completion, HttpRequestOptions requestOptions)
-    {
-        HttpRequest request = Private::BuildBlobRequest(*m_target, HttpMethod::Put, "comp=undelete");
-        Private::SendAndParse<Models::UndeleteBlobResult>(*m_httpClient,
-            *m_target,
-            std::move(request),
-            [](const HttpResponse& response)
-        {
-            return Models::UndeleteBlobResult{
-                .RequestId = std::string{Private::FindHeaderValue(response, Private::XMsRequestIdHeaderName)}};
-        },
-            std::move(completion),
-            requestOptions);
-    }
 } // namespace AVEVA::AzureClient

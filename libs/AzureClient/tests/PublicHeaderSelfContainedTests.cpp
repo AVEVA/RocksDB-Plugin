@@ -1,6 +1,5 @@
 // Compile-and-run check that consumers can use every client through the public headers alone (T01).
 // This target deliberately has no include path into src/ or tests/: only <AVEVA/AzureClient/...>.
-#include "AVEVA/AzureClient/AppendBlobClient.hpp"
 #include "AVEVA/AzureClient/BlobClientOptions.hpp"
 #include "AVEVA/AzureClient/BlobContainerClient.hpp"
 #include "AVEVA/AzureClient/BlobServiceClient.hpp"
@@ -147,18 +146,6 @@ TEST(PublicHeaderSelfContainedTests, PageBlobClient)
         [](PageBlobClient& c, auto&& token)
     {
         return c.DeleteAsync(std::forward<decltype(token)>(token));
-    });
-}
-
-TEST(PublicHeaderSelfContainedTests, AppendBlobClient)
-{
-    LoopbackHttpClient http;
-    AppendBlobClient client{http, BlobOptions()};
-    ExerciseAllTokenKinds(http,
-        client,
-        [](AppendBlobClient& c, auto&& token)
-    {
-        return c.GetPropertiesAsync(std::forward<decltype(token)>(token));
     });
 }
 

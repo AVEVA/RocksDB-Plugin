@@ -105,35 +105,6 @@ namespace AVEVA::AzureClient
         Models::BlobRequestConditions Conditions;
     };
 
-    // Copy Blob From URL (synchronous copy of a source up to 256 MiB into a block blob).
-    struct CopyFromUriOptions
-    {
-        Models::MetadataMap Metadata;
-        // Empty omits the x-ms-access-tier header (the service default applies).
-        Models::AccessTier AccessTier;
-        Models::BlobRequestConditions Conditions;
-        std::string SourceContentMd5;
-    };
-
-    struct AbortCopyFromUriOptions
-    {
-        std::string LeaseId;
-    };
-
-    struct GetBlobTagsOptions
-    {
-        std::string LeaseId;
-        // Tag filter the blob must satisfy (x-ms-if-tags), e.g. "\"status\" = 'ready'".
-        std::string TagConditions;
-    };
-
-    struct SetBlobTagsOptions
-    {
-        std::string LeaseId;
-        std::string TagConditions;
-        std::string TransactionalContentMd5;
-    };
-
     struct FindBlobsByTagsOptions
     {
         std::string Marker;
@@ -212,32 +183,6 @@ namespace AVEVA::AzureClient
         Models::BlobRequestConditions Conditions;
     };
 
-    struct SetBlobHttpHeadersOptions
-    {
-        Models::BlobHttpHeaders HttpHeaders;
-        Models::BlobRequestConditions Conditions;
-    };
-
-    struct SetBlobAccessTierOptions
-    {
-        Models::AccessTier AccessTier;
-        Models::BlobRequestConditions Conditions;
-    };
-
-    struct StartCopyFromUriOptions
-    {
-        Models::MetadataMap Metadata;
-        // Empty omits the x-ms-access-tier header (the service default applies).
-        Models::AccessTier AccessTier;
-        Models::BlobRequestConditions Conditions;
-    };
-
-    struct SnapshotBlobOptions
-    {
-        Models::MetadataMap Metadata;
-        Models::BlobRequestConditions Conditions;
-    };
-
     struct AcquireLeaseOptions
     {
         Models::BlobRequestConditions Conditions;
@@ -289,31 +234,6 @@ namespace AVEVA::AzureClient
         // complete; Marker and MaxResults only select where to start and the size of each page requested.
         std::string Marker;
         std::optional<std::uint32_t> MaxResults;
-    };
-
-    struct CreateAppendBlobOptions
-    {
-        Models::BlobHttpHeaders HttpHeaders;
-        Models::MetadataMap Metadata;
-        Models::BlobRequestConditions Conditions;
-    };
-
-    struct AppendBlockOptions
-    {
-        Models::BlobRequestConditions Conditions;
-        // Bytes; fails with AppendPositionConditionNotMet unless the blob's current length equals this value.
-        std::optional<std::uint64_t> IfAppendPositionEqual;
-        // Fails with MaxBlobSizeConditionNotMet if the append would make the blob longer than this many bytes.
-        std::optional<std::uint64_t> IfMaxSizeLessThanOrEqual;
-        // Base64-encoded MD5 / CRC64 of the appended block, verified by the service.
-        std::string TransactionalContentMd5;
-        std::string TransactionalContentCrc64;
-    };
-
-    struct SealAppendBlobOptions
-    {
-        Models::BlobRequestConditions Conditions;
-        std::optional<std::uint64_t> IfAppendPositionEqual;
     };
 
     // UploadFromAsync stages the source as blocks of BlockSize bytes with up to Concurrency Put Block

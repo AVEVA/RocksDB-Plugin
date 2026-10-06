@@ -305,13 +305,10 @@ namespace AVEVA::AzureClient::Private
     [[nodiscard]] Models::BlobProperties ParseBlobProperties(const HttpResponse& response);
     [[nodiscard]] Models::DeleteBlobResult ParseDeleteBlobResult(const HttpResponse& response);
     [[nodiscard]] Models::DownloadBlobResult ParseDownloadBlobResult(HttpResponse& response);
-    [[nodiscard]] Models::StartBlobCopyFromUriResult ParseStartBlobCopyFromUriResult(const HttpResponse& response);
-    [[nodiscard]] Models::CreateBlobSnapshotResult ParseCreateBlobSnapshotResult(const HttpResponse& response);
     [[nodiscard]] Models::AcquireBlobLeaseResult ParseAcquireBlobLeaseResult(const HttpResponse& response);
     [[nodiscard]] Models::ReleaseBlobLeaseResult ParseReleaseBlobLeaseResult(const HttpResponse& response);
     [[nodiscard]] Models::BreakBlobLeaseResult ParseBreakBlobLeaseResult(const HttpResponse& response);
     [[nodiscard]] Models::RenewBlobLeaseResult ParseRenewBlobLeaseResult(const HttpResponse& response);
-    [[nodiscard]] Models::AppendBlockResult ParseAppendBlockResult(const HttpResponse& response);
     [[nodiscard]] Models::AccountInfo ParseAccountInfo(const HttpResponse& response);
     [[nodiscard]] Models::BlobServiceProperties ParseBlobServicePropertiesXml(std::string_view xml);
     [[nodiscard]] Models::UserDelegationKey ParseUserDelegationKeyXml(std::string_view xml);
@@ -319,13 +316,7 @@ namespace AVEVA::AzureClient::Private
     [[nodiscard]] std::string FormatIso8601Utc(std::chrono::system_clock::time_point value);
     // Parses "YYYY-MM-DDThh:mm:ss[.fffffff]Z"; std::nullopt if malformed.
     [[nodiscard]] std::optional<std::chrono::system_clock::time_point> ParseIso8601Utc(std::string_view value) noexcept;
-    [[nodiscard]] Models::CopyBlobFromUriResult ParseCopyBlobFromUriResult(const HttpResponse& response);
-    [[nodiscard]] Models::AbortCopyBlobFromUriResult ParseAbortCopyBlobFromUriResult(const HttpResponse& response);
-    [[nodiscard]] Models::GetBlobTagsResult ParseGetBlobTagsResultXml(std::string_view xml);
     [[nodiscard]] Models::FindBlobsByTagsResult ParseFindBlobsByTagsResultXml(std::string_view xml);
-    [[nodiscard]] std::string BuildBlobTagsXml(const Models::BlobTags& tags);
-    // Empty when `tags` satisfies the service's tag rules, otherwise a description of the first violation.
-    [[nodiscard]] std::string ValidateBlobTags(const Models::BlobTags& tags);
     // "comp=blobs&where=...[&marker=...][&maxresults=...]" for Find Blobs by Tags.
     [[nodiscard]] std::string BuildFindBlobsByTagsQuery(std::string_view where, const FindBlobsByTagsOptions& options);
 
@@ -336,7 +327,6 @@ namespace AVEVA::AzureClient::Private
 
     // Content-MD5 / x-ms-content-crc64 request headers for service-side body verification.
     void ApplyTransactionalHashes(HttpRequest& request, std::string_view md5, StringLabel<TransactionalCrc64Tag> crc64);
-    [[nodiscard]] Models::SealAppendBlobResult ParseSealAppendBlobResult(const HttpResponse& response);
     [[nodiscard]] Models::ChangeBlobLeaseResult ParseChangeBlobLeaseResult(const HttpResponse& response);
     [[nodiscard]] Models::ListBlobsResult ParseListBlobsResultXml(std::string_view xml);
     [[nodiscard]] Models::ListBlobContainersResult ParseListBlobContainersResultXml(std::string_view xml);
@@ -685,155 +675,6 @@ namespace AVEVA::AzureClient::Private
             CompleteParsed<Models::SetBlobMetadataResult>(error,
                 std::move(response),
                 ParseETagAndLastModified<Models::SetBlobMetadataResult>,
-                std::move(completion));
-        },
-            std::move(requestOptions));
-    }
-
-    template <class TCompletion>
-    void SetBlobHttpHeadersAsync(IHttpClient& httpClient,
-        const BlobTarget& options,
-        const SetBlobHttpHeadersOptions& operationOptions,
-        TCompletion&& completion,
-        HttpRequestOptions requestOptions)
-    {
-        HttpRequest request = BuildBlobRequest(options, HttpMethod::Put, "comp=properties");
-        ApplyBlobHttpHeadersForProperties(request, operationOptions.HttpHeaders);
-        ApplyBlobRequestConditions(request, operationOptions.Conditions);
-
-        SendAuthorizedRequestAsync(httpClient,
-            options,
-            std::move(request),
-            [completion = std::forward<TCompletion>(completion)](std::error_code error, HttpResponse response) mutable
-        {
-            CompleteParsed<Models::SetBlobHttpHeadersResult>(error,
-                std::move(response),
-                ParseETagAndLastModified<Models::SetBlobHttpHeadersResult>,
-                std::move(completion));
-        },
-            std::move(requestOptions));
-    }
-
-    template <class TCompletion>
-    void SetBlobAccessTierAsync(IHttpClient& httpClient,
-        const BlobTarget& options,
-        const SetBlobAccessTierOptions& operationOptions,
-        TCompletion&& completion,
-        HttpRequestOptions requestOptions)
-    {
-        HttpRequest request = BuildBlobRequest(options, HttpMethod::Put, "comp=tier");
-        AddHeaderIfNotEmpty(request, XMsAccessTierHeaderName, operationOptions.AccessTier.ToString());
-        ApplyBlobRequestConditions(request, operationOptions.Conditions);
-
-        SendAuthorizedRequestAsync(httpClient,
-            options,
-            std::move(request),
-            [completion = std::forward<TCompletion>(completion)](std::error_code error, HttpResponse response) mutable
-        {
-            CompleteParsed<Models::SetBlobAccessTierResult>(error,
-                std::move(response),
-                ParseETagAndLastModified<Models::SetBlobAccessTierResult>,
-                std::move(completion));
-        },
-            std::move(requestOptions));
-    }
-
-    template <class TCompletion>
-    void StartBlobCopyFromUriAsync(IHttpClient& httpClient,
-        const BlobTarget& options,
-        const std::string& sourceUri,
-        const StartCopyFromUriOptions& operationOptions,
-        TCompletion&& completion,
-        HttpRequestOptions requestOptions)
-    {
-        HttpRequest request = BuildBlobRequest(options, HttpMethod::Put);
-        AddHeaderIfNotEmpty(request, XMsCopySourceHeaderName, sourceUri);
-        ApplyMetadata(request, operationOptions.Metadata);
-        AddHeaderIfNotEmpty(request, XMsAccessTierHeaderName, operationOptions.AccessTier.ToString());
-        ApplyBlobRequestConditions(request, operationOptions.Conditions);
-
-        SendAuthorizedRequestAsync(httpClient,
-            options,
-            std::move(request),
-            [completion = std::forward<TCompletion>(completion)](std::error_code error, HttpResponse response) mutable
-        {
-            CompleteParsed<Models::StartBlobCopyFromUriResult>(error,
-                std::move(response),
-                ParseStartBlobCopyFromUriResult,
-                std::move(completion));
-        },
-            std::move(requestOptions));
-    }
-
-    template <class TCompletion>
-    void CopyBlobFromUriAsync(IHttpClient& httpClient,
-        const BlobTarget& target,
-        const std::string& sourceUri,
-        const CopyFromUriOptions& operationOptions,
-        TCompletion&& completion,
-        HttpRequestOptions requestOptions)
-    {
-        HttpRequest request = BuildBlobRequest(target, HttpMethod::Put);
-        AddHeader(request, XMsCopySourceHeaderName, sourceUri);
-        AddHeader(request, XMsRequiresSyncHeaderName, "true");
-        ApplyMetadata(request, operationOptions.Metadata);
-        AddHeaderIfNotEmpty(request, XMsAccessTierHeaderName, operationOptions.AccessTier.ToString());
-        AddHeaderIfNotEmpty(request, XMsSourceContentMd5HeaderName, operationOptions.SourceContentMd5);
-        ApplyBlobRequestConditions(request, operationOptions.Conditions);
-        SendAndParse<Models::CopyBlobFromUriResult>(httpClient,
-            target,
-            std::move(request),
-            ParseCopyBlobFromUriResult,
-            std::forward<TCompletion>(completion),
-            std::move(requestOptions));
-    }
-
-    template <class TCompletion>
-    void AbortCopyBlobFromUriAsync(IHttpClient& httpClient,
-        const BlobTarget& target,
-        std::string_view copyId,
-        const AbortCopyFromUriOptions& operationOptions,
-        TCompletion&& completion,
-        HttpRequestOptions requestOptions)
-    {
-        if (copyId.empty())
-        {
-            PostCompletion(httpClient,
-                std::forward<TCompletion>(completion),
-                MakeError<Models::AbortCopyBlobFromUriResult>(std::make_error_code(std::errc::invalid_argument),
-                    "Copy ID must not be empty."));
-            return;
-        }
-        HttpRequest request = BuildBlobRequest(target, HttpMethod::Put, "comp=copy&copyid=" + UrlEncode(copyId, {}));
-        AddHeader(request, XMsCopyActionHeaderName, "abort");
-        AddHeaderIfNotEmpty(request, XMsLeaseIdHeaderName, operationOptions.LeaseId);
-        SendAndParse<Models::AbortCopyBlobFromUriResult>(httpClient,
-            target,
-            std::move(request),
-            ParseAbortCopyBlobFromUriResult,
-            std::forward<TCompletion>(completion),
-            std::move(requestOptions));
-    }
-
-    template <class TCompletion>
-    void SnapshotBlobAsync(IHttpClient& httpClient,
-        const BlobTarget& options,
-        const SnapshotBlobOptions& operationOptions,
-        TCompletion&& completion,
-        HttpRequestOptions requestOptions)
-    {
-        HttpRequest request = BuildBlobRequest(options, HttpMethod::Put, "comp=snapshot");
-        ApplyMetadata(request, operationOptions.Metadata);
-        ApplyBlobRequestConditions(request, operationOptions.Conditions);
-
-        SendAuthorizedRequestAsync(httpClient,
-            options,
-            std::move(request),
-            [completion = std::forward<TCompletion>(completion)](std::error_code error, HttpResponse response) mutable
-        {
-            CompleteParsed<Models::CreateBlobSnapshotResult>(error,
-                std::move(response),
-                ParseCreateBlobSnapshotResult,
                 std::move(completion));
         },
             std::move(requestOptions));

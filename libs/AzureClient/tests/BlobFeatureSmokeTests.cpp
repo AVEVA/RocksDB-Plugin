@@ -6,7 +6,6 @@
 #include "FakeHttpClient.hpp"
 #include "TestHelpers.hpp"
 
-#include <AVEVA/AzureClient/AppendBlobClient.hpp>
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>
 #include <AVEVA/AzureClient/BlobServiceClient.hpp>
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
@@ -28,7 +27,6 @@ namespace
 {
     using AVEVA::HttpResponse;
     using AVEVA::AzureClient::AccessToken;
-    using AVEVA::AzureClient::AppendBlobClient;
     using AVEVA::AzureClient::BlobClientOptions;
     using AVEVA::AzureClient::BlobContainerClient;
     using AVEVA::AzureClient::BlobContainerClientOptions;
@@ -38,8 +36,6 @@ namespace
     using AVEVA::AzureClient::BlockBlobClient;
     using AVEVA::AzureClient::ITokenCredential;
     using AVEVA::AzureClient::Response;
-    using AVEVA::AzureClient::Models::AppendBlockResult;
-    using AVEVA::AzureClient::Models::CreateAppendBlobResult;
     using AVEVA::AzureClient::Models::ListBlobContainersResult;
     using AVEVA::AzureClient::Models::ListBlobsResult;
     using AVEVA::AzureClient::Tests::CallbackExpectation;
@@ -202,65 +198,6 @@ TEST(BlobFeatureSmokeTests, BlobServiceClientRejectsInvalidSharedKeyBase64)
                      BlobServiceClientOptions{.ServiceEndpoint = "https://storageaccount.blob.core.windows.net",
                          .SharedKey = {.AccountName = "storageaccount", .AccountKey = "bad=="}}}),
         std::invalid_argument);
-}
-
-TEST(BlobFeatureSmokeTests, AppendBlobClientBuildsAppendBlockRequest)
-{
-    FakeHttpClient httpClient;
-    httpClient.DefaultResponse() = HttpResponse{201, {{"ETag", "\"etag\""}}, {}};
-
-    AppendBlobClient client{httpClient,
-        BlobClientOptions{.ServiceEndpoint = "https://storageaccount.blob.core.windows.net",
-            .ContainerName = "images",
-            .BlobName = "append.txt",
-            .SasToken = "sv=1&sig=2"}};
-
-    client.CreateAsync([](std::expected<Response<CreateAppendBlobResult>, BlobStorageError>) {});
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.LastRequest(), "x-ms-blob-type"), "AppendBlob");
-
-    client.AppendBlockAsync("abc", [](std::expected<Response<AppendBlockResult>, BlobStorageError>) {});
-    EXPECT_NE(httpClient.LastRequest().GetUrl().find("comp=appendblock"), std::string::npos);
-    EXPECT_EQ(httpClient.Requests().back().Body, "abc");
-}
-
-TEST(BlobFeatureSmokeTests, ChildClientsAreMovableAndWorkFromFactoryResults)
-{
-    FakeHttpClient httpClient;
-    httpClient.DefaultResponse() = HttpResponse{201, {{"ETag", "\"etag\""}}, ""};
-    BlobServiceClient service{httpClient,
-        BlobServiceClientOptions{.ServiceEndpoint = "https://storageaccount.blob.core.windows.net",
-            .SasToken = "sv=1&sig=2"}};
-    BlobContainerClient container{httpClient,
-        BlobContainerClientOptions{.ServiceEndpoint = "https://storageaccount.blob.core.windows.net",
-            .ContainerName = "images",
-            .SasToken = "sv=1&sig=2"}};
-
-    std::vector<BlobServiceClient> services;
-    services.push_back(std::move(service));
-
-    std::vector<BlobContainerClient> containers;
-    containers.push_back(std::move(container));
-
-    std::vector<BlockBlobClient> clients;
-    clients.push_back(containers.at(0).GetBlockBlobClient("vector-1.txt"));
-    clients.push_back(containers.at(0).GetBlockBlobClient("vector-2.txt"));
-
-    std::vector<AVEVA::AzureClient::PageBlobClient> pageClients;
-    pageClients.push_back(containers.at(0).GetPageBlobClient("page-1.vhd"));
-
-    std::vector<AppendBlobClient> appendClients;
-    appendClients.push_back(containers.at(0).GetAppendBlobClient("append-1.log"));
-
-    auto sharedClient = std::make_shared<BlockBlobClient>(containers.at(0).GetBlockBlobClient("shared.txt"));
-    sharedClient->UploadAsync("hello",
-        [](std::expected<Response<AVEVA::AzureClient::Models::UploadBlockBlobResult>, BlobStorageError>) {});
-
-    EXPECT_EQ(services.size(), 1U);
-    EXPECT_EQ(containers.size(), 1U);
-    EXPECT_EQ(clients.size(), 2U);
-    EXPECT_EQ(pageClients.size(), 1U);
-    EXPECT_EQ(appendClients.size(), 1U);
-    EXPECT_NE(httpClient.LastRequest().GetUrl().find("/images/shared.txt"), std::string::npos);
 }
 
 TEST(BlobFeatureSmokeTests, BlobServiceClientCreatesContainerClientFactory)

@@ -62,12 +62,6 @@ namespace
         {
             static_cast<void>(ParseGetPageRangesResultXml(xml));
         }},
-            {.Name = "GetBlobTags",
-                .Parse =
-                    [](std::string_view xml)
-        {
-            static_cast<void>(ParseGetBlobTagsResultXml(xml));
-        }},
             {.Name = "FindBlobsByTags",
                 .Parse =
                     [](std::string_view xml)
@@ -347,21 +341,6 @@ TEST(ParserRobustnessTests, BlockAndPageLists_MalformedNumbersThrowAndLargeLists
     ASSERT_EQ(ranges.PageRanges.size(), 5000U);
     EXPECT_EQ(ranges.PageRanges.back().Start, 4999U * 1024U);
     EXPECT_EQ(ranges.PageRanges.back().End, (4999U * 1024U) + 511U);
-}
-
-TEST(ParserRobustnessTests, Tags_EntitiesAndEmptySets)
-{
-    const auto tags = ParseGetBlobTagsResultXml(
-        "<Tags><TagSet><Tag><Key>a&amp;b</Key><Value>&lt;v&gt;</Value></Tag></TagSet></Tags>");
-    ASSERT_EQ(tags.Tags.size(), 1U);
-    EXPECT_EQ(tags.Tags.at("a&b"), "<v>");
-    EXPECT_TRUE(ParseGetBlobTagsResultXml("<Tags><TagSet/></Tags>").Tags.empty());
-
-    const auto found = ParseFindBlobsByTagsResultXml("<EnumerationResults><Blobs><Blob><Name>n</Name><ContainerName>c</"
-                                                     "ContainerName></Blob></Blobs></EnumerationResults>");
-    ASSERT_EQ(found.Blobs.size(), 1U);
-    EXPECT_TRUE(found.Blobs.at(0).Tags.empty());
-    EXPECT_TRUE(found.NextMarker.empty());
 }
 
 TEST(ParserRobustnessTests, UserDelegationKey_MalformedDatesThrow)

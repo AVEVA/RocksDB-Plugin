@@ -1,6 +1,5 @@
 #pragma once
 
-#include <AVEVA/AzureClient/AppendBlobClient.hpp>
 #include <AVEVA/AzureClient/BlobClient.hpp>
 #include <AVEVA/AzureClient/BlobClientOptions.hpp>
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
@@ -427,7 +426,6 @@ namespace AVEVA::AzureClient
         [[nodiscard]] BlobClient GetBlobClient(std::string blobName) const;
         [[nodiscard]] BlockBlobClient GetBlockBlobClient(std::string blobName) const;
         [[nodiscard]] PageBlobClient GetPageBlobClient(std::string blobName) const;
-        [[nodiscard]] AppendBlobClient GetAppendBlobClient(std::string blobName) const;
 
       private:
         friend class BlobServiceClient;

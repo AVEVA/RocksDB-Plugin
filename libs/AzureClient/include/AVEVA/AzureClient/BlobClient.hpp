@@ -30,7 +30,7 @@ namespace AVEVA::AzureClient
 
     class BlobContainerClient;
 
-    // Operations common to every blob type; BlockBlobClient, PageBlobClient and AppendBlobClient derive
+    // Operations common to every blob type; BlockBlobClient and PageBlobClient derive
     // from it. Usable on its own (e.g. via BlobContainerClient::GetBlobClient) when the blob type is
     // irrelevant.
     //
@@ -60,36 +60,14 @@ namespace AVEVA::AzureClient
             std::move_only_function<void(std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>)>;
         using SetMetadataCompletionHandler =
             std::move_only_function<void(std::expected<Response<Models::SetBlobMetadataResult>, BlobStorageError>)>;
-        using SetHttpHeadersCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::SetBlobHttpHeadersResult>, BlobStorageError>)>;
-        using SetAccessTierCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::SetBlobAccessTierResult>, BlobStorageError>)>;
-        using StartCopyFromUriCompletionHandler = std::move_only_function<void(
-            std::expected<Response<Models::StartBlobCopyFromUriResult>, BlobStorageError>)>;
-        using CopyFromUriCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::CopyBlobFromUriResult>, BlobStorageError>)>;
-        using AbortCopyFromUriCompletionHandler = std::move_only_function<void(
-            std::expected<Response<Models::AbortCopyBlobFromUriResult>, BlobStorageError>)>;
-        using SnapshotCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::CreateBlobSnapshotResult>, BlobStorageError>)>;
         using AcquireLeaseCompletionHandler =
             std::move_only_function<void(std::expected<Response<Models::AcquireBlobLeaseResult>, BlobStorageError>)>;
         using RenewLeaseCompletionHandler =
             std::move_only_function<void(std::expected<Response<Models::RenewBlobLeaseResult>, BlobStorageError>)>;
-        using ChangeLeaseCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::ChangeBlobLeaseResult>, BlobStorageError>)>;
         using ReleaseLeaseCompletionHandler =
             std::move_only_function<void(std::expected<Response<Models::ReleaseBlobLeaseResult>, BlobStorageError>)>;
-        using BreakLeaseCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::BreakBlobLeaseResult>, BlobStorageError>)>;
         using DeleteCompletionHandler =
             std::move_only_function<void(std::expected<Response<Models::DeleteBlobResult>, BlobStorageError>)>;
-        using GetTagsCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::GetBlobTagsResult>, BlobStorageError>)>;
-        using SetTagsCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::SetBlobTagsResult>, BlobStorageError>)>;
-        using UndeleteCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::UndeleteBlobResult>, BlobStorageError>)>;
         using GetPropertiesCompletionHandler =
             std::move_only_function<void(std::expected<Response<Models::BlobProperties>, BlobStorageError>)>;
         using ExistsCompletionHandler = std::move_only_function<void(std::expected<Response<bool>, BlobStorageError>)>;
@@ -367,141 +345,6 @@ namespace AVEVA::AzureClient
         }
 
         template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto SetHttpHeadersAsync(SetBlobHttpHeadersOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::SetBlobHttpHeadersResult>(this,
-                &BlobClient::SetHttpHeadersAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(options));
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto SetAccessTierAsync(SetBlobAccessTierOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::SetBlobAccessTierResult>(this,
-                &BlobClient::SetAccessTierAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(options));
-        }
-
-        // Copy Blob From URL: copies `sourceUri` (up to 256 MiB, readable via SAS or public access) into
-        // this block blob and completes once the copy has finished.
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, CopyFromUriOptions>)
-        [[nodiscard]] auto CopyFromUriAsync(std::string sourceUri,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::CopyBlobFromUriResult>(this,
-                &BlobClient::CopyFromUriAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(sourceUri),
-                CopyFromUriOptions{});
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto CopyFromUriAsync(std::string sourceUri,
-            CopyFromUriOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::CopyBlobFromUriResult>(this,
-                &BlobClient::CopyFromUriAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(sourceUri),
-                std::move(options));
-        }
-
-        // Aborts a pending copy started by StartCopyFromUriAsync (`copyId` is its CopyId).
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, AbortCopyFromUriOptions>)
-        [[nodiscard]] auto AbortCopyFromUriAsync(std::string copyId,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::AbortCopyBlobFromUriResult>(this,
-                &BlobClient::AbortCopyFromUriAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(copyId),
-                AbortCopyFromUriOptions{});
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto AbortCopyFromUriAsync(std::string copyId,
-            AbortCopyFromUriOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::AbortCopyBlobFromUriResult>(this,
-                &BlobClient::AbortCopyFromUriAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(copyId),
-                std::move(options));
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, StartCopyFromUriOptions>)
-        [[nodiscard]] auto StartCopyFromUriAsync(std::string sourceUri,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::StartBlobCopyFromUriResult>(this,
-                &BlobClient::StartCopyFromUriAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(sourceUri),
-                StartCopyFromUriOptions{});
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto StartCopyFromUriAsync(std::string sourceUri,
-            StartCopyFromUriOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::StartBlobCopyFromUriResult>(this,
-                &BlobClient::StartCopyFromUriAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(sourceUri),
-                std::move(options));
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, SnapshotBlobOptions>)
-        [[nodiscard]] auto SnapshotAsync(CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::CreateBlobSnapshotResult>(this,
-                &BlobClient::SnapshotAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                SnapshotBlobOptions{});
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto SnapshotAsync(SnapshotBlobOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::CreateBlobSnapshotResult>(this,
-                &BlobClient::SnapshotAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(options));
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
             requires(!std::same_as<std::remove_cvref_t<CompletionToken>, AcquireLeaseOptions>)
         [[nodiscard]] auto AcquireLeaseAsync(CompletionToken&& token = CompletionToken{},
             std::optional<HttpRequestOptions> requestOptions = std::nullopt)
@@ -538,18 +381,6 @@ namespace AVEVA::AzureClient
         }
 
         template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto ChangeLeaseAsync(ChangeLeaseOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::ChangeBlobLeaseResult>(this,
-                &BlobClient::ChangeLeaseAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(options));
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
         [[nodiscard]] auto ReleaseLeaseAsync(ReleaseLeaseOptions options,
             CompletionToken&& token = CompletionToken{},
             std::optional<HttpRequestOptions> requestOptions = std::nullopt)
@@ -559,96 +390,6 @@ namespace AVEVA::AzureClient
                 std::forward<CompletionToken>(token),
                 std::move(requestOptions),
                 std::move(options));
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, BreakLeaseOptions>)
-        [[nodiscard]] auto BreakLeaseAsync(CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::BreakBlobLeaseResult>(this,
-                &BlobClient::BreakLeaseAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                BreakLeaseOptions{});
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto BreakLeaseAsync(BreakLeaseOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::BreakBlobLeaseResult>(this,
-                &BlobClient::BreakLeaseAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(options));
-        }
-
-        // Get Blob Tags (of the current blob, or of the snapshot/version this client targets).
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, GetBlobTagsOptions>)
-        [[nodiscard]] auto GetTagsAsync(CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::GetBlobTagsResult>(this,
-                &BlobClient::GetTagsAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                GetBlobTagsOptions{});
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto GetTagsAsync(GetBlobTagsOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::GetBlobTagsResult>(this,
-                &BlobClient::GetTagsAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(options));
-        }
-
-        // Set Blob Tags, replacing all existing tags. At most 10 tags; keys 1-128 and values 0-256 characters of
-        // [A-Za-z0-9 +-./:=_] (violations complete with invalid_argument without sending a request).
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, SetBlobTagsOptions>)
-        [[nodiscard]] auto SetTagsAsync(Models::BlobTags tags,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::SetBlobTagsResult>(this,
-                &BlobClient::SetTagsAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(tags),
-                SetBlobTagsOptions{});
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto SetTagsAsync(Models::BlobTags tags,
-            SetBlobTagsOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::SetBlobTagsResult>(this,
-                &BlobClient::SetTagsAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(tags),
-                std::move(options));
-        }
-
-        // Undelete Blob: restores a soft-deleted blob and its soft-deleted snapshots.
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto UndeleteAsync(CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::UndeleteBlobResult>(this,
-                &BlobClient::UndeleteAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions));
         }
 
       protected:
@@ -709,49 +450,14 @@ namespace AVEVA::AzureClient
         void SetMetadataAsyncImpl(const SetBlobMetadataOptions& options,
             SetMetadataCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void SetHttpHeadersAsyncImpl(const SetBlobHttpHeadersOptions& options,
-            SetHttpHeadersCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        void SetAccessTierAsyncImpl(const SetBlobAccessTierOptions& options,
-            SetAccessTierCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        void StartCopyFromUriAsyncImpl(const std::string& sourceUri,
-            const StartCopyFromUriOptions& options,
-            StartCopyFromUriCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        void CopyFromUriAsyncImpl(const std::string& sourceUri,
-            const CopyFromUriOptions& options,
-            CopyFromUriCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        void AbortCopyFromUriAsyncImpl(const std::string& copyId,
-            const AbortCopyFromUriOptions& options,
-            AbortCopyFromUriCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        void SnapshotAsyncImpl(const SnapshotBlobOptions& options,
-            SnapshotCompletionHandler completion,
-            HttpRequestOptions requestOptions);
         void AcquireLeaseAsyncImpl(AcquireLeaseOptions options,
             AcquireLeaseCompletionHandler completion,
             HttpRequestOptions requestOptions);
         void RenewLeaseAsyncImpl(RenewLeaseOptions options,
             RenewLeaseCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void ChangeLeaseAsyncImpl(ChangeLeaseOptions options,
-            ChangeLeaseCompletionHandler completion,
-            HttpRequestOptions requestOptions);
         void ReleaseLeaseAsyncImpl(ReleaseLeaseOptions options,
             ReleaseLeaseCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void BreakLeaseAsyncImpl(BreakLeaseOptions options,
-            BreakLeaseCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        void GetTagsAsyncImpl(const GetBlobTagsOptions& options,
-            GetTagsCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        void SetTagsAsyncImpl(const Models::BlobTags& tags,
-            const SetBlobTagsOptions& options,
-            SetTagsCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        void UndeleteAsyncImpl(UndeleteCompletionHandler completion, HttpRequestOptions requestOptions);
     };
 } // namespace AVEVA::AzureClient

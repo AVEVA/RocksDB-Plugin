@@ -7,7 +7,6 @@
 #include "TestHelpers.hpp"
 #include "ValueOrFail.hpp"
 
-#include <AVEVA/AzureClient/AppendBlobClient.hpp>
 #include <AVEVA/AzureClient/BlockBlobClient.hpp>
 #include <AVEVA/HttpClient/HttpClientError.hpp>
 #include <AVEVA/HttpClient/HttpHeader.hpp>
@@ -246,29 +245,6 @@ TEST(RetryTests, RetriesTransientTransportErrors)
         EXPECT_EQ(httpClient.RequestCount(), 2U) << error.message();
         EXPECT_TRUE(ValueOrFail(observed).has_value()) << error.message();
     }
-}
-
-TEST(RetryTests, UnconditionalAppendBlockIsNotReplayedAfterAmbiguousTransportFailure)
-{
-    FakeHttpClient httpClient;
-    httpClient.EnqueueResponse(HttpResponse{}, std::make_error_code(std::errc::connection_reset));
-    httpClient.EnqueueResponse(HttpResponse{201, {}, ""});
-    AppendBlobClient client{httpClient, MakeRetryOptions(1)};
-
-    bool done = false;
-    bool succeeded = true;
-    client.AppendBlockAsync(std::string{"data"}, AppendBlockOptions{}, [&](auto result)
-    {
-        succeeded = result.has_value();
-        done = true;
-    });
-
-    ASSERT_TRUE(PollUntil(httpClient, [&]
-    {
-        return done;
-    }));
-    EXPECT_EQ(httpClient.RequestCount(), 1U);
-    EXPECT_FALSE(succeeded);
 }
 
 TEST(RetryTests, GivesUpAfterMaxRetriesAndReportsLastResponse)

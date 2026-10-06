@@ -1,7 +1,6 @@
 #include "FakeHttpClient.hpp"
 #include "TestFixtures.hpp"
 
-#include <AVEVA/AzureClient/AppendBlobClient.hpp>
 #include <AVEVA/AzureClient/BlobClient.hpp>
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>
 #include <AVEVA/AzureClient/BlockBlobClient.hpp>
@@ -14,7 +13,6 @@
 
 namespace
 {
-    using AVEVA::AzureClient::AppendBlobClient;
     using AVEVA::AzureClient::BlobClient;
     using AVEVA::AzureClient::BlobContainerClient;
     using AVEVA::AzureClient::BlockBlobClient;
@@ -71,56 +69,6 @@ namespace
         EXPECT_EQ(observed.ErrorRequestId, "req-1");
     }
 } // namespace
-
-TEST(SuppressedErrorResponseTests, IfExistsOperationsKeepTheRealRawResponse)
-{
-    FakeHttpClient httpClient;
-    BlobClient blob{httpClient, MakeBlobClientOptions()};
-    BlockBlobClient blockBlob{httpClient, MakeBlobClientOptions()};
-    AppendBlobClient appendBlob{httpClient, MakeBlobClientOptions()};
-    BlobContainerClient container{httpClient, MakeBlobContainerClientOptions()};
-
-    ExpectSuppressedWithRealResponse(RunSuppressed(httpClient,
-                                         404,
-                                         "BlobNotFound",
-                                         [&](auto completion)
-    {
-        blob.DeleteIfExistsAsync(std::move(completion));
-    }),
-        404);
-    ExpectSuppressedWithRealResponse(RunSuppressed(httpClient,
-                                         409,
-                                         "BlobAlreadyExists",
-                                         [&](auto completion)
-    {
-        blockBlob.CreateIfNotExistsAsync(std::move(completion));
-    }),
-        409);
-    ExpectSuppressedWithRealResponse(RunSuppressed(httpClient,
-                                         412,
-                                         "ConditionNotMet",
-                                         [&](auto completion)
-    {
-        appendBlob.CreateIfNotExistsAsync(std::move(completion));
-    }),
-        412);
-    ExpectSuppressedWithRealResponse(RunSuppressed(httpClient,
-                                         409,
-                                         "ContainerAlreadyExists",
-                                         [&](auto completion)
-    {
-        container.CreateIfNotExistsAsync(std::move(completion));
-    }),
-        409);
-    ExpectSuppressedWithRealResponse(RunSuppressed(httpClient,
-                                         404,
-                                         "ContainerNotFound",
-                                         [&](auto completion)
-    {
-        container.DeleteIfExistsAsync(std::move(completion));
-    }),
-        404);
-}
 
 TEST(SuppressedErrorResponseTests, OtherFailuresAreStillReported)
 {

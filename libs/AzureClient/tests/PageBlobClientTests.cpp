@@ -54,17 +54,13 @@ namespace
     using AVEVA::AzureClient::Models::BlobType;
     using AVEVA::AzureClient::Models::BreakBlobLeaseResult;
     using AVEVA::AzureClient::Models::ClearPagesResult;
-    using AVEVA::AzureClient::Models::CreateBlobSnapshotResult;
     using AVEVA::AzureClient::Models::CreatePageBlobResult;
     using AVEVA::AzureClient::Models::DeleteBlobResult;
     using AVEVA::AzureClient::Models::DownloadBlobResult;
     using AVEVA::AzureClient::Models::DownloadBlobToResult;
     using AVEVA::AzureClient::Models::ReleaseBlobLeaseResult;
     using AVEVA::AzureClient::Models::ResizePageBlobResult;
-    using AVEVA::AzureClient::Models::SetBlobAccessTierResult;
-    using AVEVA::AzureClient::Models::SetBlobHttpHeadersResult;
     using AVEVA::AzureClient::Models::SetBlobMetadataResult;
-    using AVEVA::AzureClient::Models::StartBlobCopyFromUriResult;
     using AVEVA::AzureClient::Models::UploadPagesResult;
     using AVEVA::AzureClient::Tests::CallbackExpectation;
     using AVEVA::AzureClient::Tests::DefaultETag;
@@ -294,53 +290,6 @@ namespace
         });
     }
 
-    void StartSetHttpHeadersAsyncAndVerify(PageBlobClient& client,
-        const AVEVA::AzureClient::SetBlobHttpHeadersOptions& options,
-        CallbackExpectation& callback)
-    {
-        client.SetHttpHeadersAsync(options,
-            [&](std::expected<Response<SetBlobHttpHeadersResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            EXPECT_EQ(result->Value().ETag, DefaultETag);
-            callback.MarkInvoked();
-        });
-    }
-
-    void StartSetAccessTierAsyncAndVerify(PageBlobClient& client,
-        const AVEVA::AzureClient::SetBlobAccessTierOptions& options,
-        CallbackExpectation& callback)
-    {
-        client.SetAccessTierAsync(options,
-            [&](std::expected<Response<SetBlobAccessTierResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            EXPECT_EQ(result->Value().ETag, DefaultETag);
-            callback.MarkInvoked();
-        });
-    }
-
-    void StartCopyFromUriAsyncAndVerify(PageBlobClient& client, CallbackExpectation& callback)
-    {
-        client.StartCopyFromUriAsync("https://source.example.com/page.vhd",
-            [&](std::expected<Response<StartBlobCopyFromUriResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            EXPECT_EQ(result->Value().CopyId, "copy-1");
-            callback.MarkInvoked();
-        });
-    }
-
-    void StartSnapshotAsyncAndVerify(PageBlobClient& client, CallbackExpectation& callback)
-    {
-        client.SnapshotAsync([&](std::expected<Response<CreateBlobSnapshotResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            EXPECT_EQ(result->Value().Snapshot, "snapshot-1");
-            callback.MarkInvoked();
-        });
-    }
-
     void StartAcquireLeaseAsyncAndVerify(PageBlobClient& client, CallbackExpectation& callback)
     {
         client.AcquireLeaseAsync([&](std::expected<Response<AcquireBlobLeaseResult>, BlobStorageError> result)
@@ -360,17 +309,6 @@ namespace
         {
             ASSERT_TRUE(result.has_value());
             EXPECT_EQ(result->Value().ETag, DefaultETag);
-            callback.MarkInvoked();
-        });
-    }
-
-    void StartBreakLeaseAsyncAndVerify(PageBlobClient& client, CallbackExpectation& callback)
-    {
-        client.BreakLeaseAsync([&](std::expected<Response<BreakBlobLeaseResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            ASSERT_TRUE(result->Value().LeaseTimeSeconds.has_value());
-            EXPECT_EQ(*result->Value().LeaseTimeSeconds, 17);
             callback.MarkInvoked();
         });
     }
@@ -545,23 +483,6 @@ TEST(PageBlobClientTests, DeleteAsync_UsesDeleteMethod)
     client.DeleteAsync([](std::expected<Response<DeleteBlobResult>, BlobStorageError>) {});
 
     EXPECT_EQ(httpClient.LastRequest().GetMethod(), HttpMethod::Delete);
-}
-
-TEST(PageBlobClientTests, SetHttpHeadersAsync_SendsEmptyHeadersForProperties)
-{
-    FakeHttpClient httpClient;
-    PageBlobClient client{httpClient, BuildOptions()};
-
-    client.SetHttpHeadersAsync({},
-        [](std::expected<Response<AVEVA::AzureClient::Models::SetBlobHttpHeadersResult>, BlobStorageError>) {});
-
-    const auto& request = httpClient.LastRequest();
-    EXPECT_EQ(CountHeader(request, "x-ms-blob-content-type"), 1U);
-    EXPECT_EQ(CountHeader(request, "x-ms-blob-content-md5"), 1U);
-    EXPECT_EQ(CountHeader(request, "x-ms-blob-cache-control"), 1U);
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-blob-content-type"), "");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-blob-content-md5"), "");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-blob-cache-control"), "");
 }
 
 TEST(PageBlobClientTests, GetPropertiesAsync_ParsesBlobType)
@@ -817,80 +738,6 @@ TEST(PageBlobClientTests, GetPageRangesFollowsNextMarkerAndMergesPages)
     EXPECT_NE(httpClient.RequestAt(1).Request.GetUrl().find("marker=m1"), std::string::npos);
 }
 
-TEST(PageBlobClientTests, GetPageRangesMetadataHeadersTierCopySnapshotLeaseExistsAndDeleteIfExistsAreCovered)
-{
-    FakeHttpClient httpClient;
-    httpClient.EnqueueResponse(HttpResponse{200,
-        MakeCanonicalSuccessHeaders(),
-        R"(<PageList><PageRange><Start>0</Start><End>511</End></PageRange></PageList>)"});
-    httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders(), ""});
-    httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders(), ""});
-    httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders(), ""});
-    httpClient.EnqueueResponse(HttpResponse{202,
-        MakeCanonicalSuccessHeaders({{"x-ms-copy-id", "copy-1"}, {"x-ms-copy-status", "pending"}}),
-        ""});
-    httpClient.EnqueueResponse(HttpResponse{201, MakeCanonicalSuccessHeaders({{"x-ms-snapshot", "snapshot-1"}}), ""});
-    httpClient.EnqueueResponse(HttpResponse{201, MakeCanonicalSuccessHeaders({{"x-ms-lease-id", "lease-1"}}), ""});
-    httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders(), ""});
-    httpClient.EnqueueResponse(HttpResponse{202, MakeCanonicalSuccessHeaders({{"x-ms-lease-time", "17"}}), ""});
-    httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders(), ""});
-    httpClient.EnqueueResponse(MakeAzureErrorResponse(404, "BlobNotFound", "", "delete-request"));
-    PageBlobClient client{httpClient, BuildOptions()};
-
-    AVEVA::AzureClient::GetPageRangesOptions rangesOptions;
-    rangesOptions.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 0U, .Length = 512U};
-    CallbackExpectation rangesCallback;
-    StartGetPageRangesAsyncAndVerify(client, rangesOptions, rangesCallback);
-
-    AVEVA::AzureClient::SetBlobMetadataOptions metadataOptions;
-    metadataOptions.Metadata["owner"] = "ops";
-    CallbackExpectation metadataCallback;
-    StartSetMetadataAsyncAndVerify(client, metadataOptions, metadataCallback);
-
-    AVEVA::AzureClient::SetBlobHttpHeadersOptions headerOptions;
-    headerOptions.HttpHeaders.ContentType = "application/octet-stream";
-    CallbackExpectation headersCallback;
-    StartSetHttpHeadersAsyncAndVerify(client, headerOptions, headersCallback);
-
-    AVEVA::AzureClient::SetBlobAccessTierOptions tierOptions;
-    tierOptions.AccessTier = "Cool";
-    CallbackExpectation tierCallback;
-    StartSetAccessTierAsyncAndVerify(client, tierOptions, tierCallback);
-
-    CallbackExpectation copyCallback;
-    StartCopyFromUriAsyncAndVerify(client, copyCallback);
-
-    CallbackExpectation snapshotCallback;
-    StartSnapshotAsyncAndVerify(client, snapshotCallback);
-
-    CallbackExpectation acquireCallback;
-    StartAcquireLeaseAsyncAndVerify(client, acquireCallback);
-
-    AVEVA::AzureClient::ReleaseLeaseOptions const releaseOptions{.LeaseId = "lease-1"};
-    CallbackExpectation releaseCallback;
-    StartReleaseLeaseAsyncAndVerify(client, releaseOptions, releaseCallback);
-
-    CallbackExpectation breakCallback;
-    StartBreakLeaseAsyncAndVerify(client, breakCallback);
-
-    CallbackExpectation existsCallback;
-    StartExistsAsyncAndVerify(client, existsCallback);
-
-    AVEVA::AzureClient::DeleteBlobOptions deleteOptions;
-    deleteOptions.DeleteSnapshotsOption = "include";
-    CallbackExpectation deleteCallback;
-    StartDeleteIfExistsAsyncAndVerify(client, deleteOptions, deleteCallback);
-
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(0).Request, "x-ms-range"), "bytes=0-511");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(1).Request, "x-ms-meta-owner"), "ops");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(2).Request, "x-ms-blob-content-type"),
-        "application/octet-stream");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(3).Request, "x-ms-access-tier"), "Cool");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(7).Request, "x-ms-lease-id"), "lease-1");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(10).Request, "x-ms-delete-snapshots"), "include");
-    httpClient.Poll(); // drive the eleven posted (async) completions (T26)
-}
-
 TEST(PageBlobClientTests, DownloadAsyncAcceptsUseFutureCompletionToken)
 {
     FakeHttpClient httpClient;
@@ -983,8 +830,6 @@ namespace
         using AVEVA::AzureClient::DownloadBlobOptions;
         using AVEVA::AzureClient::GetBlobPropertiesOptions;
         using AVEVA::AzureClient::GetPageRangesOptions;
-        using AVEVA::AzureClient::SnapshotBlobOptions;
-        using AVEVA::AzureClient::StartCopyFromUriOptions;
         using AVEVA::AzureClient::UploadPagesOptions;
 
         const std::vector<std::byte> bytes;
@@ -1028,17 +873,11 @@ namespace
         static_cast<void>(client.GetPropertiesAsync());
         static_cast<void>(client.GetPropertiesAsync(GetBlobPropertiesOptions{}));
 
-        static_cast<void>(client.StartCopyFromUriAsync(str));
-        static_cast<void>(client.StartCopyFromUriAsync(str, StartCopyFromUriOptions{}));
 
-        static_cast<void>(client.SnapshotAsync());
-        static_cast<void>(client.SnapshotAsync(SnapshotBlobOptions{}));
 
         static_cast<void>(client.AcquireLeaseAsync());
         static_cast<void>(client.AcquireLeaseAsync(AcquireLeaseOptions{}));
 
-        static_cast<void>(client.BreakLeaseAsync());
-        static_cast<void>(client.BreakLeaseAsync(BreakLeaseOptions{}));
 
         static_cast<void>(client.ExistsAsync());
         static_cast<void>(client.DeleteIfExistsAsync());

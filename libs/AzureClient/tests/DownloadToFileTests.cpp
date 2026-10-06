@@ -4,7 +4,7 @@
 #include "FakeHttpClient.hpp"
 #include "TestFixtures.hpp"
 
-#include <AVEVA/AzureClient/AppendBlobClient.hpp>
+#include <AVEVA/AzureClient/PageBlobClient.hpp>
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
 
 #include <AVEVA/HttpClient/HttpResponse.hpp>
@@ -23,7 +23,7 @@
 namespace
 {
     using AVEVA::HttpResponse;
-    using AVEVA::AzureClient::AppendBlobClient;
+    using AVEVA::AzureClient::PageBlobClient;
     using AVEVA::AzureClient::BlobClientOptions;
     using AVEVA::AzureClient::BlobStorageError;
     using AVEVA::AzureClient::Response;
@@ -45,7 +45,7 @@ namespace
         invoked = true;
     }
 
-    void StartDownloadToPathAndVerifySuccess(AppendBlobClient& client, const std::filesystem::path& path, bool& invoked)
+    void StartDownloadToPathAndVerifySuccess(PageBlobClient& client, const std::filesystem::path& path, bool& invoked)
     {
         client.DownloadToAsync(path,
             [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result)
@@ -62,7 +62,7 @@ namespace
         invoked = true;
     }
 
-    void StartDownloadToPathAndVerifyFailure(AppendBlobClient& client, const std::filesystem::path& path, bool& invoked)
+    void StartDownloadToPathAndVerifyFailure(PageBlobClient& client, const std::filesystem::path& path, bool& invoked)
     {
         client.DownloadToAsync(path,
             [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result)
@@ -79,7 +79,7 @@ TEST(T06_DownloadToFileTests, SuccessRenamesAtomic)
     httpClient.DefaultResponse() =
         HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "10"}}), "downloaded"};
 
-    AppendBlobClient client{httpClient, BuildOptions()};
+    PageBlobClient client{httpClient, BuildOptions()};
 
     const std::filesystem::path path = std::filesystem::temp_directory_path() / "t06-download-output.txt";
 
@@ -112,7 +112,7 @@ TEST(T06_DownloadToFileTests, DirectoryTargetReportsIsADirectory)
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() =
         HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "10"}}), "downloaded"};
-    AppendBlobClient client{httpClient, BuildOptions()};
+    PageBlobClient client{httpClient, BuildOptions()};
 
     const std::filesystem::path dir = std::filesystem::temp_directory_path() / "t06-download-dir-target";
     std::filesystem::create_directories(dir);
@@ -139,7 +139,7 @@ TEST(T06_DownloadToFileTests, HttpFailureRemovesPartialAndLeavesTargetUntouched)
     // Simulate a transport failure for the request
     httpClient.EnqueueResponse(HttpResponse{}, std::make_error_code(std::errc::connection_reset));
 
-    AppendBlobClient client{httpClient, BuildOptions()};
+    PageBlobClient client{httpClient, BuildOptions()};
 
     const std::filesystem::path path = std::filesystem::temp_directory_path() / "t06-download-output-failure.txt";
 
@@ -185,7 +185,7 @@ TEST(T06_DownloadToFileTests, StreamWriteFailureReportsIoError)
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "4"}}), "data"};
 
-    AppendBlobClient client{httpClient, BuildOptions()};
+    PageBlobClient client{httpClient, BuildOptions()};
 
     // Create a failing streambuf that refuses writes
     struct FailBuf : std::streambuf
