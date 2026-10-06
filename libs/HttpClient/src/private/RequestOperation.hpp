@@ -238,7 +238,12 @@ namespace AVEVA::Private
             {
                 m_stream->set_verify_callback(asio::ssl::host_name_verification(m_key.host));
             }
-            if (m_hostIsName && !SSL_set_tlsext_host_name(m_stream->native_handle(), m_key.host.c_str()))
+            // Same as the SSL_set_tlsext_host_name macro, which uses a C-style cast.
+            if (m_hostIsName &&
+                !SSL_ctrl(m_stream->native_handle(),
+                    SSL_CTRL_SET_TLSEXT_HOSTNAME,
+                    TLSEXT_NAMETYPE_host_name,
+                    static_cast<void*>(const_cast<char*>(m_key.host.c_str()))))
             {
                 Fail(HttpClientError::TlsFailed);
                 return false;

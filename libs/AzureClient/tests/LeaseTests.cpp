@@ -114,7 +114,7 @@ TEST(LeaseTests, BlobRenewAndReleaseSendLeaseActionAndConditions)
     EXPECT_NE(renew.GetUrl().find("comp=lease"), std::string::npos);
     EXPECT_EQ(renewed, "lease-a");
 
-    const HttpRequest& release = ReleaseBlobLease(httpClient, client, "lease-a", IfUnmodifiedSince());
+    const HttpRequest release = ReleaseBlobLease(httpClient, client, "lease-a", IfUnmodifiedSince());
     EXPECT_EQ(Header(release, "x-ms-lease-action"), "release");
     EXPECT_EQ(Header(release, "If-Unmodified-Since"), "Fri, 26 Jun 2015 18:59:17 GMT");
 }

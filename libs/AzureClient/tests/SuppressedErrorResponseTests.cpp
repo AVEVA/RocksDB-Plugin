@@ -61,13 +61,6 @@ namespace
         return observed.value_or(Observed{});
     }
 
-    void ExpectSuppressedWithRealResponse(const Observed& observed, unsigned int status)
-    {
-        EXPECT_TRUE(observed.Succeeded);
-        EXPECT_EQ(observed.RawStatus, status);
-        EXPECT_EQ(observed.RawRequestId, "req-1");
-        EXPECT_EQ(observed.ErrorRequestId, "req-1");
-    }
 } // namespace
 
 TEST(SuppressedErrorResponseTests, OtherFailuresAreStillReported)

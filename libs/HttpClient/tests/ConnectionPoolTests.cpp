@@ -28,7 +28,8 @@ namespace
     // identity (which connection came back) and lifetime (when a connection was closed).
     struct TrackedStream
     {
-        TrackedStream(int identity, int& liveCount) : identity(identity), liveCount(&liveCount)
+        TrackedStream(int streamIdentity, int& streamLiveCount)
+            : identity(streamIdentity), liveCount(&streamLiveCount)
         {
             ++*this->liveCount;
         }

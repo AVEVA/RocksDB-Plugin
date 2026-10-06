@@ -65,12 +65,6 @@ namespace
                "</Properties></Blob></Blobs></EnumerationResults>";
     }
 
-    [[nodiscard]] std::string ContainerXml(std::string_view properties)
-    {
-        return std::string{"<EnumerationResults><Containers><Container><Name>c</Name><Properties>"} +
-               std::string{properties} + "</Properties></Container></Containers></EnumerationResults>";
-    }
-
     void ExpectParserThrowsOnMalformedDocument(const XmlParser& parser, const std::string& xml)
     {
         SCOPED_TRACE(parser.Name + " <- [" + xml + "]");

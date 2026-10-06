@@ -677,7 +677,7 @@ TEST_P(RequestShapeTests, FirstRequestHasTheDocumentedShape)
 INSTANTIATE_TEST_SUITE_P(AllOperations,
     RequestShapeTests,
     ::testing::ValuesIn(AllCases()),
-    [](const ::testing::TestParamInfo<RequestShapeCase>& info)
+    [](const ::testing::TestParamInfo<RequestShapeCase>& paramInfo)
 {
-    return info.param.Name;
+    return paramInfo.param.Name;
 });

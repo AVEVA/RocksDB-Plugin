@@ -217,8 +217,7 @@ namespace
             const std::uint64_t first = std::stoull(std::string(range.substr(6, dash - 6)));
             const std::uint64_t last =
                 std::min<std::uint64_t>(std::stoull(std::string(range.substr(dash + 1))), content.size() - 1U);
-            std::string body =
-                content.substr(static_cast<std::size_t>(first), static_cast<std::size_t>(last - first + 1U));
+            std::string body = content.substr(static_cast<std::size_t>(first), last - first + 1U);
             const std::string contentLength = std::to_string(body.size());
             return Ok(206,
                 {{"Content-Range",

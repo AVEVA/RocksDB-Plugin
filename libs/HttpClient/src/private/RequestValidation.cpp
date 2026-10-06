@@ -15,7 +15,7 @@ namespace AVEVA::Private
         {
             return (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
                    (character >= '0' && character <= '9') ||
-                   std::string_view("!#$%&'*+-.^_`|~").find(character) != std::string_view::npos;
+                   std::string_view("!#$%&'*+-.^_`|~").find(static_cast<char>(character)) != std::string_view::npos;
         });
     }
 

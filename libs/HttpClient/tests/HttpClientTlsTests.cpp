@@ -253,7 +253,10 @@ namespace
             X509_sign(certificate.get(), key.get(), EVP_sha256());
             SSL_CTX_use_certificate(m_sslContext.native_handle(), certificate.get());
             SSL_CTX_use_PrivateKey(m_sslContext.native_handle(), key.get());
-            SSL_CTX_set_tlsext_servername_callback(m_sslContext.native_handle(), &TlsTestServer::OnServerName);
+            // Same as the SSL_CTX_set_tlsext_servername_callback macro, which uses a C-style cast.
+            SSL_CTX_callback_ctrl(m_sslContext.native_handle(),
+                SSL_CTRL_SET_TLSEXT_SERVERNAME_CB,
+                reinterpret_cast<void (*)()>(&TlsTestServer::OnServerName));
             SSL_CTX_set_tlsext_servername_arg(m_sslContext.native_handle(), this);
 
             std::unique_ptr<BIO, decltype(&BIO_free)> memory(BIO_new(BIO_s_mem()), BIO_free);

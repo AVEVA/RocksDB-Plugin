@@ -155,9 +155,9 @@ TEST_P(OptionValidationTests, RejectsInvalidOptionsBeforeSendingAnyRequest)
 INSTANTIATE_TEST_SUITE_P(Matrix,
     OptionValidationTests,
     ::testing::ValuesIn(MakeCases()),
-    [](const ::testing::TestParamInfo<ValidationCase>& info)
+    [](const ::testing::TestParamInfo<ValidationCase>& paramInfo)
 {
-    return info.param.Name;
+    return paramInfo.param.Name;
 });
 
 namespace
@@ -248,7 +248,7 @@ TEST_P(TokenTransportTests, TokenCredentialsRequireHttpsUnlessLoopback)
 INSTANTIATE_TEST_SUITE_P(Matrix,
     TokenTransportTests,
     ::testing::ValuesIn(MakeTokenTransportCases()),
-    [](const ::testing::TestParamInfo<TokenTransportCase>& info)
+    [](const ::testing::TestParamInfo<TokenTransportCase>& paramInfo)
 {
-    return info.param.Name;
+    return paramInfo.param.Name;
 });

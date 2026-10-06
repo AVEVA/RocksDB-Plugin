@@ -7,7 +7,6 @@ option(AVEVA_AZURE_CLIENT_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer instru
 option(AVEVA_AZURE_CLIENT_ENABLE_TSAN "Enable ThreadSanitizer instrumentation (incompatible with AVEVA_AZURE_CLIENT_ENABLE_ASAN)" OFF)
 option(AVEVA_AZURE_CLIENT_ENABLE_COVERAGE "Enable compiler coverage instrumentation" OFF)
 option(AVEVA_AZURE_CLIENT_ENABLE_CLANG_TIDY "Enable clang-tidy analysis during compilation" OFF)
-option(AVEVA_AZURE_CLIENT_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
 # Deprecated unprefixed option names, honoured for one release.
 foreach(legacy_pair
@@ -26,9 +25,6 @@ foreach(legacy_pair
 endforeach()
 
 list(APPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/infrastructure/cmake")
-
-# Sets the COMPILE_WARNING_AS_ERROR property (/WX or -Werror) on every target created below.
-set(CMAKE_COMPILE_WARNING_AS_ERROR "${AVEVA_AZURE_CLIENT_WARNINGS_AS_ERRORS}")
 
 function(aveva_azure_client_enable_clang_tidy target_name)
     if(NOT AVEVA_AZURE_CLIENT_ENABLE_CLANG_TIDY)

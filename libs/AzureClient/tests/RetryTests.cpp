@@ -137,14 +137,6 @@ namespace
 {
     using DeleteResult = std::expected<Response<Models::DeleteBlobResult>, BlobStorageError>;
 
-    void StartDeleteAsync(BlockBlobClient& client, std::optional<DeleteResult>& observed)
-    {
-        client.DeleteAsync([&](DeleteResult result)
-        {
-            observed = std::move(result);
-        });
-    }
-
     void StartDeleteAsync(BlockBlobClient& client,
         boost::asio::cancellation_signal& signal,
         std::optional<DeleteResult>& observed)
@@ -194,11 +186,11 @@ namespace
 
     [[nodiscard]] std::size_t CountAuthorizationHeaders(const AVEVA::HttpRequest& request)
     {
-        return std::ranges::count_if(request.GetHeaders(),
+        return static_cast<std::size_t>(std::ranges::count_if(request.GetHeaders(),
             [](const AVEVA::HttpHeader& header)
         {
             return header.GetName() == "Authorization";
-        });
+        }));
     }
 } // namespace
 

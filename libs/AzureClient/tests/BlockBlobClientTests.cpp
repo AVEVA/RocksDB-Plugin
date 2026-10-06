@@ -90,18 +90,6 @@ namespace
         EXPECT_EQ(value, "Bearer " + std::string(token));
     }
 
-    [[nodiscard]] std::size_t CountHeader(const AVEVA::HttpRequest& request, std::string_view headerName)
-    {
-        std::size_t count = 0;
-        for (const auto& header : request.GetHeaders())
-        {
-            if (header.GetName() == headerName)
-            {
-                ++count;
-            }
-        }
-        return count;
-    }
 
     void AssertBlobPropertiesResultHasValue(const std::expected<Response<BlobProperties>, BlobStorageError>& result)
     {
@@ -256,115 +244,6 @@ namespace
             EXPECT_EQ(response.Value().BytesWritten, 5U);
             callback.MarkInvoked();
         });
-    }
-
-    void StartSetMetadataAsyncAndVerify(BlockBlobClient& client,
-        const AVEVA::AzureClient::SetBlobMetadataOptions& options,
-        CallbackExpectation& callback)
-    {
-        client.SetMetadataAsync(options,
-            [&](std::expected<Response<SetBlobMetadataResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            const Response<SetBlobMetadataResult>& response = *result;
-            EXPECT_EQ(response.Value().ETag, DefaultETag);
-            callback.MarkInvoked();
-        });
-    }
-
-    void StartAcquireLeaseAsyncAndVerify(BlockBlobClient& client,
-        const AVEVA::AzureClient::AcquireLeaseOptions& options,
-        CallbackExpectation& callback)
-    {
-        client.AcquireLeaseAsync(options,
-            [&](std::expected<Response<AcquireBlobLeaseResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            const Response<AcquireBlobLeaseResult>& response = *result;
-            EXPECT_EQ(response.Value().LeaseId, "lease-1");
-            callback.MarkInvoked();
-        });
-    }
-
-    void StartReleaseLeaseAsyncAndVerify(BlockBlobClient& client,
-        const AVEVA::AzureClient::ReleaseLeaseOptions& options,
-        CallbackExpectation& callback)
-    {
-        client.ReleaseLeaseAsync(options,
-            [&](std::expected<Response<ReleaseBlobLeaseResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            const Response<ReleaseBlobLeaseResult>& response = *result;
-            EXPECT_EQ(response.Value().ETag, DefaultETag);
-            callback.MarkInvoked();
-        });
-    }
-
-    void StartExistsAsyncAndVerifyTrue(BlockBlobClient& client, CallbackExpectation& callback)
-    {
-        client.ExistsAsync([&](std::expected<Response<bool>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            const Response<bool>& response = *result;
-            EXPECT_TRUE(response.Value());
-            callback.MarkInvoked();
-        });
-    }
-
-    void StartExistsAsyncAndVerifyFalse(BlockBlobClient& client, CallbackExpectation& callback)
-    {
-        client.ExistsAsync([&](std::expected<Response<bool>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            EXPECT_FALSE(result->Value());
-            ASSERT_TRUE(result->Error().has_value());
-            EXPECT_EQ(result->Error()->RequestId, "missing-request");
-            callback.MarkInvoked();
-        });
-    }
-
-    void StartDeleteIfExistsAsyncAndVerify(BlockBlobClient& client,
-        const AVEVA::AzureClient::DeleteBlobOptions& options,
-        CallbackExpectation& callback)
-    {
-        client.DeleteIfExistsAsync(options,
-            [&](std::expected<Response<DeleteBlobResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            ASSERT_TRUE(result->Error().has_value());
-            EXPECT_EQ(result->Error()->RequestId, "delete-request");
-            callback.MarkInvoked();
-        });
-    }
-
-    void StartUploadAsyncWithTransactionalHashes(BlockBlobClient& client,
-        const AVEVA::AzureClient::UploadBlockBlobOptions& options)
-    {
-        client.UploadAsync(std::string{"data"},
-            options,
-            [](auto result)
-        {
-            ASSERT_TRUE(result.has_value());
-        });
-    }
-
-    void StartStageBlockAsyncWithTransactionalHashes(BlockBlobClient& client,
-        const AVEVA::AzureClient::StageBlockOptions& options,
-        std::optional<std::string>& md5)
-    {
-        client.StageBlockAsync(AVEVA::AzureClient::Models::EncodeBlockId(0),
-            std::string{"data"},
-            options,
-            [&](auto result)
-        {
-            ASSERT_TRUE(result.has_value());
-            md5 = result->Value().ContentMd5;
-        });
-    }
-
-    void StartUploadAsyncWithoutTransactionalHashes(BlockBlobClient& client)
-    {
-        client.UploadAsync(std::string{"data"}, [](auto) {});
     }
 
 } // namespace
@@ -852,7 +731,7 @@ TEST(BlockBlobClientTests, DownloadAsyncAcceptsUseFutureCompletionToken)
     std::expected<Response<DownloadBlobResult>, BlobStorageError> result = future.get();
     ASSERT_TRUE(result.has_value());
     const auto& content = result->Value().Content;
-    EXPECT_EQ(std::string(reinterpret_cast<const char*>(content.data()), content.size()), "hello");
+    EXPECT_EQ(std::string(content.data(), content.size()), "hello");
 }
 
 TEST(BlockBlobClientTests, UploadAsyncAcceptsUseFutureCompletionTokenAndReportsFailure)
