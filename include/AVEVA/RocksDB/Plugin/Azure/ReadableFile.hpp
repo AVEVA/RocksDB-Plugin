@@ -2,10 +2,14 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include <rocksdb/file_system.h>
 
+#include <functional>
 #include <memory>
+
+namespace AVEVA::RocksDB::Plugin::Azure::Impl {
+class ReadableFileImpl;
+}
 
 namespace AVEVA::RocksDB::Plugin::Azure {
 class ReadableFile final : public rocksdb::FSSequentialFile, public rocksdb::FSRandomAccessFile {
@@ -13,7 +17,8 @@ class ReadableFile final : public rocksdb::FSSequentialFile, public rocksdb::FSR
     std::shared_ptr<Impl::ReadableFileImpl> m_file;
 
   public:
-    explicit ReadableFile(Impl::ReadableFileImpl file);
+    explicit ReadableFile(Impl::ReadableFileImpl&& file);
+    ~ReadableFile() override;
 
     virtual rocksdb::IOStatus Read(size_t n, const rocksdb::IOOptions& options, rocksdb::Slice* result, char* scratch,
                                    rocksdb::IODebugContext* dbg) override;

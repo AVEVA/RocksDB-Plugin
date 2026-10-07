@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
-#include "AVEVA/RocksDB/Plugin/Azure/AsyncReadRequest.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadRequest.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadTracker.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
@@ -27,9 +27,9 @@
 #include <thread>
 #include <vector>
 
-using AVEVA::RocksDB::Plugin::Azure::AbortAsyncReads;
+using AVEVA::RocksDB::Plugin::Azure::Impl::AbortAsyncReads;
 using AVEVA::RocksDB::Plugin::Azure::HttpStatus;
-using AVEVA::RocksDB::Plugin::Azure::PollAsyncReads;
+using AVEVA::RocksDB::Plugin::Azure::Impl::PollAsyncReads;
 using AVEVA::RocksDB::Plugin::Azure::ReadableFile;
 using AVEVA::RocksDB::Plugin::Azure::RequestFailedException;
 using AVEVA::RocksDB::Plugin::Azure::Impl::AsyncReadTracker;

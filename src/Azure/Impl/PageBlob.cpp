@@ -30,11 +30,15 @@ PageBlob::PageBlob(std::shared_ptr<ClientRuntime> runtime, AzureClient::PageBlob
 
 int64_t PageBlob::GetSize() { return BlobHelpers::GetFileSize(m_client); }
 
-void PageBlob::SetSize(int64_t size) { BlobHelpers::SetFileSize(m_client, size); }
+void PageBlob::SetSize(int64_t size) {
+    m_runtime->ThrowIfWritesFenced();
+    BlobHelpers::SetFileSize(m_client, size);
+}
 
 int64_t PageBlob::GetCapacity() { return BlobHelpers::GetBlobCapacity(m_client); }
 
 void PageBlob::SetCapacity(int64_t capacity) {
+    m_runtime->ThrowIfWritesFenced();
     Unwrap(
         BlockOn(m_client.get_executor(), m_client
             .ResizeAsync(static_cast<uint64_t>(capacity), AzureClient::ResizePageBlobOptions{}, boost::asio::use_future)));
@@ -66,6 +70,7 @@ int64_t PageBlob::DownloadTo(std::span<char> buffer, int64_t offset, int64_t len
 }
 
 void PageBlob::UploadPages(const std::span<char> buffer, const int64_t blobOffset) {
+    m_runtime->ThrowIfWritesFenced();
     Unwrap(BlockOn(m_client.get_executor(), m_client
                .UploadPagesAsync(static_cast<uint64_t>(blobOffset), std::as_bytes(buffer), boost::asio::use_future,
                                  RequestOptionsForTransfer(m_client.GetDefaultRequestOptions(), buffer.size()))));

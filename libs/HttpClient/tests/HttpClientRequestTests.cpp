@@ -118,6 +118,29 @@ namespace
         EXPECT_EQ(completions, 2u);
     }
 
+    TEST(HttpClientRequest, HeaderControlCharactersFailWithInvalidRequest)
+    {
+        boost::asio::io_context context;
+        auto client = AVEVA::IHttpClient::Create(context);
+        std::size_t completions = 0;
+
+        for (const std::string value : {std::string{"bad\0value", 9}, std::string{"bad\x1Fvalue", 9}, std::string{"bad\x7Fvalue", 9}})
+        {
+            AVEVA::HttpRequest request;
+            request.SetUrl("http://127.0.0.1/");
+            request.AddHeader({"X-Test", value});
+            client->SendAsync(std::move(request),
+                [&](std::error_code error, AVEVA::HttpResponse)
+            {
+                ++completions;
+                EXPECT_EQ(error, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidRequest));
+            });
+        }
+
+        context.run();
+        EXPECT_EQ(completions, 3u);
+    }
+
     TEST(HttpClientRequest, TokenBasedSendAsyncSupportsUseFutureAndReportsErrors)
     {
         boost::asio::io_context context;
@@ -207,6 +230,64 @@ namespace
         EXPECT_FALSE(result.error);
         EXPECT_EQ(result.received.body(), "view!");
         EXPECT_EQ(result.received[http::field::content_length], "5");
+    }
+
+    TEST(HttpClientRequest, IPv6LiteralHostHeaderKeepsBrackets)
+    {
+        asio::io_context context;
+        auto client = AVEVA::IHttpClient::Create(context);
+
+        boost::system::error_code ipv6Error;
+        const auto loopback = asio::ip::make_address("::1", ipv6Error);
+        if (ipv6Error)
+        {
+            GTEST_SKIP() << "IPv6 loopback is unavailable: " << ipv6Error.message();
+        }
+
+        Tcp::acceptor acceptor(context, {loopback.to_v6(), 0});
+        const auto port = acceptor.local_endpoint().port();
+        Tcp::socket socket(context);
+        beast::flat_buffer buffer;
+        auto received = std::make_shared<http::request<http::string_body>>();
+
+        acceptor.async_accept(socket,
+            [&](boost::system::error_code error)
+        {
+            ASSERT_FALSE(error);
+            http::async_read(socket,
+                buffer,
+                *received,
+                [&](boost::system::error_code readError, std::size_t)
+            {
+                ASSERT_FALSE(readError);
+                auto response = std::make_shared<std::string>("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+                asio::async_write(socket,
+                    asio::buffer(*response),
+                    [&, response](boost::system::error_code writeError, std::size_t)
+                {
+                    ASSERT_FALSE(writeError);
+                    boost::system::error_code ignored;
+                    socket.shutdown(Tcp::socket::shutdown_both, ignored);
+                    socket.close(ignored);
+                    acceptor.close(ignored);
+                });
+            });
+        });
+
+        AVEVA::HttpRequest request;
+        request.SetUrl("http://[::1]:" + std::to_string(port) + "/ipv6");
+        std::error_code result;
+        client->SendAsync(std::move(request),
+            [&](std::error_code error, AVEVA::HttpResponse)
+        {
+            result = error;
+        });
+
+        context.run();
+        EXPECT_FALSE(result);
+        ASSERT_TRUE(received);
+        ASSERT_TRUE(received);
+        EXPECT_EQ(received->base()[http::field::host], "[::1]:" + std::to_string(port));
     }
 
     // Proves SetBodyView() is genuinely non-owning (unlike SetBody(), which copies

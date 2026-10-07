@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
-#include "AVEVA/RocksDB/Plugin/Azure/AsyncReadRequest.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadRequest.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
@@ -1297,7 +1297,7 @@ TEST_F(BlobFilesystemIntegrationTests, ReadAsync_MultipleRequests_PollDeliversDa
         ASSERT_TRUE(
             file.ReadAsync(req, rocksdb::IOOptions{}, callback, nullptr, &handles[i], &deleters[i], nullptr).ok());
     }
-    ASSERT_TRUE(AVEVA::RocksDB::Plugin::Azure::PollAsyncReads(handles).ok());
+    ASSERT_TRUE(AVEVA::RocksDB::Plugin::Azure::Impl::PollAsyncReads(handles).ok());
     for (size_t i = 0; i < Count; ++i) {
         deleters[i](handles[i]);
     }

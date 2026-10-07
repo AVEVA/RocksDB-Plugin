@@ -3,6 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/WriteableFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
 
 #include <boost/log/trivial.hpp>
 #include <cassert>
@@ -11,14 +12,16 @@ namespace AVEVA::RocksDB::Plugin::Azure {
 using namespace boost::log::trivial;
 
 WriteableFile::WriteableFile(
-    Impl::WriteableFileImpl file,
+    Impl::WriteableFileImpl&& file,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
-    : m_file(std::move(file)), m_logger(std::move(logger)) {}
+    : m_file(std::make_unique<Impl::WriteableFileImpl>(std::move(file))), m_logger(std::move(logger)) {}
+
+WriteableFile::~WriteableFile() = default;
 
 rocksdb::IOStatus WriteableFile::Append(const rocksdb::Slice& data, const rocksdb::IOOptions&,
                                         rocksdb::IODebugContext*) {
     try {
-        m_file.Append(std::span(data.data(), data.size()));
+        m_file->Append(std::span(data.data(), data.size()));
     } catch (const RequestFailedException& ex) {
         BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
                                         << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
@@ -35,7 +38,7 @@ rocksdb::IOStatus WriteableFile::Append(const rocksdb::Slice& data, const rocksd
 
 rocksdb::IOStatus WriteableFile::Close(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
     try {
-        m_file.Close();
+        m_file->Close();
     } catch (const RequestFailedException& ex) {
         BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
                                         << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
@@ -52,7 +55,7 @@ rocksdb::IOStatus WriteableFile::Close(const rocksdb::IOOptions&, rocksdb::IODeb
 
 rocksdb::IOStatus WriteableFile::Flush(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
     try {
-        m_file.Flush();
+        m_file->Flush();
     } catch (const RequestFailedException& ex) {
         BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
                                         << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
@@ -69,7 +72,7 @@ rocksdb::IOStatus WriteableFile::Flush(const rocksdb::IOOptions&, rocksdb::IODeb
 
 rocksdb::IOStatus WriteableFile::Sync(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
     try {
-        m_file.Sync();
+        m_file->Sync();
     } catch (const RequestFailedException& ex) {
         BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
                                         << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
@@ -86,7 +89,7 @@ rocksdb::IOStatus WriteableFile::Sync(const rocksdb::IOOptions&, rocksdb::IODebu
 
 uint64_t WriteableFile::GetFileSize(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
     try {
-        const auto fileSize = m_file.GetFileSize();
+        const auto fileSize = m_file->GetFileSize();
 
         assert(fileSize >= 0 && "File size should not be negative");
         assert(fileSize <= std::numeric_limits<int64_t>::max() && "File size must fit in int64_t");

@@ -3,8 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Plugin.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp"
-
-#include <rocksdb/db.h>
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
 #include <rocksdb/file_system.h>
 #include <rocksdb/utilities/object_registry.h>
 
@@ -56,7 +55,20 @@ std::shared_ptr<Registration> GetOrAddRegistration(const std::string& pluginName
                     return static_cast<rocksdb::FileSystem*>(nullptr);
                 }
 
-                *f = create();
+                // RocksDB's C-style callers cannot handle exceptions escaping a factory.
+                try {
+                    *f = create();
+                } catch (const std::exception& ex) {
+                    if (errmsg != nullptr) {
+                        *errmsg = std::string("Failed to create Azure blob filesystem: ") + ex.what();
+                    }
+                    return static_cast<rocksdb::FileSystem*>(nullptr);
+                } catch (...) {
+                    if (errmsg != nullptr) {
+                        *errmsg = "Failed to create Azure blob filesystem: unknown error";
+                    }
+                    return static_cast<rocksdb::FileSystem*>(nullptr);
+                }
                 return f->get();
             });
     }

@@ -2,11 +2,13 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
-
 #include <rocksdb/db.h>
 
 #include <memory>
+namespace AVEVA::RocksDB::Plugin::Azure::Impl
+{
+    class LockFileImpl;
+}
 namespace AVEVA::RocksDB::Plugin::Azure
 {
     class LockFile : public rocksdb::FileLock
@@ -14,6 +16,7 @@ namespace AVEVA::RocksDB::Plugin::Azure
         std::shared_ptr<Impl::LockFileImpl> m_lock;
     public:
         explicit LockFile(std::shared_ptr<Impl::LockFileImpl> lock);
+        ~LockFile() override;
         // Returns false if the lease is already held; throws RequestFailedException on any other failure.
         bool Lock();
         void Renew() const;

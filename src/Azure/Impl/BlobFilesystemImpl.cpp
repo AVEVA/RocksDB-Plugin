@@ -373,23 +373,17 @@ std::vector<std::string> BlobFilesystemImpl::GetChildren(const std::string& dire
     const auto& container = GetContainer(prefix);
 
     std::vector<std::string> children;
+    // Only list below "realPath/" so that "foo" does not pick up siblings such as "foobar".
+    std::string dirPrefix(realPath);
+    if (!dirPrefix.empty() && !dirPrefix.ends_with('/')) {
+        dirPrefix += '/';
+    }
     AzureClient::ListBlobsOptions opts;
-    opts.Prefix = realPath;
+    opts.Prefix = dirPrefix;
     opts.MaxResults = ToListPageSize(sizeHint);
-    auto extractChildName = [&realPath](const auto& blob) -> std::string {
-        if (blob.Name.starts_with(realPath)) {
-            auto index = realPath.length();
-            if (index >= blob.Name.size()) {
-                // Exact match (e.g. listing "LOCK" where a blob named "LOCK" exists).
-                // There is no child entry to return.
-                return {};
-            }
-
-            if (blob.Name[index] == '/') {
-                index++;
-            }
-
-            return index < blob.Name.size() ? blob.Name.substr(index) : std::string{};
+    auto extractChildName = [&dirPrefix](const auto& blob) -> std::string {
+        if (blob.Name.size() > dirPrefix.size() && blob.Name.starts_with(dirPrefix)) {
+            return blob.Name.substr(dirPrefix.size());
         }
         return {};
     };
@@ -412,27 +406,23 @@ std::vector<BlobAttributes> BlobFilesystemImpl::GetChildrenFileAttributes(const 
     std::vector<BlobAttributes> attributes;
 
     AzureClient::ListBlobsOptions opts;
-    opts.Prefix = realPath;
+    std::string dirPrefix(realPath);
+    if (!dirPrefix.empty() && !dirPrefix.ends_with('/')) {
+        dirPrefix += '/';
+    }
+    opts.Prefix = dirPrefix;
     opts.MaxResults = static_cast<uint32_t>(g_maxListPageSize);
     // The file size lives in blob metadata, so list it instead of issuing a GetProperties per blob.
     opts.IncludeMetadata = true;
 
     // Process all pages of results
     ForEachBlob(*container, std::move(opts), [&](const AzureClient::Models::BlobItem& blob) {
-        if (blob.Name.size() <= realPath.length()) {
-            return;
-        }
-
-        auto index = realPath.length();
-        if (blob.Name[index] == '/') {
-            index++;
-        }
-        if (index >= blob.Name.size()) {
+        if (blob.Name.size() <= dirPrefix.size() || !blob.Name.starts_with(dirPrefix)) {
             return;
         }
 
         attributes.emplace_back(BlobHelpers::FileSizeFromProperties(blob.Properties, blob.Name),
-                                blob.Name.substr(index));
+                                blob.Name.substr(dirPrefix.size()));
     });
 
     return attributes;
@@ -528,8 +518,10 @@ void BlobFilesystemImpl::Truncate(const std::string& filePath, int64_t size) con
     const auto fileSize = BlobHelpers::GetFileSize(client);
     if (fileSize > size) {
         BlobHelpers::SetFileSize(client, size);
+        // The service only accepts page-aligned blob sizes; the logical size lives in the metadata set above.
+        const auto [partialPage, alignedSize] = BlobHelpers::RoundToEndOfNearestPage(size);
         Unwrap(BlockOn(client.get_executor(),
-                       client.ResizeAsync(static_cast<uint64_t>(size), AzureClient::ResizePageBlobOptions{},
+                       client.ResizeAsync(static_cast<uint64_t>(alignedSize), AzureClient::ResizePageBlobOptions{},
                                           boost::asio::use_future)));
     }
 }
@@ -659,7 +651,13 @@ BlobFilesystemImpl::~BlobFilesystemImpl() {
         BOOST_LOG_SEV(*m_logger, severity_level::info)
             << "Waiting for " << inFlight << " in-flight async read(s) before closing the filesystem";
     }
-    m_asyncReads->Drain();
+    // The host must keep the io_context running here: reads only end once their completions run on it. Warn
+    // periodically so a stopped io_context shows up as a diagnosable hang rather than a silent one.
+    while (!m_asyncReads->DrainFor(Configuration::AsyncReadDrainWarning)) {
+        BOOST_LOG_SEV(*m_logger, severity_level::warning)
+            << "Still waiting for " << m_asyncReads->InFlight()
+            << " in-flight async read(s); the io_context must keep running until the filesystem is destroyed";
+    }
 }
 
 const std::shared_ptr<AzureClient::BlobContainerClient>&
@@ -733,13 +731,23 @@ void BlobFilesystemImpl::RenewLease(std::stop_token stopToken) {
                         interruptibleSleep(std::chrono::milliseconds(100));
                     }
                 }
+
+                // A lease that could not be renewed in time may already be held by someone else; stop before
+                // writing on its behalf rather than waiting for the service to reject us.
+                for (const auto& lock : needsRetry) {
+                    if (lock->IsRenewalOverdue()) {
+                        throw std::runtime_error("Lease renewal did not succeed before the lease expired");
+                    }
+                }
             }
         }
     } catch (const std::exception& e) {
         BOOST_LOG_SEV(*m_logger, severity_level::fatal) << "Stopping renewal thread " << e.what();
+        m_runtime->FenceWrites();
         m_filesystemStopSource.request_stop();
     } catch (...) {
         BOOST_LOG_SEV(*m_logger, severity_level::fatal) << "Stopping renewal thread";
+        m_runtime->FenceWrites();
         m_filesystemStopSource.request_stop();
     }
 

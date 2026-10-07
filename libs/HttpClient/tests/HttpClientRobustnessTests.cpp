@@ -240,6 +240,42 @@ namespace
         EXPECT_EQ(server.TotalRequests(), 2);
     }
 
+    TEST(HttpClientRobustness, ExtraBytesAfterACompleteResponseKeepTheConnectionOutOfThePool)
+    {
+        asio::io_context context;
+        auto client = AVEVA::IHttpClient::Create(context);
+        ScriptedServer server(context,
+            [](int connection, const http::request<http::string_body>&) -> ServerAction
+        {
+            if (connection == 0)
+            {
+                return {"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOKX"};
+            }
+            return {OkResponse};
+        });
+
+        std::vector<std::error_code> errors;
+        client->SendAsync(MakeRequest(server.Url("/first")),
+            [&](std::error_code error, AVEVA::HttpResponse)
+        {
+            errors.push_back(error);
+            client->SendAsync(MakeRequest(server.Url("/second"), AVEVA::HttpMethod::Post),
+                [&](std::error_code secondError, AVEVA::HttpResponse secondResponse)
+                {
+                    errors.push_back(secondError);
+                    EXPECT_EQ(secondResponse.GetStatus(), 200U);
+                    server.Stop();
+                });
+        });
+        context.run();
+
+        ASSERT_EQ(errors.size(), 2U);
+        EXPECT_FALSE(errors[0]);
+        EXPECT_FALSE(errors[1]);
+        EXPECT_EQ(server.Accepted(), 2);
+        EXPECT_EQ(server.TotalRequests(), 2);
+    }
+
     TEST(HttpClientRobustness, IdempotentRequestIsRetriedOnAStalePooledConnection)
     {
         asio::io_context context;
@@ -337,6 +373,170 @@ namespace
         EXPECT_FALSE(secondError);
         EXPECT_EQ(server.Accepted(), 2);
     }
+
+    TEST(HttpClientRobustness, PlainHttpRequestTimesOut)
+    {
+        asio::io_context context;
+        auto client = AVEVA::IHttpClient::Create(context);
+        ScriptedServer server(context,
+            [](int, const http::request<http::string_body>&) -> ServerAction
+        {
+            return {.Hold = true};
+        });
+
+        AVEVA::HttpRequestOptions options;
+        options.SetTimeout(std::chrono::milliseconds(100));
+
+        std::error_code observed;
+        client->SendAsync(MakeRequest(server.Url("/timeout")),
+            [&](std::error_code error, AVEVA::HttpResponse)
+        {
+            observed = error;
+            server.Stop();
+        },
+            options);
+        context.run();
+
+        EXPECT_EQ(observed, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
+        EXPECT_EQ(server.Accepted(), 1);
+    }
+
+    TEST(HttpClientRobustness, ReusedConnectionRequestTimesOut)
+    {
+        asio::io_context context;
+        auto client = AVEVA::IHttpClient::Create(context);
+        ScriptedServer server(context,
+            [](int connection, const http::request<http::string_body>& request) -> ServerAction
+        {
+            if (connection == 0 && request.target() == "/second")
+            {
+                return {.Hold = true};
+            }
+            return {OkResponse};
+        });
+
+        AVEVA::HttpRequestOptions timeoutOptions;
+        timeoutOptions.SetTimeout(std::chrono::milliseconds(100));
+
+        std::vector<std::error_code> errors;
+        client->SendAsync(MakeRequest(server.Url("/first")),
+            [&](std::error_code error, AVEVA::HttpResponse)
+        {
+            errors.push_back(error);
+            client->SendAsync(MakeRequest(server.Url("/second")),
+                [&](std::error_code secondError, AVEVA::HttpResponse)
+                {
+                    errors.push_back(secondError);
+                    server.Stop();
+                },
+                timeoutOptions);
+        });
+        context.run();
+
+        ASSERT_EQ(errors.size(), 2U);
+        EXPECT_FALSE(errors[0]);
+        EXPECT_EQ(errors[1], AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
+        EXPECT_EQ(server.Accepted(), 1);
+    }
+
+    TEST(HttpClientRobustness, MaximumRequestTimeoutDoesNotExpireImmediately)
+    {
+        asio::io_context context;
+        auto client = AVEVA::IHttpClient::Create(context);
+        ScriptedServer server(context,
+            [](int, const http::request<http::string_body>&) -> ServerAction
+        {
+            return {.Wire = OkResponse, .Delay = std::chrono::milliseconds(50)};
+        });
+
+        AVEVA::HttpRequestOptions options;
+        options.SetTimeout(std::chrono::milliseconds::max());
+
+        std::error_code observed;
+        unsigned int status = 0;
+        client->SendAsync(MakeRequest(server.Url("/max-timeout")),
+            [&](std::error_code error, AVEVA::HttpResponse response)
+        {
+            observed = error;
+            status = response.GetStatus();
+            server.Stop();
+        },
+            options);
+        context.run();
+
+        EXPECT_FALSE(observed);
+        EXPECT_EQ(status, 200U);
+    }
+
+    TEST(HttpClientRobustness, IdleTimeoutExpiryClosesThePooledConnection)
+    {
+        asio::io_context context;
+        AVEVA::HttpClientOptions options;
+        options.SetIdleConnectionTimeout(std::chrono::seconds(1));
+        auto client = AVEVA::IHttpClient::Create(context, options);
+        ScriptedServer server(context,
+            [](int, const http::request<http::string_body>&) -> ServerAction
+        {
+            return {OkResponse};
+        });
+
+        std::vector<std::error_code> errors;
+        client->SendAsync(MakeRequest(server.Url("/first")),
+            [&](std::error_code error, AVEVA::HttpResponse)
+        {
+            errors.push_back(error);
+            auto timer = std::make_shared<asio::steady_timer>(context, std::chrono::milliseconds(1200));
+            timer->async_wait([&, timer](boost::system::error_code waitError)
+            {
+                ASSERT_FALSE(waitError);
+                client->SendAsync(MakeRequest(server.Url("/second")),
+                    [&](std::error_code secondError, AVEVA::HttpResponse)
+                    {
+                        errors.push_back(secondError);
+                        server.Stop();
+                    });
+            });
+        });
+        context.run();
+
+        ASSERT_EQ(errors.size(), 2U);
+        EXPECT_FALSE(errors[0]);
+        EXPECT_FALSE(errors[1]);
+        EXPECT_EQ(server.Accepted(), 2);
+    }
+
+    TEST(HttpClientRobustness, MaximumIdleTimeoutStillAllowsPooling)
+    {
+        asio::io_context context;
+        AVEVA::HttpClientOptions options;
+        options.SetIdleConnectionTimeout(std::chrono::seconds::max());
+        auto client = AVEVA::IHttpClient::Create(context, options);
+        ScriptedServer server(context,
+            [](int, const http::request<http::string_body>&) -> ServerAction
+        {
+            return {OkResponse};
+        });
+
+        std::vector<std::error_code> errors;
+        client->SendAsync(MakeRequest(server.Url("/first")),
+            [&](std::error_code error, AVEVA::HttpResponse)
+        {
+            errors.push_back(error);
+            client->SendAsync(MakeRequest(server.Url("/second")),
+                [&](std::error_code secondError, AVEVA::HttpResponse)
+                {
+                    errors.push_back(secondError);
+                    server.Stop();
+                });
+        });
+        context.run();
+
+        ASSERT_EQ(errors.size(), 2U);
+        EXPECT_FALSE(errors[0]);
+        EXPECT_FALSE(errors[1]);
+        EXPECT_EQ(server.Accepted(), 1);
+    }
+
     TEST(HttpClientRobustness, CompletionRunsWhenTheHandlerExecutorHasNoOtherWork)
     {
         asio::io_context clientContext;

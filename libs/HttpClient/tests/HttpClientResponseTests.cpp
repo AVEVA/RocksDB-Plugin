@@ -37,4 +37,21 @@ namespace
 
         EXPECT_EQ(result.error, AVEVA::make_error_code(AVEVA::HttpClientError::ProtocolError));
     }
+
+    TEST(HttpClientResponse, SwitchingProtocolsReturnsProtocolError)
+    {
+        auto result = Exchange({}, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
+
+        EXPECT_EQ(result.error, AVEVA::make_error_code(AVEVA::HttpClientError::ProtocolError));
+    }
+
+    TEST(HttpClientResponse, OversizedResponseHeadersReturnResponseTooLarge)
+    {
+        const std::string wire =
+            "HTTP/1.1 200 OK\r\nX-Big: " + std::string(70000, 'a') + "\r\nContent-Length: 0\r\n\r\n";
+        auto result = Exchange({}, wire);
+
+        EXPECT_EQ(result.error, AVEVA::make_error_code(AVEVA::HttpClientError::ResponseTooLarge));
+        EXPECT_EQ(result.response.GetStatus(), 0U);
+    }
 } // namespace

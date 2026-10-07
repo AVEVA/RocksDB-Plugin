@@ -135,3 +135,32 @@ TEST(LeaseTests, BlobAcquireLeaseValidatesDuration)
     EXPECT_EQ(error, std::make_error_code(std::errc::invalid_argument));
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
+
+TEST(LeaseTests, BlobAcquireLeaseRetryReusesGeneratedProposedLeaseId)
+{
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{503, MakeCanonicalSuccessHeaders(), ""});
+    httpClient.EnqueueResponse(LeaseResponse(201, "lease-a"));
+
+    auto options = MakeBlobClientOptions();
+    options.Retry.MaxRetries = 1;
+    options.Retry.InitialDelay = 0ms;
+    BlockBlobClient client{httpClient, options};
+
+    std::optional<std::string> acquired;
+    client.AcquireLeaseAsync([&](auto result)
+    {
+        ASSERT_TRUE(result.has_value());
+        acquired = result->Value().LeaseId;
+    });
+
+    ASSERT_TRUE(httpClient.WaitForRequest(2));
+    httpClient.Poll();
+
+    ASSERT_EQ(httpClient.RequestCount(), 2U);
+    const std::string firstLeaseId = Header(httpClient.RequestAt(0).Request, "x-ms-proposed-lease-id");
+    const std::string secondLeaseId = Header(httpClient.RequestAt(1).Request, "x-ms-proposed-lease-id");
+    EXPECT_FALSE(firstLeaseId.empty());
+    EXPECT_EQ(firstLeaseId, secondLeaseId);
+    EXPECT_EQ(acquired, "lease-a");
+}

@@ -2,6 +2,7 @@
 #include "AVEVA/AzureClient/BlobStorageError.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
 #include "AVEVA/AzureClient/Response.hpp"
+#include "BlobRequestHelpers.hpp"
 #include "FakeHttpClient.hpp"
 #include "TestFixtures.hpp"
 #include "TestHelpers.hpp"
@@ -344,6 +345,65 @@ TEST(RetryTests, RetryAfterHttpDateInThePastRetriesImmediately)
     },
         std::chrono::seconds{2}));
     EXPECT_EQ(httpClient.RequestCount(), 2U);
+}
+
+TEST(RetryTests, RetryAfterFutureHttpDateDelaysTheRetry)
+{
+    FakeHttpClient httpClient;
+    const auto retryAt = std::chrono::system_clock::now() + std::chrono::seconds{2};
+    httpClient.EnqueueResponse(HttpResponse{503,
+        {{"Retry-After", AVEVA::AzureClient::Private::BuildDateHeaderValue(retryAt)}},
+        ""});
+    httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
+    BlockBlobClient client{httpClient, MakeRetryOptions(1, std::chrono::milliseconds{0})};
+
+    std::optional<DeleteResult> observed;
+    client.DeleteAsync([&](DeleteResult result)
+    {
+        observed = std::move(result);
+    });
+
+    httpClient.Poll();
+    ASSERT_EQ(httpClient.RequestCount(), 1U);
+    EXPECT_FALSE(PollUntil(httpClient,
+        [&]
+    {
+        return httpClient.RequestCount() >= 2U;
+    },
+        std::chrono::milliseconds{500}));
+    ASSERT_TRUE(PollUntil(httpClient,
+        [&]
+    {
+        return observed.has_value();
+    },
+        std::chrono::seconds{4}));
+    EXPECT_EQ(httpClient.RequestCount(), 2U);
+    EXPECT_TRUE(ValueOrFail(observed).has_value());
+}
+
+TEST(RetryTests, XMsRetryAfterMsTakesPrecedenceOverRetryAfter)
+{
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{503,
+        {{"x-ms-retry-after-ms", "0"}, {"Retry-After", "Wed, 21 Oct 2099 07:28:00 GMT"}},
+        ""});
+    httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
+    BlockBlobClient client{httpClient, MakeRetryOptions(1, std::chrono::minutes{1})};
+
+    std::optional<DeleteResult> observed;
+    client.DeleteAsync([&](DeleteResult result)
+    {
+        observed = std::move(result);
+    });
+
+    ASSERT_TRUE(PollUntil(httpClient,
+        [&]
+    {
+        return observed.has_value();
+    },
+        std::chrono::seconds{2}));
+    EXPECT_EQ(httpClient.RequestCount(), 2U);
+    EXPECT_TRUE(ValueOrFail(observed).has_value());
 }
 
 TEST(RetryTests, ComputedBackoffIsCappedByMaxDelay)

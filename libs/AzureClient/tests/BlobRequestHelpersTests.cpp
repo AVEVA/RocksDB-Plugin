@@ -858,3 +858,35 @@ TEST(SharedKeyCanonicalizationTests, ResourcePathIsUsedAsSentOnTheWire)
     const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
     EXPECT_NE(toSign.find("/account/c/a%2Bb%20c.txt\nx:1 2"), std::string::npos) << toSign;
 }
+
+TEST(SharedKeyCanonicalizationTests, AuthorizationSupportsRootContainerUnicodeAndAzuritePathStyleEndpoints)
+{
+    HttpRequest pathStyleRequest;
+    pathStyleRequest.SetMethod(HttpMethod::Get);
+    pathStyleRequest.SetUrl("http://127.0.0.1:10000/devstoreaccount1/$root/"
+                            "caf%C3%A9%25%2Bplus%20space.txt?comp=metadata&include=snapshots&include=metadata");
+    pathStyleRequest.AddHeader({"x-ms-date", "Sun, 06 Nov 1994 08:49:37 GMT"});
+    pathStyleRequest.AddHeader({"x-ms-version", "2023-11-03"});
+
+    EXPECT_EQ(AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("devstoreaccount1", pathStyleRequest),
+        "GET\n\n\n\n\n\n\n\n\n\n\n\n"
+        "x-ms-date:Sun, 06 Nov 1994 08:49:37 GMT\n"
+        "x-ms-version:2023-11-03\n"
+        "/devstoreaccount1/devstoreaccount1/$root/caf%C3%A9%25%2Bplus%20space.txt\n"
+        "comp:metadata\n"
+        "include:metadata,snapshots");
+
+    HttpRequest rootContainerRequest;
+    rootContainerRequest.SetMethod(HttpMethod::Get);
+    rootContainerRequest.SetUrl(
+        "https://storageaccount.blob.core.windows.net/$root/%E6%96%87%E4%BB%B6%25%2Bname%20space.txt?comp=metadata");
+    rootContainerRequest.AddHeader({"x-ms-date", "Sun, 06 Nov 1994 08:49:37 GMT"});
+    rootContainerRequest.AddHeader({"x-ms-version", "2023-11-03"});
+
+    EXPECT_EQ(AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("storageaccount", rootContainerRequest),
+        "GET\n\n\n\n\n\n\n\n\n\n\n\n"
+        "x-ms-date:Sun, 06 Nov 1994 08:49:37 GMT\n"
+        "x-ms-version:2023-11-03\n"
+        "/storageaccount/$root/%E6%96%87%E4%BB%B6%25%2Bname%20space.txt\n"
+        "comp:metadata");
+}

@@ -676,6 +676,76 @@ TEST(BlockBlobClientTests, DownloadToAsync_StreamStringPathAndFilesystemPathWrit
     std::filesystem::remove(fsPath, ignored);
 }
 
+TEST(BlockBlobClientTests, EmptyBlobRangeFromOffsetZeroSucceedsForDownloadAsyncAndDownloadToAsync)
+{
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{416,
+        MakeCanonicalSuccessHeaders({{"x-ms-error-code", "InvalidRange"}, {"Content-Range", "bytes */0"}}),
+        ""});
+    httpClient.EnqueueResponse(HttpResponse{200,
+        MakeCanonicalSuccessHeaders({{"Content-Length", "0"}, {"x-ms-blob-type", "BlockBlob"}}),
+        ""});
+    httpClient.EnqueueResponse(HttpResponse{416,
+        MakeCanonicalSuccessHeaders({{"x-ms-error-code", "InvalidRange"}, {"Content-Range", "bytes */0"}}),
+        ""});
+    httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "0"}}), ""});
+    BlockBlobClient client{httpClient, BuildOptions()};
+
+    std::optional<Response<DownloadBlobResult>> download;
+    std::optional<BlobStorageError> downloadError;
+    AVEVA::AzureClient::DownloadBlobOptions downloadOptions;
+    downloadOptions.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 0U};
+    client.DownloadAsync(downloadOptions,
+        [&](std::expected<Response<DownloadBlobResult>, BlobStorageError> result)
+    {
+        if (result.has_value())
+        {
+            download = std::move(result).value();
+        }
+        else
+        {
+            downloadError = std::move(result).error();
+        }
+    });
+    httpClient.Poll();
+
+    ASSERT_TRUE(download.has_value());
+    EXPECT_FALSE(downloadError.has_value());
+    EXPECT_EQ(download->Value().Properties.ContentLength, 0U);
+    EXPECT_TRUE(download->Value().Content.empty());
+
+    std::ostringstream stream;
+    std::optional<Response<DownloadBlobToResult>> streamed;
+    std::optional<BlobStorageError> streamedError;
+    AVEVA::AzureClient::DownloadToOptions streamOptions;
+    streamOptions.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 0U};
+    client.DownloadToAsync(stream,
+        streamOptions,
+        [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result)
+    {
+        if (result.has_value())
+        {
+            streamed = std::move(result).value();
+        }
+        else
+        {
+            streamedError = std::move(result).error();
+        }
+    });
+    httpClient.Poll();
+
+    ASSERT_TRUE(streamed.has_value());
+    EXPECT_FALSE(streamedError.has_value());
+    EXPECT_EQ(streamed->Value().BytesWritten, 0U);
+    EXPECT_TRUE(stream.str().empty());
+
+    ASSERT_EQ(httpClient.RequestCount(), 4U);
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(0).Request, "Range"), "bytes=0-4194303");
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(1).Request, "Range"), "");
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(2).Request, "Range"), "bytes=0-4194303");
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(3).Request, "Range"), "");
+}
+
 TEST(BlockBlobClientTests, DownloadToAsync_LargeBodyStreamsDirectlyWithoutDuplicatingContent)
 {
     // Regression test for the interim Task 3 fix: the body must reach the destination stream

@@ -13,7 +13,7 @@
 #include <string_view>
 #include <vector>
 
-namespace AVEVA::RocksDB::Plugin::Azure {
+namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// <summary>
 /// Shared state of one FSRandomAccessFile::ReadAsync request.
 ///
@@ -89,4 +89,4 @@ rocksdb::IOStatus PollAsyncReads(const std::vector<void*>& ioHandles);
 /// Implements FileSystem::AbortIO: aborts every handle and invokes the outstanding callbacks.
 /// </summary>
 rocksdb::IOStatus AbortAsyncReads(const std::vector<void*>& ioHandles);
-} // namespace AVEVA::RocksDB::Plugin::Azure
+} // namespace AVEVA::RocksDB::Plugin::Azure::Impl

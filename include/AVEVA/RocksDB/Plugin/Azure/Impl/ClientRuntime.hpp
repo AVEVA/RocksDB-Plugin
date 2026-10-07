@@ -12,6 +12,7 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/use_future.hpp>
 
+#include <atomic>
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -40,6 +41,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// </summary>
 class ClientRuntime : public std::enable_shared_from_this<ClientRuntime> {
     std::unique_ptr<::AVEVA::IHttpClient> m_httpClient;
+    std::atomic<bool> m_writesFenced{false};
 
   public:
     explicit ClientRuntime(boost::asio::io_context& context);
@@ -50,6 +52,15 @@ class ClientRuntime : public std::enable_shared_from_this<ClientRuntime> {
     ClientRuntime& operator=(ClientRuntime&&) = delete;
 
     [[nodiscard]] ::AVEVA::IHttpClient& HttpClient() const noexcept;
+
+    /// <summary>
+    /// Makes every later mutation through this runtime's blobs fail. Called once the filesystem can no longer
+    /// prove it still holds its locks, so files opened earlier stop writing too. Irreversible.
+    /// </summary>
+    void FenceWrites() noexcept;
+    [[nodiscard]] bool WritesFenced() const noexcept;
+    /// <summary>Throws std::runtime_error when writes are fenced.</summary>
+    void ThrowIfWritesFenced() const;
 };
 
 [[noreturn]] void ThrowRequestFailed(const AzureClient::BlobStorageError& error);

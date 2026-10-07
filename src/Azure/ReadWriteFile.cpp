@@ -3,6 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/ReadWriteFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include <boost/log/trivial.hpp>
 #include <cassert>
@@ -10,9 +11,11 @@
 namespace AVEVA::RocksDB::Plugin::Azure {
 using namespace boost::log::trivial;
 ReadWriteFile::ReadWriteFile(
-    Impl::ReadWriteFileImpl file,
+    Impl::ReadWriteFileImpl&& file,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
-    : m_file(std::move(file)), m_logger(std::move(logger)) {}
+    : m_file(std::make_unique<Impl::ReadWriteFileImpl>(std::move(file))), m_logger(std::move(logger)) {}
+
+ReadWriteFile::~ReadWriteFile() = default;
 
 rocksdb::IOStatus ReadWriteFile::Write(uint64_t offset, const rocksdb::Slice& data, const rocksdb::IOOptions&,
                                        rocksdb::IODebugContext*) {
@@ -21,7 +24,7 @@ rocksdb::IOStatus ReadWriteFile::Write(uint64_t offset, const rocksdb::Slice& da
         assert(data.size() <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) &&
                "Data size must fit in int64_t");
 
-        m_file.Write(static_cast<int64_t>(offset), data.data(), static_cast<int64_t>(data.size()));
+        m_file->Write(static_cast<int64_t>(offset), data.data(), static_cast<int64_t>(data.size()));
     } catch (const RequestFailedException& ex) {
         BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
                                         << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
@@ -42,7 +45,7 @@ rocksdb::IOStatus ReadWriteFile::Read(uint64_t offset, size_t n, const rocksdb::
         assert(offset <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) && "Offset must fit in int64_t");
         assert(n <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) && "Bytes requested must fit in int64_t");
 
-        const auto bytesRead = m_file.Read(static_cast<int64_t>(offset), static_cast<int64_t>(n), scratch);
+        const auto bytesRead = m_file->Read(static_cast<int64_t>(offset), static_cast<int64_t>(n), scratch);
 
         assert(bytesRead >= 0 && "Bytes read should not be negative");
         assert(bytesRead <= static_cast<int64_t>(n) && "Bytes read should not exceed requested amount");
@@ -65,7 +68,7 @@ rocksdb::IOStatus ReadWriteFile::Read(uint64_t offset, size_t n, const rocksdb::
 
 rocksdb::IOStatus ReadWriteFile::Flush(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
     try {
-        m_file.Flush();
+        m_file->Flush();
     } catch (const RequestFailedException& ex) {
         BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
                                         << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
@@ -82,7 +85,7 @@ rocksdb::IOStatus ReadWriteFile::Flush(const rocksdb::IOOptions&, rocksdb::IODeb
 
 rocksdb::IOStatus ReadWriteFile::Sync(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
     try {
-        m_file.Sync();
+        m_file->Sync();
     } catch (const RequestFailedException& ex) {
         BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
                                         << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
@@ -99,7 +102,7 @@ rocksdb::IOStatus ReadWriteFile::Sync(const rocksdb::IOOptions&, rocksdb::IODebu
 
 rocksdb::IOStatus ReadWriteFile::Close(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
     try {
-        m_file.Close();
+        m_file->Close();
     } catch (const RequestFailedException& ex) {
         BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
                                         << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;

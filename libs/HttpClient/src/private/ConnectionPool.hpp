@@ -89,10 +89,15 @@ namespace AVEVA::Private
         // Bounds idle sockets across all origins, so a client that talks to many hosts cannot hold them unboundedly.
         static constexpr std::size_t DefaultMaxTotalIdle = 256;
 
+        // Larger values would overflow when converted to the clock's nanosecond ticks.
+        static constexpr std::chrono::seconds MaxIdleTimeout{std::chrono::hours{24 * 365}};
+
         ConnectionPool(std::size_t maxIdlePerKey,
             std::chrono::seconds idleTimeout,
             std::size_t maxTotalIdle = DefaultMaxTotalIdle)
-            : m_maxIdlePerKey(maxIdlePerKey), m_idleTimeout(idleTimeout), m_maxTotalIdle(maxTotalIdle)
+            : m_maxIdlePerKey(maxIdlePerKey)
+            , m_idleTimeout(std::clamp(idleTimeout, std::chrono::seconds::zero(), MaxIdleTimeout))
+            , m_maxTotalIdle(maxTotalIdle)
         {
         }
 
@@ -191,9 +196,31 @@ namespace AVEVA::Private
                 DropExpired(now, retired);
                 const bool wasEmpty = m_lru.empty();
 
-                // Allocate the origin before taking ownership of the connection so a bad_alloc here
-                // leaves the socket owned by the caller's (RAII) parameter.
-                auto [it, inserted] = m_origins.try_emplace(key);
+                // Everything that can throw happens before any pool state changes, so a bad_alloc
+                // leaves the pool consistent and the socket owned by the caller's (RAII) parameter.
+                Node* nodePtr = nullptr;
+                try
+                {
+                    nodePtr = Obtain();
+                }
+                catch (...)
+                {
+                    retired.clear_and_dispose(NodeDisposer{});
+                    throw;
+                }
+                Node& node = *nodePtr;
+                std::pair<decltype(m_origins.begin()), bool> emplaced;
+                try
+                {
+                    emplaced = m_origins.try_emplace(key);
+                }
+                catch (...)
+                {
+                    Recycle(node);
+                    retired.clear_and_dispose(NodeDisposer{});
+                    throw;
+                }
+                auto [it, inserted] = emplaced;
                 Origin& origin = it->second;
                 if (inserted)
                 {
@@ -209,7 +236,6 @@ namespace AVEVA::Private
                     retired.push_back(oldest);
                 }
 
-                Node& node = *Obtain();
                 node.connection = std::move(connection);
                 node.idleSince = now;
                 node.origin = &origin;

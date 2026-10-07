@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/AsyncReadRequest.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadRequest.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include <chrono>
@@ -12,6 +13,9 @@
 #include <utility>
 
 namespace AVEVA::RocksDB::Plugin::Azure {
+using Impl::AsyncReadHandle;
+using Impl::AsyncReadRequest;
+using Impl::DeleteAsyncReadHandle;
 namespace {
 rocksdb::IOStatus StatusFromException(const std::exception_ptr& error) {
     try {
@@ -26,8 +30,10 @@ rocksdb::IOStatus StatusFromException(const std::exception_ptr& error) {
 }
 } // namespace
 
-ReadableFile::ReadableFile(Impl::ReadableFileImpl file)
+ReadableFile::ReadableFile(Impl::ReadableFileImpl&& file)
     : m_file(std::make_shared<Impl::ReadableFileImpl>(std::move(file))) {}
+
+ReadableFile::~ReadableFile() = default;
 
 rocksdb::IOStatus ReadableFile::Read(const size_t n, const rocksdb::IOOptions&, rocksdb::Slice* result, char* scratch,
                                      rocksdb::IODebugContext*) {

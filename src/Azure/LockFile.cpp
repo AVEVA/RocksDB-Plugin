@@ -2,8 +2,11 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/LockFile.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 namespace AVEVA::RocksDB::Plugin::Azure {
 LockFile::LockFile(std::shared_ptr<Impl::LockFileImpl> lock) : m_lock(std::move(lock)) {}
+
+LockFile::~LockFile() = default;
 
 bool LockFile::Lock() { return m_lock->Lock(); }
 

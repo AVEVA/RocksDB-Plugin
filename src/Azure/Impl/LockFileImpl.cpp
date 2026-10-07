@@ -8,10 +8,13 @@
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
+#include <boost/asio/cancellation_signal.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/use_future.hpp>
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid_io.hpp>
 
+#include <algorithm>
 #include <cassert>
 #include <optional>
 #include <stdexcept>
@@ -108,6 +111,7 @@ bool LockFileImpl::Lock() {
     }
 
     m_lastRenewalTime = attemptStart;
+    m_held = true;
     BOOST_LOG_SEV(*m_logger, severity_level::info) << "Successfully acquired blob lease for '" << m_fileName << "'";
     return true;
 }
@@ -141,10 +145,31 @@ void LockFileImpl::RenewLocked() const {
     BOOST_LOG_SEV(*m_logger, severity_level::debug)
         << "Renewing blob lease for '" << m_fileName << "' (time since last renewal: " << TimeSinceLastRenewal().count()
         << "s)";
+
+    // Retries inside one renewal could otherwise outlast the lease while the caller keeps writing as if it held it.
+    // The whole request, retries included, is cancelled at the renewal deadline.
+    const auto budget = RenewalDeadline() - std::chrono::steady_clock::now();
+    if (budget <= std::chrono::steady_clock::duration::zero()) {
+        throw std::runtime_error("Cannot renew lease for '" + m_fileName +
+                                 "': the renewal deadline has passed (lease length: " +
+                                 std::to_string(m_leaseLength.count()) + " seconds)");
+    }
+
     AzureClient::RenewLeaseOptions options;
     options.LeaseId = *m_leaseId;
+    // Kept alive by the posted emit, which may run after this function has returned.
+    auto cancellation = std::make_shared<boost::asio::cancellation_signal>();
+    auto requestOptions = m_file->GetDefaultRequestOptions();
+    requestOptions.SetCancellationSlot(cancellation->slot());
     const auto requestStart = std::chrono::steady_clock::now();
-    Unwrap(BlockOn(m_file->get_executor(), m_file->RenewLeaseAsync(std::move(options), boost::asio::use_future)));
+    const auto executor = m_file->get_executor();
+    // Emitted on the io_context, as the AzureClient requires for cancellation slots.
+    Unwrap(BlockOnFor(executor,
+                      m_file->RenewLeaseAsync(std::move(options), boost::asio::use_future, std::move(requestOptions)),
+                      budget, [&executor, cancellation] {
+                          boost::asio::post(executor,
+                                            [cancellation] { cancellation->emit(boost::asio::cancellation_type::terminal); });
+                      }));
     m_lastRenewalTime = requestStart;
 }
 
@@ -159,14 +184,26 @@ void LockFileImpl::Unlock() {
     options.LeaseId = *m_leaseId;
     Unwrap(BlockOn(m_file->get_executor(), m_file->ReleaseLeaseAsync(std::move(options), boost::asio::use_future)));
     m_leaseId.reset();
+    m_held = false;
     BOOST_LOG_SEV(*m_logger, severity_level::debug) << "Successfully released blob lease for '" << m_fileName << "'";
 }
 
 std::chrono::seconds LockFileImpl::TimeSinceLastRenewal() const {
-    return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - m_lastRenewalTime);
+    return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - m_lastRenewalTime.load());
 }
 
 bool LockFileImpl::HasExceededLeaseLength() const { return TimeSinceLastRenewal() >= m_leaseLength; }
+
+std::chrono::steady_clock::time_point LockFileImpl::RenewalDeadline() const {
+    // Short leases (tests) get a proportionally short margin so the deadline stays after the last renewal.
+    const auto margin =
+        std::min<std::chrono::milliseconds>(Configuration::LeaseSafetyMargin, std::chrono::milliseconds(m_leaseLength) / 10);
+    return m_lastRenewalTime.load() + m_leaseLength - margin;
+}
+
+bool LockFileImpl::IsRenewalOverdue() const {
+    return m_held.load() && std::chrono::steady_clock::now() >= RenewalDeadline();
+}
 
 void LockFileImpl::unlink() {
     boost::intrusive::list_base_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>>::unlink();

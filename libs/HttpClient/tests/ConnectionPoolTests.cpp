@@ -3,11 +3,18 @@
 
 #include <gtest/gtest.h>
 
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/tcp.hpp>
+
+#include <atomic>
+#include <array>
+#include <barrier>
 #include <chrono>
 #include <memory>
 #include <thread>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace
 {
@@ -15,7 +22,10 @@ namespace
     using AVEVA::Private::ConnectionKey;
     using AVEVA::Private::ConnectionPool;
     using AVEVA::Private::PooledConnection;
+    using AVEVA::Private::PlainStream;
     using AVEVA::Private::TlsConnectionKey;
+    namespace asio = boost::asio;
+    using Tcp = asio::ip::tcp;
 
     // BasicConnectionKey and TlsConnectionKey must remain distinct, non-interchangeable types:
     // a key for one connection pool must never compile against the other pool's Acquire/Release.
@@ -279,5 +289,104 @@ namespace
         const auto key = MakeKey("example.com");
         pool.Release(key, PooledConnection<TrackedStream>{});
         EXPECT_FALSE(pool.Acquire(key).has_value());
+    }
+
+    TEST(ConnectionPool, RealSocketLivenessCheckDiscardsPeerClosedConnection)
+    {
+        asio::io_context context;
+        Tcp::acceptor acceptor(context, {asio::ip::make_address("127.0.0.1"), 0});
+        Tcp::socket server(context);
+        PlainStream stream(context);
+        AVEVA::Private::beast::get_lowest_layer(stream).socket().connect(
+            {asio::ip::make_address("127.0.0.1"), acceptor.local_endpoint().port()});
+        acceptor.accept(server);
+
+        ConnectionPool<PlainStream> pool(4, LongTimeout);
+        const ConnectionKey<PlainStream> key{"127.0.0.1", "80"};
+        pool.Release(key, PooledConnection<PlainStream>{std::make_unique<PlainStream>(std::move(stream)), {}});
+
+        boost::system::error_code ignored;
+        server.shutdown(Tcp::socket::shutdown_both, ignored);
+        server.close(ignored);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+        EXPECT_FALSE(pool.Acquire(key).has_value());
+    }
+
+    TEST(ConnectionPool, ConcurrentAcquireReleaseAcrossThreadsStaysConsistent)
+    {
+        struct ConcurrentTrackedStream
+        {
+            explicit ConcurrentTrackedStream(int streamIdentity, std::atomic<int>& streamLiveCount)
+                : identity(streamIdentity), liveCount(&streamLiveCount)
+            {
+                ++*liveCount;
+            }
+
+            ConcurrentTrackedStream(const ConcurrentTrackedStream&) = delete;
+            ConcurrentTrackedStream& operator=(const ConcurrentTrackedStream&) = delete;
+
+            ~ConcurrentTrackedStream()
+            {
+                --*liveCount;
+            }
+
+            int identity;
+            std::atomic<int>* liveCount;
+        };
+
+        using ConcurrentPool = ConnectionPool<ConcurrentTrackedStream>;
+        using ConcurrentKey = ConnectionKey<ConcurrentTrackedStream>;
+
+        auto makeConnection = [](int identity, std::atomic<int>& liveCount)
+        {
+            return PooledConnection<ConcurrentTrackedStream>{
+                std::make_unique<ConcurrentTrackedStream>(identity, liveCount), {}};
+        };
+
+        std::atomic<int> live{0};
+        std::atomic<int> nextIdentity{1};
+        ConcurrentPool pool(8, LongTimeout, 16);
+        const std::array<ConcurrentKey, 2> keys{ConcurrentKey{"a.example", "80"}, ConcurrentKey{"b.example", "80"}};
+
+        constexpr int ThreadCount = 8;
+        constexpr int Iterations = 400;
+        std::barrier start(ThreadCount);
+        std::vector<std::thread> workers;
+        workers.reserve(ThreadCount);
+        for (int threadIndex = 0; threadIndex < ThreadCount; ++threadIndex)
+        {
+            workers.emplace_back([&, threadIndex]
+            {
+                start.arrive_and_wait();
+                for (int iteration = 0; iteration < Iterations; ++iteration)
+                {
+                    const ConcurrentKey& key = keys.at(static_cast<std::size_t>((threadIndex + iteration) % keys.size()));
+                    auto acquired = pool.Acquire(key);
+                    if (!acquired.has_value())
+                    {
+                        pool.Release(key, makeConnection(nextIdentity.fetch_add(1), live));
+                        continue;
+                    }
+                    pool.Release(key, std::move(*acquired));
+                }
+            });
+        }
+        for (auto& worker : workers)
+        {
+            worker.join();
+        }
+
+        int drained = 0;
+        for (const ConcurrentKey& key : keys)
+        {
+            while (pool.Acquire(key).has_value())
+            {
+                ++drained;
+            }
+        }
+
+        EXPECT_LE(drained, 16);
+        EXPECT_EQ(live.load(), 0);
     }
 } // namespace

@@ -2,10 +2,12 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/AsyncReadRequest.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadRequest.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Directory.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/LogRateLimiter.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/LockFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Logger.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/ReadWriteFile.hpp"
@@ -17,6 +19,8 @@
 #include <string_view>
 namespace AVEVA::RocksDB::Plugin::Azure {
 using namespace boost::log::trivial;
+using Impl::AbortAsyncReads;
+using Impl::PollAsyncReads;
 namespace {
 std::string FormatRequestFailedLogMessage(const RequestFailedException& ex, const std::string_view path = {}) {
     std::ostringstream formattedMessage;
@@ -40,16 +44,17 @@ BlobFilesystem::BlobFilesystem(
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
     : rocksdb::FileSystemWrapper(std::move(rocksdbFs)), m_filesystem(std::move(filesystem)),
       m_logger(std::move(logger)),
-      m_blobNotFoundRateLimiter({"BlobNotFound"}, Impl::Configuration::LogRateLimiterCooldown) {}
+      m_blobNotFoundRateLimiter(std::make_unique<Impl::LogRateLimiter>(
+          std::vector<std::string>{"BlobNotFound"}, Impl::Configuration::LogRateLimiterCooldown)) {}
 
 void BlobFilesystem::LogRequestFailed(const RequestFailedException& ex, std::string_view path) {
     if (ex.ErrorCode == "BlobNotFound") {
-        const auto result = m_blobNotFoundRateLimiter.CheckAndRecord(ex.ErrorCode.c_str());
+        const auto result = m_blobNotFoundRateLimiter->CheckAndRecord(ex.ErrorCode.c_str());
         if (result.decision == Impl::RateDecision::Suppress) {
             return;
         }
         if (result.decision == Impl::RateDecision::AllowWithSummary) {
-            const auto seconds = m_blobNotFoundRateLimiter.Cooldown().count();
+            const auto seconds = m_blobNotFoundRateLimiter->Cooldown().count();
             BOOST_LOG_SEV(*m_logger, warning)
                 << "[" << result.suppressedCount << " BlobNotFound messages suppressed in last " << seconds << "s]";
         }

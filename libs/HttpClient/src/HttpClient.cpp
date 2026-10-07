@@ -50,7 +50,7 @@ namespace AVEVA
 
             IdleSweeper(SweepFunction plainSweep, SweepFunction tlsSweep, std::chrono::seconds idleTimeout)
                 : m_plainSweep(std::move(plainSweep)), m_tlsSweep(std::move(tlsSweep)),
-                  m_interval(std::max(std::chrono::seconds{1}, idleTimeout)),
+                  m_interval(std::clamp(idleTimeout, std::chrono::seconds{1}, std::chrono::seconds{std::chrono::hours{24 * 365}})),
                   m_thread([this](std::stop_token stop)
             {
                 Run(stop);

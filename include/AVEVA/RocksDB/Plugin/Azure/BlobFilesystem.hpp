@@ -2,12 +2,10 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/LogRateLimiter.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/LockFile.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
-#include <boost/intrusive/list.hpp>
+#include <boost/log/sources/severity_logger.hpp>
 #include <boost/log/trivial.hpp>
 
 #include <rocksdb/file_system.h>
@@ -16,13 +14,18 @@
 #include <mutex>
 #include <string>
 #include <vector>
+namespace AVEVA::RocksDB::Plugin::Azure::Impl {
+class BlobFilesystemImpl;
+class LogRateLimiter;
+} // namespace AVEVA::RocksDB::Plugin::Azure::Impl
+
 namespace AVEVA::RocksDB::Plugin::Azure {
 class BlobFilesystem final : public rocksdb::FileSystemWrapper {
     std::unique_ptr<Impl::BlobFilesystemImpl> m_filesystem;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
     std::vector<std::unique_ptr<Azure::LockFile>> m_lockFiles;
     std::mutex m_lockFilesMutex; // RocksDB may call LockFile/UnlockFile from different threads.
-    Impl::LogRateLimiter m_blobNotFoundRateLimiter;
+    std::unique_ptr<Impl::LogRateLimiter> m_blobNotFoundRateLimiter;
 
     // Logs a RequestFailedException, suppressing repeated BlobNotFound (404) messages
     // during the rate-limit cooldown window.

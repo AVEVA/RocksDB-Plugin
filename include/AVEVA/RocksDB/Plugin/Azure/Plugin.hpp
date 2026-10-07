@@ -33,6 +33,11 @@ struct Plugin {
     /// still create a filesystem (i.e. before the next Register call or process exit) leaves that reference
     /// dangling; this cannot be detected. Token refreshes still in flight when a filesystem is destroyed keep
     /// that filesystem's HTTP client alive until they complete, so keep the context running until they drain.
+    ///
+    /// Preconditions for destroying a filesystem: `ioContext` must still be running (the destructor blocks until
+    /// every async read has completed on it, logging a warning every 30 s while it waits), and the destructor
+    /// must not run on a thread running `ioContext`. Write operations are refused once a lease renewal has
+    /// failed or run past the lease.
     /// </summary>
     static rocksdb::Status
     Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::shared_ptr<rocksdb::Env>* guard,

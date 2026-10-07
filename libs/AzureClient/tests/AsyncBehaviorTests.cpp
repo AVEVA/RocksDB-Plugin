@@ -944,6 +944,35 @@ TEST(AsyncBehaviorTests, TokenCredentialSynchronousCompletionIsDeferredRatherTha
     EXPECT_TRUE(callbackInvoked);
 }
 
+TEST(AsyncBehaviorTests, CancellationWinsIfASynchronousTokenCredentialCompletedBeforePolling)
+{
+    FakeHttpClient httpClient;
+
+    auto tokenCredential = std::make_shared<ScriptedTokenCredential>();
+    tokenCredential->EnqueueImmediate({}, MakeToken("token-value", std::chrono::hours(1)));
+
+    BlobClientOptions options = MakeBlobClientOptions();
+    options.SasToken.clear();
+    options.TokenCredential = tokenCredential;
+    BlockBlobClient client{httpClient, options};
+
+    boost::asio::cancellation_signal signal;
+    std::optional<DeleteResult> observed;
+    StartDeleteWithCancellationSlot(client, signal, observed);
+
+    EXPECT_EQ(tokenCredential->CallCount(), 1);
+    EXPECT_EQ(httpClient.RequestCount(), 0U);
+    ASSERT_FALSE(observed.has_value());
+
+    signal.emit(boost::asio::cancellation_type::terminal);
+    httpClient.Poll();
+
+    ASSERT_TRUE(observed.has_value());
+    ASSERT_FALSE(ValueOrFail(observed).has_value());
+    EXPECT_TRUE(IsCanceled(ValueOrFail(observed).error()));
+    EXPECT_EQ(httpClient.RequestCount(), 0U);
+}
+
 // Task 8 verification: an early-exit validation failure must not invoke the completion before
 // the initiating call returns; it must run only once the executor it was posted to is driven.
 TEST(AsyncBehaviorTests, EarlyExitValidationFailurePostsRatherThanInvokingSynchronously)

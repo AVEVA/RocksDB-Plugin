@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
 
 #include <rocksdb/file_system.h>
 

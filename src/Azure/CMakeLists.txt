@@ -9,7 +9,6 @@ add_subdirectory(Models)
 # that linkage model and gives downstream consumers more flexibility
 # in how they package and link their final binaries.
 add_library(aveva-rocksdb-plugin-azure STATIC
-    AsyncReadRequest.cpp
     LockFile.cpp
     Directory.cpp
     AzureErrorTranslator.cpp
@@ -27,7 +26,6 @@ target_sources(aveva-rocksdb-plugin-azure
   FILE_SET HEADERS
   BASE_DIRS "${base-include-dir}"
   FILES
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/AsyncReadRequest.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/LockFile.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Directory.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
@@ -40,10 +38,16 @@ target_sources(aveva-rocksdb-plugin-azure
 )
 find_package(RocksDB CONFIG REQUIRED)
 find_package(aveva-install-library CONFIG REQUIRED)
-target_link_libraries(aveva-rocksdb-plugin-azure PUBLIC
-    aveva::rocksdb-plugin-core
-    aveva::rocksdb-plugin-azure-impl
-    RocksDB::rocksdb
+# The implementation target is private: public headers only forward-declare Impl types. Boost.Log is part of the
+# public API (loggers are passed to Plugin::Register).
+find_package(boost_log CONFIG REQUIRED)
+target_link_libraries(aveva-rocksdb-plugin-azure
+    PUBLIC
+        aveva::rocksdb-plugin-core
+        RocksDB::rocksdb
+        Boost::log
+    PRIVATE
+        aveva::rocksdb-plugin-azure-impl
 )
 aveva_install_library(aveva-rocksdb-plugin-azure)
 target_compile_features(aveva-rocksdb-plugin-azure PUBLIC cxx_std_23)

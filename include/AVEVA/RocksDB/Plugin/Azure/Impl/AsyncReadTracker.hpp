@@ -4,6 +4,7 @@
 #pragma once
 #include <boost/asio/any_io_executor.hpp>
 
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
@@ -38,6 +39,11 @@ class AsyncReadTracker : public std::enable_shared_from_this<AsyncReadTracker> {
     /// Blocks until every registered read has ended. Must not be called from a thread running the executor.
     /// </summary>
     void Drain();
+
+    /// <summary>
+    /// Like Drain, but gives up after `timeout`. Returns whether every read has ended.
+    /// </summary>
+    [[nodiscard]] bool DrainFor(std::chrono::nanoseconds timeout);
 
     [[nodiscard]] size_t InFlight() const;
 

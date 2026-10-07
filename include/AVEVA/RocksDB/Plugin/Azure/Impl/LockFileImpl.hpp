@@ -6,6 +6,7 @@
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
 #include <boost/intrusive/list.hpp>
 #include <boost/log/trivial.hpp>
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -17,7 +18,9 @@ class LockFileImpl
     std::shared_ptr<ClientRuntime> m_runtime;
     std::unique_ptr<AzureClient::PageBlobClient> m_file;
     std::optional<std::string> m_leaseId;
-    mutable std::chrono::steady_clock::time_point m_lastRenewalTime;
+    // Read by the renewal thread while Lock/Renew hold m_ioMutex across blocking requests, hence atomic.
+    mutable std::atomic<std::chrono::steady_clock::time_point> m_lastRenewalTime;
+    std::atomic<bool> m_held{false};
     std::chrono::seconds m_leaseLength;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
     std::string m_fileName;
@@ -41,6 +44,11 @@ class LockFileImpl
 
     [[nodiscard]] std::chrono::seconds TimeSinceLastRenewal() const;
     [[nodiscard]] bool HasExceededLeaseLength() const;
+    // The last moment a renewal may still complete (and writes may still proceed): the end of the lease measured
+    // from when the last successful request was sent, less a safety margin.
+    [[nodiscard]] std::chrono::steady_clock::time_point RenewalDeadline() const;
+    // True while the lease is held but can no longer be assumed valid. Safe to call while a renewal is blocked.
+    [[nodiscard]] bool IsRenewalOverdue() const;
 
     void unlink();
     bool is_linked();

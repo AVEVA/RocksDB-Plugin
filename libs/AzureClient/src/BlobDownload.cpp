@@ -432,8 +432,11 @@ namespace AVEVA::AzureClient::Private
 
             void OnProbe(std::error_code error, HttpResponse response, std::uint64_t probeLength)
             {
-                // A 0-byte blob rejects any range with 416; fall back to one un-ranged GET.
-                if (!error && response.GetStatus() == HttpStatusRangeNotSatisfiable && !m_options.Range.has_value())
+                // A 0-byte blob rejects any range with 416; fall back to one un-ranged GET. That is only
+                // equivalent when the request starts at byte 0 and has no length limit.
+                const bool unboundedFromStart = !m_options.Range.has_value() ||
+                                                (m_begin == 0U && !m_options.Range->Length.has_value());
+                if (!error && response.GetStatus() == HttpStatusRangeNotSatisfiable && unboundedFromStart)
                 {
                     Send(RequestKind::Full, m_begin, 0U, m_options.Conditions);
                     return;

@@ -269,25 +269,25 @@ namespace AVEVA::AzureClient
         // the host without a trailing slash.
         [[nodiscard]] std::string NormalizeAuthorityHost(std::string_view authorityHost)
         {
-            constexpr std::string_view Scheme = "https://";
             std::string_view host = authorityHost;
             while (host.ends_with('/'))
             {
                 host.remove_suffix(1);
             }
-            const bool hasScheme = host.size() > Scheme.size() && std::ranges::equal(host.substr(0, Scheme.size()),
-                                                                      Scheme,
-                                                                      [](char a, char b)
-            {
-                return std::tolower(static_cast<unsigned char>(a)) == b;
-            });
-            if (!hasScheme)
+            const auto parsed = boost::urls::parse_uri(host);
+            if (!parsed || parsed->scheme_id() != boost::urls::scheme::https || !parsed->has_authority() ||
+                parsed->host().empty())
             {
                 throw std::invalid_argument("AuthorityHost must be an https URL with a non-empty host.");
             }
-            if (host.find_first_of("?#/\\@ \t\r\n", Scheme.size()) != std::string_view::npos)
+            if (parsed->has_userinfo() || !parsed->encoded_path().empty() || parsed->has_query() ||
+                parsed->has_fragment() || host.find('\\') != std::string_view::npos)
             {
                 throw std::invalid_argument("AuthorityHost must not contain userinfo, a path, query or fragment.");
+            }
+            if (parsed->has_port() && parsed->port_number() == 0)
+            {
+                throw std::invalid_argument("AuthorityHost has an invalid port.");
             }
             return std::string{host};
         }

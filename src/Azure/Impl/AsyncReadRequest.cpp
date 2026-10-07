@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
-#include "AVEVA/RocksDB/Plugin/Azure/AsyncReadRequest.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadRequest.hpp"
 
 #include <algorithm>
 #include <cstring>
 #include <utility>
 
-namespace AVEVA::RocksDB::Plugin::Azure {
+namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 AsyncReadRequest::AsyncReadRequest(const rocksdb::FSReadRequest& request, Callback callback, void* callbackArg)
     : m_offset(request.offset), m_length(request.len), m_scratch(request.scratch), m_callback(std::move(callback)),
       m_callbackArg(callbackArg) {}
@@ -110,4 +110,4 @@ rocksdb::IOStatus AbortAsyncReads(const std::vector<void*>& ioHandles) {
 
     return rocksdb::IOStatus::OK();
 }
-} // namespace AVEVA::RocksDB::Plugin::Azure
+} // namespace AVEVA::RocksDB::Plugin::Azure::Impl

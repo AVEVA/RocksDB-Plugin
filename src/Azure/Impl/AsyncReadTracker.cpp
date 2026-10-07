@@ -49,6 +49,11 @@ void AsyncReadTracker::Drain() {
     m_idle.wait(lock, [this] { return m_inFlight == 0; });
 }
 
+bool AsyncReadTracker::DrainFor(std::chrono::nanoseconds timeout) {
+    std::unique_lock lock(m_mutex);
+    return m_idle.wait_for(lock, timeout, [this] { return m_inFlight == 0; });
+}
+
 size_t AsyncReadTracker::InFlight() const {
     std::scoped_lock lock(m_mutex);
     return m_inFlight;

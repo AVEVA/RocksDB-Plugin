@@ -89,6 +89,17 @@ ClientRuntime::~ClientRuntime() = default;
 
 ::AVEVA::IHttpClient& ClientRuntime::HttpClient() const noexcept { return *m_httpClient; }
 
+void ClientRuntime::FenceWrites() noexcept { m_writesFenced.store(true); }
+
+bool ClientRuntime::WritesFenced() const noexcept { return m_writesFenced.load(); }
+
+void ClientRuntime::ThrowIfWritesFenced() const {
+    if (WritesFenced()) {
+        throw std::runtime_error("Writes are disabled because the filesystem can no longer guarantee it holds its "
+                                 "locks");
+    }
+}
+
 void ThrowRequestFailed(const AzureClient::BlobStorageError& error) {
     throw RequestFailedException(error.StatusCode, error.ErrorCode,
                                  error.Message.empty() ? error.Code.message() : error.Message, error.RequestId,

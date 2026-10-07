@@ -222,8 +222,8 @@ namespace AVEVA::Private
         void ArmTimer()
         {
             // Clamp so huge timeouts (e.g. milliseconds::max()) cannot overflow the clock's duration or time_point.
-            constexpr auto MaxTimeout = std::chrono::hours{24 * 365};
-            m_timer.expires_after(std::min<std::chrono::nanoseconds>(m_options.GetTimeout(), MaxTimeout));
+            constexpr auto MaxTimeout = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::hours{24 * 365});
+            m_timer.expires_after(std::min(m_options.GetTimeout(), MaxTimeout));
             auto self = this->shared_from_this();
             m_timer.async_wait([self](boost::system::error_code error)
             {

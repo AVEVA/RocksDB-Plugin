@@ -147,7 +147,7 @@ void SendWithRetry(IHttpClient& httpClient, HttpRequest request, HttpRequestOpti
                 return;
             }
 
-            auto wait = WithJitter(delay);
+            auto wait = std::min(WithJitter(delay), g_maxRetryDelay);
             if (!error && (response.GetStatus() == g_tooManyRequests || response.GetStatus() == g_serviceUnavailable)) {
                 wait = std::clamp(RetryAfter(response).value_or(wait), wait, g_maxRetryDelay);
             }

@@ -130,6 +130,30 @@ TEST(ITokenCredentialTests, CachingTokenCredential_ServesCachedTokenAndRefreshes
     EXPECT_EQ(inner->CallCount(), 2);
 }
 
+TEST(ITokenCredentialTests, CachingTokenCredential_TokenShorterThanRefreshWindowIsServedBeforeRefreshCompletes)
+{
+    auto inner = std::make_shared<ScriptedTokenCredential>();
+    inner->EnqueueImmediate({}, MakeToken("short-lived", std::chrono::seconds(1)));
+    inner->EnqueueDeferred({}, MakeToken("refreshed", std::chrono::hours(1)));
+    auto credential = CachingTokenCredential::Create(inner, std::chrono::minutes(5));
+
+    PrimeTokenRequest(credential, {"scope-a"});
+
+    std::string receivedToken;
+    CallbackExpectation callback;
+    RequestTokenCapturingValue(credential, {"scope-a"}, receivedToken, &callback);
+    EXPECT_EQ(receivedToken, "short-lived");
+    EXPECT_EQ(inner->CallCount(), 2);
+    EXPECT_EQ(inner->PendingCount(), 1U);
+
+    EXPECT_TRUE(inner->CompleteNext());
+
+    std::string refreshedToken;
+    CallbackExpectation refreshedCallback;
+    RequestTokenCapturingValue(credential, {"scope-a"}, refreshedToken, &refreshedCallback);
+    EXPECT_EQ(refreshedToken, "refreshed");
+}
+
 TEST(ITokenCredentialTests, CachingTokenCredential_ExpiredTokenWaitsForTheRefresh)
 {
     auto inner = std::make_shared<ScriptedTokenCredential>();
