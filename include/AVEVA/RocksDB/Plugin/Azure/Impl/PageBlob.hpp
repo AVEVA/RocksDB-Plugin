@@ -27,6 +27,7 @@ class PageBlob final : public Core::BlobClient {
     virtual int64_t Download(std::span<char> buffer, int64_t blobOffset, int64_t readLength,
                              const std::string& ifMatch) override;
     virtual void UploadPages(const std::span<char> buffer, int64_t blobOffset) override;
+    virtual void UploadPagesAsync(std::vector<char> data, int64_t blobOffset, UploadCallback callback) override;
     virtual std::string GetEtag() override;
     virtual Core::BlobMetadata GetMetadata() override;
     // Fully asynchronous: completions run on the injected io_context's threads and never block on it.

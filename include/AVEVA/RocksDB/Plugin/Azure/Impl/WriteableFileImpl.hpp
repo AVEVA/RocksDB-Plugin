@@ -8,7 +8,10 @@
 #include <boost/log/trivial.hpp>
 
 #include <cstdint>
+#include <condition_variable>
+#include <exception>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
@@ -27,6 +30,18 @@ class WriteableFileImpl {
     bool m_flushed;
 
     std::vector<char> m_buffer;
+
+    // Shared with in-flight upload completions, which run on the host io_context and may outlive a move of this file.
+    struct UploadTracker {
+        std::mutex Mutex;
+        std::condition_variable Done;
+        size_t InFlight = 0;
+        std::exception_ptr Error;
+    };
+    std::shared_ptr<UploadTracker> m_uploads = std::make_shared<UploadTracker>();
+
+    // Upper bound on concurrent page uploads per file; bounds memory to this many buffer copies.
+    static constexpr size_t MaxInFlightUploads = 4;
 
   public:
     WriteableFileImpl(
@@ -49,5 +64,7 @@ class WriteableFileImpl {
 
   private:
     void Expand();
+    void StartUpload(std::vector<char> data, int64_t offset);
+    void WaitForUploads(size_t maxRemaining);
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

@@ -76,6 +76,31 @@ void PageBlob::UploadPages(const std::span<char> buffer, const int64_t blobOffse
                                  RequestOptionsForTransfer(m_client.GetDefaultRequestOptions(), buffer.size()))));
 }
 
+void PageBlob::UploadPagesAsync(std::vector<char> data, const int64_t blobOffset, UploadCallback callback) {
+    try {
+        m_runtime->ThrowIfWritesFenced();
+    } catch (...) {
+        callback(std::current_exception());
+        return;
+    }
+
+    // The completion handler owns the data so the request body stays valid until the upload finishes.
+    auto owned = std::make_shared<std::vector<char>>(std::move(data));
+    const auto bytes = std::as_bytes(std::span<const char>(*owned));
+    m_client.UploadPagesAsync(
+        static_cast<uint64_t>(blobOffset), bytes,
+        [owned, callback = std::move(callback)](auto result) {
+            std::exception_ptr error;
+            try {
+                Unwrap(std::move(result));
+            } catch (...) {
+                error = std::current_exception();
+            }
+            callback(error);
+        },
+        RequestOptionsForTransfer(m_client.GetDefaultRequestOptions(), owned->size()));
+}
+
 Core::BlobMetadata PageBlob::GetMetadata() {
     auto properties = Unwrap(BlockOn(m_client.get_executor(), m_client.GetPropertiesAsync(boost::asio::use_future)));
     return {BlobHelpers::FileSizeFromProperties(properties), std::move(properties.ETag)};

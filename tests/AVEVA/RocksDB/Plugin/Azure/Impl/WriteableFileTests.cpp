@@ -27,6 +27,47 @@ class WriteableFileTests : public ::testing::Test {
     }
 };
 
+namespace {
+// Holds upload completions until the test releases them, to observe pipelining.
+class DeferredUploadBlobClient : public BlobClientMock {
+  public:
+    std::vector<UploadCallback> Pending;
+    void UploadPagesAsync(std::vector<char>, int64_t, UploadCallback callback) override {
+        Pending.push_back(std::move(callback));
+    }
+};
+} // namespace
+
+TEST_F(WriteableFileTests, Flush_UploadInFlight_ReturnsWithoutWaitingAndSyncCompletesIt) {
+    // Arrange
+    auto client = std::make_shared<DeferredUploadBlobClient>();
+    EXPECT_CALL(*client, SetSize(Configuration::PageBlob::PageSize)).Times(1);
+    WriteableFileImpl file{"", client, nullptr, m_logger};
+    file.Append(std::vector<char>(Configuration::PageBlob::PageSize, 'a'));
+
+    // Act
+    file.Flush();
+
+    // Assert
+    ASSERT_EQ(1u, client->Pending.size());
+    client->Pending[0](nullptr);
+    EXPECT_NO_THROW(file.Sync());
+}
+
+TEST_F(WriteableFileTests, Sync_UploadFailed_ThrowsAndKeepsThrowing) {
+    // Arrange
+    auto client = std::make_shared<DeferredUploadBlobClient>();
+    WriteableFileImpl file{"", client, nullptr, m_logger};
+    file.Append(std::vector<char>(Configuration::PageBlob::PageSize, 'a'));
+    file.Flush();
+    ASSERT_EQ(1u, client->Pending.size());
+    client->Pending[0](std::make_exception_ptr(std::runtime_error("upload failed")));
+
+    // Act / Assert - the failed data is gone, so a later Sync must not report success
+    EXPECT_THROW(file.Sync(), std::runtime_error);
+    EXPECT_THROW(file.Sync(), std::runtime_error);
+}
+
 TEST_F(WriteableFileTests, AppendBytes_LessThanAPage_PageWritten) {
     // Arrange
     EXPECT_CALL(*m_blobClient, UploadPages(_, _))

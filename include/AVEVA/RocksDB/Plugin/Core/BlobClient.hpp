@@ -9,6 +9,7 @@
 #include <span>
 #include <string>
 #include <utility>
+#include <vector>
 namespace AVEVA::RocksDB::Plugin::Core {
 /// <summary>
 /// Size and ETag of a blob, read together so that they describe the same version of the blob.
@@ -69,6 +70,25 @@ class BlobClient {
     /// <param name="buffer">A span containing the page data to upload.</param>
     /// <param name="blobOffset">The offset within the blob where the data should be uploaded.</param>
     virtual void UploadPages(const std::span<char> buffer, int64_t blobOffset) = 0;
+
+    /// <summary>
+    /// Completion of UploadPagesAsync: an exception, or null on success.
+    /// </summary>
+    using UploadCallback = std::function<void(std::exception_ptr error)>;
+
+    /// <summary>
+    /// Asynchronously uploads a sequence of pages, taking ownership of the data. The callback may run on any thread
+    /// (including inline) and must not block on further blob I/O. The default implementation is synchronous.
+    /// </summary>
+    virtual void UploadPagesAsync(std::vector<char> data, int64_t blobOffset, UploadCallback callback) {
+        std::exception_ptr error;
+        try {
+            UploadPages(std::span<char>(data), blobOffset);
+        } catch (...) {
+            error = std::current_exception();
+        }
+        callback(error);
+    }
 
     /// <summary>
     /// Retrieve the current ETag of the blob.

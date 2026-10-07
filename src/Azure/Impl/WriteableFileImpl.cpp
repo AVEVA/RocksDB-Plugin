@@ -64,7 +64,7 @@ WriteableFileImpl::WriteableFileImpl(WriteableFileImpl&& other) noexcept
       m_fileCache(std::move(other.m_fileCache)), m_logger(std::move(other.m_logger)),
       m_lastPageOffset(other.m_lastPageOffset), m_size(other.m_size), m_capacity(other.m_capacity),
       m_bufferOffset(other.m_bufferOffset), m_closed(std::exchange(other.m_closed, true)), m_flushed(other.m_flushed),
-      m_buffer(std::move(other.m_buffer)) {}
+      m_buffer(std::move(other.m_buffer)), m_uploads(std::move(other.m_uploads)) {}
 
 WriteableFileImpl& WriteableFileImpl::operator=(WriteableFileImpl&& other) noexcept {
     m_name = std::move(other.m_name);
@@ -79,6 +79,7 @@ WriteableFileImpl& WriteableFileImpl::operator=(WriteableFileImpl&& other) noexc
     m_closed = std::exchange(other.m_closed, true);
     m_flushed = other.m_flushed;
     m_buffer = std::move(other.m_buffer);
+    m_uploads = std::move(other.m_uploads);
     return *this;
 }
 
@@ -123,10 +124,14 @@ void WriteableFileImpl::Flush() {
 
     const auto [remaining, bytesToWrite] = BlobHelpers::RoundToEndOfNearestPage(m_bufferOffset);
     if ((m_lastPageOffset + bytesToWrite) > m_capacity) {
+        // Resizing the blob while uploads are in flight would race with them.
+        WaitForUploads(0);
         Expand();
     }
 
-    m_blobClient->UploadPages(std::span(m_buffer.begin(), m_buffer.begin() + bytesToWrite), m_lastPageOffset);
+    // Back-pressure: also surfaces an earlier upload failure before more data is accepted.
+    WaitForUploads(MaxInFlightUploads - 1);
+    StartUpload(std::vector<char>(m_buffer.begin(), m_buffer.begin() + bytesToWrite), m_lastPageOffset);
     if (remaining != 0) {
         const auto residualOffsetBegin = m_bufferOffset - remaining;
         const auto residualOffsetEnd = residualOffsetBegin + remaining;
@@ -149,8 +154,46 @@ void WriteableFileImpl::Sync() {
     }
 
     Flush();
+    WaitForUploads(0);
     m_blobClient->SetSize(m_size);
     BOOST_LOG_SEV(*m_logger, debug) << "Synced writeable file '" << m_name << "' to " << m_size << " bytes";
+}
+
+// Uploads of distinct page ranges are independent, so up to MaxInFlightUploads overlap. The data is copied because
+// the caller's buffer is reused immediately.
+void WriteableFileImpl::StartUpload(std::vector<char> data, const int64_t offset) {
+    {
+        std::scoped_lock lock(m_uploads->Mutex);
+        ++m_uploads->InFlight;
+    }
+
+    auto tracker = m_uploads;
+    try {
+        m_blobClient->UploadPagesAsync(std::move(data), offset, [tracker](std::exception_ptr error) {
+            {
+                std::scoped_lock lock(tracker->Mutex);
+                --tracker->InFlight;
+                if (error && !tracker->Error) {
+                    tracker->Error = error;
+                }
+            }
+            tracker->Done.notify_all();
+        });
+    } catch (...) {
+        std::scoped_lock lock(tracker->Mutex);
+        --tracker->InFlight;
+        throw;
+    }
+}
+
+// Blocks the calling (RocksDB) thread, never an io_context thread. The first upload failure is sticky: the data of a
+// failed upload is gone, so every later Sync/Close must keep reporting it rather than claim durability.
+void WriteableFileImpl::WaitForUploads(const size_t maxRemaining) {
+    std::unique_lock lock(m_uploads->Mutex);
+    m_uploads->Done.wait(lock, [&] { return m_uploads->InFlight <= maxRemaining; });
+    if (m_uploads->Error) {
+        std::rethrow_exception(m_uploads->Error);
+    }
 }
 
 void WriteableFileImpl::Truncate(int64_t size) {
