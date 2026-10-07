@@ -11,6 +11,7 @@
 #include <cassert>
 #include <limits>
 #include <utility>
+#include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Azure {
 using Impl::AsyncReadHandle;
@@ -108,6 +109,45 @@ rocksdb::IOStatus ReadableFile::ReadAsync(rocksdb::FSReadRequest& req, const roc
     } catch (...) {
         return StatusFromException(std::current_exception());
     }
+}
+
+// The default MultiRead issues one blocking round trip per request. Starting every download before waiting lets them
+// overlap on the host io_context, so a batch costs roughly one round trip. Per-request failures are reported in
+// each request's status, as RocksDB expects; the returned status only covers batch-level problems.
+rocksdb::IOStatus ReadableFile::MultiRead(rocksdb::FSReadRequest* reqs, const size_t num_reqs,
+                                          const rocksdb::IOOptions& opts, rocksdb::IODebugContext* dbg) {
+    std::vector<void*> handles;
+    handles.reserve(num_reqs);
+    // Deleting a handle aborts a request still in flight, so the handles are released even on an early exit.
+    struct HandleCleanup {
+        std::vector<void*>& Handles;
+        ~HandleCleanup() {
+            for (auto* handle : Handles) {
+                DeleteAsyncReadHandle(handle);
+            }
+        }
+    } cleanup{handles};
+
+    for (size_t i = 0; i < num_reqs; ++i) {
+        auto* target = &reqs[i];
+        void* handle = nullptr;
+        rocksdb::IOHandleDeleter deleter = nullptr;
+        auto started = ReadAsync(
+            *target, opts,
+            [target](rocksdb::FSReadRequest& done, void*) {
+                target->status = done.status;
+                target->result = done.result;
+            },
+            nullptr, &handle, &deleter, dbg);
+        if (!started.ok()) {
+            target->status = started;
+            target->result = rocksdb::Slice();
+            continue;
+        }
+        handles.push_back(handle);
+    }
+
+    return Impl::PollAsyncReads(handles);
 }
 
 rocksdb::IOStatus ReadableFile::Skip(const uint64_t n) {
