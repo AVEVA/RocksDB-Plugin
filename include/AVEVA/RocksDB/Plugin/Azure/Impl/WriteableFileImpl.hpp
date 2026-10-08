@@ -28,7 +28,8 @@ class WriteableFileImpl {
     int64_t m_bufferOffset;
     bool m_closed;
     bool m_flushed;
-
+    // Set while data has been appended that the blob's size metadata does not yet reflect.
+    bool m_unsyncedSize = false;
     std::vector<char> m_buffer;
 
     // Shared with in-flight upload completions, which run on the host io_context and may outlive a move of this file.
@@ -44,10 +45,20 @@ class WriteableFileImpl {
     static constexpr size_t MaxInFlightUploads = 4;
 
   public:
+    // Size and capacity of the blob when the caller already knows them, which saves two GetProperties round trips.
+    struct BlobState {
+        int64_t Size;
+        int64_t Capacity;
+    };
+
     WriteableFileImpl(
         std::string_view name, std::shared_ptr<Core::BlobClient> blobClient, std::shared_ptr<Core::FileCache> fileCache,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         int64_t bufferSize = Configuration::PageBlob::DefaultBufferSize);
+    WriteableFileImpl(
+        std::string_view name, std::shared_ptr<Core::BlobClient> blobClient, std::shared_ptr<Core::FileCache> fileCache,
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+        int64_t bufferSize, BlobState knownState);
     ~WriteableFileImpl();
     WriteableFileImpl(const WriteableFileImpl&) = delete;
     WriteableFileImpl& operator=(const WriteableFileImpl&) = delete;

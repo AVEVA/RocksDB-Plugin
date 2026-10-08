@@ -16,9 +16,18 @@ AVEVA::RocksDB::Plugin::Azure::Impl::WriteableFileImpl::WriteableFileImpl(
     std::shared_ptr<Core::FileCache> fileCache,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     const int64_t bufferSize)
+    : WriteableFileImpl(name, blobClient, std::move(fileCache), std::move(logger), bufferSize,
+                        // Braced initialisation guarantees GetSize runs before GetCapacity.
+                        BlobState{blobClient->GetSize(), blobClient->GetCapacity()}) {}
+
+WriteableFileImpl::WriteableFileImpl(
+    const std::string_view name, std::shared_ptr<Core::BlobClient> blobClient,
+    std::shared_ptr<Core::FileCache> fileCache,
+    std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+    const int64_t bufferSize, const BlobState knownState)
     : m_name(name), m_bufferSize(bufferSize), m_blobClient(std::move(blobClient)), m_fileCache(std::move(fileCache)),
-      m_logger(std::move(logger)), m_lastPageOffset(0), m_size(m_blobClient->GetSize()),
-      m_capacity(m_blobClient->GetCapacity()), m_bufferOffset(0), m_closed(false), m_flushed(true) {
+      m_logger(std::move(logger)), m_lastPageOffset(0), m_size(knownState.Size), m_capacity(knownState.Capacity),
+      m_bufferOffset(0), m_closed(false), m_flushed(true) {
     if (m_bufferSize < Configuration::PageBlob::PageSize) {
         throw std::invalid_argument("Buffer size cannot be smaller than a page");
     }
@@ -91,7 +100,7 @@ WriteableFileImpl::WriteableFileImpl(WriteableFileImpl&& other) noexcept
       m_fileCache(std::move(other.m_fileCache)), m_logger(std::move(other.m_logger)),
       m_lastPageOffset(other.m_lastPageOffset), m_size(other.m_size), m_capacity(other.m_capacity),
       m_bufferOffset(other.m_bufferOffset), m_closed(std::exchange(other.m_closed, true)), m_flushed(other.m_flushed),
-      m_buffer(std::move(other.m_buffer)), m_uploads(std::move(other.m_uploads)) {}
+      m_unsyncedSize(other.m_unsyncedSize), m_buffer(std::move(other.m_buffer)), m_uploads(std::move(other.m_uploads)) {}
 
 WriteableFileImpl& WriteableFileImpl::operator=(WriteableFileImpl&& other) noexcept {
     m_name = std::move(other.m_name);
@@ -105,6 +114,7 @@ WriteableFileImpl& WriteableFileImpl::operator=(WriteableFileImpl&& other) noexc
     m_bufferOffset = other.m_bufferOffset;
     m_closed = std::exchange(other.m_closed, true);
     m_flushed = other.m_flushed;
+    m_unsyncedSize = other.m_unsyncedSize;
     m_buffer = std::move(other.m_buffer);
     m_uploads = std::move(other.m_uploads);
     return *this;
@@ -136,6 +146,7 @@ void WriteableFileImpl::Append(const std::span<const char> data) {
         dataPos += bytesToCopy;
         m_size += bytesToCopy;
         m_flushed = false; // Mark as not flushed since we added new data
+        m_unsyncedSize = true;
     }
 }
 
@@ -189,13 +200,18 @@ void WriteableFileImpl::StartFlush(const bool includePartialPage) {
 }
 
 void WriteableFileImpl::Sync() {
-    if (m_fileCache) {
+    // Every metadata write changes the blob's ETag and invalidates open readers, so a Sync with nothing new to
+    // publish (e.g. Sync followed by Close) must not write the size again.
+    if (m_unsyncedSize && m_fileCache) {
         m_fileCache->MarkFileAsStaleIfExists(m_name);
     }
 
     StartFlush(true);
     WaitForUploads(0);
-    m_blobClient->SetSize(m_size);
+    if (m_unsyncedSize) {
+        m_blobClient->SetSize(m_size);
+        m_unsyncedSize = false;
+    }
     BOOST_LOG_SEV(*m_logger, debug) << "Synced writeable file '" << m_name << "' to " << m_size << " bytes";
 }
 

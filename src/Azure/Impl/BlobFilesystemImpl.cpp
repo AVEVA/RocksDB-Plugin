@@ -208,20 +208,30 @@ WriteableFileImpl BlobFilesystemImpl::CreateWriteableFile(const std::string& fil
     auto client = container->GetPageBlobClient(std::string(realPath));
     const auto created = BlobHelpers::CreateIfNotExists(client, initialSize);
 
+    // A freshly created blob has a known size and capacity; only a pre-existing one needs to be inspected.
+    int64_t capacity = initialSize;
+
     // Creating a writeable file is intended to always provide a "new" file.
     // If the file previously existed, efficiently truncate it so that for
     // all intents and purposes, it's a new file.
     if (!created) {
         BlobHelpers::SetFileSize(client, 0);
-        if (BlobHelpers::GetBlobCapacity(client) > initialSize) {
+        capacity = BlobHelpers::GetBlobCapacity(client);
+        if (capacity > initialSize) {
             Unwrap(BlockOn(client.get_executor(),
                            client.ResizeAsync(static_cast<uint64_t>(initialSize), AzureClient::ResizePageBlobOptions{},
                                               boost::asio::use_future)));
+            capacity = initialSize;
         }
     }
 
     auto blobClient = std::make_unique<PageBlob>(m_runtime, std::move(client));
-    return WriteableFileImpl{realPath, std::move(blobClient), FindCache(m_fileCaches, prefix), m_logger, bufferSize};
+    return WriteableFileImpl{realPath,
+                             std::move(blobClient),
+                             FindCache(m_fileCaches, prefix),
+                             m_logger,
+                             bufferSize,
+                             WriteableFileImpl::BlobState{0, capacity}};
 }
 
 ReadWriteFileImpl BlobFilesystemImpl::CreateReadWriteFile(const std::string& filePath) {
@@ -263,8 +273,12 @@ WriteableFileImpl BlobFilesystemImpl::ReuseWritableFile(const std::string& fileP
     BlobHelpers::CreateIfNotExists(client, initialSize);
 
     auto blobClient = std::make_shared<PageBlob>(m_runtime, std::move(client));
-    return WriteableFileImpl{realPath, std::move(blobClient), FindCache(m_fileCaches, prefix), m_logger,
-                             static_cast<int64_t>(bufferSize)};
+    return WriteableFileImpl{realPath,
+                             std::move(blobClient),
+                             FindCache(m_fileCaches, prefix),
+                             m_logger,
+                             static_cast<int64_t>(bufferSize),
+                             WriteableFileImpl::BlobState{0, initialSize}};
 }
 
 LoggerImpl BlobFilesystemImpl::CreateLogger(const std::string& filePath, const int logLevel,
