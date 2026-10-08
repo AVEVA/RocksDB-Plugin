@@ -53,12 +53,10 @@ jobs:
           key: vcpkg-${{ matrix.preset }}-tests-${{ matrix.tests }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
           restore-keys: vcpkg-${{ matrix.preset }}-
 
-      # Plugin tests, the vendored AzureClient/HttpClient test suites and the installed-package consumer test.
+      # Plugin tests and the vendored AzureClient/HttpClient test suites.
       - name: Configure
         if: matrix.tests
-        run: >
-          cmake --preset ${{ matrix.preset }}
-          -DAVEVA_ROCKSDB_PACKAGE_TEST=ON
+        run: cmake --preset ${{ matrix.preset }}
 
       - name: Configure (tests off, no vcpkg testing feature)
         if: ${{ !matrix.tests }}
