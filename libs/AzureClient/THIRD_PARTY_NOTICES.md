@@ -13,7 +13,6 @@ Dependencies come from `vcpkg.json`. Verify exact versions and license texts wit
 | OpenSSL | TLS and HMAC/SHA primitives | Apache License 2.0 (OpenSSL 3.x) |
 | libxml2 | XML response parsing | MIT |
 | GoogleTest (tests only) | Unit tests | BSD 3-Clause |
-| Google Benchmark (benchmarks only) | Micro-benchmarks | Apache License 2.0 |
 | bemanproject/exemplar (`infrastructure/cmake/aveva-install-library-config.cmake`, derived) | CMake install helper | Apache License 2.0 with LLVM exception |
 
 Binary redistribution of this library together with its dependencies must reproduce each dependency's

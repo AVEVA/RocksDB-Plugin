@@ -6,7 +6,6 @@
 include_guard(GLOBAL)
 
 set(AVEVA_HTTP_CLIENT_TESTS ${AVEVA_ROCKSDB_TESTS})
-set(AVEVA_HTTP_CLIENT_BENCHMARKS OFF)
 # Installed by aveva_install_library() using the library's own config template.
 set(AVEVA_HTTP_CLIENT_INSTALL_CONFIG_FILE_PACKAGE ON)
 add_subdirectory("${PROJECT_SOURCE_DIR}/libs/HttpClient" "${PROJECT_BINARY_DIR}/libs/HttpClient")
@@ -22,7 +21,6 @@ set(aveva-http-client_DIR "${_aveva_http_client_shim_dir}" CACHE INTERNAL "In-tr
 
 set(AVEVA_AZURE_CLIENT_TESTS ${AVEVA_ROCKSDB_TESTS})
 set(AVEVA_AZURE_CLIENT_EXAMPLES OFF)
-set(AVEVA_AZURE_CLIENT_BENCHMARKS OFF)
 set(AVEVA_AZURE_CLIENT_INSTALL_TEST OFF)
 set(AVEVA_AZURE_CLIENT_INSTALL_CONFIG_FILE_PACKAGE ON)
 add_subdirectory("${PROJECT_SOURCE_DIR}/libs/AzureClient" "${PROJECT_BINARY_DIR}/libs/AzureClient")

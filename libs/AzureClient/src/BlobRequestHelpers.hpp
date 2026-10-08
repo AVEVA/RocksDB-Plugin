@@ -305,7 +305,7 @@ namespace AVEVA::AzureClient::Private
     [[nodiscard]] std::string BuildContainerUrl(const ContainerTarget& target, std::string_view queryString = {});
     [[nodiscard]] std::string BuildServiceUrl(const ConnectionState& connection, std::string_view queryString = {});
 
-    // Convenience overloads that normalise and validate client options first (tests/benchmarks).
+    // Convenience overloads that normalise and validate client options first (tests).
     [[nodiscard]] std::string BuildBlobUrl(const BlobClientOptions& options, std::string_view queryString = {});
     [[nodiscard]] HttpRequest BuildBlobRequest(const BlobClientOptions& options,
         HttpMethod method,

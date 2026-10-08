@@ -23,12 +23,6 @@
         "boost-beast",
         "gtest"
       ]
-    },
-    "benchmarks": {
-      "description": "Builds the Google Benchmark micro-benchmark targets.",
-      "dependencies": [
-        "benchmark"
-      ]
     }
   }
 }

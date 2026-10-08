@@ -13,7 +13,7 @@ Checks: >-
   -performance-avoid-endl,
   -readability-identifier-length
 FormatStyle: file
-HeaderFilterRegex: '(include|src|tests|benchmarks)[\\/].*'
+HeaderFilterRegex: '(include|src|tests)[\\/].*'
 # `cppcoreguidelines-pro-type-reinterpret-cast` is excluded above because this library hands buffers to C
 # APIs (OpenSSL's `unsigned char*`, libxml2's `xmlChar*`) and views `std::byte` storage as characters; the
 # standard offers no conforming alternative for those conversions.
