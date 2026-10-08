@@ -25,6 +25,8 @@ namespace AVEVA::RocksDB::Plugin::Azure
         virtual rocksdb::IOStatus Close(const rocksdb::IOOptions&, rocksdb::IODebugContext*) override;
         virtual rocksdb::IOStatus Flush(const rocksdb::IOOptions& options, rocksdb::IODebugContext* dbg) override;
         virtual rocksdb::IOStatus Sync(const rocksdb::IOOptions& options, rocksdb::IODebugContext* dbg) override;
+        virtual rocksdb::IOStatus RangeSync(uint64_t offset, uint64_t nbytes, const rocksdb::IOOptions& options,
+                                            rocksdb::IODebugContext* dbg) override;
         virtual uint64_t GetFileSize(const rocksdb::IOOptions&, rocksdb::IODebugContext*) override;
     };
 }

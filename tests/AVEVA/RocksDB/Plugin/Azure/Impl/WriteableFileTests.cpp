@@ -38,7 +38,7 @@ class DeferredUploadBlobClient : public BlobClientMock {
 };
 } // namespace
 
-TEST_F(WriteableFileTests, Flush_UploadInFlight_ReturnsWithoutWaitingAndSyncCompletesIt) {
+TEST_F(WriteableFileTests, RangeSync_UploadInFlight_ReturnsWithoutWaitingAndSyncCompletesIt) {
     // Arrange
     auto client = std::make_shared<DeferredUploadBlobClient>();
     EXPECT_CALL(*client, SetSize(Configuration::PageBlob::PageSize)).Times(1);
@@ -46,7 +46,7 @@ TEST_F(WriteableFileTests, Flush_UploadInFlight_ReturnsWithoutWaitingAndSyncComp
     file.Append(std::vector<char>(Configuration::PageBlob::PageSize, 'a'));
 
     // Act
-    file.Flush();
+    file.RangeSync();
 
     // Assert
     ASSERT_EQ(1u, client->Pending.size());
@@ -59,7 +59,7 @@ TEST_F(WriteableFileTests, Sync_UploadFailed_ThrowsAndKeepsThrowing) {
     auto client = std::make_shared<DeferredUploadBlobClient>();
     WriteableFileImpl file{"", client, nullptr, m_logger};
     file.Append(std::vector<char>(Configuration::PageBlob::PageSize, 'a'));
-    file.Flush();
+    file.RangeSync();
     ASSERT_EQ(1u, client->Pending.size());
     client->Pending[0](std::make_exception_ptr(std::runtime_error("upload failed")));
 

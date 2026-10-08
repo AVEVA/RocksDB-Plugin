@@ -358,7 +358,7 @@ rocksdb::IOStatus BlobFilesystem::AbortIO(std::vector<void*>& io_handles) { retu
 
 void BlobFilesystem::DiscardCacheForDirectory(const std::string&) { return; }
 
-// Only async reads are advertised: Prefetch, FS-allocated buffers and verify-and-reconstruct are not implemented.
+// Only async reads are advertised: FS-allocated buffers and verify-and-reconstruct are not implemented.
 void BlobFilesystem::SupportedOps(int64_t& supported_ops) {
     supported_ops = int64_t{1} << rocksdb::FSSupportedOps::kAsyncIO;
 }

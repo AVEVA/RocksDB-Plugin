@@ -30,6 +30,8 @@ class ReadableFile final : public rocksdb::FSSequentialFile, public rocksdb::FSR
                                         rocksdb::IODebugContext* dbg) override;
     virtual rocksdb::IOStatus MultiRead(rocksdb::FSReadRequest* reqs, size_t num_reqs,
                                         const rocksdb::IOOptions& options, rocksdb::IODebugContext* dbg) override;
+    virtual rocksdb::IOStatus Prefetch(uint64_t offset, size_t n, const rocksdb::IOOptions& options,
+                                       rocksdb::IODebugContext* dbg) override;
     virtual rocksdb::IOStatus Skip(uint64_t n) override;
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure

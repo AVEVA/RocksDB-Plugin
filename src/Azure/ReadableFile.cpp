@@ -150,6 +150,22 @@ rocksdb::IOStatus ReadableFile::MultiRead(rocksdb::FSReadRequest* reqs, const si
     return Impl::PollAsyncReads(handles);
 }
 
+// A hint: starts a background download into a per-file buffer that later reads of that range are served from.
+rocksdb::IOStatus ReadableFile::Prefetch(const uint64_t offset, const size_t n, const rocksdb::IOOptions&,
+                                         rocksdb::IODebugContext*) {
+    if (offset > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+        n > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+        return rocksdb::IOStatus::InvalidArgument("Prefetch range exceeds int64_t");
+    }
+
+    try {
+        Impl::ReadableFileImpl::Prefetch(m_file, static_cast<int64_t>(offset), static_cast<int64_t>(n));
+        return rocksdb::IOStatus::OK();
+    } catch (...) {
+        return StatusFromException(std::current_exception());
+    }
+}
+
 rocksdb::IOStatus ReadableFile::Skip(const uint64_t n) {
     try {
         assert(n <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) &&

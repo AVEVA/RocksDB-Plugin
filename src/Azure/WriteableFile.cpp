@@ -70,6 +70,31 @@ rocksdb::IOStatus WriteableFile::Flush(const rocksdb::IOOptions&, rocksdb::IODeb
     return rocksdb::IOStatus::OK();
 }
 
+// RocksDB calls this every `bytes_per_sync` bytes while writing an SST. Starting the page uploads now (without waiting
+// for them) spreads the transfer across the write instead of bursting it at the final Sync. Durability is still only
+// established by Sync/Close, so strict mode defers to Sync.
+rocksdb::IOStatus WriteableFile::RangeSync(uint64_t, uint64_t, const rocksdb::IOOptions& options,
+                                           rocksdb::IODebugContext* dbg) {
+    if (strict_bytes_per_sync_) {
+        return Sync(options, dbg);
+    }
+
+    try {
+        m_file->RangeSync();
+    } catch (const RequestFailedException& ex) {
+        BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
+                                        << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
+        return AzureErrorTranslator::IOStatusFromError(ex);
+    } catch (const std::exception& ex) {
+        BOOST_LOG_SEV(*m_logger, error) << ex.what();
+        return rocksdb::IOStatus::IOError(ex.what());
+    } catch (...) {
+        return rocksdb::IOStatus::IOError("Unknown error when range-syncing file");
+    }
+
+    return rocksdb::IOStatus::OK();
+}
+
 rocksdb::IOStatus WriteableFile::Sync(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
     try {
         m_file->Sync();

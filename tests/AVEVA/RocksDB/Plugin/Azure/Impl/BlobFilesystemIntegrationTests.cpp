@@ -1348,6 +1348,36 @@ TEST_F(BlobFilesystemIntegrationTests, MultiRead_MultipleRequests_FillsEveryRequ
     EXPECT_TRUE(m_filesystem->DeleteFile(blobName));
 }
 
+TEST_F(BlobFilesystemIntegrationTests, Prefetch_ThenRead_ReturnsPrefetchedData) {
+    // Arrange
+    std::string blobName = m_containerPrefix + "/prefetch-" + m_blobName;
+    std::vector<char> data(4096);
+    for (size_t i = 0; i < data.size(); ++i) {
+        data[i] = static_cast<char>('a' + (i / 512));
+    }
+    auto writeFile = m_filesystem->CreateWriteableFile(blobName);
+    writeFile.Append(data);
+    writeFile.Sync();
+    writeFile.Close();
+    AVEVA::RocksDB::Plugin::Azure::ReadableFile file{m_filesystem->CreateReadableFile(blobName)};
+
+    // Act
+    ASSERT_TRUE(file.Prefetch(1024, 2048, rocksdb::IOOptions{}, nullptr).ok());
+    std::vector<char> scratch(512);
+    rocksdb::Slice inside;
+    rocksdb::Slice outside;
+    std::vector<char> scratchOutside(512);
+    ASSERT_TRUE(file.Read(1536, 512, rocksdb::IOOptions{}, &inside, scratch.data(), nullptr).ok());
+    ASSERT_TRUE(file.Read(0, 512, rocksdb::IOOptions{}, &outside, scratchOutside.data(), nullptr).ok());
+
+    // Assert
+    EXPECT_EQ(std::string(512, 'd'), inside.ToString());
+    EXPECT_EQ(std::string(512, 'a'), outside.ToString());
+
+    // Cleanup
+    EXPECT_TRUE(m_filesystem->DeleteFile(blobName));
+}
+
 TEST_F(BlobFilesystemIntegrationTests, ReadableFile_CachedSst_IsServedFromCacheAfterBlobDeleted) {
     // Arrange - Only SST files are cached, and the cache downloads a file in the background on its second access.
     const auto cacheDir = std::filesystem::temp_directory_path() / ("aveva_cache_hit_" + GenerateRandomBlobName());

@@ -9,6 +9,7 @@
 #include <boost/log/trivial.hpp>
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -31,6 +32,21 @@ class ReadableFileImpl {
     // Optional; when set, every ReadAsync is registered with it until its callback has been released.
     std::shared_ptr<AsyncReadTracker> m_asyncReads;
 
+    // One range requested through FSRandomAccessFile::Prefetch. Shared with the download's completion, which runs on
+    // the host io_context and may outlive a move of this file.
+    struct PrefetchState {
+        std::mutex Mutex;
+        std::condition_variable Done;
+        uint64_t Generation = 0;
+        int64_t Offset = 0;
+        int64_t Length = 0;
+        bool Pending = false;
+        std::string Data;
+    };
+    std::shared_ptr<PrefetchState> m_prefetch = std::make_shared<PrefetchState>();
+
+    [[nodiscard]] std::optional<size_t> TryReadFromPrefetch(int64_t offset, int64_t bytesToRead, char* buffer) const;
+    void ClearPrefetch() const;
     int64_t DownloadWithRetry(const int64_t offset, const int64_t bytesToRead, char* buffer) const;
     [[nodiscard]] std::pair<int64_t, std::string> GetMetadata() const;
     void SetMetadata(int64_t size, std::string etag) const;
@@ -68,6 +84,14 @@ class ReadableFileImpl {
     static void ReadAsync(std::shared_ptr<const ReadableFileImpl> self, int64_t offset, int64_t bytesToRead,
                           ReadCallback callback, int attemptsLeft = kMaxStaleReadRetries,
                           std::chrono::milliseconds timeout = std::chrono::milliseconds::zero());
+
+    // Upper bound of a single prefetched range, to keep per-file memory bounded.
+    static constexpr int64_t kMaxPrefetchBytes = 8 * 1024 * 1024;
+
+    // Starts a non-blocking download of [offset, offset + n) (clamped to kMaxPrefetchBytes) into a per-file buffer.
+    // Later reads fully inside that range are served from it, waiting for the download if it is still running.
+    // Only the latest range is kept, and it is dropped when the blob's metadata changes.
+    static void Prefetch(std::shared_ptr<const ReadableFileImpl> self, int64_t offset, int64_t n);
 
     int64_t GetOffset() const;
     void Skip(int64_t n);

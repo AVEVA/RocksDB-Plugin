@@ -57,6 +57,8 @@ class WriteableFileImpl {
     void Close();
     void Append(const std::span<const char> data);
     void Flush();
+    // Starts uploading the buffered pages without waiting for them (see WriteableFile::RangeSync).
+    void RangeSync();
     void Sync();
     void Truncate(int64_t size);
     [[nodiscard]] int64_t GetFileSize() const noexcept;
@@ -64,6 +66,7 @@ class WriteableFileImpl {
 
   private:
     void Expand();
+    void StartFlush();
     void StartUpload(std::vector<char> data, int64_t offset);
     void WaitForUploads(size_t maxRemaining);
 };

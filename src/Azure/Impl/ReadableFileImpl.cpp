@@ -76,6 +76,10 @@ int64_t ReadableFileImpl::RandomRead(const int64_t offset, const int64_t bytesTo
         }
     }
 
+    if (const auto prefetched = TryReadFromPrefetch(offset, bytesToRead, buffer)) {
+        return static_cast<int64_t>(*prefetched);
+    }
+
     auto bytesRead = DownloadWithRetry(offset, bytesToRead, buffer);
     bytesRead = std::max<int64_t>(bytesRead, 0);
 
@@ -100,18 +104,103 @@ std::pair<int64_t, std::string> ReadableFileImpl::GetMetadata() const {
 void ReadableFileImpl::SetMetadata(const int64_t size, std::string etag) const {
     BOOST_LOG_SEV(*m_logger, debug) << "Blob metadata refreshed for file '" << m_name << "' :size = " << size
                                     << " bytes, etag = " << etag;
-    std::scoped_lock lock(*m_metadataMutex);
-    m_size = size;
-    m_etag = std::move(etag);
+    {
+        std::scoped_lock lock(*m_metadataMutex);
+        m_size = size;
+        m_etag = std::move(etag);
+    }
+    // The blob changed, so previously prefetched bytes may be stale.
+    ClearPrefetch();
+}
+
+void ReadableFileImpl::ClearPrefetch() const {
+    {
+        std::scoped_lock lock(m_prefetch->Mutex);
+        ++m_prefetch->Generation;
+        m_prefetch->Length = 0;
+        m_prefetch->Pending = false;
+        m_prefetch->Data.clear();
+    }
+    m_prefetch->Done.notify_all();
+}
+
+void ReadableFileImpl::Prefetch(std::shared_ptr<const ReadableFileImpl> self, const int64_t offset, int64_t n) {
+    if (offset < 0 || n <= 0) {
+        return;
+    }
+
+    n = std::min(n, kMaxPrefetchBytes);
+    auto state = self->m_prefetch;
+    uint64_t generation = 0;
+    {
+        std::scoped_lock lock(state->Mutex);
+        generation = ++state->Generation;
+        state->Offset = offset;
+        state->Length = n;
+        state->Pending = true;
+        state->Data.clear();
+    }
+    state->Done.notify_all();
+
+    // A superseded or cleared prefetch (different generation) must not publish its bytes.
+    ReadAsync(std::move(self), offset, n, [state, generation](std::exception_ptr error, std::string data) {
+        {
+            std::scoped_lock lock(state->Mutex);
+            if (state->Generation != generation) {
+                return;
+            }
+            state->Pending = false;
+            if (error) {
+                state->Length = 0;
+            } else {
+                state->Data = std::move(data);
+            }
+        }
+        state->Done.notify_all();
+    });
+}
+
+// Runs on RocksDB threads only (never the io_context), so waiting for an in-flight prefetch is safe. The wait is
+// bounded so a stuck download degrades to a normal read instead of a hang.
+std::optional<size_t> ReadableFileImpl::TryReadFromPrefetch(const int64_t offset, const int64_t bytesToRead,
+                                                            char* buffer) const {
+    if (offset < 0 || bytesToRead <= 0) {
+        return std::nullopt;
+    }
+
+    auto& state = *m_prefetch;
+    std::unique_lock lock(state.Mutex);
+    const auto covers = [&] {
+        return state.Length > 0 && offset >= state.Offset && offset + bytesToRead <= state.Offset + state.Length;
+    };
+    if (!covers()) {
+        return std::nullopt;
+    }
+
+    if (state.Pending && !state.Done.wait_for(lock, std::chrono::seconds(30), [&] { return !state.Pending; })) {
+        return std::nullopt;
+    }
+
+    const auto start = static_cast<size_t>(offset - state.Offset);
+    const auto length = static_cast<size_t>(bytesToRead);
+    if (!covers() || start + length > state.Data.size()) {
+        return std::nullopt;
+    }
+
+    std::copy_n(state.Data.data() + start, length, buffer);
+    return length;
 }
 
 std::optional<size_t> ReadableFileImpl::TryReadFromCache(const int64_t offset, const int64_t bytesToRead,
                                                          char* buffer) const {
     if (!m_fileCache || offset < 0 || bytesToRead <= 0) {
-        return std::nullopt;
+        return TryReadFromPrefetch(offset, bytesToRead, buffer);
     }
 
-    return m_fileCache->ReadFile(m_name, offset, bytesToRead, buffer);
+    if (const auto cached = m_fileCache->ReadFile(m_name, offset, bytesToRead, buffer)) {
+        return cached;
+    }
+    return TryReadFromPrefetch(offset, bytesToRead, buffer);
 }
 
 void ReadableFileImpl::ReadAsync(std::shared_ptr<const ReadableFileImpl> self, const int64_t offset,

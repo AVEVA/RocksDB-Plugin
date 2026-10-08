@@ -96,7 +96,7 @@ void WriteableFileImpl::Append(const std::span<const char> data) {
     while (dataSize > 0) {
         const auto spaceLeft = m_bufferSize - m_bufferOffset;
         if (spaceLeft < Configuration::PageBlob::PageSize) {
-            Flush();
+            StartFlush();
             continue;
         }
 
@@ -113,6 +113,14 @@ void WriteableFileImpl::Append(const std::span<const char> data) {
 }
 
 void WriteableFileImpl::Flush() {
+    StartFlush();
+    WaitForUploads(0);
+}
+
+void WriteableFileImpl::RangeSync() { StartFlush(); }
+
+// Uploads the buffered pages without waiting for them; Flush, Sync and Close wait.
+void WriteableFileImpl::StartFlush() {
     if (m_bufferOffset == 0) {
         return;
     }
@@ -153,7 +161,7 @@ void WriteableFileImpl::Sync() {
         m_fileCache->MarkFileAsStaleIfExists(m_name);
     }
 
-    Flush();
+    StartFlush();
     WaitForUploads(0);
     m_blobClient->SetSize(m_size);
     BOOST_LOG_SEV(*m_logger, debug) << "Synced writeable file '" << m_name << "' to " << m_size << " bytes";
