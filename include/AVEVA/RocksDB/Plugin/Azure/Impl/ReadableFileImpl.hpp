@@ -12,6 +12,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -48,6 +49,9 @@ class ReadableFileImpl {
         std::condition_variable Done;
         uint64_t NextId = 0;
         std::vector<PrefetchSlot> Slots; // Oldest first.
+        // Reads waiting for a pending slot (by id) to settle. Kept outside the slots so a slot that is cleared while
+        // downloading still releases its waiters when its download finishes.
+        std::vector<std::pair<uint64_t, std::move_only_function<void()>>> Waiters;
         std::shared_ptr<std::atomic<int64_t>> Budget;
 
         ~PrefetchState();
@@ -58,8 +62,10 @@ class ReadableFileImpl {
     std::shared_ptr<PrefetchState> m_prefetch = std::make_shared<PrefetchState>();
 
     // Serves from a completed prefetch only. With `wait`, first waits (bounded) for a covering pending prefetch.
+    // With `allowPartial`, a range that only starts inside a slot is served up to the slot's end and the caller
+    // fetches the remainder; the result is then the number of bytes copied, which may be less than requested.
     [[nodiscard]] std::optional<size_t> TryReadFromPrefetch(int64_t offset, int64_t bytesToRead, char* buffer,
-                                                            bool wait) const;
+                                                            bool wait, bool allowPartial = false) const;
     void ClearPrefetch() const;
     int64_t DownloadWithRetry(const int64_t offset, const int64_t bytesToRead, char* buffer) const;
     [[nodiscard]] std::pair<int64_t, std::string> GetMetadata() const;
@@ -88,6 +94,10 @@ class ReadableFileImpl {
 
     // Serves a random read from the local file cache only; returns nullopt when it must go to the blob.
     [[nodiscard]] std::optional<size_t> TryReadFromCache(int64_t offset, int64_t bytesToRead, char* buffer) const;
+    // If a still-downloading prefetch fully covers the range, queues `resume` to run when that download settles
+    // (successfully or not) and returns true; the caller must then not start its own read. Never blocks.
+    [[nodiscard]] bool ChainOntoPendingPrefetch(int64_t offset, int64_t bytesToRead,
+                                                std::move_only_function<void()>& resume) const;
 
     using ReadCallback = Core::BlobClient::DownloadCallback;
 

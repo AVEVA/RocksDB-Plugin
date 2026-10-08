@@ -190,10 +190,10 @@ TEST_F(AsyncReadTests, ReadAsync_DoesNotBlockAndPollDeliversOnCallerThread) {
     EXPECT_EQ(std::string(128, 'A'), record.Data);
 }
 
-TEST_F(AsyncReadTests, ReadAsync_RangeCoveredByPendingPrefetch_StartsOwnDownloadWithoutBlocking) {
+TEST_F(AsyncReadTests, ReadAsync_RangeCoveredByPendingPrefetch_WaitsForItWithoutBlockingOrDownloadingTwice) {
     auto file = CreateFile(m_deferred);
     ASSERT_TRUE(file.Prefetch(1024, 2048, rocksdb::IOOptions{}, nullptr).ok());
-    ASSERT_EQ(1U, m_deferred->PendingCount()); // The prefetch download never completes in this test.
+    ASSERT_EQ(1U, m_deferred->PendingCount());
 
     std::vector<char> scratch(64);
     auto req = MakeRequest(1100, scratch);
@@ -203,7 +203,100 @@ TEST_F(AsyncReadTests, ReadAsync_RangeCoveredByPendingPrefetch_StartsOwnDownload
 
     ASSERT_EQ(std::future_status::ready, done.wait_for(std::chrono::seconds(5)));
     EXPECT_TRUE(done.get().ok());
-    EXPECT_EQ(2U, m_deferred->PendingCount());
+    EXPECT_EQ(1U, m_deferred->PendingCount()); // Chained onto the prefetch; no second download.
+    EXPECT_EQ(0, record.Calls.load());
+
+    m_deferred->Take().Callback(nullptr, std::string(2048, 'P'));
+    std::vector<void*> handles{handle.Handle};
+    ASSERT_TRUE(PollAsyncReads(handles).ok());
+
+    EXPECT_EQ(1, record.Calls.load());
+    EXPECT_TRUE(record.Status.ok()) << record.Status.ToString();
+    EXPECT_EQ(std::string(64, 'P'), record.Data);
+    EXPECT_EQ(0U, m_deferred->PendingCount());
+}
+
+TEST_F(AsyncReadTests, ReadAsync_ChainedOntoFailedPrefetch_FallsBackToOwnDownload) {
+    auto file = CreateFile(m_deferred);
+    ASSERT_TRUE(file.Prefetch(1024, 2048, rocksdb::IOOptions{}, nullptr).ok());
+
+    std::vector<char> scratch(64);
+    auto req = MakeRequest(1100, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+    ASSERT_TRUE(Submit(file, req, record, handle).ok());
+
+    m_deferred->Take().Callback(std::make_exception_ptr(std::runtime_error("boom")), {});
+    ASSERT_EQ(1U, m_deferred->PendingCount());
+    auto download = m_deferred->Take();
+    EXPECT_EQ(1100, download.Offset);
+    download.Callback(nullptr, std::string(64, 'D'));
+
+    std::vector<void*> handles{handle.Handle};
+    ASSERT_TRUE(PollAsyncReads(handles).ok());
+    EXPECT_TRUE(record.Status.ok()) << record.Status.ToString();
+    EXPECT_EQ(std::string(64, 'D'), record.Data);
+}
+
+TEST_F(AsyncReadTests, Read_PartiallyOverlappingPrefetch_DownloadsOnlyTheRemainder) {
+    auto file = CreateFile(m_deferred);
+    ASSERT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
+    m_deferred->Take().Callback(nullptr, std::string(512, 'P'));
+
+    std::vector<char> scratch(512);
+    rocksdb::Slice result;
+    int64_t downloadOffset = -1;
+    int64_t downloadLength = -1;
+    EXPECT_CALL(*m_deferred, Download(_, _, _, _))
+        .WillOnce([&](std::span<char> buffer, int64_t offset, int64_t length, const std::string&) {
+            downloadOffset = offset;
+            downloadLength = length;
+            std::ranges::fill(buffer, 'R');
+            return length;
+        });
+
+    const auto status = file.Read(256, scratch.size(), rocksdb::IOOptions{}, &result, scratch.data(), nullptr);
+
+    EXPECT_TRUE(status.ok()) << status.ToString();
+    EXPECT_EQ(512, downloadOffset);
+    EXPECT_EQ(256, downloadLength);
+    EXPECT_EQ(std::string(256, 'P') + std::string(256, 'R'), result.ToString());
+}
+
+TEST_F(AsyncReadTests, Read_PastTheEndOfPrefetchedRange_ReleasesItsBudget) {
+    auto budget = std::make_shared<std::atomic<int64_t>>(0);
+    ReadableFile file{ReadableFileImpl{"test.sst", m_deferred, nullptr, m_logger, nullptr, budget}};
+    ASSERT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
+    m_deferred->Take().Callback(nullptr, std::string(512, 'P'));
+    ASSERT_EQ(512, budget->load());
+
+    std::vector<char> scratch(512);
+    auto req = MakeRequest(0, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+    ASSERT_TRUE(Submit(file, req, record, handle).ok());
+
+    EXPECT_EQ(0U, m_deferred->PendingCount());
+    EXPECT_EQ(0, budget->load());
+}
+
+TEST_F(AsyncReadTests, Prefetch_DeclinedForBudget_DoesNotEvictFinishedRange) {
+    auto budget = std::make_shared<std::atomic<int64_t>>(0);
+    ReadableFile file{ReadableFileImpl{"test.sst", m_deferred, nullptr, m_logger, nullptr, budget}};
+    ASSERT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
+    ASSERT_TRUE(file.Prefetch(1024, 512, rocksdb::IOOptions{}, nullptr).ok());
+    m_deferred->Take().Callback(nullptr, std::string(512, 'A'));
+    m_deferred->Take().Callback(nullptr, std::string(512, 'B'));
+
+    budget->store(ReadableFileImpl::kDefaultPrefetchBudgetBytes);
+    EXPECT_TRUE(file.Prefetch(2048, 1024, rocksdb::IOOptions{}, nullptr).IsNotSupported());
+
+    std::vector<char> scratch(256);
+    auto req = MakeRequest(0, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+    ASSERT_TRUE(Submit(file, req, record, handle).ok());
+    EXPECT_EQ(0U, m_deferred->PendingCount()); // Still served from the first range.
 }
 
 TEST_F(AsyncReadTests, Prefetch_AllSlotsStillDownloading_ReturnsNotSupported) {

@@ -97,12 +97,27 @@ rocksdb::IOStatus ReadableFile::ReadAsync(rocksdb::FSReadRequest& req, const roc
             // The cache wrote straight into scratch; Complete only records the length.
             request->Complete(rocksdb::IOStatus::OK(), std::string_view(req.scratch, *cached));
         } else {
-            Impl::ReadableFileImpl::ReadAsync(
-                m_file, offset, length,
-                [request](std::exception_ptr error, std::string data) {
-                    request->Complete(error ? StatusFromException(error) : rocksdb::IOStatus::OK(), data);
-                },
-                Impl::ReadableFileImpl::kMaxStaleReadRetries, timeout);
+            auto download = [file = m_file, offset, length, timeout, request] {
+                Impl::ReadableFileImpl::ReadAsync(
+                    file, offset, length,
+                    [request](std::exception_ptr error, std::string data) {
+                        request->Complete(error ? StatusFromException(error) : rocksdb::IOStatus::OK(), data);
+                    },
+                    Impl::ReadableFileImpl::kMaxStaleReadRetries, timeout);
+            };
+
+            // A prefetch of this range may still be downloading; waiting for it beats downloading it twice.
+            std::move_only_function<void()> resume = [file = m_file, offset, length, scratch = req.scratch, request,
+                                                      download] {
+                if (const auto cached = file->TryReadFromCache(offset, length, scratch)) {
+                    request->Complete(rocksdb::IOStatus::OK(), std::string_view(scratch, *cached));
+                } else {
+                    download();
+                }
+            };
+            if (!m_file->ChainOntoPendingPrefetch(offset, length, resume)) {
+                download();
+            }
         }
 
         *io_handle = handle.release();
