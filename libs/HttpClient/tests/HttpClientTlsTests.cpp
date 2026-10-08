@@ -256,6 +256,9 @@ namespace
             X509_sign(certificate.get(), key.get(), EVP_sha256());
             SSL_CTX_use_certificate(m_sslContext.native_handle(), certificate.get());
             SSL_CTX_use_PrivateKey(m_sslContext.native_handle(), key.get());
+            SSL_CTX_set_session_id_context(m_sslContext.native_handle(),
+                reinterpret_cast<const unsigned char*>("tls-test"),
+                8);
             // Same as the SSL_CTX_set_tlsext_servername_callback macro, which uses a C-style cast.
             SSL_CTX_callback_ctrl(m_sslContext.native_handle(),
                 SSL_CTRL_SET_TLSEXT_SERVERNAME_CB,
@@ -283,6 +286,11 @@ namespace
         [[nodiscard]] int Handshakes() const
         {
             return m_handshakes;
+        }
+
+        [[nodiscard]] int Resumed() const
+        {
+            return m_resumed;
         }
 
         [[nodiscard]] int Requests() const
@@ -355,6 +363,10 @@ namespace
                         return;
                     }
                     ++m_handshakes;
+                    if (SSL_session_reused(session->Stream.native_handle()) != 0)
+                    {
+                        ++m_resumed;
+                    }
                     m_negotiatedVersion = SSL_get_version(session->Stream.native_handle());
                     ReadRequest(session);
                 });
@@ -414,6 +426,7 @@ namespace
         std::vector<std::shared_ptr<Session>> m_sessions;
         std::vector<boost::system::error_code> m_closeObservations;
         int m_handshakes = 0;
+        int m_resumed = 0;
         int m_requests = 0;
 
       public:
@@ -557,6 +570,17 @@ namespace
         ASSERT_EQ(outcomes.size(), 1U);
         EXPECT_FALSE(outcomes[0].Error) << outcomes[0].Error.message();
         EXPECT_EQ(server.NegotiatedVersion(), "TLSv1.3");
+    }
+
+    TEST(HttpClientTls, ReplacementConnectionResumesTheEarlierSession)
+    {
+        asio::io_context context;
+        TlsTestServer server(context, "IP:127.0.0.1", TlsTestServer::AfterResponse::AbortConnection);
+        const auto outcomes = SendSequentialRequests(context, server, {}, "127.0.0.1", 3);
+
+        ASSERT_EQ(outcomes.size(), 3U);
+        EXPECT_EQ(server.Handshakes(), 3);
+        EXPECT_EQ(server.Resumed(), 2) << "only the first connection needs a full handshake";
     }
 
     TEST(HttpClientTls, ConnectionCloseSendsTlsCloseNotify)

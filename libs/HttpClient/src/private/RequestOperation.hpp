@@ -6,6 +6,7 @@
 #include "ConnectionPool.hpp"
 #include "RequestValidation.hpp"
 #include "StreamTypes.hpp"
+#include "TlsContextConfigurator.hpp"
 
 #include "AVEVA/HttpClient/HttpClient.hpp"
 #include "AVEVA/HttpClient/HttpRequest.hpp"
@@ -237,6 +238,7 @@ namespace AVEVA::Private
 
         bool ConfigureTlsForHost()
         {
+            PrepareTlsSessionResumption(m_stream->native_handle(), m_key.host, m_key.service);
             if (SSL_get_verify_mode(m_stream->native_handle()) != SSL_VERIFY_NONE)
             {
                 m_stream->set_verify_callback(asio::ssl::host_name_verification(m_key.host));
