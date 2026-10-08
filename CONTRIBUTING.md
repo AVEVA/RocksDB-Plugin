@@ -1,6 +1,3 @@
-<!-- SPDX-License-Identifier: Apache-2.0 -->
-<!-- SPDX-FileCopyrightText: Copyright 2025 AVEVA -->
-
 # Contributing
 
 This repository is currently maintained by AVEVA teams.

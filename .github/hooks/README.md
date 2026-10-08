@@ -1,6 +1,3 @@
-<!-- SPDX-License-Identifier: Apache-2.0 -->
-<!-- SPDX-FileCopyrightText: Copyright 2025 AVEVA -->
-
 # Hooks
 
 This folder contains repository Git hook scripts. Git does not run them automatically

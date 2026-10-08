@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright 2025 AVEVA
+# SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 # Builds the in-tree aveva-http-client and aveva-azure-client libraries (libs/) as part of this project
 # and makes them consumable both in the build tree and from an installed package.

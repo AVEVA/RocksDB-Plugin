@@ -1,6 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright 2025 AVEVA
-
 cmake_minimum_required(VERSION 3.22)
 
 option(AVEVA_ROCKSDB_BUILD_DB_BENCH

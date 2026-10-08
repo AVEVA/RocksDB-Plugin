@@ -1,6 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright 2025 AVEVA
-
 set(AVEVA_ROCKSDB_PLUGIN_CORE_VERSION @PROJECT_VERSION@)
 
 @PACKAGE_INIT@

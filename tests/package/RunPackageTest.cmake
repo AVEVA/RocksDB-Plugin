@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright 2025 AVEVA
+# SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 # Installs the plugin to a scratch prefix, then configures and builds tests/package against it.
 # Invoked by CTest as `cmake -P` with:
