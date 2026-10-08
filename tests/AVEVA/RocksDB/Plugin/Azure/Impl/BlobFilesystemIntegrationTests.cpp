@@ -1348,6 +1348,42 @@ TEST_F(BlobFilesystemIntegrationTests, MultiRead_MultipleRequests_FillsEveryRequ
     EXPECT_TRUE(m_filesystem->DeleteFile(blobName));
 }
 
+TEST_F(BlobFilesystemIntegrationTests, MultiRead_MoreRequestsThanOneWave_FillsEveryRequest) {
+    // Arrange
+    std::string blobName = m_containerPrefix + "/multiread-waves-" + m_blobName;
+    std::vector<char> data(4096);
+    for (size_t i = 0; i < data.size(); ++i) {
+        data[i] = static_cast<char>('a' + (i / 512));
+    }
+    auto writeFile = m_filesystem->CreateWriteableFile(blobName);
+    writeFile.Append(data);
+    writeFile.Sync();
+    writeFile.Close();
+    AVEVA::RocksDB::Plugin::Azure::ReadableFile file{m_filesystem->CreateReadableFile(blobName)};
+
+    constexpr size_t Count = 70;
+    std::vector<std::vector<char>> scratches(Count, std::vector<char>(512));
+    std::vector<rocksdb::FSReadRequest> reqs(Count);
+    for (size_t i = 0; i < Count; ++i) {
+        reqs[i].offset = (i % 8) * 512;
+        reqs[i].len = 512;
+        reqs[i].scratch = scratches[i].data();
+    }
+
+    // Act
+    const auto status = file.MultiRead(reqs.data(), reqs.size(), rocksdb::IOOptions{}, nullptr);
+
+    // Assert
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    for (size_t i = 0; i < Count; ++i) {
+        EXPECT_TRUE(reqs[i].status.ok()) << reqs[i].status.ToString();
+        EXPECT_EQ(std::string(512, static_cast<char>('a' + (i % 8))), reqs[i].result.ToString());
+    }
+
+    // Cleanup
+    EXPECT_TRUE(m_filesystem->DeleteFile(blobName));
+}
+
 TEST_F(BlobFilesystemIntegrationTests, Prefetch_ThenRead_ReturnsPrefetchedData) {
     // Arrange
     std::string blobName = m_containerPrefix + "/prefetch-" + m_blobName;

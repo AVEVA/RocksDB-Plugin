@@ -7,6 +7,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <limits>
@@ -117,38 +118,49 @@ rocksdb::IOStatus ReadableFile::ReadAsync(rocksdb::FSReadRequest& req, const roc
 // each request's status, as RocksDB expects; the returned status only covers batch-level problems.
 rocksdb::IOStatus ReadableFile::MultiRead(rocksdb::FSReadRequest* reqs, const size_t num_reqs,
                                           const rocksdb::IOOptions& opts, rocksdb::IODebugContext* dbg) {
-    std::vector<void*> handles;
-    handles.reserve(num_reqs);
-    // Deleting a handle aborts a request still in flight, so the handles are released even on an early exit.
-    struct HandleCleanup {
-        std::vector<void*>& Handles;
-        ~HandleCleanup() {
-            for (auto* handle : Handles) {
-                DeleteAsyncReadHandle(handle);
-            }
-        }
-    } cleanup{handles};
+    // A large batch must not open an unbounded number of connections, so requests run in bounded waves.
+    constexpr size_t maxInFlight = 32;
+    rocksdb::IOStatus batchStatus = rocksdb::IOStatus::OK();
 
-    for (size_t i = 0; i < num_reqs; ++i) {
-        auto* target = &reqs[i];
-        void* handle = nullptr;
-        rocksdb::IOHandleDeleter deleter = nullptr;
-        auto started = ReadAsync(
-            *target, opts,
-            [target](rocksdb::FSReadRequest& done, void*) {
-                target->status = done.status;
-                target->result = done.result;
-            },
-            nullptr, &handle, &deleter, dbg);
-        if (!started.ok()) {
-            target->status = started;
-            target->result = rocksdb::Slice();
-            continue;
+    for (size_t begin = 0; begin < num_reqs; begin += maxInFlight) {
+        const size_t end = std::min(num_reqs, begin + maxInFlight);
+        std::vector<void*> handles;
+        handles.reserve(end - begin);
+        // Deleting a handle aborts a request still in flight, so the handles are released even on an early exit.
+        struct HandleCleanup {
+            std::vector<void*>& Handles;
+            ~HandleCleanup() {
+                for (auto* handle : Handles) {
+                    DeleteAsyncReadHandle(handle);
+                }
+            }
+        } cleanup{handles};
+
+        for (size_t i = begin; i < end; ++i) {
+            auto* target = &reqs[i];
+            void* handle = nullptr;
+            rocksdb::IOHandleDeleter deleter = nullptr;
+            auto started = ReadAsync(
+                *target, opts,
+                [target](rocksdb::FSReadRequest& done, void*) {
+                    target->status = done.status;
+                    target->result = done.result;
+                },
+                nullptr, &handle, &deleter, dbg);
+            if (!started.ok()) {
+                target->status = started;
+                target->result = rocksdb::Slice();
+                continue;
+            }
+            handles.push_back(handle);
         }
-        handles.push_back(handle);
+
+        if (auto waited = Impl::PollAsyncReads(handles); !waited.ok() && batchStatus.ok()) {
+            batchStatus = waited;
+        }
     }
 
-    return Impl::PollAsyncReads(handles);
+    return batchStatus;
 }
 
 // A hint: starts a background download into a per-file buffer that later reads of that range are served from.

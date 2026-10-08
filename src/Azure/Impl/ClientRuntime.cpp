@@ -24,6 +24,8 @@
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 namespace {
+constexpr std::size_t MaxIdleConnectionsPerHost = 64;
+
 #ifdef _WIN32
 bool HasEnvironmentVariable(const char* name) {
     const char* value = std::getenv(name); // NOLINT(concurrency-mt-unsafe)
@@ -71,6 +73,9 @@ const std::string& WindowsRootCertificatePem() {
 
 std::unique_ptr<::AVEVA::IHttpClient> CreateHttpClient(boost::asio::io_context& context) {
     ::AVEVA::HttpClientOptions options;
+    // MultiRead waves, directory deletes and per-file uploads run in parallel; the default of 6 idle connections
+    // would close and re-handshake most of them after every burst.
+    options.SetMaxIdleConnectionsPerHost(MaxIdleConnectionsPerHost);
 #ifdef _WIN32
     if (!HasEnvironmentVariable("SSL_CERT_FILE") && !HasEnvironmentVariable("SSL_CERT_DIR")) {
         // Passed in memory: a temporary file could be swapped by another local process between write and read.
