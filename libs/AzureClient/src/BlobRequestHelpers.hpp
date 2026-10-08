@@ -227,8 +227,33 @@ namespace AVEVA::AzureClient::Private
         std::optional<BlobStorageError> Details;
     };
 
-    [[nodiscard]] bool IEquals(std::string_view lhs, std::string_view rhs) noexcept;
-    [[nodiscard]] bool IStartsWith(std::string_view value, std::string_view prefix) noexcept;
+    // Locale-free ASCII folding: the std::locale based algorithms take a process-wide lock on MSVC per character.
+    [[nodiscard]] constexpr char FoldAscii(char value) noexcept
+    {
+        return (value >= 'A' && value <= 'Z') ? static_cast<char>(value | 0x20) : value;
+    }
+
+    [[nodiscard]] constexpr bool IEquals(std::string_view lhs, std::string_view rhs) noexcept
+    {
+        if (lhs.size() != rhs.size())
+        {
+            return false;
+        }
+        for (std::size_t index = 0; index < lhs.size(); ++index)
+        {
+            if (FoldAscii(lhs[index]) != FoldAscii(rhs[index]))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    [[nodiscard]] constexpr bool IStartsWith(std::string_view value, std::string_view prefix) noexcept
+    {
+        return value.size() >= prefix.size() && IEquals(value.substr(0, prefix.size()), prefix);
+    }
+
     [[nodiscard]] std::string ToLowerAscii(std::string_view value);
     [[nodiscard]] std::string_view TrimWhitespace(std::string_view value) noexcept;
     // True if `value` contains CR, LF or NUL (header injection / truncation).

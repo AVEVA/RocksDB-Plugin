@@ -22,8 +22,6 @@
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
-#include <boost/algorithm/string/case_conv.hpp>
-#include <boost/algorithm/string/predicate.hpp>
 #include <boost/url/encode.hpp> // IWYU pragma: keep (symbol is defined in a Boost impl/ header)
 #include <boost/url/parse.hpp>
 #include <boost/url/pct_string_view.hpp>
@@ -102,7 +100,9 @@ namespace AVEVA::AzureClient::Private
 
     std::string ToLowerAscii(std::string_view value)
     {
-        return boost::algorithm::to_lower_copy(std::string{value}, std::locale::classic());
+        std::string result{value};
+        std::ranges::transform(result, result.begin(), FoldAscii);
+        return result;
     }
 
     [[nodiscard]] std::string_view TrimWhitespace(std::string_view value) noexcept
@@ -448,16 +448,6 @@ namespace AVEVA::AzureClient::Private
             }
         }
     } // namespace
-
-    bool IEquals(std::string_view lhs, std::string_view rhs) noexcept
-    {
-        return boost::algorithm::iequals(lhs, rhs, std::locale::classic());
-    }
-
-    bool IStartsWith(std::string_view value, std::string_view prefix) noexcept
-    {
-        return boost::algorithm::istarts_with(value, prefix, std::locale::classic());
-    }
 
     std::string BuildDateHeaderValue(std::chrono::system_clock::time_point now)
     {

@@ -366,6 +366,20 @@ TEST(BlobRequestHelpersTests, ParseHttpDateHeader_AcceptsAllRfc7231Formats)
     EXPECT_EQ(ParseHttpDateHeader("Fri Jun 26 18:59:17 2015"), std::optional{expectedTime});
 }
 
+TEST(BlobRequestHelpersTests, AsciiHelpers_FoldOnlyAsciiLettersAndPassOtherBytesThrough)
+{
+    static_assert(AVEVA::AzureClient::Private::IEquals("Content-LENGTH", "content-length"));
+    static_assert(!AVEVA::AzureClient::Private::IEquals("abc", "abcd"));
+    static_assert(AVEVA::AzureClient::Private::IStartsWith("X-MS-Meta", "x-ms-"));
+    static_assert(!AVEVA::AzureClient::Private::IStartsWith("x-m", "x-ms-"));
+
+    // 0xC9 and 0xE9 differ only by bit 0x20 but are not ASCII letters, so they must stay distinct.
+    EXPECT_FALSE(AVEVA::AzureClient::Private::IEquals("\xC9", "\xE9"));
+    EXPECT_FALSE(AVEVA::AzureClient::Private::IEquals("@", "`"));
+    EXPECT_FALSE(AVEVA::AzureClient::Private::IEquals("[", "{"));
+    EXPECT_EQ(AVEVA::AzureClient::Private::ToLowerAscii("AbC-\xC9Z[@"), "abc-\xC9z[@");
+}
+
 TEST(BlobRequestHelpersTests, StringHelpers_AreCaseInsensitiveAndTrimAsExpected)
 {
     EXPECT_TRUE(IEquals("x-ms-meta-project", "X-Ms-MeTa-PrOjEcT"));

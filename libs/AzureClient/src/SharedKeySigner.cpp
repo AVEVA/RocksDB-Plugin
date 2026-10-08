@@ -6,7 +6,6 @@
 
 #include <AVEVA/HttpClient/HttpMethod.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
-#include <boost/algorithm/string/predicate.hpp>
 #include <boost/url/parse.hpp>
 #include <boost/url/pct_string_view.hpp>
 #include <boost/url/url_view.hpp>
