@@ -3,6 +3,7 @@
 
 #pragma once
 #include <boost/asio/dispatch.hpp>
+#include <boost/asio/io_context.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -17,6 +18,19 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// Throws std::logic_error when the calling thread is running `executor`: blocking there can never finish.
 /// </summary>
 template <typename Executor> void ThrowIfRunningOn(const Executor& executor) {
+    constexpr auto message = "Blocking Azure calls must not be made from a thread running the io_context; "
+                             "call them from a RocksDB thread instead.";
+
+    // The common case needs no probe: an io_context executor can answer directly.
+    if constexpr (requires { executor.template target<boost::asio::io_context::executor_type>(); }) {
+        if (const auto* ioExecutor = executor.template target<boost::asio::io_context::executor_type>()) {
+            if (ioExecutor->running_in_this_thread()) {
+                throw std::logic_error(message);
+            }
+            return;
+        }
+    }
+
     // any_io_executor cannot be asked running_in_this_thread() directly, but dispatch runs the handler inline
     // exactly when the calling thread is already running the executor. Otherwise it is queued and some other host
     // thread may run it at any moment (even before the check below), so the handler records which thread ran it and
@@ -24,8 +38,7 @@ template <typename Executor> void ThrowIfRunningOn(const Executor& executor) {
     auto ranOn = std::make_shared<std::atomic<std::thread::id>>(std::thread::id{});
     boost::asio::dispatch(executor, [ranOn] { ranOn->store(std::this_thread::get_id()); });
     if (ranOn->load() == std::this_thread::get_id()) {
-        throw std::logic_error("Blocking Azure calls must not be made from a thread running the io_context; "
-                               "call them from a RocksDB thread instead.");
+        throw std::logic_error(message);
     }
 }
 

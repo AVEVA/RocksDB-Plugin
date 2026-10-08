@@ -3,6 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlockOn.hpp"
 
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/use_future.hpp>
@@ -62,4 +63,27 @@ TEST(BlockOnTests, NeverThrowsSpuriouslyWhileOtherThreadsRunTheContext) {
     for (auto& worker : workers) {
         worker.join();
     }
+}
+
+TEST(BlockOnTests, TypeErasedExecutor_DetectsContextThreadWithoutProbing) {
+    boost::asio::io_context context;
+    const boost::asio::any_io_executor erased = context.get_executor();
+    std::promise<bool> threw;
+    boost::asio::post(context, [&] {
+        std::promise<int> value;
+        value.set_value(1);
+        try {
+            BlockOn(erased, value.get_future());
+            threw.set_value(false);
+        } catch (const std::logic_error&) {
+            threw.set_value(true);
+        }
+    });
+    context.run();
+    EXPECT_TRUE(threw.get_future().get());
+
+    // From a thread that is not running the context, nothing may be posted to it: it is not being run at all here.
+    std::promise<int> value;
+    value.set_value(7);
+    EXPECT_EQ(BlockOn(erased, value.get_future()), 7);
 }
