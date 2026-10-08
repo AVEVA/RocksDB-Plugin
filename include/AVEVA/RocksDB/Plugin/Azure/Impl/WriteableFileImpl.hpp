@@ -65,7 +65,7 @@ class WriteableFileImpl {
     [[nodiscard]] int64_t GetUniqueId(char* id, int64_t maxIdSize) const noexcept;
 
   private:
-    void Expand();
+    void Expand(int64_t requiredCapacity);
     void StartFlush(bool includePartialPage);
     void StartUpload(std::vector<char> data, int64_t offset);
     void WaitForUploads(size_t maxRemaining);

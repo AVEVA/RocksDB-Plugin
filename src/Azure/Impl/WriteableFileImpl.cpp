@@ -166,7 +166,7 @@ void WriteableFileImpl::StartFlush(const bool includePartialPage) {
     if ((m_lastPageOffset + bytesToWrite) > m_capacity) {
         // Resizing the blob while uploads are in flight would race with them.
         WaitForUploads(0);
-        Expand();
+        Expand(m_lastPageOffset + bytesToWrite);
     }
 
     // Back-pressure: also surfaces an earlier upload failure before more data is accepted.
@@ -277,10 +277,12 @@ int64_t WriteableFileImpl::GetUniqueId(char* id, const int64_t maxIdSize) const 
     return length;
 }
 
-void WriteableFileImpl::Expand() {
+// Doubling alone under-sizes the blob when the capacity is zero (after Truncate(0)) or smaller than the pending
+// write, so the pending write itself must always fit.
+void WriteableFileImpl::Expand(const int64_t requiredCapacity) {
     // TODO: Consider expanding by less for large files.
-    const auto [_, rounded] = BlobHelpers::RoundToEndOfNearestPage(m_capacity * 2);
-    const auto desiredSize = rounded;
+    const auto wanted = std::max({requiredCapacity, m_capacity * 2, Configuration::PageBlob::DefaultSize});
+    const auto [_, desiredSize] = BlobHelpers::RoundToEndOfNearestPage(wanted);
 
     BOOST_LOG_SEV(*m_logger, debug) << "Expanding writeable file '" << m_name << "' to " << desiredSize << " bytes";
 

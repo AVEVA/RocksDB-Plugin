@@ -347,6 +347,55 @@ TEST_F(WriteableFileTests, Append_ExceedsCapacity_SetCapacityCalled) {
         << "SetCapacity should be called with a capacity greater than the initial capacity";
 }
 
+TEST_F(WriteableFileTests, Append_AfterTruncateToZero_CapacityCoversPendingWrite) {
+    // Arrange
+    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
+    int64_t capacity = pageSize;
+    EXPECT_CALL(*m_blobClient, GetSize()).WillRepeatedly(::testing::Return(pageSize));
+    EXPECT_CALL(*m_blobClient, GetCapacity()).WillRepeatedly(::testing::Return(pageSize));
+    EXPECT_CALL(*m_blobClient, SetSize(_)).Times(::testing::AtLeast(0));
+    EXPECT_CALL(*m_blobClient, SetCapacity(_)).WillRepeatedly(::testing::SaveArg<0>(&capacity));
+    int64_t maxUploadEnd = 0;
+    EXPECT_CALL(*m_blobClient, UploadPages(_, _))
+        .WillRepeatedly([&](const std::span<const char> data, const int64_t offset) {
+            maxUploadEnd = std::max(maxUploadEnd, offset + static_cast<int64_t>(data.size()));
+        });
+    WriteableFileImpl file{"", m_blobClient, nullptr, m_logger};
+
+    // Act
+    file.Truncate(0);
+    file.Append(std::vector<char>(pageSize * 3, 'x'));
+    file.Sync();
+
+    // Assert
+    EXPECT_GE(maxUploadEnd, pageSize * 3);
+    EXPECT_GE(capacity, maxUploadEnd);
+}
+
+TEST_F(WriteableFileTests, Append_LargerThanTwiceCapacity_CapacityCoversPendingWrite) {
+    // Arrange
+    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
+    int64_t capacity = pageSize;
+    EXPECT_CALL(*m_blobClient, GetSize()).WillRepeatedly(::testing::Return(0));
+    EXPECT_CALL(*m_blobClient, GetCapacity()).WillRepeatedly(::testing::Return(pageSize));
+    EXPECT_CALL(*m_blobClient, SetSize(_)).Times(::testing::AtLeast(0));
+    EXPECT_CALL(*m_blobClient, SetCapacity(_)).WillRepeatedly(::testing::SaveArg<0>(&capacity));
+    int64_t maxUploadEnd = 0;
+    EXPECT_CALL(*m_blobClient, UploadPages(_, _))
+        .WillRepeatedly([&](const std::span<const char> data, const int64_t offset) {
+            maxUploadEnd = std::max(maxUploadEnd, offset + static_cast<int64_t>(data.size()));
+        });
+    WriteableFileImpl file{"", m_blobClient, nullptr, m_logger, pageSize * 64};
+
+    // Act
+    file.Append(std::vector<char>(pageSize * 40, 'x'));
+    file.Sync();
+
+    // Assert
+    EXPECT_GE(maxUploadEnd, pageSize * 40);
+    EXPECT_GE(capacity, maxUploadEnd);
+}
+
 TEST_F(WriteableFileTests, Constructor_BufferSizeSmallerThanPage_ThrowsException) {
     // Arrange
     constexpr size_t invalidBufferSize = Configuration::PageBlob::PageSize - 1;
