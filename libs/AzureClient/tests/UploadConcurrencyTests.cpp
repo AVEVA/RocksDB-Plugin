@@ -405,7 +405,8 @@ TEST(T04_ConcurrencyTests, StreamWriteFailureReportsIoError)
     httpClient.Poll();
 
     EXPECT_EQ(callbackCount, 1);
-    EXPECT_EQ(httpClient.RequestCount(), 1U);
+    // The next chunk is requested while the first write is still running; the failed write cancels it.
+    EXPECT_EQ(httpClient.RequestCount(), 2U);
     EXPECT_EQ(httpClient.PendingCount(), 0U);
 }
 

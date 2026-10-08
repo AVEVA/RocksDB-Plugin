@@ -33,6 +33,9 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
+#include <mutex>
+#include <vector>
 #include <utility>
 
 // T11: parallel chunked DownloadToAsync (Concurrency > 1).
@@ -106,6 +109,31 @@ namespace
         {
             return {static_cast<off_type>(-1)};
         }
+    };
+
+    // Records the thread of every write.
+    class ThreadRecordingBuffer final : public std::stringbuf
+    {
+      public:
+        [[nodiscard]] std::vector<std::thread::id> WriteThreads() const
+        {
+            const std::scoped_lock lock(m_mutex);
+            return m_threads;
+        }
+
+      protected:
+        std::streamsize xsputn(const char* data, std::streamsize count) override
+        {
+            {
+                const std::scoped_lock lock(m_mutex);
+                m_threads.push_back(std::this_thread::get_id());
+            }
+            return std::stringbuf::xsputn(data, count);
+        }
+
+      private:
+        mutable std::mutex m_mutex;
+        std::vector<std::thread::id> m_threads;
     };
 
     // Completes the most recently issued pending request.
@@ -278,6 +306,30 @@ TEST(T11_ParallelDownloadAcceptanceTests, OutOfOrderCompletionIsWrittenInOrderTo
     EXPECT_EQ(buffer.str(), content);
     EXPECT_EQ(httpClient.RequestCount(), 6U);
     VerifyIfMatchHeaderOnChunkRequests(httpClient, "\"etag-a\"");
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, SinkWritesRunOffTheIoThreadAndStayInOrder)
+{
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(18);
+    EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
+    BlockBlobClient client{httpClient, BuildOptions()};
+
+    ThreadRecordingBuffer buffer;
+    std::ostream out(&buffer);
+    int callbackCount = 0;
+    StartDownloadToAsyncAndExpectSuccess(client, out, Parallel(3U, 3U), callbackCount, content.size());
+    ASSERT_TRUE(httpClient.CompleteRequest(0U));
+    static_cast<void>(CompleteNewestUntilCallback(httpClient, 3U, callbackCount));
+
+    ASSERT_EQ(callbackCount, 1);
+    EXPECT_EQ(buffer.str(), content);
+    const auto threads = buffer.WriteThreads();
+    ASSERT_FALSE(threads.empty());
+    for (const auto& thread : threads)
+    {
+        EXPECT_NE(thread, std::this_thread::get_id());
+    }
 }
 
 TEST(T11_ParallelDownloadAcceptanceTests, ReorderWindowBoundsBufferedChunksToConcurrency)

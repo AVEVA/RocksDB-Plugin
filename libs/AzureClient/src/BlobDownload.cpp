@@ -8,6 +8,7 @@
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
 #include "AVEVA/AzureClient/Response.hpp"
 #include "BlobRequestHelpers.hpp"
+#include "DownloadWriterPool.hpp"
 #include "ProtocolConstants.hpp"
 
 #include <AVEVA/HttpClient/HttpClient.hpp>
@@ -18,6 +19,7 @@
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/cancellation_type.hpp>
 #include <boost/asio/post.hpp>
+#include <boost/asio/thread_pool.hpp>
 
 #include <algorithm>
 #include <cerrno>
@@ -115,6 +117,12 @@ namespace AVEVA::AzureClient::Private
             {
             }
 
+            // True when Write is cheap and never blocks, so it can run on the I/O thread.
+            [[nodiscard]] virtual bool WritesInline() const noexcept
+            {
+                return false;
+            }
+
             [[nodiscard]] virtual bool Write(std::string data) = 0;
         };
 
@@ -162,6 +170,11 @@ namespace AVEVA::AzureClient::Private
                     throw std::length_error("Blob is too large to download into memory.");
                 }
                 m_data.reserve(static_cast<std::size_t>(size));
+            }
+
+            [[nodiscard]] bool WritesInline() const noexcept override
+            {
+                return true;
             }
 
             [[nodiscard]] bool Write(std::string data) override
@@ -260,6 +273,9 @@ namespace AVEVA::AzureClient::Private
                 std::uint64_t RequestId = 0;
                 std::error_code Error;
                 HttpResponse Response;
+                bool WriteDone = false;
+                bool WriteOk = true;
+                std::size_t WriteSize = 0;
             };
 
             void Enqueue(Event event)
@@ -384,6 +400,14 @@ namespace AVEVA::AzureClient::Private
                         Fail(MakeFailure(std::errc::operation_canceled, "The operation was canceled."));
                         MaybeFinish();
                     }
+                    return;
+                }
+
+                if (event.WriteDone)
+                {
+                    OnWriteDone(event);
+                    Pump();
+                    MaybeFinish();
                     return;
                 }
 
@@ -570,28 +594,74 @@ namespace AVEVA::AzureClient::Private
                 Deliver(offset, std::move(body));
             }
 
-            // Writes `data` if it is next in order, then any buffered chunks that follow it.
+            // Writes `data` (or queues it behind earlier gaps), then everything that has become contiguous.
             void Deliver(std::uint64_t offset, std::string data)
             {
-                if (offset != m_written + m_begin)
+                m_ready.emplace(offset, std::move(data));
+                WriteReady();
+            }
+
+            // Sinks that block on the disk or a caller's stream are written from a small worker pool so a slow
+            // write never stalls the I/O thread that is also servicing every other connection. One write is in
+            // flight at a time, which keeps the sink in offset order; completion re-enters on the I/O executor.
+            void WriteReady()
+            {
+                while (!m_writing && !m_failure.has_value())
                 {
-                    m_ready.emplace(offset, std::move(data));
-                    return;
-                }
-                if (!WriteToSink(std::move(data)))
-                {
-                    return;
-                }
-                for (auto it = m_ready.find(m_written + m_begin); it != m_ready.end();
-                    it = m_ready.find(m_written + m_begin))
-                {
-                    std::string next = std::move(it->second);
-                    m_ready.erase(it);
-                    if (!WriteToSink(std::move(next)))
+                    const auto it = m_ready.find(m_written + m_begin);
+                    if (it == m_ready.end())
                     {
                         return;
                     }
+                    std::string data = std::move(it->second);
+                    m_ready.erase(it);
+
+                    if (m_sink->WritesInline())
+                    {
+                        if (!WriteToSink(std::move(data)))
+                        {
+                            return;
+                        }
+                        continue;
+                    }
+
+                    m_writing = true;
+                    PendingDownloadWrites().fetch_add(1U);
+                    StartedDownloadWrites().fetch_add(1U);
+                    boost::asio::post(DownloadWriterPool(),
+                        [self = shared_from_this(), data = std::move(data)]() mutable
+                    {
+                        const std::size_t size = data.size();
+                        bool ok = false;
+                        try
+                        {
+                            ok = self->m_sink->Write(std::move(data));
+                        }
+                        catch (const std::exception&)
+                        {
+                            ok = false;
+                        }
+                        boost::asio::post(self->m_httpClient.get_executor(),
+                            [self, ok, size]()
+                        {
+                            self->Enqueue(Event{.WriteDone = true, .WriteOk = ok, .WriteSize = size});
+                        });
+                        PendingDownloadWrites().fetch_sub(1U);
+                    });
+                    return;
                 }
+            }
+
+            void OnWriteDone(const Event& event)
+            {
+                m_writing = false;
+                if (!event.WriteOk)
+                {
+                    Fail(MakeFailure(std::errc::io_error, "Failed to write the downloaded data."));
+                    return;
+                }
+                m_written += event.WriteSize;
+                WriteReady();
             }
 
             [[nodiscard]] bool WriteToSink(std::string data)
@@ -612,7 +682,8 @@ namespace AVEVA::AzureClient::Private
                 {
                     return;
                 }
-                while (m_next < *m_end && m_chunksInFlight + m_ready.size() < m_concurrency && !m_failure.has_value())
+                while (m_next < *m_end && m_chunksInFlight + m_ready.size() + (m_writing ? 1U : 0U) < m_concurrency &&
+                       !m_failure.has_value())
                 {
                     const std::uint64_t length = std::min<std::uint64_t>(m_chunkSize, *m_end - m_next);
                     const std::uint64_t offset = m_next;
@@ -639,7 +710,7 @@ namespace AVEVA::AzureClient::Private
 
             void MaybeFinish()
             {
-                if (m_done || !m_inFlight.empty())
+                if (m_done || !m_inFlight.empty() || m_writing)
                 {
                     return;
                 }
@@ -703,6 +774,7 @@ namespace AVEVA::AzureClient::Private
             std::uint64_t m_next = 0;
             std::uint64_t m_written = 0;
             bool m_ranged = false;
+            bool m_writing = false;
             std::optional<BlobStorageError> m_failure;
             DownloadSummary m_summary;
             bool m_done = false;

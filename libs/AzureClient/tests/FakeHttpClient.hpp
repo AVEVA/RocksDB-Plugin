@@ -9,6 +9,8 @@
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 
+#include "../src/DownloadWriterPool.hpp"
+
 #include <algorithm>
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/cancellation_signal.hpp>
@@ -23,6 +25,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -87,6 +90,37 @@ namespace AVEVA::AzureClient::Tests
         // Runs ready handlers on this client's executor without blocking; returns the number run.
         // Use after an ...Async call to observe a completion that Task 8's PostCompletion deferred.
         std::size_t Poll()
+        {
+            const std::size_t writesBefore = Private::StartedDownloadWrites().load();
+            const std::size_t ran = PollRaw();
+            SettleIfWritesStarted(writesBefore);
+            return ran;
+        }
+
+        // Downloads write to their sink off the I/O thread; when a step started such a write this waits for it and
+        // runs the completions it posts back, so a test observes the state a synchronous sink would have produced.
+        void SettleIfWritesStarted(std::size_t writesBefore)
+        {
+            if (Private::StartedDownloadWrites().load() == writesBefore)
+            {
+                return;
+            }
+            for (;;)
+            {
+                while (Private::PendingDownloadWrites().load() > 0U)
+                {
+                    std::this_thread::yield();
+                }
+                const std::size_t startedNow = Private::StartedDownloadWrites().load();
+                if (PollRaw() == 0U && Private::PendingDownloadWrites().load() == 0U &&
+                    Private::StartedDownloadWrites().load() == startedNow)
+                {
+                    return;
+                }
+            }
+        }
+
+        std::size_t PollRaw()
         {
             // poll() leaves the context stopped once it runs out of work; restart so repeated
             // Poll() calls keep observing newly posted handlers.
@@ -162,7 +196,9 @@ namespace AVEVA::AzureClient::Tests
             // inline completion can set CompleteInline() = true.
             if (m_completeInline)
             {
+                const std::size_t writesBefore = Private::StartedDownloadWrites().load();
                 completion(scripted.Error, std::move(scripted.Response));
+                SettleIfWritesStarted(writesBefore);
             }
             else
             {
@@ -211,7 +247,9 @@ namespace AVEVA::AzureClient::Tests
             // test assertions that expect the callback to have been invoked after calling
             // CompleteNext/CompletePending. SendAsyncErased still posts completions when
             // CompleteInline is false, so this keeps the non-reentrant testing helper behavior.
+            const std::size_t writesBefore = Private::StartedDownloadWrites().load();
             pending.Completion(pending.Error, std::move(pending.Response));
+            SettleIfWritesStarted(writesBefore);
             return true;
         }
 
@@ -225,7 +263,9 @@ namespace AVEVA::AzureClient::Tests
             PendingCompletion pending = std::move(m_pending.at(index));
             m_pending.erase(m_pending.begin() + static_cast<std::ptrdiff_t>(index));
             // Invoke inline for test helper immediacy.
+            const std::size_t writesBefore = Private::StartedDownloadWrites().load();
             pending.Completion(pending.Error, std::move(pending.Response));
+            SettleIfWritesStarted(writesBefore);
             return true;
         }
 
@@ -242,6 +282,8 @@ namespace AVEVA::AzureClient::Tests
             return false;
         }
 
+        // Downloads write to their sink off the I/O thread; this waits for those writes and runs the completions
+        // they post back, so a test observes the same state a synchronous sink would have produced.
         [[nodiscard]] bool FailPending(std::size_t index, std::error_code error, HttpResponse response = HttpResponse{})
         {
             if (index >= m_pending.size())
@@ -252,7 +294,9 @@ namespace AVEVA::AzureClient::Tests
             PendingCompletion pending = std::move(m_pending.at(index));
             m_pending.erase(m_pending.begin() + static_cast<std::ptrdiff_t>(index));
             // Invoke inline for test helper immediacy.
+            const std::size_t writesBefore = Private::StartedDownloadWrites().load();
             pending.Completion(error, std::move(response));
+            SettleIfWritesStarted(writesBefore);
             return true;
         }
 
