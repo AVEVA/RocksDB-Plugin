@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
 // Manual allocation benchmark for Task 12 (HttpRequest::SetBodyView).
 //
 // This is intentionally not built on a benchmarking framework: it exists purely to demonstrate,

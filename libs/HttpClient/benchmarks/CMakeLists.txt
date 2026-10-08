@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
 find_package(boost_asio CONFIG REQUIRED)
 
 add_executable(aveva-http-client-benchmarks

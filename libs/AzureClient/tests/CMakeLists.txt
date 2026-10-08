@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
 find_package(aveva-http-client CONFIG REQUIRED)
 find_package(Boost CONFIG REQUIRED COMPONENTS asio beast)
 find_package(GTest CONFIG REQUIRED)

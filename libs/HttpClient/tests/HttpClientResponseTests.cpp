@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
 #include "HttpClientTestHelpers.hpp"
 
 #include <gtest/gtest.h>

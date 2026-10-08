@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
 find_package(boost_asio CONFIG REQUIRED)
 find_package(boost_beast CONFIG REQUIRED)
 find_package(boost_intrusive CONFIG REQUIRED)

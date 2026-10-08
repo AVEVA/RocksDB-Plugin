@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
 // Table-driven request-shape tests (T27): one row per public operation, asserting the exact HTTP
 // method, path, query parameters, operation-specific headers and body of the first request it sends.
 #include "AVEVA/AzureClient/BlobClient.hpp"

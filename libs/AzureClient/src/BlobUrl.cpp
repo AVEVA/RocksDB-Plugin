@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
 #include "BlobRequestHelpers.hpp"
 
 #include <boost/url/encode.hpp> // IWYU pragma: keep (symbol is defined in a Boost impl/ header)

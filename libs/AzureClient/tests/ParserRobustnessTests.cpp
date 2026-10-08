@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
 // Parser robustness (T28): every Parse* function must turn malformed service output into a
 // std::exception (reported to callers as BlobStorageErrorCode::InvalidResponse), tolerate missing
 // optional fields, accept namespaced XML and entities, and scale to full 5,000-item pages.

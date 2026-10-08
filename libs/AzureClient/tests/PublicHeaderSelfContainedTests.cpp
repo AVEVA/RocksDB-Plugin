@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
 // Compile-and-run check that consumers can use every client through the public headers alone (T01).
 // This target deliberately has no include path into src/ or tests/: only <AVEVA/AzureClient/...>.
 #include "AVEVA/AzureClient/BlobClientOptions.hpp"

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
 cmake_minimum_required(VERSION 3.22)
 project(aveva-azure-client LANGUAGES CXX VERSION 0.0.1)
 

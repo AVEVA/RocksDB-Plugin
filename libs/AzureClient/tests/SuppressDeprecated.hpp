@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
 #pragma once
 
 // Wraps the few test call sites that deliberately exercise [[deprecated]] overloads (warnings are errors).

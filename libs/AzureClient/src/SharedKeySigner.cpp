@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT AND Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) Microsoft Corporation.
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
 #include "BlobRequestHelpers.hpp"
 
 #include <AVEVA/HttpClient/HttpMethod.hpp>

@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# SPDX-FileCopyrightText: Copyright (c) Beman Project contributors
+# SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
 # Taken from: https://github.com/bemanproject/exemplar/blob/main/infra/cmake/beman-install-library-config.cmake
 include_guard(GLOBAL)
 

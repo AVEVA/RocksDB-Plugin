@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
 // Runs the multi-request engines (UploadFrom, DownloadTo, retry) on a multi-threaded executor, so
 // completions for one operation genuinely arrive on several threads at once. Built as its own
 // executable with the `concurrency` label; run it under ThreadSanitizer (LinuxDebugTSan) to check
