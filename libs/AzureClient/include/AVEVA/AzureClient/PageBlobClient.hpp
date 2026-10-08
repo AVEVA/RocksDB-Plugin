@@ -108,6 +108,40 @@ namespace AVEVA::AzureClient
                 std::move(options));
         }
 
+        // Zero-copy upload: the request body views `content`, which the request keeps alive until the HTTP
+        // operation (including retries) has finished, so the caller may drop its reference immediately.
+        template <class CompletionToken = DefaultCompletionToken>
+            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, UploadPagesOptions>)
+        [[nodiscard]] auto UploadPagesAsync(std::uint64_t offset,
+            std::shared_ptr<const std::vector<char>> content,
+            CompletionToken&& token = CompletionToken{},
+            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
+        {
+            return Private::InitiateClientOperation<Models::UploadPagesResult>(this,
+                &PageBlobClient::UploadPagesSharedAsyncImpl,
+                std::forward<CompletionToken>(token),
+                std::move(requestOptions),
+                offset,
+                std::move(content),
+                UploadPagesOptions{});
+        }
+
+        template <class CompletionToken = DefaultCompletionToken>
+        [[nodiscard]] auto UploadPagesAsync(std::uint64_t offset,
+            std::shared_ptr<const std::vector<char>> content,
+            UploadPagesOptions options,
+            CompletionToken&& token = CompletionToken{},
+            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
+        {
+            return Private::InitiateClientOperation<Models::UploadPagesResult>(this,
+                &PageBlobClient::UploadPagesSharedAsyncImpl,
+                std::forward<CompletionToken>(token),
+                std::move(requestOptions),
+                offset,
+                std::move(content),
+                std::move(options));
+        }
+
         // `content` is read when the operation is *initiated*; it must stay valid until then. With the default
         // deferred completion token, initiation happens when the returned operation is `co_await`ed or
         // launched, which may be long after this call returns. See the README lifetime section.
@@ -229,6 +263,19 @@ namespace AVEVA::AzureClient
             HttpRequestOptions requestOptions);
         void UploadPagesBytesAsyncImpl(std::uint64_t offset,
             std::span<const std::byte> content,
+            const UploadPagesOptions& options,
+            UploadPagesCompletionHandler completion,
+            HttpRequestOptions requestOptions);
+        void UploadPagesSharedAsyncImpl(std::uint64_t offset,
+            std::shared_ptr<const std::vector<char>> content,
+            const UploadPagesOptions& options,
+            UploadPagesCompletionHandler completion,
+            HttpRequestOptions requestOptions);
+        // Shared by the byte-span and shared-buffer uploads; a non-null `keepAlive` makes the body a view of
+        // `content` instead of a copy.
+        void UploadPagesCoreAsync(std::uint64_t offset,
+            std::span<const std::byte> content,
+            std::shared_ptr<const void> keepAlive,
             const UploadPagesOptions& options,
             UploadPagesCompletionHandler completion,
             HttpRequestOptions requestOptions);

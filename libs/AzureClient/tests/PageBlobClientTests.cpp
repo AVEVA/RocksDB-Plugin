@@ -303,6 +303,28 @@ TEST(PageBlobClientTests, UploadPagesAsync_SpanOverloadUsesSingleRequestPath)
     EXPECT_EQ(httpClient.LastRequest().GetBody().size(), PageBlobPageSize);
 }
 
+TEST(PageBlobClientTests, UploadPagesAsync_SharedBufferOverloadSendsViewWithoutCopying)
+{
+    FakeHttpClient httpClient;
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    auto content = std::make_shared<const std::vector<char>>(PageBlobPageSize, 'x');
+    const auto* originalData = content->data();
+    client.UploadPagesAsync(PageBlobPageSize,
+        content,
+        [](std::expected<Response<UploadPagesResult>, BlobStorageError>) {});
+
+    const auto& request = httpClient.LastRequest();
+    EXPECT_TRUE(request.HasBodyView());
+    EXPECT_EQ(static_cast<const void*>(request.GetBodyView().data()), static_cast<const void*>(originalData));
+    EXPECT_EQ(request.GetBodySize(), PageBlobPageSize);
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-range"), "bytes=512-1023");
+
+    // The request keeps the buffer alive after the caller drops its reference.
+    content.reset();
+    EXPECT_EQ(request.GetBodyView().size(), PageBlobPageSize);
+}
+
 TEST(PageBlobClientTests, UploadPagesAsync_ReportsUnalignedOffsetViaCompletion)
 {
     FakeHttpClient httpClient;

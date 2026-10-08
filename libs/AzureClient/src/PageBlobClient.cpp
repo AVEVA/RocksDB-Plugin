@@ -113,6 +113,34 @@ namespace AVEVA::AzureClient
         UploadPagesCompletionHandler completion,
         HttpRequestOptions requestOptions)
     {
+        UploadPagesCoreAsync(offset, content, nullptr, options, std::move(completion), requestOptions);
+    }
+
+    void PageBlobClient::UploadPagesSharedAsyncImpl(std::uint64_t offset,
+        std::shared_ptr<const std::vector<char>> content,
+        const UploadPagesOptions& options,
+        UploadPagesCompletionHandler completion,
+        HttpRequestOptions requestOptions)
+    {
+        if (!content)
+        {
+            Private::PostCompletion(HttpClient(),
+                std::move(completion),
+                Private::MakeError<Models::UploadPagesResult>(
+                    std::make_error_code(std::errc::invalid_argument), "content must not be null"));
+            return;
+        }
+        const auto bytes = std::as_bytes(std::span<const char>(*content));
+        UploadPagesCoreAsync(offset, bytes, std::move(content), options, std::move(completion), requestOptions);
+    }
+
+    void PageBlobClient::UploadPagesCoreAsync(std::uint64_t offset,
+        std::span<const std::byte> content,
+        std::shared_ptr<const void> keepAlive,
+        const UploadPagesOptions& options,
+        UploadPagesCompletionHandler completion,
+        HttpRequestOptions requestOptions)
+    {
         if (const auto validationError = ValidatePageAligned(offset, "offset"); validationError.has_value())
         {
             Private::PostCompletion(HttpClient(),
@@ -144,7 +172,14 @@ namespace AVEVA::AzureClient
         }
         Private::AddHeader(request, Private::XMsRangeHeaderName, *rangeHeader);
         Private::AddHeaderIfNotEmpty(request, Private::ContentMd5HeaderName, options.ContentMd5);
-        request.SetBody(Private::BytesToString(content));
+        if (keepAlive)
+        {
+            request.SetBodyView(content, std::move(keepAlive));
+        }
+        else
+        {
+            request.SetBody(Private::BytesToString(content));
+        }
         SendUploadPagesRequest(std::move(request), options, std::move(completion), requestOptions);
     }
 
