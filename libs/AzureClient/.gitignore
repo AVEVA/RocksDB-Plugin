@@ -1,5 +1,0 @@
-build/
-
-# Test result/report output (R06: should not be committed)
-*.xml
-Testing/

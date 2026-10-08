@@ -27,7 +27,6 @@ foreach(legacy_pair
     endif()
 endforeach()
 
-list(APPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/infrastructure/cmake")
 
 function(aveva_azure_client_enable_clang_tidy target_name)
     if(NOT AVEVA_AZURE_CLIENT_ENABLE_CLANG_TIDY)
