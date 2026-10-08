@@ -77,6 +77,11 @@ void PageBlob::UploadPages(const std::span<char> buffer, const int64_t blobOffse
 }
 
 void PageBlob::UploadPagesAsync(std::vector<char> data, const int64_t blobOffset, UploadCallback callback) {
+    UploadPagesAsync(std::make_shared<const std::vector<char>>(std::move(data)), blobOffset, std::move(callback));
+}
+
+void PageBlob::UploadPagesAsync(std::shared_ptr<const std::vector<char>> owned, const int64_t blobOffset,
+                                UploadCallback callback) {
     try {
         m_runtime->ThrowIfWritesFenced();
     } catch (...) {
@@ -84,9 +89,7 @@ void PageBlob::UploadPagesAsync(std::vector<char> data, const int64_t blobOffset
         return;
     }
 
-    // The completion handler owns the data so the request body stays valid until the upload finishes.
     // The request views this buffer and keeps it alive itself, so the payload is never copied.
-    auto owned = std::make_shared<const std::vector<char>>(std::move(data));
     const auto size = owned->size();
     m_client.UploadPagesAsync(
         static_cast<uint64_t>(blobOffset), std::move(owned),

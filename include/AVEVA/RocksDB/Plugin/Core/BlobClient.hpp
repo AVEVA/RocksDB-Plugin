@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <memory>
 #include <span>
 #include <string>
 #include <utility>
@@ -88,6 +89,15 @@ class BlobClient {
             error = std::current_exception();
         }
         callback(error);
+    }
+
+    /// <summary>
+    /// As above, but the data is shared so implementations can send it without copying; the owner may recycle the
+    /// buffer once its last reference is released. The default implementation copies into the vector overload.
+    /// </summary>
+    virtual void UploadPagesAsync(std::shared_ptr<const std::vector<char>> data, int64_t blobOffset,
+                                  UploadCallback callback) {
+        UploadPagesAsync(std::vector<char>(data->begin(), data->end()), blobOffset, std::move(callback));
     }
 
     /// <summary>

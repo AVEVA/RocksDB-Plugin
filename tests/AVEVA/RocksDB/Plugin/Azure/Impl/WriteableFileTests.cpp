@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <set>
 #include <thread>
 
 using AVEVA::RocksDB::Plugin::Azure::Impl::Configuration;
@@ -62,6 +63,52 @@ class DeferredUploadBlobClient : public BlobClientMock {
     }
 };
 } // namespace
+
+namespace {
+// Records the payload of each shared-buffer upload and completes it inline.
+class SharedUploadBlobClient : public BlobClientMock {
+  public:
+    std::vector<const char*> PayloadAddresses;
+    std::vector<std::pair<int64_t, std::vector<char>>> Completed;
+
+    void UploadPagesAsync(std::shared_ptr<const std::vector<char>> data, int64_t offset,
+                          UploadCallback callback) override {
+        PayloadAddresses.push_back(data->data());
+        Completed.emplace_back(offset, *data);
+        callback(nullptr);
+    }
+    void UploadPagesAsync(std::vector<char>, int64_t, UploadCallback) override {
+        ADD_FAILURE() << "the copying overload must not be used";
+    }
+};
+} // namespace
+
+TEST_F(WriteableFileTests, Flush_ReusesBuffersAndKeepsTheTailAcrossTheSwap) {
+    // Arrange
+    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
+    auto client = std::make_shared<SharedUploadBlobClient>();
+    ON_CALL(*client, GetCapacity()).WillByDefault(::testing::Return(64 * pageSize));
+    EXPECT_CALL(*client, SetSize(::testing::_)).Times(::testing::AtLeast(1));
+    std::vector<char> expected;
+    for (int64_t i = 0; i < 3 * 4 * pageSize + 100; ++i) {
+        expected.push_back(static_cast<char>('a' + (i * 7) % 26));
+    }
+    WriteableFileImpl file{"", client, nullptr, m_logger, 4 * pageSize};
+
+    // Act
+    file.Append(expected);
+    file.Sync();
+
+    // Assert
+    std::vector<char> blob(13 * pageSize, '\0');
+    for (const auto& [offset, data] : client->Completed) {
+        std::copy(data.begin(), data.end(), blob.begin() + offset);
+    }
+    EXPECT_EQ(expected, std::vector<char>(blob.begin(), blob.begin() + static_cast<std::ptrdiff_t>(expected.size())));
+    ASSERT_EQ(4U, client->PayloadAddresses.size());
+    const std::set<const char*> distinct(client->PayloadAddresses.begin(), client->PayloadAddresses.end());
+    EXPECT_LE(distinct.size(), 2U) << "uploads should alternate between two pooled buffers";
+}
 
 TEST_F(WriteableFileTests, RangeSync_PartialPageThenMoreData_UploadsNeverOverlapAndLandInAnyOrder) {
     // Arrange

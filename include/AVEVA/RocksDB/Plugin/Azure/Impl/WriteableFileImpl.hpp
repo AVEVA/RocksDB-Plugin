@@ -38,6 +38,8 @@ class WriteableFileImpl {
         std::condition_variable Done;
         size_t InFlight = 0;
         std::exception_ptr Error;
+        // Buffers of finished uploads, reused so a flush does not allocate and copy a full buffer each time.
+        std::vector<std::vector<char>> Free;
     };
     std::shared_ptr<UploadTracker> m_uploads = std::make_shared<UploadTracker>();
 
@@ -78,7 +80,8 @@ class WriteableFileImpl {
   private:
     void Expand(int64_t requiredCapacity);
     void StartFlush(bool includePartialPage);
-    void StartUpload(std::vector<char> data, int64_t offset);
+    void StartUpload(std::shared_ptr<const std::vector<char>> data, int64_t offset);
+    [[nodiscard]] std::vector<char> RentBuffer() const;
     void WaitForUploads(size_t maxRemaining);
     [[nodiscard]] bool HasUploadError() const noexcept;
     void DrainUploads() noexcept;

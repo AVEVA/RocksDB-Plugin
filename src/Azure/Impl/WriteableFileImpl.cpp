@@ -186,12 +186,30 @@ void WriteableFileImpl::StartFlush(const bool includePartialPage) {
         // The zero padding past the tail is part of the page being uploaded.
         std::fill(m_buffer.begin() + m_bufferOffset, m_buffer.begin() + bytesToWrite, '\0');
     }
-    StartUpload(std::vector<char>(m_buffer.begin(), m_buffer.begin() + bytesToWrite), m_lastPageOffset);
-
-    if (tail != 0 && fullBytes != 0) {
-        std::copy(m_buffer.begin() + fullBytes, m_buffer.begin() + m_bufferOffset, m_buffer.begin());
+    // The full buffer becomes the upload payload as-is and a recycled buffer takes its place; only the partial-page
+    // tail (under one page) is copied. A pooled buffer returns to the pool when the last reference to the payload,
+    // held by the in-flight request, is released.
+    std::vector<char> next = RentBuffer();
+    std::copy(m_buffer.begin() + fullBytes, m_buffer.begin() + m_bufferOffset, next.begin());
+    std::swap(m_buffer, next);
+    next.resize(static_cast<size_t>(bytesToWrite));
+    auto* const raw = new std::vector<char>(std::move(next));
+    const std::shared_ptr<const std::vector<char>> payload(raw, [tracker = m_uploads](const std::vector<char>* done) {
+        auto buffer = std::move(*const_cast<std::vector<char>*>(done));
+        delete done;
+        std::scoped_lock lock(tracker->Mutex);
+        if (tracker->Free.size() < MaxInFlightUploads) {
+            tracker->Free.push_back(std::move(buffer));
+        }
+    });
+    try {
+        StartUpload(payload, m_lastPageOffset);
+    } catch (...) {
+        // Nothing was accepted, so the data stays buffered for a retry.
+        raw->resize(static_cast<size_t>(m_bufferSize));
+        std::swap(m_buffer, *raw);
+        throw;
     }
-
     BOOST_LOG_SEV(*m_logger, debug) << "Flushed " << bytesToWrite << " bytes to writeable file '" << m_name << "'.";
     m_lastPageOffset += fullBytes;
     m_bufferOffset = tail;
@@ -215,9 +233,9 @@ void WriteableFileImpl::Sync() {
     BOOST_LOG_SEV(*m_logger, debug) << "Synced writeable file '" << m_name << "' to " << m_size << " bytes";
 }
 
-// Uploads of distinct page ranges are independent, so up to MaxInFlightUploads overlap. The data is copied because
-// the caller's buffer is reused immediately.
-void WriteableFileImpl::StartUpload(std::vector<char> data, const int64_t offset) {
+// Uploads of distinct page ranges are independent, so up to MaxInFlightUploads overlap. The payload is a buffer the
+// caller no longer touches, so it is sent without a copy.
+void WriteableFileImpl::StartUpload(std::shared_ptr<const std::vector<char>> data, const int64_t offset) {
     {
         std::scoped_lock lock(m_uploads->Mutex);
         ++m_uploads->InFlight;
@@ -240,6 +258,20 @@ void WriteableFileImpl::StartUpload(std::vector<char> data, const int64_t offset
         --tracker->InFlight;
         throw;
     }
+}
+
+std::vector<char> WriteableFileImpl::RentBuffer() const {
+    std::vector<char> buffer;
+    {
+        std::scoped_lock lock(m_uploads->Mutex);
+        if (!m_uploads->Free.empty()) {
+            buffer = std::move(m_uploads->Free.back());
+            m_uploads->Free.pop_back();
+        }
+    }
+    // A buffer that carried a short final page was trimmed; growing it zero-fills only the missing part.
+    buffer.resize(static_cast<size_t>(m_bufferSize));
+    return buffer;
 }
 
 // Blocks the calling (RocksDB) thread, never an io_context thread. The first upload failure is sticky: the data of a
