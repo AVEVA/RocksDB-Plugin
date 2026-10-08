@@ -232,6 +232,32 @@ TEST(ITokenCredentialTests, CachingTokenCredential_RefreshFailureDoesNotDiscardP
     EXPECT_EQ(cachedTokenAfterFailure, "token-a");
 }
 
+TEST(ITokenCredentialTests, CachingTokenCredential_RemembersFailureBrieflyWhenNoValidTokenExists)
+{
+    auto now = std::chrono::system_clock::time_point{std::chrono::hours(1000)};
+    auto inner = std::make_shared<ScriptedTokenCredential>();
+    inner->EnqueueImmediate(std::make_error_code(std::errc::permission_denied), {});
+    inner->EnqueueImmediate({}, MakeToken("token-a", std::chrono::hours(1)));
+    auto credential = CachingTokenCredential::Create(
+        inner, std::chrono::minutes(5), std::nullopt, [&now] { return now; });
+
+    std::error_code first;
+    std::error_code second;
+    credential->GetTokenAsync({"scope-a"}, [&](std::error_code error, const AccessToken&) { first = error; });
+    credential->GetTokenAsync({"scope-a"}, [&](std::error_code error, const AccessToken&) { second = error; });
+
+    EXPECT_EQ(first, std::make_error_code(std::errc::permission_denied));
+    EXPECT_EQ(second, std::make_error_code(std::errc::permission_denied));
+    EXPECT_EQ(inner->CallCount(), 1);
+
+    // Once the window has passed the inner credential is asked again.
+    now += AVEVA::AzureClient::DefaultTokenCredentialNegativeCacheWindow + std::chrono::seconds(1);
+    std::string token;
+    credential->GetTokenAsync({"scope-a"}, [&](std::error_code, AccessToken received) { token = std::move(received.Token); });
+    EXPECT_EQ(inner->CallCount(), 2);
+    EXPECT_EQ(token, "token-a");
+}
+
 TEST(ITokenCredentialTests, CachingTokenCredential_ServesStaleTokenDuringRefreshBackoff)
 {
     auto inner = std::make_shared<ScriptedTokenCredential>();

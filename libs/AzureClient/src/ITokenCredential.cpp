@@ -115,6 +115,15 @@ namespace AVEVA::AzureClient
             return result;
         }
 
+        if (!tokenStillValid && m_failureRetryAfter.has_value() && now < *m_failureRetryAfter &&
+            m_failedScopes == scopes)
+        {
+            LookupResult result;
+            result.CachedFailure = m_lastFailure;
+            result.PendingCompletion = std::move(completion);
+            return result;
+        }
+
         if (tokenStillValid)
         {
             // Inside the refresh window: serve the still-valid token now and refresh in the background
@@ -174,10 +183,17 @@ namespace AVEVA::AzureClient
                 m_cachedToken = token;
                 m_hasToken = true;
                 m_nextRefreshRetryAfter.reset();
+                m_failureRetryAfter.reset();
             }
             else if (m_hasToken && m_cachedScopes == scopes && m_cachedToken.ExpiresOn > now)
             {
                 m_nextRefreshRetryAfter = now + DefaultTokenCredentialFailedRefreshBackoff;
+            }
+            else
+            {
+                m_failureRetryAfter = now + DefaultTokenCredentialNegativeCacheWindow;
+                m_lastFailure = error;
+                m_failedScopes = scopes;
             }
         }
 
@@ -189,6 +205,12 @@ namespace AVEVA::AzureClient
     {
         const std::optional<boost::asio::any_io_executor> completionExecutor = m_executor;
         LookupResult lookup = LookUpCachedTokenOrStartRefresh(scopes, std::move(completion));
+        if (lookup.CachedFailure.has_value())
+        {
+            CompleteOnExecutorIfSet(
+                completionExecutor, std::move(lookup.PendingCompletion), *lookup.CachedFailure, AccessToken{});
+            return;
+        }
         if (!lookup.RefreshToStart && !lookup.CachedToken.has_value())
         {
             // The completion was queued onto a refresh that is already running; it will be invoked from there.

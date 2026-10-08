@@ -217,6 +217,12 @@ namespace AVEVA::AzureClient::Private
                     CachingTokenCredential::Create(std::make_shared<StaticTokenCredential>(bearerToken));
                 bearerToken.clear();
             }
+            else if (tokenCredential && !std::dynamic_pointer_cast<CachingTokenCredential>(tokenCredential))
+            {
+                // Identity-provider credentials (client secret, workload/managed identity) would otherwise fetch
+                // a new token for every request and retry.
+                tokenCredential = CachingTokenCredential::Create(std::move(tokenCredential));
+            }
         }
 
         // Splits a validated endpoint into "scheme://host[:port]" and its encoded path (no trailing
