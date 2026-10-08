@@ -1,8 +1,8 @@
 #include "AVEVA/HttpClient/HttpClient.hpp"
 #include "HttpClientTestHelpers.hpp"
 
-#include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/read_until.hpp>
 #include <boost/asio/ssl.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -16,14 +16,14 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
-#include <random>
-#include <cstdio>
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
-#include <functional>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -45,8 +45,7 @@ namespace
     {
         asio::io_context context;
         asio::ssl::context serverContext(asio::ssl::context::tls_server);
-        std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> key(
-            EVP_PKEY_Q_keygen(nullptr, nullptr, "EC", "prime256v1"),
+        std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> key(EVP_PKEY_Q_keygen(nullptr, nullptr, "EC", "prime256v1"),
             EVP_PKEY_free);
         std::unique_ptr<X509, decltype(&X509_free)> certificate(X509_new(), X509_free);
         ASSERT_TRUE(key);
@@ -98,14 +97,15 @@ namespace
         context.run();
         EXPECT_EQ(completions, 1);
     }
+
     // Serves one TLS handshake with a self-signed certificate that the client explicitly trusts through
     // SetCaFile, and returns the error the client reports.
-    std::error_code ConnectTrustingCertificateWithAltName(const std::string& subjectAltName, bool trustThroughPem = false)
+    std::error_code ConnectTrustingCertificateWithAltName(const std::string& subjectAltName,
+        bool trustThroughPem = false)
     {
         asio::io_context context;
         asio::ssl::context serverContext(asio::ssl::context::tls_server);
-        std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> key(
-            EVP_PKEY_Q_keygen(nullptr, nullptr, "EC", "prime256v1"),
+        std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> key(EVP_PKEY_Q_keygen(nullptr, nullptr, "EC", "prime256v1"),
             EVP_PKEY_free);
         std::unique_ptr<X509, decltype(&X509_free)> certificate(X509_new(), X509_free);
         EXPECT_TRUE(key);
@@ -137,7 +137,8 @@ namespace
         SSL_CTX_use_certificate(serverContext.native_handle(), certificate.get());
         SSL_CTX_use_PrivateKey(serverContext.native_handle(), key.get());
 
-        const auto caFile = std::filesystem::temp_directory_path() / ("aveva-http-client-test-ca-" + std::to_string(std::random_device{}()) + ".pem");
+        const auto caFile = std::filesystem::temp_directory_path() /
+                            ("aveva-http-client-test-ca-" + std::to_string(std::random_device{}()) + ".pem");
         {
             std::unique_ptr<BIO, decltype(&BIO_free)> file(BIO_new_file(caFile.string().c_str(), "wb"), BIO_free);
             EXPECT_TRUE(file);
@@ -211,19 +212,18 @@ namespace
     // A minimal HTTPS server with a self-signed certificate that answers every request with "200 ok".
     class TlsTestServer
     {
-    public:
+      public:
         enum class AfterResponse
         {
             KeepOpen,
             AbortConnection,
-            AdvertiseClose
+            AdvertiseClose,
+            EofDelimitedAbort // No Content-Length; the TCP connection closes without a TLS close_notify.
         };
 
         TlsTestServer(asio::io_context& context, const std::string& subjectAltName, AfterResponse after)
-            : m_context(context)
-            , m_sslContext(asio::ssl::context::tls_server)
-            , m_acceptor(context, {asio::ip::make_address("127.0.0.1"), 0})
-            , m_after(after)
+            : m_context(context), m_sslContext(asio::ssl::context::tls_server),
+              m_acceptor(context, {asio::ip::make_address("127.0.0.1"), 0}), m_after(after)
         {
             std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> key(
                 EVP_PKEY_Q_keygen(nullptr, nullptr, "EC", "prime256v1"),
@@ -267,17 +267,40 @@ namespace
             Accept();
         }
 
-        [[nodiscard]] unsigned short Port() const { return m_acceptor.local_endpoint().port(); }
-        [[nodiscard]] const std::string& CertificatePem() const { return m_certificatePem; }
-        [[nodiscard]] int Handshakes() const { return m_handshakes; }
-        [[nodiscard]] int Requests() const { return m_requests; }
-        [[nodiscard]] const std::string& ServerName() const { return m_serverName; }
+        [[nodiscard]] unsigned short Port() const
+        {
+            return m_acceptor.local_endpoint().port();
+        }
+
+        [[nodiscard]] const std::string& CertificatePem() const
+        {
+            return m_certificatePem;
+        }
+
+        [[nodiscard]] int Handshakes() const
+        {
+            return m_handshakes;
+        }
+
+        [[nodiscard]] int Requests() const
+        {
+            return m_requests;
+        }
+
+        [[nodiscard]] const std::string& ServerName() const
+        {
+            return m_serverName;
+        }
+
         [[nodiscard]] const std::vector<boost::system::error_code>& CloseObservations() const
         {
             return m_closeObservations;
         }
 
-        void SetOnClose(std::function<void()> onClose) { m_onClose = std::move(onClose); }
+        void SetOnClose(std::function<void()> onClose)
+        {
+            m_onClose = std::move(onClose);
+        }
 
         void Stop()
         {
@@ -289,13 +312,13 @@ namespace
             }
         }
 
-    private:
+      private:
         struct Session
         {
-            Session(asio::io_context& context, asio::ssl::context& sslContext)
-                : Stream(context, sslContext)
+            Session(asio::io_context& context, asio::ssl::context& sslContext) : Stream(context, sslContext)
             {
             }
+
             asio::ssl::stream<Tcp::socket> Stream;
             asio::streambuf Buffer;
         };
@@ -354,8 +377,10 @@ namespace
                 session->Buffer.consume(bytes);
                 ++m_requests;
                 auto response = std::make_shared<std::string>(
-                    std::string{"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"} +
-                    (m_after == AfterResponse::AdvertiseClose ? "Connection: close\r\n" : "") + "\r\nok");
+                    m_after == AfterResponse::EofDelimitedAbort
+                        ? std::string{"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nok"}
+                        : std::string{"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"} +
+                              (m_after == AfterResponse::AdvertiseClose ? "Connection: close\r\n" : "") + "\r\nok");
                 asio::async_write(session->Stream,
                     asio::buffer(*response),
                     [this, session, response](boost::system::error_code writeError, std::size_t)
@@ -364,7 +389,7 @@ namespace
                     {
                         return;
                     }
-                    if (m_after == AfterResponse::AbortConnection)
+                    if (m_after == AfterResponse::AbortConnection || m_after == AfterResponse::EofDelimitedAbort)
                     {
                         boost::system::error_code ignored;
                         session->Stream.next_layer().close(ignored);
@@ -388,8 +413,11 @@ namespace
         int m_handshakes = 0;
         int m_requests = 0;
 
-    public:
-        [[nodiscard]] const std::string& NegotiatedVersion() const { return m_negotiatedVersion; }
+      public:
+        [[nodiscard]] const std::string& NegotiatedVersion() const
+        {
+            return m_negotiatedVersion;
+        }
     };
 
     struct TlsOutcome
@@ -492,6 +520,18 @@ namespace
         EXPECT_EQ(server.Handshakes(), 2);
     }
 
+    TEST(HttpClientTls, EofDelimitedResponseWithoutCloseNotifyCompletes)
+    {
+        asio::io_context context;
+        TlsTestServer server(context, "IP:127.0.0.1", TlsTestServer::AfterResponse::EofDelimitedAbort);
+        const auto outcomes = SendSequentialRequests(context, server, {}, "127.0.0.1", 1);
+
+        ASSERT_EQ(outcomes.size(), 1U);
+        EXPECT_FALSE(outcomes[0].Error) << outcomes[0].Error.message();
+        EXPECT_EQ(outcomes[0].Status, 200U);
+        EXPECT_EQ(outcomes[0].Body, "ok");
+    }
+
     TEST(HttpClientTls, ServerNameIsSentForDnsHosts)
     {
         asio::io_context context;
@@ -520,7 +560,10 @@ namespace
     {
         asio::io_context context;
         TlsTestServer server(context, "IP:127.0.0.1", TlsTestServer::AfterResponse::AdvertiseClose);
-        server.SetOnClose([&server]() { server.Stop(); });
+        server.SetOnClose([&server]()
+        {
+            server.Stop();
+        });
         const auto outcomes = SendSequentialRequests(context, server, {}, "127.0.0.1", 1, false);
 
         ASSERT_EQ(outcomes.size(), 1U);

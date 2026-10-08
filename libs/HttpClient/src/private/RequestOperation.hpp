@@ -39,9 +39,8 @@ namespace AVEVA::Private
             ConnectionKey<Stream> key,
             beast::flat_buffer buffer = {})
             : m_tlsContext(std::move(tlsContext)), m_executor(stream->get_executor()), m_stream(std::move(stream)),
-              m_resolver(m_executor), m_timer(m_executor),
-              m_completion(std::move(completion)), m_options(options), m_pool(std::move(pool)),
-              m_key(std::move(key)), m_buffer(std::move(buffer))
+              m_resolver(m_executor), m_timer(m_executor), m_completion(std::move(completion)), m_options(options),
+              m_pool(std::move(pool)), m_key(std::move(key)), m_buffer(std::move(buffer))
         {
         }
 
@@ -93,8 +92,7 @@ namespace AVEVA::Private
             ArmTimer();
             m_resolver.async_resolve(m_key.host,
                 m_key.service,
-                [self = this->shared_from_this()](boost::system::error_code error,
-                    Tcp::resolver::results_type results)
+                [self = this->shared_from_this()](boost::system::error_code error, Tcp::resolver::results_type results)
             {
                 self->OnResolve(error, std::move(results));
             });
@@ -176,8 +174,7 @@ namespace AVEVA::Private
                     Fail(HttpClientError::InvalidRequest);
                     return false;
                 }
-                if (beast::iequals(header.GetName(), "Host") ||
-                    beast::iequals(header.GetName(), "Content-Length") ||
+                if (beast::iequals(header.GetName(), "Host") || beast::iequals(header.GetName(), "Content-Length") ||
                     beast::iequals(header.GetName(), "Transfer-Encoding") ||
                     beast::iequals(header.GetName(), "Connection"))
                 {
@@ -222,7 +219,8 @@ namespace AVEVA::Private
         void ArmTimer()
         {
             // Clamp so huge timeouts (e.g. milliseconds::max()) cannot overflow the clock's duration or time_point.
-            constexpr auto MaxTimeout = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::hours{24 * 365});
+            constexpr auto MaxTimeout =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::hours{24 * 365});
             m_timer.expires_after(std::min(m_options.GetTimeout(), MaxTimeout));
             auto self = this->shared_from_this();
             m_timer.async_wait([self](boost::system::error_code error)
@@ -241,11 +239,10 @@ namespace AVEVA::Private
                 m_stream->set_verify_callback(asio::ssl::host_name_verification(m_key.host));
             }
             // Same as the SSL_set_tlsext_host_name macro, which uses a C-style cast.
-            if (m_hostIsName &&
-                !SSL_ctrl(m_stream->native_handle(),
-                    SSL_CTRL_SET_TLSEXT_HOSTNAME,
-                    TLSEXT_NAMETYPE_host_name,
-                    static_cast<void*>(const_cast<char*>(m_key.host.c_str()))))
+            if (m_hostIsName && !SSL_ctrl(m_stream->native_handle(),
+                                    SSL_CTRL_SET_TLSEXT_HOSTNAME,
+                                    TLSEXT_NAMETYPE_host_name,
+                                    static_cast<void*>(const_cast<char*>(m_key.host.c_str()))))
             {
                 Fail(HttpClientError::TlsFailed);
                 return false;
@@ -286,8 +283,7 @@ namespace AVEVA::Private
 
             m_resolver.async_resolve(m_key.host,
                 m_key.service,
-                [self = this->shared_from_this()](boost::system::error_code error,
-                    Tcp::resolver::results_type results)
+                [self = this->shared_from_this()](boost::system::error_code error, Tcp::resolver::results_type results)
             {
                 self->OnResolve(error, std::move(results));
             });
@@ -314,6 +310,7 @@ namespace AVEVA::Private
         {
             m_parser = std::make_unique<http::response_parser<http::string_body>>();
             m_parser->body_limit(m_options.GetResponseBodyLimit());
+            m_parser->header_limit(m_options.GetResponseHeaderLimit());
             m_parser->skip(m_request.method() == http::verb::head);
         }
 
@@ -443,6 +440,22 @@ namespace AVEVA::Private
             }
             if (error)
             {
+                if constexpr (std::is_same_v<Stream, TlsStream>)
+                {
+                    // A server may close TCP without close_notify; that still ends an EOF-delimited body.
+                    if (error == asio::ssl::error::stream_truncated && m_parser->got_some())
+                    {
+                        boost::system::error_code eofError;
+                        m_parser->put_eof(eofError);
+                        if (!eofError)
+                        {
+                            error = {};
+                        }
+                    }
+                }
+            }
+            if (error)
+            {
                 if (error == http::error::body_limit)
                 {
                     return Fail(HttpClientError::ResponseTooLarge);
@@ -482,8 +495,7 @@ namespace AVEVA::Private
             {
                 auto message = m_parser->release();
                 std::vector<HttpHeader> headers;
-                headers.reserve(
-                    static_cast<std::size_t>(std::distance(message.base().begin(), message.base().end())));
+                headers.reserve(static_cast<std::size_t>(std::distance(message.base().begin(), message.base().end())));
                 for (const auto& header : message.base())
                 {
                     headers.push_back({std::string(header.name_string()), std::string(header.value())});
@@ -574,7 +586,8 @@ namespace AVEVA::Private
             {
                 return;
             }
-            asio::post(m_executor, [self = this->shared_from_this()]()
+            asio::post(m_executor,
+                [self = this->shared_from_this()]()
             {
                 self->Cancel();
             });

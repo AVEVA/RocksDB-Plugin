@@ -124,7 +124,8 @@ namespace
         auto client = AVEVA::IHttpClient::Create(context);
         std::size_t completions = 0;
 
-        for (const std::string value : {std::string{"bad\0value", 9}, std::string{"bad\x1Fvalue", 9}, std::string{"bad\x7Fvalue", 9}})
+        for (const std::string& value :
+            {std::string{"bad\0value", 9}, std::string{"bad\x1Fvalue", 9}, std::string{"bad\x7Fvalue", 9}})
         {
             AVEVA::HttpRequest request;
             request.SetUrl("http://127.0.0.1/");
@@ -171,10 +172,10 @@ namespace
             AVEVA::HttpRequestOptions{},
             asio::bind_executor(strand,
                 [&](std::error_code, AVEVA::HttpResponse)
-                {
-                    ranOnStrand = strand.running_in_this_thread();
-                    completed = true;
-                }));
+        {
+            ranOnStrand = strand.running_in_this_thread();
+            completed = true;
+        }));
 
         context.run();
 
@@ -216,8 +217,7 @@ namespace
 
     TEST(HttpClientRequest, SetBodyViewTransmitsTheReferencedBytes)
     {
-        std::vector<std::byte> payload{
-            std::byte{'v'}, std::byte{'i'}, std::byte{'e'}, std::byte{'w'}, std::byte{'!'}};
+        std::vector<std::byte> payload{std::byte{'v'}, std::byte{'i'}, std::byte{'e'}, std::byte{'w'}, std::byte{'!'}};
 
         AVEVA::HttpRequest request;
         request.SetMethod(AVEVA::HttpMethod::Post);
@@ -527,9 +527,7 @@ namespace
         AVEVA::HttpRequestOptions options;
         options.SetCancellationSlot(cancellation.slot());
 
-        auto result = Exchange({},
-            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
-            options);
+        auto result = Exchange({}, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", options);
 
         EXPECT_FALSE(result.error);
         EXPECT_EQ(result.response.GetStatus(), 200u);
@@ -594,6 +592,7 @@ namespace
         context.run();
         EXPECT_EQ(completions, 1);
     }
+
     TEST(HttpClientRequest, ReleaseBodyMovesTheOwnedBodyOut)
     {
         AVEVA::HttpRequest request;

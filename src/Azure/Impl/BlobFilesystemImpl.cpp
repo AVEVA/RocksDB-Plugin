@@ -193,7 +193,8 @@ ReadableFileImpl BlobFilesystemImpl::CreateReadableFile(const std::string& fileP
     const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
     const auto& container = GetContainer(prefix);
     auto blobClient = std::make_shared<PageBlob>(m_runtime, container->GetPageBlobClient(std::string(realPath)));
-    return ReadableFileImpl{realPath, std::move(blobClient), FindCache(m_fileCaches, prefix), m_logger, m_asyncReads};
+    return ReadableFileImpl{realPath, std::move(blobClient), FindCache(m_fileCaches, prefix),
+                            m_logger, m_asyncReads,          m_prefetchBytes};
 }
 
 WriteableFileImpl BlobFilesystemImpl::CreateWriteableFile(const std::string& filePath) {

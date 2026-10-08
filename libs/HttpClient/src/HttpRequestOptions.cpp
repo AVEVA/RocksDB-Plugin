@@ -27,6 +27,16 @@ namespace AVEVA
         m_responseBodyLimit = responseBodyLimit;
     }
 
+    std::uint32_t HttpRequestOptions::GetResponseHeaderLimit() const noexcept
+    {
+        return m_responseHeaderLimit;
+    }
+
+    void HttpRequestOptions::SetResponseHeaderLimit(std::uint32_t responseHeaderLimit) noexcept
+    {
+        m_responseHeaderLimit = responseHeaderLimit;
+    }
+
     void HttpRequestOptions::SetCancellationSlot(boost::asio::cancellation_slot cancellationSlot) noexcept
     {
         m_cancellationSlot = cancellationSlot;

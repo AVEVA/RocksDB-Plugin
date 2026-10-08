@@ -16,23 +16,23 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
-#include <stdexcept>
 #include <atomic>
 #include <chrono>
 #include <deque>
 #include <future>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
 
-using AVEVA::RocksDB::Plugin::Azure::Impl::AbortAsyncReads;
 using AVEVA::RocksDB::Plugin::Azure::HttpStatus;
-using AVEVA::RocksDB::Plugin::Azure::Impl::PollAsyncReads;
 using AVEVA::RocksDB::Plugin::Azure::ReadableFile;
 using AVEVA::RocksDB::Plugin::Azure::RequestFailedException;
+using AVEVA::RocksDB::Plugin::Azure::Impl::AbortAsyncReads;
 using AVEVA::RocksDB::Plugin::Azure::Impl::AsyncReadTracker;
+using AVEVA::RocksDB::Plugin::Azure::Impl::PollAsyncReads;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ReadableFileImpl;
 using AVEVA::RocksDB::Plugin::Core::Mocks::BlobClientMock;
 using boost::log::sources::severity_logger_mt;
@@ -145,6 +145,13 @@ class AsyncReadTests : public ::testing::Test {
         }
     }
 
+    // Downloads a test leaves pending hold the file, which holds the client: a cycle that leaks the mock.
+    void TearDown() override {
+        while (m_deferred->PendingCount() > 0) {
+            m_deferred->Take().Callback(std::make_exception_ptr(std::runtime_error("test finished")), {});
+        }
+    }
+
     ReadableFile CreateFile(std::shared_ptr<BlobClientMock> client) {
         return ReadableFile{ReadableFileImpl{"test.sst", std::move(client), nullptr, m_logger}};
     }
@@ -181,6 +188,45 @@ TEST_F(AsyncReadTests, ReadAsync_DoesNotBlockAndPollDeliversOnCallerThread) {
     EXPECT_EQ(std::this_thread::get_id(), record.Thread);
     EXPECT_TRUE(record.Status.ok()) << record.Status.ToString();
     EXPECT_EQ(std::string(128, 'A'), record.Data);
+}
+
+TEST_F(AsyncReadTests, ReadAsync_RangeCoveredByPendingPrefetch_StartsOwnDownloadWithoutBlocking) {
+    auto file = CreateFile(m_deferred);
+    ASSERT_TRUE(file.Prefetch(1024, 2048, rocksdb::IOOptions{}, nullptr).ok());
+    ASSERT_EQ(1U, m_deferred->PendingCount()); // The prefetch download never completes in this test.
+
+    std::vector<char> scratch(64);
+    auto req = MakeRequest(1100, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+    auto done = std::async(std::launch::async, [&] { return Submit(file, req, record, handle); });
+
+    ASSERT_EQ(std::future_status::ready, done.wait_for(std::chrono::seconds(5)));
+    EXPECT_TRUE(done.get().ok());
+    EXPECT_EQ(2U, m_deferred->PendingCount());
+}
+
+TEST_F(AsyncReadTests, Prefetch_AllSlotsStillDownloading_ReturnsNotSupported) {
+    auto file = CreateFile(m_deferred);
+    ASSERT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
+    ASSERT_TRUE(file.Prefetch(1024, 512, rocksdb::IOOptions{}, nullptr).ok());
+
+    EXPECT_TRUE(file.Prefetch(2048, 512, rocksdb::IOOptions{}, nullptr).IsNotSupported());
+    EXPECT_EQ(2U, m_deferred->PendingCount());
+}
+
+TEST_F(AsyncReadTests, Prefetch_OverSharedBudget_ReturnsNotSupportedAndFailedPrefetchReleasesBytes) {
+    auto budget = std::make_shared<std::atomic<int64_t>>(0);
+    ReadableFile file{ReadableFileImpl{"test.sst", m_deferred, nullptr, m_logger, nullptr, budget}};
+
+    ASSERT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
+    EXPECT_EQ(512, budget->load());
+    m_deferred->Take().Callback(std::make_exception_ptr(std::runtime_error("boom")), {});
+    EXPECT_EQ(0, budget->load());
+
+    budget->store(ReadableFileImpl::kDefaultPrefetchBudgetBytes);
+    EXPECT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).IsNotSupported());
+    EXPECT_EQ(ReadableFileImpl::kDefaultPrefetchBudgetBytes, budget->load());
 }
 
 TEST_F(AsyncReadTests, ReadAsync_PassesIoOptionsTimeoutToTheDownload) {
@@ -344,6 +390,65 @@ TEST_F(AsyncReadTests, AbortIO_WhileInFlight_ReturnsImmediatelyAndLateDataIsDrop
     m_deferred->Take().Callback(nullptr, std::string(32, 'F'));
     EXPECT_EQ(std::string(32, 'x'), std::string(scratch.begin(), scratch.end()));
     EXPECT_EQ(1, record.Calls.load());
+}
+
+TEST_F(AsyncReadTests, AbortIO_AfterDownloadCompleted_ReportsTheRealStatusNotAborted) {
+    auto file = CreateFile(m_deferred);
+    std::vector<char> scratch(32, 'x');
+    auto req = MakeRequest(0, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+    ASSERT_TRUE(Submit(file, req, record, handle).ok());
+    m_deferred->Take().Callback(nullptr, std::string(32, 'F'));
+
+    std::vector<void*> handles{handle.Handle};
+    ASSERT_TRUE(AbortAsyncReads(handles).ok());
+
+    EXPECT_EQ(1, record.Calls.load());
+    EXPECT_TRUE(record.Status.ok()) << record.Status.ToString();
+    EXPECT_EQ(std::string(32, 'F'), record.Data);
+}
+
+TEST_F(AsyncReadTests, AbortIO_AfterDownloadFailed_ReportsTheRealError) {
+    auto file = CreateFile(m_deferred);
+    std::vector<char> scratch(32, 'x');
+    auto req = MakeRequest(0, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+    ASSERT_TRUE(Submit(file, req, record, handle).ok());
+    m_deferred->Take().Callback(
+        std::make_exception_ptr(RequestFailedException(HttpStatus::NotFound, "BlobNotFound", "missing", "id", {})), {});
+
+    std::vector<void*> handles{handle.Handle};
+    ASSERT_TRUE(AbortAsyncReads(handles).ok());
+
+    EXPECT_EQ(1, record.Calls.load());
+    EXPECT_FALSE(record.Status.ok());
+    EXPECT_FALSE(record.Status.IsAborted()) << record.Status.ToString();
+}
+
+TEST_F(AsyncReadTests, ReadAsync_PreconditionFailedEveryTime_StopsAfterTheRetryLimitAndReportsAnError) {
+    auto file = CreateFile(m_deferred);
+    std::vector<char> scratch(16);
+    auto req = MakeRequest(0, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+    ASSERT_TRUE(Submit(file, req, record, handle).ok());
+
+    // The first download plus kMaxStaleReadRetries refreshed attempts, and no more.
+    for (int attempt = 0; attempt <= ReadableFileImpl::kMaxStaleReadRetries; ++attempt) {
+        ASSERT_EQ(1u, m_deferred->PendingCount()) << "attempt " << attempt;
+        m_deferred->Take().Callback(std::make_exception_ptr(RequestFailedException(HttpStatus::PreconditionFailed,
+                                                                                   "ConditionNotMet", "", "", {})),
+                                    {});
+    }
+    EXPECT_EQ(0u, m_deferred->PendingCount());
+
+    std::vector<void*> handles{handle.Handle};
+    ASSERT_TRUE(PollAsyncReads(handles).ok());
+    EXPECT_EQ(1, record.Calls.load());
+    EXPECT_FALSE(record.Status.ok());
+    EXPECT_TRUE(record.Data.empty());
 }
 
 TEST_F(AsyncReadTests, DeleteHandle_BeforeCompletion_NeverCallsBackOrWritesScratch) {

@@ -10,6 +10,8 @@
 #include <rocksdb/env.h>
 
 #include <memory>
+#include <optional>
+#include <string>
 #include <string_view>
 
 namespace boost::asio {
@@ -60,5 +62,14 @@ struct Plugin {
              int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
              int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
              std::optional<std::string_view> cachePath = std::nullopt, size_t maxCacheSize = 0);
+
+    /// <summary>
+    /// Returns the name under which Register publishes the filesystem for this primary/backup pair, e.g. for
+    /// `--fs_uri` or Env::CreateFromUri. Only the account URLs and database names take part in the name.
+    /// </summary>
+    static std::string NameFor(const Models::ServicePrincipalStorageInfo& primary,
+                               const std::optional<Models::ServicePrincipalStorageInfo>& backup = std::nullopt);
+    static std::string NameFor(const Models::ChainedCredentialInfo& primary,
+                               const std::optional<Models::ChainedCredentialInfo>& backup = std::nullopt);
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure

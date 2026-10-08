@@ -141,6 +141,29 @@ TEST_F(LockFileImplTests, RenewSendsTheAcquiredLeaseId) {
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(m_httpClient.RequestAt(1).Request, "x-ms-lease-id"), ProposedLeaseId(0));
 }
 
+TEST_F(LockFileImplTests, RenewThatOutlastsTheLeaseIsCancelledAtTheDeadlineAndTheLeaseIsTreatedAsExpired) {
+    m_httpClient.EnqueueResponse(Acquired());
+    // Never completed: the renewal hangs until the lease has run out.
+    m_httpClient.EnqueueDeferredResponse(HttpResponse{200, MakeCanonicalSuccessHeaders({}), ""});
+
+    // 15s is the shortest lease the service accepts, so this test runs for about that long.
+    const auto leaseLength = std::chrono::seconds(15);
+    auto lock = CreateLock(leaseLength);
+    ASSERT_TRUE(lock->Lock());
+
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_ANY_THROW(lock->Renew());
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    // The caller must find out before it would keep writing under a lease the service has already released.
+    EXPECT_LT(elapsed, leaseLength);
+
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    EXPECT_TRUE(lock->HasExceededLeaseLength());
+    EXPECT_THROW(lock->Renew(), std::runtime_error);
+    EXPECT_EQ(m_httpClient.RequestCount(), 2U);
+}
+
 TEST_F(LockFileImplTests, UnlockReleasesTheLeaseAndStopsFurtherRenewal) {
     m_httpClient.EnqueueResponse(Acquired());
     m_httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders({}), ""});

@@ -7,6 +7,10 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
+#include <thread>
+
 using AVEVA::RocksDB::Plugin::Azure::Impl::Configuration;
 using AVEVA::RocksDB::Plugin::Azure::Impl::WriteableFileImpl;
 using AVEVA::RocksDB::Plugin::Core::Mocks::BlobClientMock;
@@ -31,17 +35,113 @@ namespace {
 // Holds upload completions until the test releases them, to observe pipelining.
 class DeferredUploadBlobClient : public BlobClientMock {
   public:
+    struct Upload {
+        int64_t Offset;
+        std::vector<char> Data;
+        UploadCallback Callback;
+    };
+    std::vector<Upload> Uploads;
     std::vector<UploadCallback> Pending;
-    void UploadPagesAsync(std::vector<char>, int64_t, UploadCallback callback) override {
+    bool Defer = true;
+    std::vector<std::pair<int64_t, std::vector<char>>> Completed;
+
+    void UploadPagesAsync(std::vector<char> data, int64_t offset, UploadCallback callback) override {
+        if (!Defer) {
+            Completed.emplace_back(offset, std::move(data));
+            callback(nullptr);
+            return;
+        }
+        Uploads.push_back({offset, data, callback});
         Pending.push_back(std::move(callback));
+    }
+
+    // Completes a deferred upload and records its data as having landed in the blob.
+    void Complete(const size_t index) {
+        Completed.emplace_back(Uploads[index].Offset, Uploads[index].Data);
+        Pending[index](nullptr);
     }
 };
 } // namespace
 
+TEST_F(WriteableFileTests, RangeSync_PartialPageThenMoreData_UploadsNeverOverlapAndLandInAnyOrder) {
+    // Arrange
+    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
+    auto client = std::make_shared<DeferredUploadBlobClient>();
+    EXPECT_CALL(*client, SetSize(pageSize + 200)).Times(::testing::AtLeast(1)); // again when the destructor closes
+    std::vector<char> expected;
+    for (int64_t i = 0; i < pageSize + 200; ++i) {
+        expected.push_back(static_cast<char>('a' + i % 26));
+    }
+    WriteableFileImpl file{"", client, nullptr, m_logger};
+
+    // Act
+    file.Append(std::span<const char>(expected.data(), pageSize + 100));
+    file.RangeSync();
+    file.Append(std::span<const char>(expected.data() + pageSize + 100, 100));
+    file.RangeSync();
+
+    // Assert - no two pending uploads touch the same bytes
+    for (size_t i = 0; i < client->Uploads.size(); ++i) {
+        for (size_t j = i + 1; j < client->Uploads.size(); ++j) {
+            const auto& a = client->Uploads[i];
+            const auto& b = client->Uploads[j];
+            const auto aEnd = a.Offset + static_cast<int64_t>(a.Data.size());
+            const auto bEnd = b.Offset + static_cast<int64_t>(b.Data.size());
+            EXPECT_TRUE(aEnd <= b.Offset || bEnd <= a.Offset) << "uploads " << i << " and " << j << " overlap";
+        }
+    }
+
+    // Complete in reverse order, then let the final tail upload finish immediately
+    for (size_t i = client->Pending.size(); i-- > 0;) {
+        client->Complete(i);
+    }
+    client->Defer = false;
+    file.Sync();
+
+    std::vector<char> blob(2 * pageSize, '\0');
+    for (const auto& [offset, data] : client->Completed) {
+        std::copy(data.begin(), data.end(), blob.begin() + offset);
+    }
+    EXPECT_EQ(expected, std::vector<char>(blob.begin(), blob.begin() + static_cast<std::ptrdiff_t>(expected.size())));
+}
+
+TEST_F(WriteableFileTests, Destructor_UploadsStillInFlightAfterFailure_WaitsForThem) {
+    // Arrange
+    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
+    auto client = std::make_shared<DeferredUploadBlobClient>();
+    // Enough capacity that no flush expands the blob, which would wait for the deferred uploads.
+    ON_CALL(*client, GetCapacity()).WillByDefault(::testing::Return(16 * pageSize));
+    auto file = std::make_unique<WriteableFileImpl>("", client, nullptr, m_logger);
+    for (int i = 0; i < 4; ++i) {
+        file->Append(std::vector<char>(pageSize, 'a'));
+        file->RangeSync();
+    }
+    ASSERT_EQ(4u, client->Pending.size());
+    client->Pending[0](std::make_exception_ptr(std::runtime_error("upload failed")));
+    file->Append(std::vector<char>(pageSize, 'b'));
+    ASSERT_THROW(file->RangeSync(), std::runtime_error);
+
+    // Act
+    std::atomic<bool> destroyed = false;
+    std::thread destroyer([&] {
+        file.reset();
+        destroyed = true;
+    });
+
+    // Assert
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_FALSE(destroyed);
+    for (size_t i = 1; i < client->Pending.size(); ++i) {
+        client->Pending[i](nullptr);
+    }
+    destroyer.join();
+    EXPECT_TRUE(destroyed);
+}
+
 TEST_F(WriteableFileTests, RangeSync_UploadInFlight_ReturnsWithoutWaitingAndSyncCompletesIt) {
     // Arrange
     auto client = std::make_shared<DeferredUploadBlobClient>();
-    EXPECT_CALL(*client, SetSize(Configuration::PageBlob::PageSize)).Times(1);
+    EXPECT_CALL(*client, SetSize(Configuration::PageBlob::PageSize)).Times(::testing::AtLeast(1));
     WriteableFileImpl file{"", client, nullptr, m_logger};
     file.Append(std::vector<char>(Configuration::PageBlob::PageSize, 'a'));
 
@@ -191,9 +291,11 @@ TEST_F(WriteableFileTests, Append_MultipleWritesLargerThanPage_UploadPagesCalled
     std::vector<char> dataToAppend2(Configuration::PageBlob::PageSize + 1, 'z');
     EXPECT_CALL(*m_blobClient, UploadPages(_, _))
         .WillOnce([this, &dataToAppend1](const std::span<char> buffer, const int64_t blobOffset) {
-            EXPECT_EQ(Configuration::PageBlob::PageSize * 2, buffer.size());
-            const auto realData = buffer.subspan(0, dataToAppend1.size());
-            EXPECT_EQ(dataToAppend1, std::vector(realData.begin(), realData.end()));
+            // Only the complete page goes out; the partial page stays buffered so it is never uploaded twice.
+            EXPECT_EQ(Configuration::PageBlob::PageSize, buffer.size());
+            EXPECT_EQ(
+                std::vector(dataToAppend1.begin(), dataToAppend1.begin() + static_cast<std::ptrdiff_t>(buffer.size())),
+                std::vector(buffer.begin(), buffer.end()));
             EXPECT_EQ(0, blobOffset);
         })
         .WillOnce([this, &dataToAppend1, &dataToAppend2](const std::span<char> buffer, const int64_t blobOffset) {

@@ -2,13 +2,13 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadRequest.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadRequest.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
-#include <chrono>
 #include <cassert>
+#include <chrono>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -97,7 +97,8 @@ rocksdb::IOStatus ReadableFile::ReadAsync(rocksdb::FSReadRequest& req, const roc
             request->Complete(rocksdb::IOStatus::OK(), std::string_view(req.scratch, *cached));
         } else {
             Impl::ReadableFileImpl::ReadAsync(
-                m_file, offset, length, [request](std::exception_ptr error, std::string data) {
+                m_file, offset, length,
+                [request](std::exception_ptr error, std::string data) {
                     request->Complete(error ? StatusFromException(error) : rocksdb::IOStatus::OK(), data);
                 },
                 Impl::ReadableFileImpl::kMaxStaleReadRetries, timeout);
@@ -159,7 +160,9 @@ rocksdb::IOStatus ReadableFile::Prefetch(const uint64_t offset, const size_t n, 
     }
 
     try {
-        Impl::ReadableFileImpl::Prefetch(m_file, static_cast<int64_t>(offset), static_cast<int64_t>(n));
+        if (!Impl::ReadableFileImpl::Prefetch(m_file, static_cast<int64_t>(offset), static_cast<int64_t>(n))) {
+            return rocksdb::IOStatus::NotSupported("Prefetch declined; another prefetch is pending or over budget");
+        }
         return rocksdb::IOStatus::OK();
     } catch (...) {
         return StatusFromException(std::current_exception());

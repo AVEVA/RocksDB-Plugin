@@ -58,6 +58,8 @@ class BlobFilesystemImpl {
     // Async reads still running on the io_context; drained by the destructor before the runtime and caches above
     // are released (see AsyncReadTracker).
     std::shared_ptr<AsyncReadTracker> m_asyncReads;
+    // Bytes held by per-file prefetch buffers across all open files; caps Prefetch memory.
+    std::shared_ptr<std::atomic<int64_t>> m_prefetchBytes = std::make_shared<std::atomic<int64_t>>(0);
     std::mutex m_lockFilesMutex;
     boost::intrusive::list<LockFileImpl, boost::intrusive::constant_time_size<false>> m_locks;
     // Parallel to m_locks; lets the renewal thread keep locks alive while it renews outside m_lockFilesMutex.

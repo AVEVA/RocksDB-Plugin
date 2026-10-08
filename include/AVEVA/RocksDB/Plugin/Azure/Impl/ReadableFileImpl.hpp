@@ -8,6 +8,7 @@
 
 #include <boost/log/trivial.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -17,6 +18,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 class ReadableFileImpl {
     std::string m_name;
@@ -34,18 +36,30 @@ class ReadableFileImpl {
 
     // One range requested through FSRandomAccessFile::Prefetch. Shared with the download's completion, which runs on
     // the host io_context and may outlive a move of this file.
-    struct PrefetchState {
-        std::mutex Mutex;
-        std::condition_variable Done;
-        uint64_t Generation = 0;
+    struct PrefetchSlot {
+        uint64_t Id = 0;
         int64_t Offset = 0;
-        int64_t Length = 0;
+        int64_t Length = 0; // Also the number of bytes reserved from the shared budget.
         bool Pending = false;
         std::string Data;
     };
+    struct PrefetchState {
+        std::mutex Mutex;
+        std::condition_variable Done;
+        uint64_t NextId = 0;
+        std::vector<PrefetchSlot> Slots; // Oldest first.
+        std::shared_ptr<std::atomic<int64_t>> Budget;
+
+        ~PrefetchState();
+        // Removes a slot and returns its bytes to the budget. Caller holds Mutex.
+        void Drop(std::vector<PrefetchSlot>::iterator slot);
+        void DropAll();
+    };
     std::shared_ptr<PrefetchState> m_prefetch = std::make_shared<PrefetchState>();
 
-    [[nodiscard]] std::optional<size_t> TryReadFromPrefetch(int64_t offset, int64_t bytesToRead, char* buffer) const;
+    // Serves from a completed prefetch only. With `wait`, first waits (bounded) for a covering pending prefetch.
+    [[nodiscard]] std::optional<size_t> TryReadFromPrefetch(int64_t offset, int64_t bytesToRead, char* buffer,
+                                                            bool wait) const;
     void ClearPrefetch() const;
     int64_t DownloadWithRetry(const int64_t offset, const int64_t bytesToRead, char* buffer) const;
     [[nodiscard]] std::pair<int64_t, std::string> GetMetadata() const;
@@ -63,7 +77,8 @@ class ReadableFileImpl {
     ReadableFileImpl(
         std::string_view name, std::shared_ptr<Core::BlobClient> blobClient, std::shared_ptr<Core::FileCache> fileCache,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-        std::shared_ptr<AsyncReadTracker> asyncReads = nullptr);
+        std::shared_ptr<AsyncReadTracker> asyncReads = nullptr,
+        std::shared_ptr<std::atomic<int64_t>> prefetchBudget = nullptr);
 
     // NOTE: Increments m_offset
     [[nodiscard]] int64_t SequentialRead(int64_t bytesToRead, char* buffer);
@@ -89,9 +104,15 @@ class ReadableFileImpl {
     static constexpr int64_t kMaxPrefetchBytes = 8 * 1024 * 1024;
 
     // Starts a non-blocking download of [offset, offset + n) (clamped to kMaxPrefetchBytes) into a per-file buffer.
-    // Later reads fully inside that range are served from it, waiting for the download if it is still running.
-    // Only the latest range is kept, and it is dropped when the blob's metadata changes.
-    static void Prefetch(std::shared_ptr<const ReadableFileImpl> self, int64_t offset, int64_t n);
+    // Blocking reads fully inside that range are served from it, waiting for the download if it is still running;
+    // async reads use it only once it has completed. A slot is released once a read consumes its end, and the file
+    // keeps at most kMaxPrefetchSlots ranges. Returns false (and starts nothing) when every slot is still downloading
+    // or the shared byte budget would be exceeded, so the caller can let RocksDB fall back to its own readahead.
+    [[nodiscard]] static bool Prefetch(std::shared_ptr<const ReadableFileImpl> self, int64_t offset, int64_t n);
+
+    static constexpr size_t kMaxPrefetchSlots = 2;
+    // Default process-wide cap on prefetched bytes across all files sharing a budget.
+    static constexpr int64_t kDefaultPrefetchBudgetBytes = 256 * 1024 * 1024;
 
     int64_t GetOffset() const;
     void Skip(int64_t n);

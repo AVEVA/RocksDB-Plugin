@@ -23,6 +23,10 @@ AVEVA::RocksDB::Plugin::Azure::Impl::WriteableFileImpl::WriteableFileImpl(
         throw std::invalid_argument("Buffer size cannot be smaller than a page");
     }
 
+    // Asynchronous flushes upload whole pages only, so a page-aligned buffer guarantees a full page is always
+    // available whenever the buffer runs out of space.
+    m_bufferSize = (m_bufferSize / Configuration::PageBlob::PageSize) * Configuration::PageBlob::PageSize;
+
     assert(m_bufferSize > 0);
     m_buffer.resize(static_cast<size_t>(m_bufferSize));
     if (m_size > 0) // Existing file with data
@@ -56,7 +60,30 @@ WriteableFileImpl::~WriteableFileImpl() {
         } catch (...) {
             BOOST_LOG_SEV(*m_logger, warning) << "Failed to close file '" << m_name << "' on attempt " << i;
         }
+        // A failed upload is sticky, so retrying can only fail the same way.
+        if (HasUploadError()) {
+            break;
+        }
     }
+
+    // Outstanding upload completions use the blob client and logger, which are released below.
+    DrainUploads();
+}
+
+bool WriteableFileImpl::HasUploadError() const noexcept {
+    if (!m_uploads) {
+        return false;
+    }
+    std::scoped_lock lock(m_uploads->Mutex);
+    return static_cast<bool>(m_uploads->Error);
+}
+
+void WriteableFileImpl::DrainUploads() noexcept {
+    if (!m_uploads) {
+        return;
+    }
+    std::unique_lock lock(m_uploads->Mutex);
+    m_uploads->Done.wait(lock, [&] { return m_uploads->InFlight == 0; });
 }
 
 WriteableFileImpl::WriteableFileImpl(WriteableFileImpl&& other) noexcept
@@ -96,7 +123,7 @@ void WriteableFileImpl::Append(const std::span<const char> data) {
     while (dataSize > 0) {
         const auto spaceLeft = m_bufferSize - m_bufferOffset;
         if (spaceLeft < Configuration::PageBlob::PageSize) {
-            StartFlush();
+            StartFlush(false);
             continue;
         }
 
@@ -113,24 +140,29 @@ void WriteableFileImpl::Append(const std::span<const char> data) {
 }
 
 void WriteableFileImpl::Flush() {
-    StartFlush();
+    StartFlush(true);
     WaitForUploads(0);
 }
 
-void WriteableFileImpl::RangeSync() { StartFlush(); }
+void WriteableFileImpl::RangeSync() { StartFlush(false); }
 
-// Uploads the buffered pages without waiting for them; Flush, Sync and Close wait.
-void WriteableFileImpl::StartFlush() {
-    if (m_bufferOffset == 0) {
+// Uploads the buffered data without waiting for it; Flush, Sync and Close wait. Asynchronous flushes send complete
+// pages only and keep the trailing partial page buffered: uploading it zero-padded and again later with more data
+// would put two overlapping requests in flight, and Azure does not order them. Only the final flush, which is
+// always followed by WaitForUploads(0), uploads the padded tail.
+void WriteableFileImpl::StartFlush(const bool includePartialPage) {
+    if (m_bufferOffset == 0 || m_flushed) {
         return;
     }
 
-    // If already flushed and no new data, don't flush again
-    if (m_flushed) {
+    constexpr auto pageSize = Configuration::PageBlob::PageSize;
+    const auto fullBytes = (m_bufferOffset / pageSize) * pageSize;
+    const auto tail = m_bufferOffset - fullBytes;
+    const auto bytesToWrite = (includePartialPage && tail != 0) ? fullBytes + pageSize : fullBytes;
+    if (bytesToWrite == 0) {
         return;
     }
 
-    const auto [remaining, bytesToWrite] = BlobHelpers::RoundToEndOfNearestPage(m_bufferOffset);
     if ((m_lastPageOffset + bytesToWrite) > m_capacity) {
         // Resizing the blob while uploads are in flight would race with them.
         WaitForUploads(0);
@@ -139,21 +171,21 @@ void WriteableFileImpl::StartFlush() {
 
     // Back-pressure: also surfaces an earlier upload failure before more data is accepted.
     WaitForUploads(MaxInFlightUploads - 1);
+    if (includePartialPage && tail != 0) {
+        // The zero padding past the tail is part of the page being uploaded.
+        std::fill(m_buffer.begin() + m_bufferOffset, m_buffer.begin() + bytesToWrite, '\0');
+    }
     StartUpload(std::vector<char>(m_buffer.begin(), m_buffer.begin() + bytesToWrite), m_lastPageOffset);
-    if (remaining != 0) {
-        const auto residualOffsetBegin = m_bufferOffset - remaining;
-        const auto residualOffsetEnd = residualOffsetBegin + remaining;
 
-        // TODO: Can there be overlap here? If so, memmove is the way to go.
-        std::copy(m_buffer.data() + residualOffsetBegin, m_buffer.data() + residualOffsetEnd, m_buffer.begin());
-
-        // TODO: Set target offset appropriately for next flush.
+    if (tail != 0 && fullBytes != 0) {
+        std::copy(m_buffer.begin() + fullBytes, m_buffer.begin() + m_bufferOffset, m_buffer.begin());
     }
 
     BOOST_LOG_SEV(*m_logger, debug) << "Flushed " << bytesToWrite << " bytes to writeable file '" << m_name << "'.";
-    m_bufferOffset = remaining;
-    m_lastPageOffset = (m_size / Configuration::PageBlob::PageSize) * Configuration::PageBlob::PageSize;
-    m_flushed = true;
+    m_lastPageOffset += fullBytes;
+    m_bufferOffset = tail;
+    // The tail only counts as flushed once it has been uploaded.
+    m_flushed = tail == 0 || includePartialPage;
 }
 
 void WriteableFileImpl::Sync() {
@@ -161,7 +193,7 @@ void WriteableFileImpl::Sync() {
         m_fileCache->MarkFileAsStaleIfExists(m_name);
     }
 
-    StartFlush();
+    StartFlush(true);
     WaitForUploads(0);
     m_blobClient->SetSize(m_size);
     BOOST_LOG_SEV(*m_logger, debug) << "Synced writeable file '" << m_name << "' to " << m_size << " bytes";

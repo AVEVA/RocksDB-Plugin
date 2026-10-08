@@ -91,7 +91,9 @@ alive by the caller for the duration of the operation).
 
 The positive timeout defaults to 30 seconds and covers resolution, connection,
 TLS handshake, writing, and reading once the runtime starts processing the request.
-The response body limit defaults to 8 MiB. HEAD responses and informational
+The response body limit defaults to 8 MiB (`SetResponseBodyLimit`) and the limit on the
+status line plus headers defaults to 64 KiB (`SetResponseHeaderLimit`); a response over
+either fails with `ResponseTooLarge`. HEAD responses and informational
 responses are handled internally. Completed HTTPS responses are delivered before
 a bounded, best-effort TLS shutdown finishes.
 

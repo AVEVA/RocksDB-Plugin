@@ -6,6 +6,7 @@
 #include <boost/log/trivial.hpp>
 
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <utility>
@@ -33,10 +34,11 @@ void FinishRead(std::shared_ptr<const ReadableFileImpl>& self, ReadableFileImpl:
 ReadableFileImpl::ReadableFileImpl(
     std::string_view name, std::shared_ptr<Core::BlobClient> blobClient, std::shared_ptr<Core::FileCache> fileCache,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-    std::shared_ptr<AsyncReadTracker> asyncReads)
+    std::shared_ptr<AsyncReadTracker> asyncReads, std::shared_ptr<std::atomic<int64_t>> prefetchBudget)
     : m_name(name), m_blobClient(std::move(blobClient)), m_fileCache(std::move(fileCache)), m_offset(0),
       m_metadataMutex(std::make_unique<std::mutex>()), m_size(0), m_logger(std::move(logger)),
       m_asyncReads(std::move(asyncReads)) {
+    m_prefetch->Budget = std::move(prefetchBudget);
     auto metadata = m_blobClient->GetMetadata();
     m_size = metadata.Size;
     m_etag = std::move(metadata.ETag);
@@ -76,7 +78,7 @@ int64_t ReadableFileImpl::RandomRead(const int64_t offset, const int64_t bytesTo
         }
     }
 
-    if (const auto prefetched = TryReadFromPrefetch(offset, bytesToRead, buffer)) {
+    if (const auto prefetched = TryReadFromPrefetch(offset, bytesToRead, buffer, true)) {
         return static_cast<int64_t>(*prefetched);
     }
 
@@ -113,94 +115,172 @@ void ReadableFileImpl::SetMetadata(const int64_t size, std::string etag) const {
     ClearPrefetch();
 }
 
+ReadableFileImpl::PrefetchState::~PrefetchState() { DropAll(); }
+
+void ReadableFileImpl::PrefetchState::Drop(const std::vector<PrefetchSlot>::iterator slot) {
+    if (Budget) {
+        Budget->fetch_sub(slot->Length);
+    }
+    Slots.erase(slot);
+}
+
+void ReadableFileImpl::PrefetchState::DropAll() {
+    while (!Slots.empty()) {
+        Drop(Slots.begin());
+    }
+}
+
 void ReadableFileImpl::ClearPrefetch() const {
     {
         std::scoped_lock lock(m_prefetch->Mutex);
-        ++m_prefetch->Generation;
-        m_prefetch->Length = 0;
-        m_prefetch->Pending = false;
-        m_prefetch->Data.clear();
+        m_prefetch->DropAll();
     }
     m_prefetch->Done.notify_all();
 }
 
-void ReadableFileImpl::Prefetch(std::shared_ptr<const ReadableFileImpl> self, const int64_t offset, int64_t n) {
+bool ReadableFileImpl::Prefetch(std::shared_ptr<const ReadableFileImpl> self, const int64_t offset, int64_t n) {
     if (offset < 0 || n <= 0) {
-        return;
+        return true;
     }
 
     n = std::min(n, kMaxPrefetchBytes);
     auto state = self->m_prefetch;
-    uint64_t generation = 0;
+    uint64_t id = 0;
     {
         std::scoped_lock lock(state->Mutex);
-        generation = ++state->Generation;
-        state->Offset = offset;
-        state->Length = n;
-        state->Pending = true;
-        state->Data.clear();
-    }
-    state->Done.notify_all();
+        for (const auto& slot : state->Slots) {
+            if (offset >= slot.Offset && offset + n <= slot.Offset + slot.Length) {
+                return true; // Already (being) fetched.
+            }
+        }
 
-    // A superseded or cleared prefetch (different generation) must not publish its bytes.
-    ReadAsync(std::move(self), offset, n, [state, generation](std::exception_ptr error, std::string data) {
+        if (state->Slots.size() >= kMaxPrefetchSlots) {
+            // Evict the oldest finished range; if all are still downloading, decline so RocksDB reads ahead itself.
+            const auto victim = std::ranges::find_if(state->Slots, [](const auto& slot) { return !slot.Pending; });
+            if (victim == state->Slots.end()) {
+                return false;
+            }
+            state->Drop(victim);
+        }
+
+        if (state->Budget) {
+            if (state->Budget->fetch_add(n) + n > kDefaultPrefetchBudgetBytes) {
+                state->Budget->fetch_sub(n);
+                return false;
+            }
+        }
+
+        id = ++state->NextId;
+        state->Slots.push_back(PrefetchSlot{.Id = id, .Offset = offset, .Length = n, .Pending = true, .Data = {}});
+    }
+
+    // A superseded or cleared prefetch (its slot is gone) must not publish its bytes.
+    auto logger = self->m_logger;
+    auto name = self->m_name;
+    try {
+        ReadAsync(std::move(self), offset, n,
+                  [state, id, logger = std::move(logger), name = std::move(name)](std::exception_ptr error,
+                                                                                  std::string data) {
+                      {
+                          std::scoped_lock lock(state->Mutex);
+                          const auto slot = std::ranges::find(state->Slots, id, &PrefetchSlot::Id);
+                          if (slot == state->Slots.end()) {
+                              return;
+                          }
+                          if (error) {
+                              state->Drop(slot);
+                          } else {
+                              slot->Pending = false;
+                              slot->Data = std::move(data);
+                          }
+                      }
+                      if (error) {
+                          try {
+                              std::rethrow_exception(error);
+                          } catch (const std::exception& e) {
+                              BOOST_LOG_SEV(*logger, warning) << "Prefetch of '" << name << "' failed: " << e.what();
+                          } catch (...) {
+                              BOOST_LOG_SEV(*logger, warning) << "Prefetch of '" << name << "' failed";
+                          }
+                      }
+                      state->Done.notify_all();
+                  });
+    } catch (...) {
         {
             std::scoped_lock lock(state->Mutex);
-            if (state->Generation != generation) {
-                return;
-            }
-            state->Pending = false;
-            if (error) {
-                state->Length = 0;
-            } else {
-                state->Data = std::move(data);
+            if (const auto slot = std::ranges::find(state->Slots, id, &PrefetchSlot::Id); slot != state->Slots.end()) {
+                state->Drop(slot);
             }
         }
         state->Done.notify_all();
-    });
+        throw;
+    }
+    return true;
 }
 
-// Runs on RocksDB threads only (never the io_context), so waiting for an in-flight prefetch is safe. The wait is
-// bounded so a stuck download degrades to a normal read instead of a hang.
+// With `wait` this runs on RocksDB threads only (never the io_context), so waiting for an in-flight prefetch is safe.
+// The wait is bounded so a stuck download degrades to a normal read instead of a hang. Without `wait` a pending
+// prefetch is skipped so async callers never block.
 std::optional<size_t> ReadableFileImpl::TryReadFromPrefetch(const int64_t offset, const int64_t bytesToRead,
-                                                            char* buffer) const {
+                                                            char* buffer, const bool wait) const {
     if (offset < 0 || bytesToRead <= 0) {
         return std::nullopt;
     }
 
     auto& state = *m_prefetch;
     std::unique_lock lock(state.Mutex);
-    const auto covers = [&] {
-        return state.Length > 0 && offset >= state.Offset && offset + bytesToRead <= state.Offset + state.Length;
+    const auto find = [&] {
+        return std::ranges::find_if(state.Slots, [&](const PrefetchSlot& slot) {
+            return offset >= slot.Offset && offset + bytesToRead <= slot.Offset + slot.Length;
+        });
     };
-    if (!covers()) {
+    auto slot = find();
+    if (slot == state.Slots.end()) {
         return std::nullopt;
     }
 
-    if (state.Pending && !state.Done.wait_for(lock, std::chrono::seconds(30), [&] { return !state.Pending; })) {
-        return std::nullopt;
+    if (slot->Pending) {
+        if (!wait) {
+            return std::nullopt;
+        }
+        const auto id = slot->Id;
+        const auto settled = state.Done.wait_for(lock, std::chrono::seconds(30), [&] {
+            const auto current = std::ranges::find(state.Slots, id, &PrefetchSlot::Id);
+            return current == state.Slots.end() || !current->Pending;
+        });
+        if (!settled) {
+            return std::nullopt;
+        }
+        slot = find();
+        if (slot == state.Slots.end()) {
+            return std::nullopt;
+        }
     }
 
-    const auto start = static_cast<size_t>(offset - state.Offset);
+    const auto start = static_cast<size_t>(offset - slot->Offset);
     const auto length = static_cast<size_t>(bytesToRead);
-    if (!covers() || start + length > state.Data.size()) {
+    if (start + length > slot->Data.size()) {
         return std::nullopt;
     }
 
-    std::copy_n(state.Data.data() + start, length, buffer);
+    std::copy_n(slot->Data.data() + start, length, buffer);
+    // Reading up to the end of the range means the scan has moved past it; free the memory.
+    if (offset + bytesToRead >= slot->Offset + slot->Length) {
+        state.Drop(slot);
+    }
     return length;
 }
 
 std::optional<size_t> ReadableFileImpl::TryReadFromCache(const int64_t offset, const int64_t bytesToRead,
                                                          char* buffer) const {
     if (!m_fileCache || offset < 0 || bytesToRead <= 0) {
-        return TryReadFromPrefetch(offset, bytesToRead, buffer);
+        return TryReadFromPrefetch(offset, bytesToRead, buffer, false);
     }
 
     if (const auto cached = m_fileCache->ReadFile(m_name, offset, bytesToRead, buffer)) {
         return cached;
     }
-    return TryReadFromPrefetch(offset, bytesToRead, buffer);
+    return TryReadFromPrefetch(offset, bytesToRead, buffer, false);
 }
 
 void ReadableFileImpl::ReadAsync(std::shared_ptr<const ReadableFileImpl> self, const int64_t offset,

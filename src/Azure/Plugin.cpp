@@ -146,6 +146,16 @@ RegisterImpl(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::sha
 }
 } // namespace
 
+std::string Plugin::NameFor(const Models::ServicePrincipalStorageInfo& primary,
+                            const std::optional<Models::ServicePrincipalStorageInfo>& backup) {
+    return PluginNameFor(primary, backup);
+}
+
+std::string Plugin::NameFor(const Models::ChainedCredentialInfo& primary,
+                            const std::optional<Models::ChainedCredentialInfo>& backup) {
+    return PluginNameFor(primary, backup);
+}
+
 rocksdb::Status
 Plugin::Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::shared_ptr<rocksdb::Env>* guard,
                  boost::asio::io_context& ioContext, Models::ServicePrincipalStorageInfo primary,

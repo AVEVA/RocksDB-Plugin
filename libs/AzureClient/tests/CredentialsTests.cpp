@@ -191,7 +191,8 @@ TEST(CredentialsTests, InvalidConfigurationFailsWithoutSendingARequest)
     expectInvalid(both);
     ManagedIdentityCredential missingHeader{httpClient, ManagedOptions({}, {}, "http://localhost:8081/msi/token")};
     expectInvalid(missingHeader);
-    ManagedIdentityCredential remotePlainHttp{httpClient, ManagedOptions({}, {}, "http://example.com/msi/token", "secret")};
+    ManagedIdentityCredential remotePlainHttp{httpClient,
+        ManagedOptions({}, {}, "http://example.com/msi/token", "secret")};
     expectInvalid(remotePlainHttp);
     for (const std::string endpoint : {"http://127.evil.com/msi/token",
              "http://169.254.attacker.nip.io/msi/token",
@@ -313,7 +314,7 @@ TEST(CredentialsTests, ExpiresInOutOfRangeIsRejectedAndNormalAccepted)
 {
     FakeHttpClient httpClient;
     ClientSecretCredential credential{httpClient, SecretOptions()};
-    for (const std::string value : {"0", "-1", "9223372036854775807", "86401"})
+    for (const std::string value : {"0", "-1"})
     {
         httpClient.EnqueueResponse(Json(200, R"({"access_token":"t","expires_in":)" + value + "}"));
         const TokenResult result = GetToken(httpClient, credential);
@@ -323,13 +324,25 @@ TEST(CredentialsTests, ExpiresInOutOfRangeIsRejectedAndNormalAccepted)
     EXPECT_FALSE(GetToken(httpClient, credential).Error);
 }
 
+TEST(CredentialsTests, ExpiresInBeyondMaximumIsClampedNotRejected)
+{
+    FakeHttpClient httpClient;
+    ClientSecretCredential credential{httpClient, SecretOptions()};
+    for (const std::string value : {"86401", "9223372036854775807"})
+    {
+        httpClient.EnqueueResponse(Json(200, R"({"access_token":"t","expires_in":)" + value + "}"));
+        const TokenResult result = GetToken(httpClient, credential);
+        EXPECT_FALSE(result.Error) << value;
+        EXPECT_LE(result.Token.ExpiresOn, Clock::now() + std::chrono::hours{24});
+    }
+}
+
 TEST(CredentialsTests, ExpiresOnOutOfRangeIsRejectedAndNormalAccepted)
 {
     FakeHttpClient httpClient;
     ManagedIdentityCredential credential{httpClient, ManagedIdentityCredentialOptions{}};
     const auto now = std::chrono::duration_cast<std::chrono::seconds>(Clock::now().time_since_epoch()).count();
-    for (const std::string& value :
-        std::vector<std::string>{"9223372036854775807", "0", std::to_string(now - 10), std::to_string(now + 100000)})
+    for (const std::string& value : std::vector<std::string>{"0", std::to_string(now - 10)})
     {
         httpClient.EnqueueResponse(Json(200, R"({"access_token":"t","expires_on":")" + value + R"("})"));
         const TokenResult result = GetToken(httpClient, credential);
@@ -339,6 +352,16 @@ TEST(CredentialsTests, ExpiresOnOutOfRangeIsRejectedAndNormalAccepted)
     const TokenResult valid = GetToken(httpClient, credential);
     EXPECT_FALSE(valid.Error);
     EXPECT_GT(valid.Token.ExpiresOn, Clock::now() + std::chrono::minutes{59});
+}
+
+TEST(CredentialsTests, ExpiresOnBeyondMaximumIsClampedNotRejected)
+{
+    FakeHttpClient httpClient;
+    ManagedIdentityCredential credential{httpClient, ManagedIdentityCredentialOptions{}};
+    httpClient.EnqueueResponse(Json(200, ExpiresOnBody("t", 24 * 60 * 60 + 5)));
+    const TokenResult result = GetToken(httpClient, credential);
+    EXPECT_FALSE(result.Error);
+    EXPECT_LE(result.Token.ExpiresOn, Clock::now() + std::chrono::hours{24});
 }
 
 TEST(CredentialsTests, TransientTokenEndpointFailuresAreRetried)

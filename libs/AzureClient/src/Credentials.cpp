@@ -105,8 +105,7 @@ namespace AVEVA::AzureClient
             }
             switch (url.host_type())
             {
-            case boost::urls::host_type::ipv4:
-            {
+            case boost::urls::host_type::ipv4: {
                 const auto bytes = url.host_ipv4_address().to_bytes();
                 return bytes[0] == 127 || (bytes[0] == 169 && bytes[1] == 254);
             }
@@ -168,10 +167,12 @@ namespace AVEVA::AzureClient
                 return invalid;
             }
             if (const auto expiresIn = ParseInteger(JsonText(tree, "expires_in"));
-                expiresIn.has_value() && *expiresIn >= MinTokenLifetimeSeconds && *expiresIn <= MaxTokenLifetimeSeconds)
+                expiresIn.has_value() && *expiresIn >= MinTokenLifetimeSeconds)
             {
+                // Tokens living longer than the cap are accepted but refreshed at the cap.
+                const auto lifetime = std::min(*expiresIn, MaxTokenLifetimeSeconds);
                 token.ExpiresOn =
-                    std::chrono::time_point_cast<Clock::duration>(Clock::now() + std::chrono::seconds{*expiresIn});
+                    std::chrono::time_point_cast<Clock::duration>(Clock::now() + std::chrono::seconds{lifetime});
             }
             else if (const auto expiresOn = ParseInteger(JsonText(tree, "expires_on"));
                 expiresOn.has_value() && *expiresOn >= 0)
@@ -180,11 +181,12 @@ namespace AVEVA::AzureClient
                 const std::int64_t nowSeconds =
                     std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
                 const std::int64_t lifetime = *expiresOn - nowSeconds;
-                if (lifetime < MinTokenLifetimeSeconds || lifetime > MaxTokenLifetimeSeconds)
+                if (lifetime < MinTokenLifetimeSeconds)
                 {
                     return invalid;
                 }
-                token.ExpiresOn = std::chrono::time_point_cast<Clock::duration>(now + std::chrono::seconds{lifetime});
+                token.ExpiresOn = std::chrono::time_point_cast<Clock::duration>(
+                    now + std::chrono::seconds{std::min(lifetime, MaxTokenLifetimeSeconds)});
             }
             else
             {

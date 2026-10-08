@@ -7,8 +7,8 @@
 
 #include <boost/log/trivial.hpp>
 
-#include <cstdint>
 #include <condition_variable>
+#include <cstdint>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -66,8 +66,10 @@ class WriteableFileImpl {
 
   private:
     void Expand();
-    void StartFlush();
+    void StartFlush(bool includePartialPage);
     void StartUpload(std::vector<char> data, int64_t offset);
     void WaitForUploads(size_t maxRemaining);
+    [[nodiscard]] bool HasUploadError() const noexcept;
+    void DrainUploads() noexcept;
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

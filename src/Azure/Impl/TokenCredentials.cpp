@@ -13,10 +13,10 @@
 #include <boost/asio/error.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
-#include <boost/log/trivial.hpp>
 #include <boost/json/parse.hpp>
 #include <boost/json/serialize.hpp>
 #include <boost/json/value.hpp>
+#include <boost/log/trivial.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -188,9 +188,11 @@ std::expected<AzureClient::AccessToken, std::error_code> ParseAccessToken(std::e
     const auto [end, ec] =
         std::from_chars(expiresInText.data(), expiresInText.data() + expiresInText.size(), expiresIn);
     if (token.Token.empty() || ec != std::errc{} || end != expiresInText.data() + expiresInText.size() ||
-        expiresIn <= 0 || expiresIn > g_maxTokenLifetimeSeconds) {
+        expiresIn <= 0) {
         return std::unexpected(InvalidResponse());
     }
+    // Longer-lived tokens are accepted but treated as expiring at the cap, so they are refreshed earlier.
+    expiresIn = std::min(expiresIn, g_maxTokenLifetimeSeconds);
 
     token.ExpiresOn = std::chrono::time_point_cast<Clock::duration>(Clock::now() + std::chrono::seconds(expiresIn));
     return token;

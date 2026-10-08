@@ -3,8 +3,8 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/TokenCredentials.hpp"
 
-#include "FakeHttpPump.hpp"
 #include "FakeHttpClient.hpp"
+#include "FakeHttpPump.hpp"
 
 #include <gtest/gtest.h>
 
@@ -131,6 +131,17 @@ TEST(RuntimeBoundCredentialTests, PendingRefreshKeepsRuntimeAliveUntilCompletion
     inner.reset();
     context.run();
     EXPECT_TRUE(weak.expired());
+}
+
+TEST_F(TokenCredentialsTests, TokenLifetimeBeyondMaximumIsClampedNotRejected) {
+    m_httpClient.EnqueueResponse(OidcResponse());
+    m_httpClient.EnqueueResponse(HttpResponse{200, {}, R"({"access_token":"tok","expires_in":"86401"})"});
+    auto credential = std::make_shared<AzurePipelinesCredential>(m_httpClient, PipelineOptions());
+
+    const auto [error, token] = GetToken(*credential);
+
+    EXPECT_FALSE(error);
+    EXPECT_EQ(token.Token, "tok");
 }
 
 TEST_F(TokenCredentialsTests, NonTransientFailureIsNotRetried) {

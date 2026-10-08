@@ -6,23 +6,55 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
 
-#include <atomic>
 #include <array>
+#include <atomic>
 #include <barrier>
 #include <chrono>
+#include <cstdlib>
 #include <memory>
+#include <new>
 #include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+// Lets a test make the Nth upcoming allocation on this thread throw; -1 means disarmed. A global replacement is the
+// only way to reach the pool's allocation failures without changing the pool itself.
+namespace AllocationFailure
+{
+    thread_local int allocationsUntilFailure = -1;
+}
+
+void* operator new(std::size_t size)
+{
+    if (AllocationFailure::allocationsUntilFailure >= 0 && AllocationFailure::allocationsUntilFailure-- == 0)
+    {
+        throw std::bad_alloc();
+    }
+    if (void* memory = std::malloc(size != 0 ? size : 1))
+    {
+        return memory;
+    }
+    throw std::bad_alloc();
+}
+
+void operator delete(void* memory) noexcept
+{
+    std::free(memory);
+}
+
+void operator delete(void* memory, std::size_t) noexcept
+{
+    std::free(memory);
+}
 
 namespace
 {
     using AVEVA::Private::BasicConnectionKey;
     using AVEVA::Private::ConnectionKey;
     using AVEVA::Private::ConnectionPool;
-    using AVEVA::Private::PooledConnection;
     using AVEVA::Private::PlainStream;
+    using AVEVA::Private::PooledConnection;
     using AVEVA::Private::TlsConnectionKey;
     namespace asio = boost::asio;
     using Tcp = asio::ip::tcp;
@@ -38,8 +70,7 @@ namespace
     // identity (which connection came back) and lifetime (when a connection was closed).
     struct TrackedStream
     {
-        TrackedStream(int streamIdentity, int& streamLiveCount)
-            : identity(streamIdentity), liveCount(&streamLiveCount)
+        TrackedStream(int streamIdentity, int& streamLiveCount) : identity(streamIdentity), liveCount(&streamLiveCount)
         {
             ++*this->liveCount;
         }
@@ -65,8 +96,15 @@ namespace
         using time_point = std::chrono::time_point<FakeClock>;
         static constexpr bool is_steady = true;
 
-        static time_point now() noexcept { return time_point{Offset}; }
-        static void Advance(duration amount) noexcept { Offset += amount; }
+        static time_point now() noexcept
+        {
+            return time_point{Offset};
+        }
+
+        static void Advance(duration amount) noexcept
+        {
+            Offset += amount;
+        }
 
         static inline duration Offset{};
     };
@@ -237,7 +275,10 @@ namespace
         int live = 0;
         int notifications = 0;
         Pool pool(4, LongTimeout);
-        pool.SetOnBecameNonEmpty([&] { ++notifications; });
+        pool.SetOnBecameNonEmpty([&]
+        {
+            ++notifications;
+        });
 
         pool.Release(MakeKey("a.com"), MakeConnection(1, live));
         pool.Release(MakeKey("b.com"), MakeConnection(2, live));
@@ -291,6 +332,48 @@ namespace
         EXPECT_FALSE(pool.Acquire(key).has_value());
     }
 
+    // Fails the Nth allocation inside Release: 0 is the node, 1 is the new origin's map entry.
+    class ConnectionPoolAllocationFailure : public ::testing::TestWithParam<int>
+    {
+    };
+
+    TEST_P(ConnectionPoolAllocationFailure, ReleaseThatRunsOutOfMemoryLeavesThePoolConsistent)
+    {
+        int live = 0;
+        Pool pool(4, LongTimeout);
+        const auto kept = MakeKey("kept.com");
+        const auto failing = MakeKey("failing.com");
+        pool.Release(kept, MakeConnection(1, live));
+
+        auto doomed = MakeConnection(2, live);
+        AllocationFailure::allocationsUntilFailure = GetParam();
+        bool threw = false;
+        try
+        {
+            pool.Release(failing, std::move(doomed));
+        }
+        catch (const std::bad_alloc&)
+        {
+            threw = true;
+        }
+        AllocationFailure::allocationsUntilFailure = -1;
+        doomed = PooledConnection<TrackedStream>{};
+
+        ASSERT_TRUE(threw);
+        EXPECT_EQ(live, 1);
+        EXPECT_FALSE(pool.Acquire(failing).has_value());
+
+        pool.Release(failing, MakeConnection(3, live));
+        auto reused = pool.Acquire(failing);
+        ASSERT_TRUE(reused.has_value());
+        EXPECT_EQ(reused->stream->identity, 3);
+        auto original = pool.Acquire(kept);
+        ASSERT_TRUE(original.has_value());
+        EXPECT_EQ(original->stream->identity, 1);
+    }
+
+    INSTANTIATE_TEST_SUITE_P(Allocations, ConnectionPoolAllocationFailure, ::testing::Values(0, 1));
+
     TEST(ConnectionPool, RealSocketLivenessCheckDiscardsPeerClosedConnection)
     {
         asio::io_context context;
@@ -341,7 +424,8 @@ namespace
         auto makeConnection = [](int identity, std::atomic<int>& liveCount)
         {
             return PooledConnection<ConcurrentTrackedStream>{
-                std::make_unique<ConcurrentTrackedStream>(identity, liveCount), {}};
+                std::make_unique<ConcurrentTrackedStream>(identity, liveCount),
+                {}};
         };
 
         std::atomic<int> live{0};
@@ -361,7 +445,7 @@ namespace
                 start.arrive_and_wait();
                 for (int iteration = 0; iteration < Iterations; ++iteration)
                 {
-                    const ConcurrentKey& key = keys.at(static_cast<std::size_t>((threadIndex + iteration) % keys.size()));
+                    const ConcurrentKey& key = keys.at(static_cast<std::size_t>(threadIndex + iteration) % keys.size());
                     auto acquired = pool.Acquire(key);
                     if (!acquired.has_value())
                     {
