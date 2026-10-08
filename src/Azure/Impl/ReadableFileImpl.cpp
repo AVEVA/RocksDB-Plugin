@@ -59,11 +59,45 @@ int64_t ReadableFileImpl::SequentialRead(const int64_t bytesToRead, char* buffer
 
     assert(GetMetadata().first >= m_offset && "m_size needs to be bigger than m_offset or else we will overflow");
 
-    auto bytesRead = DownloadWithRetry(m_offset, bytesToRead, buffer);
+    int64_t bytesRead = 0;
+    if (bytesToRead >= kReadaheadBytes) {
+        bytesRead = DownloadWithRetry(m_offset, bytesToRead, buffer);
+    } else {
+        bytesRead = ReadThroughReadahead(bytesToRead, buffer);
+    }
     bytesRead = std::max<int64_t>(bytesRead, 0);
 
     m_offset += bytesRead;
     return bytesRead;
+}
+
+int64_t ReadableFileImpl::ReadThroughReadahead(const int64_t bytesToRead, char* buffer) {
+    const auto copyFromReadahead = [&]() -> int64_t {
+        const auto available = m_readaheadStart + static_cast<int64_t>(m_readahead.size()) - m_offset;
+        if (m_offset < m_readaheadStart || available <= 0 || GetMetadata().second != m_readaheadEtag) {
+            return 0;
+        }
+        const auto n = std::min(bytesToRead, available);
+        std::copy_n(m_readahead.data() + (m_offset - m_readaheadStart), n, buffer);
+        return n;
+    };
+
+    auto served = copyFromReadahead();
+    if (served == bytesToRead) {
+        return served;
+    }
+
+    // The readahead is exhausted (or stale): refill it with one larger GET starting at the current position.
+    m_readahead.clear();
+    m_readahead.resize(static_cast<size_t>(kReadaheadBytes));
+    const auto fetched = std::max<int64_t>(DownloadWithRetry(m_offset + served, kReadaheadBytes, m_readahead.data()), 0);
+    m_readahead.resize(static_cast<size_t>(fetched));
+    m_readaheadStart = m_offset + served;
+    m_readaheadEtag = GetMetadata().second;
+
+    const auto n = std::min(bytesToRead - served, fetched);
+    std::copy_n(m_readahead.data(), n, buffer + served);
+    return served + n;
 }
 
 int64_t ReadableFileImpl::RandomRead(const int64_t offset, const int64_t bytesToRead, char* buffer) const {
