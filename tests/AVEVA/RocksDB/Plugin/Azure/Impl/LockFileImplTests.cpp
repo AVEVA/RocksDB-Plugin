@@ -284,8 +284,8 @@ class LeaseRenewalLoopTests : public LockFileImplTests {
 
     void StartLoop(const std::shared_ptr<LockFileImpl>& lock) {
         m_loop = LeaseRenewalLoop::Start(
-            m_loopContext.get_executor(), m_logger, [lock] { return std::vector{lock}; },
-            [this] { ++m_fatalCount; }, std::chrono::milliseconds(20), std::chrono::milliseconds(5));
+            m_loopContext.get_executor(), m_logger, [lock] { return std::vector{lock}; }, [this] { ++m_fatalCount; },
+            std::chrono::milliseconds(20), std::chrono::milliseconds(5));
     }
 
     bool WaitForRequests(const std::size_t count) const {
@@ -296,7 +296,9 @@ class LeaseRenewalLoopTests : public LockFileImplTests {
         return m_httpClient.RequestCount() >= count;
     }
 
-    static HttpResponse Renewed() { return HttpResponse{200, MakeCanonicalSuccessHeaders({{"x-ms-lease-id", "lease"}}), ""}; }
+    static HttpResponse Renewed() {
+        return HttpResponse{200, MakeCanonicalSuccessHeaders({{"x-ms-lease-id", "lease"}}), ""};
+    }
 
     boost::asio::io_context m_loopContext;
     std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>> m_guard;

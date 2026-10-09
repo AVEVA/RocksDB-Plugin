@@ -57,8 +57,7 @@ template <typename Executor, typename T> T BlockOn(const Executor& executor, std
 /// promptly; the timeout bounds how long a caller waits for a result that retries would otherwise stretch.
 /// </summary>
 template <typename Executor, typename T, typename OnTimeout>
-T BlockOnFor(const Executor& executor, std::future<T> future, std::chrono::nanoseconds timeout,
-             OnTimeout&& onTimeout) {
+T BlockOnFor(const Executor& executor, std::future<T> future, std::chrono::nanoseconds timeout, OnTimeout&& onTimeout) {
     ThrowIfRunningOn(executor);
     if (future.wait_for(timeout) == std::future_status::timeout) {
         std::forward<OnTimeout>(onTimeout)();

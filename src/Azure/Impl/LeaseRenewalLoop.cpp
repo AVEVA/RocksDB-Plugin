@@ -28,16 +28,13 @@ LeaseRenewalLoop::LeaseRenewalLoop(boost::asio::any_io_executor executor, std::s
                                    Snapshot snapshot, std::function<void()> onFatal,
                                    const std::chrono::milliseconds interval, const std::chrono::milliseconds retryDelay,
                                    const size_t maxAttempts)
-    : m_executor(executor), m_logger(std::move(logger)), m_snapshot(std::move(snapshot)),
-      m_onFatal(std::move(onFatal)), m_interval(interval), m_retryDelay(retryDelay), m_maxAttempts(maxAttempts),
-      m_timer(std::move(executor)) {}
+    : m_executor(executor), m_logger(std::move(logger)), m_snapshot(std::move(snapshot)), m_onFatal(std::move(onFatal)),
+      m_interval(interval), m_retryDelay(retryDelay), m_maxAttempts(maxAttempts), m_timer(std::move(executor)) {}
 
-std::shared_ptr<LeaseRenewalLoop> LeaseRenewalLoop::Start(boost::asio::any_io_executor executor,
-                                                          std::shared_ptr<Logger> logger, Snapshot snapshot,
-                                                          std::function<void()> onFatal,
-                                                          const std::chrono::milliseconds interval,
-                                                          const std::chrono::milliseconds retryDelay,
-                                                          const size_t maxAttempts) {
+std::shared_ptr<LeaseRenewalLoop>
+LeaseRenewalLoop::Start(boost::asio::any_io_executor executor, std::shared_ptr<Logger> logger, Snapshot snapshot,
+                        std::function<void()> onFatal, const std::chrono::milliseconds interval,
+                        const std::chrono::milliseconds retryDelay, const size_t maxAttempts) {
     std::shared_ptr<LeaseRenewalLoop> loop(new LeaseRenewalLoop(std::move(executor), std::move(logger),
                                                                 std::move(snapshot), std::move(onFatal), interval,
                                                                 retryDelay, maxAttempts));
@@ -45,7 +42,6 @@ std::shared_ptr<LeaseRenewalLoop> LeaseRenewalLoop::Start(boost::asio::any_io_ex
     std::scoped_lock lock(loop->m_mutex);
     loop->ScheduleWakeUp(interval);
     return loop;
-
 }
 
 bool LeaseRenewalLoop::IsStopped() const {
@@ -94,7 +90,6 @@ void LeaseRenewalLoop::BeginRound(std::vector<std::shared_ptr<LockFileImpl>> loc
     if (locks.empty()) {
         ScheduleWakeUp(m_interval);
         return;
-
     }
 
     auto round = std::make_shared<Round>();
@@ -197,7 +192,6 @@ void LeaseRenewalLoop::ScheduleWakeUp(const std::chrono::milliseconds delay) {
         BeginRound(std::move(locks), 0);
     });
 }
-
 
 void LeaseRenewalLoop::Fail(const std::string& reason) {
     BOOST_LOG_SEV(*m_logger, severity_level::fatal) << "Stopping lease renewal: " << reason;

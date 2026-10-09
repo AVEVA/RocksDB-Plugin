@@ -47,23 +47,27 @@ struct BlobHelpers {
     static AzureClient::BlobServiceClientOptions CreateServiceClientOptions(const std::string& storageAccountUrl);
     // Wraps `credential` so that in-flight token refreshes keep `runtime` (and its IHttpClient) alive.
     static std::shared_ptr<AzureClient::ITokenCredential>
-    BindToRuntime(const std::shared_ptr<ClientRuntime>& runtime, std::shared_ptr<AzureClient::ITokenCredential> credential);
-    static std::shared_ptr<AzureClient::ITokenCredential> CreateClientSecretCredential(const std::shared_ptr<ClientRuntime>& runtime,
-                                                                                       const std::string& tenantId,
-                                                                                       const std::string& clientId,
-                                                                                       const std::string& clientSecret);
+    BindToRuntime(const std::shared_ptr<ClientRuntime>& runtime,
+                  std::shared_ptr<AzureClient::ITokenCredential> credential);
     static std::shared_ptr<AzureClient::ITokenCredential>
-    CreatePipelinesCredential(const std::shared_ptr<ClientRuntime>& runtime, const std::string& tenantId, const std::string& clientId,
-                              const std::string& serviceConnectionId, const std::string& systemAccessToken);
+    CreateClientSecretCredential(const std::shared_ptr<ClientRuntime>& runtime, const std::string& tenantId,
+                                 const std::string& clientId, const std::string& clientSecret);
+    static std::shared_ptr<AzureClient::ITokenCredential>
+    CreatePipelinesCredential(const std::shared_ptr<ClientRuntime>& runtime, const std::string& tenantId,
+                              const std::string& clientId, const std::string& serviceConnectionId,
+                              const std::string& systemAccessToken);
     // The ordered credential sources behind CreateChainedCredential: service principal, managed identity
     // (system-assigned when no id is given), then environment and workload identity when their variables are set.
     static std::vector<std::shared_ptr<AzureClient::ITokenCredential>>
-    CreateCredentialSources(const std::shared_ptr<ClientRuntime>& runtime, const Models::ChainedCredentialInfo& chainedCredential);
+    CreateCredentialSources(const std::shared_ptr<ClientRuntime>& runtime,
+                            const Models::ChainedCredentialInfo& chainedCredential);
     static std::shared_ptr<AzureClient::ITokenCredential>
-    CreateChainedCredential(const std::shared_ptr<ClientRuntime>& runtime, const Models::ChainedCredentialInfo& chainedCredential);
+    CreateChainedCredential(const std::shared_ptr<ClientRuntime>& runtime,
+                            const Models::ChainedCredentialInfo& chainedCredential);
     static std::string AccountNameFromUrl(const std::string& storageAccountUrl);
     static AzureClient::BlobServiceClient
-    CreateServiceClient(const std::shared_ptr<ClientRuntime>& runtime, const Models::ServicePrincipalStorageInfo& servicePrincipal);
+    CreateServiceClient(const std::shared_ptr<ClientRuntime>& runtime,
+                        const Models::ServicePrincipalStorageInfo& servicePrincipal);
     static AzureClient::BlobServiceClient CreateServiceClient(const std::shared_ptr<ClientRuntime>& runtime,
                                                               const Models::ChainedCredentialInfo& servicePrincipal);
     static std::shared_ptr<AzureClient::BlobContainerClient>

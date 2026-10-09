@@ -40,11 +40,10 @@ class LeaseRenewalLoop : public std::enable_shared_from_this<LeaseRenewalLoop> {
     /// running, never after Stop() returns; they run with the loop's internal mutex held and so must not block or
     /// call back into the loop.
     /// </summary>
-    static std::shared_ptr<LeaseRenewalLoop> Start(boost::asio::any_io_executor executor, std::shared_ptr<Logger> logger,
-                                                   Snapshot snapshot, std::function<void()> onFatal,
-                                                   std::chrono::milliseconds interval,
-                                                   std::chrono::milliseconds retryDelay = std::chrono::milliseconds(100),
-                                                   size_t maxAttempts = 5);
+    static std::shared_ptr<LeaseRenewalLoop>
+    Start(boost::asio::any_io_executor executor, std::shared_ptr<Logger> logger, Snapshot snapshot,
+          std::function<void()> onFatal, std::chrono::milliseconds interval,
+          std::chrono::milliseconds retryDelay = std::chrono::milliseconds(100), size_t maxAttempts = 5);
 
     ~LeaseRenewalLoop() = default;
     LeaseRenewalLoop(const LeaseRenewalLoop&) = delete;

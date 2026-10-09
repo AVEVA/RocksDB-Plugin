@@ -31,8 +31,8 @@ SequentialFile::SequentialFile(Impl::SequentialFileImpl&& file)
 
 SequentialFile::~SequentialFile() = default;
 
-rocksdb::IOStatus SequentialFile::Read(const size_t n, const rocksdb::IOOptions&, rocksdb::Slice* result,
-                                       char* scratch, rocksdb::IODebugContext*) {
+rocksdb::IOStatus SequentialFile::Read(const size_t n, const rocksdb::IOOptions&, rocksdb::Slice* result, char* scratch,
+                                       rocksdb::IODebugContext*) {
     try {
         assert(n <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) &&
                "size_t value exceeds int64_t max value");

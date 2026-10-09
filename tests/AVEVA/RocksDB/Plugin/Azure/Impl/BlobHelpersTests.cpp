@@ -4,8 +4,8 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
-#include "FakeHttpPump.hpp"
 #include "FakeHttpClient.hpp"
+#include "FakeHttpPump.hpp"
 #include "TestFixtures.hpp"
 
 #include <AVEVA/AzureClient/Credentials.hpp>

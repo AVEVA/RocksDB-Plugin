@@ -103,8 +103,8 @@ class BlobFilesystemImpl {
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::optional<std::string_view> cachePath = {}, size_t maxCacheSize = Configuration::MaxCacheSize);
 
-    // Stops lease renewal, then blocks until reads abandoned by RocksDB mid-flight have completed, so that their completions never release
-    // the HTTP client or a file cache. Requires the host io_context to still be running.
+    // Stops lease renewal, then blocks until reads abandoned by RocksDB mid-flight have completed, so that their
+    // completions never release the HTTP client or a file cache. Requires the host io_context to still be running.
     ~BlobFilesystemImpl();
     BlobFilesystemImpl(const BlobFilesystemImpl&) = delete;
     BlobFilesystemImpl& operator=(const BlobFilesystemImpl&) = delete;

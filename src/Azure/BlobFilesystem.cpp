@@ -2,9 +2,9 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadRequest.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Directory.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadRequest.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LogRateLimiter.hpp"
@@ -45,8 +45,8 @@ BlobFilesystem::BlobFilesystem(
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
     : rocksdb::FileSystemWrapper(std::move(rocksdbFs)), m_filesystem(std::move(filesystem)),
       m_logger(std::move(logger)),
-      m_blobNotFoundRateLimiter(std::make_unique<Impl::LogRateLimiter>(
-          std::vector<std::string>{"BlobNotFound"}, Impl::Configuration::LogRateLimiterCooldown)) {}
+      m_blobNotFoundRateLimiter(std::make_unique<Impl::LogRateLimiter>(std::vector<std::string>{"BlobNotFound"},
+                                                                       Impl::Configuration::LogRateLimiterCooldown)) {}
 
 void BlobFilesystem::LogRequestFailed(const RequestFailedException& ex, std::string_view path) {
     if (ex.ErrorCode == "BlobNotFound") {
@@ -100,8 +100,8 @@ rocksdb::IOStatus BlobFilesystem::NewSequentialFile(const std::string& f, const 
                                                     std::unique_ptr<rocksdb::FSSequentialFile>* r,
                                                     rocksdb::IODebugContext*) {
     return Guard("NewSequentialFile", f, [&]() -> rocksdb::IOStatus {
-            *r = std::unique_ptr<rocksdb::FSSequentialFile>(new SequentialFile(m_filesystem->CreateSequentialFile(f)));
-            return rocksdb::IOStatus::OK();
+        *r = std::unique_ptr<rocksdb::FSSequentialFile>(new SequentialFile(m_filesystem->CreateSequentialFile(f)));
+        return rocksdb::IOStatus::OK();
     });
 }
 
@@ -109,8 +109,8 @@ rocksdb::IOStatus BlobFilesystem::NewRandomAccessFile(const std::string& f, cons
                                                       std::unique_ptr<rocksdb::FSRandomAccessFile>* r,
                                                       rocksdb::IODebugContext*) {
     return Guard("NewRandomAccessFile", f, [&]() -> rocksdb::IOStatus {
-            *r = std::unique_ptr<rocksdb::FSRandomAccessFile>(new ReadableFile(m_filesystem->CreateReadableFile(f)));
-            return rocksdb::IOStatus::OK();
+        *r = std::unique_ptr<rocksdb::FSRandomAccessFile>(new ReadableFile(m_filesystem->CreateReadableFile(f)));
+        return rocksdb::IOStatus::OK();
     });
 }
 
@@ -118,9 +118,9 @@ rocksdb::IOStatus BlobFilesystem::NewWritableFile(const std::string& f, const ro
                                                   std::unique_ptr<rocksdb::FSWritableFile>* r,
                                                   rocksdb::IODebugContext*) {
     return Guard("NewWritableFile", f, [&]() -> rocksdb::IOStatus {
-            *r =
-                std::unique_ptr<rocksdb::FSWritableFile>(new WriteableFile(m_filesystem->CreateWriteableFile(f), m_logger));
-            return rocksdb::IOStatus::OK();
+        *r =
+            std::unique_ptr<rocksdb::FSWritableFile>(new WriteableFile(m_filesystem->CreateWriteableFile(f), m_logger));
+        return rocksdb::IOStatus::OK();
     });
 }
 
@@ -128,9 +128,9 @@ rocksdb::IOStatus BlobFilesystem::ReopenWritableFile(const std::string& fname, c
                                                      std::unique_ptr<rocksdb::FSWritableFile>* result,
                                                      rocksdb::IODebugContext*) {
     return Guard("ReopenWritableFile", fname, [&]() -> rocksdb::IOStatus {
-            *result = std::unique_ptr<rocksdb::FSWritableFile>(
-                new WriteableFile(m_filesystem->ReopenWriteableFile(fname), m_logger));
-            return rocksdb::IOStatus::OK();
+        *result = std::unique_ptr<rocksdb::FSWritableFile>(
+            new WriteableFile(m_filesystem->ReopenWriteableFile(fname), m_logger));
+        return rocksdb::IOStatus::OK();
     });
 }
 
@@ -139,9 +139,9 @@ rocksdb::IOStatus BlobFilesystem::ReuseWritableFile(const std::string& fname, co
                                                     std::unique_ptr<rocksdb::FSWritableFile>* r,
                                                     rocksdb::IODebugContext*) {
     return Guard("ReuseWritableFile", fname, [&]() -> rocksdb::IOStatus {
-            *r = std::unique_ptr<rocksdb::FSWritableFile>(
-                new WriteableFile(m_filesystem->ReuseWritableFile(fname), m_logger));
-            return rocksdb::IOStatus::OK();
+        *r = std::unique_ptr<rocksdb::FSWritableFile>(
+            new WriteableFile(m_filesystem->ReuseWritableFile(fname), m_logger));
+        return rocksdb::IOStatus::OK();
     });
 }
 
@@ -149,9 +149,9 @@ rocksdb::IOStatus BlobFilesystem::NewRandomRWFile(const std::string& fname, cons
                                                   std::unique_ptr<rocksdb::FSRandomRWFile>* result,
                                                   rocksdb::IODebugContext*) {
     return Guard("NewRandomRWFile", fname, [&]() -> rocksdb::IOStatus {
-            *result = std::unique_ptr<rocksdb::FSRandomRWFile>(
-                new ReadWriteFile(m_filesystem->CreateReadWriteFile(fname), m_logger));
-            return rocksdb::IOStatus::OK();
+        *result = std::unique_ptr<rocksdb::FSRandomRWFile>(
+            new ReadWriteFile(m_filesystem->CreateReadWriteFile(fname), m_logger));
+        return rocksdb::IOStatus::OK();
     });
 }
 
@@ -164,27 +164,27 @@ rocksdb::IOStatus BlobFilesystem::NewDirectory(const std::string& name, const ro
                                                std::unique_ptr<rocksdb::FSDirectory>* result,
                                                rocksdb::IODebugContext*) {
     return Guard("NewDirectory", name, [&]() -> rocksdb::IOStatus {
-            *result = std::unique_ptr<rocksdb::FSDirectory>(new Directory(m_filesystem->CreateDirectory(name)));
-            return rocksdb::IOStatus::OK();
+        *result = std::unique_ptr<rocksdb::FSDirectory>(new Directory(m_filesystem->CreateDirectory(name)));
+        return rocksdb::IOStatus::OK();
     });
 }
 
 rocksdb::IOStatus BlobFilesystem::FileExists(const std::string& f, const rocksdb::IOOptions&,
                                              rocksdb::IODebugContext*) {
     return Guard("FileExists", f, [&]() -> rocksdb::IOStatus {
-            if (m_filesystem->FileExists(f)) {
-                return rocksdb::IOStatus::OK();
-            } else {
-                return rocksdb::IOStatus::NotFound();
-            }
+        if (m_filesystem->FileExists(f)) {
+            return rocksdb::IOStatus::OK();
+        } else {
+            return rocksdb::IOStatus::NotFound();
+        }
     });
 }
 
 rocksdb::IOStatus BlobFilesystem::GetChildren(const std::string& dir, const rocksdb::IOOptions&,
                                               std::vector<std::string>* r, rocksdb::IODebugContext*) {
     return Guard("GetChildren", dir, [&]() -> rocksdb::IOStatus {
-            *r = m_filesystem->GetChildren(dir);
-            return rocksdb::IOStatus::OK();
+        *r = m_filesystem->GetChildren(dir);
+        return rocksdb::IOStatus::OK();
     });
 }
 
@@ -192,35 +192,35 @@ rocksdb::IOStatus BlobFilesystem::GetChildrenFileAttributes(const std::string& d
                                                             std::vector<rocksdb::FileAttributes>* result,
                                                             rocksdb::IODebugContext*) {
     return Guard("GetChildrenFileAttributes", dir, [&]() -> rocksdb::IOStatus {
-            const auto attributes = m_filesystem->GetChildrenFileAttributes(dir);
-            for (const auto& attr : attributes) {
-                result->push_back({
-                    .name = attr.GetName(),
-                    .size_bytes = attr.GetSize(),
-                });
-            }
+        const auto attributes = m_filesystem->GetChildrenFileAttributes(dir);
+        for (const auto& attr : attributes) {
+            result->push_back({
+                .name = attr.GetName(),
+                .size_bytes = attr.GetSize(),
+            });
+        }
 
-            return rocksdb::IOStatus::OK();
+        return rocksdb::IOStatus::OK();
     });
 }
 
 rocksdb::IOStatus BlobFilesystem::DeleteFile(const std::string& f, const rocksdb::IOOptions&,
                                              rocksdb::IODebugContext*) {
     return Guard("DeleteFile", f, [&]() -> rocksdb::IOStatus {
-            if (m_filesystem->DeleteFile(f)) {
-                return rocksdb::IOStatus::OK();
-            } else {
-                return rocksdb::IOStatus::NotFound();
-            }
+        if (m_filesystem->DeleteFile(f)) {
+            return rocksdb::IOStatus::OK();
+        } else {
+            return rocksdb::IOStatus::NotFound();
+        }
     });
 }
 
 rocksdb::IOStatus BlobFilesystem::Truncate(const std::string& fname, size_t size, const rocksdb::IOOptions&,
                                            rocksdb::IODebugContext*) {
     return Guard("Truncate", fname, [&]() -> rocksdb::IOStatus {
-            assert(size < static_cast<size_t>(std::numeric_limits<int64_t>::max()));
-            m_filesystem->Truncate(fname, static_cast<int64_t>(size));
-            return rocksdb::IOStatus::OK();
+        assert(size < static_cast<size_t>(std::numeric_limits<int64_t>::max()));
+        m_filesystem->Truncate(fname, static_cast<int64_t>(size));
+        return rocksdb::IOStatus::OK();
     });
 }
 
@@ -235,32 +235,32 @@ rocksdb::IOStatus BlobFilesystem::CreateDirIfMissing(const std::string&, const r
 
 rocksdb::IOStatus BlobFilesystem::DeleteDir(const std::string& d, const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
     return Guard("DeleteDir", d, [&]() -> rocksdb::IOStatus {
-            const auto remainingFiles = m_filesystem->DeleteDir(d);
-            if (remainingFiles == 0) {
-                return rocksdb::IOStatus::OK();
-            } else {
-                BOOST_LOG_SEV(*m_logger, error)
-                    << "Failed to delete all contents within directory. " << remainingFiles << " remaining.";
-                return rocksdb::IOStatus::IOError("Failed to delete all contents within directory");
-            }
+        const auto remainingFiles = m_filesystem->DeleteDir(d);
+        if (remainingFiles == 0) {
+            return rocksdb::IOStatus::OK();
+        } else {
+            BOOST_LOG_SEV(*m_logger, error)
+                << "Failed to delete all contents within directory. " << remainingFiles << " remaining.";
+            return rocksdb::IOStatus::IOError("Failed to delete all contents within directory");
+        }
     });
 }
 
 rocksdb::IOStatus BlobFilesystem::GetFileSize(const std::string& f, const rocksdb::IOOptions&, uint64_t* s,
                                               rocksdb::IODebugContext*) {
     return Guard("GetFileSize", f, [&]() -> rocksdb::IOStatus {
-            const auto fileSize = m_filesystem->GetFileSize(f);
-            assert(fileSize >= 0);
-            *s = static_cast<uint64_t>(fileSize);
-            return rocksdb::IOStatus::OK();
+        const auto fileSize = m_filesystem->GetFileSize(f);
+        assert(fileSize >= 0);
+        *s = static_cast<uint64_t>(fileSize);
+        return rocksdb::IOStatus::OK();
     });
 }
 
 rocksdb::IOStatus BlobFilesystem::GetFileModificationTime(const std::string& fname, const rocksdb::IOOptions&,
                                                           uint64_t* file_mtime, rocksdb::IODebugContext*) {
     return Guard("GetFileModificationTime", fname, [&]() -> rocksdb::IOStatus {
-            *file_mtime = m_filesystem->GetFileModificationTime(fname);
-            return rocksdb::IOStatus::OK();
+        *file_mtime = m_filesystem->GetFileModificationTime(fname);
+        return rocksdb::IOStatus::OK();
     });
 }
 
@@ -274,8 +274,8 @@ rocksdb::IOStatus BlobFilesystem::GetAbsolutePath(const std::string& db_path, co
 rocksdb::IOStatus BlobFilesystem::RenameFile(const std::string& s, const std::string& t, const rocksdb::IOOptions&,
                                              rocksdb::IODebugContext*) {
     return Guard("RenameFile", s + " -> " + t, [&]() -> rocksdb::IOStatus {
-            m_filesystem->RenameFile(s, t);
-            return rocksdb::IOStatus::OK();
+        m_filesystem->RenameFile(s, t);
+        return rocksdb::IOStatus::OK();
     });
 }
 
@@ -298,29 +298,29 @@ rocksdb::IOStatus BlobFilesystem::AreFilesSame(const std::string& first, const s
 rocksdb::IOStatus BlobFilesystem::LockFile(const std::string& f, const rocksdb::IOOptions&, rocksdb::FileLock** l,
                                            rocksdb::IODebugContext*) {
     return Guard("LockFile", f, [&]() -> rocksdb::IOStatus {
-            *l = nullptr;
-            auto lock = m_filesystem->LockFile(f);
-            auto lockFileWrapper = std::make_unique<Plugin::Azure::LockFile>(lock);
-            *l = lockFileWrapper.get();
-            std::scoped_lock _(m_lockFilesMutex);
-            m_lockFiles.push_back(std::move(lockFileWrapper));
-            return rocksdb::IOStatus::OK();
+        *l = nullptr;
+        auto lock = m_filesystem->LockFile(f);
+        auto lockFileWrapper = std::make_unique<Plugin::Azure::LockFile>(lock);
+        *l = lockFileWrapper.get();
+        std::scoped_lock _(m_lockFilesMutex);
+        m_lockFiles.push_back(std::move(lockFileWrapper));
+        return rocksdb::IOStatus::OK();
     });
 }
 
 rocksdb::IOStatus BlobFilesystem::UnlockFile(rocksdb::FileLock* l, const rocksdb::IOOptions&,
                                              rocksdb::IODebugContext*) {
     return Guard("UnlockFile", {}, [&]() -> rocksdb::IOStatus {
-            auto lockFile = dynamic_cast<Plugin::Azure::LockFile*>(l);
-            if (lockFile == nullptr) {
-                BOOST_LOG_SEV(*m_logger, error) << "Unable to cast file lock to Azure::LockFile";
-                return rocksdb::IOStatus::InvalidArgument();
-            }
+        auto lockFile = dynamic_cast<Plugin::Azure::LockFile*>(l);
+        if (lockFile == nullptr) {
+            BOOST_LOG_SEV(*m_logger, error) << "Unable to cast file lock to Azure::LockFile";
+            return rocksdb::IOStatus::InvalidArgument();
+        }
 
-            m_filesystem->UnlockFile(lockFile->GetImpl());
-            std::scoped_lock _(m_lockFilesMutex);
-            std::erase_if(m_lockFiles, [lockFile](const auto& entry) { return entry.get() == lockFile; });
-            return rocksdb::IOStatus::OK();
+        m_filesystem->UnlockFile(lockFile->GetImpl());
+        std::scoped_lock _(m_lockFilesMutex);
+        std::erase_if(m_lockFiles, [lockFile](const auto& entry) { return entry.get() == lockFile; });
+        return rocksdb::IOStatus::OK();
     });
 }
 
@@ -332,9 +332,9 @@ rocksdb::IOStatus BlobFilesystem::GetTestDirectory(const rocksdb::IOOptions& opt
 rocksdb::IOStatus BlobFilesystem::NewLogger(const std::string& fname, const rocksdb::IOOptions&,
                                             std::shared_ptr<rocksdb::Logger>* result, rocksdb::IODebugContext*) {
     return Guard("NewLogger", fname, [&]() -> rocksdb::IOStatus {
-            auto impl = m_filesystem->CreateLogger(fname, rocksdb::Logger::kDefaultLogLevel);
-            *result = std::shared_ptr<rocksdb::Logger>(new Plugin::Azure::Logger(std::move(impl)));
-            return rocksdb::IOStatus::OK();
+        auto impl = m_filesystem->CreateLogger(fname, rocksdb::Logger::kDefaultLogLevel);
+        *result = std::shared_ptr<rocksdb::Logger>(new Plugin::Azure::Logger(std::move(impl)));
+        return rocksdb::IOStatus::OK();
     });
 }
 

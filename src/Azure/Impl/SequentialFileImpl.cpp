@@ -48,8 +48,7 @@ int64_t SequentialFileImpl::ReadThroughReadahead(const int64_t bytesToRead, char
         m_readahead = std::make_unique_for_overwrite<char[]>(static_cast<size_t>(kReadaheadBytes));
     }
     m_readaheadLength = 0;
-    const auto fetched =
-        std::max<int64_t>(m_file.RandomRead(m_offset + served, kReadaheadBytes, m_readahead.get()), 0);
+    const auto fetched = std::max<int64_t>(m_file.RandomRead(m_offset + served, kReadaheadBytes, m_readahead.get()), 0);
     m_readaheadLength = fetched;
     m_readaheadStart = m_offset + served;
     m_readaheadEtag = m_file.GetETag();

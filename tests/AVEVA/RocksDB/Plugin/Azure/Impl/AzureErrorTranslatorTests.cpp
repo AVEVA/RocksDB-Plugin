@@ -92,9 +92,9 @@ TEST(AzureErrorTranslatorTests, HttpClientTimeoutIsRetryableTimedOut) {
 }
 
 TEST(AzureErrorTranslatorTests, PermanentHttpClientErrorsAreNonRetryable) {
-    for (auto error : {AVEVA::HttpClientError::InvalidUrl, AVEVA::HttpClientError::InvalidRequest,
-                       AVEVA::HttpClientError::TlsFailed, AVEVA::HttpClientError::ResponseTooLarge,
-                       AVEVA::HttpClientError::ProtocolError}) {
+    for (auto error :
+         {AVEVA::HttpClientError::InvalidUrl, AVEVA::HttpClientError::InvalidRequest, AVEVA::HttpClientError::TlsFailed,
+          AVEVA::HttpClientError::ResponseTooLarge, AVEVA::HttpClientError::ProtocolError}) {
         const std::error_code code = error;
         EXPECT_FALSE(AzureErrorTranslator::IsTransient(0, code)) << code.message();
         EXPECT_FALSE(AzureErrorTranslator::IOStatusFromError(Failure(0, "", code)).GetRetryable()) << code.message();

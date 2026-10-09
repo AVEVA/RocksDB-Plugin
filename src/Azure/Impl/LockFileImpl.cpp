@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlockOn.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlockOn.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
@@ -88,7 +88,8 @@ bool LockFileImpl::Lock() {
         AzureClient::AcquireLeaseOptions options;
         options.ProposedLeaseId = leaseId;
         options.Duration = m_leaseLength;
-        auto result = BlockOn(m_file->get_executor(), m_file->AcquireLeaseAsync(std::move(options), boost::asio::use_future));
+        auto result =
+            BlockOn(m_file->get_executor(), m_file->AcquireLeaseAsync(std::move(options), boost::asio::use_future));
         if (result.has_value()) {
             {
                 const std::scoped_lock lock(m_stateMutex);
@@ -176,9 +177,9 @@ std::chrono::steady_clock::duration LockFileImpl::RenewalBudget() const {
     // The whole request, retries included, is cancelled at the renewal deadline.
     const auto budget = RenewalDeadline() - std::chrono::steady_clock::now();
     if (budget <= std::chrono::steady_clock::duration::zero()) {
-        throw std::runtime_error("Cannot renew lease for '" + m_fileName +
-                                 "': the renewal deadline has passed (lease length: " +
-                                 std::to_string(m_leaseLength.count()) + " seconds)");
+        throw std::runtime_error(
+            "Cannot renew lease for '" + m_fileName +
+            "': the renewal deadline has passed (lease length: " + std::to_string(m_leaseLength.count()) + " seconds)");
     }
     return budget;
 }
@@ -214,38 +215,41 @@ void LockFileImpl::RenewAsync(RenewCallback callback) const {
     state->Done = std::move(callback);
     const auto requestStart = std::chrono::steady_clock::now();
 
-    boost::asio::post(state->Strand, [this, state, leaseId = *leaseId, requestStart, budget, options = std::move(options)]() mutable {
-        state->Deadline.expires_after(budget);
-        state->Deadline.async_wait([state](const boost::system::error_code& error) {
-            if (!error) {
-                state->Cancel.emit(boost::asio::cancellation_type::terminal);
-            }
+    boost::asio::post(
+        state->Strand, [this, state, leaseId = *leaseId, requestStart, budget, options = std::move(options)]() mutable {
+            state->Deadline.expires_after(budget);
+            state->Deadline.async_wait([state](const boost::system::error_code& error) {
+                if (!error) {
+                    state->Cancel.emit(boost::asio::cancellation_type::terminal);
+                }
+            });
+            auto requestOptions = m_file->GetDefaultRequestOptions();
+            requestOptions.SetCancellationSlot(state->Cancel.slot());
+            m_file->RenewLeaseAsync(
+                std::move(options),
+                [this, state, leaseId, requestStart](auto result) {
+                    boost::asio::post(state->Strand,
+                                      [this, state, leaseId, requestStart, result = std::move(result)]() mutable {
+                                          state->Deadline.cancel();
+                                          std::exception_ptr error;
+                                          bool renewed = true;
+                                          try {
+                                              Unwrap(std::move(result));
+                                              m_lastRenewalTime = requestStart;
+                                          } catch (...) {
+                                              // An Unlock that raced with this renewal makes the failure expected, not
+                                              // an error.
+                                              if (CurrentLeaseId() != leaseId) {
+                                                  renewed = false;
+                                              } else {
+                                                  error = std::current_exception();
+                                              }
+                                          }
+                                          state->Done(error, renewed);
+                                      });
+                },
+                std::move(requestOptions));
         });
-        auto requestOptions = m_file->GetDefaultRequestOptions();
-        requestOptions.SetCancellationSlot(state->Cancel.slot());
-        m_file->RenewLeaseAsync(
-            std::move(options),
-            [this, state, leaseId, requestStart](auto result) {
-                boost::asio::post(state->Strand, [this, state, leaseId, requestStart, result = std::move(result)]() mutable {
-                    state->Deadline.cancel();
-                    std::exception_ptr error;
-                    bool renewed = true;
-                    try {
-                        Unwrap(std::move(result));
-                        m_lastRenewalTime = requestStart;
-                    } catch (...) {
-                        // An Unlock that raced with this renewal makes the failure expected, not an error.
-                        if (CurrentLeaseId() != leaseId) {
-                            renewed = false;
-                        } else {
-                            error = std::current_exception();
-                        }
-                    }
-                    state->Done(error, renewed);
-                });
-            },
-            std::move(requestOptions));
-    });
 }
 
 void LockFileImpl::RenewLease(const std::string& leaseId) const {
@@ -253,7 +257,8 @@ void LockFileImpl::RenewLease(const std::string& leaseId) const {
 
     AzureClient::RenewLeaseOptions options;
     options.LeaseId = leaseId;
-    // Kept alive by the posted emit, which may run after this function has returned. by the posted emit, which may run after this function has returned.
+    // Kept alive by the posted emit, which may run after this function has returned. by the posted emit, which may run
+    // after this function has returned.
     auto cancellation = std::make_shared<boost::asio::cancellation_signal>();
     auto requestOptions = m_file->GetDefaultRequestOptions();
     requestOptions.SetCancellationSlot(cancellation->slot());
@@ -263,8 +268,9 @@ void LockFileImpl::RenewLease(const std::string& leaseId) const {
     Unwrap(BlockOnFor(executor,
                       m_file->RenewLeaseAsync(std::move(options), boost::asio::use_future, std::move(requestOptions)),
                       budget, [&executor, cancellation] {
-                          boost::asio::post(executor,
-                                            [cancellation] { cancellation->emit(boost::asio::cancellation_type::terminal); });
+                          boost::asio::post(executor, [cancellation] {
+                              cancellation->emit(boost::asio::cancellation_type::terminal);
+                          });
                       }));
     m_lastRenewalTime = requestStart;
 }
@@ -290,15 +296,16 @@ void LockFileImpl::Unlock() {
 }
 
 std::chrono::seconds LockFileImpl::TimeSinceLastRenewal() const {
-    return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - m_lastRenewalTime.load());
+    return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() -
+                                                            m_lastRenewalTime.load());
 }
 
 bool LockFileImpl::HasExceededLeaseLength() const { return TimeSinceLastRenewal() >= m_leaseLength; }
 
 std::chrono::steady_clock::time_point LockFileImpl::RenewalDeadline() const {
     // Short leases (tests) get a proportionally short margin so the deadline stays after the last renewal.
-    const auto margin =
-        std::min<std::chrono::milliseconds>(Configuration::LeaseSafetyMargin, std::chrono::milliseconds(m_leaseLength) / 10);
+    const auto margin = std::min<std::chrono::milliseconds>(Configuration::LeaseSafetyMargin,
+                                                            std::chrono::milliseconds(m_leaseLength) / 10);
     return m_lastRenewalTime.load() + m_leaseLength - margin;
 }
 

@@ -4,9 +4,9 @@
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
+#include <atomic>
 #include <boost/intrusive/list.hpp>
 #include <boost/log/trivial.hpp>
-#include <atomic>
 #include <chrono>
 #include <exception>
 #include <functional>

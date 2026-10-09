@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlockOn.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlockOn.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Environment.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/TokenCredentials.hpp"
@@ -31,8 +31,8 @@ constexpr std::string_view g_sizeMetadata = "filesize";
 std::chrono::milliseconds WithJitter(std::chrono::milliseconds delay) {
     thread_local std::mt19937 generator{std::random_device{}()};
     std::uniform_real_distribution<double> factor(0.8, 1.2);
-    return std::chrono::milliseconds(static_cast<std::chrono::milliseconds::rep>(
-        static_cast<double>(delay.count()) * factor(generator)));
+    return std::chrono::milliseconds(
+        static_cast<std::chrono::milliseconds::rep>(static_cast<double>(delay.count()) * factor(generator)));
 }
 } // namespace
 
@@ -66,11 +66,13 @@ void BlobHelpers::SetFileSize(AzureClient::BlobClient& client, int64_t size) {
 
 BlobHelpers::BlobInfo BlobHelpers::GetBlobInfo(AzureClient::BlobClient& client) {
     auto properties = Unwrap(BlockOn(client.get_executor(), client.GetPropertiesAsync(boost::asio::use_future)));
-    return {FileSizeFromProperties(properties), static_cast<int64_t>(properties.ContentLength), std::move(properties.ETag)};
+    return {FileSizeFromProperties(properties), static_cast<int64_t>(properties.ContentLength),
+            std::move(properties.ETag)};
 }
 
 int64_t BlobHelpers::GetFileSize(AzureClient::BlobClient& client) {
-    return FileSizeFromProperties(Unwrap(BlockOn(client.get_executor(), client.GetPropertiesAsync(boost::asio::use_future))));
+    return FileSizeFromProperties(
+        Unwrap(BlockOn(client.get_executor(), client.GetPropertiesAsync(boost::asio::use_future))));
 }
 
 int64_t BlobHelpers::FileSizeFromProperties(const AzureClient::Models::BlobProperties& properties,
@@ -102,8 +104,8 @@ int64_t BlobHelpers::GetBlobCapacity(AzureClient::BlobClient& client) {
 bool BlobHelpers::CreateIfNotExists(AzureClient::PageBlobClient& client, int64_t capacity) {
     AzureClient::CreatePageBlobOptions options;
     options.Conditions.IfNoneMatch = "*";
-    auto result =
-        BlockOn(client.get_executor(), client.CreateAsync(static_cast<uint64_t>(capacity), std::move(options), boost::asio::use_future));
+    auto result = BlockOn(client.get_executor(), client.CreateAsync(static_cast<uint64_t>(capacity), std::move(options),
+                                                                    boost::asio::use_future));
     if (result.has_value()) {
         return true;
     }
@@ -147,7 +149,8 @@ AzureClient::BlobServiceClientOptions BlobHelpers::CreateServiceClientOptions(co
 }
 
 std::shared_ptr<AzureClient::ITokenCredential>
-BlobHelpers::BindToRuntime(const std::shared_ptr<ClientRuntime>& runtime, std::shared_ptr<AzureClient::ITokenCredential> credential) {
+BlobHelpers::BindToRuntime(const std::shared_ptr<ClientRuntime>& runtime,
+                           std::shared_ptr<AzureClient::ITokenCredential> credential) {
     // Token refreshes can still be in flight when the filesystem goes away; they must keep the HTTP client alive.
     return std::make_shared<RuntimeBoundCredential>(runtime, std::move(credential));
 }
@@ -165,8 +168,9 @@ BlobHelpers::CreateClientSecretCredential(const std::shared_ptr<ClientRuntime>& 
 }
 
 std::shared_ptr<AzureClient::ITokenCredential>
-BlobHelpers::CreatePipelinesCredential(const std::shared_ptr<ClientRuntime>& runtime, const std::string& tenantId, const std::string& clientId,
-                                       const std::string& serviceConnectionId, const std::string& systemAccessToken) {
+BlobHelpers::CreatePipelinesCredential(const std::shared_ptr<ClientRuntime>& runtime, const std::string& tenantId,
+                                       const std::string& clientId, const std::string& serviceConnectionId,
+                                       const std::string& systemAccessToken) {
     AzurePipelinesCredentialOptions options;
     options.TenantId = tenantId;
     options.ClientId = clientId;
@@ -178,13 +182,15 @@ BlobHelpers::CreatePipelinesCredential(const std::shared_ptr<ClientRuntime>& run
 }
 
 std::shared_ptr<AzureClient::ITokenCredential>
-BlobHelpers::CreateChainedCredential(const std::shared_ptr<ClientRuntime>& runtime, const Models::ChainedCredentialInfo& chainedCredential) {
+BlobHelpers::CreateChainedCredential(const std::shared_ptr<ClientRuntime>& runtime,
+                                     const Models::ChainedCredentialInfo& chainedCredential) {
     return AzureClient::CachingTokenCredential::Create(BindToRuntime(
         runtime, std::make_shared<ChainedTokenCredential>(CreateCredentialSources(runtime, chainedCredential))));
 }
 
 std::vector<std::shared_ptr<AzureClient::ITokenCredential>>
-BlobHelpers::CreateCredentialSources(const std::shared_ptr<ClientRuntime>& runtime, const Models::ChainedCredentialInfo& chainedCredential) {
+BlobHelpers::CreateCredentialSources(const std::shared_ptr<ClientRuntime>& runtime,
+                                     const Models::ChainedCredentialInfo& chainedCredential) {
     std::vector<std::shared_ptr<AzureClient::ITokenCredential>> sources;
 
     // Try to use user specified credentials to try to authenticate first.
@@ -248,7 +254,8 @@ std::string BlobHelpers::AccountNameFromUrl(const std::string& storageAccountUrl
 }
 
 AzureClient::BlobServiceClient
-BlobHelpers::CreateServiceClient(const std::shared_ptr<ClientRuntime>& runtime, const Models::ServicePrincipalStorageInfo& servicePrincipal) {
+BlobHelpers::CreateServiceClient(const std::shared_ptr<ClientRuntime>& runtime,
+                                 const Models::ServicePrincipalStorageInfo& servicePrincipal) {
     auto options = CreateServiceClientOptions(servicePrincipal.GetStorageAccountUrl());
     options.TokenCredential =
         CreateClientSecretCredential(runtime, servicePrincipal.GetTenantId(), servicePrincipal.GetServicePrincipalId(),
@@ -257,7 +264,8 @@ BlobHelpers::CreateServiceClient(const std::shared_ptr<ClientRuntime>& runtime, 
 }
 
 AzureClient::BlobServiceClient
-BlobHelpers::CreateServiceClient(const std::shared_ptr<ClientRuntime>& runtime, const Models::ChainedCredentialInfo& chainedCredential) {
+BlobHelpers::CreateServiceClient(const std::shared_ptr<ClientRuntime>& runtime,
+                                 const Models::ChainedCredentialInfo& chainedCredential) {
     auto options = CreateServiceClientOptions(chainedCredential.GetStorageAccountUrl());
     options.TokenCredential = CreateChainedCredential(runtime, chainedCredential);
     return AzureClient::BlobServiceClient{runtime->HttpClient(), std::move(options)};
