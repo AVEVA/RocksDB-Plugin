@@ -132,6 +132,11 @@ namespace AVEVA
                        (parsed->has_port() ? std::string(parsed->port()) : (isTls ? "443" : "80"));
             }
 
+            // Cancellation-slot ownership: a caller's slot holds exactly one handler at a time, so ownership is
+            // handed over rather than shared. While a request waits in the limiter, the handler installed here
+            // removes it from the queue. When the request starts, RequestOperation::BindCancellationSlot replaces
+            // that handler with one that cancels the running operation. After that the limiter can no longer be
+            // reached through the slot, which is correct: a started request holds its slot until it completes.
             void SendLimited(std::string origin, HttpRequest request, CompletionHandler completion, HttpRequestOptions options)
             {
                 struct Pending
