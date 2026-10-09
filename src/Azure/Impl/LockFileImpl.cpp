@@ -11,6 +11,7 @@
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/use_future.hpp>
+#include <boost/scope/scope_exit.hpp>
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid_io.hpp>
 
@@ -54,13 +55,21 @@ LockFileImpl::LockFileImpl(
 }
 
 bool LockFileImpl::Lock() {
-    const std::scoped_lock lock(m_ioMutex);
-    // Do not attempt to lock again when you already have a lock aquired.
-    if (m_leaseId.has_value()) {
-        BOOST_LOG_SEV(*m_logger, severity_level::debug)
-            << "Lock already acquired for '" << m_fileName << "', skipping duplicate lock attempt";
-        return false;
+    {
+        const std::scoped_lock lock(m_stateMutex);
+        // Do not attempt to lock again when a lease is held or another thread is already acquiring one.
+        if (m_leaseId.has_value() || m_lockInProgress) {
+            BOOST_LOG_SEV(*m_logger, severity_level::debug)
+                << "Lock already acquired or in progress for '" << m_fileName << "', skipping duplicate lock attempt";
+            return false;
+        }
+        m_lockInProgress = true;
     }
+    // The retry loop below blocks on the network and sleeps, so no mutex is held; the flag keeps other Lock calls out.
+    const boost::scope::scope_exit clearInProgress([this] {
+        const std::scoped_lock lock(m_stateMutex);
+        m_lockInProgress = false;
+    });
 
     BOOST_LOG_SEV(*m_logger, severity_level::debug)
         << "Attempting to acquire blob lease for '" << m_fileName << "' (timeout: " << m_leaseLength.count() << "s)";
@@ -79,7 +88,10 @@ bool LockFileImpl::Lock() {
         options.Duration = m_leaseLength;
         auto result = BlockOn(m_file->get_executor(), m_file->AcquireLeaseAsync(std::move(options), boost::asio::use_future));
         if (result.has_value()) {
-            m_leaseId = leaseId;
+            {
+                const std::scoped_lock lock(m_stateMutex);
+                m_leaseId = leaseId;
+            }
             lastError.reset();
             break;
         }
@@ -117,24 +129,36 @@ bool LockFileImpl::Lock() {
 }
 
 void LockFileImpl::Renew() const {
-    const std::scoped_lock lock(m_ioMutex);
-    RenewLocked();
+    const auto leaseId = CurrentLeaseId();
+    if (!leaseId.has_value()) {
+        throw std::runtime_error("Cannot renew lease that has not been acquired");
+    }
+    RenewLease(*leaseId);
 }
 
 bool LockFileImpl::RenewIfLocked() const {
-    const std::scoped_lock lock(m_ioMutex);
-    if (!m_leaseId.has_value()) {
+    const auto leaseId = CurrentLeaseId();
+    if (!leaseId.has_value()) {
         return false;
     }
-    RenewLocked();
+    try {
+        RenewLease(*leaseId);
+    } catch (...) {
+        // An Unlock that raced with this renewal makes the failure expected, not an error.
+        if (CurrentLeaseId() != leaseId) {
+            return false;
+        }
+        throw;
+    }
     return true;
 }
 
-void LockFileImpl::RenewLocked() const {
-    if (!m_leaseId.has_value()) {
-        throw std::runtime_error("Cannot renew lease that has not been acquired");
-    }
+std::optional<std::string> LockFileImpl::CurrentLeaseId() const {
+    const std::scoped_lock lock(m_stateMutex);
+    return m_leaseId;
+}
 
+void LockFileImpl::RenewLease(const std::string& leaseId) const {
     if (HasExceededLeaseLength()) {
         const auto timeSinceRenewal = TimeSinceLastRenewal();
         throw std::runtime_error(
@@ -156,8 +180,8 @@ void LockFileImpl::RenewLocked() const {
     }
 
     AzureClient::RenewLeaseOptions options;
-    options.LeaseId = *m_leaseId;
-    // Kept alive by the posted emit, which may run after this function has returned.
+    options.LeaseId = leaseId;
+    // Kept alive by the posted emit, which may run after this function has returned. by the posted emit, which may run after this function has returned.
     auto cancellation = std::make_shared<boost::asio::cancellation_signal>();
     auto requestOptions = m_file->GetDefaultRequestOptions();
     requestOptions.SetCancellationSlot(cancellation->slot());
@@ -174,16 +198,21 @@ void LockFileImpl::RenewLocked() const {
 }
 
 void LockFileImpl::Unlock() {
-    const std::scoped_lock lock(m_ioMutex);
-    if (!m_leaseId.has_value()) {
+    const auto leaseId = CurrentLeaseId();
+    if (!leaseId.has_value()) {
         throw std::runtime_error("Cannot release lease that has not been acquired");
     }
 
     BOOST_LOG_SEV(*m_logger, severity_level::debug) << "Releasing blob lease for '" << m_fileName << "'";
     AzureClient::ReleaseLeaseOptions options;
-    options.LeaseId = *m_leaseId;
+    options.LeaseId = *leaseId;
     Unwrap(BlockOn(m_file->get_executor(), m_file->ReleaseLeaseAsync(std::move(options), boost::asio::use_future)));
-    m_leaseId.reset();
+    {
+        const std::scoped_lock lock(m_stateMutex);
+        if (m_leaseId == leaseId) {
+            m_leaseId.reset();
+        }
+    }
     m_held = false;
     BOOST_LOG_SEV(*m_logger, severity_level::debug) << "Successfully released blob lease for '" << m_fileName << "'";
 }

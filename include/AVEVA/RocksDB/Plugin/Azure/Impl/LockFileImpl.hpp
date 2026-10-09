@@ -18,16 +18,19 @@ class LockFileImpl
     std::shared_ptr<ClientRuntime> m_runtime;
     std::unique_ptr<AzureClient::PageBlobClient> m_file;
     std::optional<std::string> m_leaseId;
-    // Read by the renewal thread while Lock/Renew hold m_ioMutex across blocking requests, hence atomic.
+    // Read by the renewal thread while Lock/Renew block on the network, hence atomic.
     mutable std::atomic<std::chrono::steady_clock::time_point> m_lastRenewalTime;
     std::atomic<bool> m_held{false};
     std::chrono::seconds m_leaseLength;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
     std::string m_fileName;
-    // Serializes Lock/Renew/Unlock so the renewal thread can renew without holding the filesystem's lock list mutex.
-    mutable std::mutex m_ioMutex;
+    // Guards only m_leaseId and m_lockInProgress and is never held across network I/O or sleeps, so a slow Lock
+    // cannot stall the renewal thread or state queries.
+    mutable std::mutex m_stateMutex;
+    bool m_lockInProgress = false;
 
-    void RenewLocked() const;
+    [[nodiscard]] std::optional<std::string> CurrentLeaseId() const;
+    void RenewLease(const std::string& leaseId) const;
 
   public:
     LockFileImpl(std::shared_ptr<ClientRuntime> runtime, std::unique_ptr<AzureClient::PageBlobClient> file,

@@ -121,6 +121,29 @@ TEST_F(LockFileImplTests, LeaseHeldByAnotherOwnerIsRetried) {
     EXPECT_EQ(m_httpClient.RequestCount(), 2U);
 }
 
+TEST_F(LockFileImplTests, StateQueriesAreNotBlockedWhileLockIsRetrying) {
+    for (int i = 0; i < 6; ++i) {
+        m_httpClient.EnqueueResponse(MakeAzureErrorResponse(409, "LeaseAlreadyPresent", "held", "r1"));
+    }
+    m_httpClient.EnqueueResponse(Acquired());
+
+    auto lock = CreateLock(std::chrono::seconds(20));
+    std::atomic<bool> lockResult{false};
+    std::jthread locker([&] { lockResult = lock->Lock(); });
+    while (m_httpClient.RequestCount() < 2U) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_FALSE(lock->RenewIfLocked());
+    EXPECT_FALSE(lock->IsRenewalOverdue());
+    EXPECT_FALSE(lock->Lock()); // A concurrent acquire is rejected rather than queued behind the retry loop.
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(200));
+
+    locker.join();
+    EXPECT_TRUE(lockResult);
+}
+
 TEST_F(LockFileImplTests, RenewAndUnlockBeforeLockThrowAndSendNothing) {
     auto lock = CreateLock(std::chrono::seconds(20));
     EXPECT_THROW(lock->Renew(), std::runtime_error);
