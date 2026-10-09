@@ -53,11 +53,7 @@ namespace AVEVA
 
             IdleSweeper(SweepFunction plainSweep, SweepFunction tlsSweep, std::chrono::seconds idleTimeout)
                 : m_plainSweep(std::move(plainSweep)), m_tlsSweep(std::move(tlsSweep)),
-                  m_interval(std::clamp(idleTimeout, std::chrono::seconds{1}, std::chrono::seconds{std::chrono::hours{24 * 365}})),
-                  m_thread([this](std::stop_token stop)
-            {
-                Run(stop);
-            })
+                  m_interval(std::clamp(idleTimeout, std::chrono::seconds{1}, std::chrono::seconds{std::chrono::hours{24 * 365}}))
             {
             }
 
@@ -75,6 +71,14 @@ namespace AVEVA
                 {
                     std::lock_guard<std::mutex> lock(m_mutex);
                     m_hasIdle = true;
+                    // Started on first use so a client that never pools a connection never owns a thread.
+                    if (!m_thread.joinable())
+                    {
+                        m_thread = std::jthread([this](std::stop_token stop)
+                        {
+                            Run(stop);
+                        });
+                    }
                 }
                 m_wake.notify_all();
             }

@@ -18,6 +18,11 @@
 #include <string>
 #include <utility>
 
+#if !defined(_WIN32)
+#include <cerrno>
+#include <sys/socket.h>
+#endif
+
 namespace AVEVA::Private
 {
     // Identifies the (host, service) origin a pooled connection belongs to. Parameterized on
@@ -286,6 +291,7 @@ namespace AVEVA::Private
                     return false;
                 }
                 boost::system::error_code ec;
+#if defined(_WIN32)
                 socket.non_blocking(true, ec);
                 if (ec)
                 {
@@ -296,6 +302,12 @@ namespace AVEVA::Private
                 boost::system::error_code ignored;
                 socket.non_blocking(false, ignored);
                 return ec == boost::asio::error::would_block || ec == boost::asio::error::try_again;
+#else
+                // MSG_DONTWAIT makes just this call non-blocking, so the socket's mode is never toggled.
+                char probe = 0;
+                const auto received = ::recv(socket.native_handle(), &probe, 1, MSG_PEEK | MSG_DONTWAIT);
+                return received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
+#endif
             }
             catch (...)
             {

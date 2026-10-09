@@ -13,6 +13,7 @@ include(GoogleTest)
 
 add_executable(aveva-http-client-tests
 	ConnectionPoolTests.cpp
+	DnsCacheTests.cpp
 	HttpClientConstructionTests.cpp
 	HttpClientRequestTests.cpp
 	HttpClientResponseTests.cpp

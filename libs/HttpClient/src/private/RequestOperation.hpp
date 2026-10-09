@@ -4,6 +4,7 @@
 #pragma once
 
 #include "ConnectionPool.hpp"
+#include "DnsCache.hpp"
 #include "RequestValidation.hpp"
 #include "StreamTypes.hpp"
 #include "TlsContextConfigurator.hpp"
@@ -12,6 +13,8 @@
 #include "AVEVA/HttpClient/HttpRequest.hpp"
 #include "AVEVA/HttpClient/HttpRequestOptions.hpp"
 #include "AVEVA/HttpClient/HttpResponse.hpp"
+
+#include <boost/asio/post.hpp>
 
 #include <boost/asio/ssl/context.hpp>
 #include <boost/asio/ssl/host_name_verification.hpp>
@@ -94,12 +97,7 @@ namespace AVEVA::Private
                 }
             }
             ArmTimer();
-            m_resolver.async_resolve(m_key.host,
-                m_key.service,
-                [self = this->shared_from_this()](boost::system::error_code error, Tcp::resolver::results_type results)
-            {
-                self->OnResolve(error, std::move(results));
-            });
+            Resolve();
         }
 
         // Reused pooled connection: already connected (and, for TLS, already handshaked).
@@ -286,12 +284,7 @@ namespace AVEVA::Private
             m_buffer.consume(m_buffer.size());
             ResetParser();
 
-            m_resolver.async_resolve(m_key.host,
-                m_key.service,
-                [self = this->shared_from_this()](boost::system::error_code error, Tcp::resolver::results_type results)
-            {
-                self->OnResolve(error, std::move(results));
-            });
+            Resolve();
             return true;
         }
 
@@ -317,6 +310,31 @@ namespace AVEVA::Private
             m_parser->body_limit(m_options.GetResponseBodyLimit());
             m_parser->header_limit(m_options.GetResponseHeaderLimit());
             m_parser->skip(m_request.method() == http::verb::head);
+        }
+
+        // Serves a recent result from the shared cache; the hit is posted so the handler never runs re-entrantly.
+        void Resolve()
+        {
+            auto& cache = DnsCache::Shared();
+            if (auto cached = cache.Find(m_key.host, m_key.service))
+            {
+                asio::post(m_executor,
+                    [self = this->shared_from_this(), results = std::move(*cached)]() mutable
+                {
+                    self->OnResolve({}, std::move(results));
+                });
+                return;
+            }
+            m_resolver.async_resolve(m_key.host,
+                m_key.service,
+                [self = this->shared_from_this()](boost::system::error_code error, Tcp::resolver::results_type results)
+            {
+                if (!error)
+                {
+                    DnsCache::Shared().Store(self->m_key.host, self->m_key.service, results);
+                }
+                self->OnResolve(error, std::move(results));
+            });
         }
 
         void OnResolve(boost::system::error_code error, Tcp::resolver::results_type results)
