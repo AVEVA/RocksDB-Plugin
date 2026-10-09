@@ -106,8 +106,8 @@ void PageBlob::UploadPagesAsync(std::shared_ptr<const std::vector<char>> owned, 
 }
 
 Core::BlobMetadata PageBlob::GetMetadata() {
-    auto properties = Unwrap(BlockOn(m_client.get_executor(), m_client.GetPropertiesAsync(boost::asio::use_future)));
-    return {BlobHelpers::FileSizeFromProperties(properties), std::move(properties.ETag)};
+    auto info = BlobHelpers::GetBlobInfo(m_client);
+    return {info.Size, std::move(info.ETag)};
 }
 
 std::string PageBlob::GetEtag() {

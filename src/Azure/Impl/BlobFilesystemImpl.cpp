@@ -626,8 +626,7 @@ void BlobFilesystemImpl::RenameFile(const std::string& fromFilePath, const std::
     auto destClient = container->GetPageBlobClient(std::string(realPathTo));
 
     // TODO: Check if there is already a file with this name
-    const auto size = BlobHelpers::GetFileSize(srcClient);
-    const auto cap = BlobHelpers::GetBlobCapacity(srcClient);
+    const auto [size, cap, etag] = BlobHelpers::GetBlobInfo(srcClient);
     BlobHelpers::CreateIfNotExists(destClient, cap);
 
     // The next chunk is downloaded while the current one is being uploaded, so the two transfers overlap.

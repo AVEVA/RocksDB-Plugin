@@ -64,6 +64,11 @@ void BlobHelpers::SetFileSize(AzureClient::BlobClient& client, int64_t size) {
     Unwrap(BlockOn(client.get_executor(), client.SetMetadataAsync(std::move(options), boost::asio::use_future)));
 }
 
+BlobHelpers::BlobInfo BlobHelpers::GetBlobInfo(AzureClient::BlobClient& client) {
+    auto properties = Unwrap(BlockOn(client.get_executor(), client.GetPropertiesAsync(boost::asio::use_future)));
+    return {FileSizeFromProperties(properties), static_cast<int64_t>(properties.ContentLength), std::move(properties.ETag)};
+}
+
 int64_t BlobHelpers::GetFileSize(AzureClient::BlobClient& client) {
     return FileSizeFromProperties(Unwrap(BlockOn(client.get_executor(), client.GetPropertiesAsync(boost::asio::use_future))));
 }

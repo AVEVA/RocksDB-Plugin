@@ -22,6 +22,13 @@
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 struct BlobHelpers {
     static void SetFileSize(AzureClient::BlobClient& client, int64_t size);
+    // Everything one GetProperties call reveals, so callers needing several values pay for a single round trip.
+    struct BlobInfo {
+        int64_t Size;
+        int64_t Capacity;
+        std::string ETag;
+    };
+    static BlobInfo GetBlobInfo(AzureClient::BlobClient& client);
     static int64_t GetFileSize(AzureClient::BlobClient& client);
     // The logical file size recorded in the blob's metadata (0 when absent). Throws std::runtime_error (naming
     // lobName when given) when the value is not a non-negative integer.
