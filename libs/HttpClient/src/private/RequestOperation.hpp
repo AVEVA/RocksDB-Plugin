@@ -34,6 +34,13 @@
 
 namespace AVEVA::Private
 {
+    // Any error raised by Beast's HTTP parser (bad status line, bad header, bad chunk, ...) means the peer sent
+    // something that is not valid HTTP, as opposed to a transport failure.
+    inline bool IsBeastHttpError(const boost::system::error_code& error) noexcept
+    {
+        return error.category() == boost::beast::http::make_error_code(boost::beast::http::error{}).category();
+    }
+
     template <typename Stream>
     class RequestOperation final : public std::enable_shared_from_this<RequestOperation<Stream>>
     {
@@ -528,7 +535,7 @@ namespace AVEVA::Private
                 }
                 // A connection that ends mid-message is a transport failure, not a malformed response.
                 const bool truncated = error == http::error::end_of_stream || error == http::error::partial_message;
-                return Fail(!truncated && error.category() == make_error_code(http::error::bad_status).category()
+                return Fail(!truncated && IsBeastHttpError(error)
                                 ? HttpClientError::ProtocolError
                                 : HttpClientError::ReadFailed);
             }

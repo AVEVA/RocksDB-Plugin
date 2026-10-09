@@ -757,4 +757,40 @@ namespace
             }
         }
     }
+    std::error_code SendOnce(const std::string& wire, AVEVA::HttpRequestOptions options = {})
+    {
+        asio::io_context context;
+        auto client = AVEVA::IHttpClient::Create(context);
+        ScriptedServer server(context,
+            [&](int, const http::request<http::string_body>&) -> ServerAction { return {wire, true}; });
+        std::error_code result;
+        client->SendAsync(MakeRequest(server.Url()),
+            [&](std::error_code error, AVEVA::HttpResponse)
+        {
+            result = error;
+            server.Stop();
+        },
+            options);
+        context.run();
+        return result;
+    }
+
+    TEST(HttpClientRobustness, MalformedStatusLineIsAProtocolError)
+    {
+        EXPECT_EQ(SendOnce("NOT-HTTP garbage\r\n\r\n"), AVEVA::make_error_code(AVEVA::HttpClientError::ProtocolError));
+    }
+
+    TEST(HttpClientRobustness, OversizedBodyIsReportedAsResponseTooLarge)
+    {
+        AVEVA::HttpRequestOptions options;
+        options.SetResponseBodyLimit(4);
+        EXPECT_EQ(SendOnce("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n0123456789", options),
+            AVEVA::make_error_code(AVEVA::HttpClientError::ResponseTooLarge));
+    }
+
+    TEST(HttpClientRobustness, TruncatedMessageIsAReadFailureNotAProtocolError)
+    {
+        EXPECT_EQ(SendOnce("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nOK"),
+            AVEVA::make_error_code(AVEVA::HttpClientError::ReadFailed));
+    }
 } // namespace
