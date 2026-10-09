@@ -9,6 +9,8 @@
 #include <boost/intrusive/list.hpp>
 #include <boost/unordered/unordered_node_map.hpp>
 
+#include "Timeouts.hpp"
+
 #include <chrono>
 #include <cstddef>
 #include <functional>
@@ -110,7 +112,7 @@ namespace AVEVA::Private
         static constexpr std::size_t DefaultMaxTotalIdle = 256;
 
         // Larger values would overflow when converted to the clock's nanosecond ticks.
-        static constexpr std::chrono::seconds MaxIdleTimeout{std::chrono::hours{24 * 365}};
+        static constexpr std::chrono::seconds MaxIdleTimeout{EffectivelyInfinite};
 
         ConnectionPool(std::size_t maxIdlePerKey,
             std::chrono::seconds idleTimeout,

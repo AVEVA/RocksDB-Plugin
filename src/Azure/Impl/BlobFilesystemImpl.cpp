@@ -33,15 +33,6 @@ using boost::log::trivial::severity_level;
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 namespace {
-// The service accepts at most 5000 results per List Blobs page.
-const constexpr int32_t g_maxListPageSize = 5000;
-
-// Number of delete requests kept in flight at once by DeleteDir.
-const constexpr std::size_t g_maxConcurrentDeletes = 256;
-
-// Largest range downloaded and uploaded per request when copying a blob in RenameFile.
-const constexpr int64_t g_maxCopyChunkSize = static_cast<int64_t>(4) * 1024 * 1024;
-
 /// <summary>
 /// Lists every blob in the container whose name starts with `options.Prefix`, following continuation markers,
 /// and invokes `onBlob` for each.
@@ -73,14 +64,14 @@ void ForEachBlob(AzureClient::BlobContainerClient& container, AzureClient::ListB
     });
 }
 
-uint32_t ToListPageSize(int32_t sizeHint) { return static_cast<uint32_t>(std::clamp(sizeHint, 1, g_maxListPageSize)); }
+uint32_t ToListPageSize(int32_t sizeHint) { return static_cast<uint32_t>(std::clamp(sizeHint, 1, Configuration::Transfer::MaxListPageSize)); }
 
 using RenameDownload = std::future<
     std::expected<AzureClient::Response<AzureClient::Models::DownloadBlobResult>, AzureClient::BlobStorageError>>;
 
-// Starts downloading the next chunk [offset, offset + g_maxCopyChunkSize) of the rename source.
+// Starts downloading the next chunk [offset, offset + Configuration::Transfer::MaxCopyChunkSize) of the rename source.
 RenameDownload StartRenameDownload(AzureClient::PageBlobClient& source, int64_t size, int64_t offset) {
-    const auto readSize = std::min(size - offset, g_maxCopyChunkSize);
+    const auto readSize = std::min(size - offset, Configuration::Transfer::MaxCopyChunkSize);
     AzureClient::DownloadBlobOptions options;
     options.Range = AzureClient::Models::BlobByteRange{static_cast<uint64_t>(offset), static_cast<uint64_t>(readSize)};
     return source.DownloadAsync(
@@ -458,7 +449,7 @@ std::vector<BlobAttributes> BlobFilesystemImpl::GetChildrenFileAttributes(const 
         dirPrefix += '/';
     }
     opts.Prefix = dirPrefix;
-    opts.MaxResults = static_cast<uint32_t>(g_maxListPageSize);
+    opts.MaxResults = static_cast<uint32_t>(Configuration::Transfer::MaxListPageSize);
     // The file size lives in blob metadata, so list it instead of issuing a GetProperties per blob.
     opts.IncludeMetadata = true;
 
@@ -534,7 +525,7 @@ size_t BlobFilesystemImpl::DeleteDir(const std::string& directoryPath) const {
         window.pop_front();
     };
     for (size_t i = 0; i < blobs.size(); i++) {
-        if (window.size() >= g_maxConcurrentDeletes) {
+        if (window.size() >= Configuration::Transfer::MaxConcurrentDeletes) {
             finishOldest();
         }
         auto client = container->GetPageBlobClient(blobs[i]);

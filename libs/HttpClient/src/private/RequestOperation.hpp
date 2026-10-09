@@ -227,7 +227,7 @@ namespace AVEVA::Private
         {
             // Clamp so huge timeouts (e.g. milliseconds::max()) cannot overflow the clock's duration or time_point.
             constexpr auto MaxTimeout =
-                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::hours{24 * 365});
+                std::chrono::duration_cast<std::chrono::milliseconds>(EffectivelyInfinite);
             m_timer.expires_after(std::min(m_options.GetTimeout(), MaxTimeout));
             auto self = this->shared_from_this();
             m_timer.async_wait([self](boost::system::error_code error)
@@ -591,7 +591,7 @@ namespace AVEVA::Private
             {
                 if constexpr (std::is_same_v<Stream, TlsStream>)
                 {
-                    beast::get_lowest_layer(*m_stream).expires_after(std::chrono::seconds(1));
+                    beast::get_lowest_layer(*m_stream).expires_after(TlsShutdownGrace);
                     m_stream->async_shutdown([self = this->shared_from_this()](boost::system::error_code)
                     {
                         self->Close();

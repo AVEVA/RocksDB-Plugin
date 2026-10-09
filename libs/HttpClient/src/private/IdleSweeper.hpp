@@ -4,6 +4,8 @@
 #pragma once
 
 #include <atomic>
+#include "Timeouts.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -27,7 +29,7 @@ namespace AVEVA::Private
 
         IdleSweeper(SweepFunction plainSweep, SweepFunction tlsSweep, std::chrono::seconds idleTimeout)
             : m_plainSweep(std::move(plainSweep)), m_tlsSweep(std::move(tlsSweep)),
-              m_interval(std::clamp(idleTimeout, std::chrono::seconds{1}, std::chrono::seconds{std::chrono::hours{24 * 365}}))
+              m_interval(std::clamp(idleTimeout, std::chrono::seconds{1}, std::chrono::seconds{EffectivelyInfinite}))
         {
         }
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlockOn.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
@@ -16,10 +17,6 @@
 #include <stdexcept>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 namespace {
-// Chunking used when downloading a range of a blob into a local file.
-const constexpr std::size_t g_downloadChunkSize = static_cast<std::size_t>(4) * 1024 * 1024;
-const constexpr std::size_t g_downloadConcurrency = 4;
-
 AzureClient::Models::BlobByteRange ToRange(int64_t offset, int64_t length) {
     return AzureClient::Models::BlobByteRange{static_cast<uint64_t>(offset), static_cast<uint64_t>(length)};
 }
@@ -56,8 +53,8 @@ void PageBlob::DownloadTo(const std::string& path, int64_t offset, int64_t lengt
 
     AzureClient::DownloadToOptions options;
     options.Range = ToRange(offset, length);
-    options.ChunkSize = g_downloadChunkSize;
-    options.Concurrency = g_downloadConcurrency;
+    options.ChunkSize = Configuration::Transfer::DownloadChunkSize;
+    options.Concurrency = Configuration::Transfer::DownloadConcurrency;
     Unwrap(BlockOn(m_client.get_executor(), m_client.DownloadToAsync(std::filesystem::path(path), std::move(options), boost::asio::use_future)));
 }
 

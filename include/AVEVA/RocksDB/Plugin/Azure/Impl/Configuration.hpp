@@ -16,6 +16,21 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
             static const constexpr int64_t DefaultBufferSize = 128 * PageSize * 2;
         };
 
+        // Request sizing and fan-out used by the filesystem layer.
+        struct Transfer
+        {
+            // The service accepts at most 5000 results per List Blobs page.
+            static const constexpr int32_t MaxListPageSize = 5000;
+            // Delete requests kept in flight at once by DeleteDir; bounds sockets and memory on huge directories.
+            static const constexpr std::size_t MaxConcurrentDeletes = 256;
+            // Largest range downloaded and uploaded per request when copying a blob in RenameFile.
+            static const constexpr int64_t MaxCopyChunkSize = static_cast<int64_t>(4) * 1024 * 1024;
+            // Chunking used when downloading a blob range into a local file: big enough to amortise request
+            // latency, with a few chunks overlapping to keep the link busy.
+            static const constexpr std::size_t DownloadChunkSize = static_cast<std::size_t>(4) * 1024 * 1024;
+            static const constexpr std::size_t DownloadConcurrency = 4;
+        };
+
         static const constexpr std::chrono::seconds LeaseLength = std::chrono::seconds(20);
         static const constexpr std::chrono::seconds RenewalDelay = std::chrono::seconds(5);
         // Writes stop this long before the lease can expire, so one already in flight cannot land after it lapsed.
