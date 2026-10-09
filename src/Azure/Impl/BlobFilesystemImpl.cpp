@@ -730,23 +730,45 @@ void BlobFilesystemImpl::RenewLease(std::stop_token stopToken) {
                     << "Attempting to renew " << needsRetry.size() << " leases";
                 int retries = 0;
                 while (needsRetry.size() > 0 && retries < 5 && !stopToken.stop_requested()) {
-                    std::erase_if(needsRetry, [this](const auto& client) -> bool {
-                        try {
-                            [[maybe_unused]] const bool renewed = client->RenewIfLocked();
-                            return true;
-                        } catch (const RequestFailedException& e) {
-                            if (e.StatusCode == HttpStatus::Conflict) {
-                                BOOST_LOG_SEV(*m_logger, severity_level::error)
-                                    << "Failed to renew lease due to conflict, lease might be expired: " << e.what();
-                                throw;
-                            } else {
+                    // Renewals run side by side so one slow or failing lease cannot delay the others past their
+                    // deadlines. Each future is drained before any exception is rethrown.
+                    std::vector<std::future<bool>> attempts;
+                    attempts.reserve(needsRetry.size());
+                    for (const auto& client : needsRetry) {
+                        attempts.push_back(std::async(std::launch::async, [this, client]() -> bool {
+                            try {
+                                [[maybe_unused]] const bool renewed = client->RenewIfLocked();
+                                return true;
+                            } catch (const RequestFailedException& e) {
+                                if (e.StatusCode == HttpStatus::Conflict) {
+                                    BOOST_LOG_SEV(*m_logger, severity_level::error)
+                                        << "Failed to renew lease due to conflict, lease might be expired: "
+                                        << e.what();
+                                    throw;
+                                }
                                 BOOST_LOG_SEV(*m_logger, severity_level::error)
                                     << "Failed to renew lease: " << e.what();
                             }
+                            return false;
+                        }));
+                    }
+                    std::vector<std::shared_ptr<LockFileImpl>> stillPending;
+                    std::exception_ptr failure;
+                    for (std::size_t i = 0; i < attempts.size(); ++i) {
+                        try {
+                            if (!attempts[i].get()) {
+                                stillPending.push_back(std::move(needsRetry[i]));
+                            }
+                        } catch (...) {
+                            if (!failure) {
+                                failure = std::current_exception();
+                            }
                         }
-
-                        return false;
-                    });
+                    }
+                    if (failure) {
+                        std::rethrow_exception(failure);
+                    }
+                    needsRetry = std::move(stillPending);
 
                     retries++;
                     if (needsRetry.size() > 0) {
