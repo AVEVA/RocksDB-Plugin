@@ -29,7 +29,7 @@ namespace AVEVA::AzureClient
 {
     // Block blob operations; the common blob operations, lifetime, cancellation and completion-token
     // contracts come from BlobClient.
-    class BlockBlobClient final : public BlobClient
+    class BlockBlobClient : public BlobClient
     {
       public:
         using UploadCompletionHandler =
@@ -262,20 +262,20 @@ namespace AVEVA::AzureClient
         friend class BlobContainerClient;
         BlockBlobClient(IHttpClient& httpClient, std::shared_ptr<const Private::BlobTarget> target);
 
-        void UploadBytesAsyncImpl(std::span<const std::byte> content,
+        virtual void UploadBytesAsyncImpl(std::span<const std::byte> content,
             const UploadBlockBlobOptions& options,
             UploadCompletionHandler completion,
             HttpRequestOptions requestOptions);
         // Moves the caller's std::string straight into the request body (no copy via a byte span).
-        void UploadStringAsyncImpl(std::string content,
+        virtual void UploadStringAsyncImpl(std::string content,
             const UploadBlockBlobOptions& options,
             UploadCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void UploadSharedAsyncImpl(std::shared_ptr<const std::vector<char>> content,
+        virtual void UploadSharedAsyncImpl(std::shared_ptr<const std::vector<char>> content,
             const UploadBlockBlobOptions& options,
             UploadCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void StageBlockSharedAsyncImpl(const std::string& blockId,
+        virtual void StageBlockSharedAsyncImpl(const std::string& blockId,
             std::shared_ptr<const std::vector<char>> content,
             const StageBlockOptions& options,
             StageBlockCompletionHandler completion,
@@ -284,12 +284,12 @@ namespace AVEVA::AzureClient
             const UploadBlockBlobOptions& options,
             UploadCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void StageBlockBytesAsyncImpl(const std::string& blockId,
+        virtual void StageBlockBytesAsyncImpl(const std::string& blockId,
             std::span<const std::byte> content,
             const StageBlockOptions& options,
             StageBlockCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void StageBlockStringAsyncImpl(const std::string& blockId,
+        virtual void StageBlockStringAsyncImpl(const std::string& blockId,
             const StageBlockOptions& options,
             std::string content,
             StageBlockCompletionHandler completion,
@@ -297,7 +297,7 @@ namespace AVEVA::AzureClient
         void SendStageBlockRequest(HttpRequest request,
             StageBlockCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void CommitBlockListAsyncImpl(const std::vector<std::string>& blockIds,
+        virtual void CommitBlockListAsyncImpl(const std::vector<std::string>& blockIds,
             const CommitBlockListOptions& options,
             CommitBlockListCompletionHandler completion,
             HttpRequestOptions requestOptions);

@@ -69,7 +69,7 @@ namespace AVEVA::AzureClient
     // Omitting the token yields a deferred, directly co_await-able operation, e.g. `co_await
     // client.GetBlobContainerClient(...);`. Overloads that also take an options struct exclude it from the defaulted
     // token via `requires`.
-    class BlobServiceClient final
+    class BlobServiceClient
     {
       public:
         BlobServiceClient(IHttpClient& httpClient, BlobServiceClientOptions options);
@@ -77,7 +77,7 @@ namespace AVEVA::AzureClient
         BlobServiceClient& operator=(const BlobServiceClient&) = delete;
         BlobServiceClient(BlobServiceClient&&) noexcept = default;
         BlobServiceClient& operator=(BlobServiceClient&&) noexcept = default;
-        ~BlobServiceClient() = default;
+        virtual ~BlobServiceClient() = default;
 
         // The executor associated with this client's underlying IHttpClient; usable as the default
         // executor argument for a boost::asio::default_completion_token_t, or to schedule work that
@@ -97,7 +97,7 @@ namespace AVEVA::AzureClient
         // (matching this client's executor_type, per boost::asio::default_completion_token).
         using DefaultCompletionToken = boost::asio::default_completion_token<executor_type>::type;
 
-        [[nodiscard]] BlobContainerClient GetBlobContainerClient(std::string containerName) const;
+        [[nodiscard]] virtual std::unique_ptr<BlobContainerClient> GetBlobContainerClient(std::string containerName) const;
 
       private:
         IHttpClient* m_httpClient = nullptr;

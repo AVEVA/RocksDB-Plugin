@@ -13,10 +13,13 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 class PageBlob final : public Core::BlobClient {
     // Declared first so that it is destroyed after the client that references its HTTP client.
     std::shared_ptr<ClientRuntime> m_runtime;
-    AzureClient::PageBlobClient m_client;
+    // Heap-owned so a polymorphic client (e.g. a test mock) is never sliced; m_client aliases it.
+    std::unique_ptr<AzureClient::PageBlobClient> m_owned;
+    AzureClient::PageBlobClient& m_client;
 
   public:
     PageBlob(std::shared_ptr<ClientRuntime> runtime, AzureClient::PageBlobClient client);
+    PageBlob(std::shared_ptr<ClientRuntime> runtime, std::unique_ptr<AzureClient::PageBlobClient> client);
 
     virtual int64_t GetSize() override;
     virtual void SetSize(int64_t size) override;

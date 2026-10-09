@@ -81,7 +81,7 @@ namespace AVEVA::AzureClient
         BlobClient& operator=(const BlobClient&) = delete;
         BlobClient(BlobClient&&) noexcept = default;
         BlobClient& operator=(BlobClient&&) noexcept = default;
-        ~BlobClient() = default;
+        virtual ~BlobClient() = default;
 
         // The executor of the underlying IHttpClient (the default executor for completions).
         using executor_type = IHttpClient::executor_type;
@@ -404,49 +404,51 @@ namespace AVEVA::AzureClient
         IHttpClient* m_httpClient = nullptr;
         std::shared_ptr<const Private::BlobTarget> m_target;
 
-        void DownloadAsyncImpl(DownloadBlobOptions options,
+        // Type-erased operation entry points. They are virtual so tests can substitute a mock: the public
+        // ...Async templates reach them through member pointers, which dispatch virtually.
+        virtual void DownloadAsyncImpl(DownloadBlobOptions options,
             DownloadCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void DownloadToStreamAsyncImpl(std::ostream& stream,
+        virtual void DownloadToStreamAsyncImpl(std::ostream& stream,
             DownloadToOptions options,
             DownloadToCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void DownloadToFileAsyncImpl(const std::filesystem::path& path,
+        virtual void DownloadToFileAsyncImpl(const std::filesystem::path& path,
             DownloadToOptions options,
             DownloadToCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void DownloadRangeToStreamAsyncImpl(std::ostream& stream,
+        virtual void DownloadRangeToStreamAsyncImpl(std::ostream& stream,
             DownloadBlobOptions options,
             DownloadToCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void DownloadRangeToSpanAsyncImpl(std::span<char> destination,
+        virtual void DownloadRangeToSpanAsyncImpl(std::span<char> destination,
             DownloadBlobOptions options,
             DownloadToCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void DownloadRangeToFileAsyncImpl(const std::filesystem::path& path,
+        virtual void DownloadRangeToFileAsyncImpl(const std::filesystem::path& path,
             DownloadBlobOptions options,
             DownloadToCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void DeleteAsyncImpl(const DeleteBlobOptions& options,
+        virtual void DeleteAsyncImpl(const DeleteBlobOptions& options,
             DeleteCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void DeleteIfExistsAsyncImpl(const DeleteBlobOptions& options,
+        virtual void DeleteIfExistsAsyncImpl(const DeleteBlobOptions& options,
             DeleteCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void GetPropertiesAsyncImpl(const GetBlobPropertiesOptions& options,
+        virtual void GetPropertiesAsyncImpl(const GetBlobPropertiesOptions& options,
             GetPropertiesCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void ExistsAsyncImpl(ExistsCompletionHandler completion, HttpRequestOptions requestOptions);
-        void SetMetadataAsyncImpl(const SetBlobMetadataOptions& options,
+        virtual void ExistsAsyncImpl(ExistsCompletionHandler completion, HttpRequestOptions requestOptions);
+        virtual void SetMetadataAsyncImpl(const SetBlobMetadataOptions& options,
             SetMetadataCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void AcquireLeaseAsyncImpl(AcquireLeaseOptions options,
+        virtual void AcquireLeaseAsyncImpl(AcquireLeaseOptions options,
             AcquireLeaseCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void RenewLeaseAsyncImpl(RenewLeaseOptions options,
+        virtual void RenewLeaseAsyncImpl(RenewLeaseOptions options,
             RenewLeaseCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void ReleaseLeaseAsyncImpl(ReleaseLeaseOptions options,
+        virtual void ReleaseLeaseAsyncImpl(ReleaseLeaseOptions options,
             ReleaseLeaseCompletionHandler completion,
             HttpRequestOptions requestOptions);
     };

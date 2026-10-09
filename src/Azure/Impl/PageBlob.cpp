@@ -23,7 +23,10 @@ AzureClient::Models::BlobByteRange ToRange(int64_t offset, int64_t length) {
 } // namespace
 
 PageBlob::PageBlob(std::shared_ptr<ClientRuntime> runtime, AzureClient::PageBlobClient client)
-    : m_runtime(std::move(runtime)), m_client(std::move(client)) {}
+    : PageBlob(std::move(runtime), std::make_unique<AzureClient::PageBlobClient>(std::move(client))) {}
+
+PageBlob::PageBlob(std::shared_ptr<ClientRuntime> runtime, std::unique_ptr<AzureClient::PageBlobClient> client)
+    : m_runtime(std::move(runtime)), m_owned(std::move(client)), m_client(*m_owned) {}
 
 int64_t PageBlob::GetSize() { return BlobHelpers::GetFileSize(m_client); }
 

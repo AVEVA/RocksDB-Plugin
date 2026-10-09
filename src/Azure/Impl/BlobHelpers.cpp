@@ -265,8 +265,8 @@ BlobHelpers::CreateServiceClient(const std::shared_ptr<ClientRuntime>& runtime, 
 
 std::shared_ptr<AzureClient::BlobContainerClient>
 BlobHelpers::GetContainerClient(const AzureClient::BlobServiceClient& blobServiceClient, const std::string& name) {
-    auto blobContainerClient =
-        std::make_shared<AzureClient::BlobContainerClient>(blobServiceClient.GetBlobContainerClient(name));
+    std::shared_ptr<AzureClient::BlobContainerClient> blobContainerClient =
+        blobServiceClient.GetBlobContainerClient(name);
     CreateContainerIfNotExists(*blobContainerClient);
     return blobContainerClient;
 }

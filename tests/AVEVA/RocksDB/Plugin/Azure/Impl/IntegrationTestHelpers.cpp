@@ -87,8 +87,7 @@ void AzureIntegrationTestBase::CreateContainerClient() {
         m_runtime = std::make_shared<ClientRuntime>(m_ioContext.Get());
         const auto serviceClient = BlobHelpers::CreateServiceClient(m_runtime, *m_credentials);
 
-        m_containerClient = std::make_shared<AzureClient::BlobContainerClient>(
-            serviceClient.GetBlobContainerClient(m_credentials->GetDbName()));
+        m_containerClient = serviceClient.GetBlobContainerClient(m_credentials->GetDbName());
 
         // Create container if it doesn't exist - this will test authentication
         TryCreateContainer();
@@ -135,8 +134,8 @@ void AzureIntegrationTestBase::HandleAuthenticationError(const RequestFailedExce
 void AzureIntegrationTestBase::CleanupBlob() {
     if (m_containerClient && !m_blobName.empty()) {
         try {
-            auto pageBlobClient = m_containerClient->GetPageBlobClient(m_blobName);
-            Unwrap(pageBlobClient.DeleteAsync(boost::asio::use_future).get());
+            const auto pageBlobClient = m_containerClient->GetPageBlobClient(m_blobName);
+            Unwrap(pageBlobClient->DeleteAsync(boost::asio::use_future).get());
         } catch (const std::exception& e) {
             BOOST_LOG_SEV(*m_logger, error) << e.what();
         } catch (...) {
@@ -146,14 +145,15 @@ void AzureIntegrationTestBase::CleanupBlob() {
 }
 
 std::shared_ptr<Core::BlobClient> AzureIntegrationTestBase::CreateEmptyBlob() {
-    auto pageBlobClient = m_containerClient->GetPageBlobClient(m_blobName);
-    Unwrap(pageBlobClient.CreateAsync(Configuration::PageBlob::DefaultSize, boost::asio::use_future).get());
-    BlobHelpers::SetFileSize(pageBlobClient, 0);
-    return std::make_shared<PageBlob>(m_runtime, std::move(pageBlobClient));
+    auto pageBlobClientPtr = m_containerClient->GetPageBlobClient(m_blobName);
+    Unwrap(pageBlobClientPtr->CreateAsync(Configuration::PageBlob::DefaultSize, boost::asio::use_future).get());
+    BlobHelpers::SetFileSize(*pageBlobClientPtr, 0);
+    return std::make_shared<PageBlob>(m_runtime, std::move(pageBlobClientPtr));
 }
 
 std::shared_ptr<Core::BlobClient> AzureIntegrationTestBase::CreateBlobWithData(const std::vector<char>& data) {
-    auto pageBlobClient = m_containerClient->GetPageBlobClient(m_blobName);
+    auto pageBlobClientPtr = m_containerClient->GetPageBlobClient(m_blobName);
+    auto& pageBlobClient = *pageBlobClientPtr;
 
     // Calculate capacity rounded to page size
     int64_t capacity = std::max<int64_t>(static_cast<int64_t>(data.size()), Configuration::PageBlob::DefaultSize);
@@ -179,11 +179,12 @@ std::shared_ptr<Core::BlobClient> AzureIntegrationTestBase::CreateBlobWithData(c
         BlobHelpers::SetFileSize(pageBlobClient, static_cast<int64_t>(data.size()));
     }
 
-    return std::make_shared<PageBlob>(m_runtime, std::move(pageBlobClient));
+    return std::make_shared<PageBlob>(m_runtime, std::move(pageBlobClientPtr));
 }
 
 std::vector<char> AzureIntegrationTestBase::DownloadBlobData(size_t maxSize) {
-    auto pageBlobClient = m_containerClient->GetPageBlobClient(m_blobName);
+    const auto pageBlobClientPtr = m_containerClient->GetPageBlobClient(m_blobName);
+    auto& pageBlobClient = *pageBlobClientPtr;
     const auto actualSize = BlobHelpers::GetFileSize(pageBlobClient);
 
     std::vector<char> data(std::min(static_cast<size_t>(actualSize), maxSize));

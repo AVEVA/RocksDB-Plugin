@@ -227,7 +227,8 @@ WriteableFileImpl BlobFilesystemImpl::CreateWriteableFile(const std::string& fil
     const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
     const auto& container = GetContainer(prefix);
 
-    auto client = container->GetPageBlobClient(std::string(realPath));
+    auto clientPtr = container->GetPageBlobClient(std::string(realPath));
+    auto& client = *clientPtr;
     const auto created = BlobHelpers::CreateIfNotExists(client, initialSize);
 
     // A freshly created blob has a known size and capacity; only a pre-existing one needs to be inspected.
@@ -247,7 +248,7 @@ WriteableFileImpl BlobFilesystemImpl::CreateWriteableFile(const std::string& fil
         }
     }
 
-    auto blobClient = std::make_unique<PageBlob>(m_runtime, std::move(client));
+    auto blobClient = std::make_unique<PageBlob>(m_runtime, std::move(clientPtr));
     return WriteableFileImpl{realPath,
                              std::move(blobClient),
                              FindCache(m_fileCaches, prefix),
@@ -262,10 +263,10 @@ ReadWriteFileImpl BlobFilesystemImpl::CreateReadWriteFile(const std::string& fil
     const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
     const auto& container = GetContainer(prefix);
 
-    auto client = container->GetPageBlobClient(std::string(realPath));
-    BlobHelpers::CreateIfNotExists(client, Configuration::PageBlob::DefaultSize);
+    auto clientPtr = container->GetPageBlobClient(std::string(realPath));
+    BlobHelpers::CreateIfNotExists(*clientPtr, Configuration::PageBlob::DefaultSize);
 
-    auto blobClient = std::make_shared<PageBlob>(m_runtime, std::move(client));
+    auto blobClient = std::make_shared<PageBlob>(m_runtime, std::move(clientPtr));
 
     return ReadWriteFileImpl{realPath, std::move(blobClient), FindCache(m_fileCaches, prefix), m_logger};
 }
@@ -290,11 +291,12 @@ WriteableFileImpl BlobFilesystemImpl::ReuseWritableFile(const std::string& fileP
     const auto [initialSize, bufferSize] = SizingFor(filePath, m_dataFileInitialSize, m_dataFileBufferSize);
 
     // TODO: figure out what the intent here is for now just delete and recreate
-    auto client = container->GetPageBlobClient(std::string(realPath));
+    auto clientPtr = container->GetPageBlobClient(std::string(realPath));
+    auto& client = *clientPtr;
     UnwrapResponse(BlockOn(client.get_executor(), client.DeleteIfExistsAsync(boost::asio::use_future)));
     BlobHelpers::CreateIfNotExists(client, initialSize);
 
-    auto blobClient = std::make_shared<PageBlob>(m_runtime, std::move(client));
+    auto blobClient = std::make_shared<PageBlob>(m_runtime, std::move(clientPtr));
     return WriteableFileImpl{realPath,
                              std::move(blobClient),
                              FindCache(m_fileCaches, prefix),
@@ -310,10 +312,10 @@ LoggerImpl BlobFilesystemImpl::CreateLogger(const std::string& filePath, const i
     const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
     const auto& container = GetContainer(prefix);
 
-    auto client = container->GetPageBlobClient(std::string(realPath));
-    BlobHelpers::CreateIfNotExists(client, Configuration::PageBlob::DefaultSize);
+    auto clientPtr = container->GetPageBlobClient(std::string(realPath));
+    BlobHelpers::CreateIfNotExists(*clientPtr, Configuration::PageBlob::DefaultSize);
 
-    auto blobClient = std::make_shared<PageBlob>(m_runtime, std::move(client));
+    auto blobClient = std::make_shared<PageBlob>(m_runtime, std::move(clientPtr));
     auto impl = std::make_unique<WriteableFileImpl>(realPath, std::move(blobClient), nullptr, m_logger,
                                                     Configuration::PageBlob::DefaultSize);
     return LoggerImpl{
@@ -328,7 +330,7 @@ std::shared_ptr<LockFileImpl> BlobFilesystemImpl::LockFile(const std::string& fi
     const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
     const auto& container = GetContainer(prefix);
 
-    auto client = std::make_unique<AzureClient::PageBlobClient>(container->GetPageBlobClient(std::string(realPath)));
+    auto client = container->GetPageBlobClient(std::string(realPath));
     BlobHelpers::CreateIfNotExists(*client, Configuration::PageBlob::DefaultSize);
     auto lockFile = std::make_shared<LockFileImpl>(m_runtime, std::move(client), Configuration::LeaseLength, m_logger,
                                                    std::string(realPath));
@@ -373,7 +375,8 @@ bool BlobFilesystemImpl::FileExists(const std::string& name) {
     const auto [prefix, realPath] = StorageAccount::StripPrefix(name);
     const auto& container = GetContainer(prefix);
 
-    auto client = container->GetPageBlobClient(std::string(realPath));
+    const auto clientPtr = container->GetPageBlobClient(std::string(realPath));
+    auto& client = *clientPtr;
     auto props = BlockOn(client.get_executor(), client.GetPropertiesAsync(boost::asio::use_future));
     if (props.has_value()) {
         return true;
@@ -470,7 +473,8 @@ bool BlobFilesystemImpl::DeleteFile(const std::string& filePath) const {
 
     const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
     const auto& container = GetContainer(prefix);
-    auto client = container->GetPageBlobClient(std::string(realPath));
+    const auto clientPtr = container->GetPageBlobClient(std::string(realPath));
+    auto& client = *clientPtr;
     const auto res =
         UnwrapResponse(BlockOn(client.get_executor(), client.DeleteIfExistsAsync(boost::asio::use_future)));
 
@@ -504,7 +508,7 @@ size_t BlobFilesystemImpl::DeleteDir(const std::string& directoryPath) const {
     // A sliding window: as soon as the oldest delete finishes, the next one starts, so one slow request does not
     // hold back a whole batch.
     struct PendingDelete {
-        AzureClient::PageBlobClient client;
+        std::unique_ptr<AzureClient::PageBlobClient> client;
         std::future<
             std::expected<AzureClient::Response<AzureClient::Models::DeleteBlobResult>, AzureClient::BlobStorageError>>
             result;
@@ -513,7 +517,7 @@ size_t BlobFilesystemImpl::DeleteDir(const std::string& directoryPath) const {
     std::deque<PendingDelete> window;
     const auto finishOldest = [&] {
         auto& oldest = window.front();
-        auto result = BlockOn(oldest.client.get_executor(), std::move(oldest.result));
+        auto result = BlockOn(oldest.client->get_executor(), std::move(oldest.result));
         if (!result.has_value()) {
             BOOST_LOG_SEV(*m_logger, severity_level::warning)
                 << "Failed to delete blob '" << blobs[oldest.index] << "': " << result.error().Message;
@@ -528,7 +532,7 @@ size_t BlobFilesystemImpl::DeleteDir(const std::string& directoryPath) const {
             finishOldest();
         }
         auto client = container->GetPageBlobClient(blobs[i]);
-        auto result = client.DeleteIfExistsAsync(boost::asio::use_future);
+        auto result = client->DeleteIfExistsAsync(boost::asio::use_future);
         window.push_back(PendingDelete{std::move(client), std::move(result), i});
     }
     while (!window.empty()) {
@@ -551,7 +555,8 @@ void BlobFilesystemImpl::Truncate(const std::string& filePath, int64_t size) con
     const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
     const auto& container = GetContainer(prefix);
 
-    auto client = container->GetPageBlobClient(std::string(realPath));
+    const auto clientPtr = container->GetPageBlobClient(std::string(realPath));
+    auto& client = *clientPtr;
     const auto fileSize = BlobHelpers::GetFileSize(client);
     if (fileSize > size) {
         BlobHelpers::SetFileSize(client, size);
@@ -569,8 +574,8 @@ int64_t BlobFilesystemImpl::GetFileSize(const std::string& filePath) const {
     const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
     const auto& container = GetContainer(prefix);
 
-    auto client = container->GetPageBlobClient(std::string(realPath));
-    return BlobHelpers::GetFileSize(client);
+    const auto client = container->GetPageBlobClient(std::string(realPath));
+    return BlobHelpers::GetFileSize(*client);
 }
 
 uint64_t BlobFilesystemImpl::GetFileModificationTime(const std::string& filePath) const {
@@ -579,7 +584,8 @@ uint64_t BlobFilesystemImpl::GetFileModificationTime(const std::string& filePath
     const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
     const auto& container = GetContainer(prefix);
 
-    auto client = container->GetPageBlobClient(std::string(realPath));
+    const auto clientPtr = container->GetPageBlobClient(std::string(realPath));
+    auto& client = *clientPtr;
     const auto props = Unwrap(BlockOn(client.get_executor(), client.GetPropertiesAsync(boost::asio::use_future)));
     return static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::seconds>(props.LastModified.time_since_epoch()).count());
@@ -612,8 +618,10 @@ void BlobFilesystemImpl::RenameFile(const std::string& fromFilePath, const std::
 
     const auto& container = GetContainer(prefixAccountTo);
 
-    auto srcClient = container->GetPageBlobClient(std::string(realPathFrom));
-    auto destClient = container->GetPageBlobClient(std::string(realPathTo));
+    const auto srcClientPtr = container->GetPageBlobClient(std::string(realPathFrom));
+    const auto destClientPtr = container->GetPageBlobClient(std::string(realPathTo));
+    auto& srcClient = *srcClientPtr;
+    auto& destClient = *destClientPtr;
 
     // TODO: Check if there is already a file with this name
     const auto [size, cap, etag] = BlobHelpers::GetBlobInfo(srcClient);

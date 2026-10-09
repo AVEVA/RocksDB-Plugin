@@ -156,25 +156,25 @@ namespace AVEVA::AzureClient
             requestOptions);
     }
 
-    BlobClient BlobContainerClient::GetBlobClient(std::string blobName) const
+    std::unique_ptr<BlobClient> BlobContainerClient::GetBlobClient(std::string blobName) const
     {
-        return BlobClient{*m_httpClient,
+        return std::unique_ptr<BlobClient>(new BlobClient{*m_httpClient,
             std::make_shared<const Private::BlobTarget>(
-                Private::MakeBlobTarget(m_target->Connection, m_target->ContainerName, std::move(blobName)))};
+                Private::MakeBlobTarget(m_target->Connection, m_target->ContainerName, std::move(blobName)))});
     }
 
-    BlockBlobClient BlobContainerClient::GetBlockBlobClient(std::string blobName) const
+    std::unique_ptr<BlockBlobClient> BlobContainerClient::GetBlockBlobClient(std::string blobName) const
     {
-        return BlockBlobClient{*m_httpClient,
+        return std::unique_ptr<BlockBlobClient>(new BlockBlobClient{*m_httpClient,
             std::make_shared<const Private::BlobTarget>(
-                Private::MakeBlobTarget(m_target->Connection, m_target->ContainerName, std::move(blobName)))};
+                Private::MakeBlobTarget(m_target->Connection, m_target->ContainerName, std::move(blobName)))});
     }
 
-    PageBlobClient BlobContainerClient::GetPageBlobClient(std::string blobName) const
+    std::unique_ptr<PageBlobClient> BlobContainerClient::GetPageBlobClient(std::string blobName) const
     {
-        return PageBlobClient{*m_httpClient,
+        return std::unique_ptr<PageBlobClient>(new PageBlobClient{*m_httpClient,
             std::make_shared<const Private::BlobTarget>(
-                Private::MakeBlobTarget(m_target->Connection, m_target->ContainerName, std::move(blobName)))};
+                Private::MakeBlobTarget(m_target->Connection, m_target->ContainerName, std::move(blobName)))});
     }
 
 } // namespace AVEVA::AzureClient

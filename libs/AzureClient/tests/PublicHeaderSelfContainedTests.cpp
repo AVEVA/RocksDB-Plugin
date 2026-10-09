@@ -165,7 +165,8 @@ TEST(PublicHeaderSelfContainedTests, BlobContainerClient)
         return c.ListBlobsAsync(std::forward<decltype(token)>(token));
     });
 
-    BlockBlobClient child = client.GetBlockBlobClient("child");
+    const auto childPtr = client.GetBlockBlobClient("child");
+    BlockBlobClient& child = *childPtr;
     ExerciseAllTokenKinds(http,
         child,
         [](BlockBlobClient& c, auto&& token)

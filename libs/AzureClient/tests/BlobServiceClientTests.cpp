@@ -86,8 +86,10 @@ TEST(BlobServiceClientTests, DerivedClientsSignWithTheSharedConnectionSigner)
         BlobServiceClientOptions{.ServiceEndpoint = "https://storageaccount.blob.core.windows.net",
             .SharedKey = {.AccountName = "storageaccount", .AccountKey = "MDEyMzQ1Njc4OWFiY2RlZg=="}}};
 
-    AVEVA::AzureClient::BlobContainerClient container = service.GetBlobContainerClient("images");
-    AVEVA::AzureClient::BlockBlobClient blob = container.GetBlockBlobClient("folder/photo.png");
+    const auto containerPtr = service.GetBlobContainerClient("images");
+    AVEVA::AzureClient::BlobContainerClient& container = *containerPtr;
+    const auto blobPtr = container.GetBlockBlobClient("folder/photo.png");
+    AVEVA::AzureClient::BlockBlobClient& blob = *blobPtr;
 
     int completions = 0;
     container.CreateAsync([&](auto result)
@@ -118,7 +120,7 @@ TEST(BlobServiceClientTests, GetBlobContainerClient_ValidatesTheContainerName)
     BlobServiceClient service{httpClient, BuildOptions()};
     EXPECT_THROW(static_cast<void>(service.GetBlobContainerClient("Invalid_Name")), std::invalid_argument);
     const auto container = service.GetBlobContainerClient("valid-name");
-    EXPECT_THROW(static_cast<void>(container.GetBlockBlobClient("")), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(container->GetBlockBlobClient("")), std::invalid_argument);
 }
 
 TEST(BlobServiceClientTests, OptionsDefaultApiVersionMatchesSharedDefault)

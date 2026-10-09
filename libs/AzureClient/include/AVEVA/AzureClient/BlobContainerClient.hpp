@@ -72,7 +72,7 @@ namespace AVEVA::AzureClient
     // use_future, use_awaitable, ...) and completes with std::expected<Response<T>, BlobStorageError>.
     // Omitting the token yields a deferred, directly co_await-able operation, e.g. `co_await client.ListBlobsAsync();`.
     // Overloads that also take an options struct exclude it from the defaulted token via `requires`.
-    class BlobContainerClient final
+    class BlobContainerClient
     {
       public:
         using CreateCompletionHandler =
@@ -85,7 +85,7 @@ namespace AVEVA::AzureClient
         BlobContainerClient& operator=(const BlobContainerClient&) = delete;
         BlobContainerClient(BlobContainerClient&&) noexcept = default;
         BlobContainerClient& operator=(BlobContainerClient&&) noexcept = default;
-        ~BlobContainerClient() = default;
+        virtual ~BlobContainerClient() = default;
 
         // The executor associated with this client's underlying IHttpClient; usable as the default
         // executor argument for a boost::asio::default_completion_token_t, or to schedule work that
@@ -181,9 +181,9 @@ namespace AVEVA::AzureClient
                 std::move(options));
         }
 
-        [[nodiscard]] BlobClient GetBlobClient(std::string blobName) const;
-        [[nodiscard]] BlockBlobClient GetBlockBlobClient(std::string blobName) const;
-        [[nodiscard]] PageBlobClient GetPageBlobClient(std::string blobName) const;
+        [[nodiscard]] virtual std::unique_ptr<BlobClient> GetBlobClient(std::string blobName) const;
+        [[nodiscard]] virtual std::unique_ptr<BlockBlobClient> GetBlockBlobClient(std::string blobName) const;
+        [[nodiscard]] virtual std::unique_ptr<PageBlobClient> GetPageBlobClient(std::string blobName) const;
 
       private:
         friend class BlobServiceClient;
@@ -192,10 +192,11 @@ namespace AVEVA::AzureClient
             std::shared_ptr<const Private::ConnectionState> connection,
             std::string containerName);
 
-        void CreateAsyncImpl(const CreateBlobContainerOptions& options,
+        // Type-erased operation entry points; virtual so tests can substitute a mock (see BlobClient).
+        virtual void CreateAsyncImpl(const CreateBlobContainerOptions& options,
             CreateCompletionHandler completion,
             HttpRequestOptions requestOptions = {});
-        void ListBlobsAsyncImpl(ListBlobsOptions options,
+        virtual void ListBlobsAsyncImpl(ListBlobsOptions options,
             ListBlobsCompletionHandler completion,
             HttpRequestOptions requestOptions = {});
         static void ListBlobsPageAsync(IHttpClient& httpClient,
@@ -203,7 +204,7 @@ namespace AVEVA::AzureClient
             ListBlobsOptions options,
             ListBlobsCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void CreateIfNotExistsAsyncImpl(const CreateBlobContainerOptions& options,
+        virtual void CreateIfNotExistsAsyncImpl(const CreateBlobContainerOptions& options,
             CreateCompletionHandler completion,
             HttpRequestOptions requestOptions = {});
         IHttpClient* m_httpClient = nullptr;

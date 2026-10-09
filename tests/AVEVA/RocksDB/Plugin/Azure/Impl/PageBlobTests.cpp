@@ -3,6 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.hpp"
 
+#include "PageBlobClientMock.hpp"
 #include "FakeHttpPump.hpp"
 #include "FakeHttpClient.hpp"
 #include "TestFixtures.hpp"
@@ -28,6 +29,7 @@ using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime;
 using AVEVA::RocksDB::Plugin::Azure::Impl::PageBlob;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::PageBlobClientMock;
 
 namespace {
 class PageBlobTests : public ::testing::Test {
@@ -100,4 +102,54 @@ TEST_F(PageBlobTests, DownloadToBufferWithZeroLengthReturnsZeroWithoutRequest) {
     std::vector<char> buffer(8);
     EXPECT_EQ(0, m_blob->DownloadTo(std::span<char>(buffer), 0, 0));
     EXPECT_TRUE(m_httpClient.NoRequestMade());
+}
+
+namespace {
+class PageBlobMockedClientTests : public ::testing::Test {
+  protected:
+    void SetUp() override {
+        auto mock = std::make_unique<::testing::StrictMock<PageBlobClientMock>>(
+            m_httpClient, MakeBlobClientOptions("files", "000001.sst"));
+        m_mock = mock.get();
+        m_blob = std::make_unique<PageBlob>(std::make_shared<ClientRuntime>(m_context), std::move(mock));
+    }
+
+    boost::asio::io_context m_context;
+    FakeHttpClient m_httpClient;
+    ::testing::StrictMock<PageBlobClientMock>* m_mock = nullptr;
+    std::unique_ptr<PageBlob> m_blob;
+};
+} // namespace
+
+TEST_F(PageBlobMockedClientTests, GetEtagReadsThePropertiesReturnedByTheMock) {
+    EXPECT_CALL(*m_mock, GetPropertiesAsyncImpl)
+        .WillOnce([](const auto&, auto completion, auto) {
+            AVEVA::AzureClient::Models::BlobProperties properties;
+            properties.ETag = "\"mocked\"";
+            completion(AVEVA::AzureClient::Response<AVEVA::AzureClient::Models::BlobProperties>(
+                std::move(properties), HttpResponse{200, {}, {}}));
+        });
+
+    EXPECT_EQ("\"mocked\"", m_blob->GetEtag());
+    EXPECT_TRUE(m_httpClient.NoRequestMade());
+}
+
+TEST_F(PageBlobMockedClientTests, SetCapacityResizesTheBlobToTheRequestedSize) {
+    EXPECT_CALL(*m_mock, ResizeAsyncImpl(1024U, ::testing::_, ::testing::_, ::testing::_))
+        .WillOnce([](auto, const auto&, auto completion, auto) {
+            completion(AVEVA::AzureClient::Response<AVEVA::AzureClient::Models::ResizePageBlobResult>(
+                {}, HttpResponse{200, {}, {}}));
+        });
+
+    m_blob->SetCapacity(1024);
+    EXPECT_TRUE(m_httpClient.NoRequestMade());
+}
+
+TEST_F(PageBlobMockedClientTests, StorageFailuresFromTheMockSurfaceAsExceptions) {
+    EXPECT_CALL(*m_mock, GetPropertiesAsyncImpl)
+        .WillOnce([](const auto&, auto completion, auto) {
+            completion(std::unexpected(AVEVA::AzureClient::BlobStorageError{}));
+        });
+
+    EXPECT_ANY_THROW((void)m_blob->GetEtag());
 }

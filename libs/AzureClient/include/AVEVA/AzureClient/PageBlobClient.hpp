@@ -34,7 +34,7 @@ namespace AVEVA::AzureClient
     // Alignment: every `offset`, `length`, `contentLength` and `newSize` is a byte value and must be a
     // multiple of PageBlobPageSize (512). Misaligned values are rejected before any request is sent: the
     // completion receives std::errc::invalid_argument.
-    class PageBlobClient final : public BlobClient
+    class PageBlobClient : public BlobClient
     {
       public:
         using CreateCompletionHandler =
@@ -242,16 +242,16 @@ namespace AVEVA::AzureClient
         friend class BlobContainerClient;
         PageBlobClient(IHttpClient& httpClient, std::shared_ptr<const Private::BlobTarget> target);
 
-        void CreateAsyncImpl(std::uint64_t contentLength,
+        virtual void CreateAsyncImpl(std::uint64_t contentLength,
             const CreatePageBlobOptions& options,
             CreateCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void UploadPagesBytesAsyncImpl(std::uint64_t offset,
+        virtual void UploadPagesBytesAsyncImpl(std::uint64_t offset,
             std::span<const std::byte> content,
             const UploadPagesOptions& options,
             UploadPagesCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void UploadPagesSharedAsyncImpl(std::uint64_t offset,
+        virtual void UploadPagesSharedAsyncImpl(std::uint64_t offset,
             std::shared_ptr<const std::vector<char>> content,
             const UploadPagesOptions& options,
             UploadPagesCompletionHandler completion,
@@ -265,7 +265,7 @@ namespace AVEVA::AzureClient
             UploadPagesCompletionHandler completion,
             HttpRequestOptions requestOptions);
         // Moves the caller's std::string straight into the request body (no copy via a byte span).
-        void UploadPagesStringAsyncImpl(std::uint64_t offset,
+        virtual void UploadPagesStringAsyncImpl(std::uint64_t offset,
             std::string content,
             const UploadPagesOptions& options,
             UploadPagesCompletionHandler completion,
@@ -274,12 +274,12 @@ namespace AVEVA::AzureClient
             const UploadPagesOptions& options,
             UploadPagesCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void ClearPagesAsyncImpl(std::uint64_t offset,
+        virtual void ClearPagesAsyncImpl(std::uint64_t offset,
             std::uint64_t length,
             const ClearPagesOptions& options,
             ClearPagesCompletionHandler completion,
             HttpRequestOptions requestOptions);
-        void ResizeAsyncImpl(std::uint64_t newSize,
+        virtual void ResizeAsyncImpl(std::uint64_t newSize,
             const ResizePageBlobOptions& options,
             ResizeCompletionHandler completion,
             HttpRequestOptions requestOptions);

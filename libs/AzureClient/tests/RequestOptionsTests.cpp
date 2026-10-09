@@ -154,11 +154,11 @@ TEST(RequestOptionsTests, ContainerDefaultsApplyToContainerAndChildBlobOperation
     httpClient.Poll();
     EXPECT_EQ(httpClient.LastRequestOptions().GetTimeout(), 777ms);
 
-    auto blob = container.GetBlockBlobClient("child");
-    blob.DeleteAsync(IgnoreResult);
+    const auto blob = container.GetBlockBlobClient("child");
+    blob->DeleteAsync(IgnoreResult);
     httpClient.Poll();
     EXPECT_EQ(httpClient.LastRequestOptions().GetTimeout(), 777ms);
-    EXPECT_EQ(blob.GetDefaultRequestOptions().GetResponseBodyLimit(), 5U);
+    EXPECT_EQ(blob->GetDefaultRequestOptions().GetResponseBodyLimit(), 5U);
 
     container.ListBlobsAsync(WithRequestOptions(MakeRequestOptions(10ms, 6), IgnoreResult));
     httpClient.Poll();

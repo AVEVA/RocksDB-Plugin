@@ -23,8 +23,9 @@ namespace AVEVA::AzureClient
         return m_connection->DefaultRequestOptions;
     }
 
-    BlobContainerClient BlobServiceClient::GetBlobContainerClient(std::string containerName) const
+    std::unique_ptr<BlobContainerClient> BlobServiceClient::GetBlobContainerClient(std::string containerName) const
     {
-        return BlobContainerClient{*m_httpClient, m_connection, std::move(containerName)};
+        return std::unique_ptr<BlobContainerClient>(
+            new BlobContainerClient{*m_httpClient, m_connection, std::move(containerName)});
     }
 } // namespace AVEVA::AzureClient

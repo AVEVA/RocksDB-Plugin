@@ -291,7 +291,7 @@ namespace
 
     struct ConcurrentBlobData
     {
-        std::vector<BlockBlobClient> Clients;
+        std::vector<std::unique_ptr<BlockBlobClient>> Clients;
         std::vector<std::string> Contents;
     };
 
@@ -310,7 +310,7 @@ namespace
         return data;
     }
 
-    void UploadAllBlobs(std::vector<BlockBlobClient>& clients,
+    void UploadAllBlobs(std::vector<std::unique_ptr<BlockBlobClient>>& clients,
         const std::vector<std::string>& contents,
         const UploadBlockBlobOptions& uploadOptions)
     {
@@ -318,7 +318,7 @@ namespace
         uploads.reserve(clients.size());
         for (std::size_t i = 0; i < clients.size(); ++i)
         {
-            uploads.push_back(clients.at(i).UploadAsync(contents.at(i), uploadOptions, boost::asio::use_future));
+            uploads.push_back(clients.at(i)->UploadAsync(contents.at(i), uploadOptions, boost::asio::use_future));
         }
         for (auto& upload : uploads)
         {
@@ -327,7 +327,7 @@ namespace
         }
     }
 
-    void DownloadAndVerifyAllBlobs(std::vector<BlockBlobClient>& clients,
+    void DownloadAndVerifyAllBlobs(std::vector<std::unique_ptr<BlockBlobClient>>& clients,
         const std::vector<std::string>& contents,
         const DownloadToOptions& downloadOptions)
     {
@@ -336,7 +336,7 @@ namespace
         downloads.reserve(clients.size());
         for (std::size_t i = 0; i < clients.size(); ++i)
         {
-            downloads.push_back(clients.at(i).DownloadToAsync(sinks.at(i), downloadOptions, boost::asio::use_future));
+            downloads.push_back(clients.at(i)->DownloadToAsync(sinks.at(i), downloadOptions, boost::asio::use_future));
         }
         for (std::size_t i = 0; i < clients.size(); ++i)
         {
@@ -373,7 +373,8 @@ TEST(MultiThreadedExecutorTests, ClientsAreSafeToInitiateFromManyThreads)
 
     ThreadPoolBlobService service;
     const BlobContainerClient container{service, SharedKeyContainerOptions()};
-    BlockBlobClient shared = container.GetBlockBlobClient("shared");
+    const auto sharedPtr = container.GetBlockBlobClient("shared");
+    BlockBlobClient& shared = *sharedPtr;
     ASSERT_TRUE(shared.UploadAsync(std::string{"payload"}, boost::asio::use_future).get().has_value());
 
     std::atomic<std::size_t> succeeded{0};
@@ -385,7 +386,8 @@ TEST(MultiThreadedExecutorTests, ClientsAreSafeToInitiateFromManyThreads)
         {
             // Mix the shared client with per-thread derived clients so both the shared target and
             // the shared signer are used concurrently.
-            BlockBlobClient own = container.GetBlockBlobClient("shared");
+            const auto ownPtr = container.GetBlockBlobClient("shared");
+            BlockBlobClient& own = *ownPtr;
             for (std::size_t call = 0; call < CallsPerThread; ++call)
             {
                 BlockBlobClient& client = (call + t) % 2 == 0 ? shared : own;
