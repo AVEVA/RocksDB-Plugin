@@ -193,21 +193,34 @@ void WriteableFileImpl::StartFlush(const bool includePartialPage) {
     std::copy(m_buffer.begin() + fullBytes, m_buffer.begin() + m_bufferOffset, next.begin());
     std::swap(m_buffer, next);
     next.resize(static_cast<size_t>(bytesToWrite));
-    auto* const raw = new std::vector<char>(std::move(next));
-    const std::shared_ptr<const std::vector<char>> payload(raw, [tracker = m_uploads](const std::vector<char>* done) {
-        auto buffer = std::move(*const_cast<std::vector<char>*>(done));
-        delete done;
-        std::scoped_lock lock(tracker->Mutex);
-        if (tracker->Free.size() < MaxInFlightUploads) {
-            tracker->Free.push_back(std::move(buffer));
+
+    // Owns an upload payload and hands its storage back to the pool when the last reference is released.
+    struct PooledPayload {
+        std::vector<char> Data;
+        std::shared_ptr<UploadTracker> Pool;
+
+        PooledPayload(std::vector<char> data, std::shared_ptr<UploadTracker> pool)
+            : Data(std::move(data)), Pool(std::move(pool)) {}
+        PooledPayload(const PooledPayload&) = delete;
+        PooledPayload& operator=(const PooledPayload&) = delete;
+        ~PooledPayload() {
+            if (!Pool) {
+                return;
+            }
+            std::scoped_lock lock(Pool->Mutex);
+            if (Pool->Free.size() < MaxInFlightUploads) {
+                Pool->Free.push_back(std::move(Data));
+            }
         }
-    });
+    };
+    const auto owner = std::make_shared<PooledPayload>(std::move(next), m_uploads);
     try {
-        StartUpload(payload, m_lastPageOffset);
+        StartUpload(std::shared_ptr<const std::vector<char>>(owner, &owner->Data), m_lastPageOffset);
     } catch (...) {
         // Nothing was accepted, so the data stays buffered for a retry.
-        raw->resize(static_cast<size_t>(m_bufferSize));
-        std::swap(m_buffer, *raw);
+        owner->Data.resize(static_cast<size_t>(m_bufferSize));
+        std::swap(m_buffer, owner->Data);
+        owner->Pool.reset();
         throw;
     }
     BOOST_LOG_SEV(*m_logger, debug) << "Flushed " << bytesToWrite << " bytes to writeable file '" << m_name << "'.";
