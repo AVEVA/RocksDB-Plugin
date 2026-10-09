@@ -16,6 +16,8 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <exception>
+#include <future>
 #include <memory>
 #include <thread>
 
@@ -198,4 +200,55 @@ TEST_F(LockFileImplTests, UnlockReleasesTheLeaseAndStopsFurtherRenewal) {
     EXPECT_FALSE(lock->RenewIfLocked());
     EXPECT_THROW(lock->Unlock(), std::runtime_error);
     EXPECT_EQ(m_httpClient.RequestCount(), 2U);
+}
+
+namespace {
+struct AsyncRenewOutcome {
+    std::exception_ptr Error;
+    bool Renewed = false;
+};
+
+AsyncRenewOutcome RenewAndWait(const LockFileImpl& lock) {
+    std::promise<AsyncRenewOutcome> outcome;
+    auto future = outcome.get_future();
+    lock.RenewAsync([&outcome](std::exception_ptr error, const bool renewed) {
+        outcome.set_value(AsyncRenewOutcome{std::move(error), renewed});
+    });
+    EXPECT_EQ(future.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    return future.get();
+}
+} // namespace
+
+TEST_F(LockFileImplTests, RenewAsyncBeforeLockSendsNothingAndReportsNoRenewal) {
+    auto lock = CreateLock(std::chrono::seconds(20));
+    const auto outcome = RenewAndWait(*lock);
+    EXPECT_FALSE(outcome.Error);
+    EXPECT_FALSE(outcome.Renewed);
+    EXPECT_EQ(m_httpClient.RequestCount(), 0U);
+}
+
+TEST_F(LockFileImplTests, RenewAsyncSendsTheAcquiredLeaseIdAndReportsSuccess) {
+    m_httpClient.EnqueueResponse(Acquired());
+    m_httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders({{"x-ms-lease-id", "lease"}}), ""});
+
+    auto lock = CreateLock(std::chrono::seconds(20));
+    ASSERT_TRUE(lock->Lock());
+    const auto outcome = RenewAndWait(*lock);
+
+    EXPECT_FALSE(outcome.Error);
+    EXPECT_TRUE(outcome.Renewed);
+    ASSERT_EQ(m_httpClient.RequestCount(), 2U);
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(m_httpClient.RequestAt(1).Request, "x-ms-lease-id"), ProposedLeaseId(0));
+}
+
+TEST_F(LockFileImplTests, RenewAsyncReportsAFailedRenewalAsAnError) {
+    m_httpClient.EnqueueResponse(Acquired());
+    m_httpClient.EnqueueResponse(MakeAzureErrorResponse(409, "LeaseIdMismatchWithLeaseOperation", "mismatch", "r2"));
+
+    auto lock = CreateLock(std::chrono::seconds(20));
+    ASSERT_TRUE(lock->Lock());
+    const auto outcome = RenewAndWait(*lock);
+
+    ASSERT_TRUE(outcome.Error);
+    EXPECT_THROW(std::rethrow_exception(outcome.Error), RequestFailedException);
 }

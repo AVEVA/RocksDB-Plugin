@@ -8,6 +8,8 @@
 #include <boost/log/trivial.hpp>
 #include <atomic>
 #include <chrono>
+#include <exception>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -31,6 +33,8 @@ class LockFileImpl
 
     [[nodiscard]] std::optional<std::string> CurrentLeaseId() const;
     void RenewLease(const std::string& leaseId) const;
+    // Throws when the lease has expired or its renewal deadline has passed; otherwise returns the time left to renew.
+    [[nodiscard]] std::chrono::steady_clock::duration RenewalBudget() const;
 
   public:
     LockFileImpl(std::shared_ptr<ClientRuntime> runtime, std::unique_ptr<AzureClient::PageBlobClient> file,
@@ -43,6 +47,13 @@ class LockFileImpl
     void Renew() const;
     // Renews the lease unless it was released concurrently; returns false when there was nothing to renew.
     [[nodiscard]] bool RenewIfLocked() const;
+    // Called once per RenewAsync with the failure (null on success) and whether a renewal happened (false when the
+    // lease was not held or was released concurrently). Runs on the host io_context, or inline in RenewAsync when the
+    // renewal cannot be started, so it must not block.
+    using RenewCallback = std::function<void(std::exception_ptr, bool)>;
+    // Starts a renewal without blocking, so many leases can renew at once. The request is cancelled at the renewal
+    // deadline. The caller must keep this object alive until the callback has run.
+    void RenewAsync(RenewCallback callback) const;
     void Unlock();
 
     [[nodiscard]] std::chrono::seconds TimeSinceLastRenewal() const;

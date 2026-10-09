@@ -10,6 +10,8 @@
 
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/post.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/asio/use_future.hpp>
 #include <boost/scope/scope_exit.hpp>
 #include <boost/uuid/random_generator.hpp>
@@ -158,7 +160,7 @@ std::optional<std::string> LockFileImpl::CurrentLeaseId() const {
     return m_leaseId;
 }
 
-void LockFileImpl::RenewLease(const std::string& leaseId) const {
+std::chrono::steady_clock::duration LockFileImpl::RenewalBudget() const {
     if (HasExceededLeaseLength()) {
         const auto timeSinceRenewal = TimeSinceLastRenewal();
         throw std::runtime_error(
@@ -178,6 +180,76 @@ void LockFileImpl::RenewLease(const std::string& leaseId) const {
                                  "': the renewal deadline has passed (lease length: " +
                                  std::to_string(m_leaseLength.count()) + " seconds)");
     }
+    return budget;
+}
+
+void LockFileImpl::RenewAsync(RenewCallback callback) const {
+    const auto leaseId = CurrentLeaseId();
+    if (!leaseId.has_value()) {
+        callback(nullptr, false);
+        return;
+    }
+    std::chrono::steady_clock::duration budget;
+    try {
+        budget = RenewalBudget();
+    } catch (...) {
+        callback(std::current_exception(), true);
+        return;
+    }
+
+    AzureClient::RenewLeaseOptions options;
+    options.LeaseId = *leaseId;
+
+    // The timer, the cancellation signal and every completion are serialised on one strand: asio timers and
+    // cancellation signals are not thread safe, and the AzureClient requires slots to be emitted on its executor.
+    struct State {
+        State(const boost::asio::any_io_executor& executor)
+            : Strand(boost::asio::make_strand(executor)), Deadline(Strand) {}
+        boost::asio::strand<boost::asio::any_io_executor> Strand;
+        boost::asio::steady_timer Deadline;
+        boost::asio::cancellation_signal Cancel;
+        RenewCallback Done;
+    };
+    auto state = std::make_shared<State>(m_file->get_executor());
+    state->Done = std::move(callback);
+    const auto requestStart = std::chrono::steady_clock::now();
+
+    boost::asio::post(state->Strand, [this, state, leaseId = *leaseId, requestStart, budget, options = std::move(options)]() mutable {
+        state->Deadline.expires_after(budget);
+        state->Deadline.async_wait([state](const boost::system::error_code& error) {
+            if (!error) {
+                state->Cancel.emit(boost::asio::cancellation_type::terminal);
+            }
+        });
+        auto requestOptions = m_file->GetDefaultRequestOptions();
+        requestOptions.SetCancellationSlot(state->Cancel.slot());
+        m_file->RenewLeaseAsync(
+            std::move(options),
+            [this, state, leaseId, requestStart](auto result) {
+                boost::asio::post(state->Strand, [this, state, leaseId, requestStart, result = std::move(result)]() mutable {
+                    state->Deadline.cancel();
+                    std::exception_ptr error;
+                    bool renewed = true;
+                    try {
+                        Unwrap(std::move(result));
+                        m_lastRenewalTime = requestStart;
+                    } catch (...) {
+                        // An Unlock that raced with this renewal makes the failure expected, not an error.
+                        if (CurrentLeaseId() != leaseId) {
+                            renewed = false;
+                        } else {
+                            error = std::current_exception();
+                        }
+                    }
+                    state->Done(error, renewed);
+                });
+            },
+            std::move(requestOptions));
+    });
+}
+
+void LockFileImpl::RenewLease(const std::string& leaseId) const {
+    const auto budget = RenewalBudget();
 
     AzureClient::RenewLeaseOptions options;
     options.LeaseId = leaseId;

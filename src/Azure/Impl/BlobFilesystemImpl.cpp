@@ -22,7 +22,6 @@
 #include <cstddef>
 #include <deque>
 #include <functional>
-#include <future>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -721,42 +720,46 @@ void BlobFilesystemImpl::RenewLease(std::stop_token stopToken) {
                 int retries = 0;
                 while (needsRetry.size() > 0 && retries < 5 && !stopToken.stop_requested()) {
                     // Renewals run side by side so one slow or failing lease cannot delay the others past their
-                    // deadlines. Each future is drained before any exception is rethrown.
-                    std::vector<std::future<bool>> attempts;
-                    attempts.reserve(needsRetry.size());
-                    for (const auto& client : needsRetry) {
-                        attempts.push_back(std::async(std::launch::async, [this, client]() -> bool {
-                            try {
-                                [[maybe_unused]] const bool renewed = client->RenewIfLocked();
-                                return true;
-                            } catch (const RequestFailedException& e) {
-                                if (e.StatusCode == HttpStatus::Conflict) {
-                                    BOOST_LOG_SEV(*m_logger, severity_level::error)
-                                        << "Failed to renew lease due to conflict, lease might be expired: "
-                                        << e.what();
-                                    throw;
-                                }
-                                BOOST_LOG_SEV(*m_logger, severity_level::error)
-                                    << "Failed to renew lease: " << e.what();
-                            }
-                            return false;
-                        }));
+                    // deadlines. Each request is cancelled at its own renewal deadline, so waiting for all of them
+                    // is bounded; the wait is deliberately not interruptible because the callbacks touch the locks.
+                    struct Round {
+                        std::mutex Mutex;
+                        std::condition_variable Done;
+                        size_t Pending;
+                        std::vector<std::exception_ptr> Errors;
+                    };
+                    auto round = std::make_shared<Round>();
+                    round->Pending = needsRetry.size();
+                    round->Errors.resize(needsRetry.size());
+                    for (size_t i = 0; i < needsRetry.size(); ++i) {
+                        needsRetry[i]->RenewAsync([round, i, lock = needsRetry[i]](std::exception_ptr error, bool) {
+                            std::scoped_lock guard(round->Mutex);
+                            round->Errors[i] = std::move(error);
+                            --round->Pending;
+                            round->Done.notify_all();
+                        });
                     }
+                    {
+                        std::unique_lock guard(round->Mutex);
+                        round->Done.wait(guard, [&] { return round->Pending == 0; });
+                    }
+
                     std::vector<std::shared_ptr<LockFileImpl>> stillPending;
-                    std::exception_ptr failure;
-                    for (std::size_t i = 0; i < attempts.size(); ++i) {
-                        try {
-                            if (!attempts[i].get()) {
-                                stillPending.push_back(std::move(needsRetry[i]));
-                            }
-                        } catch (...) {
-                            if (!failure) {
-                                failure = std::current_exception();
-                            }
+                    for (size_t i = 0; i < needsRetry.size(); ++i) {
+                        if (!round->Errors[i]) {
+                            continue;
                         }
-                    }
-                    if (failure) {
-                        std::rethrow_exception(failure);
+                        try {
+                            std::rethrow_exception(round->Errors[i]);
+                        } catch (const RequestFailedException& e) {
+                            if (e.StatusCode == HttpStatus::Conflict) {
+                                BOOST_LOG_SEV(*m_logger, severity_level::error)
+                                    << "Failed to renew lease due to conflict, lease might be expired: " << e.what();
+                                throw;
+                            }
+                            BOOST_LOG_SEV(*m_logger, severity_level::error) << "Failed to renew lease: " << e.what();
+                            stillPending.push_back(std::move(needsRetry[i]));
+                        }
                     }
                     needsRetry = std::move(stillPending);
 
