@@ -94,10 +94,26 @@ TEST(AsyncReadTrackerDrainTests, DrainForTimesOutWhileAReadIsInFlight) {
     EXPECT_FALSE(tracker->DrainFor(20ms));
     EXPECT_EQ(tracker->InFlight(), 1U);
 
-    // The registration ends from a task posted to the executor once the last token is released.
+    // Released off the io_context threads, the registration ends the read directly.
     token.reset();
-    context.run();
+    EXPECT_EQ(tracker->InFlight(), 0U);
     EXPECT_TRUE(tracker->DrainFor(1s));
+}
+
+TEST(AsyncReadTrackerDrainTests, TokenReleasedOnTheIoThreadEndsFromAFreshTask) {
+    boost::asio::io_context context;
+    auto tracker = std::make_shared<AsyncReadTracker>(context.get_executor());
+    auto token = tracker->Begin();
+
+    // Inside a completion the end is deferred so the filesystem outlives the handler that is still running.
+    std::size_t inFlightRightAfterRelease = 0;
+    boost::asio::post(context, [&, token = std::move(token)]() mutable {
+        token.reset();
+        inFlightRightAfterRelease = tracker->InFlight();
+    });
+    context.run();
+
+    EXPECT_EQ(inFlightRightAfterRelease, 1U);
     EXPECT_EQ(tracker->InFlight(), 0U);
 }
 

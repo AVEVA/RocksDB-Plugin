@@ -3,6 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadTracker.hpp"
 
+#include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
 
 #include <utility>
@@ -18,9 +19,15 @@ struct AsyncReadTracker::Registration {
     Registration& operator=(Registration&&) = delete;
 
     // Typically runs inside an HTTP completion on an io_context thread; deferring End() to a fresh task keeps the
-    // filesystem (and with it the HTTP client) alive until that completion has returned.
+    // filesystem (and with it the HTTP client) alive until that completion has returned. A token released on any
+    // other thread cannot be inside such a completion, so it ends the read directly and skips the post.
     ~Registration() {
         try {
+            if (const auto* ioExecutor = Tracker->m_executor.target<boost::asio::io_context::executor_type>();
+                ioExecutor != nullptr && !ioExecutor->running_in_this_thread()) {
+                Tracker->End();
+                return;
+            }
             boost::asio::post(Tracker->m_executor, [tracker = Tracker]() { tracker->End(); });
         } catch (...) {
             Tracker->End();
