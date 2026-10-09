@@ -508,6 +508,96 @@ namespace
         EXPECT_EQ(server.Accepted(), 2);
     }
 
+    TEST(HttpClientRobustness, MaxConnectionsPerHostQueuesExtraRequestsAndReusesTheConnection)
+    {
+        asio::io_context context;
+        AVEVA::HttpClientOptions options;
+        options.SetMaxConnectionsPerHost(1);
+        auto client = AVEVA::IHttpClient::Create(context, options);
+        ScriptedServer server(context,
+            [](int, const http::request<http::string_body>&) -> ServerAction
+        {
+            return {OkResponse};
+        });
+
+        std::vector<std::error_code> errors;
+        for (int i = 0; i < 4; ++i)
+        {
+            client->SendAsync(MakeRequest(server.Url("/" + std::to_string(i))),
+                [&](std::error_code error, AVEVA::HttpResponse)
+            {
+                errors.push_back(error);
+                if (errors.size() == 4)
+                {
+                    server.Stop();
+                }
+            });
+        }
+        context.run();
+
+        ASSERT_EQ(errors.size(), 4U);
+        for (const auto& error : errors)
+        {
+            EXPECT_FALSE(error);
+        }
+        EXPECT_EQ(server.Accepted(), 1);
+    }
+
+    TEST(HttpClientRobustness, CancellingAQueuedRequestFailsItWithoutStartingIt)
+    {
+        asio::io_context context;
+        AVEVA::HttpClientOptions clientOptions;
+        clientOptions.SetMaxConnectionsPerHost(1);
+        auto client = AVEVA::IHttpClient::Create(context, clientOptions);
+        ScriptedServer server(context,
+            [](int, const http::request<http::string_body>&) -> ServerAction
+        {
+            ServerAction action;
+            action.Hold = true;
+            return action;
+        });
+
+        asio::cancellation_signal firstCancel;
+        AVEVA::HttpRequestOptions firstOptions;
+        firstOptions.SetCancellationSlot(firstCancel.slot());
+        asio::cancellation_signal queuedCancel;
+        AVEVA::HttpRequestOptions queuedOptions;
+        queuedOptions.SetCancellationSlot(queuedCancel.slot());
+
+        std::error_code firstResult;
+        std::error_code queuedResult;
+        int completions = 0;
+        const auto finishWhenBothDone = [&]
+        {
+            if (++completions == 2)
+            {
+                server.Stop();
+            }
+        };
+        client->SendAsync(MakeRequest(server.Url("/held")),
+            [&](std::error_code error, AVEVA::HttpResponse)
+        {
+            firstResult = error;
+            finishWhenBothDone();
+        },
+            firstOptions);
+        client->SendAsync(MakeRequest(server.Url("/queued")),
+            [&](std::error_code error, AVEVA::HttpResponse)
+        {
+            queuedResult = error;
+            // The queued request is cancelled first; the held one is released only after that completion.
+            firstCancel.emit(asio::cancellation_type::terminal);
+            finishWhenBothDone();
+        },
+            queuedOptions);
+        queuedCancel.emit(asio::cancellation_type::terminal);
+        context.run();
+
+        EXPECT_EQ(queuedResult, std::make_error_code(std::errc::operation_canceled));
+        EXPECT_EQ(firstResult, std::make_error_code(std::errc::operation_canceled));
+        EXPECT_LE(server.Accepted(), 1);
+    }
+
     TEST(HttpClientRobustness, MaximumIdleTimeoutStillAllowsPooling)
     {
         asio::io_context context;

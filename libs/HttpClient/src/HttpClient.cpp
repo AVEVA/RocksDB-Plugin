@@ -15,16 +15,25 @@
 #include <boost/url.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
+#include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <stop_token>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <thread>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace AVEVA
 {
@@ -60,64 +69,236 @@ namespace AVEVA
             IdleSweeper(const IdleSweeper&) = delete;
             IdleSweeper& operator=(const IdleSweeper&) = delete;
 
-            ~IdleSweeper()
-            {
-                m_thread.request_stop();
-                m_wake.notify_all();
-            }
-
+            // Called when a pool gains an idle connection; schedules a sweep unless one is already pending.
             void Notify()
             {
+                if (!m_scheduled.exchange(true))
                 {
-                    std::lock_guard<std::mutex> lock(m_mutex);
-                    m_hasIdle = true;
-                    // Started on first use so a client that never pools a connection never owns a thread.
-                    if (!m_thread.joinable())
-                    {
-                        m_thread = std::jthread([this](std::stop_token stop)
-                        {
-                            Run(stop);
-                        });
-                    }
+                    SweepScheduler::Instance().Schedule(m_self, m_interval);
                 }
-                m_wake.notify_all();
+            }
+
+            // Runs on the scheduler thread. The flag is cleared before sweeping so a release that lands during the
+            // sweep schedules itself instead of being lost.
+            void RunSweep()
+            {
+                m_scheduled = false;
+                if (m_plainSweep() + m_tlsSweep() > 0 && !m_scheduled.exchange(true))
+                {
+                    SweepScheduler::Instance().Schedule(m_self, m_interval);
+                }
+            }
+
+            // Must be called once the sweeper is owned by a shared_ptr.
+            void BindSelf(const std::shared_ptr<IdleSweeper>& self)
+            {
+                m_self = self;
             }
 
           private:
-            void Run(std::stop_token stop)
+            // One thread for the whole process, started on first use, that runs every client's sweeps in deadline
+            // order. A per-client thread would cost a stack for each of many short-lived clients.
+            class SweepScheduler
             {
-                std::unique_lock<std::mutex> lock(m_mutex);
-                while (!stop.stop_requested())
+              public:
+                static SweepScheduler& Instance()
                 {
-                    if (!m_wake.wait(lock, stop, [this] { return m_hasIdle; }))
-                    {
-                        return;
-                    }
-                    m_hasIdle = false;
-                    lock.unlock();
-                    // Sweep after the interval; keep going while either pool still holds connections.
-                    bool remaining = true;
-                    while (remaining && !stop.stop_requested())
-                    {
-                        std::unique_lock<std::mutex> sleepLock(m_sleepMutex);
-                        if (m_wake.wait_for(sleepLock, stop, m_interval, [] { return false; }) || stop.stop_requested())
-                        {
-                            break;
-                        }
-                        remaining = m_plainSweep() + m_tlsSweep() > 0;
-                    }
-                    lock.lock();
+                    static SweepScheduler scheduler;
+                    return scheduler;
                 }
-            }
+
+                void Schedule(const std::weak_ptr<IdleSweeper>& sweeper, std::chrono::seconds delay)
+                {
+                    {
+                        std::lock_guard<std::mutex> lock(m_mutex);
+                        m_queue.emplace(Clock::now() + delay, sweeper);
+                        if (!m_thread.joinable())
+                        {
+                            m_thread = std::jthread([this](std::stop_token stop)
+                            {
+                                Run(stop);
+                            });
+                        }
+                    }
+                    m_wake.notify_all();
+                }
+
+                ~SweepScheduler()
+                {
+                    m_thread.request_stop();
+                    m_wake.notify_all();
+                }
+
+              private:
+                using Clock = std::chrono::steady_clock;
+
+                void Run(std::stop_token stop)
+                {
+                    std::unique_lock<std::mutex> lock(m_mutex);
+                    while (!stop.stop_requested())
+                    {
+                        if (m_queue.empty())
+                        {
+                            m_wake.wait(lock, stop, [this] { return !m_queue.empty(); });
+                            continue;
+                        }
+                        const auto due = m_queue.begin()->first;
+                        if (Clock::now() < due)
+                        {
+                            m_wake.wait_until(lock, stop, due, [] { return false; });
+                            continue;
+                        }
+                        auto sweeper = m_queue.begin()->second.lock();
+                        m_queue.erase(m_queue.begin());
+                        if (!sweeper)
+                        {
+                            continue;
+                        }
+                        lock.unlock();
+                        try
+                        {
+                            sweeper->RunSweep();
+                        }
+                        catch (...)
+                        {
+                            // A failing sweep must not end the thread that serves every other client.
+                        }
+                        sweeper.reset();
+                        lock.lock();
+                    }
+                }
+
+                std::mutex m_mutex;
+                std::condition_variable_any m_wake;
+                std::multimap<Clock::time_point, std::weak_ptr<IdleSweeper>> m_queue;
+                std::jthread m_thread; // Declared last so every other member exists before the thread starts.
+            };
 
             SweepFunction m_plainSweep;
             SweepFunction m_tlsSweep;
             std::chrono::seconds m_interval;
+            std::atomic<bool> m_scheduled{false};
+            std::weak_ptr<IdleSweeper> m_self;
+        };
+
+        // Caps in-flight requests per origin. Requests over the cap wait in FIFO order and start as earlier ones
+        // finish. A waiting request can still be cancelled, and Close() fails whatever is left when the client dies.
+        class OriginLimiter : public std::enable_shared_from_this<OriginLimiter>
+        {
+          public:
+            using Start = std::move_only_function<void()>;
+            using Abort = std::move_only_function<void(std::error_code)>;
+
+            explicit OriginLimiter(std::size_t maxPerOrigin) : m_max(maxPerOrigin)
+            {
+            }
+
+            std::uint64_t NextTicket() noexcept
+            {
+                return ++m_nextTicket;
+            }
+
+            // Runs `start` now if the origin has capacity, otherwise queues it under `ticket` (see Cancel).
+            void Run(const std::string& origin, std::uint64_t ticket, Start start, Abort abort)
+            {
+                std::unique_lock<std::mutex> lock(m_mutex);
+                auto& state = m_origins[origin];
+                if (state.active < m_max)
+                {
+                    ++state.active;
+                    lock.unlock();
+                    start();
+                    return;
+                }
+                state.waiters.push_back(Waiter{ticket, std::move(start), std::move(abort)});
+            }
+
+            // Hands the finished request's slot to the next waiter, or frees it.
+            void Release(const std::string& origin)
+            {
+                Start next;
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    const auto it = m_origins.find(origin);
+                    if (it == m_origins.end())
+                    {
+                        return;
+                    }
+                    if (it->second.waiters.empty())
+                    {
+                        if (--it->second.active == 0)
+                        {
+                            m_origins.erase(it);
+                        }
+                        return;
+                    }
+                    next = std::move(it->second.waiters.front().start);
+                    it->second.waiters.pop_front();
+                }
+                next();
+            }
+
+            // Removes a queued request and fails it; a no-op if it already started.
+            void Cancel(const std::string& origin, std::uint64_t ticket)
+            {
+                Abort abort;
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    const auto it = m_origins.find(origin);
+                    if (it == m_origins.end())
+                    {
+                        return;
+                    }
+                    auto& waiters = it->second.waiters;
+                    const auto waiter = std::ranges::find(waiters, ticket, &Waiter::ticket);
+                    if (waiter == waiters.end())
+                    {
+                        return;
+                    }
+                    abort = std::move(waiter->abort);
+                    waiters.erase(waiter);
+                }
+                abort(std::make_error_code(std::errc::operation_canceled));
+            }
+
+            void Close()
+            {
+                std::vector<Abort> aborts;
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    for (auto& [origin, state] : m_origins)
+                    {
+                        for (auto& waiter : state.waiters)
+                        {
+                            aborts.push_back(std::move(waiter.abort));
+                        }
+                        state.waiters.clear();
+                    }
+                }
+                for (auto& abort : aborts)
+                {
+                    abort(std::make_error_code(std::errc::operation_canceled));
+                }
+            }
+
+          private:
+            struct Waiter
+            {
+                std::uint64_t ticket;
+                Start start;
+                Abort abort;
+            };
+
+            struct OriginState
+            {
+                std::size_t active = 0;
+                std::deque<Waiter> waiters;
+            };
+
+            std::size_t m_max;
             std::mutex m_mutex;
-            std::mutex m_sleepMutex;
-            std::condition_variable_any m_wake;
-            bool m_hasIdle = false;
-            std::jthread m_thread; // Declared last so every other member exists before the thread starts.
+            std::atomic<std::uint64_t> m_nextTicket{0};
+            std::unordered_map<std::string, OriginState> m_origins;
         };
 
         class HttpClient final : public IHttpClient
@@ -134,6 +315,11 @@ namespace AVEVA
                       [pool = m_tlsPool] { return pool->Sweep(); },
                       options.GetIdleConnectionTimeout()))
             {
+                if (options.GetMaxConnectionsPerHost() > 0)
+                {
+                    m_limiter = std::make_shared<OriginLimiter>(options.GetMaxConnectionsPerHost());
+                }
+                m_sweeper->BindSelf(m_sweeper);
                 // Weak, because a pool can outlive the client while in-flight requests still hold it.
                 const auto notify = [weak = std::weak_ptr{m_sweeper}]
                 {
@@ -155,13 +341,90 @@ namespace AVEVA
                 return asio::any_io_executor(context_.get_executor());
             }
 
+            ~HttpClient() override
+            {
+                if (m_limiter)
+                {
+                    m_limiter->Close();
+                }
+            }
+
             void SendAsyncErased(HttpRequest request, CompletionHandler completion, HttpRequestOptions options) override
             {
                 if (!completion)
                 {
                     throw std::invalid_argument("AsyncSend requires a completion handler");
                 }
+                if (const auto origin = m_limiter ? OriginOf(request.GetUrl()) : std::nullopt)
+                {
+                    return SendLimited(*origin, std::move(request), std::move(completion), std::move(options));
+                }
+                SendUnlimited(std::move(request), std::move(completion), std::move(options));
+            }
 
+          private:
+            // Unparseable URLs bypass the cap; they fail fast and never open a connection.
+            static std::optional<std::string> OriginOf(std::string_view url)
+            {
+                const auto parsed = urls::parse_uri(url);
+                if (!parsed)
+                {
+                    return std::nullopt;
+                }
+                const bool isTls = parsed->scheme_id() == urls::scheme::https;
+                return std::string(parsed->scheme()) + "://" + std::string(parsed->host_address()) + ':' +
+                       (parsed->has_port() ? std::string(parsed->port()) : (isTls ? "443" : "80"));
+            }
+
+            void SendLimited(std::string origin, HttpRequest request, CompletionHandler completion, HttpRequestOptions options)
+            {
+                struct Pending
+                {
+                    HttpRequest request;
+                    CompletionHandler completion;
+                    HttpRequestOptions options;
+                };
+                auto pending = std::make_shared<Pending>(Pending{std::move(request), std::move(completion), std::move(options)});
+                const auto ticket = m_limiter->NextTicket();
+                // Set before queueing so a cancellation cannot slip in between; a started request replaces it with
+                // its own handler.
+                if (auto slot = pending->options.GetCancellationSlot(); slot.is_connected())
+                {
+                    slot.assign([weak = std::weak_ptr{m_limiter}, origin, ticket](asio::cancellation_type type)
+                    {
+                        if (type != asio::cancellation_type::none)
+                        {
+                            if (auto limiter = weak.lock())
+                            {
+                                limiter->Cancel(origin, ticket);
+                            }
+                        }
+                    });
+                }
+                m_limiter->Run(origin,
+                    ticket,
+                    [this, origin, pending]() mutable
+                {
+                    auto wrapped = [limiter = m_limiter, origin, inner = std::move(pending->completion)](
+                                       std::error_code error, HttpResponse response) mutable
+                    {
+                        limiter->Release(origin);
+                        inner(error, std::move(response));
+                    };
+                    SendUnlimited(std::move(pending->request), std::move(wrapped), std::move(pending->options));
+                },
+                    [this, pending](std::error_code error)
+                {
+                    // Posted because a completion must never run inside the call that triggered it.
+                    asio::post(context_, [pending, error]() mutable
+                    {
+                        pending->completion(error, HttpResponse{});
+                    });
+                });
+            }
+
+            void SendUnlimited(HttpRequest request, CompletionHandler completion, HttpRequestOptions options)
+            {
                 // Invalid requests take the fresh-connection path, which fails them without closing a healthy
                 // pooled connection.
                 auto parsed = urls::parse_uri(request.GetUrl());
@@ -280,7 +543,8 @@ namespace AVEVA
             std::shared_ptr<asio::ssl::context> m_tlsContext;
             std::shared_ptr<ConnectionPool<PlainStream>> m_plainPool;
             std::shared_ptr<ConnectionPool<TlsStream>> m_tlsPool;
-            std::shared_ptr<IdleSweeper> m_sweeper; // Last: destroyed (and joined) before the pools it sweeps.
+            std::shared_ptr<OriginLimiter> m_limiter; // Null when no per-origin cap is configured.
+            std::shared_ptr<IdleSweeper> m_sweeper; // Last: stops scheduling sweeps before the pools it sweeps go away.
         };
     } // namespace
 

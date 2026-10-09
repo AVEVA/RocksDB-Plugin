@@ -312,7 +312,8 @@ namespace AVEVA::Private
             m_parser->skip(m_request.method() == http::verb::head);
         }
 
-        // Serves a recent result from the shared cache; the hit is posted so the handler never runs re-entrantly.
+        // Serves a recent result from the shared cache and collapses concurrent lookups for one origin into a
+        // single resolve; hits are posted so the handler never runs re-entrantly.
         void Resolve()
         {
             auto& cache = DnsCache::Shared();
@@ -325,14 +326,47 @@ namespace AVEVA::Private
                 });
                 return;
             }
+            DnsCache::Waiter waiter = [self = this->shared_from_this()](
+                                          boost::system::error_code error, Tcp::resolver::results_type results)
+            {
+                asio::post(self->m_executor,
+                    [self, error, results = std::move(results)]() mutable
+                {
+                    // The leader was cancelled or timed out, which says nothing about this request's lookup.
+                    if (error == asio::error::operation_aborted && !self->finished_ && !self->IsCancellationRequested())
+                    {
+                        return self->Resolve();
+                    }
+                    self->OnResolve(error, std::move(results));
+                });
+            };
+            if (!cache.JoinOrLead(m_key.host, m_key.service, waiter))
+            {
+                return;
+            }
+            // If the handler is destroyed unrun (io_context torn down), the guard still releases the waiters.
+            struct LeaderGuard
+            {
+                std::string host;
+                std::string service;
+                bool finished = false;
+
+                ~LeaderGuard()
+                {
+                    if (!finished)
+                    {
+                        DnsCache::Shared().Finish(host, service, asio::error::operation_aborted, {});
+                    }
+                }
+            };
+            auto guard = std::make_shared<LeaderGuard>(LeaderGuard{m_key.host, m_key.service});
             m_resolver.async_resolve(m_key.host,
                 m_key.service,
-                [self = this->shared_from_this()](boost::system::error_code error, Tcp::resolver::results_type results)
+                [self = this->shared_from_this(), guard](
+                    boost::system::error_code error, Tcp::resolver::results_type results)
             {
-                if (!error)
-                {
-                    DnsCache::Shared().Store(self->m_key.host, self->m_key.service, results);
-                }
+                guard->finished = true;
+                DnsCache::Shared().Finish(self->m_key.host, self->m_key.service, error, results);
                 self->OnResolve(error, std::move(results));
             });
         }

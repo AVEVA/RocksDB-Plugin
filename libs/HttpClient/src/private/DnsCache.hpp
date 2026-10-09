@@ -7,11 +7,13 @@
 
 #include <chrono>
 #include <cstddef>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace AVEVA::Private
 {
@@ -69,6 +71,48 @@ namespace AVEVA::Private
             return cache;
         }
 
+        using Waiter = std::move_only_function<void(boost::system::error_code, Tcp::resolver::results_type)>;
+
+        // Returns true when the caller must perform the lookup (and then call Finish). Otherwise the lookup is
+        // already in flight and `waiter` has been queued to receive its outcome.
+        bool JoinOrLead(const std::string& host, const std::string& service, Waiter& waiter)
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            const auto [it, inserted] = m_pending.try_emplace(MakeKey(host, service));
+            if (inserted)
+            {
+                return true;
+            }
+            it->second.push_back(std::move(waiter));
+            return false;
+        }
+
+        // Publishes the leader's outcome to every queued waiter. Must be called exactly once per leader.
+        void Finish(const std::string& host,
+            const std::string& service,
+            boost::system::error_code error,
+            const Tcp::resolver::results_type& results)
+        {
+            if (!error)
+            {
+                Store(host, service, results);
+            }
+            std::vector<Waiter> waiters;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                const auto it = m_pending.find(MakeKey(host, service));
+                if (it != m_pending.end())
+                {
+                    waiters = std::move(it->second);
+                    m_pending.erase(it);
+                }
+            }
+            for (auto& waiter : waiters)
+            {
+                waiter(error, results);
+            }
+        }
+
       private:
         struct Entry
         {
@@ -84,6 +128,7 @@ namespace AVEVA::Private
         std::chrono::seconds m_ttl;
         std::mutex m_mutex;
         std::unordered_map<std::string, Entry> m_entries;
+        std::unordered_map<std::string, std::vector<Waiter>> m_pending;
     };
 
     using DnsCache = BasicDnsCache<>;

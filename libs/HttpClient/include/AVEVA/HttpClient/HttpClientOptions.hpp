@@ -28,6 +28,7 @@ namespace AVEVA
         const std::string& GetCaPem() const noexcept;
         std::size_t GetMaxIdleConnectionsPerHost() const noexcept;
         std::chrono::seconds GetIdleConnectionTimeout() const noexcept;
+        std::size_t GetMaxConnectionsPerHost() const noexcept;
 
         void SetTlsVersion(TlsVersion version) noexcept;
         void SetVerifyPeer(bool verifyPeer) noexcept;
@@ -37,6 +38,9 @@ namespace AVEVA
         void SetCaPem(std::string caPem);
         void SetMaxIdleConnectionsPerHost(std::size_t maxIdleConnectionsPerHost) noexcept;
         void SetIdleConnectionTimeout(std::chrono::seconds idleConnectionTimeout) noexcept;
+        // Caps in-flight requests per origin (scheme, host, port); further requests wait in FIFO order until one
+        // finishes, and a waiting request still honors its cancellation slot. 0 (the default) means unlimited.
+        void SetMaxConnectionsPerHost(std::size_t maxConnectionsPerHost) noexcept;
 
       private:
         TlsVersion m_tlsVersion;
@@ -46,5 +50,6 @@ namespace AVEVA
         std::string m_caPem;
         std::size_t m_maxIdleConnectionsPerHost = 6;
         std::chrono::seconds m_idleConnectionTimeout{30};
+        std::size_t m_maxConnectionsPerHost = 0;
     };
 } // namespace AVEVA

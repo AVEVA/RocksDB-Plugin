@@ -47,6 +47,11 @@ namespace AVEVA
         return m_idleConnectionTimeout;
     }
 
+    std::size_t HttpClientOptions::GetMaxConnectionsPerHost() const noexcept
+    {
+        return m_maxConnectionsPerHost;
+    }
+
     void HttpClientOptions::SetTlsVersion(TlsVersion version) noexcept
     {
         m_tlsVersion = version;
@@ -80,5 +85,9 @@ namespace AVEVA
     void HttpClientOptions::SetIdleConnectionTimeout(std::chrono::seconds idleConnectionTimeout) noexcept
     {
         m_idleConnectionTimeout = idleConnectionTimeout;
+    }
+    void HttpClientOptions::SetMaxConnectionsPerHost(std::size_t maxConnectionsPerHost) noexcept
+    {
+        m_maxConnectionsPerHost = maxConnectionsPerHost;
     }
 } // namespace AVEVA

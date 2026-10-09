@@ -151,9 +151,12 @@ namespace AVEVA::Private
         // and a non-idempotent request sent on it could not be retried safely, so dead ones are discarded here.
         std::optional<PooledConnection<Stream>> Acquire(const ConnectionKey<Stream>& key)
         {
-            while (auto connection = AcquireUnchecked(key))
+            typename Clock::duration idleFor{};
+            while (auto connection = AcquireAged(key, idleFor))
             {
-                if (IsAlive(*connection))
+                // A connection returned moments ago has not had time to be closed by the peer; a request that does
+                // hit a just-closed socket is retried by the caller where that is safe.
+                if (idleFor < SkipProbeBelow || IsAlive(*connection))
                 {
                     return connection;
                 }
@@ -163,11 +166,19 @@ namespace AVEVA::Private
 
         std::optional<PooledConnection<Stream>> AcquireUnchecked(const ConnectionKey<Stream>& key)
         {
+            typename Clock::duration idleFor{};
+            return AcquireAged(key, idleFor);
+        }
+
+        std::optional<PooledConnection<Stream>> AcquireAged(const ConnectionKey<Stream>& key,
+            typename Clock::duration& idleFor)
+        {
             LruList retired;
             std::optional<PooledConnection<Stream>> connection;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
-                DropExpired(Clock::now(), retired);
+                const auto now = Clock::now();
+                DropExpired(now, retired);
                 auto it = m_origins.find(key);
                 if (it != m_origins.end())
                 {
@@ -176,6 +187,7 @@ namespace AVEVA::Private
                     Origin& origin = it->second;
                     Node& node = origin.idle.back(); // Newest, and least likely to have been closed by the peer.
                     origin.idle.pop_back();
+                    idleFor = now - node.idleSince;
                     m_lru.erase(m_lru.iterator_to(node));
                     connection.emplace(std::move(node.connection));
                     Recycle(node);
@@ -392,6 +404,7 @@ namespace AVEVA::Private
         }
 
         static constexpr std::size_t MaxRecycledNodes = 32;
+        static constexpr std::chrono::milliseconds SkipProbeBelow{50};
 
         std::size_t m_maxIdlePerKey;
         std::chrono::seconds m_idleTimeout;
