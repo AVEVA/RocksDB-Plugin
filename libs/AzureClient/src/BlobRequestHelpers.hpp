@@ -148,7 +148,7 @@ namespace AVEVA::AzureClient::Private
         std::string SasToken; // without a leading '?'
         std::string ApiVersion;
         std::shared_ptr<ITokenCredential> TokenCredential; // BearerToken is folded in here
-        std::vector<std::string> TokenScopes;
+        std::shared_ptr<const std::vector<std::string>> TokenScopes; // shared with every request's RequestAuth
         std::shared_ptr<const SharedKeySigner> Signer; // set iff Shared Key authorization is used
 
         std::string BasePrefix; // scheme://host[:port]
@@ -495,7 +495,7 @@ namespace AVEVA::AzureClient::Private
         Kind Type = Kind::None;
         std::shared_ptr<const SharedKeySigner> Signer;
         std::shared_ptr<ITokenCredential> TokenCredential;
-        std::vector<std::string> TokenScopes;
+        std::shared_ptr<const std::vector<std::string>> TokenScopes;
     };
 
     [[nodiscard]] RequestAuth MakeRequestAuth(const ConnectionState& connection);

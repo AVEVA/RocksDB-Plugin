@@ -395,7 +395,7 @@ namespace AVEVA::AzureClient::Private
             state->ApiVersion = std::move(options.ApiVersion);
             NormalizeTokenFields(options.TokenCredential, options.TokenScopes, options.BearerToken);
             state->TokenCredential = std::move(options.TokenCredential);
-            state->TokenScopes = std::move(options.TokenScopes);
+            state->TokenScopes = std::make_shared<const std::vector<std::string>>(std::move(options.TokenScopes));
             if (!options.SharedKey.AccountName.empty())
             {
                 state->Signer = std::make_shared<const SharedKeySigner>(std::move(options.SharedKey.AccountName),

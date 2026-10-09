@@ -203,8 +203,18 @@ namespace AVEVA::AzureClient
 
     void CachingTokenCredential::GetTokenAsync(std::vector<std::string> scopes, GetTokenCompletionHandler completion)
     {
+        GetTokenForScopesAsync(std::make_shared<const std::vector<std::string>>(std::move(scopes)),
+            std::move(completion));
+    }
+
+    void CachingTokenCredential::GetTokenForScopesAsync(ScopeList scopes, GetTokenCompletionHandler completion)
+    {
+        if (!scopes)
+        {
+            scopes = std::make_shared<const std::vector<std::string>>();
+        }
         const std::optional<boost::asio::any_io_executor> completionExecutor = m_executor;
-        LookupResult lookup = LookUpCachedTokenOrStartRefresh(scopes, std::move(completion));
+        LookupResult lookup = LookUpCachedTokenOrStartRefresh(*scopes, std::move(completion));
         if (lookup.CachedFailure.has_value())
         {
             CompleteOnExecutorIfSet(
@@ -232,15 +242,14 @@ namespace AVEVA::AzureClient
             return;
         }
 
-        std::vector<std::string> requestScopes = scopes;
-        m_inner->GetTokenAsync(std::move(requestScopes),
+        m_inner->GetTokenForScopesAsync(scopes,
             [weakSelf = weak_from_this(),
                 refreshState = lookup.RefreshToStart,
-                scopes = std::move(scopes)](std::error_code error, AccessToken token) mutable
+                scopes](std::error_code error, AccessToken token) mutable
         {
             if (const auto self = weakSelf.lock())
             {
-                self->HandleInnerTokenResult(error, std::move(token), refreshState, scopes);
+                self->HandleInnerTokenResult(error, std::move(token), refreshState, *scopes);
                 return;
             }
 

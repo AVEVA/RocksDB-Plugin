@@ -106,6 +106,29 @@ TEST(ITokenCredentialTests, CachingTokenCredential_ReusesCachedTokenOutsideRefre
     EXPECT_EQ(receivedTokens, (std::vector<std::string>{"cached-token", "cached-token"}));
 }
 
+TEST(ITokenCredentialTests, CachingTokenCredential_SharedScopeListIsServedFromTheCacheAndMatchesVectorCalls)
+{
+    auto inner = std::make_shared<ScriptedTokenCredential>();
+    inner->EnqueueImmediate({}, MakeToken("cached-token", std::chrono::hours(1)));
+    auto credential = CachingTokenCredential::Create(inner, std::chrono::minutes(5));
+    const auto scopes = std::make_shared<const std::vector<std::string>>(std::vector<std::string>{"scope-a"});
+
+    std::vector<std::string> receivedTokens;
+    const auto record = [&](std::error_code error, AccessToken token)
+    {
+        EXPECT_FALSE(error);
+        receivedTokens.push_back(std::move(token.Token));
+    };
+    credential->GetTokenForScopesAsync(scopes, record);
+    credential->GetTokenForScopesAsync(scopes, record);
+    credential->GetTokenAsync({"scope-a"}, record);
+
+    EXPECT_EQ(inner->CallCount(), 1);
+    EXPECT_EQ(receivedTokens, (std::vector<std::string>{"cached-token", "cached-token", "cached-token"}));
+    ASSERT_EQ(inner->RequestedScopes().size(), 1U);
+    EXPECT_EQ(inner->RequestedScopes().front(), *scopes);
+}
+
 TEST(ITokenCredentialTests, CachingTokenCredential_ServesCachedTokenAndRefreshesInBackgroundInsideRefreshWindow)
 {
     auto inner = std::make_shared<ScriptedTokenCredential>();

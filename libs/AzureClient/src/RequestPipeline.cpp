@@ -283,7 +283,7 @@ namespace AVEVA::AzureClient::Private
             {
                 auto self = shared_from_this();
                 m_awaitingToken.store(true, std::memory_order_release);
-                m_auth.TokenCredential->GetTokenAsync(m_auth.TokenScopes,
+                m_auth.TokenCredential->GetTokenForScopesAsync(m_auth.TokenScopes,
                     [self, attempt = std::move(attempt)](std::error_code error, AccessToken token) mutable
                 {
                     auto proceed = [self, error, token = std::move(token), attempt = std::move(attempt)]() mutable

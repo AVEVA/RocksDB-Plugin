@@ -47,6 +47,15 @@ namespace AVEVA::AzureClient
         virtual ~ITokenCredential() = default;
 
         virtual void GetTokenAsync(std::vector<std::string> scopes, GetTokenCompletionHandler completion) = 0;
+
+        // Same request with a scope list shared between calls, so callers that ask for the same scopes on every
+        // request (and caches that only compare them) need not copy the strings. Implementations that do not
+        // override it receive a copy through GetTokenAsync.
+        using ScopeList = std::shared_ptr<const std::vector<std::string>>;
+        virtual void GetTokenForScopesAsync(ScopeList scopes, GetTokenCompletionHandler completion)
+        {
+            GetTokenAsync(scopes ? *scopes : std::vector<std::string>{}, std::move(completion));
+        }
     };
 
     // Returns a fixed token. The requested `scopes` are ignored.
@@ -106,6 +115,8 @@ namespace AVEVA::AzureClient
             Clock clock);
 
         void GetTokenAsync(std::vector<std::string> scopes, GetTokenCompletionHandler completion) override;
+        // The cache-hit path compares against the shared list without copying it.
+        void GetTokenForScopesAsync(ScopeList scopes, GetTokenCompletionHandler completion) override;
 
       private:
         struct RefreshState
