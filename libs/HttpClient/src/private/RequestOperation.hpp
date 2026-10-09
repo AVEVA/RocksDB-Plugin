@@ -313,7 +313,7 @@ namespace AVEVA::Private
 
         void ResetParser()
         {
-            m_parser = std::make_unique<http::response_parser<http::string_body>>();
+            m_parser.emplace();
             m_parser->body_limit(m_options.GetResponseBodyLimit());
             m_parser->header_limit(m_options.GetResponseHeaderLimit());
             m_parser->skip(m_request.method() == http::verb::head);
@@ -523,6 +523,8 @@ namespace AVEVA::Private
             {
                 try
                 {
+                    // A pooled connection is idle for a long time; don't let it pin the last response's buffer.
+                    m_buffer.shrink_to_fit();
                     m_pool->Release(m_key, PooledConnection<Stream>{std::move(m_stream), std::move(m_buffer)});
                     pooled = true;
                 }
@@ -623,7 +625,7 @@ namespace AVEVA::Private
         std::string m_ownedBodyStorage;
         // Keeps a shared body view alive for as long as this operation can still read it.
         std::shared_ptr<const void> m_bodyKeepAlive;
-        std::unique_ptr<http::response_parser<http::string_body>> m_parser;
+        std::optional<http::response_parser<http::string_body>> m_parser;
         bool finished_ = false;
         bool m_reused = false;
         bool m_retried = false;
