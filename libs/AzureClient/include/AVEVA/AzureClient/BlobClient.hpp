@@ -19,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <ostream>
+#include <span>
 #include <string>
 #include <type_traits>
 
@@ -172,6 +173,23 @@ namespace AVEVA::AzureClient
                 std::move(requestOptions),
                 std::ref(stream),
                 DownloadToOptions{});
+        }
+
+        // Downloads the range straight into `destination`, avoiding an intermediate copy of the body. The span must
+        // stay valid until the operation completes. A range larger than the span fails; BytesWritten reports the
+        // bytes stored when the blob ends before the requested range does.
+        template <class CompletionToken = DefaultCompletionToken>
+        [[nodiscard]] auto DownloadToAsync(std::span<char> destination,
+            DownloadBlobOptions options,
+            CompletionToken&& token = CompletionToken{},
+            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
+        {
+            return Private::InitiateClientOperation<Models::DownloadBlobToResult>(this,
+                &BlobClient::DownloadRangeToSpanAsyncImpl,
+                std::forward<CompletionToken>(token),
+                std::move(requestOptions),
+                destination,
+                std::move(options));
         }
 
         template <class CompletionToken = DefaultCompletionToken>
@@ -428,6 +446,10 @@ namespace AVEVA::AzureClient
             DownloadToCompletionHandler completion,
             HttpRequestOptions requestOptions);
         void DownloadRangeToStreamAsyncImpl(std::ostream& stream,
+            DownloadBlobOptions options,
+            DownloadToCompletionHandler completion,
+            HttpRequestOptions requestOptions);
+        void DownloadRangeToSpanAsyncImpl(std::span<char> destination,
             DownloadBlobOptions options,
             DownloadToCompletionHandler completion,
             HttpRequestOptions requestOptions);

@@ -84,6 +84,19 @@ namespace AVEVA::AzureClient
             requestOptions);
     }
 
+    void BlobClient::DownloadRangeToSpanAsyncImpl(std::span<char> destination,
+        DownloadBlobOptions options,
+        DownloadToCompletionHandler completion,
+        HttpRequestOptions requestOptions)
+    {
+        Private::DownloadBlobToSpanAsync(*m_httpClient,
+            *m_target,
+            Private::ToDownloadToOptions(std::move(options)),
+            destination,
+            std::move(completion),
+            requestOptions);
+    }
+
     void BlobClient::DownloadRangeToFileAsyncImpl(const std::filesystem::path& path,
         DownloadBlobOptions options,
         DownloadToCompletionHandler completion,

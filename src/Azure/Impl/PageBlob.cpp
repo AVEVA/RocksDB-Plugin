@@ -169,20 +169,16 @@ int64_t PageBlob::Download(std::span<char> buffer, int64_t offset, int64_t lengt
     if (!ifMatch.empty()) {
         options.Conditions.IfMatch = ifMatch;
     }
+    // The body is copied once, straight into the caller's buffer; a range larger than the buffer fails instead of
+    // being truncated or overflowing.
     const auto result = Unwrap(BlockOn(m_client.get_executor(), m_client
-                                   .DownloadAsync(std::move(options), boost::asio::use_future,
-                                                  RequestOptionsForTransfer(m_client.GetDefaultRequestOptions(),
-                                                                            static_cast<uint64_t>(length)))));
-
-    // TODO(backlog): AzureClient only returns the body as std::string, so every download is copied once more into
-    // the caller's buffer. Writing the response body straight into a caller-provided span needs support in
-    // AzureClient's DownloadBlobOptions/HttpClient; track as an AzureClient enhancement.
-    const auto bytesRead = std::min(result.Content.size(), buffer.size());
-    std::memcpy(buffer.data(), result.Content.data(), bytesRead);
+                                   .DownloadToAsync(buffer, std::move(options), boost::asio::use_future,
+                                                    RequestOptionsForTransfer(m_client.GetDefaultRequestOptions(),
+                                                                              static_cast<uint64_t>(length)))));
 
     assert((!result.ContentRange.has_value() || !result.ContentRange->Length.has_value() ||
-            *result.ContentRange->Length == result.Content.size()) &&
+            *result.ContentRange->Length == result.BytesWritten) &&
            "Body size differs from server ContentRange");
-    return static_cast<int64_t>(bytesRead);
+    return static_cast<int64_t>(result.BytesWritten);
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

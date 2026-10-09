@@ -62,16 +62,14 @@ TEST_F(PageBlobTests, DownloadToFileWithZeroLengthCreatesEmptyFileWithoutRequest
     std::filesystem::remove(path);
 }
 
-TEST_F(PageBlobTests, DownloadToBufferReturnsBytesCopiedNotRangeLength) {
+TEST_F(PageBlobTests, DownloadLargerThanTheBufferFailsWithoutWritingPastIt) {
     m_httpClient.EnqueueResponse(
         HttpResponse{206, MakeCanonicalSuccessHeaders({{"Content-Range", "bytes 0-15/16"}, {"Content-Length", "16"}}),
                      std::string(16, 'x')});
 
-    std::vector<char> buffer(8);
-    const auto bytes = m_blob->DownloadTo(std::span<char>(buffer), 0, 16);
-
-    EXPECT_EQ(8, bytes);
-    EXPECT_EQ(std::string(8, 'x'), std::string(buffer.begin(), buffer.end()));
+    std::vector<char> storage(16, '#');
+    EXPECT_ANY_THROW((void)m_blob->DownloadTo(std::span<char>(storage).first(8), 0, 16));
+    EXPECT_EQ(std::string(8, '#'), std::string(storage.begin() + 8, storage.end()));
 }
 
 TEST_F(PageBlobTests, DownloadToBufferAcceptsResponseWithoutContentRange) {

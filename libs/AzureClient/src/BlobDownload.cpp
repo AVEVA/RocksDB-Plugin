@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstddef>
+#include <cstring>
 #include <cstdint>
 #include <deque>
 #include <exception>
@@ -38,6 +39,7 @@
 #include <mutex>
 #include <new>
 #include <optional>
+#include <span>
 #include <ostream>
 #include <stdexcept>
 #include <string>
@@ -158,6 +160,44 @@ namespace AVEVA::AzureClient::Private
 
           private:
             std::shared_ptr<std::ofstream> m_file;
+        };
+
+        // Copies into caller-owned memory, so a download into a fixed buffer needs no intermediate string. A blob
+        // range larger than the buffer fails the download instead of writing past the end.
+        class SpanSink final : public DownloadSink
+        {
+          public:
+            explicit SpanSink(std::span<char> destination) : m_destination(destination)
+            {
+            }
+
+            void Reserve(std::uint64_t size) override
+            {
+                if (size > m_destination.size())
+                {
+                    throw std::length_error("The download is larger than the destination buffer.");
+                }
+            }
+
+            [[nodiscard]] bool WritesInline() const noexcept override
+            {
+                return true;
+            }
+
+            [[nodiscard]] bool Write(std::string data) override
+            {
+                if (data.size() > m_destination.size() - m_position)
+                {
+                    return false;
+                }
+                std::memcpy(m_destination.data() + m_position, data.data(), data.size());
+                m_position += data.size();
+                return true;
+            }
+
+          private:
+            std::span<char> m_destination;
+            std::size_t m_position = 0;
         };
 
         class StringSink final : public DownloadSink
@@ -855,6 +895,29 @@ namespace AVEVA::AzureClient::Private
             options,
             std::move(operationOptions),
             std::make_shared<StreamSink>(stream),
+            [completion = std::move(completion)](SummaryResult result) mutable
+        {
+            if (!result.has_value())
+            {
+                completion(std::unexpected(std::move(result).error()));
+                return;
+            }
+            completion(ToDownloadToResponse(std::move(*result)));
+        },
+            requestOptions);
+    }
+
+    void DownloadBlobToSpanAsync(IHttpClient& httpClient,
+        const BlobTarget& options,
+        DownloadToOptions operationOptions,
+        std::span<char> destination,
+        DownloadToCompletion completion,
+        HttpRequestOptions requestOptions)
+    {
+        StartDownload(httpClient,
+            options,
+            std::move(operationOptions),
+            std::make_shared<SpanSink>(destination),
             [completion = std::move(completion)](SummaryResult result) mutable
         {
             if (!result.has_value())

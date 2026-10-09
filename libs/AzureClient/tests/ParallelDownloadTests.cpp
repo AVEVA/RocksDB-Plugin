@@ -29,6 +29,7 @@
 #include <iterator>
 #include <optional>
 #include <ostream>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -541,4 +542,68 @@ TEST(B05_DownloadIgnoredRangeTests, LengthRangeAnswered200IsTruncatedToTheReques
     ASSERT_TRUE(result->has_value());
     EXPECT_EQ(result->value().Value().BytesWritten, 5U);
     EXPECT_EQ(out.str(), content.substr(0, 5U));
+}
+
+TEST(A3_DownloadIntoSpanTests, FullAndPartialRangesAreWrittenByteForByte)
+{
+    const std::string content = MakeContent(18);
+    for (const auto [offset, length] : {std::pair{0U, 18U}, std::pair{4U, 7U}})
+    {
+        FakeHttpClient httpClient;
+        httpClient.EnqueueResponse(RangeResponse(offset, content.substr(offset, length), content.size()), {}, true);
+        PageBlobClient client{httpClient, BuildOptions()};
+
+        std::string destination(length, '\0');
+        AVEVA::AzureClient::DownloadBlobOptions options;
+        options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = offset, .Length = length};
+        std::optional<DownloadToResult> result;
+        client.DownloadToAsync(std::span<char>(destination), options, [&](DownloadToResult r) { result = std::move(r); });
+    ASSERT_TRUE(httpClient.CompleteRequest(0U));
+
+        ASSERT_TRUE(result.has_value());
+        ASSERT_TRUE(result->has_value());
+        EXPECT_EQ(result->value().Value().BytesWritten, length);
+        EXPECT_EQ(destination, content.substr(offset, length));
+    }
+}
+
+TEST(A3_DownloadIntoSpanTests, BlobShorterThanTheRequestedRangeReportsTheBytesWritten)
+{
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(18);
+    httpClient.EnqueueResponse(RangeResponse(0, content, content.size()), {}, true);
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    std::string destination(20, '#');
+    AVEVA::AzureClient::DownloadBlobOptions options;
+    options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 0, .Length = 20};
+    std::optional<DownloadToResult> result;
+    client.DownloadToAsync(std::span<char>(destination), options, [&](DownloadToResult r) { result = std::move(r); });
+    ASSERT_TRUE(httpClient.CompleteRequest(0U));
+
+    ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(result->has_value());
+    EXPECT_EQ(result->value().Value().BytesWritten, 18U);
+    EXPECT_EQ(destination.substr(0, 18), content);
+    EXPECT_EQ(destination.substr(18), "##");
+}
+
+TEST(A3_DownloadIntoSpanTests, ResponseLargerThanTheDestinationFailsWithoutWritingPastIt)
+{
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(18);
+    httpClient.EnqueueResponse(RangeResponse(0, content, content.size()), {}, true);
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    std::string storage(18, '#');
+    AVEVA::AzureClient::DownloadBlobOptions options;
+    options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 0, .Length = 18};
+    std::optional<DownloadToResult> result;
+    // Only the first 10 bytes are offered; the rest of `storage` acts as a guard region.
+    client.DownloadToAsync(std::span<char>(storage).first(10), options, [&](DownloadToResult r) { result = std::move(r); });
+    ASSERT_TRUE(httpClient.CompleteRequest(0U));
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_FALSE(result->has_value());
+    EXPECT_EQ(storage.substr(10), std::string(8, '#'));
 }

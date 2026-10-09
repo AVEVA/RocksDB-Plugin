@@ -583,6 +583,14 @@ namespace AVEVA::AzureClient::Private
         std::ostream& stream,
         DownloadToCompletion completion,
         HttpRequestOptions requestOptions);
+    // Writes straight into `destination`, which must stay valid until the completion runs. A range larger than
+    // the buffer fails the download; a shorter blob leaves the tail untouched (see BytesWritten).
+    void DownloadBlobToSpanAsync(IHttpClient& httpClient,
+        const BlobTarget& options,
+        DownloadToOptions operationOptions,
+        std::span<char> destination,
+        DownloadToCompletion completion,
+        HttpRequestOptions requestOptions);
     // Downloads into `<path>.partial-<id>` and renames it over `path` only on success.
     void DownloadBlobToFileAsync(IHttpClient& httpClient,
         const BlobTarget& options,
