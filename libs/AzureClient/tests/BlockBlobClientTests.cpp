@@ -7,7 +7,6 @@
 #include "AVEVA/AzureClient/Response.hpp"
 #include "BlobRequestHelpers.hpp"
 #include "FakeHttpClient.hpp"
-#include "SuppressDeprecated.hpp"
 #include "TestFixtures.hpp"
 #include "TestHelpers.hpp"
 #include "ValueOrFail.hpp"
@@ -217,23 +216,6 @@ namespace
             callback.MarkInvoked();
         });
     }
-
-    AVEVA_TEST_ALLOW_DEPRECATED_BEGIN
-    void StartDownloadToStringPathAsyncAndVerify(BlockBlobClient& client,
-        const std::string& path,
-        CallbackExpectation& callback)
-    {
-        client.DownloadToAsync(path,
-            [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            const Response<DownloadBlobToResult>& response = *result;
-            EXPECT_EQ(response.Value().BytesWritten, 4U);
-            callback.MarkInvoked();
-        });
-    }
-
-    AVEVA_TEST_ALLOW_DEPRECATED_END
 
     void StartDownloadToFilesystemPathAsyncAndVerify(BlockBlobClient& client,
         const std::filesystem::path& path,
@@ -672,13 +654,10 @@ TEST(BlockBlobClientTests, DownloadAsync_DefaultAndOptionsOverloadsParseContent)
     httpClient.Poll(); // drive the two posted (async) completions (T26)
 }
 
-TEST(BlockBlobClientTests, DownloadToAsync_StreamStringPathAndFilesystemPathWriteBytes)
+TEST(BlockBlobClientTests, DownloadToAsync_StreamAndFilesystemPathWriteBytes)
 {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "4"}}), "data"},
-        {},
-        true);
-    httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "4"}}), "more"},
         {},
         true);
     httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "5"}}), "bytes"},
@@ -692,24 +671,16 @@ TEST(BlockBlobClientTests, DownloadToAsync_StreamStringPathAndFilesystemPathWrit
     EXPECT_TRUE(httpClient.CompleteNext());
     EXPECT_EQ(stream.str(), "data");
 
-    const std::filesystem::path stringPath =
-        std::filesystem::temp_directory_path() / "azure-client-block-download-string.txt";
     const std::filesystem::path fsPath =
         std::filesystem::temp_directory_path() / "azure-client-block-download-path.txt";
-
-    CallbackExpectation stringPathCallback;
-    StartDownloadToStringPathAsyncAndVerify(client, stringPath.string(), stringPathCallback);
-    EXPECT_TRUE(httpClient.CompleteNext());
 
     CallbackExpectation fsPathCallback;
     StartDownloadToFilesystemPathAsyncAndVerify(client, fsPath, fsPathCallback);
     EXPECT_TRUE(httpClient.CompleteNext());
 
-    EXPECT_EQ(std::filesystem::file_size(stringPath), 4U);
     EXPECT_EQ(std::filesystem::file_size(fsPath), 5U);
 
     std::error_code ignored;
-    std::filesystem::remove(stringPath, ignored);
     std::filesystem::remove(fsPath, ignored);
 }
 

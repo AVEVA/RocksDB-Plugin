@@ -89,6 +89,7 @@ namespace
         request.SetUrl("https://127.0.0.1:" + std::to_string(acceptor.local_endpoint().port()) + "/");
         int completions = 0;
         client->SendAsync(std::move(request),
+            AVEVA::HttpRequestOptions{},
             [&](std::error_code error, AVEVA::HttpResponse response)
         {
             ++completions;
@@ -180,6 +181,7 @@ namespace
         request.SetUrl("https://127.0.0.1:" + std::to_string(acceptor.local_endpoint().port()) + "/");
         std::error_code result;
         client->SendAsync(std::move(request),
+            AVEVA::HttpRequestOptions{},
             [&](std::error_code error, AVEVA::HttpResponse)
         {
             result = error;
@@ -471,6 +473,7 @@ namespace
             AVEVA::HttpRequest request;
             request.SetUrl(url);
             client->SendAsync(std::move(request),
+                AVEVA::HttpRequestOptions{},
                 [&](std::error_code error, AVEVA::HttpResponse response)
             {
                 outcomes.push_back({error, response.GetStatus(), std::string{response.GetBody()}});

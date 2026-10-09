@@ -238,21 +238,6 @@ namespace AVEVA::AzureClient
                 std::move(options));
         }
 
-        // Only options.Conditions was ever used; HttpHeaders, Metadata and AccessTier are ignored.
-        // Deprecated; scheduled for removal in the next breaking release.
-        template <class CompletionToken = DefaultCompletionToken>
-        [[deprecated("Use ResizeAsync(newSize, ResizePageBlobOptions{...})")]] [[nodiscard]] auto ResizeAsync(
-            std::uint64_t newSize,
-            CreatePageBlobOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return ResizeAsync(newSize,
-                ResizePageBlobOptions{.Conditions = std::move(options.Conditions)},
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions));
-        }
-
       private:
         friend class BlobContainerClient;
         PageBlobClient(IHttpClient& httpClient, std::shared_ptr<const Private::BlobTarget> target);

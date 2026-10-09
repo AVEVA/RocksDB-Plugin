@@ -57,12 +57,6 @@ namespace AVEVA
         // `options.GetCancellationSlot()` if set.
         virtual void SendAsyncErased(HttpRequest request, CompletionHandler completion, HttpRequestOptions options) = 0;
 
-        // Legacy, non-completion-token overload preserved for source compatibility.
-        void SendAsync(HttpRequest request, CompletionHandler completion, HttpRequestOptions options = {})
-        {
-            SendAsyncErased(std::move(request), std::move(completion), std::move(options));
-        }
-
         // Completion-token-aware overload. Propagates the token's associated executor,
         // allocator, and cancellation slot (falling back to this client's executor, the
         // default allocator, and `options`'s existing cancellation slot respectively) so

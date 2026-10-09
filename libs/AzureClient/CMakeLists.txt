@@ -11,22 +11,6 @@ option(AVEVA_AZURE_CLIENT_ENABLE_TSAN "Enable ThreadSanitizer instrumentation (i
 option(AVEVA_AZURE_CLIENT_ENABLE_COVERAGE "Enable compiler coverage instrumentation" OFF)
 option(AVEVA_AZURE_CLIENT_ENABLE_CLANG_TIDY "Enable clang-tidy analysis during compilation" OFF)
 
-# Deprecated unprefixed option names, honoured for one release.
-foreach(legacy_pair
-    "ENABLE_ASAN:AVEVA_AZURE_CLIENT_ENABLE_ASAN"
-    "ENABLE_UBSAN:AVEVA_AZURE_CLIENT_ENABLE_UBSAN"
-    "ENABLE_TSAN:AVEVA_AZURE_CLIENT_ENABLE_TSAN"
-    "ENABLE_COVERAGE:AVEVA_AZURE_CLIENT_ENABLE_COVERAGE"
-    "ENABLE_CLANG_TIDY:AVEVA_AZURE_CLIENT_ENABLE_CLANG_TIDY")
-    string(REPLACE ":" ";" legacy_names "${legacy_pair}")
-    list(GET legacy_names 0 legacy_name)
-    list(GET legacy_names 1 new_name)
-    if(${legacy_name})
-        message(DEPRECATION "${legacy_name} is deprecated; use ${new_name}.")
-        set(${new_name} ON)
-    endif()
-endforeach()
-
 
 function(aveva_azure_client_enable_clang_tidy target_name)
     if(NOT AVEVA_AZURE_CLIENT_ENABLE_CLANG_TIDY)

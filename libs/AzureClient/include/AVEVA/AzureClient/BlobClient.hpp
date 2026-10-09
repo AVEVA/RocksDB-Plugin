@@ -125,7 +125,6 @@ namespace AVEVA::AzureClient
         //   (stream|path, DownloadToOptions)   - whole blob (or DownloadToOptions::Range), chunked and optionally parallel.
         //   (stream|path, token)               - whole blob with default DownloadToOptions, chunked.
         //   (stream|path, DownloadBlobOptions) - honours DownloadBlobOptions::Range; goes through the same chunked engine.
-        // The std::string path overloads are deprecated forwarding wrappers for the std::filesystem::path ones.
         // Stream/file writes run on the client's executor (the threads completing HTTP requests): use a dedicated
         // io_context or a fast stream. To cancel, emit the signal from the handler's executor/strand.
 
@@ -232,35 +231,6 @@ namespace AVEVA::AzureClient
                 std::forward<CompletionToken>(token),
                 std::move(requestOptions),
                 path,
-                std::move(options));
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, DownloadBlobOptions> &&
-                     !std::same_as<std::remove_cvref_t<CompletionToken>, DownloadToOptions>)
-        [[deprecated("Pass a std::filesystem::path")]] [[nodiscard]] auto DownloadToAsync(const std::string& path,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::DownloadBlobToResult>(this,
-                &BlobClient::DownloadToFileAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::filesystem::path{path},
-                DownloadToOptions{});
-        }
-
-        template <class CompletionToken = DefaultCompletionToken>
-        [[deprecated("Pass a std::filesystem::path")]] [[nodiscard]] auto DownloadToAsync(const std::string& path,
-            DownloadBlobOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::DownloadBlobToResult>(this,
-                &BlobClient::DownloadRangeToFileAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::filesystem::path{path},
                 std::move(options));
         }
 

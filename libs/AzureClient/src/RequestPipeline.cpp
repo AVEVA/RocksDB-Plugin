@@ -347,7 +347,7 @@ namespace AVEVA::AzureClient::Private
                     m_parentSlot.is_connected() ? m_attemptSignal.slot() : boost::asio::cancellation_slot{});
 
                 auto self = shared_from_this();
-                m_httpClient.SendAsync(std::move(attempt),
+                m_httpClient.SendAsyncErased(std::move(attempt),
                     [self](std::error_code error, HttpResponse response)
                 {
                     // A transport that completes inside SendAsync must not complete the caller's
@@ -363,7 +363,7 @@ namespace AVEVA::AzureClient::Private
                     }
                     self->OnAttemptComplete(error, std::move(response));
                 },
-                    options);
+                    std::move(options));
             }
 
             void OnAttemptComplete(std::error_code error, HttpResponse response)

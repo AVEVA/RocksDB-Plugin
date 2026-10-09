@@ -135,7 +135,7 @@ std::optional<std::chrono::milliseconds> RetryAfter(const HttpResponse& response
 void SendWithRetry(IHttpClient& httpClient, HttpRequest request, HttpRequestOptions options, int retriesLeft,
                    std::chrono::milliseconds delay, IHttpClient::CompletionHandler completion) {
     auto attempt = request;
-    httpClient.SendAsync(
+    httpClient.SendAsyncErased(
         std::move(attempt),
         [&httpClient, request = std::move(request), options, retriesLeft, delay,
          completion = std::move(completion)](std::error_code error, HttpResponse response) mutable {

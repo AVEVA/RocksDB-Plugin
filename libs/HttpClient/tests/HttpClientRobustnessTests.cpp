@@ -219,12 +219,14 @@ namespace
         std::vector<std::error_code> errors;
         std::vector<std::string> bodies;
         client->SendAsync(MakeRequest(server.Url("/first")),
+            AVEVA::HttpRequestOptions{},
             [&](std::error_code error, AVEVA::HttpResponse response)
         {
             errors.push_back(error);
             bodies.push_back(response.GetBody());
             // A POST is never silently re-sent, so it only succeeds if it gets a fresh connection.
             client->SendAsync(MakeRequest(server.Url("/second"), AVEVA::HttpMethod::Post),
+                AVEVA::HttpRequestOptions{},
                 [&](std::error_code secondError, AVEVA::HttpResponse secondResponse)
             {
                 errors.push_back(secondError);
@@ -259,10 +261,12 @@ namespace
 
         std::vector<std::error_code> errors;
         client->SendAsync(MakeRequest(server.Url("/first")),
+            AVEVA::HttpRequestOptions{},
             [&](std::error_code error, AVEVA::HttpResponse)
         {
             errors.push_back(error);
             client->SendAsync(MakeRequest(server.Url("/second"), AVEVA::HttpMethod::Post),
+                AVEVA::HttpRequestOptions{},
                 [&](std::error_code secondError, AVEVA::HttpResponse secondResponse)
                 {
                     errors.push_back(secondError);
@@ -292,6 +296,7 @@ namespace
 
         std::vector<std::error_code> errors;
         client->SendAsync(MakeRequest(server.Url("/first")),
+            AVEVA::HttpRequestOptions{},
             [&](std::error_code error, AVEVA::HttpResponse)
         {
             errors.push_back(error);
@@ -300,6 +305,7 @@ namespace
             timer->async_wait([&, timer](boost::system::error_code)
             {
                 client->SendAsync(MakeRequest(server.Url("/second")),
+                    AVEVA::HttpRequestOptions{},
                     [&](std::error_code secondError, AVEVA::HttpResponse secondResponse)
                 {
                     errors.push_back(secondError);
@@ -331,9 +337,11 @@ namespace
 
         std::error_code postError;
         client->SendAsync(MakeRequest(server.Url("/first")),
+            AVEVA::HttpRequestOptions{},
             [&](std::error_code, AVEVA::HttpResponse)
         {
             client->SendAsync(MakeRequest(server.Url("/second"), AVEVA::HttpMethod::Post),
+                AVEVA::HttpRequestOptions{},
                 [&](std::error_code error, AVEVA::HttpResponse)
             {
                 postError = error;
@@ -362,9 +370,11 @@ namespace
 
         std::error_code secondError;
         client->SendAsync(MakeRequest(server.Url("/first")),
+            AVEVA::HttpRequestOptions{},
             [&](std::error_code, AVEVA::HttpResponse)
         {
             client->SendAsync(MakeRequest(server.Url("/second")),
+                AVEVA::HttpRequestOptions{},
                 [&](std::error_code error, AVEVA::HttpResponse)
             {
                 secondError = error;
@@ -392,12 +402,12 @@ namespace
 
         std::error_code observed;
         client->SendAsync(MakeRequest(server.Url("/timeout")),
+            options,
             [&](std::error_code error, AVEVA::HttpResponse)
         {
             observed = error;
             server.Stop();
-        },
-            options);
+        });
         context.run();
 
         EXPECT_EQ(observed, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
@@ -423,16 +433,17 @@ namespace
 
         std::vector<std::error_code> errors;
         client->SendAsync(MakeRequest(server.Url("/first")),
+            AVEVA::HttpRequestOptions{},
             [&](std::error_code error, AVEVA::HttpResponse)
         {
             errors.push_back(error);
             client->SendAsync(MakeRequest(server.Url("/second")),
+                timeoutOptions,
                 [&](std::error_code secondError, AVEVA::HttpResponse)
                 {
                     errors.push_back(secondError);
                     server.Stop();
-                },
-                timeoutOptions);
+                });
         });
         context.run();
 
@@ -458,13 +469,13 @@ namespace
         std::error_code observed;
         unsigned int status = 0;
         client->SendAsync(MakeRequest(server.Url("/max-timeout")),
+            options,
             [&](std::error_code error, AVEVA::HttpResponse response)
         {
             observed = error;
             status = response.GetStatus();
             server.Stop();
-        },
-            options);
+        });
         context.run();
 
         EXPECT_FALSE(observed);
@@ -485,6 +496,7 @@ namespace
 
         std::vector<std::error_code> errors;
         client->SendAsync(MakeRequest(server.Url("/first")),
+            AVEVA::HttpRequestOptions{},
             [&](std::error_code error, AVEVA::HttpResponse)
         {
             errors.push_back(error);
@@ -493,6 +505,7 @@ namespace
             {
                 ASSERT_FALSE(waitError);
                 client->SendAsync(MakeRequest(server.Url("/second")),
+                    AVEVA::HttpRequestOptions{},
                     [&](std::error_code secondError, AVEVA::HttpResponse)
                     {
                         errors.push_back(secondError);
@@ -524,6 +537,7 @@ namespace
         for (int i = 0; i < 4; ++i)
         {
             client->SendAsync(MakeRequest(server.Url("/" + std::to_string(i))),
+                AVEVA::HttpRequestOptions{},
                 [&](std::error_code error, AVEVA::HttpResponse)
             {
                 errors.push_back(error);
@@ -575,21 +589,21 @@ namespace
             }
         };
         client->SendAsync(MakeRequest(server.Url("/held")),
+            firstOptions,
             [&](std::error_code error, AVEVA::HttpResponse)
         {
             firstResult = error;
             finishWhenBothDone();
-        },
-            firstOptions);
+        });
         client->SendAsync(MakeRequest(server.Url("/queued")),
+            queuedOptions,
             [&](std::error_code error, AVEVA::HttpResponse)
         {
             queuedResult = error;
             // The queued request is cancelled first; the held one is released only after that completion.
             firstCancel.emit(asio::cancellation_type::terminal);
             finishWhenBothDone();
-        },
-            queuedOptions);
+        });
         queuedCancel.emit(asio::cancellation_type::terminal);
         context.run();
 
@@ -612,10 +626,12 @@ namespace
 
         std::vector<std::error_code> errors;
         client->SendAsync(MakeRequest(server.Url("/first")),
+            AVEVA::HttpRequestOptions{},
             [&](std::error_code error, AVEVA::HttpResponse)
         {
             errors.push_back(error);
             client->SendAsync(MakeRequest(server.Url("/second")),
+                AVEVA::HttpRequestOptions{},
                 [&](std::error_code secondError, AVEVA::HttpResponse)
                 {
                     errors.push_back(secondError);
@@ -686,13 +702,13 @@ namespace
             int completions = 0;
             std::error_code result;
             client->SendAsync(MakeRequest(server.Url()),
+                options,
                 [&](std::error_code error, AVEVA::HttpResponse)
             {
                 ++completions;
                 result = error;
                 server.Stop();
-            },
-                options);
+            });
 
             std::thread canceller(
                 [&]
@@ -724,6 +740,7 @@ namespace
             int completions = 0;
             std::error_code secondResult;
             client->SendAsync(MakeRequest(server.Url("/first")),
+                AVEVA::HttpRequestOptions{},
                 [&](std::error_code, AVEVA::HttpResponse)
             {
                 auto timer = std::make_shared<asio::steady_timer>(context, std::chrono::milliseconds(50));
@@ -732,13 +749,13 @@ namespace
                     AVEVA::HttpRequestOptions options;
                     options.SetCancellationSlot(cancellation.slot());
                     client->SendAsync(MakeRequest(server.Url("/second")),
+                        options,
                         [&](std::error_code error, AVEVA::HttpResponse)
                     {
                         ++completions;
                         secondResult = error;
                         server.Stop();
-                    },
-                        options);
+                    });
                     // Lands while the reuse failure and the replacement connection are being processed.
                     auto cancelTimer = std::make_shared<asio::steady_timer>(
                         context, std::chrono::microseconds(iteration * 200));
@@ -765,12 +782,12 @@ namespace
             [&](int, const http::request<http::string_body>&) -> ServerAction { return {wire, true}; });
         std::error_code result;
         client->SendAsync(MakeRequest(server.Url()),
+            options,
             [&](std::error_code error, AVEVA::HttpResponse)
         {
             result = error;
             server.Stop();
-        },
-            options);
+        });
         context.run();
         return result;
     }
@@ -815,6 +832,7 @@ namespace
                 return;
             }
             client->SendAsync(MakeRequest("http://127.0.0.1:" + port + paths[next++]),
+                AVEVA::HttpRequestOptions{},
                 [&](std::error_code error, AVEVA::HttpResponse)
             {
                 EXPECT_FALSE(error);

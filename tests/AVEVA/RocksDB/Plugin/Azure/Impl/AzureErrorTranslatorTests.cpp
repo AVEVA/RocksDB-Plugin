@@ -156,12 +156,6 @@ TEST(AzureErrorTranslatorTests, StatusTextIncludesCodeAndMessage) {
     EXPECT_NE(text.find("boom"), std::string::npos);
 }
 
-TEST(AzureErrorTranslatorTests, LegacyOverloadKeepsRetryableTimeout) {
-    auto status = AzureErrorTranslator::IOStatusFromError("ctx", HttpStatus::RequestTimeout);
-    EXPECT_TRUE(status.IsTimedOut());
-    EXPECT_TRUE(status.GetRetryable());
-}
-
 TEST(AzureErrorTranslatorTests, TransientClassification) {
     for (unsigned int code : {0u, 408u, 429u, 500u, 501u, 502u, 503u, 504u, 507u}) {
         EXPECT_TRUE(AzureErrorTranslator::IsTransient(Failure(code))) << code;

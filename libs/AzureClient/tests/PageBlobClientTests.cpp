@@ -6,7 +6,6 @@
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
 #include "AVEVA/AzureClient/Response.hpp"
 #include "FakeHttpClient.hpp"
-#include "SuppressDeprecated.hpp"
 #include "TestFixtures.hpp"
 #include "TestHelpers.hpp"
 #include "ValueOrFail.hpp"
@@ -719,10 +718,6 @@ namespace
         static_cast<void>(client.DownloadToAsync(stream, DownloadBlobOptions{}));
         static_cast<void>(client.DownloadToAsync(path));
         static_cast<void>(client.DownloadToAsync(path, DownloadBlobOptions{}));
-        AVEVA_TEST_ALLOW_DEPRECATED_BEGIN
-        static_cast<void>(client.DownloadToAsync(str));
-        static_cast<void>(client.DownloadToAsync(str, DownloadBlobOptions{}));
-        AVEVA_TEST_ALLOW_DEPRECATED_END
 
         static_cast<void>(client.DeleteAsync());
         static_cast<void>(client.DeleteAsync(DeleteBlobOptions{}));
