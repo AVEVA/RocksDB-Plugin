@@ -121,6 +121,8 @@ class ReadableFileImpl {
     static constexpr int64_t kDefaultPrefetchBudgetBytes = 256 * 1024 * 1024;
 
     [[nodiscard]] std::string GetETag() const;
+    // Compares against the cached ETag under the metadata lock without copying it.
+    [[nodiscard]] bool HasETag(std::string_view etag) const;
     int64_t GetSize() const;
     void RefreshBlobMetadata() const;
 };

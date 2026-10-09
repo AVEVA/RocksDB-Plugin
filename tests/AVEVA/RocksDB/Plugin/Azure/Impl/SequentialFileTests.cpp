@@ -133,8 +133,16 @@ TEST_F(SequentialFileTests, SequentialRead_SmallReads_ShareOneReadaheadAndRefill
     EXPECT_EQ(blobSize, file.GetOffset());
 }
 
-TEST_F(SequentialFileTests, SequentialRead_LargeReadBypassesReadahead) {
-    // Arrange
+TEST_F(SequentialFileTests, HasETag_ComparesTheCachedETagWithoutCopying) {
+    ON_CALL(*m_blobClient, GetEtag()).WillByDefault(Return(std::string{"etag-1"}));
+    ReadableFileImpl file{"test.sst", m_blobClient, nullptr, m_logger};
+
+    EXPECT_TRUE(file.HasETag("etag-1"));
+    EXPECT_FALSE(file.HasETag("etag-2"));
+    EXPECT_FALSE(file.HasETag(""));
+}
+
+TEST_F(SequentialFileTests, SequentialRead_LargeReadBypassesReadahead) {    // Arrange
     constexpr int64_t megabyte = 1024 * 1024;
     constexpr int64_t blobSize = 4 * megabyte;
     ON_CALL(*m_blobClient, GetSize()).WillByDefault(Return(blobSize));

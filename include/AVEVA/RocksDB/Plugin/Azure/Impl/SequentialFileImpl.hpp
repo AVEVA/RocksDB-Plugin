@@ -18,7 +18,8 @@ class SequentialFileImpl {
 
     ReadableFileImpl m_file;
     int64_t m_offset = 0;
-    std::vector<char> m_readahead;
+    std::unique_ptr<char[]> m_readahead;
+    int64_t m_readaheadLength = 0;
     int64_t m_readaheadStart = 0;
     std::string m_readaheadEtag;
 

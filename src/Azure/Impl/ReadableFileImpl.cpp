@@ -73,6 +73,11 @@ int64_t ReadableFileImpl::RandomRead(const int64_t offset, const int64_t bytesTo
 
 std::string ReadableFileImpl::GetETag() const { return GetMetadata().second; }
 
+bool ReadableFileImpl::HasETag(const std::string_view etag) const {
+    std::scoped_lock lock(*m_metadataMutex);
+    return m_etag == etag;
+}
+
 int64_t ReadableFileImpl::GetSize() const {
     RefreshBlobMetadata();
 
