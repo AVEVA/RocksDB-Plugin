@@ -6,6 +6,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/DirectoryImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/LeaseRenewalLoop.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LoggerImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
@@ -63,10 +64,11 @@ class BlobFilesystemImpl {
     std::shared_ptr<std::atomic<int64_t>> m_prefetchBytes = std::make_shared<std::atomic<int64_t>>(0);
     std::mutex m_lockFilesMutex;
     boost::intrusive::list<LockFileImpl, boost::intrusive::constant_time_size<false>> m_locks;
-    // Parallel to m_locks; lets the renewal thread keep locks alive while it renews outside m_lockFilesMutex.
+    // Parallel to m_locks; lets the renewal loop keep locks alive while it renews outside m_lockFilesMutex.
     std::vector<std::weak_ptr<LockFileImpl>> m_renewableLocks;
     std::stop_source m_filesystemStopSource;
-    std::jthread m_lockRenewalThread;
+    // Declared last: Stop()ped first thing in the destructor, before anything its callbacks use is released.
+    std::shared_ptr<LeaseRenewalLoop> m_leaseRenewal;
 
   public:
     // Every constructor takes the host-owned io_context that all Azure I/O runs on. The filesystem never runs,
@@ -101,7 +103,7 @@ class BlobFilesystemImpl {
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::optional<std::string_view> cachePath = {}, size_t maxCacheSize = Configuration::MaxCacheSize);
 
-    // Blocks until reads abandoned by RocksDB mid-flight have completed, so that their completions never release
+    // Stops lease renewal, then blocks until reads abandoned by RocksDB mid-flight have completed, so that their completions never release
     // the HTTP client or a file cache. Requires the host io_context to still be running.
     ~BlobFilesystemImpl();
     BlobFilesystemImpl(const BlobFilesystemImpl&) = delete;
@@ -140,7 +142,6 @@ class BlobFilesystemImpl {
     void AddContainer(AzureClient::BlobServiceClient serviceClient, const std::string& storageAccountUrl,
                       const std::string& name, std::optional<std::string_view> cachePath, size_t maxCacheSize);
     [[nodiscard]] const std::shared_ptr<AzureClient::BlobContainerClient>& GetContainer(std::string_view prefix) const;
-    void RenewLease(std::stop_token stopToken);
     void EnsureLiveness(std::source_location location = std::source_location::current()) const;
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

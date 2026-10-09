@@ -12,6 +12,7 @@ add_library(aveva-rocksdb-plugin-azure-impl
     LoggerImpl.cpp
     LogRateLimiter.cpp
     LockFileImpl.cpp
+    LeaseRenewalLoop.cpp
     BlobAttributes.cpp
     DirectoryImpl.cpp
     AzureContainerClient.cpp
@@ -41,6 +42,7 @@ target_sources(aveva-rocksdb-plugin-azure-impl
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/LoggerImpl.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/LogRateLimiter.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/LeaseRenewalLoop.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobAttributes.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/DirectoryImpl.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/AzureContainerClient.hpp"

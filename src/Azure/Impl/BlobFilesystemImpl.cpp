@@ -655,9 +655,28 @@ BlobFilesystemImpl::BlobFilesystemImpl(
     : m_logger(std::move(logger)), m_dataFileInitialSize(dataFileInitialSize), m_dataFileBufferSize(dataFileBufferSize),
       m_runtime(std::make_shared<ClientRuntime>(ioContext)),
       m_asyncReads(std::make_shared<AsyncReadTracker>(ioContext.get_executor())),
-      m_lockRenewalThread{[this](std::stop_token stopToken) { RenewLease(stopToken); }} {}
-
+      m_leaseRenewal{LeaseRenewalLoop::Start(
+          ioContext.get_executor(), m_logger,
+          [this] {
+              // Snapshot under the mutex but renew outside it, so LockFile/UnlockFile are not blocked behind
+              // network round trips and their retries. The shared_ptrs keep the locks alive meanwhile.
+              std::vector<std::shared_ptr<LockFileImpl>> locks;
+              std::scoped_lock lock(m_lockFilesMutex);
+              std::erase_if(m_renewableLocks, [](const auto& weak) { return weak.expired(); });
+              for (const auto& weak : m_renewableLocks) {
+                  if (auto shared = weak.lock()) {
+                      locks.push_back(std::move(shared));
+                  }
+              }
+              return locks;
+          },
+          [this] {
+              m_runtime->FenceWrites();
+              m_filesystemStopSource.request_stop();
+          },
+          std::chrono::duration_cast<std::chrono::milliseconds>(Configuration::RenewalDelay))} {}
 BlobFilesystemImpl::~BlobFilesystemImpl() {
+    m_leaseRenewal->Stop();
     if (const auto inFlight = m_asyncReads->InFlight(); inFlight > 0) {
         BOOST_LOG_SEV(*m_logger, severity_level::info)
             << "Waiting for " << inFlight << " in-flight async read(s) before closing the filesystem";
@@ -681,114 +700,6 @@ BlobFilesystemImpl::GetContainer(const std::string_view prefix) const {
     } else {
         throw std::runtime_error("Client not found for '" + std::string(prefix) + "'");
     }
-}
-
-void BlobFilesystemImpl::RenewLease(std::stop_token stopToken) {
-    BOOST_LOG_SEV(*m_logger, severity_level::info) << "Starting blob lease renewal thread";
-    try {
-        // Waiting on a condition variable with the stop token wakes the thread as soon as a stop is requested.
-        std::mutex wakeMutex;
-        std::condition_variable_any wake;
-        const auto interruptibleSleep = [&](std::chrono::milliseconds duration) {
-            std::unique_lock lock(wakeMutex);
-            wake.wait_for(lock, stopToken, duration, [] { return false; });
-        };
-
-        while (!stopToken.stop_requested()) {
-            interruptibleSleep(std::chrono::duration_cast<std::chrono::milliseconds>(Configuration::RenewalDelay));
-            if (stopToken.stop_requested()) {
-                break;
-            }
-
-            {
-                // Snapshot under the mutex but renew outside it, so LockFile/UnlockFile are not blocked behind
-                // network round trips and their retries. The shared_ptrs keep the locks alive meanwhile.
-                std::vector<std::shared_ptr<LockFileImpl>> needsRetry;
-                {
-                    std::scoped_lock lock(m_lockFilesMutex);
-                    std::erase_if(m_renewableLocks, [](const auto& weak) { return weak.expired(); });
-                    for (const auto& weak : m_renewableLocks) {
-                        if (auto shared = weak.lock()) {
-                            needsRetry.push_back(std::move(shared));
-                        }
-                    }
-                }
-
-                // Attempt to renew all locks with retries
-                BOOST_LOG_SEV(*m_logger, severity_level::debug)
-                    << "Attempting to renew " << needsRetry.size() << " leases";
-                int retries = 0;
-                while (needsRetry.size() > 0 && retries < 5 && !stopToken.stop_requested()) {
-                    // Renewals run side by side so one slow or failing lease cannot delay the others past their
-                    // deadlines. Each request is cancelled at its own renewal deadline, so waiting for all of them
-                    // is bounded; the wait is deliberately not interruptible because the callbacks touch the locks.
-                    struct Round {
-                        std::mutex Mutex;
-                        std::condition_variable Done;
-                        size_t Pending;
-                        std::vector<std::exception_ptr> Errors;
-                    };
-                    auto round = std::make_shared<Round>();
-                    round->Pending = needsRetry.size();
-                    round->Errors.resize(needsRetry.size());
-                    for (size_t i = 0; i < needsRetry.size(); ++i) {
-                        needsRetry[i]->RenewAsync([round, i, lock = needsRetry[i]](std::exception_ptr error, bool) {
-                            std::scoped_lock guard(round->Mutex);
-                            round->Errors[i] = std::move(error);
-                            --round->Pending;
-                            round->Done.notify_all();
-                        });
-                    }
-                    {
-                        std::unique_lock guard(round->Mutex);
-                        round->Done.wait(guard, [&] { return round->Pending == 0; });
-                    }
-
-                    std::vector<std::shared_ptr<LockFileImpl>> stillPending;
-                    for (size_t i = 0; i < needsRetry.size(); ++i) {
-                        if (!round->Errors[i]) {
-                            continue;
-                        }
-                        try {
-                            std::rethrow_exception(round->Errors[i]);
-                        } catch (const RequestFailedException& e) {
-                            if (e.StatusCode == HttpStatus::Conflict) {
-                                BOOST_LOG_SEV(*m_logger, severity_level::error)
-                                    << "Failed to renew lease due to conflict, lease might be expired: " << e.what();
-                                throw;
-                            }
-                            BOOST_LOG_SEV(*m_logger, severity_level::error) << "Failed to renew lease: " << e.what();
-                            stillPending.push_back(std::move(needsRetry[i]));
-                        }
-                    }
-                    needsRetry = std::move(stillPending);
-
-                    retries++;
-                    if (needsRetry.size() > 0) {
-                        interruptibleSleep(std::chrono::milliseconds(100));
-                    }
-                }
-
-                // A lease that could not be renewed in time may already be held by someone else; stop before
-                // writing on its behalf rather than waiting for the service to reject us.
-                for (const auto& lock : needsRetry) {
-                    if (lock->IsRenewalOverdue()) {
-                        throw std::runtime_error("Lease renewal did not succeed before the lease expired");
-                    }
-                }
-            }
-        }
-    } catch (const std::exception& e) {
-        BOOST_LOG_SEV(*m_logger, severity_level::fatal) << "Stopping renewal thread " << e.what();
-        m_runtime->FenceWrites();
-        m_filesystemStopSource.request_stop();
-    } catch (...) {
-        BOOST_LOG_SEV(*m_logger, severity_level::fatal) << "Stopping renewal thread";
-        m_runtime->FenceWrites();
-        m_filesystemStopSource.request_stop();
-    }
-
-    BOOST_LOG_SEV(*m_logger, severity_level::info) << "Exiting blob lease renewal thread";
 }
 
 void BlobFilesystemImpl::EnsureLiveness(const std::source_location location) const {
