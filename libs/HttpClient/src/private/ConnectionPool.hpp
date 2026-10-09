@@ -58,6 +58,18 @@ namespace AVEVA::Private
         }
     };
 
+    // Buffers up to this capacity are kept as-is when a connection is pooled so the next response on it does
+    // not have to reallocate; larger ones are released so an idle connection does not pin a big response.
+    inline constexpr std::size_t MaxRetainedBufferCapacity = 64 * 1024;
+
+    inline void TrimIdleBuffer(beast::flat_buffer& buffer)
+    {
+        if (buffer.capacity() > MaxRetainedBufferCapacity)
+        {
+            buffer.shrink_to_fit();
+        }
+    }
+
     template <typename Stream> struct PooledConnection
     {
         std::unique_ptr<Stream> stream;

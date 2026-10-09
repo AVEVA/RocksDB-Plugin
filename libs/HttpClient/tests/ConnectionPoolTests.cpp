@@ -476,4 +476,16 @@ namespace
         EXPECT_LE(drained, 16);
         EXPECT_EQ(live.load(), 0);
     }
-} // namespace
+    TEST(ConnectionPoolBuffers, SmallIdleBufferKeepsItsCapacityAndLargeOneIsReleased)
+    {
+        boost::beast::flat_buffer small;
+        small.prepare(4096);
+        const auto capacity = small.capacity();
+        AVEVA::Private::TrimIdleBuffer(small);
+        EXPECT_EQ(small.capacity(), capacity);
+
+        boost::beast::flat_buffer large;
+        large.prepare(AVEVA::Private::MaxRetainedBufferCapacity * 4);
+        AVEVA::Private::TrimIdleBuffer(large);
+        EXPECT_LT(large.capacity(), AVEVA::Private::MaxRetainedBufferCapacity);
+    }} // namespace

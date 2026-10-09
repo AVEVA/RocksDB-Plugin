@@ -583,7 +583,7 @@ namespace AVEVA::Private
                 try
                 {
                     // A pooled connection is idle for a long time; don't let it pin the last response's buffer.
-                    m_buffer.shrink_to_fit();
+                    TrimIdleBuffer(m_buffer);
                     m_pool->Release(m_key, PooledConnection<Stream>{std::move(m_stream), std::move(m_buffer)});
                     pooled = true;
                 }
