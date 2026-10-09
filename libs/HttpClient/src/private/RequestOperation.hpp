@@ -15,6 +15,7 @@
 #include "AVEVA/HttpClient/HttpRequestOptions.hpp"
 #include "AVEVA/HttpClient/HttpResponse.hpp"
 
+#include <boost/asio/dispatch.hpp>
 #include <boost/asio/post.hpp>
 
 #include <boost/asio/ssl/context.hpp>
@@ -313,13 +314,14 @@ namespace AVEVA::Private
         }
 
         // Serves a recent result from the shared cache and collapses concurrent lookups for one origin into a
-        // single resolve; hits are posted so the handler never runs re-entrantly.
+        // single resolve. Every caller already runs on this operation's strand, so a hit is dispatched (run inline)
+        // instead of posted; completions are always posted, so the caller's handler is still never re-entered.
         void Resolve()
         {
             auto& cache = DnsCache::Shared();
             if (auto cached = cache.Find(m_key.host, m_key.service))
             {
-                asio::post(m_executor,
+                asio::dispatch(m_executor,
                     [self = this->shared_from_this(), results = std::move(*cached)]() mutable
                 {
                     self->OnResolve({}, std::move(results));
