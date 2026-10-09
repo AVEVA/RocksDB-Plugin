@@ -665,21 +665,43 @@ namespace AVEVA::AzureClient::Private
                         continue;
                     }
 
+                    // Take every chunk that is already contiguous so one pool task (and one hop back to the
+                    // I/O executor) covers the whole run instead of one pair of hops per chunk.
+                    std::vector<std::string> batch;
+                    batch.push_back(std::move(data));
+                    std::uint64_t next = m_written + m_begin + batch.back().size();
+                    for (auto following = m_ready.find(next); following != m_ready.end(); following = m_ready.find(next))
+                    {
+                        next += following->second.size();
+                        batch.push_back(std::move(following->second));
+                        m_ready.erase(following);
+                    }
+
                     m_writing = true;
+                    m_writingChunks = batch.size();
                     PendingDownloadWrites().fetch_add(1U);
                     StartedDownloadWrites().fetch_add(1U);
                     boost::asio::post(DownloadWriterPool(),
-                        [self = shared_from_this(), data = std::move(data)]() mutable
+                        [self = shared_from_this(), batch = std::move(batch)]() mutable
                     {
-                        const std::size_t size = data.size();
-                        bool ok = false;
-                        try
+                        std::size_t size = 0U;
+                        bool ok = true;
+                        for (auto& chunk : batch)
                         {
-                            ok = self->m_sink->Write(std::move(data));
-                        }
-                        catch (const std::exception&)
-                        {
-                            ok = false;
+                            const std::size_t chunkSize = chunk.size();
+                            try
+                            {
+                                ok = self->m_sink->Write(std::move(chunk));
+                            }
+                            catch (const std::exception&)
+                            {
+                                ok = false;
+                            }
+                            if (!ok)
+                            {
+                                break;
+                            }
+                            size += chunkSize;
                         }
                         boost::asio::post(self->m_httpClient.get_executor(),
                             [self, ok, size]()
@@ -695,6 +717,7 @@ namespace AVEVA::AzureClient::Private
             void OnWriteDone(const Event& event)
             {
                 m_writing = false;
+                m_writingChunks = 0U;
                 if (!event.WriteOk)
                 {
                     Fail(MakeFailure(std::errc::io_error, "Failed to write the downloaded data."));
@@ -722,7 +745,7 @@ namespace AVEVA::AzureClient::Private
                 {
                     return;
                 }
-                while (m_next < *m_end && m_chunksInFlight + m_ready.size() + (m_writing ? 1U : 0U) < m_concurrency &&
+                while (m_next < *m_end && m_chunksInFlight + m_ready.size() + m_writingChunks < m_concurrency &&
                        !m_failure.has_value())
                 {
                     const std::uint64_t length = std::min<std::uint64_t>(m_chunkSize, *m_end - m_next);
@@ -815,6 +838,7 @@ namespace AVEVA::AzureClient::Private
             std::uint64_t m_written = 0;
             bool m_ranged = false;
             bool m_writing = false;
+        std::size_t m_writingChunks = 0;
             std::optional<BlobStorageError> m_failure;
             DownloadSummary m_summary;
             bool m_done = false;
