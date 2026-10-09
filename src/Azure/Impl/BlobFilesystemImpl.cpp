@@ -13,6 +13,7 @@
 #include "AVEVA/RocksDB/Plugin/Core/RocksDBHelpers.hpp"
 
 #include <boost/asio/use_future.hpp>
+#include <boost/scope/scope_fail.hpp>
 
 #include <algorithm>
 #include <cassert>
@@ -73,7 +74,34 @@ void ForEachBlob(AzureClient::BlobContainerClient& container, AzureClient::ListB
 }
 
 uint32_t ToListPageSize(int32_t sizeHint) { return static_cast<uint32_t>(std::clamp(sizeHint, 1, g_maxListPageSize)); }
-} // namespace
+
+using RenameDownload = std::future<
+    std::expected<AzureClient::Response<AzureClient::Models::DownloadBlobResult>, AzureClient::BlobStorageError>>;
+
+// Starts downloading the next chunk [offset, offset + g_maxCopyChunkSize) of the rename source.
+RenameDownload StartRenameDownload(AzureClient::PageBlobClient& source, int64_t size, int64_t offset) {
+    const auto readSize = std::min(size - offset, g_maxCopyChunkSize);
+    AzureClient::DownloadBlobOptions options;
+    options.Range = AzureClient::Models::BlobByteRange{static_cast<uint64_t>(offset), static_cast<uint64_t>(readSize)};
+    return source.DownloadAsync(
+        std::move(options), boost::asio::use_future,
+        RequestOptionsForTransfer(source.GetDefaultRequestOptions(), static_cast<uint64_t>(readSize)));
+}
+
+// Page blob writes must be page aligned, so a short final chunk is padded with zeros; the logical size is carried
+// separately by SetFileSize.
+void UploadRenameChunk(AzureClient::PageBlobClient& destination, int64_t offset, std::string buffer) {
+    const auto remaining = buffer.size() % Configuration::PageBlob::PageSize;
+    if (remaining != 0) {
+        buffer.resize(buffer.size() + (Configuration::PageBlob::PageSize - remaining), '\0');
+    }
+
+    Unwrap(BlockOn(destination.get_executor(),
+                   destination.UploadPagesAsync(
+                       static_cast<uint64_t>(offset), std::as_bytes(std::span<const char>(buffer)),
+                       boost::asio::use_future,
+                       RequestOptionsForTransfer(destination.GetDefaultRequestOptions(), buffer.size()))));
+}} // namespace
 
 BlobFilesystemImpl::BlobFilesystemImpl(
     boost::asio::io_context& ioContext, const std::string& name, const std::string& storageAccountUrl,
@@ -602,57 +630,32 @@ void BlobFilesystemImpl::RenameFile(const std::string& fromFilePath, const std::
     const auto cap = BlobHelpers::GetBlobCapacity(srcClient);
     BlobHelpers::CreateIfNotExists(destClient, cap);
 
-    const auto startDownload = [&srcClient, size](int64_t offset) {
-        const auto readSize = std::min(size - offset, g_maxCopyChunkSize);
-        AzureClient::DownloadBlobOptions options;
-        options.Range =
-            AzureClient::Models::BlobByteRange{static_cast<uint64_t>(offset), static_cast<uint64_t>(readSize)};
-        return srcClient.DownloadAsync(
-            std::move(options), boost::asio::use_future,
-            RequestOptionsForTransfer(srcClient.GetDefaultRequestOptions(), static_cast<uint64_t>(readSize)));
-    };
-
     // The next chunk is downloaded while the current one is being uploaded, so the two transfers overlap.
-    std::optional<decltype(startDownload(0))> pendingDownload;
-    if (size > 0) {
-        pendingDownload.emplace(startDownload(0));
-    }
-    try {
-        int64_t uploadOffset = 0;
-        while (pendingDownload) {
-            auto chunk = Unwrap(BlockOn(srcClient.get_executor(), std::move(*pendingDownload)));
-            pendingDownload.reset();
-            auto& buffer = chunk.Content;
-            const auto bytesRead = static_cast<int64_t>(buffer.size());
-            if (bytesRead == 0) {
-                throw std::runtime_error("Unexpected end of blob while renaming '" + std::string(realPathFrom) + "'");
-            }
-            if (uploadOffset + bytesRead < size) {
-                pendingDownload.emplace(startDownload(uploadOffset + bytesRead));
-            }
-
-            // this must be aligned to page size so in some cases need dummy data
-            const auto remaining = buffer.size() % Configuration::PageBlob::PageSize;
-            if (remaining != 0) {
-                buffer.resize(buffer.size() + (Configuration::PageBlob::PageSize - remaining), '\0');
-            }
-
-            Unwrap(BlockOn(destClient.get_executor(),
-                           destClient.UploadPagesAsync(
-                               static_cast<uint64_t>(uploadOffset), std::as_bytes(std::span<const char>(buffer)),
-                               boost::asio::use_future,
-                               RequestOptionsForTransfer(destClient.GetDefaultRequestOptions(), buffer.size()))));
-
-            uploadOffset += bytesRead;
-        }
-    } catch (...) {
-        // The in-flight download references srcClient, so wait for it before the clients go out of scope.
+    std::optional<RenameDownload> pendingDownload;
+    // The in-flight download references srcClient, so wait for it before the clients go out of scope.
+    const boost::scope::scope_fail waitForDownload([&pendingDownload] {
         if (pendingDownload && pendingDownload->valid()) {
             pendingDownload->wait();
         }
-        throw;
+    });
+    if (size > 0) {
+        pendingDownload.emplace(StartRenameDownload(srcClient, size, 0));
     }
+    int64_t uploadOffset = 0;
+    while (pendingDownload) {
+        auto chunk = Unwrap(BlockOn(srcClient.get_executor(), std::move(*pendingDownload)));
+        pendingDownload.reset();
+        const auto bytesRead = static_cast<int64_t>(chunk.Content.size());
+        if (bytesRead == 0) {
+            throw std::runtime_error("Unexpected end of blob while renaming '" + std::string(realPathFrom) + "'");
+        }
+        if (uploadOffset + bytesRead < size) {
+            pendingDownload.emplace(StartRenameDownload(srcClient, size, uploadOffset + bytesRead));
+        }
 
+        UploadRenameChunk(destClient, uploadOffset, std::move(chunk.Content));
+        uploadOffset += bytesRead;
+    }
     BlobHelpers::SetFileSize(destClient, size);
     UnwrapResponse(BlockOn(srcClient.get_executor(), srcClient.DeleteIfExistsAsync(boost::asio::use_future)));
 }
