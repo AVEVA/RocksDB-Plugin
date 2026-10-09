@@ -100,6 +100,70 @@ namespace AVEVA::AzureClient
                 std::move(options));
         }
 
+        // Zero-copy upload: the request body views `content`, which the request keeps alive until the HTTP
+        // operation (including retries) has finished, so the caller may drop its reference immediately.
+        template <class CompletionToken = DefaultCompletionToken>
+            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, UploadBlockBlobOptions>)
+        [[nodiscard]] auto UploadAsync(std::shared_ptr<const std::vector<char>> content,
+            CompletionToken&& token = CompletionToken{},
+            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
+        {
+            return Private::InitiateClientOperation<Models::UploadBlockBlobResult>(this,
+                &BlockBlobClient::UploadSharedAsyncImpl,
+                std::forward<CompletionToken>(token),
+                std::move(requestOptions),
+                std::move(content),
+                UploadBlockBlobOptions{});
+        }
+
+        template <class CompletionToken = DefaultCompletionToken>
+        [[nodiscard]] auto UploadAsync(std::shared_ptr<const std::vector<char>> content,
+            UploadBlockBlobOptions options,
+            CompletionToken&& token = CompletionToken{},
+            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
+        {
+            return Private::InitiateClientOperation<Models::UploadBlockBlobResult>(this,
+                &BlockBlobClient::UploadSharedAsyncImpl,
+                std::forward<CompletionToken>(token),
+                std::move(requestOptions),
+                std::move(content),
+                std::move(options));
+        }
+
+        // Zero-copy variant of StageBlockAsync; see UploadAsync(shared_ptr) for the lifetime contract.
+        template <class CompletionToken = DefaultCompletionToken>
+            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, UploadBlockBlobOptions> &&
+                     !std::same_as<std::remove_cvref_t<CompletionToken>, StageBlockOptions>)
+        [[nodiscard]] auto StageBlockAsync(std::string blockId,
+            std::shared_ptr<const std::vector<char>> content,
+            CompletionToken&& token = CompletionToken{},
+            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
+        {
+            return Private::InitiateClientOperation<Models::StageBlockResult>(this,
+                &BlockBlobClient::StageBlockSharedAsyncImpl,
+                std::forward<CompletionToken>(token),
+                std::move(requestOptions),
+                std::move(blockId),
+                std::move(content),
+                StageBlockOptions{});
+        }
+
+        template <class CompletionToken = DefaultCompletionToken>
+        [[nodiscard]] auto StageBlockAsync(std::string blockId,
+            std::shared_ptr<const std::vector<char>> content,
+            StageBlockOptions options,
+            CompletionToken&& token = CompletionToken{},
+            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
+        {
+            return Private::InitiateClientOperation<Models::StageBlockResult>(this,
+                &BlockBlobClient::StageBlockSharedAsyncImpl,
+                std::forward<CompletionToken>(token),
+                std::move(requestOptions),
+                std::move(blockId),
+                std::move(content),
+                std::move(options));
+        }
+
         template <class CompletionToken = DefaultCompletionToken>
             requires(!std::same_as<std::remove_cvref_t<CompletionToken>, UploadBlockBlobOptions> &&
                      !std::same_as<std::remove_cvref_t<CompletionToken>, StageBlockOptions>)
@@ -206,6 +270,15 @@ namespace AVEVA::AzureClient
         void UploadStringAsyncImpl(std::string content,
             const UploadBlockBlobOptions& options,
             UploadCompletionHandler completion,
+            HttpRequestOptions requestOptions);
+        void UploadSharedAsyncImpl(std::shared_ptr<const std::vector<char>> content,
+            const UploadBlockBlobOptions& options,
+            UploadCompletionHandler completion,
+            HttpRequestOptions requestOptions);
+        void StageBlockSharedAsyncImpl(const std::string& blockId,
+            std::shared_ptr<const std::vector<char>> content,
+            const StageBlockOptions& options,
+            StageBlockCompletionHandler completion,
             HttpRequestOptions requestOptions);
         void SendUploadRequest(HttpRequest request,
             const UploadBlockBlobOptions& options,

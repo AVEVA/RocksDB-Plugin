@@ -193,6 +193,59 @@ namespace AVEVA::AzureClient
         SendUploadRequest(std::move(request), options, std::move(completion), requestOptions);
     }
 
+    void BlockBlobClient::UploadSharedAsyncImpl(std::shared_ptr<const std::vector<char>> content,
+        const UploadBlockBlobOptions& options,
+        UploadCompletionHandler completion,
+        HttpRequestOptions requestOptions)
+    {
+        if (!content)
+        {
+            Private::PostCompletion(HttpClient(),
+                std::move(completion),
+                Private::MakeError<Models::UploadBlockBlobResult>(
+                    std::make_error_code(std::errc::invalid_argument), "content must not be null"));
+            return;
+        }
+        HttpRequest request = Private::BuildBlobRequest(Target(), HttpMethod::Put);
+        Private::AddHeader(request, Private::XMsBlobTypeHeaderName, BlockBlobTypeValue);
+        const auto bytes = std::as_bytes(std::span<const char>(*content));
+        request.SetBodyView(bytes, std::move(content));
+        SendUploadRequest(std::move(request), options, std::move(completion), requestOptions);
+    }
+
+    void BlockBlobClient::StageBlockSharedAsyncImpl(const std::string& blockId,
+        std::shared_ptr<const std::vector<char>> content,
+        const StageBlockOptions& options,
+        StageBlockCompletionHandler completion,
+        HttpRequestOptions requestOptions)
+    {
+        try
+        {
+            Private::ValidateBlockId(blockId);
+        }
+        catch (const std::invalid_argument&)
+        {
+            Private::PostCompletion(HttpClient(),
+                std::move(completion),
+                Private::MakeError<Models::StageBlockResult>(std::make_error_code(std::errc::invalid_argument)));
+            return;
+        }
+        if (!content)
+        {
+            Private::PostCompletion(HttpClient(),
+                std::move(completion),
+                Private::MakeError<Models::StageBlockResult>(
+                    std::make_error_code(std::errc::invalid_argument), "content must not be null"));
+            return;
+        }
+
+        HttpRequest request = BuildStageBlockRequest(Target(), blockId, options.Conditions);
+        Private::ApplyTransactionalHashes(request, options.TransactionalContentMd5, options.TransactionalContentCrc64);
+        const auto bytes = std::as_bytes(std::span<const char>(*content));
+        request.SetBodyView(bytes, std::move(content));
+        SendStageBlockRequest(std::move(request), std::move(completion), requestOptions);
+    }
+
     void BlockBlobClient::UploadStringAsyncImpl(std::string content,
         const UploadBlockBlobOptions& options,
         UploadCompletionHandler completion,

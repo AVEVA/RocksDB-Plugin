@@ -318,6 +318,40 @@ TEST(BlockBlobClientTests, UploadAsync_SpanOverloadUsesSingleRequestPath)
     EXPECT_EQ(httpClient.LastRequest().GetBody(), "abc");
 }
 
+TEST(BlockBlobClientTests, UploadAsync_SharedBufferOverloadSendsViewWithoutCopying)
+{
+    FakeHttpClient httpClient;
+    BlockBlobClient client{httpClient, BuildOptions()};
+
+    auto content = std::make_shared<const std::vector<char>>(std::vector<char>{'a', 'b', 'c'});
+    const auto* originalData = content->data();
+    client.UploadAsync(content, [](std::expected<Response<UploadBlockBlobResult>, BlobStorageError>) {});
+
+    ASSERT_EQ(httpClient.RequestCount(), 1U);
+    const auto& request = httpClient.LastRequest();
+    EXPECT_TRUE(request.HasBodyView());
+    EXPECT_EQ(static_cast<const void*>(request.GetBodyView().data()), static_cast<const void*>(originalData));
+
+    content.reset();
+    EXPECT_EQ(request.GetBodyView().size(), 3U);
+}
+
+TEST(BlockBlobClientTests, StageBlockAsync_SharedBufferOverloadSendsViewWithoutCopying)
+{
+    FakeHttpClient httpClient;
+    BlockBlobClient client{httpClient, BuildOptions()};
+
+    auto content = std::make_shared<const std::vector<char>>(std::vector<char>{'a', 'b', 'c'});
+    const auto* originalData = content->data();
+    client.StageBlockAsync("AAAAAA==", content, [](std::expected<Response<StageBlockResult>, BlobStorageError>) {});
+
+    ASSERT_EQ(httpClient.RequestCount(), 1U);
+    const auto& request = httpClient.LastRequest();
+    EXPECT_TRUE(request.HasBodyView());
+    EXPECT_EQ(static_cast<const void*>(request.GetBodyView().data()), static_cast<const void*>(originalData));
+    EXPECT_NE(request.GetUrl().find("comp=block&blockid=AAAAAA%3D%3D"), std::string::npos);
+}
+
 TEST(BlockBlobClientTests, StageBlockAsync_EncodesBlockIdInQuery)
 {
     FakeHttpClient httpClient;
