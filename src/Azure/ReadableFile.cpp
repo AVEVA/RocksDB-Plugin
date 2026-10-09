@@ -37,22 +37,6 @@ ReadableFile::ReadableFile(Impl::ReadableFileImpl&& file)
 
 ReadableFile::~ReadableFile() = default;
 
-rocksdb::IOStatus ReadableFile::Read(const size_t n, const rocksdb::IOOptions&, rocksdb::Slice* result, char* scratch,
-                                     rocksdb::IODebugContext*) {
-    try {
-        assert(n <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) &&
-               "size_t value exceeds int64_t max value");
-        const auto bytesRead = m_file->SequentialRead(static_cast<int64_t>(n), scratch);
-        assert(bytesRead >= 0 && "SequentialRead should not return negative values");
-        assert(static_cast<size_t>(bytesRead) <= std::numeric_limits<size_t>::max() &&
-               "bytesRead exceeds size_t max value");
-        *result = rocksdb::Slice(scratch, static_cast<size_t>(bytesRead));
-        return rocksdb::IOStatus::OK();
-    } catch (...) {
-        return StatusFromException(std::current_exception());
-    }
-}
-
 rocksdb::IOStatus ReadableFile::Read(const uint64_t offset, const size_t n, const rocksdb::IOOptions&,
                                      rocksdb::Slice* result, char* scratch, rocksdb::IODebugContext*) const {
     try {
@@ -190,17 +174,6 @@ rocksdb::IOStatus ReadableFile::Prefetch(const uint64_t offset, const size_t n, 
         if (!Impl::ReadableFileImpl::Prefetch(m_file, static_cast<int64_t>(offset), static_cast<int64_t>(n))) {
             return rocksdb::IOStatus::NotSupported("Prefetch declined; another prefetch is pending or over budget");
         }
-        return rocksdb::IOStatus::OK();
-    } catch (...) {
-        return StatusFromException(std::current_exception());
-    }
-}
-
-rocksdb::IOStatus ReadableFile::Skip(const uint64_t n) {
-    try {
-        assert(n <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) &&
-               "skip value exceeds int64_t max value");
-        m_file->Skip(static_cast<int64_t>(n));
         return rocksdb::IOStatus::OK();
     } catch (...) {
         return StatusFromException(std::current_exception());

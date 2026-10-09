@@ -12,6 +12,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Logger.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/ReadWriteFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/SequentialFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/WriteableFile.hpp"
 
 #include <boost/log/trivial.hpp>
@@ -99,7 +100,7 @@ rocksdb::IOStatus BlobFilesystem::NewSequentialFile(const std::string& f, const 
                                                     std::unique_ptr<rocksdb::FSSequentialFile>* r,
                                                     rocksdb::IODebugContext*) {
     return Guard("NewSequentialFile", f, [&]() -> rocksdb::IOStatus {
-            *r = std::unique_ptr<rocksdb::FSSequentialFile>(new ReadableFile(m_filesystem->CreateReadableFile(f)));
+            *r = std::unique_ptr<rocksdb::FSSequentialFile>(new SequentialFile(m_filesystem->CreateSequentialFile(f)));
             return rocksdb::IOStatus::OK();
     });
 }

@@ -197,6 +197,10 @@ ReadableFileImpl BlobFilesystemImpl::CreateReadableFile(const std::string& fileP
                             m_logger, m_asyncReads,          m_prefetchBytes};
 }
 
+SequentialFileImpl BlobFilesystemImpl::CreateSequentialFile(const std::string& filePath) {
+    return SequentialFileImpl{CreateReadableFile(filePath)};
+}
+
 WriteableFileImpl BlobFilesystemImpl::CreateWriteableFile(const std::string& filePath) {
     EnsureLiveness();
 

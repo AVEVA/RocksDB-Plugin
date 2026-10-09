@@ -4,6 +4,7 @@ add_library(aveva-rocksdb-plugin-azure-impl
     BlobHelpers.cpp
     PageBlob.cpp
     ReadableFileImpl.cpp
+    SequentialFileImpl.cpp
     WriteableFileImpl.cpp
     ReadWriteFileImpl.cpp
     BlobFilesystemImpl.cpp
@@ -30,6 +31,7 @@ target_sources(aveva-rocksdb-plugin-azure-impl
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/SequentialFileImpl.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"

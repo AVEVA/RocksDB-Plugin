@@ -1179,7 +1179,7 @@ TEST_F(BlobFilesystemIntegrationTests, SequentialRead_ETagMismatch_RefreshesAndR
     file.Append(initialData);
     file.Sync(); // Sync to update size metadata
 
-    auto readFile = m_filesystem->CreateReadableFile(blobName);
+    auto readFile = m_filesystem->CreateSequentialFile(blobName);
     std::vector<char> readBuffer(512);
     auto bytesRead = readFile.SequentialRead(static_cast<int64_t>(512), readBuffer.data());
     EXPECT_EQ(512, bytesRead);

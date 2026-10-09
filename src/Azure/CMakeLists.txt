@@ -11,6 +11,7 @@ add_library(aveva-rocksdb-plugin-azure STATIC
     AzureErrorTranslator.cpp
     Logger.cpp
     ReadableFile.cpp
+    SequentialFile.cpp
     WriteableFile.cpp
     ReadWriteFile.cpp
     BlobFilesystem.cpp
@@ -28,7 +29,7 @@ target_sources(aveva-rocksdb-plugin-azure
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Logger.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/WriteableFile.hpp"
+        "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/SequentialFile.hpp"    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/WriteableFile.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/ReadWriteFile.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Plugin.hpp"

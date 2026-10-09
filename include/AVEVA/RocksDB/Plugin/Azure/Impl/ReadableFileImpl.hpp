@@ -25,13 +25,6 @@ class ReadableFileImpl {
     std::string m_name;
     std::shared_ptr<Core::BlobClient> m_blobClient;
     std::shared_ptr<Core::FileCache> m_fileCache;
-    int64_t m_offset;
-    // SequentialRead serves small reads (WAL/MANIFEST replay issues them in 32 KB steps) from a block fetched
-    // ahead in one GET. Only SequentialRead touches it, and it is dropped when the blob's ETag changes.
-    static constexpr int64_t kReadaheadBytes = 1024 * 1024;
-    std::vector<char> m_readahead;
-    int64_t m_readaheadStart = 0;
-    std::string m_readaheadEtag;
     // Random (and async) reads may run concurrently on one file, so the cached blob metadata is guarded.
     // Held by pointer to keep the type movable.
     std::unique_ptr<std::mutex> m_metadataMutex;
@@ -74,7 +67,6 @@ class ReadableFileImpl {
                                                             bool wait, bool allowPartial = false) const;
     void ClearPrefetch() const;
     int64_t DownloadWithRetry(const int64_t offset, const int64_t bytesToRead, char* buffer) const;
-    int64_t ReadThroughReadahead(int64_t bytesToRead, char* buffer);
     [[nodiscard]] std::pair<int64_t, std::string> GetMetadata() const;
     void SetMetadata(int64_t size, std::string etag) const;
     static void ReadAsyncAttempt(std::shared_ptr<const ReadableFileImpl> self, int64_t offset, int64_t bytesToRead,
@@ -93,10 +85,7 @@ class ReadableFileImpl {
         std::shared_ptr<AsyncReadTracker> asyncReads = nullptr,
         std::shared_ptr<std::atomic<int64_t>> prefetchBudget = nullptr);
 
-    // NOTE: Increments m_offset
-    [[nodiscard]] int64_t SequentialRead(int64_t bytesToRead, char* buffer);
-
-    // NOTE: Random so doesn't affect the sequential reads
+    // Reads at an explicit offset; carries no read position of its own.
     [[nodiscard]] int64_t RandomRead(int64_t offset, int64_t bytesToRead, char* buffer) const;
 
     // Serves a random read from the local file cache only; returns nullopt when it must go to the blob.
@@ -131,8 +120,7 @@ class ReadableFileImpl {
     // Default process-wide cap on prefetched bytes across all files sharing a budget.
     static constexpr int64_t kDefaultPrefetchBudgetBytes = 256 * 1024 * 1024;
 
-    int64_t GetOffset() const;
-    void Skip(int64_t n);
+    [[nodiscard]] std::string GetETag() const;
     int64_t GetSize() const;
     void RefreshBlobMetadata() const;
 };

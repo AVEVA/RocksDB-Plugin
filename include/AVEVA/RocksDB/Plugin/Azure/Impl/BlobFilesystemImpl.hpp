@@ -10,6 +10,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LoggerImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/SequentialFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ChainedCredentialInfo.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ServicePrincipalStorageInfo.hpp"
@@ -109,6 +110,7 @@ class BlobFilesystemImpl {
     BlobFilesystemImpl& operator=(BlobFilesystemImpl&&) = delete;
 
     [[nodiscard]] ReadableFileImpl CreateReadableFile(const std::string& filePath);
+    [[nodiscard]] SequentialFileImpl CreateSequentialFile(const std::string& filePath);
     [[nodiscard]] WriteableFileImpl CreateWriteableFile(const std::string& filePath);
     [[nodiscard]] ReadWriteFileImpl CreateReadWriteFile(const std::string& filePath);
     [[nodiscard]] WriteableFileImpl ReopenWriteableFile(const std::string& filePath);

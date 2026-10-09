@@ -12,7 +12,7 @@ class ReadableFileImpl;
 }
 
 namespace AVEVA::RocksDB::Plugin::Azure {
-class ReadableFile final : public rocksdb::FSSequentialFile, public rocksdb::FSRandomAccessFile {
+class ReadableFile final : public rocksdb::FSRandomAccessFile {
     // Shared with in-flight async reads so the file (and its blob client) outlives their completions.
     std::shared_ptr<Impl::ReadableFileImpl> m_file;
 
@@ -20,8 +20,6 @@ class ReadableFile final : public rocksdb::FSSequentialFile, public rocksdb::FSR
     explicit ReadableFile(Impl::ReadableFileImpl&& file);
     ~ReadableFile() override;
 
-    virtual rocksdb::IOStatus Read(size_t n, const rocksdb::IOOptions& options, rocksdb::Slice* result, char* scratch,
-                                   rocksdb::IODebugContext* dbg) override;
     virtual rocksdb::IOStatus Read(uint64_t offset, size_t n, const rocksdb::IOOptions& options, rocksdb::Slice* result,
                                    char* scratch, rocksdb::IODebugContext* dbg) const override;
     virtual rocksdb::IOStatus ReadAsync(rocksdb::FSReadRequest& req, const rocksdb::IOOptions& opts,
@@ -32,6 +30,5 @@ class ReadableFile final : public rocksdb::FSSequentialFile, public rocksdb::FSR
                                         const rocksdb::IOOptions& options, rocksdb::IODebugContext* dbg) override;
     virtual rocksdb::IOStatus Prefetch(uint64_t offset, size_t n, const rocksdb::IOOptions& options,
                                        rocksdb::IODebugContext* dbg) override;
-    virtual rocksdb::IOStatus Skip(uint64_t n) override;
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure
