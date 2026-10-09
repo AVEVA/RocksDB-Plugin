@@ -11,6 +11,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -30,10 +31,10 @@ namespace AVEVA::Private
         {
         }
 
-        std::optional<Tcp::resolver::results_type> Find(const std::string& host, const std::string& service)
+        std::optional<Tcp::resolver::results_type> Find(std::string_view host, std::string_view service)
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            const auto it = m_entries.find(MakeKey(host, service));
+            const auto it = m_entries.find(KeyView{host, service});
             if (it == m_entries.end())
             {
                 return std::nullopt;
@@ -46,7 +47,7 @@ namespace AVEVA::Private
             return it->second.results;
         }
 
-        void Store(const std::string& host, const std::string& service, const Tcp::resolver::results_type& results)
+        void Store(std::string_view host, std::string_view service, const Tcp::resolver::results_type& results)
         {
             if (results.empty())
             {
@@ -62,7 +63,7 @@ namespace AVEVA::Private
                     m_entries.clear();
                 }
             }
-            m_entries.insert_or_assign(MakeKey(host, service), Entry{results, now + m_ttl});
+            m_entries.insert_or_assign(Key{std::string(host), std::string(service)}, Entry{results, now + m_ttl});
         }
 
         static BasicDnsCache& Shared()
@@ -75,10 +76,10 @@ namespace AVEVA::Private
 
         // Returns true when the caller must perform the lookup (and then call Finish). Otherwise the lookup is
         // already in flight and `waiter` has been queued to receive its outcome.
-        bool JoinOrLead(const std::string& host, const std::string& service, Waiter& waiter)
+        bool JoinOrLead(std::string_view host, std::string_view service, Waiter& waiter)
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            const auto [it, inserted] = m_pending.try_emplace(MakeKey(host, service));
+            const auto [it, inserted] = m_pending.try_emplace(Key{std::string(host), std::string(service)});
             if (inserted)
             {
                 return true;
@@ -88,8 +89,8 @@ namespace AVEVA::Private
         }
 
         // Publishes the leader's outcome to every queued waiter. Must be called exactly once per leader.
-        void Finish(const std::string& host,
-            const std::string& service,
+        void Finish(std::string_view host,
+            std::string_view service,
             boost::system::error_code error,
             const Tcp::resolver::results_type& results)
         {
@@ -100,7 +101,7 @@ namespace AVEVA::Private
             std::vector<Waiter> waiters;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
-                const auto it = m_pending.find(MakeKey(host, service));
+                const auto it = m_pending.find(KeyView{host, service});
                 if (it != m_pending.end())
                 {
                     waiters = std::move(it->second);
@@ -120,15 +121,63 @@ namespace AVEVA::Private
             typename Clock::time_point expires;
         };
 
-        static std::string MakeKey(const std::string& host, const std::string& service)
+        struct Key
         {
-            return host + '\n' + service;
-        }
+            std::string host;
+            std::string service;
+        };
+
+        // Lookups use views so a hit does not build a temporary key string.
+        struct KeyView
+        {
+            std::string_view host;
+            std::string_view service;
+        };
+
+        struct KeyHash
+        {
+            using is_transparent = void;
+
+            static std::size_t Combine(std::string_view host, std::string_view service) noexcept
+            {
+                std::size_t seed = std::hash<std::string_view>{}(host);
+                seed ^= std::hash<std::string_view>{}(service) + 0x9e3779b9U + (seed << 6) + (seed >> 2);
+                return seed;
+            }
+            std::size_t operator()(const Key& key) const noexcept
+            {
+                return Combine(key.host, key.service);
+            }
+            std::size_t operator()(const KeyView& key) const noexcept
+            {
+                return Combine(key.host, key.service);
+            }
+        };
+
+        struct KeyEqual
+        {
+            using is_transparent = void;
+
+            static KeyView View(const Key& key) noexcept
+            {
+                return {key.host, key.service};
+            }
+            static KeyView View(const KeyView& key) noexcept
+            {
+                return key;
+            }
+            template <typename L, typename R> bool operator()(const L& lhs, const R& rhs) const noexcept
+            {
+                const auto left = View(lhs);
+                const auto right = View(rhs);
+                return left.host == right.host && left.service == right.service;
+            }
+        };
 
         std::chrono::seconds m_ttl;
         std::mutex m_mutex;
-        std::unordered_map<std::string, Entry> m_entries;
-        std::unordered_map<std::string, std::vector<Waiter>> m_pending;
+        std::unordered_map<Key, Entry, KeyHash, KeyEqual> m_entries;
+        std::unordered_map<Key, std::vector<Waiter>, KeyHash, KeyEqual> m_pending;
     };
 
     using DnsCache = BasicDnsCache<>;
