@@ -171,10 +171,10 @@ namespace AVEVA
                         if (auto pooled = m_tlsPool->Acquire(key))
                         {
                             return ResumeWithPooledConnection<TlsStream>(std::move(*pooled),
-                                key,
+                                std::move(key),
                                 std::move(request),
                                 std::move(completion),
-                                options,
+                                std::move(options),
                                 m_tlsPool);
                         }
                     }
@@ -185,17 +185,17 @@ namespace AVEVA
                         if (auto pooled = m_plainPool->Acquire(key))
                         {
                             return ResumeWithPooledConnection<PlainStream>(std::move(*pooled),
-                                key,
+                                std::move(key),
                                 std::move(request),
                                 std::move(completion),
-                                options,
+                                std::move(options),
                                 m_plainPool);
                         }
                     }
                 }
 
                 auto executor = asio::make_strand(context_);
-                auto innerParsed = urls::parse_uri(request.GetUrl());
+                const auto& innerParsed = parsed;
                 if (innerParsed && innerParsed->scheme_id() == urls::scheme::https)
                 {
                     TlsConnectionKey key{innerParsed->host_address(),
@@ -204,7 +204,7 @@ namespace AVEVA
                     auto operation = std::make_shared<RequestOperation<TlsStream>>(m_tlsContext,
                         std::move(stream),
                         std::move(completion),
-                        options,
+                        std::move(options),
                         m_tlsPool,
                         std::move(key));
                     operation->BindCancellationSlot();
@@ -221,7 +221,7 @@ namespace AVEVA
                 auto operation = std::make_shared<RequestOperation<PlainStream>>(m_tlsContext,
                     std::move(stream),
                     std::move(completion),
-                    options,
+                    std::move(options),
                     m_plainPool,
                     std::move(key));
                 operation->BindCancellationSlot();
@@ -260,7 +260,7 @@ namespace AVEVA
                 auto operation = std::make_shared<RequestOperation<Stream>>(m_tlsContext,
                     std::move(pooled.stream),
                     std::move(completion),
-                    options,
+                    std::move(options),
                     std::move(pool),
                     std::move(key),
                     std::move(pooled.buffer));
