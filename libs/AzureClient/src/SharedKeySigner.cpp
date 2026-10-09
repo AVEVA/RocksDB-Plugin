@@ -153,19 +153,6 @@ namespace AVEVA::AzureClient::Private
             return parsed;
         }
 
-        [[nodiscard]] std::string_view GetRequestHeaderValue(const HttpRequest& request,
-            std::string_view headerName) noexcept
-        {
-            for (const auto& header : request.GetHeaders())
-            {
-                if (IEquals(header.GetName(), headerName))
-                {
-                    return header.GetValue();
-                }
-            }
-            return {};
-        }
-
         [[nodiscard]] std::string_view MethodToString(HttpMethod method)
         {
             switch (method)
@@ -227,12 +214,10 @@ namespace AVEVA::AzureClient::Private
     namespace
     {
         // The service canonicalizes a header value by trimming it and replacing each run of linear whitespace with
-        // one space.
-        [[nodiscard]] std::string CollapseWhitespace(std::string_view value)
+        // one space. Appends straight to `out` so no intermediate string is built per header.
+        void AppendCollapsedWhitespace(std::string& out, std::string_view value)
         {
             value = TrimWhitespace(value);
-            std::string result;
-            result.reserve(value.size());
             bool inRun = false;
             for (const char character : value)
             {
@@ -242,9 +227,8 @@ namespace AVEVA::AzureClient::Private
                     continue;
                 }
                 inRun = space;
-                result.push_back(space ? ' ' : character);
+                out.push_back(space ? ' ' : character);
             }
-            return result;
         }
     } // namespace
 
@@ -254,14 +238,41 @@ namespace AVEVA::AzureClient::Private
         // sorted in place instead of being copied into a second vector purely to sort it.
         ParsedUrl parsedUrl = ParseUrl(request.GetUrl());
 
+        // One pass over the headers collects both the x-ms-* headers and the standard string-to-sign fields
+        // (the first header with a given name wins, as before).
+        constexpr std::array<std::string_view, 11> fieldHeaderNames{ContentEncodingHeaderName,
+            ContentLanguageHeaderName,
+            std::string_view{}, // Content-Length slot: filled from the body size
+            ContentMd5HeaderName,
+            ContentTypeHeaderName,
+            std::string_view{}, // Date slot: always empty because x-ms-date is used instead
+            IfModifiedSinceHeaderName,
+            IfMatchHeaderName,
+            IfNoneMatchHeaderName,
+            IfUnmodifiedSinceHeaderName,
+            RangeHeaderName};
+        std::array<std::string_view, 11> fields{};
+        std::array<bool, 11> fieldFound{};
         const std::vector<HttpHeader>& headers = request.GetHeaders();
         std::vector<std::size_t> canonicalizedHeaderIndices;
         canonicalizedHeaderIndices.reserve(headers.size());
         for (std::size_t index = 0; index < headers.size(); ++index)
         {
-            if (IStartsWith(headers.at(index).GetName(), "x-ms-"))
+            const HttpHeader& header = headers.at(index);
+            if (IStartsWith(header.GetName(), "x-ms-"))
             {
                 canonicalizedHeaderIndices.push_back(index);
+                continue;
+            }
+            for (std::size_t slot = 0; slot < fieldHeaderNames.size(); ++slot)
+            {
+                if (!fieldFound.at(slot) && !fieldHeaderNames.at(slot).empty() &&
+                    IEquals(header.GetName(), fieldHeaderNames.at(slot)))
+                {
+                    fields.at(slot) = header.GetValue();
+                    fieldFound.at(slot) = true;
+                    break;
+                }
             }
         }
         // Names are lowercased before comparing because the culture-aware tables only rank lowercase letters.
@@ -289,17 +300,14 @@ namespace AVEVA::AzureClient::Private
                 {
                     canonicalizedHeadersText.push_back('\n');
                 }
-                std::format_to(std::back_inserter(canonicalizedHeadersText),
-                    "{}:{}",
-                    lowercaseNames.at(canonicalizedHeaderIndices.at(position)),
-                    CollapseWhitespace(header.GetValue()));
+                canonicalizedHeadersText.append(lowercaseNames.at(canonicalizedHeaderIndices.at(position)))
+                    .push_back(':');
             }
             else
             {
-                std::format_to(std::back_inserter(canonicalizedHeadersText),
-                    ",{}",
-                    CollapseWhitespace(header.GetValue()));
+                canonicalizedHeadersText.push_back(',');
             }
+            AppendCollapsedWhitespace(canonicalizedHeadersText, header.GetValue());
         }
         if (!canonicalizedHeadersText.empty())
         {
@@ -328,17 +336,6 @@ namespace AVEVA::AzureClient::Private
 
         const std::size_t bodySize = request.GetBodySize();
         const std::string_view method = MethodToString(request.GetMethod());
-        const std::array<std::string_view, 11> fields{GetRequestHeaderValue(request, ContentEncodingHeaderName),
-            GetRequestHeaderValue(request, ContentLanguageHeaderName),
-            std::string_view{},
-            GetRequestHeaderValue(request, ContentMd5HeaderName),
-            GetRequestHeaderValue(request, ContentTypeHeaderName),
-            std::string_view{}, // Date slot: always empty because x-ms-date is used instead
-            GetRequestHeaderValue(request, IfModifiedSinceHeaderName),
-            GetRequestHeaderValue(request, IfMatchHeaderName),
-            GetRequestHeaderValue(request, IfNoneMatchHeaderName),
-            GetRequestHeaderValue(request, IfUnmodifiedSinceHeaderName),
-            GetRequestHeaderValue(request, RangeHeaderName)};
         constexpr std::size_t ContentLengthField = 2;
 
         // The string-to-sign is assembled in one reserved buffer rather than through intermediate strings.

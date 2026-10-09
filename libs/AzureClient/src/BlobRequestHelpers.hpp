@@ -169,6 +169,9 @@ namespace AVEVA::AzureClient::Private
         std::shared_ptr<const ConnectionState> Connection;
         std::string ContainerName;
         std::string BlobName;
+        // "<scheme://host[:port]><basePath>/<encoded container>/<encoded blob>", built once so each request only
+        // appends its query string.
+        std::string EncodedResource;
     };
 
     // Normalise and validate client options (throw std::invalid_argument on invalid settings).

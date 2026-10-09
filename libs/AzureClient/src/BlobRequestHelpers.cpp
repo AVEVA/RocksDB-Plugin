@@ -636,9 +636,12 @@ namespace AVEVA::AzureClient::Private
         {
             throw std::invalid_argument("BlobName must not be empty.");
         }
+        std::string encodedResource = connection->BasePrefix + connection->BasePath + '/' +
+                                      UrlEncode(containerName, {}) + '/' + UrlEncode(blobName, "/");
         return BlobTarget{.Connection = std::move(connection),
             .ContainerName = std::move(containerName),
-            .BlobName = std::move(blobName)};
+            .BlobName = std::move(blobName),
+            .EncodedResource = std::move(encodedResource)};
     }
 
     ContainerTarget MakeContainerTarget(const BlobContainerClientOptions& options)
@@ -745,9 +748,15 @@ namespace AVEVA::AzureClient::Private
     {
         std::string query;
         AppendQueryParts(query, *target.Connection, queryString);
-        return ComposeUrl(*target.Connection,
-            {UrlEncode(target.ContainerName, {}), UrlEncode(target.BlobName, "/")},
-            query);
+        std::string url;
+        url.reserve(target.EncodedResource.size() + query.size() + 1U);
+        url += target.EncodedResource;
+        if (!query.empty())
+        {
+            url += '?';
+            url += query;
+        }
+        return url;
     }
 
     std::string BuildContainerUrl(const ContainerTarget& target, std::string_view queryString)

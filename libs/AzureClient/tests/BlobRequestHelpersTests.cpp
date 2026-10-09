@@ -775,6 +775,23 @@ TEST(BlobRequestHelpersTests, MakeConnectionState_NormalisesOptionsOnce)
     EXPECT_THROW(static_cast<void>(MakeBlobTarget(sharedKey, "container", "")), std::invalid_argument);
 }
 
+TEST(BlobRequestHelpersTests, BlobTarget_CachesTheEncodedResourceAndAppendsOnlyTheQuery)
+{
+    using AVEVA::AzureClient::BlobServiceClientOptions;
+    using AVEVA::AzureClient::Private::MakeBlobTarget;
+    using AVEVA::AzureClient::Private::MakeConnectionState;
+
+    const auto connection =
+        MakeConnectionState(BlobServiceClientOptions{.ServiceEndpoint = "https://account.blob.core.windows.net/x",
+            .SasToken = "sv=1&sig=s"});
+    const auto blob = MakeBlobTarget(connection, "container", "folder name/file?.txt");
+
+    EXPECT_EQ(blob.EncodedResource, "https://account.blob.core.windows.net/x/container/folder%20name/file%3F.txt");
+    EXPECT_EQ(BuildBlobUrl(blob, "comp=metadata"),
+        blob.EncodedResource + "?comp=metadata&sv=1&sig=s");
+    EXPECT_EQ(BuildBlobUrl(blob, ""), blob.EncodedResource + "?sv=1&sig=s");
+}
+
 TEST(BlobRequestHelpersTests, ParseListBlobsResultXml_HandlesEntitiesCdataCommentsAndNamespaces)
 {
     const std::string xml = R"(<?xml version="1.0" encoding="utf-8"?>
@@ -849,6 +866,23 @@ TEST(SharedKeyCanonicalizationTests, InternalWhitespaceRunsInHeaderValuesAreColl
 
     const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
     EXPECT_NE(toSign.find("x-ms-meta-k:a b c\n"), std::string::npos) << toSign;
+}
+
+TEST(SharedKeyCanonicalizationTests, StandardHeadersFillTheirSlotsCaseInsensitivelyAndFirstOneWins)
+{
+    AVEVA::HttpRequest request;
+    request.SetMethod(HttpMethod::Put);
+    request.SetUrl("https://account.blob.core.windows.net/container/blob");
+    request.AddHeader(AVEVA::HttpHeader{"range", "bytes=0-1"});
+    request.AddHeader(AVEVA::HttpHeader{"IF-MATCH", "\"etag\""});
+    request.AddHeader(AVEVA::HttpHeader{"Content-Type", "text/plain"});
+    request.AddHeader(AVEVA::HttpHeader{"content-type", "ignored"});
+    request.AddHeader(AVEVA::HttpHeader{"If-Unmodified-Since", "yesterday"});
+    request.AddHeader(AVEVA::HttpHeader{"x-ms-a", "1"});
+
+    const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
+    EXPECT_TRUE(toSign.starts_with("PUT\n\n\n\n\ntext/plain\n\n\n\"etag\"\n\nyesterday\nbytes=0-1\nx-ms-a:1\n"))
+        << toSign;
 }
 
 TEST(SharedKeyCanonicalizationTests, HeadersAreOrderedWithCultureAwareRules)
