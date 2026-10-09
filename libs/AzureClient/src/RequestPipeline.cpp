@@ -129,24 +129,26 @@ namespace AVEVA::AzureClient::Private
 
           private:
             // Serializes all state mutation: transport, timer, token and cancellation callbacks may
-            // arrive from different threads. Runs inline when idle (so initiation stays synchronous)
-            // and queues work that arrives while another thread, or an outer call, is running.
+            // arrive from different threads. Runs inline when idle (so initiation stays synchronous,
+            // and nothing is allocated or queued) and queues work that arrives while another thread,
+            // or an outer call, is running.
             template <typename F> void Run(F&& work)
             {
                 {
                     const std::scoped_lock lock(m_queueMutex);
-                    m_queue.emplace_back(std::forward<F>(work));
                     if (m_draining)
                     {
+                        m_queue.emplace_back(std::forward<F>(work));
                         return;
                     }
                     m_draining = true;
                 }
 
                 const auto keepAlive = shared_from_this();
+                std::forward<F>(work)();
                 for (;;)
                 {
-                    std::function<void()> next;
+                    std::move_only_function<void()> next;
                     {
                         const std::scoped_lock lock(m_queueMutex);
                         if (m_queue.empty())
@@ -286,7 +288,7 @@ namespace AVEVA::AzureClient::Private
                 {
                     auto proceed = [self, error, token = std::move(token), attempt = std::move(attempt)]() mutable
                     {
-                        self->OnToken(error, token, std::move(attempt));
+                        self->OnToken(error, std::move(token), std::move(attempt));
                     };
 
                     // Never complete inside the caller's initiating function, even if the
@@ -302,9 +304,9 @@ namespace AVEVA::AzureClient::Private
                 });
             }
 
-            void OnToken(std::error_code error, const AccessToken& token, HttpRequest attempt)
+            void OnToken(std::error_code error, AccessToken token, HttpRequest attempt)
             {
-                Run([this, error, token, attempt = std::move(attempt)]() mutable
+                Run([this, error, token = std::move(token), attempt = std::move(attempt)]() mutable
                 {
                     OnTokenOnStrand(error, token, std::move(attempt));
                 });
@@ -466,7 +468,7 @@ namespace AVEVA::AzureClient::Private
             boost::asio::cancellation_signal m_attemptSignal;
             boost::asio::steady_timer m_timer;
             std::mutex m_queueMutex;
-            std::deque<std::function<void()>> m_queue;
+            std::deque<std::move_only_function<void()>> m_queue;
             bool m_draining = false;
             int m_maxAttempts = 1;
             int m_attempt = 0;
