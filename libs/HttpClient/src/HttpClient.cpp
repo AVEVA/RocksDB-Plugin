@@ -502,7 +502,7 @@ namespace AVEVA
             static bool IsPoolableRequest(const HttpRequest& request, const HttpRequestOptions& options)
             {
                 const HttpMethod method = request.GetMethod();
-                if (ToString(method).empty() || method == HttpMethod::Connect ||
+                if (Private::ToBeastVerb(method) == boost::beast::http::verb::unknown || method == HttpMethod::Connect ||
                     (method == HttpMethod::Trace && request.GetBodySize() != 0) || options.GetTimeout().count() <= 0)
                 {
                     return false;

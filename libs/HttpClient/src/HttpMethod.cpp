@@ -3,32 +3,19 @@
 
 #include "AVEVA/HttpClient/HttpMethod.hpp"
 
+#include "private/HttpVerb.hpp"
+
+#include <boost/beast/http/verb.hpp>
+#include <ostream>
 namespace AVEVA
 {
     std::string ToString(HttpMethod method)
     {
-        switch (method)
+        const auto verb = Private::ToBeastVerb(method);
+        if (verb == boost::beast::http::verb::unknown)
         {
-        case HttpMethod::Get:
-            return "GET";
-        case HttpMethod::Post:
-            return "POST";
-        case HttpMethod::Put:
-            return "PUT";
-        case HttpMethod::Patch:
-            return "PATCH";
-        case HttpMethod::Delete:
-            return "DELETE";
-        case HttpMethod::Head:
-            return "HEAD";
-        case HttpMethod::Options:
-            return "OPTIONS";
-        case HttpMethod::Trace:
-            return "TRACE";
-        case HttpMethod::Connect:
-            return "CONNECT";
-        default:
             return {};
         }
+        return std::string(boost::beast::http::to_string(verb));
     }
 } // namespace AVEVA

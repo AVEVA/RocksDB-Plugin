@@ -5,6 +5,7 @@
 
 #include "ConnectionPool.hpp"
 #include "DnsCache.hpp"
+#include "HttpVerb.hpp"
 #include "RequestValidation.hpp"
 #include "StreamTypes.hpp"
 #include "TlsContextConfigurator.hpp"
@@ -154,8 +155,8 @@ namespace AVEVA::Private
 
             const auto& url = *parsed;
             const std::string host = url.host_address();
-            const std::string method = ToString(request.GetMethod());
-            if (method.empty() || request.GetMethod() == HttpMethod::Connect ||
+            const auto verb = Private::ToBeastVerb(request.GetMethod());
+            if (verb == http::verb::unknown || request.GetMethod() == HttpMethod::Connect ||
                 (request.GetMethod() == HttpMethod::Trace && request.GetBodySize() != 0) ||
                 m_options.GetTimeout().count() <= 0)
             {
@@ -164,16 +165,12 @@ namespace AVEVA::Private
             }
 
             m_request.version(11);
-            m_request.method_string(method);
-            std::string target(url.encoded_path());
-            if (target.empty())
+            m_request.method(verb);
+            std::string target(url.encoded_target());
+            // With an authority the path is empty or absolute, so an empty path only needs the root slash.
+            if (target.empty() || target.front() != '/')
             {
-                target = "/";
-            }
-            if (url.has_query())
-            {
-                target += "?";
-                target += url.encoded_query();
+                target.insert(target.begin(), '/');
             }
             m_request.target(target);
             for (const auto& header : request.GetHeaders())
@@ -248,11 +245,7 @@ namespace AVEVA::Private
             {
                 m_stream->set_verify_callback(asio::ssl::host_name_verification(m_key.host));
             }
-            // Same as the SSL_set_tlsext_host_name macro, which uses a C-style cast.
-            if (m_hostIsName && !SSL_ctrl(m_stream->native_handle(),
-                                    SSL_CTRL_SET_TLSEXT_HOSTNAME,
-                                    TLSEXT_NAMETYPE_host_name,
-                                    static_cast<void*>(const_cast<char*>(m_key.host.c_str()))))
+            if (m_hostIsName && !SSL_set_tlsext_host_name(m_stream->native_handle(), m_key.host.c_str()))
             {
                 Fail(HttpClientError::TlsFailed);
                 return false;

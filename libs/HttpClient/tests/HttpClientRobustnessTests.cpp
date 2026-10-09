@@ -793,4 +793,37 @@ namespace
         EXPECT_EQ(SendOnce("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nOK"),
             AVEVA::make_error_code(AVEVA::HttpClientError::ReadFailed));
     }
+    TEST(HttpClientRobustness, RequestTargetIsBuiltFromPathAndQuery)
+    {
+        asio::io_context context;
+        auto client = AVEVA::IHttpClient::Create(context);
+        std::vector<std::string> targets;
+        ScriptedServer server(context,
+            [&](int, const http::request<http::string_body>& request) -> ServerAction
+        {
+            targets.emplace_back(request.target());
+            return {OkResponse};
+        });
+        const auto port = server.Url("").substr(std::string("http://127.0.0.1:").size());
+        const std::vector<std::string> paths{"", "?a=1", "/p/q%20r?x=%2F&y=", "/p?"};
+        std::size_t next = 0;
+        std::function<void()> sendNext = [&]
+        {
+            if (next == paths.size())
+            {
+                server.Stop();
+                return;
+            }
+            client->SendAsync(MakeRequest("http://127.0.0.1:" + port + paths[next++]),
+                [&](std::error_code error, AVEVA::HttpResponse)
+            {
+                EXPECT_FALSE(error);
+                sendNext();
+            });
+        };
+        sendNext();
+        context.run();
+
+        EXPECT_EQ(targets, (std::vector<std::string>{"/", "/?a=1", "/p/q%20r?x=%2F&y=", "/p?"}));
+    }
 } // namespace
