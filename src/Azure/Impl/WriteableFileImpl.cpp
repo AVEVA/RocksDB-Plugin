@@ -3,8 +3,8 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
-#include "AVEVA/RocksDB/Plugin/Core/BlobClient.hpp"
 
 #include <boost/log/trivial.hpp>
 
@@ -12,22 +12,22 @@
 using namespace boost::log::trivial;
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 AVEVA::RocksDB::Plugin::Azure::Impl::WriteableFileImpl::WriteableFileImpl(
-    const std::string_view name, std::shared_ptr<Core::BlobClient> blobClient,
-    std::shared_ptr<Core::FileCache> fileCache,
+    const std::string_view name, std::shared_ptr<ClientRuntime> runtime,
+    std::shared_ptr<AzureClient::PageBlobClient> blob, std::shared_ptr<Core::FileCache> fileCache,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     const int64_t bufferSize)
-    : WriteableFileImpl(name, blobClient, std::move(fileCache), std::move(logger), bufferSize,
+    : WriteableFileImpl(name, std::move(runtime), blob, std::move(fileCache), std::move(logger), bufferSize,
                         // Braced initialisation guarantees GetSize runs before GetCapacity.
-                        BlobState{blobClient->GetSize(), blobClient->GetCapacity()}) {}
+                        BlobState{BlobOperations::GetSize(*blob), BlobOperations::GetCapacity(*blob)}) {}
 
 WriteableFileImpl::WriteableFileImpl(
-    const std::string_view name, std::shared_ptr<Core::BlobClient> blobClient,
-    std::shared_ptr<Core::FileCache> fileCache,
+    const std::string_view name, std::shared_ptr<ClientRuntime> runtime,
+    std::shared_ptr<AzureClient::PageBlobClient> blob, std::shared_ptr<Core::FileCache> fileCache,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     const int64_t bufferSize, const BlobState knownState)
-    : m_name(name), m_bufferSize(bufferSize), m_blobClient(std::move(blobClient)), m_fileCache(std::move(fileCache)),
-      m_logger(std::move(logger)), m_lastPageOffset(0), m_size(knownState.Size), m_capacity(knownState.Capacity),
-      m_bufferOffset(0), m_closed(false), m_flushed(true) {
+    : m_name(name), m_bufferSize(bufferSize), m_runtime(std::move(runtime)), m_blob(std::move(blob)),
+      m_fileCache(std::move(fileCache)), m_logger(std::move(logger)), m_lastPageOffset(0), m_size(knownState.Size),
+      m_capacity(knownState.Capacity), m_bufferOffset(0), m_closed(false), m_flushed(true) {
     if (m_bufferSize < Configuration::PageBlob::PageSize) {
         throw std::invalid_argument("Buffer size cannot be smaller than a page");
     }
@@ -47,7 +47,7 @@ WriteableFileImpl::WriteableFileImpl(
         if (lastPageBytes > 0) // There is a partially filled page
         {
             [[maybe_unused]] const auto bytesDownloaded =
-                m_blobClient->DownloadTo(m_buffer, m_lastPageOffset, lastPageBytes);
+                BlobOperations::DownloadToBuffer(*m_blob, m_buffer, m_lastPageOffset, lastPageBytes);
             assert(bytesDownloaded == lastPageBytes);
             m_bufferOffset = lastPageBytes;
             m_flushed = false; // We have existing partial page data in buffer
@@ -96,16 +96,18 @@ void WriteableFileImpl::DrainUploads() noexcept {
 }
 
 WriteableFileImpl::WriteableFileImpl(WriteableFileImpl&& other) noexcept
-    : m_name(std::move(other.m_name)), m_bufferSize(other.m_bufferSize), m_blobClient(std::move(other.m_blobClient)),
-      m_fileCache(std::move(other.m_fileCache)), m_logger(std::move(other.m_logger)),
+    : m_name(std::move(other.m_name)), m_bufferSize(other.m_bufferSize), m_runtime(std::move(other.m_runtime)),
+      m_blob(std::move(other.m_blob)), m_fileCache(std::move(other.m_fileCache)), m_logger(std::move(other.m_logger)),
       m_lastPageOffset(other.m_lastPageOffset), m_size(other.m_size), m_capacity(other.m_capacity),
       m_bufferOffset(other.m_bufferOffset), m_closed(std::exchange(other.m_closed, true)), m_flushed(other.m_flushed),
-      m_unsyncedSize(other.m_unsyncedSize), m_buffer(std::move(other.m_buffer)), m_uploads(std::move(other.m_uploads)) {}
+      m_unsyncedSize(other.m_unsyncedSize), m_buffer(std::move(other.m_buffer)), m_uploads(std::move(other.m_uploads)) {
+}
 
 WriteableFileImpl& WriteableFileImpl::operator=(WriteableFileImpl&& other) noexcept {
     m_name = std::move(other.m_name);
     m_bufferSize = other.m_bufferSize;
-    m_blobClient = std::move(other.m_blobClient);
+    m_blob = std::move(other.m_blob);
+    m_runtime = std::move(other.m_runtime);
     m_fileCache = std::move(other.m_fileCache);
     m_logger = std::move(other.m_logger);
     m_lastPageOffset = other.m_lastPageOffset;
@@ -240,7 +242,7 @@ void WriteableFileImpl::Sync() {
     StartFlush(true);
     WaitForUploads(0);
     if (m_unsyncedSize) {
-        m_blobClient->SetSize(m_size);
+        BlobOperations::SetSize(*m_runtime, *m_blob, m_size);
         m_unsyncedSize = false;
     }
     BOOST_LOG_SEV(*m_logger, debug) << "Synced writeable file '" << m_name << "' to " << m_size << " bytes";
@@ -256,16 +258,17 @@ void WriteableFileImpl::StartUpload(std::shared_ptr<const std::vector<char>> dat
 
     auto tracker = m_uploads;
     try {
-        m_blobClient->UploadPagesAsync(std::move(data), offset, [tracker](std::exception_ptr error) {
-            {
-                std::scoped_lock lock(tracker->Mutex);
-                --tracker->InFlight;
-                if (error && !tracker->Error) {
-                    tracker->Error = error;
-                }
-            }
-            tracker->Done.notify_all();
-        });
+        BlobOperations::UploadPagesAsync(*m_runtime, *m_blob, std::move(data), offset,
+                                         [tracker](std::exception_ptr error) {
+                                             {
+                                                 std::scoped_lock lock(tracker->Mutex);
+                                                 --tracker->InFlight;
+                                                 if (error && !tracker->Error) {
+                                                     tracker->Error = error;
+                                                 }
+                                             }
+                                             tracker->Done.notify_all();
+                                         });
     } catch (...) {
         std::scoped_lock lock(tracker->Mutex);
         --tracker->InFlight;
@@ -315,19 +318,19 @@ void WriteableFileImpl::Truncate(int64_t size) {
     if (partialPageSize != 0) {
         // Read the partial page into memory for further appends
         [[maybe_unused]] const auto bytesDownloaded =
-            m_blobClient->DownloadTo(m_buffer, totalPageOffset, partialPageSize);
+            BlobOperations::DownloadToBuffer(*m_blob, m_buffer, totalPageOffset, partialPageSize);
         assert(bytesDownloaded == partialPageSize);
         m_bufferOffset = partialPageSize;
         m_flushed = false; // We have data in buffer now
     }
 
     m_size = size;
-    m_blobClient->SetSize(m_size);
+    BlobOperations::SetSize(*m_runtime, *m_blob, m_size);
 
     // Calculate new capacity rounded up to page size
     const auto [_, newCapacity] = BlobHelpers::RoundToEndOfNearestPage(size);
     m_capacity = newCapacity;
-    m_blobClient->SetCapacity(newCapacity);
+    BlobOperations::SetCapacity(*m_runtime, *m_blob, newCapacity);
 }
 
 int64_t WriteableFileImpl::GetFileSize() const noexcept { return m_size; }
@@ -347,7 +350,7 @@ void WriteableFileImpl::Expand(const int64_t requiredCapacity) {
 
     BOOST_LOG_SEV(*m_logger, debug) << "Expanding writeable file '" << m_name << "' to " << desiredSize << " bytes";
 
-    m_blobClient->SetCapacity(desiredSize);
+    BlobOperations::SetCapacity(*m_runtime, *m_blob, desiredSize);
     m_capacity = desiredSize;
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

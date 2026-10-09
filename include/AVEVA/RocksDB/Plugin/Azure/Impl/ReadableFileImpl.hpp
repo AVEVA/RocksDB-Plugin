@@ -3,8 +3,11 @@
 
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadTracker.hpp"
-#include "AVEVA/RocksDB/Plugin/Core/BlobClient.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
+
+#include <AVEVA/AzureClient/PageBlobClient.hpp>
 
 #include <boost/log/trivial.hpp>
 
@@ -23,7 +26,9 @@
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 class ReadableFileImpl {
     std::string m_name;
-    std::shared_ptr<Core::BlobClient> m_blobClient;
+    // Declared before the client so that it is destroyed after it: the client references the runtime's HTTP client.
+    std::shared_ptr<ClientRuntime> m_runtime;
+    std::shared_ptr<AzureClient::PageBlobClient> m_blob;
     std::shared_ptr<Core::FileCache> m_fileCache;
     // Random (and async) reads may run concurrently on one file, so the cached blob metadata is guarded.
     // Held by pointer to keep the type movable.
@@ -70,17 +75,18 @@ class ReadableFileImpl {
     [[nodiscard]] std::pair<int64_t, std::string> GetMetadata() const;
     void SetMetadata(int64_t size, std::string etag) const;
     static void ReadAsyncAttempt(std::shared_ptr<const ReadableFileImpl> self, int64_t offset, int64_t bytesToRead,
-                                 Core::BlobClient::DownloadCallback callback, int attemptsLeft,
+                                 BlobOperations::DownloadCallback callback, int attemptsLeft,
                                  std::chrono::milliseconds timeout);
     static void RefreshMetadataAndReadAsync(std::shared_ptr<const ReadableFileImpl> self, int64_t offset,
-                                            int64_t bytesToRead, Core::BlobClient::DownloadCallback callback,
+                                            int64_t bytesToRead, BlobOperations::DownloadCallback callback,
                                             int attemptsLeft, std::chrono::milliseconds timeout);
 
   public:
     // A blob that keeps changing underneath the reader fails with an IOError after this many metadata refreshes.
     static constexpr int kMaxStaleReadRetries = 5;
     ReadableFileImpl(
-        std::string_view name, std::shared_ptr<Core::BlobClient> blobClient, std::shared_ptr<Core::FileCache> fileCache,
+        std::string_view name, std::shared_ptr<ClientRuntime> runtime,
+        std::shared_ptr<AzureClient::PageBlobClient> blob, std::shared_ptr<Core::FileCache> fileCache,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::shared_ptr<AsyncReadTracker> asyncReads = nullptr,
         std::shared_ptr<std::atomic<int64_t>> prefetchBudget = nullptr);
@@ -95,13 +101,13 @@ class ReadableFileImpl {
     [[nodiscard]] bool ChainOntoPendingPrefetch(int64_t offset, int64_t bytesToRead,
                                                 std::move_only_function<void()>& resume) const;
 
-    using ReadCallback = Core::BlobClient::DownloadCallback;
+    using ReadCallback = BlobOperations::DownloadCallback;
 
     // Non-blocking random read from the blob (bypassing the file cache), with the same ETag/size refresh and retry
     // semantics as RandomRead. `self` keeps the file alive until `callback` has run; the callback may run on an
     // io_context thread or inline, so it must not block on blob I/O. The file is released before `callback` runs,
     // and the read stays registered with the AsyncReadTracker (if any) until `callback` itself is released.
-    // A non-zero `timeout` caps each blob download of the read (see Core::BlobClient::DownloadAsync).
+    // A non-zero `timeout` caps each blob download of the read (see BlobOperations::DownloadAsync).
     static void ReadAsync(std::shared_ptr<const ReadableFileImpl> self, int64_t offset, int64_t bytesToRead,
                           ReadCallback callback, int attemptsLeft = kMaxStaleReadRetries,
                           std::chrono::milliseconds timeout = std::chrono::milliseconds::zero());

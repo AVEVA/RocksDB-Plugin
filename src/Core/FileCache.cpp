@@ -199,8 +199,7 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
 
             int64_t fileSize = 0;
             try {
-                auto blobClient = m_containerClient->GetBlobClient(filePath);
-                fileSize = blobClient->GetSize();
+                fileSize = m_containerClient->GetBlobSize(filePath);
             } catch (std::exception& e) {
                 BOOST_LOG_SEV(*m_logger, error)
                     << "Failed to get file size for '" << filePath << "'. Error: " << e.what();
@@ -249,12 +248,11 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
             }
 
             try {
-                auto blobClient = m_containerClient->GetBlobClient(filePath);
                 const auto actualFilePath = m_cachePath / filePath;
 
                 // No need to download the _whole_ blob. There could be lots of padding
                 // at the end of the file. We can just download the actual size.
-                blobClient->DownloadTo(actualFilePath.string(), 0, fileSize);
+                m_containerClient->DownloadBlobTo(filePath, actualFilePath.string(), 0, fileSize);
             } catch (std::exception& e) {
                 // NOTE: We're not putting the filePath back on the download queue because
                 // this operation could _also_ throw. Let the next read be a cache miss which

@@ -4,8 +4,8 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AzureContainerClient.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlockOn.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
@@ -63,7 +63,9 @@ void ForEachBlob(AzureClient::BlobContainerClient& container, AzureClient::ListB
     });
 }
 
-uint32_t ToListPageSize(int32_t sizeHint) { return static_cast<uint32_t>(std::clamp(sizeHint, 1, Configuration::Transfer::MaxListPageSize)); }
+uint32_t ToListPageSize(int32_t sizeHint) {
+    return static_cast<uint32_t>(std::clamp(sizeHint, 1, Configuration::Transfer::MaxListPageSize));
+}
 
 using RenameDownload = std::future<
     std::expected<AzureClient::Response<AzureClient::Models::DownloadBlobResult>, AzureClient::BlobStorageError>>;
@@ -91,7 +93,8 @@ void UploadRenameChunk(AzureClient::PageBlobClient& destination, int64_t offset,
                        static_cast<uint64_t>(offset), std::as_bytes(std::span<const char>(buffer)),
                        boost::asio::use_future,
                        RequestOptionsForTransfer(destination.GetDefaultRequestOptions(), buffer.size()))));
-}} // namespace
+}
+} // namespace
 
 BlobFilesystemImpl::BlobFilesystemImpl(
     boost::asio::io_context& ioContext, const std::string& name, const std::string& storageAccountUrl,
@@ -210,9 +213,9 @@ ReadableFileImpl BlobFilesystemImpl::CreateReadableFile(const std::string& fileP
 
     const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
     const auto& container = GetContainer(prefix);
-    auto blobClient = std::make_shared<PageBlob>(m_runtime, container->GetPageBlobClient(std::string(realPath)));
-    return ReadableFileImpl{realPath, std::move(blobClient), FindCache(m_fileCaches, prefix),
-                            m_logger, m_asyncReads,          m_prefetchBytes};
+    auto blob = container->GetPageBlobClient(std::string(realPath));
+    return ReadableFileImpl{realPath, m_runtime,    std::move(blob), FindCache(m_fileCaches, prefix),
+                            m_logger, m_asyncReads, m_prefetchBytes};
 }
 
 SequentialFileImpl BlobFilesystemImpl::CreateSequentialFile(const std::string& filePath) {
@@ -248,9 +251,9 @@ WriteableFileImpl BlobFilesystemImpl::CreateWriteableFile(const std::string& fil
         }
     }
 
-    auto blobClient = std::make_unique<PageBlob>(m_runtime, std::move(clientPtr));
     return WriteableFileImpl{realPath,
-                             std::move(blobClient),
+                             m_runtime,
+                             std::move(clientPtr),
                              FindCache(m_fileCaches, prefix),
                              m_logger,
                              bufferSize,
@@ -266,9 +269,7 @@ ReadWriteFileImpl BlobFilesystemImpl::CreateReadWriteFile(const std::string& fil
     auto clientPtr = container->GetPageBlobClient(std::string(realPath));
     BlobHelpers::CreateIfNotExists(*clientPtr, Configuration::PageBlob::DefaultSize);
 
-    auto blobClient = std::make_shared<PageBlob>(m_runtime, std::move(clientPtr));
-
-    return ReadWriteFileImpl{realPath, std::move(blobClient), FindCache(m_fileCaches, prefix), m_logger};
+    return ReadWriteFileImpl{realPath, m_runtime, std::move(clientPtr), FindCache(m_fileCaches, prefix), m_logger};
 }
 
 WriteableFileImpl BlobFilesystemImpl::ReopenWriteableFile(const std::string& filePath) {
@@ -278,9 +279,10 @@ WriteableFileImpl BlobFilesystemImpl::ReopenWriteableFile(const std::string& fil
     const auto& container = GetContainer(prefix);
     const auto [initialSize, bufferSize] = SizingFor(filePath, m_dataFileInitialSize, m_dataFileBufferSize);
 
-    auto client = std::make_shared<PageBlob>(m_runtime, container->GetPageBlobClient(std::string(realPath)));
-    return WriteableFileImpl{realPath, std::move(client), FindCache(m_fileCaches, prefix), m_logger,
-                             static_cast<int64_t>(bufferSize)};
+    auto client = container->GetPageBlobClient(std::string(realPath));
+    return WriteableFileImpl{realPath,          m_runtime,
+                             std::move(client), FindCache(m_fileCaches, prefix),
+                             m_logger,          static_cast<int64_t>(bufferSize)};
 }
 
 WriteableFileImpl BlobFilesystemImpl::ReuseWritableFile(const std::string& filePath) {
@@ -296,9 +298,9 @@ WriteableFileImpl BlobFilesystemImpl::ReuseWritableFile(const std::string& fileP
     UnwrapResponse(BlockOn(client.get_executor(), client.DeleteIfExistsAsync(boost::asio::use_future)));
     BlobHelpers::CreateIfNotExists(client, initialSize);
 
-    auto blobClient = std::make_shared<PageBlob>(m_runtime, std::move(clientPtr));
     return WriteableFileImpl{realPath,
-                             std::move(blobClient),
+                             m_runtime,
+                             std::move(clientPtr),
                              FindCache(m_fileCaches, prefix),
                              m_logger,
                              static_cast<int64_t>(bufferSize),
@@ -315,8 +317,7 @@ LoggerImpl BlobFilesystemImpl::CreateLogger(const std::string& filePath, const i
     auto clientPtr = container->GetPageBlobClient(std::string(realPath));
     BlobHelpers::CreateIfNotExists(*clientPtr, Configuration::PageBlob::DefaultSize);
 
-    auto blobClient = std::make_shared<PageBlob>(m_runtime, std::move(clientPtr));
-    auto impl = std::make_unique<WriteableFileImpl>(realPath, std::move(blobClient), nullptr, m_logger,
+    auto impl = std::make_unique<WriteableFileImpl>(realPath, m_runtime, std::move(clientPtr), nullptr, m_logger,
                                                     Configuration::PageBlob::DefaultSize);
     return LoggerImpl{
         std::move(impl), logLevel,

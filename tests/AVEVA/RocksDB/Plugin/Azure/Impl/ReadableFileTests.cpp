@@ -4,7 +4,8 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
-#include "AVEVA/RocksDB/Plugin/Core/Mocks/BlobClientMock.hpp"
+
+#include "FakeBlobEnvironment.hpp"
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -12,191 +13,137 @@
 using AVEVA::RocksDB::Plugin::Azure::RequestFailedException;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Configuration;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ReadableFileImpl;
-using AVEVA::RocksDB::Plugin::Core::Mocks::BlobClientMock;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobEnvironment;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakePageBlobClient;
 using boost::log::sources::severity_logger_mt;
 using boost::log::trivial::severity_level;
-using ::testing::_;
-
-using ::testing::DoAll;
-using ::testing::Return;
-using ::testing::SetArrayArgument;
 
 class ReadableFileTests : public ::testing::Test {
   protected:
-    std::shared_ptr<BlobClientMock> m_blobClient;
-    static const constexpr uint64_t DefaultBlobSize = Configuration::PageBlob::PageSize * 2;
-    std::shared_ptr<severity_logger_mt<severity_level>> m_logger;
+    static const constexpr int64_t DefaultBlobSize = Configuration::PageBlob::PageSize * 2;
+    FakeBlobEnvironment m_env;
+    std::shared_ptr<severity_logger_mt<severity_level>> m_logger =
+        std::make_shared<severity_logger_mt<severity_level>>();
 
-    void TearDown() override { ASSERT_TRUE(::testing::Mock::VerifyAndClearExpectations(m_blobClient.get())); }
-
-    void SetUp() override {
-        m_blobClient = std::make_shared<BlobClientMock>();
-
-        // Default behavior: return a blob size
-        ON_CALL(*m_blobClient, GetSize()).WillByDefault(Return(DefaultBlobSize));
-
-        m_logger = std::make_shared<severity_logger_mt<severity_level>>();
-    }
+    ReadableFileImpl MakeFile() { return ReadableFileImpl{"test.sst", m_env.Runtime, m_env.Blob, nullptr, m_logger}; }
 };
 
 TEST_F(ReadableFileTests, Constructor_InitializesWithBlobSize) {
-    // Arrange
-    static constexpr uint64_t expectedSize = Configuration::PageBlob::PageSize;
+    constexpr int64_t expectedSize = Configuration::PageBlob::PageSize;
+    m_env.Fill(expectedSize);
 
-    ON_CALL(*m_blobClient, GetEtag()).WillByDefault(Return(std::string{"etag"}));
+    const auto file = MakeFile();
 
-    EXPECT_CALL(*m_blobClient, GetSize()).WillRepeatedly(Return(expectedSize));
-
-    // Act
-    ReadableFileImpl file{"test.sst", m_blobClient, nullptr, m_logger};
-
-    // Assert
-    EXPECT_EQ(static_cast<int64_t>(expectedSize), file.GetSize());
+    EXPECT_EQ(expectedSize, file.GetSize());
 }
 
 TEST_F(ReadableFileTests, RandomRead_WithoutCache_ReadsFromBlob) {
-    // Arrange
     constexpr int64_t offset = 50;
     constexpr int64_t bytesToRead = 100;
+    m_env.Fill(DefaultBlobSize, 'B');
     std::vector<char> buffer(bytesToRead);
-    std::vector<char> expectedData(bytesToRead, 'B');
+    const auto file = MakeFile();
 
-    EXPECT_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), offset, bytesToRead, ::testing::_))
-        .WillOnce([&expectedData](std::span<char> downloadBuffer, int64_t /*offset*/, int64_t /*length*/,
-                                  const std::string& /*ifMatch*/) {
-            std::copy(expectedData.begin(), expectedData.end(), downloadBuffer.begin());
-            return static_cast<int64_t>(expectedData.size());
-        });
-
-    ReadableFileImpl file{"test.sst", m_blobClient, nullptr, m_logger};
-
-    // Act
     const auto bytesRead = file.RandomRead(offset, bytesToRead, buffer.data());
 
-    // Assert
     EXPECT_EQ(bytesToRead, bytesRead);
-    EXPECT_EQ(expectedData, buffer);
+    EXPECT_EQ(std::vector<char>(bytesToRead, 'B'), buffer);
+    ASSERT_EQ(1U, m_env.Blob->Downloads.size());
+    EXPECT_EQ(offset, m_env.Blob->Downloads[0].Offset);
+    EXPECT_EQ(bytesToRead, m_env.Blob->Downloads[0].Length);
 }
 
 TEST_F(ReadableFileTests, RandomRead_RequestMoreThanAvailable_ReadsOnlyAvailableBytes) {
-    // Arrange
-    constexpr uint64_t blobSize = 200;
+    constexpr int64_t blobSize = 200;
     constexpr int64_t offset = 150;
     constexpr int64_t bytesToRead = 100;
     constexpr int64_t expectedBytes = 50; // Only 50 bytes available from offset 150 in a 200 byte blob
+    m_env.Fill(blobSize, 'C');
     std::vector<char> buffer(bytesToRead);
+    const auto file = MakeFile();
 
-    EXPECT_CALL(*m_blobClient, GetSize()).WillOnce(Return(blobSize));
-
-    EXPECT_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), offset, expectedBytes, ::testing::_))
-        .WillOnce([expectedBytes](std::span<char> downloadBuffer, int64_t /*offset*/, int64_t /*length*/,
-                                  const std::string& /*ifMatch*/) {
-            std::fill_n(downloadBuffer.begin(), expectedBytes, 'C');
-            return static_cast<int64_t>(expectedBytes);
-        });
-
-    ReadableFileImpl file{"test.sst", m_blobClient, nullptr, m_logger};
-
-    // Act
     const auto bytesRead = file.RandomRead(offset, bytesToRead, buffer.data());
 
-    // Assert
     EXPECT_EQ(expectedBytes, bytesRead);
+    ASSERT_EQ(1U, m_env.Blob->Downloads.size());
+    EXPECT_EQ(expectedBytes, m_env.Blob->Downloads[0].Length);
 }
 
 TEST_F(ReadableFileTests, RandomRead_AtEndOfFile_ReturnsZero) {
-    // Arrange
-    constexpr uint64_t blobSize = 100;
+    constexpr int64_t blobSize = 100;
+    m_env.Fill(blobSize);
     std::vector<char> buffer(50);
+    const auto file = MakeFile();
 
-    EXPECT_CALL(*m_blobClient, GetSize()).WillOnce(Return(blobSize));
+    const auto bytesRead = file.RandomRead(blobSize, 50, buffer.data());
 
-    ReadableFileImpl file{"test.sst", m_blobClient, nullptr, m_logger};
-
-    // Act
-    const auto bytesRead = file.RandomRead(static_cast<int64_t>(blobSize), 50, buffer.data());
-
-    // Assert
     EXPECT_EQ(0, bytesRead);
+    EXPECT_TRUE(m_env.Blob->Downloads.empty());
 }
 
 TEST_F(ReadableFileTests, GetSize_ReturnsCorrectSize) {
-    // Arrange
-    constexpr uint64_t expectedSize = 5000;
+    constexpr int64_t expectedSize = 5000;
+    m_env.Fill(expectedSize);
 
-    EXPECT_CALL(*m_blobClient, GetSize()).WillRepeatedly(Return(expectedSize));
-    ON_CALL(*m_blobClient, GetEtag()).WillByDefault(Return(std::string{"etag"}));
+    const auto file = MakeFile();
 
-    // Act
-    ReadableFileImpl file{"test.sst", m_blobClient, nullptr, m_logger};
-
-    // Assert
-    EXPECT_EQ(static_cast<int64_t>(expectedSize), file.GetSize());
+    EXPECT_EQ(expectedSize, file.GetSize());
 }
 
-TEST_F(ReadableFileTests, RandomRead_DownloadReturnsNegative_ReturnsZero) {
-    // Arrange
-    constexpr int64_t offset = 50;
-    constexpr int64_t bytesToRead = 100;
-    std::vector<char> buffer(bytesToRead);
+TEST_F(ReadableFileTests, RandomRead_DownloadFails_PropagatesTheError) {
+    m_env.Fill(DefaultBlobSize);
+    m_env.Blob->Fault =
+        [](const FakePageBlobClient::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (operation == FakePageBlobClient::Operation::DownloadToBuffer) {
+            return FakePageBlobClient::Error(500, "InternalError");
+        }
+        return std::nullopt;
+    };
+    const auto file = MakeFile();
+    std::vector<char> buffer(100);
 
-    EXPECT_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), offset, bytesToRead, ::testing::_))
-        .WillOnce(Return(-1)); // Simulate error
-
-    ReadableFileImpl file{"test.sst", m_blobClient, nullptr, m_logger};
-
-    // Act
-    const auto bytesRead = file.RandomRead(offset, bytesToRead, buffer.data());
-
-    // Assert
-    EXPECT_EQ(0, bytesRead);
+    EXPECT_THROW([[maybe_unused]] auto n = file.RandomRead(50, 100, buffer.data()), RequestFailedException);
 }
 
 TEST_F(ReadableFileTests, RandomRead_EmptyBlob_ReturnsZero) {
-    // Arrange
-    constexpr uint64_t blobSize = 0;
+    m_env.Fill(0);
     std::vector<char> buffer(100);
+    const auto file = MakeFile();
 
-    EXPECT_CALL(*m_blobClient, GetSize()).WillOnce(Return(blobSize));
-
-    ReadableFileImpl file{"test.sst", m_blobClient, nullptr, m_logger};
-
-    // Act
     const auto bytesRead = file.RandomRead(0, 100, buffer.data());
 
-    // Assert
     EXPECT_EQ(0, bytesRead);
+    EXPECT_TRUE(m_env.Blob->Downloads.empty());
 }
 
 TEST_F(ReadableFileTests, Constructor_FetchesSizeAndEtagWithOneMetadataCall) {
-    using AVEVA::RocksDB::Plugin::Core::BlobMetadata;
-    EXPECT_CALL(*m_blobClient, GetMetadata()).Times(1).WillOnce(Return(BlobMetadata{1024, "etag-1"}));
-    EXPECT_CALL(*m_blobClient, GetSize()).Times(0);
-    EXPECT_CALL(*m_blobClient, GetEtag()).Times(0);
+    m_env.Fill(1024);
 
-    ReadableFileImpl file{"test.sst", m_blobClient, nullptr, m_logger};
+    const auto file = MakeFile();
 
+    EXPECT_EQ(1, m_env.Blob->PropertiesRequests);
+    EXPECT_TRUE(file.HasETag(m_env.Blob->ETag));
 }
 
 TEST_F(ReadableFileTests, GetSize_RefreshesWithOneMetadataCall) {
-    using AVEVA::RocksDB::Plugin::Core::BlobMetadata;
-    EXPECT_CALL(*m_blobClient, GetMetadata())
-        .Times(2)
-        .WillOnce(Return(BlobMetadata{1024, "etag-1"}))
-        .WillOnce(Return(BlobMetadata{2048, "etag-2"}));
-    EXPECT_CALL(*m_blobClient, GetSize()).Times(0);
-    EXPECT_CALL(*m_blobClient, GetEtag()).Times(0);
-
-    ReadableFileImpl file{"test.sst", m_blobClient, nullptr, m_logger};
+    m_env.Fill(1024);
+    const auto file = MakeFile();
+    m_env.Blob->Size = 2048;
 
     EXPECT_EQ(2048, file.GetSize());
+    EXPECT_EQ(2, m_env.Blob->PropertiesRequests);
 }
+
 TEST_F(ReadableFileTests, RandomRead_GivesUpWhenBlobKeepsChanging) {
-    using AVEVA::RocksDB::Plugin::Core::BlobMetadata;
-    ON_CALL(*m_blobClient, GetMetadata()).WillByDefault(Return(BlobMetadata{1024, "etag"}));
-    ON_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), _, _, _))
-        .WillByDefault(::testing::Throw(RequestFailedException(412, "ConditionNotMet", "changed", "", {})));
-    ReadableFileImpl file{"test.sst", m_blobClient, nullptr, m_logger};
+    m_env.Fill(1024);
+    m_env.Blob->Fault =
+        [](const FakePageBlobClient::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (operation == FakePageBlobClient::Operation::DownloadToBuffer) {
+            return FakePageBlobClient::Error(412, "ConditionNotMet");
+        }
+        return std::nullopt;
+    };
+    const auto file = MakeFile();
     std::vector<char> buffer(16);
 
     EXPECT_THROW([[maybe_unused]] auto n = file.RandomRead(0, 16, buffer.data()), RequestFailedException);

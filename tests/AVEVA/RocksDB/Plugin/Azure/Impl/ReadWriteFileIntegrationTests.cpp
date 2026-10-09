@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
 #include "IntegrationTestHelpers.hpp"
 
@@ -30,7 +30,7 @@ class ReadWriteFileIntegrationTests : public AzureIntegrationTestBase {
 TEST_F(ReadWriteFileIntegrationTests, Write_ThenRead_DataMatchesCorrectly) {
     // Arrange
     auto blobClient = CreateEmptyBlob();
-    ReadWriteFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    ReadWriteFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     std::vector<char> testData(500);
     for (size_t i = 0; i < testData.size(); ++i) {
@@ -53,7 +53,7 @@ TEST_F(ReadWriteFileIntegrationTests, Write_ThenRead_DataMatchesCorrectly) {
 TEST_F(ReadWriteFileIntegrationTests, Write_AtDifferentOffsets_ReadsCorrectly) {
     // Arrange
     auto blobClient = CreateEmptyBlob();
-    ReadWriteFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    ReadWriteFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     const std::vector<char> data1(100, 'A');
     const std::vector<char> data2(150, 'B');
@@ -85,7 +85,7 @@ TEST_F(ReadWriteFileIntegrationTests, Write_AtDifferentOffsets_ReadsCorrectly) {
 TEST_F(ReadWriteFileIntegrationTests, Write_LargeData_HandlesCorrectly) {
     // Arrange
     auto blobClient = CreateEmptyBlob();
-    ReadWriteFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    ReadWriteFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     // Create large data spanning multiple pages
     std::vector<char> testData(Configuration::PageBlob::PageSize * 3);
@@ -109,7 +109,7 @@ TEST_F(ReadWriteFileIntegrationTests, OverwriteExistingData_UpdatesCorrectly) {
     // Arrange
     const std::vector<char> initialData(1000, 'X');
     auto blobClient = CreateBlobWithData(initialData);
-    ReadWriteFileImpl file(m_blobName, blobClient, nullptr, m_logger);
+    ReadWriteFileImpl file(m_blobName, m_runtime, blobClient, nullptr, m_logger);
 
     const std::vector<char> newData(200, 'Y');
 
@@ -131,7 +131,7 @@ TEST_F(ReadWriteFileIntegrationTests, OverwriteExistingData_UpdatesCorrectly) {
 TEST_F(ReadWriteFileIntegrationTests, Flush_PersistsChangesToBlob) {
     // Arrange
     auto blobClient = CreateEmptyBlob();
-    ReadWriteFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    ReadWriteFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
     const std::vector<char> testData(750, 'F');
 
     // Act
@@ -162,7 +162,7 @@ TEST_F(ReadWriteFileIntegrationTests, Flush_PersistsChangesToBlob) {
 TEST_F(ReadWriteFileIntegrationTests, Sync_UpdatesFileSizeInBlob) {
     // Arrange
     auto blobClient = CreateEmptyBlob();
-    ReadWriteFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    ReadWriteFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
     const std::vector<char> testData(888, 'S');
 
     // Act
@@ -183,7 +183,7 @@ TEST_F(ReadWriteFileIntegrationTests, Read_FromExistingFile_ReadsCorrectly) {
     }
 
     auto blobClient = CreateBlobWithData(initialData);
-    ReadWriteFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    ReadWriteFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     // Act
     std::vector<char> readBuffer(initialData.size());
@@ -197,7 +197,7 @@ TEST_F(ReadWriteFileIntegrationTests, Read_FromExistingFile_ReadsCorrectly) {
 TEST_F(ReadWriteFileIntegrationTests, NonPageAlignedWrites_HandleCorrectly) {
     // Arrange
     auto blobClient = CreateEmptyBlob();
-    ReadWriteFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    ReadWriteFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     // Write at non-page-aligned offset
     const int64_t offset = 137;
@@ -218,7 +218,7 @@ TEST_F(ReadWriteFileIntegrationTests, NonPageAlignedWrites_HandleCorrectly) {
 TEST_F(ReadWriteFileIntegrationTests, GetFileSize_ReturnsCorrectSize) {
     // Arrange
     auto blobClient = CreateEmptyBlob();
-    ReadWriteFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    ReadWriteFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     const std::vector<char> testData(1234, 'G');
 
@@ -235,7 +235,7 @@ TEST_F(ReadWriteFileIntegrationTests, GetFileSize_ReturnsCorrectSize) {
 TEST_F(ReadWriteFileIntegrationTests, Close_CanBeCalledMultipleTimes) {
     // Arrange
     auto blobClient = CreateEmptyBlob();
-    ReadWriteFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    ReadWriteFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     const std::vector<char> testData(100, 'C');
     file.Write(0, testData.data(), static_cast<int64_t>(testData.size()));
@@ -249,7 +249,7 @@ TEST_F(ReadWriteFileIntegrationTests, Close_CanBeCalledMultipleTimes) {
 TEST_F(ReadWriteFileIntegrationTests, WriteAndReadAcrossPageBoundaries_HandlesCorrectly) {
     // Arrange
     auto blobClient = CreateEmptyBlob();
-    ReadWriteFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    ReadWriteFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     // Write data that spans across page boundaries
     const auto offset = Configuration::PageBlob::PageSize - 100;
@@ -270,7 +270,7 @@ TEST_F(ReadWriteFileIntegrationTests, WriteAndReadAcrossPageBoundaries_HandlesCo
 TEST_F(ReadWriteFileIntegrationTests, WriteExtendsBeyondInitialCapacity_ExpandsBlob) {
     // Arrange
     auto blobClient = CreateEmptyBlob();
-    ReadWriteFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    ReadWriteFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     // Write data beyond default size
     const auto offset = Configuration::PageBlob::DefaultSize + 1000;
@@ -291,7 +291,7 @@ TEST_F(ReadWriteFileIntegrationTests, WriteExtendsBeyondInitialCapacity_ExpandsB
 TEST_F(ReadWriteFileIntegrationTests, MultipleWritesAndReads_MaintainDataIntegrity) {
     // Arrange
     auto blobClient = CreateEmptyBlob();
-    ReadWriteFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    ReadWriteFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     // Act - Perform multiple interleaved writes and reads
     const std::vector<char> data1(300, '1');

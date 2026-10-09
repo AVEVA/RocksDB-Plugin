@@ -4,119 +4,35 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
-#include "AVEVA/RocksDB/Plugin/Core/Mocks/BlobClientMock.hpp"
+
+#include "FakeBlobEnvironment.hpp"
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 using namespace AVEVA::RocksDB::Plugin::Azure::Impl;
 using namespace AVEVA::RocksDB::Plugin::Core;
-using namespace AVEVA::RocksDB::Plugin::Core::Mocks;
-using ::testing::_;
-using ::testing::DoAll;
-using ::testing::NiceMock;
-using ::testing::Return;
-using ::testing::SetArgPointee;
-using ::testing::StrictMock;
-
-/// <summary>
-/// Helper class for blob simulation
-/// </summary>
-class BlobSimulator {
-    uint64_t m_fileSize;
-    uint64_t m_capacity;
-    std::vector<uint8_t> m_data;
-
-  public:
-    explicit BlobSimulator(uint64_t initialCapacity = Configuration::PageBlob::DefaultSize)
-        : m_fileSize(0), m_capacity(initialCapacity) {
-        m_data.resize(static_cast<size_t>(initialCapacity), 0);
-    }
-
-    uint64_t GetSize() const { return m_fileSize; }
-
-    void SetSize(int64_t size) { m_fileSize = static_cast<uint64_t>(size); }
-
-    uint64_t GetCapacity() const { return m_capacity; }
-
-    void SetCapacity(int64_t capacity) {
-        m_capacity = static_cast<uint64_t>(capacity);
-        if (static_cast<size_t>(capacity) > m_data.size()) {
-            m_data.resize(static_cast<size_t>(capacity), 0);
-        }
-    }
-
-    void UploadPages(const std::span<char> buffer, int64_t offset) {
-        if (static_cast<size_t>(offset) + buffer.size() > m_data.size()) {
-            m_data.resize(static_cast<size_t>(offset) + buffer.size(), 0);
-        }
-
-        std::copy(buffer.begin(), buffer.end(), reinterpret_cast<char*>(m_data.data()) + offset);
-    }
-
-    int64_t DownloadTo(std::span<char> buffer, int64_t offset, int64_t length) {
-        if (static_cast<size_t>(offset) < m_data.size()) {
-            size_t available = std::min(static_cast<size_t>(length), m_data.size() - static_cast<size_t>(offset));
-            std::copy_n(reinterpret_cast<char*>(m_data.data()) + offset, available, buffer.data());
-            // Zero out any remaining bytes
-            if (available < buffer.size()) {
-                std::fill_n(buffer.data() + available, buffer.size() - available, static_cast<char>(0));
-            }
-
-            return static_cast<int64_t>(available);
-        } else {
-            std::fill_n(buffer.data(), buffer.size(), static_cast<char>(0));
-            return 0;
-        }
-    }
-
-    const std::vector<uint8_t>& GetData() const { return m_data; }
-};
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobEnvironment;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakePageBlobClient;
 
 class ReadWriteFileImplTests : public ::testing::Test {
   protected:
-    std::shared_ptr<BlobClientMock> m_mockBlobClient;
-    std::shared_ptr<BlobSimulator> m_blobSim;
+    FakeBlobEnvironment m_env;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
     std::string m_testFileName = "test.blob";
 
-    void TearDown() override { ASSERT_TRUE(::testing::Mock::VerifyAndClearExpectations(m_mockBlobClient.get())); }
-
     void SetUp() override {
-        m_mockBlobClient = std::make_shared<BlobClientMock>();
-        m_blobSim = std::make_shared<BlobSimulator>();
         m_logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
-
-        // Setup default mock behavior using the simulator
-        ON_CALL(*m_mockBlobClient, GetSize()).WillByDefault([this]() { return m_blobSim->GetSize(); });
-
-        ON_CALL(*m_mockBlobClient, SetSize(_)).WillByDefault([this](int64_t size) { m_blobSim->SetSize(size); });
-
-        ON_CALL(*m_mockBlobClient, GetCapacity()).WillByDefault([this]() { return m_blobSim->GetCapacity(); });
-
-        ON_CALL(*m_mockBlobClient, SetCapacity(_)).WillByDefault([this](int64_t capacity) {
-            m_blobSim->SetCapacity(capacity);
-        });
-
-        ON_CALL(*m_mockBlobClient, UploadPages(_, _))
-            .WillByDefault(
-                [this](const std::span<char> buffer, int64_t offset) { m_blobSim->UploadPages(buffer, offset); });
-
-        ON_CALL(*m_mockBlobClient,
-                DownloadTo(testing::A<std::span<char>>(), testing::A<int64_t>(), testing::A<int64_t>()))
-            .WillByDefault([this](std::span<char> buffer, int64_t offset, int64_t length) {
-                return m_blobSim->DownloadTo(buffer, offset, length);
-            });
+        m_env.Blob->SetCapacity(Configuration::PageBlob::DefaultSize);
     }
 
     std::unique_ptr<ReadWriteFileImpl> CreateFile() {
-        return std::make_unique<ReadWriteFileImpl>(m_testFileName, m_mockBlobClient, nullptr, m_logger);
+        return std::make_unique<ReadWriteFileImpl>(m_testFileName, m_env.Runtime, m_env.Blob, nullptr, m_logger);
     }
 };
-
 TEST_F(ReadWriteFileImplTests, Constructor_InitializesCorrectly) {
     // Arrange
-    m_blobSim->SetSize(1024);
+    m_env.Blob->Size = 1024;
 
     // Act
     const auto file = CreateFile();
@@ -193,8 +109,6 @@ TEST_F(ReadWriteFileImplTests, Write_NonPageAlignedEnd_HandlesPostPadding) {
 
 TEST_F(ReadWriteFileImplTests, Write_BufferFull_TriggersAutoFlush) {
     // Arrange
-    EXPECT_CALL(*m_mockBlobClient, UploadPages(_, _)).Times(2);
-
     auto file = CreateFile();
     const int64_t dataSize = Configuration::PageBlob::DefaultBufferSize + Configuration::PageBlob::PageSize;
     std::vector<char> data(dataSize, 'D');
@@ -205,6 +119,8 @@ TEST_F(ReadWriteFileImplTests, Write_BufferFull_TriggersAutoFlush) {
     // Assert - auto-flush should have occurred
     // Sync to finalize
     file->Sync();
+
+    EXPECT_EQ(2U, m_env.Blob->Uploads.size());
 
     std::vector<char> readBuffer(dataSize);
     auto bytesRead = file->Read(0, dataSize, readBuffer.data());
@@ -218,9 +134,8 @@ TEST_F(ReadWriteFileImplTests, Flush_PartialFirstPage_MergesExistingData) {
 
     // Pre-populate blob with some data at page start
     const int64_t offset = 100; // Within first page
-    std::vector<char> existingData(offset, 'X');
-    m_blobSim->UploadPages(existingData, 0);
-    m_blobSim->SetSize(offset);
+    std::fill_n(m_env.Blob->Data.begin(), offset, 'X');
+    m_env.Blob->Size = offset;
 
     // Write data at offset
     const int64_t dataSize = 100;
@@ -246,7 +161,6 @@ TEST_F(ReadWriteFileImplTests, Flush_PartialFirstPage_MergesExistingData) {
 TEST_F(ReadWriteFileImplTests, Sync_UpdatesFileSizeMetadata) {
     // Arrange
     const int64_t dataSize = 500;
-    EXPECT_CALL(*m_mockBlobClient, SetSize(500)).Times(::testing::Exactly(1)).WillOnce(::testing::DoDefault());
 
     auto file = CreateFile();
     std::vector<char> data(dataSize, 'E');
@@ -255,8 +169,9 @@ TEST_F(ReadWriteFileImplTests, Sync_UpdatesFileSizeMetadata) {
     file->Write(0, data.data(), dataSize);
     file->Close(); // Close will call Sync internally
 
-    // Assert - verify that the file size was actually updated in the simulator
-    EXPECT_EQ(dataSize, m_blobSim->GetSize());
+    // Assert - the size was written to the blob metadata exactly once
+    EXPECT_EQ(dataSize, m_env.Blob->Size);
+    EXPECT_EQ((std::vector<int64_t>{dataSize}), m_env.Blob->SizeWrites);
 }
 
 // Test Read returns correct data
@@ -321,18 +236,16 @@ TEST_F(ReadWriteFileImplTests, Close_CallsSync) {
 
     file->Write(0, data.data(), dataSize);
 
-    EXPECT_CALL(*m_mockBlobClient, SetSize(dataSize)).Times(1);
-
     // Act
     file->Close();
 
-    // Assert - mock expectation validates sync was called
+    // Assert - sync recorded the size
+    EXPECT_EQ((std::vector<int64_t>{dataSize}), m_env.Blob->SizeWrites);
 }
 
 // Test Close is idempotent
 TEST_F(ReadWriteFileImplTests, Close_CalledTwice_IsIdempotent) {
     // Arrange
-    EXPECT_CALL(*m_mockBlobClient, SetSize(_)).Times(1);
     auto file = CreateFile();
     const int64_t dataSize = 100;
     std::vector<char> data(dataSize, 'J');
@@ -343,7 +256,8 @@ TEST_F(ReadWriteFileImplTests, Close_CalledTwice_IsIdempotent) {
     file->Close();
     file->Close(); // Second close should be no-op
 
-    // Assert - mock expectation validates sync was called only once
+    // Assert - sync ran only once
+    EXPECT_EQ(1U, m_env.Blob->SizeWrites.size());
 }
 
 // Test Expand increases capacity
@@ -353,40 +267,35 @@ TEST_F(ReadWriteFileImplTests, Expand_IncreasesCapacity) {
     const int64_t largeDataSize = Configuration::PageBlob::DefaultSize + 1000;
     std::vector<char> data(largeDataSize, 'K');
 
-    // Expect SetCapacity to be called
-    EXPECT_CALL(*m_mockBlobClient, SetCapacity(_)).Times(testing::AtLeast(1));
-
     // Act
     file->Write(0, data.data(), largeDataSize);
     file->Sync();
 
-    // Assert - mock expectation validates SetCapacity was called
+    // Assert - the blob had to grow
+    EXPECT_FALSE(m_env.Blob->CapacityWrites.empty());
 }
 
 // Test destructor retries Close on failure
 TEST_F(ReadWriteFileImplTests, Destructor_RetriesCloseOnFailure) {
-    // Arrange
-    auto strictMock = std::make_shared<StrictMock<BlobClientMock>>();
-
-    // Setup initial calls for construction
-    EXPECT_CALL(*strictMock, GetSize()).WillOnce(Return(0));
-    // GetCapacity is called once at construction and again inside Flush() on each
-    // Close() retry, so allow it to be called repeatedly.
-    EXPECT_CALL(*strictMock, GetCapacity()).WillRepeatedly(Return(Configuration::PageBlob::DefaultSize));
-
-    // Setup SetSize to fail a few times then succeed
-    EXPECT_CALL(*strictMock, SetSize(_))
-        .Times(3)
-        .WillOnce(testing::Throw(std::runtime_error("Network error")))
-        .WillOnce(testing::Throw(std::runtime_error("Network error")))
-        .WillOnce(Return());
+    // Arrange - the first two attempts to record the size fail
+    int sizeWriteAttempts = 0;
+    m_env.Blob->Fault =
+        [&sizeWriteAttempts](
+            const FakePageBlobClient::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (operation == FakePageBlobClient::Operation::SetMetadata && ++sizeWriteAttempts <= 2) {
+            return FakePageBlobClient::Error(500, "InternalError");
+        }
+        return std::nullopt;
+    };
 
     // Act - destructor should retry
     {
-        ReadWriteFileImpl file(m_testFileName, strictMock, nullptr, m_logger);
+        ReadWriteFileImpl file(m_testFileName, m_env.Runtime, m_env.Blob, nullptr, m_logger);
     } // Destructor called here
 
-    // Assert - mock expectations verify retry behavior
+    // Assert
+    EXPECT_EQ(3, sizeWriteAttempts);
+    EXPECT_EQ(1U, m_env.Blob->SizeWrites.size());
 }
 
 // Test move constructor

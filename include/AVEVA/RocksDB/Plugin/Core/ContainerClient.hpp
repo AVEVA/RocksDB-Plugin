@@ -2,17 +2,23 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
-#include "AVEVA/RocksDB/Plugin/Core/BlobClient.hpp"
+#include <cstdint>
 #include <string>
-#include <memory>
-namespace AVEVA::RocksDB::Plugin::Core
-{
-    class ContainerClient
-    {
-    public:
-        ContainerClient() = default;
-        virtual ~ContainerClient() = default;
+namespace AVEVA::RocksDB::Plugin::Core {
+class ContainerClient {
+  public:
+    ContainerClient() = default;
+    virtual ~ContainerClient() = default;
 
-        virtual std::unique_ptr<BlobClient> GetBlobClient(const std::string& path) = 0;
-    };
-}
+    /// <summary>
+    /// Returns the size of the blob's representable data.
+    /// </summary>
+    virtual int64_t GetBlobSize(const std::string& path) = 0;
+
+    /// <summary>
+    /// Downloads [offset, offset + length) of the blob to the local file at destinationPath.
+    /// </summary>
+    virtual void DownloadBlobTo(const std::string& path, const std::string& destinationPath, int64_t offset,
+                                int64_t length) = 0;
+};
+} // namespace AVEVA::RocksDB::Plugin::Core

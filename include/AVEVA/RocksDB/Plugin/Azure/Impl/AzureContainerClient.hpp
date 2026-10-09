@@ -16,6 +16,8 @@ class AzureContainerClient final : public Core::ContainerClient {
   public:
     AzureContainerClient(std::shared_ptr<ClientRuntime> runtime,
                          std::shared_ptr<AzureClient::BlobContainerClient> client);
-    virtual std::unique_ptr<Core::BlobClient> GetBlobClient(const std::string& path) override;
+    virtual int64_t GetBlobSize(const std::string& path) override;
+    virtual void DownloadBlobTo(const std::string& path, const std::string& destinationPath, int64_t offset,
+                                int64_t length) override;
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

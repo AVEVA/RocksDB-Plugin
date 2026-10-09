@@ -3,6 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
 
 #include <boost/log/trivial.hpp>
 
@@ -10,10 +11,12 @@
 using namespace boost::log::trivial;
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 ReadWriteFileImpl::ReadWriteFileImpl(
-    std::string_view name, std::shared_ptr<Core::BlobClient> blobClient, std::shared_ptr<Core::FileCache> fileCache,
+    std::string_view name, std::shared_ptr<ClientRuntime> runtime, std::shared_ptr<AzureClient::PageBlobClient> blob,
+    std::shared_ptr<Core::FileCache> fileCache,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
-    : m_name(name), m_blobClient(std::move(blobClient)), m_fileCache(std::move(fileCache)), m_logger(std::move(logger)),
-      m_size(m_blobClient->GetSize()), m_syncSize(m_size), m_capacity(m_blobClient->GetCapacity()), m_closed(false),
+    : m_name(name), m_runtime(std::move(runtime)), m_blob(std::move(blob)), m_fileCache(std::move(fileCache)),
+      m_logger(std::move(logger)), m_size(BlobOperations::GetSize(*m_blob)), m_syncSize(m_size),
+      m_capacity(BlobOperations::GetCapacity(*m_blob)), m_closed(false),
       m_buffer(Configuration::PageBlob::DefaultBufferSize) {}
 
 ReadWriteFileImpl::~ReadWriteFileImpl() {
@@ -32,14 +35,15 @@ ReadWriteFileImpl::~ReadWriteFileImpl() {
 }
 
 ReadWriteFileImpl::ReadWriteFileImpl(ReadWriteFileImpl&& other) noexcept
-    : m_name(std::move(other.m_name)), m_blobClient(std::move(other.m_blobClient)),
+    : m_name(std::move(other.m_name)), m_runtime(std::move(other.m_runtime)), m_blob(std::move(other.m_blob)),
       m_fileCache(std::move(other.m_fileCache)), m_logger(std::move(other.m_logger)), m_size(other.m_size),
       m_syncSize(other.m_syncSize), m_capacity(other.m_capacity), m_closed(std::exchange(other.m_closed, true)),
       m_buffer(std::move(other.m_buffer)), m_bufferStats(std::move(other.m_bufferStats)) {}
 
 ReadWriteFileImpl& ReadWriteFileImpl::operator=(ReadWriteFileImpl&& other) noexcept {
     m_name = std::move(other.m_name);
-    m_blobClient = std::move(other.m_blobClient);
+    m_blob = std::move(other.m_blob);
+    m_runtime = std::move(other.m_runtime);
     m_fileCache = std::move(other.m_fileCache);
     m_logger = std::move(other.m_logger);
     m_size = other.m_size;
@@ -65,13 +69,13 @@ void ReadWriteFileImpl::Sync() {
 
     Flush();
 
-    m_blobClient->SetSize(m_size);
+    BlobOperations::SetSize(*m_runtime, *m_blob, m_size);
     m_syncSize = m_size;
     BOOST_LOG_SEV(*m_logger, debug) << "Synced read/writeable file '" << m_name << "' to " << m_size << " bytes";
 }
 
 void ReadWriteFileImpl::Flush() {
-    m_capacity = m_blobClient->GetCapacity();
+    m_capacity = BlobOperations::GetCapacity(*m_blob);
 
     // Pre-calculate the maximum size we'll need and expand if necessary
     auto maxSizeNeeded = m_size;
@@ -103,7 +107,8 @@ void ReadWriteFileImpl::Flush() {
             // read in the padding bits from first page
             std::span<char> prePaddingBuffer(m_buffer.data() + chunk.bufferOffset,
                                              static_cast<size_t>(chunk.prePadding));
-            m_blobClient->DownloadTo(prePaddingBuffer, targetStart, chunk.prePadding);
+            [[maybe_unused]] const auto prePaddingRead =
+                BlobOperations::DownloadToBuffer(*m_blob, prePaddingBuffer, targetStart, chunk.prePadding);
         }
         if (chunk.postPadding > 0) {
             auto targetEnd = chunk.targetOffset + chunk.dataLength;
@@ -122,7 +127,8 @@ void ReadWriteFileImpl::Flush() {
                 std::span<char> postPaddingBuffer(
                     &m_buffer[static_cast<size_t>(chunk.bufferOffset + chunk.prePadding + chunk.dataLength)],
                     static_cast<size_t>(chunk.postPadding));
-                m_blobClient->DownloadTo(postPaddingBuffer, targetEnd, chunk.postPadding);
+                [[maybe_unused]] const auto postPaddingRead =
+                    BlobOperations::DownloadToBuffer(*m_blob, postPaddingBuffer, targetEnd, chunk.postPadding);
             }
         }
 
@@ -132,7 +138,7 @@ void ReadWriteFileImpl::Flush() {
 
         std::span<char> uploadBuffer(&m_buffer[static_cast<size_t>(chunk.bufferOffset)],
                                      static_cast<size_t>(chunk.ChunkSize()));
-        m_blobClient->UploadPages(uploadBuffer, targetStart);
+        BlobOperations::UploadPages(*m_runtime, *m_blob, uploadBuffer, targetStart);
 
         BOOST_LOG_SEV(*m_logger, debug) << "Flushed " << chunk.ChunkSize() << " bytes to read/writeable file '"
                                         << m_name << "'";
@@ -214,14 +220,14 @@ int64_t ReadWriteFileImpl::Read(int64_t offset, int64_t bytesRequested, char* bu
         bytesRequested = bytesCanRead;
 
     std::span<char> readBuffer(buffer, static_cast<size_t>(bytesRequested));
-    return m_blobClient->DownloadTo(readBuffer, offset, bytesRequested);
+    return BlobOperations::DownloadToBuffer(*m_blob, readBuffer, offset, bytesRequested);
 }
 
 void ReadWriteFileImpl::Expand() {
     const auto capacity = std::max(static_cast<int64_t>(1), m_capacity);
     const auto [_, rounded] = BlobHelpers::RoundToEndOfNearestPage((m_size + capacity) * 2);
     const auto desiredSize = rounded;
-    m_blobClient->SetCapacity(desiredSize);
+    BlobOperations::SetCapacity(*m_runtime, *m_blob, desiredSize);
     m_capacity = desiredSize;
 
     BOOST_LOG_SEV(*m_logger, debug) << "Expanding read/writeable file '" << m_name << "' to " << desiredSize

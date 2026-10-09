@@ -22,7 +22,6 @@ target_sources(aveva-rocksdb-plugin-core
   FILES
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/FileCacheEntry.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/BlobClient.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/ContainerClient.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/Filesystem.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/File.hpp"

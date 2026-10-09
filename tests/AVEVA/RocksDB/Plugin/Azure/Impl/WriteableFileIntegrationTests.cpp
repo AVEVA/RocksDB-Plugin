@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
 #include "IntegrationTestHelpers.hpp"
 
@@ -30,7 +30,7 @@ class WriteableFileIntegrationTests : public AzureIntegrationTestBase {
 TEST_F(WriteableFileIntegrationTests, Append_SmallData_WritesSuccessfully) {
     // Arrange
     auto blobClient = CreateEmptyBlob();
-    WriteableFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    WriteableFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     const std::vector<char> testData(100, 'A');
 
@@ -46,7 +46,7 @@ TEST_F(WriteableFileIntegrationTests, Append_SmallData_WritesSuccessfully) {
 TEST_F(WriteableFileIntegrationTests, Append_MultipleWrites_AccumulatesData) {
     // Arrange
     auto blobClient = CreateEmptyBlob();
-    WriteableFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    WriteableFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     const std::vector<char> data1(100, 'A');
     const std::vector<char> data2(150, 'B');
@@ -72,7 +72,7 @@ TEST_F(WriteableFileIntegrationTests, Append_MultipleWrites_AccumulatesData) {
 TEST_F(WriteableFileIntegrationTests, Append_LargeData_WritesCorrectly) {
     // Arrange
     auto blobClient = CreateEmptyBlob();
-    WriteableFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    WriteableFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     // Create data larger than buffer size
     std::vector<char> testData(Configuration::PageBlob::DefaultBufferSize * 2);
@@ -93,7 +93,7 @@ TEST_F(WriteableFileIntegrationTests, Append_LargeData_WritesCorrectly) {
 TEST_F(WriteableFileIntegrationTests, Flush_PersistsData_ToBlob) {
     // Arrange
     auto blobClient = CreateEmptyBlob();
-    WriteableFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    WriteableFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
     const std::vector<char> testData(500, 'X');
 
     // Act
@@ -124,7 +124,7 @@ TEST_F(WriteableFileIntegrationTests, Flush_PersistsData_ToBlob) {
 TEST_F(WriteableFileIntegrationTests, Sync_PersistsDataAndSize_ToBlob) {
     // Arrange
     auto blobClient = CreateEmptyBlob();
-    WriteableFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    WriteableFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     const std::vector<char> testData(750, 'Y');
 
@@ -145,7 +145,7 @@ TEST_F(WriteableFileIntegrationTests, Truncate_ReducesFileSize) {
     // Arrange
     std::vector<char> initialData(1000, 'Z');
     auto blobClient = CreateBlobWithData(initialData);
-    WriteableFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    WriteableFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     // Act
     file.Truncate(500);
@@ -163,7 +163,7 @@ TEST_F(WriteableFileIntegrationTests, AppendToExistingFile_PreservesExistingData
     const std::vector<char> initialData(Configuration::PageBlob::PageSize - 100, 'I');
     const std::vector<char> newData(200, 'N');
     auto blobClient = CreateBlobWithData(initialData);
-    WriteableFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    WriteableFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     // Act
     file.Append(newData);
@@ -181,7 +181,7 @@ TEST_F(WriteableFileIntegrationTests, AppendToExistingFile_PreservesExistingData
 TEST_F(WriteableFileIntegrationTests, GetFileSize_ReturnsCorrectSize) {
     // Arrange
     auto blobClient = CreateEmptyBlob();
-    WriteableFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    WriteableFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     const std::vector<char> data1(300, 'A');
     const std::vector<char> data2(200, 'B');
@@ -199,7 +199,7 @@ TEST_F(WriteableFileIntegrationTests, GetFileSize_ReturnsCorrectSize) {
 TEST_F(WriteableFileIntegrationTests, Close_CanBeCalledMultipleTimes) {
     // Arrange
     auto blobClient = CreateEmptyBlob();
-    WriteableFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    WriteableFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     const std::vector<char> testData(100, 'M');
     file.Append(std::span<const char>(testData));
@@ -213,7 +213,7 @@ TEST_F(WriteableFileIntegrationTests, Close_CanBeCalledMultipleTimes) {
 TEST_F(WriteableFileIntegrationTests, PageAlignedWrites_HandleCorrectly) {
     // Arrange
     auto blobClient = CreateEmptyBlob();
-    WriteableFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    WriteableFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     // Write exactly one page
     const std::vector<char> pageData(Configuration::PageBlob::PageSize, 'P');
@@ -230,7 +230,7 @@ TEST_F(WriteableFileIntegrationTests, PageAlignedWrites_HandleCorrectly) {
 TEST_F(WriteableFileIntegrationTests, NonPageAlignedWrites_HandleCorrectly) {
     // Arrange
     auto blobClient = CreateEmptyBlob();
-    WriteableFileImpl file{m_blobName, blobClient, nullptr, m_logger};
+    WriteableFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     // Write non-page-aligned data
     const std::vector<char> testData(Configuration::PageBlob::PageSize + 100, 'Q');

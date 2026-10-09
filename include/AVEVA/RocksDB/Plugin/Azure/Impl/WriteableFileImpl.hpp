@@ -2,8 +2,12 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
+
+#include <AVEVA/AzureClient/PageBlobClient.hpp>
 
 #include <boost/log/trivial.hpp>
 
@@ -18,7 +22,9 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 class WriteableFileImpl {
     std::string m_name;
     int64_t m_bufferSize;
-    std::shared_ptr<Core::BlobClient> m_blobClient;
+    // Declared before the client so that it is destroyed after it: the client references the runtime's HTTP client.
+    std::shared_ptr<ClientRuntime> m_runtime;
+    std::shared_ptr<AzureClient::PageBlobClient> m_blob;
     std::shared_ptr<Core::FileCache> m_fileCache;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
 
@@ -54,11 +60,13 @@ class WriteableFileImpl {
     };
 
     WriteableFileImpl(
-        std::string_view name, std::shared_ptr<Core::BlobClient> blobClient, std::shared_ptr<Core::FileCache> fileCache,
+        std::string_view name, std::shared_ptr<ClientRuntime> runtime,
+        std::shared_ptr<AzureClient::PageBlobClient> blob, std::shared_ptr<Core::FileCache> fileCache,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         int64_t bufferSize = Configuration::PageBlob::DefaultBufferSize);
     WriteableFileImpl(
-        std::string_view name, std::shared_ptr<Core::BlobClient> blobClient, std::shared_ptr<Core::FileCache> fileCache,
+        std::string_view name, std::shared_ptr<ClientRuntime> runtime,
+        std::shared_ptr<AzureClient::PageBlobClient> blob, std::shared_ptr<Core::FileCache> fileCache,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         int64_t bufferSize, BlobState knownState);
     ~WriteableFileImpl();

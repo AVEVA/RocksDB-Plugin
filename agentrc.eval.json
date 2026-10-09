@@ -36,9 +36,9 @@
     },
     {
       "id": "pageblob-failed-write-not-surfaced",
-      "prompt": "A reviewer suspects that when PageBlob::SetSize or a page write throws an Azure SDK exception, the failure may not propagate back to RocksDB as an IOStatus on the WriteableFile path. Investigate and describe the fix.",
+      "prompt": "A reviewer suspects that when BlobOperations::SetSize or a page write throws an Azure SDK exception, the failure may not propagate back to RocksDB as an IOStatus on the WriteableFile path. Investigate and describe the fix.",
       "expectation": [
-        "Classifies the change as Azure-layer work spanning src/AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.cpp, WriteableFileImpl.cpp, and BlobHelpers.cpp.",
+        "Classifies the change as Azure-layer work spanning src/AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.cpp, WriteableFileImpl.cpp, and BlobHelpers.cpp.",
         "Traces how AzureClient failures (the plugin's RequestFailedException) are caught and converted via AzureErrorTranslator::IOStatusFromError into a rocksdb::IOStatus.",
         "Confirms the WriteableFile / ReadWriteFile public methods return the translated IOStatus instead of swallowing or asserting on the failure.",
         "Plans to build with a CMake preset and run ctest, adding a test under tests/AVEVA/RocksDB/Plugin/Azure/Impl/ (e.g. WriteableFileTests.cpp) that forces a blob failure and asserts the error surfaces as the expected IOStatus."

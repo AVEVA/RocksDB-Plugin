@@ -3,8 +3,8 @@
 
 #include "IntegrationTestHelpers.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
 
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
@@ -144,14 +144,15 @@ void AzureIntegrationTestBase::CleanupBlob() {
     }
 }
 
-std::shared_ptr<Core::BlobClient> AzureIntegrationTestBase::CreateEmptyBlob() {
+std::shared_ptr<AzureClient::PageBlobClient> AzureIntegrationTestBase::CreateEmptyBlob() {
     auto pageBlobClientPtr = m_containerClient->GetPageBlobClient(m_blobName);
     Unwrap(pageBlobClientPtr->CreateAsync(Configuration::PageBlob::DefaultSize, boost::asio::use_future).get());
     BlobHelpers::SetFileSize(*pageBlobClientPtr, 0);
-    return std::make_shared<PageBlob>(m_runtime, std::move(pageBlobClientPtr));
+    return pageBlobClientPtr;
 }
 
-std::shared_ptr<Core::BlobClient> AzureIntegrationTestBase::CreateBlobWithData(const std::vector<char>& data) {
+std::shared_ptr<AzureClient::PageBlobClient>
+AzureIntegrationTestBase::CreateBlobWithData(const std::vector<char>& data) {
     auto pageBlobClientPtr = m_containerClient->GetPageBlobClient(m_blobName);
     auto& pageBlobClient = *pageBlobClientPtr;
 
@@ -179,7 +180,7 @@ std::shared_ptr<Core::BlobClient> AzureIntegrationTestBase::CreateBlobWithData(c
         BlobHelpers::SetFileSize(pageBlobClient, static_cast<int64_t>(data.size()));
     }
 
-    return std::make_shared<PageBlob>(m_runtime, std::move(pageBlobClientPtr));
+    return pageBlobClientPtr;
 }
 
 std::vector<char> AzureIntegrationTestBase::DownloadBlobData(size_t maxSize) {

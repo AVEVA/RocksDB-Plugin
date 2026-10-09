@@ -5,7 +5,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ServicePrincipalStorageInfo.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
-#include "AVEVA/RocksDB/Plugin/Core/BlobClient.hpp"
+#include <AVEVA/AzureClient/PageBlobClient.hpp>
 
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>
 #include <boost/asio/executor_work_guard.hpp>
@@ -106,13 +106,13 @@ class AzureIntegrationTestBase : public ::testing::Test {
     /// <summary>
     /// Creates an empty page blob with default size and file size set to 0.
     /// </summary>
-    std::shared_ptr<Core::BlobClient> CreateEmptyBlob();
+    std::shared_ptr<AzureClient::PageBlobClient> CreateEmptyBlob();
 
     /// <summary>
     /// Creates a page blob with the provided data.
     /// The blob capacity is rounded up to the nearest page size.
     /// </summary>
-    std::shared_ptr<Core::BlobClient> CreateBlobWithData(const std::vector<char>& data);
+    std::shared_ptr<AzureClient::PageBlobClient> CreateBlobWithData(const std::vector<char>& data);
 
     /// <summary>
     /// Downloads blob data up to maxSize bytes.
