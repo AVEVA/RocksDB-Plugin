@@ -12,9 +12,9 @@
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 #include <AVEVA/AzureClient/BlockBlobClient.hpp>
 #include <AVEVA/AzureClient/Credentials.hpp>
-#include <AVEVA/AzureClient/ITokenCredential.hpp>
 #include <AVEVA/AzureClient/Models/BlobContainerModels.hpp>
 #include <AVEVA/AzureClient/Models/BlobModels.hpp>
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
 #include <AVEVA/AzureClient/Response.hpp>
+#include <AVEVA/AzureClient/TokenCredential.hpp>
 #include <AVEVA/AzureClient/WithRequestOptions.hpp>

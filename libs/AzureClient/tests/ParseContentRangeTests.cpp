@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
-#include "BlobRequestHelpers.hpp"
 #include "ValueOrFail.hpp"
+#include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 
 #include <gtest/gtest.h>
 
@@ -10,8 +10,7 @@ using AVEVA::AzureClient::Tests::ValueOrFail;
 
 using AVEVA::AzureClient::Private::ParseContentRange;
 
-TEST(ParseContentRangeTests, ParsesNormalRangeWithTotal)
-{
+TEST(ParseContentRangeTests, ParsesNormalRangeWithTotal) {
     const auto r = ParseContentRange("bytes 0-499/1234");
     ASSERT_TRUE(r.has_value());
     EXPECT_EQ(ValueOrFail(r).Start, 0U);
@@ -20,8 +19,7 @@ TEST(ParseContentRangeTests, ParsesNormalRangeWithTotal)
     EXPECT_EQ(*ValueOrFail(r).Total, 1234U);
 }
 
-TEST(ParseContentRangeTests, ParsesAsteriskRangeWithTotal)
-{
+TEST(ParseContentRangeTests, ParsesAsteriskRangeWithTotal) {
     const auto r = ParseContentRange("bytes */1234");
     ASSERT_TRUE(r.has_value());
     EXPECT_EQ(ValueOrFail(r).Start, 0U);
@@ -31,8 +29,7 @@ TEST(ParseContentRangeTests, ParsesAsteriskRangeWithTotal)
     EXPECT_TRUE(ValueOrFail(r).Unsatisfied);
 }
 
-TEST(ParseContentRangeTests, ParsesRangeWithoutTotal)
-{
+TEST(ParseContentRangeTests, ParsesRangeWithoutTotal) {
     const auto r = ParseContentRange("bytes 100-199/*");
     ASSERT_TRUE(r.has_value());
     EXPECT_EQ(ValueOrFail(r).Start, 100U);
@@ -40,25 +37,21 @@ TEST(ParseContentRangeTests, ParsesRangeWithoutTotal)
     EXPECT_FALSE(ValueOrFail(r).Total.has_value());
 }
 
-TEST(ParseContentRangeTests, RejectsMissingPrefix)
-{
+TEST(ParseContentRangeTests, RejectsMissingPrefix) {
     const auto r = ParseContentRange("0-99/100");
     EXPECT_FALSE(r.has_value());
 }
 
-TEST(ParseContentRangeTests, RejectsMalformedNumbers)
-{
+TEST(ParseContentRangeTests, RejectsMalformedNumbers) {
     EXPECT_FALSE(ParseContentRange("bytes abc-def/100").has_value());
     EXPECT_FALSE(ParseContentRange("bytes 0-99/1a0").has_value());
 }
 
-TEST(ParseContentRangeTests, RejectsEndBeforeStart)
-{
+TEST(ParseContentRangeTests, RejectsEndBeforeStart) {
     EXPECT_FALSE(ParseContentRange("bytes 200-100/1000").has_value());
 }
 
-TEST(ParseContentRangeTests, AcceptsExtraWhitespace)
-{
+TEST(ParseContentRangeTests, AcceptsExtraWhitespace) {
     const auto r = ParseContentRange("  bytes   5-10/  20  ");
     ASSERT_TRUE(r.has_value());
     EXPECT_EQ(ValueOrFail(r).Start, 5U);

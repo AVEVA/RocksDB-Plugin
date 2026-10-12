@@ -23,6 +23,9 @@ using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::RocksDB::Plugin::Azure::Impl::AzurePipelinesCredential;
 using AVEVA::RocksDB::Plugin::Azure::Impl::AzurePipelinesCredentialOptions;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ChainedTokenCredential;
+using AVEVA::RocksDB::Plugin::Azure::Impl::CredentialVariant;
+using TestSource = CredentialVariant<ClientSecretCredential, StaticTokenCredential>;
+using TestChain = ChainedTokenCredential<TestSource>;
 
 namespace {
 class TokenCredentialsTests : public ::testing::Test {
@@ -32,7 +35,7 @@ class TokenCredentialsTests : public ::testing::Test {
         m_bridge = std::make_unique<AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeHttpBridge>(m_httpClient);
     }
 
-    std::pair<std::error_code, AccessToken> GetToken(AVEVA::AzureClient::ITokenCredential& credential) {
+    template <class TCred> std::pair<std::error_code, AccessToken> GetToken(TCred& credential) {
         auto promise = std::make_shared<std::promise<std::pair<std::error_code, AccessToken>>>();
         auto future = promise->get_future();
         credential.GetTokenAsync(
@@ -70,8 +73,8 @@ class TokenCredentialsTests : public ::testing::Test {
 TEST_F(TokenCredentialsTests, ChainFallsThroughToLaterSource) {
     auto failing = std::make_shared<ClientSecretCredential>(m_bridge->Client(), ClientSecretCredentialOptions{});
     auto working = std::make_shared<StaticTokenCredential>("static");
-    auto chain = std::make_shared<ChainedTokenCredential>(
-        std::vector<std::shared_ptr<AVEVA::AzureClient::ITokenCredential>>{failing, working});
+    auto chain = std::make_shared<TestChain>(std::vector<std::shared_ptr<TestSource>>{
+        std::make_shared<TestSource>(failing), std::make_shared<TestSource>(working)});
 
     const auto [error, token] = GetToken(*chain);
 
@@ -82,8 +85,8 @@ TEST_F(TokenCredentialsTests, ChainFallsThroughToLaterSource) {
 TEST_F(TokenCredentialsTests, ChainReportsLastErrorWhenAllSourcesFail) {
     auto first = std::make_shared<ClientSecretCredential>(m_bridge->Client(), ClientSecretCredentialOptions{});
     auto second = std::make_shared<ClientSecretCredential>(m_bridge->Client(), ClientSecretCredentialOptions{});
-    auto chain = std::make_shared<ChainedTokenCredential>(
-        std::vector<std::shared_ptr<AVEVA::AzureClient::ITokenCredential>>{first, second});
+    auto chain = std::make_shared<TestChain>(std::vector<std::shared_ptr<TestSource>>{
+        std::make_shared<TestSource>(first), std::make_shared<TestSource>(second)});
 
     const auto [error, token] = GetToken(*chain);
 
@@ -105,12 +108,14 @@ TEST_F(TokenCredentialsTests, RetryAfterIsHonoredOn429) {
     EXPECT_GE(elapsed, std::chrono::milliseconds(900));
 }
 
-class DeferredCredential final : public AVEVA::AzureClient::ITokenCredential {
+class DeferredCredential final {
   public:
-    void GetTokenAsync(std::vector<std::string>, GetTokenCompletionHandler completion) override {
-        Pending = std::move(completion);
+    template <boost::asio::completion_token_for<AVEVA::AzureClient::TokenSignature> CompletionToken>
+    auto GetTokenAsync(std::vector<std::string> scopes, CompletionToken&& token) {
+        return boost::asio::async_initiate<AVEVA::AzureClient::TokenSignature>(
+            [this](auto handler, std::vector<std::string>) { Pending = std::move(handler); }, token, std::move(scopes));
     }
-    GetTokenCompletionHandler Pending;
+    std::move_only_function<AVEVA::AzureClient::TokenSignature> Pending;
 };
 
 TEST(RuntimeBoundCredentialTests, PendingRefreshKeepsRuntimeAliveUntilCompletion) {
@@ -118,7 +123,8 @@ TEST(RuntimeBoundCredentialTests, PendingRefreshKeepsRuntimeAliveUntilCompletion
     auto runtime = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime>(context);
     const std::weak_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime> weak = runtime;
     auto inner = std::make_shared<DeferredCredential>();
-    auto bound = std::make_unique<AVEVA::RocksDB::Plugin::Azure::Impl::RuntimeBoundCredential>(runtime, inner);
+    auto bound = std::make_unique<AVEVA::RocksDB::Plugin::Azure::Impl::RuntimeBoundCredential<DeferredCredential>>(
+        runtime, inner);
     bool completed = false;
     bound->GetTokenAsync({"scope"}, [&completed](std::error_code, AccessToken) { completed = true; });
 

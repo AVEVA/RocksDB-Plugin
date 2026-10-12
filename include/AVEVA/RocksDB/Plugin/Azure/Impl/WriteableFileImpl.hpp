@@ -7,7 +7,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 
-#include <AVEVA/AzureClient/PageBlobClient.hpp>
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 
 #include <boost/log/trivial.hpp>
 
@@ -19,12 +19,12 @@
 #include <string>
 #include <vector>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-class WriteableFileImpl {
+template <typename TBlob> class BasicWriteableFileImpl {
     std::string m_name;
     int64_t m_bufferSize;
     // Declared before the client so that it is destroyed after it: the client references the runtime's HTTP client.
     std::shared_ptr<ClientRuntime> m_runtime;
-    std::shared_ptr<AzureClient::PageBlobClient> m_blob;
+    std::shared_ptr<TBlob> m_blob;
     std::shared_ptr<Core::FileCache> m_fileCache;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
 
@@ -59,21 +59,21 @@ class WriteableFileImpl {
         int64_t Capacity;
     };
 
-    WriteableFileImpl(
-        std::string_view name, std::shared_ptr<ClientRuntime> runtime,
-        std::shared_ptr<AzureClient::PageBlobClient> blob, std::shared_ptr<Core::FileCache> fileCache,
+    BasicWriteableFileImpl(
+        std::string_view name, std::shared_ptr<ClientRuntime> runtime, std::shared_ptr<TBlob> blob,
+        std::shared_ptr<Core::FileCache> fileCache,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         int64_t bufferSize = Configuration::PageBlob::DefaultBufferSize);
-    WriteableFileImpl(
-        std::string_view name, std::shared_ptr<ClientRuntime> runtime,
-        std::shared_ptr<AzureClient::PageBlobClient> blob, std::shared_ptr<Core::FileCache> fileCache,
+    BasicWriteableFileImpl(
+        std::string_view name, std::shared_ptr<ClientRuntime> runtime, std::shared_ptr<TBlob> blob,
+        std::shared_ptr<Core::FileCache> fileCache,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         int64_t bufferSize, BlobState knownState);
-    ~WriteableFileImpl();
-    WriteableFileImpl(const WriteableFileImpl&) = delete;
-    WriteableFileImpl& operator=(const WriteableFileImpl&) = delete;
-    WriteableFileImpl(WriteableFileImpl&&) noexcept;
-    WriteableFileImpl& operator=(WriteableFileImpl&&) noexcept;
+    ~BasicWriteableFileImpl();
+    BasicWriteableFileImpl(const BasicWriteableFileImpl&) = delete;
+    BasicWriteableFileImpl& operator=(const BasicWriteableFileImpl&) = delete;
+    BasicWriteableFileImpl(BasicWriteableFileImpl&&) noexcept;
+    BasicWriteableFileImpl& operator=(BasicWriteableFileImpl&&) noexcept;
 
     void Close();
     void Append(const std::span<const char> data);
@@ -94,4 +94,13 @@ class WriteableFileImpl {
     [[nodiscard]] bool HasUploadError() const noexcept;
     void DrainUploads() noexcept;
 };
+extern template class BasicWriteableFileImpl<PageBlobClient>;
+
+/// <summary>The production file, over the real page blob client. Non-template so it can be forward declared.</summary>
+class WriteableFileImpl : public BasicWriteableFileImpl<PageBlobClient> {
+  public:
+    using BasicWriteableFileImpl<PageBlobClient>::BasicWriteableFileImpl;
+};
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
+
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.ipp"

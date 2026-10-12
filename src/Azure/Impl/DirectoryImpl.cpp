@@ -5,8 +5,8 @@
 
 #include <algorithm>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-DirectoryImpl::DirectoryImpl(std::shared_ptr<ClientRuntime> runtime,
-                             std::shared_ptr<AzureClient::BlobContainerClient> client, const std::string_view dirname)
+DirectoryImpl::DirectoryImpl(std::shared_ptr<ClientRuntime> runtime, std::shared_ptr<Impl::BlobContainerClient> client,
+                             const std::string_view dirname)
     : m_runtime(std::move(runtime)), m_client(std::move(client)), m_name(dirname) {}
 
 void DirectoryImpl::Fsync() {

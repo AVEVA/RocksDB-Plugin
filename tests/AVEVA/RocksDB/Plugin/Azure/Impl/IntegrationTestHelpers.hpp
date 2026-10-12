@@ -3,11 +3,11 @@
 
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ServicePrincipalStorageInfo.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
-#include <AVEVA/AzureClient/PageBlobClient.hpp>
 
-#include <AVEVA/AzureClient/BlobContainerClient.hpp>
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/log/trivial.hpp>
@@ -70,7 +70,7 @@ class AzureIntegrationTestBase : public ::testing::Test {
     TestIoContext m_ioContext;
     std::optional<Models::ServicePrincipalStorageInfo> m_credentials;
     std::shared_ptr<ClientRuntime> m_runtime;
-    std::shared_ptr<AzureClient::BlobContainerClient> m_containerClient;
+    std::shared_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::BlobContainerClient> m_containerClient;
     std::string m_blobName;
     std::string m_containerPrefix;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
@@ -106,13 +106,14 @@ class AzureIntegrationTestBase : public ::testing::Test {
     /// <summary>
     /// Creates an empty page blob with default size and file size set to 0.
     /// </summary>
-    std::shared_ptr<AzureClient::PageBlobClient> CreateEmptyBlob();
+    std::shared_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient> CreateEmptyBlob();
 
     /// <summary>
     /// Creates a page blob with the provided data.
     /// The blob capacity is rounded up to the nearest page size.
     /// </summary>
-    std::shared_ptr<AzureClient::PageBlobClient> CreateBlobWithData(const std::vector<char>& data);
+    std::shared_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient>
+    CreateBlobWithData(const std::vector<char>& data);
 
     /// <summary>
     /// Downloads blob data up to maxSize bytes.

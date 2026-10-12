@@ -12,13 +12,13 @@ class ReadableFileImpl;
 }
 
 namespace AVEVA::RocksDB::Plugin::Azure {
-class ReadableFile final : public rocksdb::FSRandomAccessFile {
+template <class TImpl> class BasicReadableFile final : public rocksdb::FSRandomAccessFile {
     // Shared with in-flight async reads so the file (and its blob client) outlives their completions.
-    std::shared_ptr<Impl::ReadableFileImpl> m_file;
+    std::shared_ptr<TImpl> m_file;
 
   public:
-    explicit ReadableFile(Impl::ReadableFileImpl&& file);
-    ~ReadableFile() override;
+    explicit BasicReadableFile(TImpl&& file);
+    ~BasicReadableFile() override;
 
     virtual rocksdb::IOStatus Read(uint64_t offset, size_t n, const rocksdb::IOOptions& options, rocksdb::Slice* result,
                                    char* scratch, rocksdb::IODebugContext* dbg) const override;
@@ -31,4 +31,9 @@ class ReadableFile final : public rocksdb::FSRandomAccessFile {
     virtual rocksdb::IOStatus Prefetch(uint64_t offset, size_t n, const rocksdb::IOOptions& options,
                                        rocksdb::IODebugContext* dbg) override;
 };
+
+using ReadableFile = BasicReadableFile<Impl::ReadableFileImpl>;
+extern template class BasicReadableFile<Impl::ReadableFileImpl>;
 } // namespace AVEVA::RocksDB::Plugin::Azure
+
+#include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.ipp"

@@ -4,9 +4,9 @@
 #include "AVEVA/AzureClient/BlobOperationOptions.hpp"
 #include "AVEVA/AzureClient/Models/BlobContainerModels.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
-#include "BlobRequestHelpers.hpp"
 #include "FakeHttpClient.hpp"
 #include "TestFixtures.hpp"
+#include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 
 #include <AVEVA/AzureClient/BlockBlobClient.hpp>
 #include <AVEVA/AzureClient/PageBlobClient.hpp>

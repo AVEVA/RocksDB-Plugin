@@ -4,7 +4,7 @@
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 
-#include <AVEVA/AzureClient/BlobContainerClient.hpp>
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 
 #include <memory>
 #include <string>
@@ -12,11 +12,11 @@
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 class DirectoryImpl {
     std::shared_ptr<ClientRuntime> m_runtime;
-    std::shared_ptr<AzureClient::BlobContainerClient> m_client;
+    std::shared_ptr<Impl::BlobContainerClient> m_client;
     std::string m_name;
 
   public:
-    DirectoryImpl(std::shared_ptr<ClientRuntime> runtime, std::shared_ptr<AzureClient::BlobContainerClient> client,
+    DirectoryImpl(std::shared_ptr<ClientRuntime> runtime, std::shared_ptr<Impl::BlobContainerClient> client,
                   std::string_view dirname);
     void Fsync();
     size_t GetUniqueId(char* id, size_t maxSize) const noexcept;

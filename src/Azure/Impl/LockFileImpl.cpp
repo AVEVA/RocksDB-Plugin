@@ -41,7 +41,7 @@ bool ShouldRetryAcquire(const AzureClient::BlobStorageError& error) {
 }
 } // namespace
 LockFileImpl::LockFileImpl(
-    std::shared_ptr<ClientRuntime> runtime, std::unique_ptr<AzureClient::PageBlobClient> file,
+    std::shared_ptr<ClientRuntime> runtime, std::unique_ptr<Impl::PageBlobClient> file,
     std::chrono::seconds leaseLength,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     std::string fileName)
@@ -204,9 +204,9 @@ void LockFileImpl::RenewAsync(RenewCallback callback) const {
     // The timer, the cancellation signal and every completion are serialised on one strand: asio timers and
     // cancellation signals are not thread safe, and the AzureClient requires slots to be emitted on its executor.
     struct State {
-        State(const boost::asio::any_io_executor& executor)
+        State(const boost::asio::io_context::executor_type& executor)
             : Strand(boost::asio::make_strand(executor)), Deadline(Strand) {}
-        boost::asio::strand<boost::asio::any_io_executor> Strand;
+        boost::asio::strand<boost::asio::io_context::executor_type> Strand;
         boost::asio::steady_timer Deadline;
         boost::asio::cancellation_signal Cancel;
         RenewCallback Done;

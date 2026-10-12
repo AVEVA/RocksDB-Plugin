@@ -8,7 +8,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
 #include "IntegrationTestHelpers.hpp"
 
-#include <AVEVA/AzureClient/PageBlobClient.hpp>
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 #include <boost/asio/use_future.hpp>
 #include <gtest/gtest.h>
 

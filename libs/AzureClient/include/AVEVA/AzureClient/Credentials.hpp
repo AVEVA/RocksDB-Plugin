@@ -5,9 +5,11 @@
 
 #include <AVEVA/AzureClient/BlobClientOptions.hpp>
 #include <AVEVA/AzureClient/HttpClientLike.hpp>
-#include <AVEVA/AzureClient/ITokenCredential.hpp>
+#include <AVEVA/AzureClient/TokenCredential.hpp>
 #include <AVEVA/HttpClient/HttpClient.hpp>
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
+
+#include <boost/asio/async_result.hpp>
 
 #include <string>
 #include <string_view>
@@ -40,13 +42,22 @@ struct ClientSecretCredentialOptions {
 };
 
 // Service principal with a client secret (OAuth 2.0 client credentials grant).
-template <HttpClientLike THttp> class BasicClientSecretCredential final : public ITokenCredential {
+template <HttpClientLike THttp> class BasicClientSecretCredential final {
   public:
     BasicClientSecretCredential(THttp& httpClient, ClientSecretCredentialOptions options);
 
-    void GetTokenAsync(std::vector<std::string> scopes, GetTokenCompletionHandler completion) override;
+    template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
+    auto GetTokenAsync(std::vector<std::string> scopes, CompletionToken&& token) {
+        return boost::asio::async_initiate<TokenSignature>(
+            [this](auto handler, std::vector<std::string> requestedScopes) {
+                Begin(std::move(requestedScopes), std::move(handler));
+            },
+            token, std::move(scopes));
+    }
 
   private:
+    template <class Handler> void Begin(std::vector<std::string> scopes, Handler completion);
+
     THttp* m_httpClient;
     ClientSecretCredentialOptions m_options;
 };
@@ -69,13 +80,22 @@ struct WorkloadIdentityCredentialOptions {
 };
 
 // Azure Workload Identity: exchanges a federated token file for an Entra ID token (client assertion grant).
-template <HttpClientLike THttp> class BasicWorkloadIdentityCredential final : public ITokenCredential {
+template <HttpClientLike THttp> class BasicWorkloadIdentityCredential final {
   public:
     BasicWorkloadIdentityCredential(THttp& httpClient, WorkloadIdentityCredentialOptions options);
 
-    void GetTokenAsync(std::vector<std::string> scopes, GetTokenCompletionHandler completion) override;
+    template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
+    auto GetTokenAsync(std::vector<std::string> scopes, CompletionToken&& token) {
+        return boost::asio::async_initiate<TokenSignature>(
+            [this](auto handler, std::vector<std::string> requestedScopes) {
+                Begin(std::move(requestedScopes), std::move(handler));
+            },
+            token, std::move(scopes));
+    }
 
   private:
+    template <class Handler> void Begin(std::vector<std::string> scopes, Handler completion);
+
     THttp* m_httpClient;
     WorkloadIdentityCredentialOptions m_options;
 };
@@ -103,16 +123,27 @@ struct ManagedIdentityCredentialOptions {
 
 // Managed identity via IMDS (VMs, VM scale sets, AKS) or the App Service identity endpoint. Requests exactly one
 // scope, which is converted to a resource ("https://storage.azure.com/.default" -> "https://storage.azure.com").
-template <HttpClientLike THttp> class BasicManagedIdentityCredential final : public ITokenCredential {
+template <HttpClientLike THttp> class BasicManagedIdentityCredential final {
   public:
     BasicManagedIdentityCredential(THttp& httpClient, ManagedIdentityCredentialOptions options);
 
-    void GetTokenAsync(std::vector<std::string> scopes, GetTokenCompletionHandler completion) override;
+    template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
+    auto GetTokenAsync(std::vector<std::string> scopes, CompletionToken&& token) {
+        return boost::asio::async_initiate<TokenSignature>(
+            [this](auto handler, std::vector<std::string> requestedScopes) {
+                Begin(std::move(requestedScopes), std::move(handler));
+            },
+            token, std::move(scopes));
+    }
 
   private:
+    template <class Handler> void Begin(std::vector<std::string> scopes, Handler completion);
+
     THttp* m_httpClient;
     ManagedIdentityCredentialOptions m_options;
 };
 
 using ManagedIdentityCredential = BasicManagedIdentityCredential<HttpClient>;
 } // namespace AVEVA::AzureClient
+
+#include <AVEVA/AzureClient/Detail/CredentialsImpl.hpp>

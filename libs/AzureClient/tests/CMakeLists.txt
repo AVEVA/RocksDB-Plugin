@@ -27,7 +27,7 @@ add_executable(aveva-azure-client-tests
     CredentialsTests.cpp
     BlobStorageErrorCategoryTests.cpp
     BlockBlobClientTests.cpp
-    ITokenCredentialTests.cpp
+    TokenCredentialTests.cpp
     ModelTests.cpp
     LeaseTests.cpp
     MetadataValidationTests.cpp

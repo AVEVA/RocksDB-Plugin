@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
-#include "BlobRequestHelpers.hpp"
+#include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 
 #include "AVEVA/AzureClient/BlobClientOptions.hpp"
 #include "AVEVA/AzureClient/BlobContainerClient.hpp"
@@ -9,9 +9,9 @@
 #include "AVEVA/AzureClient/BlobServiceClient.hpp"
 #include "AVEVA/AzureClient/BlobStorageError.hpp"
 #include "AVEVA/AzureClient/Detail/AsyncInitiation.hpp"
-#include "AVEVA/AzureClient/ITokenCredential.hpp"
 #include "AVEVA/AzureClient/Models/BlobContainerModels.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
+#include "AVEVA/AzureClient/TokenCredential.hpp"
 #include "BlobStorageErrorCategory.hpp"
 #include "BlobXmlParser.hpp"
 
@@ -183,18 +183,9 @@ struct ParsedErrorBody {
                            .AuthenticationDetail = GetChildTextOrEmpty(*root, "AuthenticationErrorDetail")};
 }
 
-void NormalizeTokenFields(std::shared_ptr<ITokenCredential>& tokenCredential, std::vector<std::string>& scopes,
-                          std::string& bearerToken) {
+void NormalizeTokenScopes(std::vector<std::string>& scopes) {
     if (scopes.empty()) {
         scopes.emplace_back("https://storage.azure.com/.default");
-    }
-    if (!tokenCredential && !bearerToken.empty()) {
-        tokenCredential = CachingTokenCredential::Create(std::make_shared<StaticTokenCredential>(bearerToken));
-        bearerToken.clear();
-    } else if (tokenCredential && !std::dynamic_pointer_cast<CachingTokenCredential>(tokenCredential)) {
-        // Identity-provider credentials (client secret, workload/managed identity) would otherwise fetch
-        // a new token for every request and retry.
-        tokenCredential = CachingTokenCredential::Create(std::move(tokenCredential));
     }
 }
 
@@ -310,14 +301,14 @@ void ValidateTokenTransport(std::string_view endpoint) {
     }
 }
 
-template <class TOptions> void ValidateConnectionOptions(const TOptions& options) {
+template <class TOptions> void ValidateConnectionOptions(const TOptions& options, bool hasTokenCredential) {
     ValidateEndpoint(options.ServiceEndpoint);
     ValidateSharedKey(options.SharedKey);
 
     std::size_t credentialCount = 0U;
     credentialCount += options.SasToken.empty() ? 0U : 1U;
     credentialCount += options.SharedKey.AccountName.empty() ? 0U : 1U;
-    credentialCount += options.TokenCredential ? 1U : 0U;
+    credentialCount += hasTokenCredential ? 1U : 0U;
     credentialCount += options.BearerToken.empty() ? 0U : 1U;
     if (credentialCount > 1U) {
         throw std::invalid_argument(
@@ -328,17 +319,18 @@ template <class TOptions> void ValidateConnectionOptions(const TOptions& options
     }
 }
 
-template <class TOptions> [[nodiscard]] std::shared_ptr<const ConnectionState> BuildConnection(TOptions& options) {
+template <class TOptions>
+[[nodiscard]] std::shared_ptr<const ConnectionState> BuildConnection(TOptions& options, bool hasTokenCredential) {
     options.ServiceEndpoint = std::string{TrimTrailingSlashes(options.ServiceEndpoint)};
     options.SasToken = std::string{TrimLeadingQuestionMark(options.SasToken)};
-    ValidateConnectionOptions(options);
+    ValidateConnectionOptions(options, hasTokenCredential);
 
     auto state = std::make_shared<ConnectionState>();
     state->ServiceEndpoint = std::move(options.ServiceEndpoint);
     state->SasToken = std::move(options.SasToken);
     state->ApiVersion = std::move(options.ApiVersion);
-    NormalizeTokenFields(options.TokenCredential, options.TokenScopes, options.BearerToken);
-    state->TokenCredential = std::move(options.TokenCredential);
+    NormalizeTokenScopes(options.TokenScopes);
+    state->BearerToken = std::move(options.BearerToken);
     state->TokenScopes = std::make_shared<const std::vector<std::string>>(std::move(options.TokenScopes));
     if (!options.SharedKey.AccountName.empty()) {
         state->Signer = std::make_shared<const SharedKeySigner>(std::move(options.SharedKey.AccountName),
@@ -505,16 +497,17 @@ void ApplyTransactionalHashes(HttpRequest& request, std::string_view md5, String
     AddHeaderIfNotEmpty(request, XMsContentCrc64HeaderName, crc64.Value);
 }
 
-std::shared_ptr<const ConnectionState> MakeConnectionState(BlobServiceClientOptions options) {
-    return BuildConnection(options);
+std::shared_ptr<const ConnectionState> MakeConnectionState(BlobServiceClientOptions options, bool hasTokenCredential) {
+    return BuildConnection(options, hasTokenCredential);
 }
 
-std::shared_ptr<const ConnectionState> MakeConnectionState(BlobContainerClientOptions options) {
-    return BuildConnection(options);
+std::shared_ptr<const ConnectionState> MakeConnectionState(BlobContainerClientOptions options,
+                                                           bool hasTokenCredential) {
+    return BuildConnection(options, hasTokenCredential);
 }
 
-std::shared_ptr<const ConnectionState> MakeConnectionState(BlobClientOptions options) {
-    return BuildConnection(options);
+std::shared_ptr<const ConnectionState> MakeConnectionState(BlobClientOptions options, bool hasTokenCredential) {
+    return BuildConnection(options, hasTokenCredential);
 }
 
 ContainerTarget MakeContainerTarget(std::shared_ptr<const ConnectionState> connection, std::string containerName) {
@@ -536,15 +529,15 @@ BlobTarget MakeBlobTarget(std::shared_ptr<const ConnectionState> connection, std
                       .EncodedResource = std::move(encodedResource)};
 }
 
-ContainerTarget MakeContainerTarget(const BlobContainerClientOptions& options) {
-    return MakeContainerTarget(MakeConnectionState(options), options.ContainerName);
+ContainerTarget MakeContainerTarget(const BlobContainerClientOptions& options, bool hasTokenCredential) {
+    return MakeContainerTarget(MakeConnectionState(options, hasTokenCredential), options.ContainerName);
 }
 
-BlobTarget MakeBlobTarget(const BlobClientOptions& options) {
-    return MakeBlobTarget(MakeConnectionState(options), options.ContainerName, options.BlobName);
+BlobTarget MakeBlobTarget(const BlobClientOptions& options, bool hasTokenCredential) {
+    return MakeBlobTarget(MakeConnectionState(options, hasTokenCredential), options.ContainerName, options.BlobName);
 }
 
-RequestAuth MakeRequestAuth(const ConnectionState& connection) {
+RequestAuth MakeRequestAuth(const ConnectionState& connection, bool hasTokenCredential) {
     RequestAuth auth;
     if (!connection.SasToken.empty()) {
         return auth;
@@ -554,9 +547,13 @@ RequestAuth MakeRequestAuth(const ConnectionState& connection) {
         auth.Signer = connection.Signer;
         return auth;
     }
-    if (connection.TokenCredential) {
+    if (!connection.BearerToken.empty()) {
+        auth.Type = RequestAuth::Kind::Bearer;
+        auth.BearerToken = connection.BearerToken;
+        return auth;
+    }
+    if (hasTokenCredential) {
         auth.Type = RequestAuth::Kind::Token;
-        auth.TokenCredential = connection.TokenCredential;
         auth.TokenScopes = connection.TokenScopes;
     }
     return auth;

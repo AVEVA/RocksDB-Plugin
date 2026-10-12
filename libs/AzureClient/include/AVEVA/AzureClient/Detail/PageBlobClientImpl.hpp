@@ -10,8 +10,8 @@
 #include "AVEVA/AzureClient/BlobOperationOptions.hpp"
 #include "AVEVA/AzureClient/Detail/AsyncInitiation.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
-#include "BlobRequestHelpers.hpp"
-#include "RequestPipeline.hpp"
+#include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
+#include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
 
 #include <AVEVA/HttpClient/HttpClient.hpp>
 #include <AVEVA/HttpClient/HttpMethod.hpp>
@@ -60,18 +60,21 @@ constexpr std::string_view PageWriteClearValue = "clear";
 
 using namespace Private::PageBlobClientDetail;
 
-template <HttpClientLike THttp>
-BasicPageBlobClient<THttp>::BasicPageBlobClient(THttp& httpClient, const BlobClientOptions& options)
-    : Base(httpClient, options) {}
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+BasicPageBlobClient<THttp, TCred>::BasicPageBlobClient(THttp& httpClient, const BlobClientOptions& options,
+                                                       std::shared_ptr<TCred> credential)
+    : Base(httpClient, options, std::move(credential)) {}
 
-template <HttpClientLike THttp>
-BasicPageBlobClient<THttp>::BasicPageBlobClient(THttp& httpClient, std::shared_ptr<const Private::BlobTarget> target)
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+BasicPageBlobClient<THttp, TCred>::BasicPageBlobClient(THttp& httpClient,
+                                                       std::shared_ptr<const Private::BasicBlobTarget<TCred>> target)
     : Base(httpClient, std::move(target)) {}
 
-template <HttpClientLike THttp>
-void BasicPageBlobClient<THttp>::CreateAsyncImpl(std::uint64_t contentLength, const CreatePageBlobOptions& options,
-                                                 CreateCompletionHandler completion,
-                                                 HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicPageBlobClient<THttp, TCred>::CreateAsyncImpl(std::uint64_t contentLength,
+                                                        const CreatePageBlobOptions& options, THandler completion,
+                                                        HttpRequestOptions requestOptions) {
     if (const auto validationError = ValidatePageAligned(contentLength, "contentLength"); validationError.has_value()) {
         Private::PostCompletion(this->Http(), std::move(completion),
                                 Private::MakeError<Models::CreatePageBlobResult>(
@@ -96,20 +99,23 @@ void BasicPageBlobClient<THttp>::CreateAsyncImpl(std::uint64_t contentLength, co
         requestOptions);
 }
 
-template <HttpClientLike THttp>
-void BasicPageBlobClient<THttp>::UploadPagesBytesAsyncImpl(std::uint64_t offset, std::span<const std::byte> content,
-                                                           const UploadPagesOptions& options,
-                                                           UploadPagesCompletionHandler completion,
-                                                           HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicPageBlobClient<THttp, TCred>::UploadPagesBytesAsyncImpl(std::uint64_t offset,
+                                                                  std::span<const std::byte> content,
+                                                                  const UploadPagesOptions& options,
+                                                                  THandler completion,
+                                                                  HttpRequestOptions requestOptions) {
     UploadPagesCoreAsync(offset, content, nullptr, options, std::move(completion), requestOptions);
 }
 
-template <HttpClientLike THttp>
-void BasicPageBlobClient<THttp>::UploadPagesSharedAsyncImpl(std::uint64_t offset,
-                                                            std::shared_ptr<const std::vector<char>> content,
-                                                            const UploadPagesOptions& options,
-                                                            UploadPagesCompletionHandler completion,
-                                                            HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicPageBlobClient<THttp, TCred>::UploadPagesSharedAsyncImpl(std::uint64_t offset,
+                                                                   std::shared_ptr<const std::vector<char>> content,
+                                                                   const UploadPagesOptions& options,
+                                                                   THandler completion,
+                                                                   HttpRequestOptions requestOptions) {
     if (!content) {
         Private::PostCompletion(this->Http(), std::move(completion),
                                 Private::MakeError<Models::UploadPagesResult>(
@@ -120,12 +126,12 @@ void BasicPageBlobClient<THttp>::UploadPagesSharedAsyncImpl(std::uint64_t offset
     UploadPagesCoreAsync(offset, bytes, std::move(content), options, std::move(completion), requestOptions);
 }
 
-template <HttpClientLike THttp>
-void BasicPageBlobClient<THttp>::UploadPagesCoreAsync(std::uint64_t offset, std::span<const std::byte> content,
-                                                      std::shared_ptr<const void> keepAlive,
-                                                      const UploadPagesOptions& options,
-                                                      UploadPagesCompletionHandler completion,
-                                                      HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicPageBlobClient<THttp, TCred>::UploadPagesCoreAsync(std::uint64_t offset, std::span<const std::byte> content,
+                                                             std::shared_ptr<const void> keepAlive,
+                                                             const UploadPagesOptions& options, THandler completion,
+                                                             HttpRequestOptions requestOptions) {
     if (const auto validationError = ValidatePageAligned(offset, "offset"); validationError.has_value()) {
         Private::PostCompletion(this->Http(), std::move(completion),
                                 Private::MakeError<Models::UploadPagesResult>(
@@ -158,11 +164,12 @@ void BasicPageBlobClient<THttp>::UploadPagesCoreAsync(std::uint64_t offset, std:
     SendUploadPagesRequest(std::move(request), options, std::move(completion), requestOptions);
 }
 
-template <HttpClientLike THttp>
-void BasicPageBlobClient<THttp>::UploadPagesStringAsyncImpl(std::uint64_t offset, std::string content,
-                                                            const UploadPagesOptions& options,
-                                                            UploadPagesCompletionHandler completion,
-                                                            HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicPageBlobClient<THttp, TCred>::UploadPagesStringAsyncImpl(std::uint64_t offset, std::string content,
+                                                                   const UploadPagesOptions& options,
+                                                                   THandler completion,
+                                                                   HttpRequestOptions requestOptions) {
     if (const auto validationError = ValidatePageAligned(offset, "offset"); validationError.has_value()) {
         Private::PostCompletion(this->Http(), std::move(completion),
                                 Private::MakeError<Models::UploadPagesResult>(
@@ -191,10 +198,10 @@ void BasicPageBlobClient<THttp>::UploadPagesStringAsyncImpl(std::uint64_t offset
     SendUploadPagesRequest(std::move(request), options, std::move(completion), requestOptions);
 }
 
-template <HttpClientLike THttp>
-void BasicPageBlobClient<THttp>::SendUploadPagesRequest(HttpRequest request, const UploadPagesOptions& options,
-                                                        UploadPagesCompletionHandler completion,
-                                                        HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicPageBlobClient<THttp, TCred>::SendUploadPagesRequest(HttpRequest request, const UploadPagesOptions& options,
+                                                               THandler completion, HttpRequestOptions requestOptions) {
     Private::ApplyBlobRequestConditions(request, options.Conditions);
 
     Private::SendAuthorizedRequestAsync(
@@ -207,11 +214,11 @@ void BasicPageBlobClient<THttp>::SendUploadPagesRequest(HttpRequest request, con
         requestOptions);
 }
 
-template <HttpClientLike THttp>
-void BasicPageBlobClient<THttp>::ClearPagesAsyncImpl(std::uint64_t offset, std::uint64_t length,
-                                                     const ClearPagesOptions& options,
-                                                     ClearPagesCompletionHandler completion,
-                                                     HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicPageBlobClient<THttp, TCred>::ClearPagesAsyncImpl(std::uint64_t offset, std::uint64_t length,
+                                                            const ClearPagesOptions& options, THandler completion,
+                                                            HttpRequestOptions requestOptions) {
     if (const auto validationError = ValidatePageAligned(offset, "offset"); validationError.has_value()) {
         Private::PostCompletion(this->Http(), std::move(completion),
                                 Private::MakeError<Models::ClearPagesResult>(
@@ -247,10 +254,10 @@ void BasicPageBlobClient<THttp>::ClearPagesAsyncImpl(std::uint64_t offset, std::
         requestOptions);
 }
 
-template <HttpClientLike THttp>
-void BasicPageBlobClient<THttp>::ResizeAsyncImpl(std::uint64_t newSize, const ResizePageBlobOptions& options,
-                                                 ResizeCompletionHandler completion,
-                                                 HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicPageBlobClient<THttp, TCred>::ResizeAsyncImpl(std::uint64_t newSize, const ResizePageBlobOptions& options,
+                                                        THandler completion, HttpRequestOptions requestOptions) {
     if (const auto validationError = ValidatePageAligned(newSize, "newSize"); validationError.has_value()) {
         Private::PostCompletion(this->Http(), std::move(completion),
                                 Private::MakeError<Models::ResizePageBlobResult>(

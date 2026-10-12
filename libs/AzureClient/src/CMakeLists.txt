@@ -25,7 +25,6 @@ add_library(aveva-azure-client
     BlobStorageErrorCategory.cpp
     BlobModels.cpp
     BlockBlobClient.cpp
-    ITokenCredential.cpp
     PageBlobClient.cpp
     RequestPipeline.cpp
 )
@@ -57,8 +56,21 @@ target_sources(aveva-azure-client
         "${base-include-dir}/AVEVA/AzureClient/BlobStorageErrorCode.hpp"
         "${base-include-dir}/AVEVA/AzureClient/BlockBlobClient.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Detail/AsyncInitiation.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/Detail/BlobClientImpl.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/Detail/BlobContainerClientImpl.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/Detail/BlobServiceClientImpl.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/Detail/BlockBlobClientImpl.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/Detail/PageBlobClientImpl.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/Detail/CredentialsImpl.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/Detail/BlobDownload.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/Detail/RequestPipeline.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/Detail/DownloadSinks.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/Detail/DownloadWriterPool.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/Detail/ProtocolConstants.hpp"
         "${base-include-dir}/AVEVA/AzureClient/HttpClientLike.hpp"
-        "${base-include-dir}/AVEVA/AzureClient/ITokenCredential.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/TokenCredential.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/ClientForwardDeclarations.hpp"
         "${base-include-dir}/AVEVA/AzureClient/PageBlobClient.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Response.hpp"
         "${base-include-dir}/AVEVA/AzureClient/WithRequestOptions.hpp"
@@ -78,16 +90,17 @@ if(MSVC)
 else()
     target_compile_options(aveva-azure-client PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
 endif()
-# Public headers include only the HTTP client and Asio; the rest are implementation details.
+# The Detail headers hold the client template definitions (consumers instantiate them for their own credential
+# types), so the libraries they include are public. OpenSSL and LibXml2 stay private (used only in .cpp files).
 target_link_libraries(aveva-azure-client
     PUBLIC
         aveva::http-client
         Boost::asio
+        Boost::json
+        Boost::url
     PRIVATE
         OpenSSL::Crypto
         Boost::algorithm
-        Boost::json
-        Boost::url
         Boost::uuid
         LibXml2::LibXml2
 )

@@ -3,7 +3,7 @@
 
 #include "AVEVA/AzureClient/BlobStorageError.hpp"
 #include "AVEVA/AzureClient/BlobStorageErrorCode.hpp"
-#include "BlobRequestHelpers.hpp"
+#include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 
 #include <AVEVA/HttpClient/HttpClientError.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>

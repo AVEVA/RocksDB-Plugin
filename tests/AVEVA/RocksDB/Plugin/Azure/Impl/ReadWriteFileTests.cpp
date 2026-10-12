@@ -14,6 +14,11 @@ using namespace AVEVA::RocksDB::Plugin::Azure::Impl;
 using namespace AVEVA::RocksDB::Plugin::Core;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobEnvironment;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakePageBlobClient;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadableFile;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadableFileImpl;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadWriteFileImpl;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeSequentialFileImpl;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeWriteableFileImpl;
 
 class ReadWriteFileImplTests : public ::testing::Test {
   protected:
@@ -26,8 +31,8 @@ class ReadWriteFileImplTests : public ::testing::Test {
         m_env.Blob->SetCapacity(Configuration::PageBlob::DefaultSize);
     }
 
-    std::unique_ptr<ReadWriteFileImpl> CreateFile() {
-        return std::make_unique<ReadWriteFileImpl>(m_testFileName, m_env.Runtime, m_env.Blob, nullptr, m_logger);
+    std::unique_ptr<FakeReadWriteFileImpl> CreateFile() {
+        return std::make_unique<FakeReadWriteFileImpl>(m_testFileName, m_env.Runtime, m_env.Blob, nullptr, m_logger);
     }
 };
 TEST_F(ReadWriteFileImplTests, Constructor_InitializesCorrectly) {
@@ -290,7 +295,7 @@ TEST_F(ReadWriteFileImplTests, Destructor_RetriesCloseOnFailure) {
 
     // Act - destructor should retry
     {
-        ReadWriteFileImpl file(m_testFileName, m_env.Runtime, m_env.Blob, nullptr, m_logger);
+        FakeReadWriteFileImpl file(m_testFileName, m_env.Runtime, m_env.Blob, nullptr, m_logger);
     } // Destructor called here
 
     // Assert
@@ -307,7 +312,7 @@ TEST_F(ReadWriteFileImplTests, MoveConstructor_TransfersOwnership) {
     file1->Write(0, data.data(), dataSize);
 
     // Act
-    ReadWriteFileImpl file2(std::move(*file1));
+    FakeReadWriteFileImpl file2(std::move(*file1));
     file2.Sync();
 
     // Assert - data should be accessible from moved object

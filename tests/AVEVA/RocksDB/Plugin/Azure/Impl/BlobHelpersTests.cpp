@@ -22,12 +22,12 @@
 #include <vector>
 
 using AVEVA::HttpResponse;
-using AVEVA::AzureClient::BlobContainerClient;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeAzureErrorResponse;
 using AVEVA::AzureClient::Tests::MakeBlobContainerClientOptions;
 using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
 using AVEVA::RocksDB::Plugin::Azure::RequestFailedException;
+using AVEVA::RocksDB::Plugin::Azure::Impl::BlobContainerClient;
 using AVEVA::RocksDB::Plugin::Azure::Impl::BlobHelpers;
 
 namespace {
@@ -128,7 +128,7 @@ std::vector<const std::type_info*> SourceTypes(const std::optional<std::string>&
         "db", "https://acct.blob.core.windows.net", "sp", "secret", "tenant", managedIdentityId);
     std::vector<const std::type_info*> types;
     for (const auto& source : BlobHelpers::CreateCredentialSources(runtime, info)) {
-        types.push_back(&typeid(*source));
+        types.push_back(&source->Type());
     }
     return types;
 }

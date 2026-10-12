@@ -142,8 +142,8 @@ class LeaseDeadlineTests : public ::testing::Test {
 } // namespace
 
 TEST_F(LeaseDeadlineTests, NotOverdueBeforeLockedOrRightAfterAcquiring) {
-    auto client = std::make_unique<AVEVA::AzureClient::PageBlobClient>(m_bridge->Client(),
-                                                                       MakeBlobClientOptions("locks", "LOCK"));
+    auto client = std::make_unique<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient>(
+        m_bridge->Client(), MakeBlobClientOptions("locks", "LOCK"));
     LockFileImpl lock(m_runtime, std::move(client), 20s, m_logger, "LOCK");
     EXPECT_FALSE(lock.IsRenewalOverdue());
 

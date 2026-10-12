@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
-#include "BlobClientImpl.hpp"
+#include <AVEVA/AzureClient/Detail/BlobClientImpl.hpp>
 
 namespace AVEVA::AzureClient {
 template class BasicBlobClient<HttpClient>;

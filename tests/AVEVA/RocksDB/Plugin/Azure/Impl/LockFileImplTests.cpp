@@ -32,8 +32,8 @@ using AVEVA::AzureClient::Tests::MakeAzureErrorResponse;
 using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
 using AVEVA::RocksDB::Plugin::Azure::RequestFailedException;
+using AVEVA::RocksDB::Plugin::Azure::Impl::BasicLeaseRenewalLoop;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime;
-using AVEVA::RocksDB::Plugin::Azure::Impl::LeaseRenewalLoop;
 using AVEVA::RocksDB::Plugin::Azure::Impl::LockFileImpl;
 
 namespace {
@@ -48,8 +48,8 @@ class LockFileImplTests : public ::testing::Test {
     }
 
     std::unique_ptr<LockFileImpl> CreateLock(std::chrono::seconds leaseLength) {
-        auto client = std::make_unique<AVEVA::AzureClient::PageBlobClient>(m_bridge->Client(),
-                                                                           MakeBlobClientOptions("locks", "LOCK"));
+        auto client = std::make_unique<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient>(
+            m_bridge->Client(), MakeBlobClientOptions("locks", "LOCK"));
         return std::make_unique<LockFileImpl>(m_runtime, std::move(client), leaseLength, m_logger, "LOCK");
     }
 
@@ -261,6 +261,17 @@ TEST_F(LockFileImplTests, RenewAsyncReportsAFailedRenewalAsAnError) {
 namespace {
 // Drives a LeaseRenewalLoop on its own io_context thread, separate from the fake HTTP client's.
 class LeaseRenewalLoopTests : public LockFileImplTests {
+  public:
+    struct FixedSnapshot {
+        std::shared_ptr<LockFileImpl> Lock;
+        std::vector<std::shared_ptr<LockFileImpl>> operator()() const { return {Lock}; }
+    };
+    struct CountFatal {
+        std::atomic<int>* Count;
+        void operator()() const { ++*Count; }
+    };
+    using Loop = BasicLeaseRenewalLoop<FixedSnapshot, CountFatal>;
+
   protected:
     void SetUp() override {
         LockFileImplTests::SetUp();
@@ -283,9 +294,8 @@ class LeaseRenewalLoopTests : public LockFileImplTests {
     }
 
     void StartLoop(const std::shared_ptr<LockFileImpl>& lock) {
-        m_loop = LeaseRenewalLoop::Start(
-            m_loopContext.get_executor(), m_logger, [lock] { return std::vector{lock}; }, [this] { ++m_fatalCount; },
-            std::chrono::milliseconds(20), std::chrono::milliseconds(5));
+        m_loop = Loop::Start(m_loopContext.get_executor(), m_logger, FixedSnapshot{lock}, CountFatal{&m_fatalCount},
+                             std::chrono::milliseconds(20), std::chrono::milliseconds(5));
     }
 
     bool WaitForRequests(const std::size_t count) const {
@@ -303,7 +313,7 @@ class LeaseRenewalLoopTests : public LockFileImplTests {
     boost::asio::io_context m_loopContext;
     std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>> m_guard;
     std::jthread m_loopThread;
-    std::shared_ptr<LeaseRenewalLoop> m_loop;
+    std::shared_ptr<Loop> m_loop;
     std::atomic<int> m_fatalCount{0};
 };
 } // namespace

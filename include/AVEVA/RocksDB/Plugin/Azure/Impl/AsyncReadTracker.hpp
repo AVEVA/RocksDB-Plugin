@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #pragma once
-#include <boost/asio/any_io_executor.hpp>
+#include <boost/asio/io_context.hpp>
 
 #include <chrono>
 #include <condition_variable>
@@ -27,7 +27,7 @@ class AsyncReadTracker : public std::enable_shared_from_this<AsyncReadTracker> {
     /// </summary>
     using Token = std::shared_ptr<const void>;
 
-    explicit AsyncReadTracker(boost::asio::any_io_executor executor);
+    explicit AsyncReadTracker(boost::asio::io_context::executor_type executor);
 
     /// <summary>
     /// Registers a read. When the last copy of the token is released the read is ended from a fresh task on the
@@ -52,7 +52,7 @@ class AsyncReadTracker : public std::enable_shared_from_this<AsyncReadTracker> {
 
     void End() noexcept;
 
-    boost::asio::any_io_executor m_executor;
+    boost::asio::io_context::executor_type m_executor;
     mutable std::mutex m_mutex;
     std::condition_variable m_idle;
     size_t m_inFlight = 0;

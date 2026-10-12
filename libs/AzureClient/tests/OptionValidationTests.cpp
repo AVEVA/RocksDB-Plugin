@@ -9,8 +9,8 @@
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
 #include <AVEVA/AzureClient/BlobServiceClient.hpp>
 #include <AVEVA/AzureClient/BlockBlobClient.hpp>
-#include <AVEVA/AzureClient/ITokenCredential.hpp>
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
+#include <AVEVA/AzureClient/TokenCredential.hpp>
 
 #include <gtest/gtest.h>
 
@@ -151,12 +151,15 @@ std::vector<TokenTransportCase> MakeTokenTransportCases() {
     };
 }
 
+using StaticBlobClient = AVEVA::AzureClient::BasicBlobClient<FakeHttpClient, AVEVA::AzureClient::StaticTokenCredential>;
+using StaticContainerClient =
+    AVEVA::AzureClient::BasicBlobContainerClient<FakeHttpClient, AVEVA::AzureClient::StaticTokenCredential>;
+using StaticServiceClient =
+    AVEVA::AzureClient::BasicBlobServiceClient<FakeHttpClient, AVEVA::AzureClient::StaticTokenCredential>;
+
 template <class TOptions> void ApplyCase(TOptions& options, const TokenTransportCase& testCase) {
     options.ServiceEndpoint = testCase.Endpoint;
     options.SasToken.clear();
-    if (testCase.UseTokenCredential) {
-        options.TokenCredential = std::make_shared<AVEVA::AzureClient::StaticTokenCredential>("token");
-    }
     if (testCase.UseBearerToken) {
         options.BearerToken = "token";
     }
@@ -175,6 +178,8 @@ class TokenTransportTests : public ::testing::TestWithParam<TokenTransportCase> 
 TEST_P(TokenTransportTests, TokenCredentialsRequireHttpsUnlessLoopback) {
     FakeHttpClient httpClient;
     const TokenTransportCase& testCase = GetParam();
+    const auto credential =
+        testCase.UseTokenCredential ? std::make_shared<AVEVA::AzureClient::StaticTokenCredential>("token") : nullptr;
 
     auto blobOptions = MakeBlobClientOptions();
     ApplyCase(blobOptions, testCase);
@@ -184,14 +189,13 @@ TEST_P(TokenTransportTests, TokenCredentialsRequireHttpsUnlessLoopback) {
     ApplyCase(serviceOptions, testCase);
 
     if (testCase.ExpectThrow) {
-        EXPECT_THROW((BlobClient{httpClient, blobOptions}), std::invalid_argument);
-        EXPECT_THROW((AVEVA::AzureClient::Tests::BlobContainerClient{httpClient, containerOptions}),
-                     std::invalid_argument);
-        EXPECT_THROW((AVEVA::AzureClient::Tests::BlobServiceClient{httpClient, serviceOptions}), std::invalid_argument);
+        EXPECT_THROW((StaticBlobClient{httpClient, blobOptions, credential}), std::invalid_argument);
+        EXPECT_THROW((StaticContainerClient{httpClient, containerOptions, credential}), std::invalid_argument);
+        EXPECT_THROW((StaticServiceClient{httpClient, serviceOptions, credential}), std::invalid_argument);
     } else {
-        EXPECT_NO_THROW((BlobClient{httpClient, blobOptions}));
-        EXPECT_NO_THROW((AVEVA::AzureClient::Tests::BlobContainerClient{httpClient, containerOptions}));
-        EXPECT_NO_THROW((AVEVA::AzureClient::Tests::BlobServiceClient{httpClient, serviceOptions}));
+        EXPECT_NO_THROW((StaticBlobClient{httpClient, blobOptions, credential}));
+        EXPECT_NO_THROW((StaticContainerClient{httpClient, containerOptions, credential}));
+        EXPECT_NO_THROW((StaticServiceClient{httpClient, serviceOptions, credential}));
     }
 }
 

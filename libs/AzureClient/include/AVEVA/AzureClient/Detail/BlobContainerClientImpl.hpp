@@ -14,8 +14,8 @@
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
 #include "AVEVA/AzureClient/PageBlobClient.hpp"
 #include "AVEVA/AzureClient/Response.hpp"
-#include "BlobRequestHelpers.hpp"
-#include "RequestPipeline.hpp"
+#include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
+#include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
 
 #include <AVEVA/HttpClient/HttpClient.hpp>
 #include <AVEVA/HttpClient/HttpMethod.hpp>
@@ -44,45 +44,47 @@ namespace Private::BlobContainerClientDetail {
 
 using namespace Private::BlobContainerClientDetail;
 
-template <HttpClientLike THttp>
-BasicBlobContainerClient<THttp>::BasicBlobContainerClient(THttp& httpClient, const BlobContainerClientOptions& options)
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+BasicBlobContainerClient<THttp, TCred>::BasicBlobContainerClient(THttp& httpClient,
+                                                                 const BlobContainerClientOptions& options,
+                                                                 std::shared_ptr<TCred> credential)
+    : m_httpClient(&httpClient), m_target(std::make_shared<const Private::BasicContainerTarget<TCred>>(
+                                     Private::MakeContainerTarget(options, std::move(credential)))) {}
+
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+BasicBlobContainerClient<THttp, TCred>::BasicBlobContainerClient(
+    THttp& httpClient, std::shared_ptr<const Private::ConnectionState> connection,
+    std::shared_ptr<CachedTokenCredential<TCred>> credential, std::string containerName)
     : m_httpClient(&httpClient),
-      m_target(std::make_shared<const Private::ContainerTarget>(Private::MakeContainerTarget(options))) {}
+      m_target(std::make_shared<const Private::BasicContainerTarget<TCred>>(Private::MakeContainerTarget<TCred>(
+          std::move(connection), std::move(credential), std::move(containerName)))) {}
 
-template <HttpClientLike THttp>
-BasicBlobContainerClient<THttp>::BasicBlobContainerClient(THttp& httpClient,
-                                                          std::shared_ptr<const Private::ConnectionState> connection,
-                                                          std::string containerName)
-    : m_httpClient(&httpClient), m_target(std::make_shared<const Private::ContainerTarget>(
-                                     Private::MakeContainerTarget(std::move(connection), std::move(containerName)))) {}
-
-template <HttpClientLike THttp>
-const HttpRequestOptions& BasicBlobContainerClient<THttp>::GetDefaultRequestOptions() const noexcept {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+const HttpRequestOptions& BasicBlobContainerClient<THttp, TCred>::GetDefaultRequestOptions() const noexcept {
     return m_target->Connection->DefaultRequestOptions;
 }
 
-template <HttpClientLike THttp>
-void BasicBlobContainerClient<THttp>::CreateAsyncImpl(const CreateBlobContainerOptions& options,
-                                                      CreateCompletionHandler completion,
-                                                      HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicBlobContainerClient<THttp, TCred>::CreateAsyncImpl(const CreateBlobContainerOptions& options,
+                                                             THandler completion, HttpRequestOptions requestOptions) {
     Private::SendAndParse<Models::CreateBlobContainerResult>(
         *m_httpClient, *m_target, BuildCreateContainerRequest(*m_target, options),
         Private::ParseETagAndLastModified<Models::CreateBlobContainerResult>, std::move(completion), requestOptions);
 }
 
-template <HttpClientLike THttp>
-void BasicBlobContainerClient<THttp>::ListBlobsAsyncImpl(ListBlobsOptions options,
-                                                         ListBlobsCompletionHandler completion,
-                                                         HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicBlobContainerClient<THttp, TCred>::ListBlobsAsyncImpl(ListBlobsOptions options, THandler completion,
+                                                                HttpRequestOptions requestOptions) {
     ListBlobsPageAsync(*m_httpClient, m_target, std::move(options), std::move(completion), requestOptions);
 }
 
-template <HttpClientLike THttp>
-void BasicBlobContainerClient<THttp>::ListBlobsPageAsync(THttp& httpClient,
-                                                         const std::shared_ptr<const Private::ContainerTarget>& target,
-                                                         ListBlobsOptions options,
-                                                         ListBlobsCompletionHandler completion,
-                                                         HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicBlobContainerClient<THttp, TCred>::ListBlobsPageAsync(
+    THttp& httpClient, const std::shared_ptr<const Private::BasicContainerTarget<TCred>>& target,
+    ListBlobsOptions options, THandler completion, HttpRequestOptions requestOptions) {
     std::vector<std::pair<std::string, std::string>> queryParameters{{"comp", "list"}};
     if (!options.Prefix.empty()) {
         queryParameters.emplace_back("prefix", options.Prefix);
@@ -128,10 +130,11 @@ void BasicBlobContainerClient<THttp>::ListBlobsPageAsync(THttp& httpClient,
         requestOptions);
 }
 
-template <HttpClientLike THttp>
-void BasicBlobContainerClient<THttp>::CreateIfNotExistsAsyncImpl(const CreateBlobContainerOptions& options,
-                                                                 CreateCompletionHandler completion,
-                                                                 HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicBlobContainerClient<THttp, TCred>::CreateIfNotExistsAsyncImpl(const CreateBlobContainerOptions& options,
+                                                                        THandler completion,
+                                                                        HttpRequestOptions requestOptions) {
     Private::SendAndParse<Models::CreateBlobContainerResult>(
         *m_httpClient, *m_target, BuildCreateContainerRequest(*m_target, options),
         Private::ParseETagAndLastModified<Models::CreateBlobContainerResult>,
@@ -141,27 +144,28 @@ void BasicBlobContainerClient<THttp>::CreateIfNotExistsAsyncImpl(const CreateBlo
         requestOptions);
 }
 
-template <HttpClientLike THttp>
-std::unique_ptr<BasicBlobClient<THttp>> BasicBlobContainerClient<THttp>::GetBlobClient(std::string blobName) const {
-    return std::unique_ptr<BasicBlobClient<THttp>>(new BasicBlobClient<THttp>{
-        *m_httpClient, std::make_shared<const Private::BlobTarget>(Private::MakeBlobTarget(
-                           m_target->Connection, m_target->ContainerName, std::move(blobName)))});
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+std::unique_ptr<BasicBlobClient<THttp, TCred>>
+BasicBlobContainerClient<THttp, TCred>::GetBlobClient(std::string blobName) const {
+    return std::unique_ptr<BasicBlobClient<THttp, TCred>>(new BasicBlobClient<THttp, TCred>{
+        *m_httpClient, std::make_shared<const Private::BasicBlobTarget<TCred>>(Private::MakeBlobTarget<TCred>(
+                           m_target->Connection, m_target->Credential, m_target->ContainerName, std::move(blobName)))});
 }
 
-template <HttpClientLike THttp>
-std::unique_ptr<BasicBlockBlobClient<THttp>>
-BasicBlobContainerClient<THttp>::GetBlockBlobClient(std::string blobName) const {
-    return std::unique_ptr<BasicBlockBlobClient<THttp>>(new BasicBlockBlobClient<THttp>{
-        *m_httpClient, std::make_shared<const Private::BlobTarget>(Private::MakeBlobTarget(
-                           m_target->Connection, m_target->ContainerName, std::move(blobName)))});
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+std::unique_ptr<BasicBlockBlobClient<THttp, TCred>>
+BasicBlobContainerClient<THttp, TCred>::GetBlockBlobClient(std::string blobName) const {
+    return std::unique_ptr<BasicBlockBlobClient<THttp, TCred>>(new BasicBlockBlobClient<THttp, TCred>{
+        *m_httpClient, std::make_shared<const Private::BasicBlobTarget<TCred>>(Private::MakeBlobTarget<TCred>(
+                           m_target->Connection, m_target->Credential, m_target->ContainerName, std::move(blobName)))});
 }
 
-template <HttpClientLike THttp>
-std::unique_ptr<BasicPageBlobClient<THttp>>
-BasicBlobContainerClient<THttp>::GetPageBlobClient(std::string blobName) const {
-    return std::unique_ptr<BasicPageBlobClient<THttp>>(new BasicPageBlobClient<THttp>{
-        *m_httpClient, std::make_shared<const Private::BlobTarget>(Private::MakeBlobTarget(
-                           m_target->Connection, m_target->ContainerName, std::move(blobName)))});
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+std::unique_ptr<BasicPageBlobClient<THttp, TCred>>
+BasicBlobContainerClient<THttp, TCred>::GetPageBlobClient(std::string blobName) const {
+    return std::unique_ptr<BasicPageBlobClient<THttp, TCred>>(new BasicPageBlobClient<THttp, TCred>{
+        *m_httpClient, std::make_shared<const Private::BasicBlobTarget<TCred>>(Private::MakeBlobTarget<TCred>(
+                           m_target->Connection, m_target->Credential, m_target->ContainerName, std::move(blobName)))});
 }
 
 } // namespace AVEVA::AzureClient

@@ -80,6 +80,8 @@ using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
 using AVEVA::AzureClient::Tests::MakeToken;
 using AVEVA::AzureClient::Tests::PageBlobClient;
 using AVEVA::AzureClient::Tests::ScriptedTokenCredential;
+using ScriptedBlockBlobClient =
+    AVEVA::AzureClient::BasicBlockBlobClient<AVEVA::AzureClient::Tests::FakeHttpClient, ScriptedTokenCredential>;
 using DeleteResult = std::expected<Response<DeleteBlobResult>, BlobStorageError>;
 using DownloadBlobToResult =
     std::expected<Response<AVEVA::AzureClient::Models::DownloadBlobToResult>, BlobStorageError>;
@@ -154,7 +156,7 @@ void HandleSuccessfulDeleteCompletion(CallbackExpectation& callback, DeleteResul
     callback.MarkInvoked();
 }
 
-void StartDeleteAndExpectSuccess(BlockBlobClient& client, CallbackExpectation& callback) {
+template <class TClient> void StartDeleteAndExpectSuccess(TClient& client, CallbackExpectation& callback) {
     client.DeleteAsync(std::bind_front(HandleSuccessfulDeleteCompletion, std::ref(callback)));
 }
 
@@ -258,7 +260,7 @@ void HandleSuccessfulDeleteInvocation(bool& callbackInvoked, DeleteResult result
     callbackInvoked = true;
 }
 
-void StartDeleteAndCaptureInvocation(BlockBlobClient& client, bool& callbackInvoked) {
+template <class TClient> void StartDeleteAndCaptureInvocation(TClient& client, bool& callbackInvoked) {
     client.DeleteAsync(std::bind_front(HandleSuccessfulDeleteInvocation, std::ref(callbackInvoked)));
 }
 
@@ -368,8 +370,9 @@ void HandleDeleteCompletionDuringTokenAcquisition(int& completions, std::optiona
     observed = std::move(result);
 }
 
-void StartDeleteDuringTokenAcquisition(BlockBlobClient& client, boost::asio::cancellation_signal& signal,
-                                       int& completions, std::optional<DeleteResult>& observed) {
+template <class TClient>
+void StartDeleteDuringTokenAcquisition(TClient& client, boost::asio::cancellation_signal& signal, int& completions,
+                                       std::optional<DeleteResult>& observed) {
     client.DeleteAsync(
         boost::asio::bind_cancellation_slot(signal.slot(), std::bind_front(HandleDeleteCompletionDuringTokenAcquisition,
                                                                            std::ref(completions), std::ref(observed))));
@@ -382,7 +385,8 @@ void InvokeDeferredDeleteOperation(DeferredOperation&& operation, std::optional<
     std::forward<DeferredOperation>(operation)(std::bind_front(CaptureDeleteResult, std::ref(observed)));
 }
 
-void StartDeleteWithCancellationSlot(BlockBlobClient& client, boost::asio::cancellation_signal& signal,
+template <class TClient>
+void StartDeleteWithCancellationSlot(TClient& client, boost::asio::cancellation_signal& signal,
                                      std::optional<DeleteResult>& observed) {
     client.DeleteAsync(
         boost::asio::bind_cancellation_slot(signal.slot(), std::bind_front(CaptureDeleteResult, std::ref(observed))));
@@ -630,10 +634,8 @@ TEST(AsyncBehaviorTests, TokenCredentialRequestCanDestroyClientAfterRequestIsSen
 
     BlobClientOptions options = MakeBlobClientOptions();
     options.SasToken.clear();
-    options.TokenCredential = tokenCredential;
-
     CallbackExpectation callback;
-    auto client = std::make_unique<BlockBlobClient>(httpClient, std::move(options));
+    auto client = std::make_unique<ScriptedBlockBlobClient>(httpClient, std::move(options), tokenCredential);
     StartDeleteAndExpectSuccess(*client, callback);
 
     EXPECT_EQ(tokenCredential->PendingCount(), 1U);
@@ -761,7 +763,7 @@ TEST(AsyncBehaviorTests, ExceptionsFromUserCallbacksPropagateWithoutCorruptingLa
     EXPECT_TRUE(httpClient.CompleteNext());
 }
 
-// Task 16 verification: an ITokenCredential that completes GetTokenAsync synchronously (the
+// Task 16 verification: a token credential that completes GetTokenAsync synchronously (the
 // default for the built-in StaticTokenCredential/CachingTokenCredential when no executor is
 // supplied, and for any third-party implementation that simply calls the handler inline) must
 // not cause the overall ...Async() call to complete before it returns to its caller.
@@ -775,8 +777,7 @@ TEST(AsyncBehaviorTests, TokenCredentialSynchronousCompletionIsDeferredRatherTha
 
     BlobClientOptions options = MakeBlobClientOptions();
     options.SasToken.clear();
-    options.TokenCredential = tokenCredential;
-    BlockBlobClient client{httpClient, options};
+    ScriptedBlockBlobClient client{httpClient, options, tokenCredential};
 
     bool callbackInvoked = false;
     StartDeleteAndCaptureInvocation(client, callbackInvoked);
@@ -805,8 +806,7 @@ TEST(AsyncBehaviorTests, CancellationWinsIfASynchronousTokenCredentialCompletedB
 
     BlobClientOptions options = MakeBlobClientOptions();
     options.SasToken.clear();
-    options.TokenCredential = tokenCredential;
-    BlockBlobClient client{httpClient, options};
+    ScriptedBlockBlobClient client{httpClient, options, tokenCredential};
 
     boost::asio::cancellation_signal signal;
     std::optional<DeleteResult> observed;
@@ -1219,7 +1219,7 @@ TEST(AsyncBehaviorTests, SignalEmittedBeforeInitiationDoesNotCancelALaterOperati
 }
 
 // Before send: with a token credential the request is not handed to the transport until the token
-// arrives. ITokenCredential has no cancellation hook, so cancellation must complete the operation
+// arrives. Token credentials have no cancellation hook, so cancellation must complete the operation
 // promptly rather than waiting for (possibly slow) credential I/O, and the late token must be ignored.
 TEST(AsyncBehaviorTests, CancellationDuringTokenAcquisitionCompletesPromptlyAndNeverSends) {
     FakeHttpClient httpClient;
@@ -1228,8 +1228,7 @@ TEST(AsyncBehaviorTests, CancellationDuringTokenAcquisitionCompletesPromptlyAndN
 
     BlobClientOptions options = MakeBlobClientOptions();
     options.SasToken.clear();
-    options.TokenCredential = credential;
-    BlockBlobClient client{httpClient, options};
+    ScriptedBlockBlobClient client{httpClient, options, credential};
 
     boost::asio::cancellation_signal signal;
     int completions = 0;

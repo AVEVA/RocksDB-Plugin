@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
-#include "AVEVA/AzureClient/ITokenCredential.hpp"
+#include "AVEVA/AzureClient/TokenCredential.hpp"
 #include "FakeHttpClient.hpp"
 
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
@@ -33,7 +33,6 @@ using AVEVA::HttpResponse;
 using AVEVA::AzureClient::AccessToken;
 using AVEVA::AzureClient::BlobStorageErrorCode;
 using AVEVA::AzureClient::ClientSecretCredentialOptions;
-using AVEVA::AzureClient::ITokenCredential;
 using AVEVA::AzureClient::ManagedIdentityCredentialOptions;
 using AVEVA::AzureClient::WorkloadIdentityCredentialOptions;
 using AVEVA::AzureClient::Tests::ClientSecretCredential;
@@ -49,7 +48,8 @@ struct TokenResult {
     AccessToken Token;
 };
 
-[[nodiscard]] TokenResult GetToken(FakeHttpClient& httpClient, ITokenCredential& credential,
+template <class TCred>
+[[nodiscard]] TokenResult GetToken(FakeHttpClient& httpClient, TCred& credential,
                                    std::vector<std::string> scopes = StorageScope()) {
     std::optional<TokenResult> result;
     credential.GetTokenAsync(std::move(scopes), [&](std::error_code error, AccessToken token) {
@@ -145,7 +145,7 @@ TEST(CredentialsTests, ClientSecretCredentialHonoursAuthorityHost) {
 
 TEST(CredentialsTests, InvalidConfigurationFailsWithoutSendingARequest) {
     FakeHttpClient httpClient;
-    const auto expectInvalid = [&](ITokenCredential& credential, std::vector<std::string> scopes = StorageScope()) {
+    const auto expectInvalid = [&](auto& credential, std::vector<std::string> scopes = StorageScope()) {
         EXPECT_EQ(GetToken(httpClient, credential, std::move(scopes)).Error,
                   std::make_error_code(std::errc::invalid_argument));
     };
@@ -433,12 +433,15 @@ TEST(CredentialsTests, AllCredentialsRejectErrorStatusesAndLeaveTokenEmpty) {
         ClientSecretCredential secret{httpClient, SecretOptions()};
         WorkloadIdentityCredential workload{httpClient, WorkloadOptions("t", "app", tokenFile.string())};
         ManagedIdentityCredential managed{httpClient, ManagedOptions({}, {})};
-        for (ITokenCredential* credential : std::initializer_list<ITokenCredential*>{&secret, &workload, &managed}) {
+        const auto check = [&](auto& credential) {
             httpClient.EnqueueResponse(Json(status, R"({"error":"x","access_token":"must-not-leak"})"));
-            const TokenResult result = GetToken(httpClient, *credential);
+            const TokenResult result = GetToken(httpClient, credential);
             EXPECT_TRUE(result.Error) << status;
             EXPECT_TRUE(result.Token.Token.empty()) << status;
-        }
+        };
+        check(secret);
+        check(workload);
+        check(managed);
     }
     std::filesystem::remove(tokenFile);
 }
@@ -451,7 +454,7 @@ TEST(CredentialsTests, AllCredentialsAreCancelledWhileTheRequestIsInFlight) {
     }
 
     const auto expectCancelled = [](FakeHttpClient& httpClient, boost::asio::cancellation_signal& signal,
-                                    ITokenCredential& credential) {
+                                    auto& credential) {
         httpClient.EnqueueDeferredResponse(Json(200, R"({"access_token":"t","expires_in":3600})"));
         std::optional<std::error_code> error;
         credential.GetTokenAsync(StorageScope(), [&](std::error_code code, AccessToken /*token*/) { error = code; });

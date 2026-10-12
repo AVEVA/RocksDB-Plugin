@@ -3,7 +3,6 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadTracker.hpp"
 
-#include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
 
 #include <utility>
@@ -23,8 +22,7 @@ struct AsyncReadTracker::Registration {
     // other thread cannot be inside such a completion, so it ends the read directly and skips the post.
     ~Registration() {
         try {
-            if (const auto* ioExecutor = Tracker->m_executor.target<boost::asio::io_context::executor_type>();
-                ioExecutor != nullptr && !ioExecutor->running_in_this_thread()) {
+            if (!Tracker->m_executor.running_in_this_thread()) {
                 Tracker->End();
                 return;
             }
@@ -35,7 +33,7 @@ struct AsyncReadTracker::Registration {
     }
 };
 
-AsyncReadTracker::AsyncReadTracker(boost::asio::any_io_executor executor) : m_executor(std::move(executor)) {}
+AsyncReadTracker::AsyncReadTracker(boost::asio::io_context::executor_type executor) : m_executor(std::move(executor)) {}
 
 AsyncReadTracker::Token AsyncReadTracker::Begin() {
     {

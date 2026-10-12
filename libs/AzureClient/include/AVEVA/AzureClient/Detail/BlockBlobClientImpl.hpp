@@ -13,16 +13,15 @@
 #include "AVEVA/AzureClient/Detail/AsyncInitiation.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
 #include "AVEVA/AzureClient/Response.hpp"
-#include "BlobRequestHelpers.hpp"
-#include "ProtocolConstants.hpp"
-#include "RequestPipeline.hpp"
+#include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
+#include <AVEVA/AzureClient/Detail/ProtocolConstants.hpp>
+#include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
 
 #include <AVEVA/HttpClient/HttpClient.hpp>
 #include <AVEVA/HttpClient/HttpMethod.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
-#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/cancellation_type.hpp>
 #include <boost/asio/post.hpp>
@@ -161,30 +160,32 @@ void inline ApplyUploadOptions(HttpRequest& request, const UploadBlockBlobOption
 
 using namespace Private::BlockBlobClientDetail;
 
-template <HttpClientLike THttp>
-BasicBlockBlobClient<THttp>::BasicBlockBlobClient(THttp& httpClient, const BlobClientOptions& options)
-    : Base(httpClient, options) {}
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+BasicBlockBlobClient<THttp, TCred>::BasicBlockBlobClient(THttp& httpClient, const BlobClientOptions& options,
+                                                         std::shared_ptr<TCred> credential)
+    : Base(httpClient, options, std::move(credential)) {}
 
-template <HttpClientLike THttp>
-BasicBlockBlobClient<THttp>::BasicBlockBlobClient(THttp& httpClient, std::shared_ptr<const Private::BlobTarget> target)
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+BasicBlockBlobClient<THttp, TCred>::BasicBlockBlobClient(THttp& httpClient,
+                                                         std::shared_ptr<const Private::BasicBlobTarget<TCred>> target)
     : Base(httpClient, std::move(target)) {}
 
-template <HttpClientLike THttp>
-void BasicBlockBlobClient<THttp>::UploadBytesAsyncImpl(std::span<const std::byte> content,
-                                                       const UploadBlockBlobOptions& options,
-                                                       UploadCompletionHandler completion,
-                                                       HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicBlockBlobClient<THttp, TCred>::UploadBytesAsyncImpl(std::span<const std::byte> content,
+                                                              const UploadBlockBlobOptions& options,
+                                                              THandler completion, HttpRequestOptions requestOptions) {
     HttpRequest request = Private::BuildBlobRequest(this->Target(), HttpMethod::Put);
     Private::AddHeader(request, Private::XMsBlobTypeHeaderName, BlockBlobTypeValue);
     request.SetBody(Private::BytesToString(content));
     SendUploadRequest(std::move(request), options, std::move(completion), requestOptions);
 }
 
-template <HttpClientLike THttp>
-void BasicBlockBlobClient<THttp>::UploadSharedAsyncImpl(std::shared_ptr<const std::vector<char>> content,
-                                                        const UploadBlockBlobOptions& options,
-                                                        UploadCompletionHandler completion,
-                                                        HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicBlockBlobClient<THttp, TCred>::UploadSharedAsyncImpl(std::shared_ptr<const std::vector<char>> content,
+                                                               const UploadBlockBlobOptions& options,
+                                                               THandler completion, HttpRequestOptions requestOptions) {
     if (!content) {
         Private::PostCompletion(this->Http(), std::move(completion),
                                 Private::MakeError<Models::UploadBlockBlobResult>(
@@ -198,12 +199,13 @@ void BasicBlockBlobClient<THttp>::UploadSharedAsyncImpl(std::shared_ptr<const st
     SendUploadRequest(std::move(request), options, std::move(completion), requestOptions);
 }
 
-template <HttpClientLike THttp>
-void BasicBlockBlobClient<THttp>::StageBlockSharedAsyncImpl(const std::string& blockId,
-                                                            std::shared_ptr<const std::vector<char>> content,
-                                                            const StageBlockOptions& options,
-                                                            StageBlockCompletionHandler completion,
-                                                            HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicBlockBlobClient<THttp, TCred>::StageBlockSharedAsyncImpl(const std::string& blockId,
+                                                                   std::shared_ptr<const std::vector<char>> content,
+                                                                   const StageBlockOptions& options,
+                                                                   THandler completion,
+                                                                   HttpRequestOptions requestOptions) {
     try {
         Private::ValidateBlockId(blockId);
     } catch (const std::invalid_argument&) {
@@ -226,20 +228,21 @@ void BasicBlockBlobClient<THttp>::StageBlockSharedAsyncImpl(const std::string& b
     SendStageBlockRequest(std::move(request), std::move(completion), requestOptions);
 }
 
-template <HttpClientLike THttp>
-void BasicBlockBlobClient<THttp>::UploadStringAsyncImpl(std::string content, const UploadBlockBlobOptions& options,
-                                                        UploadCompletionHandler completion,
-                                                        HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicBlockBlobClient<THttp, TCred>::UploadStringAsyncImpl(std::string content,
+                                                               const UploadBlockBlobOptions& options,
+                                                               THandler completion, HttpRequestOptions requestOptions) {
     HttpRequest request = Private::BuildBlobRequest(this->Target(), HttpMethod::Put);
     Private::AddHeader(request, Private::XMsBlobTypeHeaderName, BlockBlobTypeValue);
     request.SetBody(std::move(content));
     SendUploadRequest(std::move(request), options, std::move(completion), requestOptions);
 }
 
-template <HttpClientLike THttp>
-void BasicBlockBlobClient<THttp>::SendUploadRequest(HttpRequest request, const UploadBlockBlobOptions& options,
-                                                    UploadCompletionHandler completion,
-                                                    HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicBlockBlobClient<THttp, TCred>::SendUploadRequest(HttpRequest request, const UploadBlockBlobOptions& options,
+                                                           THandler completion, HttpRequestOptions requestOptions) {
     ApplyUploadOptions(request, options);
 
     Private::SendAuthorizedRequestAsync(
@@ -252,12 +255,12 @@ void BasicBlockBlobClient<THttp>::SendUploadRequest(HttpRequest request, const U
         requestOptions);
 }
 
-template <HttpClientLike THttp>
-void BasicBlockBlobClient<THttp>::StageBlockBytesAsyncImpl(const std::string& blockId,
-                                                           std::span<const std::byte> content,
-                                                           const StageBlockOptions& options,
-                                                           StageBlockCompletionHandler completion,
-                                                           HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicBlockBlobClient<THttp, TCred>::StageBlockBytesAsyncImpl(const std::string& blockId,
+                                                                  std::span<const std::byte> content,
+                                                                  const StageBlockOptions& options, THandler completion,
+                                                                  HttpRequestOptions requestOptions) {
     try {
         Private::ValidateBlockId(blockId);
     } catch (const std::invalid_argument&) {
@@ -273,11 +276,12 @@ void BasicBlockBlobClient<THttp>::StageBlockBytesAsyncImpl(const std::string& bl
     SendStageBlockRequest(std::move(request), std::move(completion), requestOptions);
 }
 
-template <HttpClientLike THttp>
-void BasicBlockBlobClient<THttp>::StageBlockStringAsyncImpl(const std::string& blockId,
-                                                            const StageBlockOptions& options, std::string content,
-                                                            StageBlockCompletionHandler completion,
-                                                            HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicBlockBlobClient<THttp, TCred>::StageBlockStringAsyncImpl(const std::string& blockId,
+                                                                   const StageBlockOptions& options,
+                                                                   std::string content, THandler completion,
+                                                                   HttpRequestOptions requestOptions) {
     try {
         Private::ValidateBlockId(blockId);
     } catch (const std::invalid_argument&) {
@@ -293,9 +297,10 @@ void BasicBlockBlobClient<THttp>::StageBlockStringAsyncImpl(const std::string& b
     SendStageBlockRequest(std::move(request), std::move(completion), requestOptions);
 }
 
-template <HttpClientLike THttp>
-void BasicBlockBlobClient<THttp>::SendStageBlockRequest(HttpRequest request, StageBlockCompletionHandler completion,
-                                                        HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicBlockBlobClient<THttp, TCred>::SendStageBlockRequest(HttpRequest request, THandler completion,
+                                                               HttpRequestOptions requestOptions) {
     Private::SendAuthorizedRequestAsync(
         this->Http(), this->Target(), std::move(request),
         [completion = std::move(completion)](std::error_code error, HttpResponse response) mutable {
@@ -305,11 +310,12 @@ void BasicBlockBlobClient<THttp>::SendStageBlockRequest(HttpRequest request, Sta
         requestOptions);
 }
 
-template <HttpClientLike THttp>
-void BasicBlockBlobClient<THttp>::CommitBlockListAsyncImpl(const std::vector<std::string>& blockIds,
-                                                           const CommitBlockListOptions& options,
-                                                           CommitBlockListCompletionHandler completion,
-                                                           HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <class THandler>
+void BasicBlockBlobClient<THttp, TCred>::CommitBlockListAsyncImpl(const std::vector<std::string>& blockIds,
+                                                                  const CommitBlockListOptions& options,
+                                                                  THandler completion,
+                                                                  HttpRequestOptions requestOptions) {
     HttpRequest request;
     try {
         request = BuildCommitBlockListRequest(this->Target(), blockIds, options);

@@ -8,14 +8,14 @@
 #include <AVEVA/AzureClient/BlobServiceClient.hpp>
 #include <AVEVA/AzureClient/BlockBlobClient.hpp>
 #include <AVEVA/AzureClient/Credentials.hpp>
-#include <AVEVA/AzureClient/ITokenCredential.hpp>
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
+#include <AVEVA/AzureClient/TokenCredential.hpp>
 #include <AVEVA/HttpClient/HttpClient.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 
-#include "../src/DownloadWriterPool.hpp"
+#include <AVEVA/AzureClient/Detail/DownloadWriterPool.hpp>
 
 #include <algorithm>
 #include <boost/asio/any_io_executor.hpp>
@@ -438,7 +438,7 @@ using ClientSecretCredential = BasicClientSecretCredential<FakeHttpClient>;
 using WorkloadIdentityCredential = BasicWorkloadIdentityCredential<FakeHttpClient>;
 using ManagedIdentityCredential = BasicManagedIdentityCredential<FakeHttpClient>;
 
-class ScriptedTokenCredential final : public ITokenCredential {
+class ScriptedTokenCredential final {
   public:
     struct Script {
         std::error_code Error;
@@ -450,7 +450,7 @@ class ScriptedTokenCredential final : public ITokenCredential {
         std::vector<std::string> Scopes;
         std::error_code Error;
         AccessToken Token;
-        GetTokenCompletionHandler Completion;
+        std::move_only_function<TokenSignature> Completion;
     };
 
     void EnqueueImmediate(std::error_code error, AccessToken token) {
@@ -461,7 +461,16 @@ class ScriptedTokenCredential final : public ITokenCredential {
         m_scripts.push_back(Script{.Error = error, .Token = std::move(token), .Deferred = true});
     }
 
-    void GetTokenAsync(std::vector<std::string> scopes, GetTokenCompletionHandler completion) override {
+    template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
+    auto GetTokenAsync(std::vector<std::string> scopes, CompletionToken&& token) {
+        return boost::asio::async_initiate<TokenSignature>(
+            [this](auto handler, std::vector<std::string> scopeList) {
+                Begin(std::move(scopeList), std::move(handler));
+            },
+            token, std::move(scopes));
+    }
+
+    template <class Handler> void Begin(std::vector<std::string> scopes, Handler completion) {
         ++m_callCount;
         m_requestedScopes.push_back(scopes);
 

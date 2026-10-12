@@ -9,10 +9,10 @@
 #include "AVEVA/AzureClient/Detail/AsyncInitiation.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
 #include "AVEVA/AzureClient/Response.hpp"
-#include "BlobRequestHelpers.hpp"
-#include "DownloadSinks.hpp"
-#include "DownloadWriterPool.hpp"
-#include "ProtocolConstants.hpp"
+#include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
+#include <AVEVA/AzureClient/Detail/DownloadSinks.hpp>
+#include <AVEVA/AzureClient/Detail/DownloadWriterPool.hpp>
+#include <AVEVA/AzureClient/Detail/ProtocolConstants.hpp>
 
 #include <AVEVA/AzureClient/HttpClientLike.hpp>
 #include <AVEVA/HttpClient/HttpMethod.hpp>
@@ -113,13 +113,11 @@ using SummaryResult = std::expected<DownloadSummary, BlobStorageError>;
 // events and processed one at a time by whichever thread queued first (a trampoline), so
 // handlers never run re-entrantly inside SendAsync or a cancellation emit, and completions
 // that the transport delivers inline are processed inline (no extra executor hop).
-template <HttpClientLike THttp>
-class DownloadOperation final : public std::enable_shared_from_this<DownloadOperation<THttp>> {
+template <HttpClientLike THttp, class TCred, class TDone>
+class DownloadOperation final : public std::enable_shared_from_this<DownloadOperation<THttp, TCred, TDone>> {
   public:
-    using Completion = std::move_only_function<void(SummaryResult)>;
-
-    DownloadOperation(THttp& httpClient, BlobTarget clientOptions, DownloadToOptions options,
-                      HttpRequestOptions requestOptions, std::shared_ptr<DownloadSink> sink, Completion completion)
+    DownloadOperation(THttp& httpClient, BasicBlobTarget<TCred> clientOptions, DownloadToOptions options,
+                      HttpRequestOptions requestOptions, std::shared_ptr<DownloadSink> sink, TDone completion)
         : m_httpClient(httpClient), m_clientOptions(std::move(clientOptions)), m_options(std::move(options)),
           m_requestOptions(requestOptions), m_sink(std::move(sink)), m_completion(std::move(completion)),
           m_parentSlot(m_requestOptions.GetCancellationSlot()),
@@ -546,7 +544,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
 
     void Finish(SummaryResult result) {
         m_done = true;
-        Completion completion = std::move(m_completion);
+        TDone completion = std::move(m_completion);
         if (m_initiating) {
             PostCompletion(m_httpClient, std::move(completion), std::move(result));
         } else {
@@ -555,11 +553,11 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
     }
 
     THttp& m_httpClient;
-    BlobTarget m_clientOptions;
+    BasicBlobTarget<TCred> m_clientOptions;
     DownloadToOptions m_options;
     HttpRequestOptions m_requestOptions;
     std::shared_ptr<DownloadSink> m_sink;
-    Completion m_completion;
+    TDone m_completion;
     boost::asio::cancellation_slot m_parentSlot;
     std::size_t m_chunkSize;
     std::size_t m_concurrency;
@@ -596,19 +594,18 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
     return Response<Models::DownloadBlobToResult>{std::move(result), std::move(summary.FirstResponse), std::nullopt};
 }
 
-template <HttpClientLike THttp>
-void StartDownload(THttp& httpClient, const BlobTarget& options, DownloadToOptions operationOptions,
-                   std::shared_ptr<DownloadSink> sink, typename DownloadOperation<THttp>::Completion completion,
-                   HttpRequestOptions requestOptions) {
-    std::make_shared<DownloadOperation<THttp>>(httpClient, options, std::move(operationOptions), requestOptions,
-                                               std::move(sink), std::move(completion))
+template <HttpClientLike THttp, class TCred, class TDone>
+void StartDownload(THttp& httpClient, const BasicBlobTarget<TCred>& options, DownloadToOptions operationOptions,
+                   std::shared_ptr<DownloadSink> sink, TDone completion, HttpRequestOptions requestOptions) {
+    std::make_shared<DownloadOperation<THttp, TCred, TDone>>(httpClient, options, std::move(operationOptions),
+                                                             requestOptions, std::move(sink), std::move(completion))
         ->Start();
 }
 } // namespace DownloadDetail
 
-template <HttpClientLike THttp>
-void DownloadBlobAsync(THttp& httpClient, const BlobTarget& options, DownloadBlobOptions operationOptions,
-                       DownloadCompletion completion, HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, class TCred, class TCompletion>
+void DownloadBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, DownloadBlobOptions operationOptions,
+                       TCompletion completion, HttpRequestOptions requestOptions) {
     using namespace DownloadDetail;
     auto sink = std::make_shared<StringSink>();
     StartDownload(
@@ -628,9 +625,9 @@ void DownloadBlobAsync(THttp& httpClient, const BlobTarget& options, DownloadBlo
         requestOptions);
 }
 
-template <HttpClientLike THttp>
-void DownloadBlobToAsync(THttp& httpClient, const BlobTarget& options, DownloadToOptions operationOptions,
-                         std::ostream& stream, DownloadToCompletion completion, HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, class TCred, class TCompletion>
+void DownloadBlobToAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, DownloadToOptions operationOptions,
+                         std::ostream& stream, TCompletion completion, HttpRequestOptions requestOptions) {
     using namespace DownloadDetail;
     StartDownload(
         httpClient, options, std::move(operationOptions), std::make_shared<StreamSink>(stream),
@@ -644,9 +641,9 @@ void DownloadBlobToAsync(THttp& httpClient, const BlobTarget& options, DownloadT
         requestOptions);
 }
 
-template <HttpClientLike THttp>
-void DownloadBlobToSpanAsync(THttp& httpClient, const BlobTarget& options, DownloadToOptions operationOptions,
-                             std::span<char> destination, DownloadToCompletion completion,
+template <HttpClientLike THttp, class TCred, class TCompletion>
+void DownloadBlobToSpanAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
+                             DownloadToOptions operationOptions, std::span<char> destination, TCompletion completion,
                              HttpRequestOptions requestOptions) {
     using namespace DownloadDetail;
     StartDownload(
@@ -661,10 +658,10 @@ void DownloadBlobToSpanAsync(THttp& httpClient, const BlobTarget& options, Downl
         requestOptions);
 }
 
-template <HttpClientLike THttp>
-void DownloadBlobToFileAsync(THttp& httpClient, const BlobTarget& options, DownloadToOptions operationOptions,
-                             const std::filesystem::path& path, DownloadToCompletion completion,
-                             HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, class TCred, class TCompletion>
+void DownloadBlobToFileAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
+                             DownloadToOptions operationOptions, const std::filesystem::path& path,
+                             TCompletion completion, HttpRequestOptions requestOptions) {
     using namespace DownloadDetail;
     std::error_code statusError;
     if (std::filesystem::is_directory(path, statusError)) {

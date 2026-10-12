@@ -2,22 +2,39 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/ContainerClient.hpp"
 
-#include <AVEVA/AzureClient/BlobContainerClient.hpp>
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 
 #include <memory>
+#include <string>
+#include <utility>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-class AzureContainerClient final : public Core::ContainerClient {
+/// <summary>
+/// Adapts a blob container to Core::ContainerClient. `TContainer` is the real container client in production and a
+/// test double that hands out fake page blobs in tests.
+/// </summary>
+template <typename TContainer> class BasicAzureContainerClient final : public Core::ContainerClient {
     std::shared_ptr<ClientRuntime> m_runtime;
-    std::shared_ptr<AzureClient::BlobContainerClient> m_client;
+    std::shared_ptr<TContainer> m_client;
 
   public:
-    AzureContainerClient(std::shared_ptr<ClientRuntime> runtime,
-                         std::shared_ptr<AzureClient::BlobContainerClient> client);
-    virtual int64_t GetBlobSize(const std::string& path) override;
-    virtual void DownloadBlobTo(const std::string& path, const std::string& destinationPath, int64_t offset,
-                                int64_t length) override;
+    BasicAzureContainerClient(std::shared_ptr<ClientRuntime> runtime, std::shared_ptr<TContainer> client)
+        : m_runtime(std::move(runtime)), m_client(std::move(client)) {}
+
+    int64_t GetBlobSize(const std::string& path) override {
+        auto blob = m_client->GetPageBlobClient(path);
+        return BlobOperations::GetSize(*blob);
+    }
+
+    void DownloadBlobTo(const std::string& path, const std::string& destinationPath, int64_t offset,
+                        int64_t length) override {
+        auto blob = m_client->GetPageBlobClient(path);
+        BlobOperations::DownloadToFile(*blob, destinationPath, offset, length);
+    }
 };
+
+using AzureContainerClient = BasicAzureContainerClient<BlobContainerClient>;
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

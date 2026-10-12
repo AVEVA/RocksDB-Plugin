@@ -8,7 +8,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 
-#include <AVEVA/AzureClient/PageBlobClient.hpp>
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 
 #include <boost/log/trivial.hpp>
 
@@ -18,11 +18,11 @@
 #include <string_view>
 #include <vector>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-class ReadWriteFileImpl {
+template <typename TBlob> class BasicReadWriteFileImpl {
     std::string m_name;
     // Declared before the client so that it is destroyed after it: the client references the runtime's HTTP client.
     std::shared_ptr<ClientRuntime> m_runtime;
-    std::shared_ptr<AzureClient::PageBlobClient> m_blob;
+    std::shared_ptr<TBlob> m_blob;
     std::shared_ptr<Core::FileCache> m_fileCache;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
 
@@ -34,15 +34,15 @@ class ReadWriteFileImpl {
     std::vector<char> m_buffer;
     std::vector<BufferChunkInfo> m_bufferStats; // to track where page info is to be inserted
   public:
-    ReadWriteFileImpl(
-        std::string_view name, std::shared_ptr<ClientRuntime> runtime,
-        std::shared_ptr<AzureClient::PageBlobClient> blob, std::shared_ptr<Core::FileCache> fileCache,
+    BasicReadWriteFileImpl(
+        std::string_view name, std::shared_ptr<ClientRuntime> runtime, std::shared_ptr<TBlob> blob,
+        std::shared_ptr<Core::FileCache> fileCache,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
-    ~ReadWriteFileImpl();
-    ReadWriteFileImpl(const ReadWriteFileImpl&) = delete;
-    ReadWriteFileImpl& operator=(const ReadWriteFileImpl&) = delete;
-    ReadWriteFileImpl(ReadWriteFileImpl&&) noexcept;
-    ReadWriteFileImpl& operator=(ReadWriteFileImpl&&) noexcept;
+    ~BasicReadWriteFileImpl();
+    BasicReadWriteFileImpl(const BasicReadWriteFileImpl&) = delete;
+    BasicReadWriteFileImpl& operator=(const BasicReadWriteFileImpl&) = delete;
+    BasicReadWriteFileImpl(BasicReadWriteFileImpl&&) noexcept;
+    BasicReadWriteFileImpl& operator=(BasicReadWriteFileImpl&&) noexcept;
 
     void Close();
     void Sync();
@@ -53,4 +53,13 @@ class ReadWriteFileImpl {
   private:
     void Expand();
 };
+extern template class BasicReadWriteFileImpl<PageBlobClient>;
+
+/// <summary>The production file, over the real page blob client. Non-template so it can be forward declared.</summary>
+class ReadWriteFileImpl : public BasicReadWriteFileImpl<PageBlobClient> {
+  public:
+    using BasicReadWriteFileImpl<PageBlobClient>::BasicReadWriteFileImpl;
+};
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
+
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.ipp"

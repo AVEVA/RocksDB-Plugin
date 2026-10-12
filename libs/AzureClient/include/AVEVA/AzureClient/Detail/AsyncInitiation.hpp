@@ -37,9 +37,38 @@ namespace AVEVA::AzureClient::Private {
 // different io_context, its run() could otherwise return before the completion is dispatched. An adopted
 // slot is cleared on the handler's executor, immediately before the handler runs, so the clear is serialized
 // with the caller emitting on that executor instead of racing on the transport thread.
-template <class THandler, class RawHandler, class TExecutor>
-[[nodiscard]] THandler BindAssociationsAndAdoptCancellationOn(RawHandler& handler, const TExecutor& defaultExecutor,
-                                                              HttpRequestOptions& requestOptions) {
+// Concrete (non-erased) wrapper produced by BindAssociationsAndAdoptCancellation. `Direct` is the fast path
+// where the handler already runs on the default executor and no slot was adopted: it is invoked in place.
+template <class TArg, class THandler, class TExecutor, class TAllocator, class TSlot> struct BoundHandler {
+    THandler Handler;
+    TExecutor Executor;
+    TAllocator Allocator;
+    TSlot Slot;
+    bool AdoptedSlot;
+    bool Direct;
+    std::optional<boost::asio::executor_work_guard<TExecutor>> Work;
+
+    // The fixed parameter type lets producers pass anything convertible (e.g. std::unexpected).
+    void operator()(TArg result) {
+        if (Direct) {
+            std::move(Handler)(std::move(result));
+            return;
+        }
+        boost::asio::dispatch(Executor,
+                              boost::asio::bind_allocator(
+                                  Allocator, [handler = std::move(Handler), result = std::move(result),
+                                              work = std::move(Work), slot = Slot, adopted = AdoptedSlot]() mutable {
+                                      if (adopted) {
+                                          slot.clear();
+                                      }
+                                      std::move(handler)(std::move(result));
+                                  }));
+    }
+};
+
+template <class TArg, class RawHandler, class TExecutor>
+[[nodiscard]] auto BindAssociationsAndAdoptCancellationOn(RawHandler& handler, const TExecutor& defaultExecutor,
+                                                          HttpRequestOptions& requestOptions) {
     auto slot = boost::asio::get_associated_cancellation_slot(handler, boost::asio::cancellation_slot());
     const bool adoptedSlot = slot.is_connected() && !requestOptions.GetCancellationSlot().is_connected();
     if (adoptedSlot) {
@@ -52,29 +81,17 @@ template <class THandler, class RawHandler, class TExecutor>
     if constexpr (std::equality_comparable_with<decltype(executor), const TExecutor&>) {
         usesDefaultExecutor = executor == defaultExecutor;
     }
-    if (usesDefaultExecutor && !adoptedSlot) {
-        return THandler{std::move(handler)};
-    }
+    const bool direct = usesDefaultExecutor && !adoptedSlot;
 
     auto allocator = boost::asio::get_associated_allocator(handler);
-    return THandler{[executor, allocator, slot, adoptedSlot, work = boost::asio::make_work_guard(executor),
-                     handler = std::move(handler)](auto result) mutable {
-        boost::asio::dispatch(
-            executor, boost::asio::bind_allocator(allocator, [handler = std::move(handler), result = std::move(result),
-                                                              work = std::move(work), slot, adoptedSlot]() mutable {
-                if (adoptedSlot) {
-                    slot.clear();
-                }
-                std::move(handler)(std::move(result));
-            }));
-    }};
+    using Executor = decltype(executor);
+    std::optional<boost::asio::executor_work_guard<Executor>> work;
+    if (!direct) {
+        work.emplace(boost::asio::make_work_guard(executor));
+    }
+    return BoundHandler<TArg, RawHandler, Executor, decltype(allocator), decltype(slot)>{
+        std::move(handler), executor, allocator, slot, adoptedSlot, direct, std::move(work)};
 }
-template <class THandler, class RawHandler, HttpClientLike THttp>
-[[nodiscard]] THandler BindAssociationsAndAdoptCancellation(RawHandler& handler, THttp& httpClient,
-                                                            HttpRequestOptions& requestOptions) {
-    return BindAssociationsAndAdoptCancellationOn<THandler>(handler, httpClient.get_executor(), requestOptions);
-}
-
 // Forwards the completion token as an rvalue so move-only tokens remain move-only.
 template <class Signature, class Initiation, class CompletionToken, class... Args>
 auto InitiateAsync(Initiation&& initiation, CompletionToken&& token, Args&&... args) {
@@ -102,8 +119,9 @@ auto InitiateClientOperation(Client* client, Impl impl, CompletionToken&& token,
             requestOptions ? std::move(*requestOptions) : client->GetDefaultRequestOptions();
         return InitiateAsync<Signature>(
             [client, impl](auto handler, HttpRequestOptions initiationRequestOptions, auto... initiationArgs) {
-                auto boundHandler = BindAssociationsAndAdoptCancellationOn<std::move_only_function<Signature>>(
-                    handler, client->get_executor(), initiationRequestOptions);
+                auto boundHandler =
+                    BindAssociationsAndAdoptCancellationOn<std::expected<Response<Result>, BlobStorageError>>(
+                        handler, client->get_executor(), initiationRequestOptions);
                 std::invoke(impl, *client, std::move(initiationArgs)..., std::move(boundHandler),
                             std::move(initiationRequestOptions));
             },

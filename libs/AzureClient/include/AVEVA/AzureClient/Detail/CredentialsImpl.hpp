@@ -6,9 +6,9 @@
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 #include <AVEVA/AzureClient/Credentials.hpp>
 
-#include "AVEVA/AzureClient/ITokenCredential.hpp"
-#include "BlobRequestHelpers.hpp"
-#include "RequestPipeline.hpp"
+#include "AVEVA/AzureClient/TokenCredential.hpp"
+#include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
+#include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
 
 #include <AVEVA/HttpClient/HttpClient.hpp>
 #include <AVEVA/HttpClient/HttpMethod.hpp>
@@ -46,7 +46,6 @@
 namespace AVEVA::AzureClient {
 namespace Private::CredentialsDetail {
 using Clock = std::chrono::system_clock;
-using GetTokenCompletionHandler = ITokenCredential::GetTokenCompletionHandler;
 
 // Accepted token lifetime range; values outside it are treated as an invalid response so a
 // hostile value cannot overflow the time point or force a tight refresh loop.
@@ -173,15 +172,14 @@ constexpr std::int64_t MaxTokenLifetimeSeconds = 24 * 60 * 60;
     return token;
 }
 
-template <HttpClientLike THttp>
-void Fail(THttp& httpClient, GetTokenCompletionHandler completion, std::error_code error) {
+template <HttpClientLike THttp, class Handler> void Fail(THttp& httpClient, Handler completion, std::error_code error) {
     boost::asio::post(httpClient.get_executor(),
                       [completion = std::move(completion), error]() mutable { completion(error, AccessToken{}); });
 }
 
-template <HttpClientLike THttp>
+template <HttpClientLike THttp, class Handler>
 void SendTokenRequest(THttp& httpClient, HttpRequest request, HttpRequestOptions requestOptions, RetryOptions retry,
-                      bool retryNotFoundAndGone, GetTokenCompletionHandler completion) {
+                      bool retryNotFoundAndGone, Handler completion) {
     for (const HttpHeader& header : request.GetHeaders()) {
         if (Private::HasHeaderControlCharacters(header.GetName()) ||
             Private::HasHeaderControlCharacters(header.GetValue())) {
@@ -190,7 +188,7 @@ void SendTokenRequest(THttp& httpClient, HttpRequest request, HttpRequestOptions
         }
     }
     Private::SendWithRetryAsync(
-        httpClient, Private::RequestAuth{}, retry, std::move(request),
+        httpClient, Private::RequestAuth{}, std::shared_ptr<NoTokenCredential>{}, retry, std::move(request),
         [completion = std::move(completion)](std::error_code error, const HttpResponse& response) mutable {
             auto token = ParseTokenResponse(error, response);
             if (token.has_value()) {
@@ -291,8 +289,8 @@ BasicClientSecretCredential<THttp>::BasicClientSecretCredential(THttp& httpClien
 }
 
 template <HttpClientLike THttp>
-void BasicClientSecretCredential<THttp>::GetTokenAsync(std::vector<std::string> scopes,
-                                                       GetTokenCompletionHandler completion) {
+template <class Handler>
+void BasicClientSecretCredential<THttp>::Begin(std::vector<std::string> scopes, Handler completion) {
     using namespace Private::CredentialsDetail;
     if (!IsValidTenantId(m_options.TenantId) || m_options.ClientId.empty() || m_options.ClientSecret.empty() ||
         scopes.empty()) {
@@ -316,8 +314,8 @@ BasicWorkloadIdentityCredential<THttp>::BasicWorkloadIdentityCredential(THttp& h
 }
 
 template <HttpClientLike THttp>
-void BasicWorkloadIdentityCredential<THttp>::GetTokenAsync(std::vector<std::string> scopes,
-                                                           GetTokenCompletionHandler completion) {
+template <class Handler>
+void BasicWorkloadIdentityCredential<THttp>::Begin(std::vector<std::string> scopes, Handler completion) {
     using namespace Private::CredentialsDetail;
     if (!IsValidTenantId(m_options.TenantId) || m_options.ClientId.empty() || m_options.TokenFilePath.empty() ||
         scopes.empty()) {
@@ -346,8 +344,8 @@ BasicManagedIdentityCredential<THttp>::BasicManagedIdentityCredential(THttp& htt
     : m_httpClient(&httpClient), m_options(std::move(options)) {}
 
 template <HttpClientLike THttp>
-void BasicManagedIdentityCredential<THttp>::GetTokenAsync(std::vector<std::string> scopes,
-                                                          GetTokenCompletionHandler completion) {
+template <class Handler>
+void BasicManagedIdentityCredential<THttp>::Begin(std::vector<std::string> scopes, Handler completion) {
     using namespace Private::CredentialsDetail;
     const bool appService = !m_options.IdentityEndpoint.empty();
     if (scopes.size() != 1U || scopes.front().empty() ||

@@ -13,10 +13,13 @@
 
 using AVEVA::RocksDB::Plugin::Azure::RequestFailedException;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Configuration;
-using AVEVA::RocksDB::Plugin::Azure::Impl::ReadableFileImpl;
-using AVEVA::RocksDB::Plugin::Azure::Impl::SequentialFileImpl;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobEnvironment;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakePageBlobClient;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadableFile;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadableFileImpl;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadWriteFileImpl;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeSequentialFileImpl;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeWriteableFileImpl;
 using boost::log::sources::severity_logger_mt;
 using boost::log::trivial::severity_level;
 
@@ -29,10 +32,10 @@ class SequentialFileTests : public ::testing::Test {
 
     void SetUp() override { m_env.Fill(DefaultBlobSize); }
 
-    ReadableFileImpl MakeReadable() {
-        return ReadableFileImpl{"test.sst", m_env.Runtime, m_env.Blob, nullptr, m_logger};
+    FakeReadableFileImpl MakeReadable() {
+        return FakeReadableFileImpl{"test.sst", m_env.Runtime, m_env.Blob, nullptr, m_logger};
     }
-    SequentialFileImpl MakeFile() { return SequentialFileImpl{MakeReadable()}; }
+    FakeSequentialFileImpl MakeFile() { return FakeSequentialFileImpl{MakeReadable()}; }
 };
 
 TEST_F(SequentialFileTests, SequentialRead_WithoutCache_ReadsFromBlob) {

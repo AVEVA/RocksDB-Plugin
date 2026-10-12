@@ -12,10 +12,10 @@
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
 #include "AVEVA/AzureClient/Response.hpp"
 
-#include "../src/BlobClientImpl.hpp"
-#include "../src/BlobContainerClientImpl.hpp"
-#include "../src/BlockBlobClientImpl.hpp"
-#include "../src/PageBlobClientImpl.hpp"
+#include <AVEVA/AzureClient/Detail/BlobClientImpl.hpp>
+#include <AVEVA/AzureClient/Detail/BlobContainerClientImpl.hpp>
+#include <AVEVA/AzureClient/Detail/BlockBlobClientImpl.hpp>
+#include <AVEVA/AzureClient/Detail/PageBlobClientImpl.hpp>
 
 #include <AVEVA/HttpClient/HttpClient.hpp>
 #include <AVEVA/HttpClient/HttpHeader.hpp>

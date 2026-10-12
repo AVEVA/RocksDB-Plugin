@@ -36,8 +36,8 @@ namespace {
 /// Lists every blob in the container whose name starts with `options.Prefix`, following continuation markers,
 /// and invokes `onBlob` for each.
 /// </summary>
-void ForEachBlobUntil(AzureClient::BlobContainerClient& container, AzureClient::ListBlobsOptions options,
-                      const std::function<bool(const AzureClient::Models::BlobItem&)>& onBlob) {
+template <std::predicate<const AzureClient::Models::BlobItem&> TOnBlob>
+void ForEachBlobUntil(Impl::BlobContainerClient& container, AzureClient::ListBlobsOptions options, TOnBlob&& onBlob) {
     while (true) {
         auto page =
             Unwrap(BlockOn(container.get_executor(), container.ListBlobsAsync(options, boost::asio::use_future)));
@@ -55,8 +55,8 @@ void ForEachBlobUntil(AzureClient::BlobContainerClient& container, AzureClient::
     }
 }
 
-void ForEachBlob(AzureClient::BlobContainerClient& container, AzureClient::ListBlobsOptions options,
-                 const std::function<void(const AzureClient::Models::BlobItem&)>& onBlob) {
+template <std::invocable<const AzureClient::Models::BlobItem&> TOnBlob>
+void ForEachBlob(Impl::BlobContainerClient& container, AzureClient::ListBlobsOptions options, TOnBlob&& onBlob) {
     ForEachBlobUntil(container, std::move(options), [&onBlob](const AzureClient::Models::BlobItem& blob) {
         onBlob(blob);
         return false;
@@ -71,7 +71,7 @@ using RenameDownload = std::future<
     std::expected<AzureClient::Response<AzureClient::Models::DownloadBlobResult>, AzureClient::BlobStorageError>>;
 
 // Starts downloading the next chunk [offset, offset + Configuration::Transfer::MaxCopyChunkSize) of the rename source.
-RenameDownload StartRenameDownload(AzureClient::PageBlobClient& source, int64_t size, int64_t offset) {
+RenameDownload StartRenameDownload(Impl::PageBlobClient& source, int64_t size, int64_t offset) {
     const auto readSize = std::min(size - offset, Configuration::Transfer::MaxCopyChunkSize);
     AzureClient::DownloadBlobOptions options;
     options.Range = AzureClient::Models::BlobByteRange{static_cast<uint64_t>(offset), static_cast<uint64_t>(readSize)};
@@ -82,7 +82,7 @@ RenameDownload StartRenameDownload(AzureClient::PageBlobClient& source, int64_t 
 
 // Page blob writes must be page aligned, so a short final chunk is padded with zeros; the logical size is carried
 // separately by SetFileSize.
-void UploadRenameChunk(AzureClient::PageBlobClient& destination, int64_t offset, std::string buffer) {
+void UploadRenameChunk(Impl::PageBlobClient& destination, int64_t offset, std::string buffer) {
     const auto remaining = buffer.size() % Configuration::PageBlob::PageSize;
     if (remaining != 0) {
         buffer.resize(buffer.size() + (Configuration::PageBlob::PageSize - remaining), '\0');
@@ -105,7 +105,7 @@ BlobFilesystemImpl::BlobFilesystemImpl(
     auto options = BlobHelpers::CreateServiceClientOptions(storageAccountUrl);
     options.SharedKey.AccountName = BlobHelpers::AccountNameFromUrl(storageAccountUrl);
     options.SharedKey.AccountKey = storageAccountKey;
-    AddContainer(AzureClient::BlobServiceClient{m_runtime->HttpClient(), std::move(options)}, storageAccountUrl, name,
+    AddContainer(Impl::BlobServiceClient{m_runtime->HttpClient(), std::move(options)}, storageAccountUrl, name,
                  cachePath, maxCacheSize);
 }
 
@@ -117,10 +117,10 @@ BlobFilesystemImpl::BlobFilesystemImpl(
     std::optional<std::string_view> cachePath, size_t maxCacheSize)
     : BlobFilesystemImpl(std::move(logger), ioContext, dataFileInitialSize, dataFileBufferSize) {
     auto options = BlobHelpers::CreateServiceClientOptions(storageAccountUrl);
-    options.TokenCredential =
-        BlobHelpers::CreateClientSecretCredential(m_runtime, tenantId, servicePrincipalId, servicePrincipalSecret);
-    AddContainer(AzureClient::BlobServiceClient{m_runtime->HttpClient(), std::move(options)}, storageAccountUrl, name,
-                 cachePath, maxCacheSize);
+    AddContainer(Impl::BlobServiceClient{m_runtime->HttpClient(), std::move(options),
+                                         BlobHelpers::CreateClientSecretCredential(
+                                             m_runtime, tenantId, servicePrincipalId, servicePrincipalSecret)},
+                 storageAccountUrl, name, cachePath, maxCacheSize);
 }
 
 BlobFilesystemImpl::BlobFilesystemImpl(
@@ -131,10 +131,10 @@ BlobFilesystemImpl::BlobFilesystemImpl(
     std::optional<std::string_view> cachePath, size_t maxCacheSize)
     : BlobFilesystemImpl(std::move(logger), ioContext, dataFileInitialSize, dataFileBufferSize) {
     auto options = BlobHelpers::CreateServiceClientOptions(storageAccountUrl);
-    options.TokenCredential =
-        BlobHelpers::CreatePipelinesCredential(m_runtime, tenantId, clientId, serviceConnectionId, accessToken);
-    AddContainer(AzureClient::BlobServiceClient{m_runtime->HttpClient(), std::move(options)}, storageAccountUrl, name,
-                 cachePath, maxCacheSize);
+    AddContainer(Impl::BlobServiceClient{m_runtime->HttpClient(), std::move(options),
+                                         BlobHelpers::CreatePipelinesCredential(m_runtime, tenantId, clientId,
+                                                                                serviceConnectionId, accessToken)},
+                 storageAccountUrl, name, cachePath, maxCacheSize);
 }
 
 BlobFilesystemImpl::BlobFilesystemImpl(
@@ -171,9 +171,9 @@ BlobFilesystemImpl::BlobFilesystemImpl(
 /// Creates the container (if needed) for `name` in the storage account, registers the client under the account's
 /// unique prefix and, when a cache path is given, sets up a file cache backed by that container.
 /// </summary>
-void BlobFilesystemImpl::AddContainer(AzureClient::BlobServiceClient serviceClient,
-                                      const std::string& storageAccountUrl, const std::string& name,
-                                      std::optional<std::string_view> cachePath, size_t maxCacheSize) {
+void BlobFilesystemImpl::AddContainer(Impl::BlobServiceClient serviceClient, const std::string& storageAccountUrl,
+                                      const std::string& name, std::optional<std::string_view> cachePath,
+                                      size_t maxCacheSize) {
     auto containerClient = BlobHelpers::GetContainerClient(serviceClient, name);
     const auto uniquePrefix = StorageAccount::UniquePrefix(storageAccountUrl, name);
     if (cachePath) {
@@ -509,7 +509,7 @@ size_t BlobFilesystemImpl::DeleteDir(const std::string& directoryPath) const {
     // A sliding window: as soon as the oldest delete finishes, the next one starts, so one slow request does not
     // hold back a whole batch.
     struct PendingDelete {
-        std::unique_ptr<AzureClient::PageBlobClient> client;
+        std::unique_ptr<Impl::PageBlobClient> client;
         std::future<
             std::expected<AzureClient::Response<AzureClient::Models::DeleteBlobResult>, AzureClient::BlobStorageError>>
             result;
@@ -664,26 +664,29 @@ BlobFilesystemImpl::BlobFilesystemImpl(
     : m_logger(std::move(logger)), m_dataFileInitialSize(dataFileInitialSize), m_dataFileBufferSize(dataFileBufferSize),
       m_runtime(std::make_shared<ClientRuntime>(ioContext)),
       m_asyncReads(std::make_shared<AsyncReadTracker>(ioContext.get_executor())),
-      m_leaseRenewal{LeaseRenewalLoop::Start(
-          ioContext.get_executor(), m_logger,
-          [this] {
-              // Snapshot under the mutex but renew outside it, so LockFile/UnlockFile are not blocked behind
-              // network round trips and their retries. The shared_ptrs keep the locks alive meanwhile.
-              std::vector<std::shared_ptr<LockFileImpl>> locks;
-              std::scoped_lock lock(m_lockFilesMutex);
-              std::erase_if(m_renewableLocks, [](const auto& weak) { return weak.expired(); });
-              for (const auto& weak : m_renewableLocks) {
-                  if (auto shared = weak.lock()) {
-                      locks.push_back(std::move(shared));
-                  }
-              }
-              return locks;
-          },
-          [this] {
-              m_runtime->FenceWrites();
-              m_filesystemStopSource.request_stop();
-          },
+      m_leaseRenewal{LeaseRenewal::Start(
+          ioContext.get_executor(), m_logger, RenewableLocksSnapshot{this}, FenceWritesOnFatal{this},
           std::chrono::duration_cast<std::chrono::milliseconds>(Configuration::RenewalDelay))} {}
+
+// Snapshot under the mutex but renew outside it, so LockFile/UnlockFile are not blocked behind network round trips
+// and their retries. The shared_ptrs keep the locks alive meanwhile.
+std::vector<std::shared_ptr<LockFileImpl>> BlobFilesystemImpl::RenewableLocksSnapshot::operator()() const {
+    std::vector<std::shared_ptr<LockFileImpl>> locks;
+    std::scoped_lock lock(Owner->m_lockFilesMutex);
+    std::erase_if(Owner->m_renewableLocks, [](const auto& weak) { return weak.expired(); });
+    for (const auto& weak : Owner->m_renewableLocks) {
+        if (auto shared = weak.lock()) {
+            locks.push_back(std::move(shared));
+        }
+    }
+    return locks;
+}
+
+void BlobFilesystemImpl::FenceWritesOnFatal::operator()() const {
+    Owner->m_runtime->FenceWrites();
+    Owner->m_filesystemStopSource.request_stop();
+}
+
 BlobFilesystemImpl::~BlobFilesystemImpl() {
     m_leaseRenewal->Stop();
     if (const auto inFlight = m_asyncReads->InFlight(); inFlight > 0) {
@@ -699,7 +702,7 @@ BlobFilesystemImpl::~BlobFilesystemImpl() {
     }
 }
 
-const std::shared_ptr<AzureClient::BlobContainerClient>&
+const std::shared_ptr<Impl::BlobContainerClient>&
 BlobFilesystemImpl::GetContainer(const std::string_view prefix) const {
     // TODO: Future work to determine health of this client. Seeing that repeated 503s/403s caused successive calls to
     // fail with the same error.

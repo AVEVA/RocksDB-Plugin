@@ -9,7 +9,7 @@
 #include "FakeHttpClient.hpp"
 #include "TestFixtures.hpp"
 
-#include <AVEVA/AzureClient/PageBlobClient.hpp>
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
@@ -42,13 +42,13 @@ class BlobOperationsTests : public ::testing::Test {
     void SetUp() override {
         // Completions are posted to the fake's own io_context while the operation blocks on a future.
         m_bridge = std::make_unique<AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeHttpBridge>(m_httpClient);
-        m_blob = std::make_unique<AVEVA::AzureClient::PageBlobClient>(m_bridge->Client(),
-                                                                      MakeBlobClientOptions("files", "000001.sst"));
+        m_blob = std::make_unique<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient>(
+            m_bridge->Client(), MakeBlobClientOptions("files", "000001.sst"));
     }
 
     FakeHttpClient m_httpClient;
     std::unique_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeHttpBridge> m_bridge;
-    std::unique_ptr<AVEVA::AzureClient::PageBlobClient> m_blob;
+    std::unique_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient> m_blob;
 };
 } // namespace
 

@@ -18,7 +18,7 @@
 
 using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeBlobContainerClientOptions;
-using AVEVA::RocksDB::Plugin::Azure::Impl::AzureContainerClient;
+using AVEVA::RocksDB::Plugin::Azure::Impl::BasicAzureContainerClient;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::BlobContainerClientMock;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeHttpBridge;
@@ -32,13 +32,12 @@ TEST(AzureContainerClientTests, GetBlobSizeReadsTheSizeFromThePageBlobHandedOutB
 
     auto pageBlob = std::make_unique<FakePageBlobClient>(httpClient);
     pageBlob->Size = 1234;
-    auto container = std::make_shared<::testing::StrictMock<BlobContainerClientMock>>(
-        httpClient, MakeBlobContainerClientOptions("files"));
+    auto container = std::make_shared<::testing::StrictMock<BlobContainerClientMock>>();
     EXPECT_CALL(*container, GetPageBlobClient("000001.sst")).WillOnce([&pageBlob](std::string) {
-        return std::unique_ptr<AVEVA::AzureClient::PageBlobClient>(std::move(pageBlob));
+        return std::move(pageBlob);
     });
 
-    AzureContainerClient adapter(std::make_shared<ClientRuntime>(context), container);
+    BasicAzureContainerClient<BlobContainerClientMock> adapter(std::make_shared<ClientRuntime>(context), container);
 
     EXPECT_EQ(1234, adapter.GetBlobSize("000001.sst"));
     EXPECT_TRUE(fake.NoRequestMade());

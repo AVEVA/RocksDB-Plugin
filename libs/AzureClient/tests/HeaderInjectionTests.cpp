@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/AzureClient/BlobStorageError.hpp"
-#include "AVEVA/AzureClient/ITokenCredential.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
+#include "AVEVA/AzureClient/TokenCredential.hpp"
 #include "FakeHttpClient.hpp"
 #include "TestFixtures.hpp"
 

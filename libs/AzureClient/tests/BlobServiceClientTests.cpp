@@ -6,7 +6,7 @@
 #include "FakeHttpClient.hpp"
 #include "TestFixtures.hpp"
 
-#include "BlobRequestHelpers.hpp"
+#include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>
 #include <AVEVA/AzureClient/BlobServiceClient.hpp>

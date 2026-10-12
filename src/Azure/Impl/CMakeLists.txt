@@ -2,7 +2,6 @@ add_library(aveva-rocksdb-plugin-azure-impl
     AsyncReadRequest.cpp
     AsyncReadTracker.cpp
     BlobHelpers.cpp
-    BlobOperations.cpp
     ReadableFileImpl.cpp
     SequentialFileImpl.cpp
     WriteableFileImpl.cpp
@@ -12,11 +11,10 @@ add_library(aveva-rocksdb-plugin-azure-impl
     LoggerImpl.cpp
     LogRateLimiter.cpp
     LockFileImpl.cpp
-    LeaseRenewalLoop.cpp
     BlobAttributes.cpp
     DirectoryImpl.cpp
-    AzureContainerClient.cpp
     ClientRuntime.cpp
+    PluginClients.cpp
     TokenCredentials.cpp
     Environment.cpp
 )
@@ -47,6 +45,7 @@ target_sources(aveva-rocksdb-plugin-azure-impl
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/DirectoryImpl.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/AzureContainerClient.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/TokenCredentials.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/Environment.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"

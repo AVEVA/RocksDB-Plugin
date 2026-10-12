@@ -3,19 +3,24 @@
 
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
-#include <boost/asio/any_io_executor.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/log/sources/severity_logger.hpp>
 #include <boost/log/trivial.hpp>
 
 #include <chrono>
+#include <concepts>
 #include <condition_variable>
 #include <cstddef>
 #include <exception>
-#include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
@@ -29,53 +34,228 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 ///
 /// While armed, the timer keeps io_context::run() from returning, so the owner must call Stop() (or destroy the
 /// loop's owner, which should) before expecting run() to drain.
+///
+/// The snapshot and fatal callables are template parameters rather than erased functions: the loop is created once
+/// per filesystem, so there is a single instantiation per owner.
 /// </summary>
-class LeaseRenewalLoop : public std::enable_shared_from_this<LeaseRenewalLoop> {
+template <std::invocable TSnapshot, std::invocable TOnFatal>
+    requires std::convertible_to<std::invoke_result_t<TSnapshot&>, std::vector<std::shared_ptr<LockFileImpl>>>
+class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRenewalLoop<TSnapshot, TOnFatal>> {
   public:
     using Logger = boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>;
-    using Snapshot = std::function<std::vector<std::shared_ptr<LockFileImpl>>()>;
 
     /// <summary>
     /// Creates the loop and arms the first wake-up. `snapshot` and `onFatal` are only invoked while the loop is
     /// running, never after Stop() returns; they run with the loop's internal mutex held and so must not block or
     /// call back into the loop.
     /// </summary>
-    static std::shared_ptr<LeaseRenewalLoop>
-    Start(boost::asio::any_io_executor executor, std::shared_ptr<Logger> logger, Snapshot snapshot,
-          std::function<void()> onFatal, std::chrono::milliseconds interval,
-          std::chrono::milliseconds retryDelay = std::chrono::milliseconds(100), size_t maxAttempts = 5);
+    static std::shared_ptr<BasicLeaseRenewalLoop>
+    Start(boost::asio::io_context::executor_type executor, std::shared_ptr<Logger> logger, TSnapshot snapshot,
+          TOnFatal onFatal, std::chrono::milliseconds interval,
+          std::chrono::milliseconds retryDelay = std::chrono::milliseconds(100), size_t maxAttempts = 5) {
+        std::shared_ptr<BasicLeaseRenewalLoop> loop(new BasicLeaseRenewalLoop(std::move(executor), std::move(logger),
+                                                                              std::move(snapshot), std::move(onFatal),
+                                                                              interval, retryDelay, maxAttempts));
+        BOOST_LOG_SEV(*loop->m_logger, boost::log::trivial::info) << "Starting blob lease renewal";
+        std::scoped_lock lock(loop->m_mutex);
+        loop->ScheduleWakeUp(interval);
+        return loop;
+    }
 
-    ~LeaseRenewalLoop() = default;
-    LeaseRenewalLoop(const LeaseRenewalLoop&) = delete;
-    LeaseRenewalLoop& operator=(const LeaseRenewalLoop&) = delete;
+    ~BasicLeaseRenewalLoop() = default;
+    BasicLeaseRenewalLoop(const BasicLeaseRenewalLoop&) = delete;
+    BasicLeaseRenewalLoop& operator=(const BasicLeaseRenewalLoop&) = delete;
 
     /// <summary>
     /// Cancels the timer and waits for a renewal round that is already on the wire; idempotent. Rounds finish on
     /// the io_context, so it must still be running unless no round is in flight. Must not be called from a thread
     /// running the executor.
     /// </summary>
-    void Stop();
+    void Stop() {
+        std::unique_lock lock(m_mutex);
+        const bool wasStopped = std::exchange(m_stopped, true);
+        m_timer.cancel();
+        // Acquiring the mutex above also waited out any wake-up that was already running, so no new round can start.
+        while (!m_roundsIdle.wait_for(lock, StopWarningInterval, [this] { return m_activeRounds == 0; })) {
+            BOOST_LOG_SEV(*m_logger, boost::log::trivial::warning)
+                << "Still waiting for " << m_activeRounds
+                << " lease renewal(s); the io_context must keep running until the filesystem is destroyed";
+        }
+        if (!wasStopped) {
+            BOOST_LOG_SEV(*m_logger, boost::log::trivial::info) << "Exiting blob lease renewal";
+        }
+    }
 
-    [[nodiscard]] bool IsStopped() const;
+    [[nodiscard]] bool IsStopped() const {
+        std::scoped_lock lock(m_mutex);
+        return m_stopped;
+    }
 
   private:
-    struct Round;
+    static constexpr auto StopWarningInterval = std::chrono::seconds(5);
 
-    LeaseRenewalLoop(boost::asio::any_io_executor executor, std::shared_ptr<Logger> logger, Snapshot snapshot,
-                     std::function<void()> onFatal, std::chrono::milliseconds interval,
-                     std::chrono::milliseconds retryDelay, size_t maxAttempts);
+    struct Round {
+        std::mutex Mutex;
+        std::vector<std::shared_ptr<LockFileImpl>> Locks;
+        std::vector<std::exception_ptr> Errors;
+        size_t Pending = 0;
+        size_t Attempt = 0;
+    };
+
+    // What the timer does when it fires: a regular wake-up (no state) or a retry of the leases that failed.
+    struct Retry {
+        std::vector<std::shared_ptr<LockFileImpl>> Locks;
+        size_t Attempt = 0;
+    };
+
+    BasicLeaseRenewalLoop(boost::asio::io_context::executor_type executor, std::shared_ptr<Logger> logger,
+                          TSnapshot snapshot, TOnFatal onFatal, const std::chrono::milliseconds interval,
+                          const std::chrono::milliseconds retryDelay, const size_t maxAttempts)
+        : m_executor(executor), m_logger(std::move(logger)), m_snapshot(std::move(snapshot)),
+          m_onFatal(std::move(onFatal)), m_interval(interval), m_retryDelay(retryDelay), m_maxAttempts(maxAttempts),
+          m_timer(std::move(executor)) {}
 
     // All of the following require m_mutex.
-    void ArmTimer(std::chrono::milliseconds delay, std::function<void()> action);
-    void ScheduleWakeUp(std::chrono::milliseconds delay);
-    void BeginRound(std::vector<std::shared_ptr<LockFileImpl>> locks, size_t attempt);
-    void OnRoundDone(const std::shared_ptr<Round>& round);
-    void Fail(const std::string& reason);
 
-    boost::asio::any_io_executor m_executor;
+    // Every wake-up re-checks m_stopped under the mutex, so a cancelled or already-queued timer completion can never
+    // start a round once Stop() has run. The action is performed with the mutex held.
+    void ArmTimer(const std::chrono::milliseconds delay, std::optional<Retry> retry) {
+        if (m_stopped) {
+            return;
+        }
+        m_timer.expires_after(delay);
+        m_timer.async_wait(
+            [self = this->shared_from_this(), retry = std::move(retry)](const boost::system::error_code& ec) mutable {
+                std::scoped_lock lock(self->m_mutex);
+                if (ec || self->m_stopped) {
+                    return;
+                }
+                try {
+                    if (retry) {
+                        self->BeginRound(std::move(retry->Locks), retry->Attempt);
+                    } else {
+                        auto locks = self->m_snapshot();
+                        BOOST_LOG_SEV(*self->m_logger, boost::log::trivial::debug)
+                            << "Attempting to renew " << locks.size() << " leases";
+                        self->BeginRound(std::move(locks), 0);
+                    }
+                } catch (const std::exception& e) {
+                    self->Fail(e.what());
+                } catch (...) {
+                    self->Fail("unknown error");
+                }
+            });
+    }
+
+    // Sleeps for `delay`, then snapshots the current leases and renews them as a fresh round.
+    void ScheduleWakeUp(const std::chrono::milliseconds delay) { ArmTimer(delay, std::nullopt); }
+
+    void BeginRound(std::vector<std::shared_ptr<LockFileImpl>> locks, const size_t attempt) {
+        if (locks.empty()) {
+            ScheduleWakeUp(m_interval);
+            return;
+        }
+
+        auto round = std::make_shared<Round>();
+        round->Locks = std::move(locks);
+        round->Errors.resize(round->Locks.size());
+        round->Pending = round->Locks.size();
+        round->Attempt = attempt;
+        ++m_activeRounds;
+
+        // RenewAsync may complete inline (e.g. the lease is not held), possibly while this thread holds m_mutex, so
+        // the completion only touches the round's own mutex and hands the rest to the executor.
+        for (size_t i = 0; i < round->Locks.size(); ++i) {
+            round->Locks[i]->RenewAsync([self = this->shared_from_this(), round, i](std::exception_ptr error, bool) {
+                bool last = false;
+                {
+                    std::scoped_lock guard(round->Mutex);
+                    round->Errors[i] = std::move(error);
+                    last = --round->Pending == 0;
+                }
+                if (last) {
+                    boost::asio::post(self->m_executor, [self, round] {
+                        std::scoped_lock lock(self->m_mutex);
+                        self->OnRoundDone(round);
+                    });
+                }
+            });
+        }
+    }
+
+    // Classifies a finished round and schedules what comes next: retry the failed leases, fail, or sleep until the
+    // next interval.
+    void OnRoundDone(const std::shared_ptr<Round>& round) {
+        const auto finish = [this] {
+            --m_activeRounds;
+            m_roundsIdle.notify_all();
+        };
+        if (m_stopped) {
+            finish();
+            return;
+        }
+
+        std::vector<std::shared_ptr<LockFileImpl>> stillPending;
+        std::string fatal;
+        for (size_t i = 0; i < round->Locks.size() && fatal.empty(); ++i) {
+            if (!round->Errors[i]) {
+                continue;
+            }
+            try {
+                std::rethrow_exception(round->Errors[i]);
+            } catch (const RequestFailedException& e) {
+                if (e.StatusCode == HttpStatus::Conflict) {
+                    BOOST_LOG_SEV(*m_logger, boost::log::trivial::error)
+                        << "Failed to renew lease due to conflict, lease might be expired: " << e.what();
+                    fatal = e.what();
+                } else {
+                    BOOST_LOG_SEV(*m_logger, boost::log::trivial::error) << "Failed to renew lease: " << e.what();
+                    stillPending.push_back(round->Locks[i]);
+                }
+            } catch (const std::exception& e) {
+                fatal = e.what();
+            } catch (...) {
+                fatal = "unknown error";
+            }
+        }
+
+        if (!fatal.empty()) {
+            finish();
+            Fail(fatal);
+            return;
+        }
+
+        const size_t nextAttempt = round->Attempt + 1;
+        if (!stillPending.empty() && nextAttempt < m_maxAttempts) {
+            finish();
+            ArmTimer(m_retryDelay, Retry{std::move(stillPending), nextAttempt});
+            return;
+        }
+
+        // A lease that could not be renewed in time may already be held by someone else; stop before writing on its
+        // behalf rather than waiting for the service to reject us.
+        for (const auto& lock : stillPending) {
+            if (lock->IsRenewalOverdue()) {
+                finish();
+                Fail("Lease renewal did not succeed before the lease expired");
+                return;
+            }
+        }
+
+        finish();
+        ScheduleWakeUp(m_interval);
+    }
+
+    void Fail(const std::string& reason) {
+        BOOST_LOG_SEV(*m_logger, boost::log::trivial::fatal) << "Stopping lease renewal: " << reason;
+        m_stopped = true;
+        m_onFatal();
+    }
+
+    boost::asio::io_context::executor_type m_executor;
     std::shared_ptr<Logger> m_logger;
-    Snapshot m_snapshot;
-    std::function<void()> m_onFatal;
+    TSnapshot m_snapshot;
+    TOnFatal m_onFatal;
     std::chrono::milliseconds m_interval;
     std::chrono::milliseconds m_retryDelay;
     size_t m_maxAttempts;

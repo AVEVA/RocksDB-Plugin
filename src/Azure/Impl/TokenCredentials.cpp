@@ -97,7 +97,7 @@ std::error_code InvalidResponse() {
 }
 
 void CompleteOnExecutor(::AVEVA::HttpClient& httpClient,
-                        AzureClient::ITokenCredential::GetTokenCompletionHandler completion, std::error_code error,
+                        std::move_only_function<AzureClient::TokenSignature> completion, std::error_code error,
                         AzureClient::AccessToken token = {}) {
     boost::asio::post(httpClient.get_executor(),
                       [completion = std::move(completion), error, token = std::move(token)]() mutable {
@@ -202,60 +202,6 @@ std::expected<AzureClient::AccessToken, std::error_code> ParseAccessToken(std::e
 }
 } // namespace
 
-ChainedTokenCredential::ChainedTokenCredential(std::vector<std::shared_ptr<AzureClient::ITokenCredential>> sources)
-    : m_sources(std::move(sources)) {
-    std::erase(m_sources, nullptr);
-}
-
-void ChainedTokenCredential::GetTokenAsync(std::vector<std::string> scopes, GetTokenCompletionHandler completion) {
-    TryGetToken(0, std::move(scopes), std::move(completion), AuthenticationFailed());
-}
-
-void ChainedTokenCredential::TryGetToken(std::size_t index, std::vector<std::string> scopes,
-                                         GetTokenCompletionHandler completion, std::error_code lastError) {
-    if (index >= m_sources.size()) {
-        completion(lastError, AzureClient::AccessToken{});
-        return;
-    }
-
-    auto source = m_sources[index];
-    auto scopesCopy = scopes;
-    source->GetTokenAsync(std::move(scopesCopy), [self = shared_from_this(), index, scopes = std::move(scopes),
-                                                  completion = std::move(completion)](
-                                                     std::error_code error, AzureClient::AccessToken token) mutable {
-        if (!error) {
-            completion(error, std::move(token));
-            return;
-        }
-
-        // Only the last failure is surfaced to the caller; earlier ones are routine when probing sources.
-        if (index + 1 < self->m_sources.size()) {
-            BOOST_LOG_TRIVIAL(debug) << "Token credential source #" << index << " failed: " << error.message()
-                                     << "; trying next source";
-        } else {
-            BOOST_LOG_TRIVIAL(warning) << "Token credential source #" << index << " failed: " << error.message()
-                                       << "; no more sources";
-        }
-        self->TryGetToken(index + 1, std::move(scopes), std::move(completion), error);
-    });
-}
-
-RuntimeBoundCredential::RuntimeBoundCredential(std::shared_ptr<ClientRuntime> runtime,
-                                               std::shared_ptr<AzureClient::ITokenCredential> inner)
-    : m_runtime(std::move(runtime)), m_inner(std::move(inner)) {}
-
-void RuntimeBoundCredential::GetTokenAsync(std::vector<std::string> scopes, GetTokenCompletionHandler completion) {
-    m_inner->GetTokenAsync(
-        std::move(scopes), [runtime = m_runtime, inner = m_inner, completion = std::move(completion)](
-                               std::error_code error, AzureClient::AccessToken token) mutable {
-            completion(error, std::move(token));
-            auto executor = runtime->HttpClient().get_executor();
-            // Keeps the runtime and inner credential alive until the completion above has returned, then releases
-            // them from a fresh executor task rather than from inside the token completion's own stack.
-            boost::asio::post(executor, [runtime = std::move(runtime), inner = std::move(inner)]() {});
-        });
-}
-
 AzurePipelinesCredential::AzurePipelinesCredential(::AVEVA::HttpClient& httpClient,
                                                    AzurePipelinesCredentialOptions options)
     : m_httpClient(&httpClient), m_options(std::move(options)) {
@@ -264,7 +210,7 @@ AzurePipelinesCredential::AzurePipelinesCredential(::AVEVA::HttpClient& httpClie
     }
 }
 
-void AzurePipelinesCredential::GetTokenAsync(std::vector<std::string> scopes, GetTokenCompletionHandler completion) {
+void AzurePipelinesCredential::Begin(std::vector<std::string> scopes, TokenCompletion completion) {
     if (m_options.OidcRequestUri.empty() || m_options.TenantId.empty() || m_options.ClientId.empty() ||
         m_options.ServiceConnectionId.empty() || m_options.SystemAccessToken.empty()) {
         CompleteOnExecutor(*m_httpClient, std::move(completion), std::make_error_code(std::errc::invalid_argument));
@@ -306,7 +252,7 @@ void AzurePipelinesCredential::GetTokenAsync(std::vector<std::string> scopes, Ge
 }
 
 void AzurePipelinesCredential::ExchangeOidcToken(const std::string& oidcToken, const std::vector<std::string>& scopes,
-                                                 GetTokenCompletionHandler completion) {
+                                                 TokenCompletion completion) {
     std::string scope;
     for (const auto& s : scopes) {
         scope += scope.empty() ? "" : " ";

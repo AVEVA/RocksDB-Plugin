@@ -2,22 +2,20 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/AzureClient/BlobClientOptions.hpp"
-#include "BlobRequestHelpers.hpp"
 #include "TestFixtures.hpp"
+#include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 
 #include <gtest/gtest.h>
 
 #include <string>
 
-namespace
-{
-    using AVEVA::AzureClient::BlobClientOptions;
-    using AVEVA::AzureClient::Private::BuildBlobUrl;
-    using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
+namespace {
+using AVEVA::AzureClient::BlobClientOptions;
+using AVEVA::AzureClient::Private::BuildBlobUrl;
+using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 } // namespace
 
-TEST(T07_ValidateEndpointTests, PathStyleServiceEndpoint_AppendsAccountPath)
-{
+TEST(T07_ValidateEndpointTests, PathStyleServiceEndpoint_AppendsAccountPath) {
     BlobClientOptions opts = MakeBlobClientOptions();
     opts.ServiceEndpoint = "http://127.0.0.1:10000/devstoreaccount1"; // Azurite-style
     opts.ContainerName = "mycontainer";

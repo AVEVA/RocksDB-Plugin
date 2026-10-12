@@ -7,9 +7,9 @@
 #include "AVEVA/AzureClient/BlobStorageError.hpp"
 #include "AVEVA/AzureClient/BlobStorageErrorCode.hpp"
 #include "AVEVA/AzureClient/HttpClientLike.hpp"
-#include "AVEVA/AzureClient/ITokenCredential.hpp"
-#include "BlobRequestHelpers.hpp"
-#include "ProtocolConstants.hpp"
+#include "AVEVA/AzureClient/TokenCredential.hpp"
+#include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
+#include <AVEVA/AzureClient/Detail/ProtocolConstants.hpp>
 
 #include <AVEVA/HttpClient/HttpClientError.hpp>
 
@@ -63,13 +63,14 @@ inline constexpr int MaxBackoffExponent = RetryPolicyConstants::MaxBackoffExpone
     return std::make_error_code(std::errc::operation_canceled);
 }
 
-template <HttpClientLike THttp>
-class RetryOperation final : public std::enable_shared_from_this<RetryOperation<THttp>> {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+class RetryOperation final : public std::enable_shared_from_this<RetryOperation<THttp, TCred>> {
   public:
-    RetryOperation(THttp& httpClient, RequestAuth auth, RetryOptions retry, HttpRequest request,
-                   HttpCompletion completion, HttpRequestOptions requestOptions, bool retryNotFoundAndGone)
-        : m_httpClient(httpClient), m_auth(std::move(auth)), m_retry(retry), m_request(std::move(request)),
-          m_completion(std::move(completion)), m_requestOptions(requestOptions),
+    RetryOperation(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
+                   HttpRequest request, HttpCompletion completion, HttpRequestOptions requestOptions,
+                   bool retryNotFoundAndGone)
+        : m_httpClient(httpClient), m_auth(std::move(auth)), m_credential(std::move(credential)), m_retry(retry),
+          m_request(std::move(request)), m_completion(std::move(completion)), m_requestOptions(requestOptions),
           m_retryNotFoundAndGone(retryNotFoundAndGone), m_parentSlot(m_requestOptions.GetCancellationSlot()),
           m_timer(httpClient.get_executor()),
           m_maxAttempts(retry.MaxRetries >= std::numeric_limits<int>::max() - 1 ? std::numeric_limits<int>::max()
@@ -138,7 +139,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         m_timer.cancel();
         m_attemptSignal.emit(type);
 
-        // ITokenCredential has no cancellation hook, so don't wait for a slow credential:
+        // Token credentials have no cancellation hook, so don't wait for a slow credential:
         // complete now and ignore the token when it eventually arrives.
         if (m_awaitingToken.load(std::memory_order_acquire)) {
             PostFinish(CanceledError());
@@ -203,6 +204,11 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
             RequestToken(std::move(attempt));
             return;
 
+        case RequestAuth::Kind::Bearer:
+            attempt.AddHeader(HttpHeader{std::string{AuthorizationHeaderName}, "Bearer " + m_auth.BearerToken});
+            Send(std::move(attempt));
+            return;
+
         case RequestAuth::Kind::None:
             break;
         }
@@ -213,20 +219,21 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     void RequestToken(HttpRequest attempt) {
         auto self = this->shared_from_this();
         m_awaitingToken.store(true, std::memory_order_release);
-        m_auth.TokenCredential->GetTokenForScopesAsync(
-            m_auth.TokenScopes, [self, attempt = std::move(attempt)](std::error_code error, AccessToken token) mutable {
-                auto proceed = [self, error, token = std::move(token), attempt = std::move(attempt)]() mutable {
-                    self->OnToken(error, std::move(token), std::move(attempt));
-                };
+        GetTokenForScopes(*m_credential, m_auth.TokenScopes,
+                          [self, attempt = std::move(attempt)](std::error_code error, AccessToken token) mutable {
+                              auto proceed = [self, error, token = std::move(token),
+                                              attempt = std::move(attempt)]() mutable {
+                                  self->OnToken(error, std::move(token), std::move(attempt));
+                              };
 
-                // Never complete inside the caller's initiating function, even if the
-                // credential answered synchronously.
-                if (self->m_initiating.load(std::memory_order_acquire)) {
-                    boost::asio::post(self->m_httpClient.get_executor(), std::move(proceed));
-                } else {
-                    proceed();
-                }
-            });
+                              // Never complete inside the caller's initiating function, even if the
+                              // credential answered synchronously.
+                              if (self->m_initiating.load(std::memory_order_acquire)) {
+                                  boost::asio::post(self->m_httpClient.get_executor(), std::move(proceed));
+                              } else {
+                                  proceed();
+                              }
+                          });
     }
 
     void OnToken(std::error_code error, AccessToken token, HttpRequest attempt) {
@@ -345,6 +352,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
 
     THttp& m_httpClient;
     RequestAuth m_auth;
+    std::shared_ptr<TCred> m_credential;
     RetryOptions m_retry;
     HttpRequest m_request;
     std::shared_ptr<const std::string> m_sharedBody;
@@ -366,18 +374,19 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
 };
 } // namespace RetryDetail
 
-template <HttpClientLike THttp>
-void SendWithRetryAsync(THttp& httpClient, RequestAuth auth, RetryOptions retry, HttpRequest request,
-                        HttpCompletion completion, HttpRequestOptions requestOptions, bool retryNotFoundAndGone) {
-    auto operation = std::make_shared<RetryDetail::RetryOperation<THttp>>(httpClient, std::move(auth), retry,
-                                                                          std::move(request), std::move(completion),
-                                                                          requestOptions, retryNotFoundAndGone);
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+void SendWithRetryAsync(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
+                        HttpRequest request, HttpCompletion completion, HttpRequestOptions requestOptions,
+                        bool retryNotFoundAndGone) {
+    auto operation = std::make_shared<RetryDetail::RetryOperation<THttp, TCred>>(
+        httpClient, std::move(auth), std::move(credential), retry, std::move(request), std::move(completion),
+        requestOptions, retryNotFoundAndGone);
     operation->Start();
 }
 
-template <HttpClientLike THttp>
-void SendAuthorizedRequestAsync(THttp& httpClient, const ConnectionState& connection, HttpRequest request,
-                                HttpCompletion completion, HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+void SendAuthorizedRequestAsync(THttp& httpClient, const ConnectionState& connection, std::shared_ptr<TCred> credential,
+                                HttpRequest request, HttpCompletion completion, HttpRequestOptions requestOptions) {
     // Checked here rather than per operation so every request carrying metadata, including the
     // internal commits issued by multi-part uploads, is rejected before reaching the service.
     for (const HttpHeader& header : request.GetHeaders()) {
@@ -393,7 +402,8 @@ void SendAuthorizedRequestAsync(THttp& httpClient, const ConnectionState& connec
             return;
         }
     }
-    SendWithRetryAsync(httpClient, MakeRequestAuth(connection), connection.Retry, std::move(request),
-                       std::move(completion), requestOptions, false);
+    const bool hasCredential = credential != nullptr;
+    SendWithRetryAsync(httpClient, MakeRequestAuth(connection, hasCredential), std::move(credential), connection.Retry,
+                       std::move(request), std::move(completion), requestOptions, false);
 }
 } // namespace AVEVA::AzureClient::Private

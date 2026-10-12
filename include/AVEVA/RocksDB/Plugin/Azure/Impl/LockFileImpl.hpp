@@ -3,7 +3,7 @@
 
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
-#include <AVEVA/AzureClient/PageBlobClient.hpp>
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 #include <atomic>
 #include <boost/intrusive/list.hpp>
 #include <boost/log/trivial.hpp>
@@ -18,7 +18,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 class LockFileImpl
     : public boost::intrusive::list_base_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>> {
     std::shared_ptr<ClientRuntime> m_runtime;
-    std::unique_ptr<AzureClient::PageBlobClient> m_file;
+    std::unique_ptr<Impl::PageBlobClient> m_file;
     std::optional<std::string> m_leaseId;
     // Read by the renewal thread while Lock/Renew block on the network, hence atomic.
     mutable std::atomic<std::chrono::steady_clock::time_point> m_lastRenewalTime;
@@ -37,7 +37,7 @@ class LockFileImpl
     [[nodiscard]] std::chrono::steady_clock::duration RenewalBudget() const;
 
   public:
-    LockFileImpl(std::shared_ptr<ClientRuntime> runtime, std::unique_ptr<AzureClient::PageBlobClient> file,
+    LockFileImpl(std::shared_ptr<ClientRuntime> runtime, std::unique_ptr<Impl::PageBlobClient> file,
                  std::chrono::seconds leaseLength,
                  std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
                  std::string fileName);

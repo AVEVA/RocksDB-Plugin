@@ -4,9 +4,7 @@
 #pragma once
 
 #include <AVEVA/AzureClient/BlobClientOptions.hpp>
-#include <AVEVA/AzureClient/BlobContainerClient.hpp>
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
-#include <AVEVA/AzureClient/BlobServiceClient.hpp>
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 #include <AVEVA/AzureClient/Detail/AsyncInitiation.hpp>
@@ -131,7 +129,7 @@ struct ConnectionState {
     std::string ServiceEndpoint;
     std::string SasToken; // without a leading '?'
     std::string ApiVersion;
-    std::shared_ptr<ITokenCredential> TokenCredential;           // BearerToken is folded in here
+    std::string BearerToken;                                     // static token sent as "Authorization: Bearer"
     std::shared_ptr<const std::vector<std::string>> TokenScopes; // shared with every request's RequestAuth
     std::shared_ptr<const SharedKeySigner> Signer;               // set iff Shared Key authorization is used
 
@@ -157,15 +155,73 @@ struct BlobTarget {
 };
 
 // Normalise and validate client options (throw std::invalid_argument on invalid settings).
-[[nodiscard]] std::shared_ptr<const ConnectionState> MakeConnectionState(BlobServiceClientOptions options);
-[[nodiscard]] std::shared_ptr<const ConnectionState> MakeConnectionState(BlobContainerClientOptions options);
-[[nodiscard]] std::shared_ptr<const ConnectionState> MakeConnectionState(BlobClientOptions options);
+// `hasTokenCredential` tells the validation that the client was also given a token credential (which lives in the
+// client targets, not in the connection), so the "at most one credential type" rule covers it.
+[[nodiscard]] std::shared_ptr<const ConnectionState> MakeConnectionState(BlobServiceClientOptions options,
+                                                                         bool hasTokenCredential = false);
+[[nodiscard]] std::shared_ptr<const ConnectionState> MakeConnectionState(BlobContainerClientOptions options,
+                                                                         bool hasTokenCredential = false);
+[[nodiscard]] std::shared_ptr<const ConnectionState> MakeConnectionState(BlobClientOptions options,
+                                                                         bool hasTokenCredential = false);
 [[nodiscard]] ContainerTarget MakeContainerTarget(std::shared_ptr<const ConnectionState> connection,
                                                   std::string containerName);
 [[nodiscard]] BlobTarget MakeBlobTarget(std::shared_ptr<const ConnectionState> connection, std::string containerName,
                                         std::string blobName);
-[[nodiscard]] ContainerTarget MakeContainerTarget(const BlobContainerClientOptions& options);
-[[nodiscard]] BlobTarget MakeBlobTarget(const BlobClientOptions& options);
+[[nodiscard]] ContainerTarget MakeContainerTarget(const BlobContainerClientOptions& options,
+                                                  bool hasTokenCredential = false);
+[[nodiscard]] BlobTarget MakeBlobTarget(const BlobClientOptions& options, bool hasTokenCredential = false);
+
+// The credential the clients actually authorize with: the caller's credential wrapped in a token cache (so
+// identity-provider credentials do not fetch a token per request), or null when none was given.
+template <TokenCredentialLike TCred>
+[[nodiscard]] std::shared_ptr<CachedTokenCredential<TCred>> MakeCachedCredential(std::shared_ptr<TCred> credential) {
+    if (!credential) {
+        return nullptr;
+    }
+    if constexpr (IsCachingTokenCredential<TCred>::value) {
+        return credential;
+    } else {
+        return CachingTokenCredential<TCred>::Create(std::move(credential));
+    }
+}
+
+// The targets carry the (cached) credential, so every request path sees the concrete credential type.
+template <class TCred> struct BasicContainerTarget : ContainerTarget {
+    std::shared_ptr<CachedTokenCredential<TCred>> Credential;
+};
+
+template <class TCred> struct BasicBlobTarget : BlobTarget {
+    std::shared_ptr<CachedTokenCredential<TCred>> Credential;
+};
+
+template <TokenCredentialLike TCred>
+[[nodiscard]] BasicContainerTarget<TCred> MakeContainerTarget(std::shared_ptr<const ConnectionState> connection,
+                                                              std::shared_ptr<CachedTokenCredential<TCred>> credential,
+                                                              std::string containerName) {
+    return {MakeContainerTarget(std::move(connection), std::move(containerName)), std::move(credential)};
+}
+
+template <TokenCredentialLike TCred>
+[[nodiscard]] BasicBlobTarget<TCred> MakeBlobTarget(std::shared_ptr<const ConnectionState> connection,
+                                                    std::shared_ptr<CachedTokenCredential<TCred>> credential,
+                                                    std::string containerName, std::string blobName) {
+    return {MakeBlobTarget(std::move(connection), std::move(containerName), std::move(blobName)),
+            std::move(credential)};
+}
+
+template <TokenCredentialLike TCred>
+[[nodiscard]] BasicContainerTarget<TCred> MakeContainerTarget(const BlobContainerClientOptions& options,
+                                                              std::shared_ptr<TCred> credential) {
+    const bool hasCredential = credential != nullptr;
+    return {MakeContainerTarget(options, hasCredential), MakeCachedCredential(std::move(credential))};
+}
+
+template <TokenCredentialLike TCred>
+[[nodiscard]] BasicBlobTarget<TCred> MakeBlobTarget(const BlobClientOptions& options,
+                                                    std::shared_ptr<TCred> credential) {
+    const bool hasCredential = credential != nullptr;
+    return {MakeBlobTarget(options, hasCredential), MakeCachedCredential(std::move(credential))};
+}
 
 inline constexpr std::string_view XMsVersionHeaderName = "x-ms-version";
 inline constexpr std::string_view XMsDateHeaderName = "x-ms-date";
@@ -425,15 +481,16 @@ template <class T>
 // Authorization material captured (by value) for the lifetime of a single logical request,
 // including all of its retry attempts. Precedence: SAS (in URL) > SharedKey > TokenCredential.
 struct RequestAuth {
-    enum class Kind : std::uint8_t { None, SharedKey, Token };
+    enum class Kind : std::uint8_t { None, SharedKey, Token, Bearer };
 
     Kind Type = Kind::None;
     std::shared_ptr<const SharedKeySigner> Signer;
-    std::shared_ptr<ITokenCredential> TokenCredential;
+    std::string BearerToken;
     std::shared_ptr<const std::vector<std::string>> TokenScopes;
 };
 
-[[nodiscard]] RequestAuth MakeRequestAuth(const ConnectionState& connection);
+// `hasTokenCredential` selects Kind::Token when no SAS, Shared Key or static bearer token applies.
+[[nodiscard]] RequestAuth MakeRequestAuth(const ConnectionState& connection, bool hasTokenCredential);
 
 // True for HTTP statuses and transport errors that Azure Storage documents as transient.
 [[nodiscard]] bool IsRetriableTransportError(std::error_code error) noexcept;
@@ -453,34 +510,29 @@ using HttpCompletion = std::move_only_function<void(std::error_code, HttpRespons
 // the in-flight attempt or the pending backoff, completing with std::errc::operation_canceled.
 // `retryNotFoundAndGone` additionally retries HTTP 404/410 (managed identity endpoints answer these while
 // starting). Defined in RequestPipeline.hpp.
-template <HttpClientLike THttp>
-void SendWithRetryAsync(THttp& httpClient, RequestAuth auth, RetryOptions retry, HttpRequest request,
-                        HttpCompletion completion, HttpRequestOptions requestOptions,
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+void SendWithRetryAsync(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
+                        HttpRequest request, HttpCompletion completion, HttpRequestOptions requestOptions,
                         bool retryNotFoundAndGone = false);
 
 // Defined in RequestPipeline.hpp.
-template <HttpClientLike THttp>
-void SendAuthorizedRequestAsync(THttp& httpClient, const ConnectionState& connection, HttpRequest request,
-                                HttpCompletion completion, HttpRequestOptions requestOptions);
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+void SendAuthorizedRequestAsync(THttp& httpClient, const ConnectionState& connection, std::shared_ptr<TCred> credential,
+                                HttpRequest request, HttpCompletion completion, HttpRequestOptions requestOptions);
 
-template <HttpClientLike THttp>
-void SendAuthorizedRequestAsync(THttp& httpClient, const ContainerTarget& target, HttpRequest request,
+template <HttpClientLike THttp, class TCred>
+void SendAuthorizedRequestAsync(THttp& httpClient, const BasicContainerTarget<TCred>& target, HttpRequest request,
                                 HttpCompletion completion, HttpRequestOptions requestOptions) {
-    SendAuthorizedRequestAsync(httpClient, *target.Connection, std::move(request), std::move(completion),
-                               requestOptions);
+    SendAuthorizedRequestAsync(httpClient, *target.Connection, target.Credential, std::move(request),
+                               std::move(completion), requestOptions);
 }
 
-template <HttpClientLike THttp>
-void SendAuthorizedRequestAsync(THttp& httpClient, const BlobTarget& target, HttpRequest request,
+template <HttpClientLike THttp, class TCred>
+void SendAuthorizedRequestAsync(THttp& httpClient, const BasicBlobTarget<TCred>& target, HttpRequest request,
                                 HttpCompletion completion, HttpRequestOptions requestOptions) {
-    SendAuthorizedRequestAsync(httpClient, *target.Connection, std::move(request), std::move(completion),
-                               requestOptions);
+    SendAuthorizedRequestAsync(httpClient, *target.Connection, target.Credential, std::move(request),
+                               std::move(completion), requestOptions);
 }
-
-using DownloadCompletion =
-    std::move_only_function<void(std::expected<Response<Models::DownloadBlobResult>, BlobStorageError>)>;
-using DownloadToCompletion =
-    std::move_only_function<void(std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>)>;
 
 // Maps the single-request download options onto the chunked engine's options (default chunk
 // size and concurrency).
@@ -492,27 +544,28 @@ using DownloadToCompletion =
 // remaining bytes are fetched in ChunkSize ranges, up to Concurrency at a time, with
 // If-Match: <first ETag> unless the caller supplied If-Match, and written in order. On failure or
 // cancellation the in-flight requests are cancelled and drained before the single completion.
-template <HttpClientLike THttp>
-void DownloadBlobAsync(THttp& httpClient, const BlobTarget& options, DownloadBlobOptions operationOptions,
-                       DownloadCompletion completion, HttpRequestOptions requestOptions);
-template <HttpClientLike THttp>
-void DownloadBlobToAsync(THttp& httpClient, const BlobTarget& options, DownloadToOptions operationOptions,
-                         std::ostream& stream, DownloadToCompletion completion, HttpRequestOptions requestOptions);
+template <HttpClientLike THttp, class TCred, class TCompletion>
+void DownloadBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, DownloadBlobOptions operationOptions,
+                       TCompletion completion, HttpRequestOptions requestOptions);
+template <HttpClientLike THttp, class TCred, class TCompletion>
+void DownloadBlobToAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, DownloadToOptions operationOptions,
+                         std::ostream& stream, TCompletion completion, HttpRequestOptions requestOptions);
 // Writes straight into `destination`, which must stay valid until the completion runs. A range larger than
 // the buffer fails the download; a shorter blob leaves the tail untouched (see BytesWritten).
-template <HttpClientLike THttp>
-void DownloadBlobToSpanAsync(THttp& httpClient, const BlobTarget& options, DownloadToOptions operationOptions,
-                             std::span<char> destination, DownloadToCompletion completion,
+template <HttpClientLike THttp, class TCred, class TCompletion>
+void DownloadBlobToSpanAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
+                             DownloadToOptions operationOptions, std::span<char> destination, TCompletion completion,
                              HttpRequestOptions requestOptions);
 // Downloads into `<path>.partial-<id>` and renames it over `path` only on success.
-template <HttpClientLike THttp>
-void DownloadBlobToFileAsync(THttp& httpClient, const BlobTarget& options, DownloadToOptions operationOptions,
-                             const std::filesystem::path& path, DownloadToCompletion completion,
-                             HttpRequestOptions requestOptions);
+template <HttpClientLike THttp, class TCred, class TCompletion>
+void DownloadBlobToFileAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
+                             DownloadToOptions operationOptions, const std::filesystem::path& path,
+                             TCompletion completion, HttpRequestOptions requestOptions);
 
-template <HttpClientLike THttp, class TCompletion>
-void DeleteBlobAsync(THttp& httpClient, const BlobTarget& options, const DeleteBlobOptions& operationOptions,
-                     TCompletion&& completion, HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, class TCred, class TCompletion>
+void DeleteBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
+                     const DeleteBlobOptions& operationOptions, TCompletion&& completion,
+                     HttpRequestOptions requestOptions) {
     HttpRequest request = BuildBlobRequest(options, HttpMethod::Delete);
     ApplyBlobRequestConditions(request, operationOptions.Conditions);
 
@@ -525,8 +578,8 @@ void DeleteBlobAsync(THttp& httpClient, const BlobTarget& options, const DeleteB
         std::move(requestOptions));
 }
 
-template <HttpClientLike THttp, class TCompletion>
-void GetBlobPropertiesAsync(THttp& httpClient, const BlobTarget& options,
+template <HttpClientLike THttp, class TCred, class TCompletion>
+void GetBlobPropertiesAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
                             const GetBlobPropertiesOptions& operationOptions, TCompletion&& completion,
                             HttpRequestOptions requestOptions) {
     HttpRequest request = BuildBlobRequest(options, HttpMethod::Head);
@@ -541,9 +594,10 @@ void GetBlobPropertiesAsync(THttp& httpClient, const BlobTarget& options,
         std::move(requestOptions));
 }
 
-template <HttpClientLike THttp, class TCompletion>
-void SetBlobMetadataAsync(THttp& httpClient, const BlobTarget& options, const SetBlobMetadataOptions& operationOptions,
-                          TCompletion&& completion, HttpRequestOptions requestOptions) {
+template <HttpClientLike THttp, class TCred, class TCompletion>
+void SetBlobMetadataAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
+                          const SetBlobMetadataOptions& operationOptions, TCompletion&& completion,
+                          HttpRequestOptions requestOptions) {
     HttpRequest request = BuildBlobRequest(options, HttpMethod::Put, "comp=metadata");
     ApplyMetadata(request, operationOptions.Metadata);
     ApplyBlobRequestConditions(request, operationOptions.Conditions);
@@ -644,8 +698,8 @@ void ReleaseLeaseAsync(THttp& httpClient, const TTarget& target, ReleaseLeaseOpt
                                                  std::forward<TCompletion>(completion), std::move(requestOptions));
 }
 
-template <HttpClientLike THttp, class TCompletion>
-void ExistsBlobAsync(THttp& httpClient, const BlobTarget& options, TCompletion&& completion,
+template <HttpClientLike THttp, class TCred, class TCompletion>
+void ExistsBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, TCompletion&& completion,
                      HttpRequestOptions requestOptions) {
     HttpRequest request = BuildBlobRequest(options, HttpMethod::Head);
 

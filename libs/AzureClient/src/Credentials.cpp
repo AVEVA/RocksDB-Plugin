@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
-#include "CredentialsImpl.hpp"
+#include <AVEVA/AzureClient/Detail/CredentialsImpl.hpp>
 
 namespace AVEVA::AzureClient {
 WorkloadIdentityCredentialOptions WorkloadIdentityCredentialOptions::FromEnvironment() {

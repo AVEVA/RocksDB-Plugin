@@ -5,6 +5,7 @@
 #include <AVEVA/AzureClient/BlobClientOptions.hpp>
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
+#include <AVEVA/AzureClient/ClientForwardDeclarations.hpp>
 #include <AVEVA/AzureClient/HttpClientLike.hpp>
 #include <AVEVA/AzureClient/Models/BlobModels.hpp>
 #include <AVEVA/AzureClient/Response.hpp>
@@ -27,11 +28,6 @@
 #include <AVEVA/AzureClient/Detail/AsyncInitiation.hpp>
 
 namespace AVEVA::AzureClient {
-namespace Private {
-struct BlobTarget;
-} // namespace Private
-
-template <HttpClientLike THttp> class BasicBlobContainerClient;
 
 // Operations common to every blob type; BlockBlobClient and PageBlobClient derive
 // from it. Usable on its own (e.g. via BlobContainerClient::GetBlobClient) when the blob type is
@@ -54,32 +50,14 @@ template <HttpClientLike THttp> class BasicBlobContainerClient;
 // use_future, use_awaitable, ...) and completes with std::expected<Response<T>, BlobStorageError>.
 // Omitting the token yields a deferred, directly co_await-able operation (DefaultCompletionToken).
 // Overloads that also take an options struct exclude it from the defaulted token via `requires`.
-template <HttpClientLike THttp> class BasicBlobClient {
+template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient {
   public:
-    using DownloadCompletionHandler =
-        std::move_only_function<void(std::expected<Response<Models::DownloadBlobResult>, BlobStorageError>)>;
-    using DownloadToCompletionHandler =
-        std::move_only_function<void(std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>)>;
-    using SetMetadataCompletionHandler =
-        std::move_only_function<void(std::expected<Response<Models::SetBlobMetadataResult>, BlobStorageError>)>;
-    using AcquireLeaseCompletionHandler =
-        std::move_only_function<void(std::expected<Response<Models::AcquireBlobLeaseResult>, BlobStorageError>)>;
-    using RenewLeaseCompletionHandler =
-        std::move_only_function<void(std::expected<Response<Models::RenewBlobLeaseResult>, BlobStorageError>)>;
-    using ReleaseLeaseCompletionHandler =
-        std::move_only_function<void(std::expected<Response<Models::ReleaseBlobLeaseResult>, BlobStorageError>)>;
-    using DeleteCompletionHandler =
-        std::move_only_function<void(std::expected<Response<Models::DeleteBlobResult>, BlobStorageError>)>;
-    using GetPropertiesCompletionHandler =
-        std::move_only_function<void(std::expected<Response<Models::BlobProperties>, BlobStorageError>)>;
-    using ExistsCompletionHandler = std::move_only_function<void(std::expected<Response<bool>, BlobStorageError>)>;
-
-    BasicBlobClient(THttp& httpClient, const BlobClientOptions& options);
+    BasicBlobClient(THttp& httpClient, const BlobClientOptions& options, std::shared_ptr<TCred> credential = nullptr);
     BasicBlobClient(const BasicBlobClient&) = delete;
     BasicBlobClient& operator=(const BasicBlobClient&) = delete;
     BasicBlobClient(BasicBlobClient&&) noexcept = default;
     BasicBlobClient& operator=(BasicBlobClient&&) noexcept = default;
-    virtual ~BasicBlobClient() = default;
+    ~BasicBlobClient() = default;
 
     // The executor of the underlying HTTP client (the default executor for completions).
     using executor_type = typename THttp::executor_type;
@@ -97,16 +75,16 @@ template <HttpClientLike THttp> class BasicBlobClient {
     [[nodiscard]] auto DownloadAsync(CompletionToken&& token = CompletionToken{},
                                      std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
         return Private::InitiateClientOperation<Models::DownloadBlobResult>(
-            this, &BasicBlobClient::DownloadAsyncImpl, std::forward<CompletionToken>(token), std::move(requestOptions),
-            DownloadBlobOptions{});
+            this, [](auto& client, auto&&... args) { client.DownloadAsyncImpl(std::forward<decltype(args)>(args)...); },
+            std::forward<CompletionToken>(token), std::move(requestOptions), DownloadBlobOptions{});
     }
 
     template <class CompletionToken = DefaultCompletionToken>
     [[nodiscard]] auto DownloadAsync(DownloadBlobOptions options, CompletionToken&& token = CompletionToken{},
                                      std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
         return Private::InitiateClientOperation<Models::DownloadBlobResult>(
-            this, &BasicBlobClient::DownloadAsyncImpl, std::forward<CompletionToken>(token), std::move(requestOptions),
-            std::move(options));
+            this, [](auto& client, auto&&... args) { client.DownloadAsyncImpl(std::forward<decltype(args)>(args)...); },
+            std::forward<CompletionToken>(token), std::move(requestOptions), std::move(options));
     }
 
     // DownloadToAsync overload set (the first argument picks the sink, the options type picks the mode):
@@ -123,8 +101,11 @@ template <HttpClientLike THttp> class BasicBlobClient {
                                        CompletionToken&& token = CompletionToken{},
                                        std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
         return Private::InitiateClientOperation<Models::DownloadBlobToResult>(
-            this, &BasicBlobClient::DownloadToStreamAsyncImpl, std::forward<CompletionToken>(token),
-            std::move(requestOptions), std::ref(stream), std::move(options));
+            this,
+            [](auto& client, auto&&... args) {
+                client.DownloadToStreamAsyncImpl(std::forward<decltype(args)>(args)...);
+            },
+            std::forward<CompletionToken>(token), std::move(requestOptions), std::ref(stream), std::move(options));
     }
 
     // Chunked download into `path`, via a temporary sibling file that replaces `path` only on success.
@@ -133,8 +114,9 @@ template <HttpClientLike THttp> class BasicBlobClient {
                                        CompletionToken&& token = CompletionToken{},
                                        std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
         return Private::InitiateClientOperation<Models::DownloadBlobToResult>(
-            this, &BasicBlobClient::DownloadToFileAsyncImpl, std::forward<CompletionToken>(token),
-            std::move(requestOptions), path, std::move(options));
+            this,
+            [](auto& client, auto&&... args) { client.DownloadToFileAsyncImpl(std::forward<decltype(args)>(args)...); },
+            std::forward<CompletionToken>(token), std::move(requestOptions), path, std::move(options));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -143,8 +125,11 @@ template <HttpClientLike THttp> class BasicBlobClient {
     [[nodiscard]] auto DownloadToAsync(std::ostream& stream, CompletionToken&& token = CompletionToken{},
                                        std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
         return Private::InitiateClientOperation<Models::DownloadBlobToResult>(
-            this, &BasicBlobClient::DownloadToStreamAsyncImpl, std::forward<CompletionToken>(token),
-            std::move(requestOptions), std::ref(stream), DownloadToOptions{});
+            this,
+            [](auto& client, auto&&... args) {
+                client.DownloadToStreamAsyncImpl(std::forward<decltype(args)>(args)...);
+            },
+            std::forward<CompletionToken>(token), std::move(requestOptions), std::ref(stream), DownloadToOptions{});
     }
 
     // Downloads the range straight into `destination`, avoiding an intermediate copy of the body. The span must
@@ -155,8 +140,11 @@ template <HttpClientLike THttp> class BasicBlobClient {
                                        CompletionToken&& token = CompletionToken{},
                                        std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
         return Private::InitiateClientOperation<Models::DownloadBlobToResult>(
-            this, &BasicBlobClient::DownloadRangeToSpanAsyncImpl, std::forward<CompletionToken>(token),
-            std::move(requestOptions), destination, std::move(options));
+            this,
+            [](auto& client, auto&&... args) {
+                client.DownloadRangeToSpanAsyncImpl(std::forward<decltype(args)>(args)...);
+            },
+            std::forward<CompletionToken>(token), std::move(requestOptions), destination, std::move(options));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -164,8 +152,11 @@ template <HttpClientLike THttp> class BasicBlobClient {
                                        CompletionToken&& token = CompletionToken{},
                                        std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
         return Private::InitiateClientOperation<Models::DownloadBlobToResult>(
-            this, &BasicBlobClient::DownloadRangeToStreamAsyncImpl, std::forward<CompletionToken>(token),
-            std::move(requestOptions), std::ref(stream), std::move(options));
+            this,
+            [](auto& client, auto&&... args) {
+                client.DownloadRangeToStreamAsyncImpl(std::forward<decltype(args)>(args)...);
+            },
+            std::forward<CompletionToken>(token), std::move(requestOptions), std::ref(stream), std::move(options));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -174,8 +165,9 @@ template <HttpClientLike THttp> class BasicBlobClient {
     [[nodiscard]] auto DownloadToAsync(const std::filesystem::path& path, CompletionToken&& token = CompletionToken{},
                                        std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
         return Private::InitiateClientOperation<Models::DownloadBlobToResult>(
-            this, &BasicBlobClient::DownloadToFileAsyncImpl, std::forward<CompletionToken>(token),
-            std::move(requestOptions), path, DownloadToOptions{});
+            this,
+            [](auto& client, auto&&... args) { client.DownloadToFileAsyncImpl(std::forward<decltype(args)>(args)...); },
+            std::forward<CompletionToken>(token), std::move(requestOptions), path, DownloadToOptions{});
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -183,8 +175,11 @@ template <HttpClientLike THttp> class BasicBlobClient {
                                        CompletionToken&& token = CompletionToken{},
                                        std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
         return Private::InitiateClientOperation<Models::DownloadBlobToResult>(
-            this, &BasicBlobClient::DownloadRangeToFileAsyncImpl, std::forward<CompletionToken>(token),
-            std::move(requestOptions), path, std::move(options));
+            this,
+            [](auto& client, auto&&... args) {
+                client.DownloadRangeToFileAsyncImpl(std::forward<decltype(args)>(args)...);
+            },
+            std::forward<CompletionToken>(token), std::move(requestOptions), path, std::move(options));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -192,16 +187,16 @@ template <HttpClientLike THttp> class BasicBlobClient {
     [[nodiscard]] auto DeleteAsync(CompletionToken&& token = CompletionToken{},
                                    std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
         return Private::InitiateClientOperation<Models::DeleteBlobResult>(
-            this, &BasicBlobClient::DeleteAsyncImpl, std::forward<CompletionToken>(token), std::move(requestOptions),
-            DeleteBlobOptions{});
+            this, [](auto& client, auto&&... args) { client.DeleteAsyncImpl(std::forward<decltype(args)>(args)...); },
+            std::forward<CompletionToken>(token), std::move(requestOptions), DeleteBlobOptions{});
     }
 
     template <class CompletionToken = DefaultCompletionToken>
     [[nodiscard]] auto DeleteAsync(DeleteBlobOptions options, CompletionToken&& token = CompletionToken{},
                                    std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
         return Private::InitiateClientOperation<Models::DeleteBlobResult>(
-            this, &BasicBlobClient::DeleteAsyncImpl, std::forward<CompletionToken>(token), std::move(requestOptions),
-            std::move(options));
+            this, [](auto& client, auto&&... args) { client.DeleteAsyncImpl(std::forward<decltype(args)>(args)...); },
+            std::forward<CompletionToken>(token), std::move(requestOptions), std::move(options));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -218,8 +213,9 @@ template <HttpClientLike THttp> class BasicBlobClient {
     [[nodiscard]] auto DeleteIfExistsAsync(DeleteBlobOptions options, CompletionToken&& token = CompletionToken{},
                                            std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
         return Private::InitiateClientOperation<Models::DeleteBlobResult>(
-            this, &BasicBlobClient::DeleteIfExistsAsyncImpl, std::forward<CompletionToken>(token),
-            std::move(requestOptions), std::move(options));
+            this,
+            [](auto& client, auto&&... args) { client.DeleteIfExistsAsyncImpl(std::forward<decltype(args)>(args)...); },
+            std::forward<CompletionToken>(token), std::move(requestOptions), std::move(options));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -227,16 +223,18 @@ template <HttpClientLike THttp> class BasicBlobClient {
     [[nodiscard]] auto GetPropertiesAsync(CompletionToken&& token = CompletionToken{},
                                           std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
         return Private::InitiateClientOperation<Models::BlobProperties>(
-            this, &BasicBlobClient::GetPropertiesAsyncImpl, std::forward<CompletionToken>(token),
-            std::move(requestOptions), GetBlobPropertiesOptions{});
+            this,
+            [](auto& client, auto&&... args) { client.GetPropertiesAsyncImpl(std::forward<decltype(args)>(args)...); },
+            std::forward<CompletionToken>(token), std::move(requestOptions), GetBlobPropertiesOptions{});
     }
 
     template <class CompletionToken = DefaultCompletionToken>
     [[nodiscard]] auto GetPropertiesAsync(GetBlobPropertiesOptions options, CompletionToken&& token = CompletionToken{},
                                           std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::BlobProperties>(this, &BasicBlobClient::GetPropertiesAsyncImpl,
-                                                                        std::forward<CompletionToken>(token),
-                                                                        std::move(requestOptions), std::move(options));
+        return Private::InitiateClientOperation<Models::BlobProperties>(
+            this,
+            [](auto& client, auto&&... args) { client.GetPropertiesAsyncImpl(std::forward<decltype(args)>(args)...); },
+            std::forward<CompletionToken>(token), std::move(requestOptions), std::move(options));
     }
 
     // Resolves to `true`/`false` for existence. Only a not-found response yields `false`; authentication,
@@ -244,16 +242,18 @@ template <HttpClientLike THttp> class BasicBlobClient {
     template <class CompletionToken = DefaultCompletionToken>
     [[nodiscard]] auto ExistsAsync(CompletionToken&& token = CompletionToken{},
                                    std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<bool>(this, &BasicBlobClient::ExistsAsyncImpl,
-                                                      std::forward<CompletionToken>(token), std::move(requestOptions));
+        return Private::InitiateClientOperation<bool>(
+            this, [](auto& client, auto&&... args) { client.ExistsAsyncImpl(std::forward<decltype(args)>(args)...); },
+            std::forward<CompletionToken>(token), std::move(requestOptions));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
     [[nodiscard]] auto SetMetadataAsync(SetBlobMetadataOptions options, CompletionToken&& token = CompletionToken{},
                                         std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
         return Private::InitiateClientOperation<Models::SetBlobMetadataResult>(
-            this, &BasicBlobClient::SetMetadataAsyncImpl, std::forward<CompletionToken>(token),
-            std::move(requestOptions), std::move(options));
+            this,
+            [](auto& client, auto&&... args) { client.SetMetadataAsyncImpl(std::forward<decltype(args)>(args)...); },
+            std::forward<CompletionToken>(token), std::move(requestOptions), std::move(options));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -261,86 +261,99 @@ template <HttpClientLike THttp> class BasicBlobClient {
     [[nodiscard]] auto AcquireLeaseAsync(CompletionToken&& token = CompletionToken{},
                                          std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
         return Private::InitiateClientOperation<Models::AcquireBlobLeaseResult>(
-            this, &BasicBlobClient::AcquireLeaseAsyncImpl, std::forward<CompletionToken>(token),
-            std::move(requestOptions), AcquireLeaseOptions{});
+            this,
+            [](auto& client, auto&&... args) { client.AcquireLeaseAsyncImpl(std::forward<decltype(args)>(args)...); },
+            std::forward<CompletionToken>(token), std::move(requestOptions), AcquireLeaseOptions{});
     }
 
     template <class CompletionToken = DefaultCompletionToken>
     [[nodiscard]] auto AcquireLeaseAsync(AcquireLeaseOptions options, CompletionToken&& token = CompletionToken{},
                                          std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
         return Private::InitiateClientOperation<Models::AcquireBlobLeaseResult>(
-            this, &BasicBlobClient::AcquireLeaseAsyncImpl, std::forward<CompletionToken>(token),
-            std::move(requestOptions), std::move(options));
+            this,
+            [](auto& client, auto&&... args) { client.AcquireLeaseAsyncImpl(std::forward<decltype(args)>(args)...); },
+            std::forward<CompletionToken>(token), std::move(requestOptions), std::move(options));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
     [[nodiscard]] auto RenewLeaseAsync(RenewLeaseOptions options, CompletionToken&& token = CompletionToken{},
                                        std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
         return Private::InitiateClientOperation<Models::RenewBlobLeaseResult>(
-            this, &BasicBlobClient::RenewLeaseAsyncImpl, std::forward<CompletionToken>(token),
-            std::move(requestOptions), std::move(options));
+            this,
+            [](auto& client, auto&&... args) { client.RenewLeaseAsyncImpl(std::forward<decltype(args)>(args)...); },
+            std::forward<CompletionToken>(token), std::move(requestOptions), std::move(options));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
     [[nodiscard]] auto ReleaseLeaseAsync(ReleaseLeaseOptions options, CompletionToken&& token = CompletionToken{},
                                          std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
         return Private::InitiateClientOperation<Models::ReleaseBlobLeaseResult>(
-            this, &BasicBlobClient::ReleaseLeaseAsyncImpl, std::forward<CompletionToken>(token),
-            std::move(requestOptions), std::move(options));
+            this,
+            [](auto& client, auto&&... args) { client.ReleaseLeaseAsyncImpl(std::forward<decltype(args)>(args)...); },
+            std::forward<CompletionToken>(token), std::move(requestOptions), std::move(options));
     }
 
   protected:
-    template <HttpClientLike> friend class BasicBlobContainerClient;
+    template <HttpClientLike, TokenCredentialLike> friend class BasicBlobContainerClient;
     // Shares the container client's validated connection state (no re-normalisation).
-    BasicBlobClient(THttp& httpClient, std::shared_ptr<const Private::BlobTarget> target);
+    BasicBlobClient(THttp& httpClient, std::shared_ptr<const Private::BasicBlobTarget<TCred>> target);
 
     // Connection state owned by this client; derived blob-type clients read it to build requests.
     [[nodiscard]] THttp& Http() const noexcept { return *m_httpClient; }
 
-    [[nodiscard]] const Private::BlobTarget& Target() const noexcept { return *m_target; }
+    [[nodiscard]] const Private::BasicBlobTarget<TCred>& Target() const noexcept { return *m_target; }
 
     // For operations that outlive the call and must keep the target alive.
-    [[nodiscard]] const std::shared_ptr<const Private::BlobTarget>& SharedTarget() const noexcept { return m_target; }
+    [[nodiscard]] const std::shared_ptr<const Private::BasicBlobTarget<TCred>>& SharedTarget() const noexcept {
+        return m_target;
+    }
 
   private:
     THttp* m_httpClient = nullptr;
-    std::shared_ptr<const Private::BlobTarget> m_target;
+    std::shared_ptr<const Private::BasicBlobTarget<TCred>> m_target;
 
-    // Type-erased operation entry points. They are virtual so tests can substitute a mock: the public
-    // ...Async templates reach them through member pointers, which dispatch virtually.
-    virtual void DownloadAsyncImpl(DownloadBlobOptions options, DownloadCompletionHandler completion,
+    // Operation entry points, templated on the completion handler so it is never type-erased.
+    template <class THandler>
+    void DownloadAsyncImpl(DownloadBlobOptions options, THandler completion, HttpRequestOptions requestOptions);
+    template <class THandler>
+    void DownloadToStreamAsyncImpl(std::ostream& stream, DownloadToOptions options, THandler completion,
                                    HttpRequestOptions requestOptions);
-    virtual void DownloadToStreamAsyncImpl(std::ostream& stream, DownloadToOptions options,
-                                           DownloadToCompletionHandler completion, HttpRequestOptions requestOptions);
-    virtual void DownloadToFileAsyncImpl(const std::filesystem::path& path, DownloadToOptions options,
-                                         DownloadToCompletionHandler completion, HttpRequestOptions requestOptions);
-    virtual void DownloadRangeToStreamAsyncImpl(std::ostream& stream, DownloadBlobOptions options,
-                                                DownloadToCompletionHandler completion,
-                                                HttpRequestOptions requestOptions);
-    virtual void DownloadRangeToSpanAsyncImpl(std::span<char> destination, DownloadBlobOptions options,
-                                              DownloadToCompletionHandler completion,
-                                              HttpRequestOptions requestOptions);
-    virtual void DownloadRangeToFileAsyncImpl(const std::filesystem::path& path, DownloadBlobOptions options,
-                                              DownloadToCompletionHandler completion,
-                                              HttpRequestOptions requestOptions);
-    virtual void DeleteAsyncImpl(const DeleteBlobOptions& options, DeleteCompletionHandler completion,
+    template <class THandler>
+    void DownloadToFileAsyncImpl(const std::filesystem::path& path, DownloadToOptions options, THandler completion,
                                  HttpRequestOptions requestOptions);
-    virtual void DeleteIfExistsAsyncImpl(const DeleteBlobOptions& options, DeleteCompletionHandler completion,
-                                         HttpRequestOptions requestOptions);
-    virtual void GetPropertiesAsyncImpl(const GetBlobPropertiesOptions& options,
-                                        GetPropertiesCompletionHandler completion, HttpRequestOptions requestOptions);
-    virtual void ExistsAsyncImpl(ExistsCompletionHandler completion, HttpRequestOptions requestOptions);
-    virtual void SetMetadataAsyncImpl(const SetBlobMetadataOptions& options, SetMetadataCompletionHandler completion,
+    template <class THandler>
+    void DownloadRangeToStreamAsyncImpl(std::ostream& stream, DownloadBlobOptions options, THandler completion,
+                                        HttpRequestOptions requestOptions);
+    template <class THandler>
+    void DownloadRangeToSpanAsyncImpl(std::span<char> destination, DownloadBlobOptions options, THandler completion,
                                       HttpRequestOptions requestOptions);
-    virtual void AcquireLeaseAsyncImpl(AcquireLeaseOptions options, AcquireLeaseCompletionHandler completion,
-                                       HttpRequestOptions requestOptions);
-    virtual void RenewLeaseAsyncImpl(RenewLeaseOptions options, RenewLeaseCompletionHandler completion,
-                                     HttpRequestOptions requestOptions);
-    virtual void ReleaseLeaseAsyncImpl(ReleaseLeaseOptions options, ReleaseLeaseCompletionHandler completion,
-                                       HttpRequestOptions requestOptions);
+    template <class THandler>
+    void DownloadRangeToFileAsyncImpl(const std::filesystem::path& path, DownloadBlobOptions options,
+                                      THandler completion, HttpRequestOptions requestOptions);
+    template <class THandler>
+    void DeleteAsyncImpl(const DeleteBlobOptions& options, THandler completion, HttpRequestOptions requestOptions);
+    template <class THandler>
+    void DeleteIfExistsAsyncImpl(const DeleteBlobOptions& options, THandler completion,
+                                 HttpRequestOptions requestOptions);
+    template <class THandler>
+    void GetPropertiesAsyncImpl(const GetBlobPropertiesOptions& options, THandler completion,
+                                HttpRequestOptions requestOptions);
+    template <class THandler> void ExistsAsyncImpl(THandler completion, HttpRequestOptions requestOptions);
+    template <class THandler>
+    void SetMetadataAsyncImpl(const SetBlobMetadataOptions& options, THandler completion,
+                              HttpRequestOptions requestOptions);
+    template <class THandler>
+    void AcquireLeaseAsyncImpl(AcquireLeaseOptions options, THandler completion, HttpRequestOptions requestOptions);
+    template <class THandler>
+    void RenewLeaseAsyncImpl(RenewLeaseOptions options, THandler completion, HttpRequestOptions requestOptions);
+    template <class THandler>
+    void ReleaseLeaseAsyncImpl(ReleaseLeaseOptions options, THandler completion, HttpRequestOptions requestOptions);
 };
 
 // The production client type. Other client types (test doubles) instantiate BasicBlobClient<T> through the
 // private definitions in src/BlobClientImpl.hpp.
 using BlobClient = BasicBlobClient<HttpClient>;
 } // namespace AVEVA::AzureClient
+
+// Operation entry points are member templates, so their definitions must be visible to every user.
+#include <AVEVA/AzureClient/Detail/BlobClientImpl.hpp>

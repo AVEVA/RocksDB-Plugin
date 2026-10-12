@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #pragma once
-#include <AVEVA/AzureClient/PageBlobClient.hpp>
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 
 #include <AVEVA/HttpClient/HttpClient.hpp>
 
@@ -12,19 +12,23 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <expected>
+#include <filesystem>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl::Tests {
-// An in-memory page blob that replaces the type-erased operation entry points of AzureClient::PageBlobClient, so
-// the plugin's file classes run their real code paths (size metadata, capacity, ETag preconditions, page uploads)
-// without any HTTP traffic. Public members describe the blob and record the requests it received.
-class FakePageBlobClient : public AzureClient::PageBlobClient {
+// A standalone in-memory page blob that provides the subset of the page blob client API the plugin's file classes use,
+// so they run their real code paths (size metadata, capacity, ETag preconditions, page uploads) without any HTTP
+// traffic. Public members describe the blob and record the requests it received.
+class FakePageBlobClient {
   public:
     enum class Operation {
         GetProperties,
@@ -50,7 +54,13 @@ class FakePageBlobClient : public AzureClient::PageBlobClient {
     explicit FakePageBlobClient(
         ::AVEVA::HttpClient& httpClient,
         const AzureClient::BlobClientOptions& options = AzureClient::Tests::MakeBlobClientOptions("files", "test.sst"))
-        : AzureClient::PageBlobClient(httpClient, options) {}
+        : m_httpClient(&httpClient), m_defaultRequestOptions(options.DefaultRequestOptions) {}
+
+    using executor_type = ::AVEVA::HttpClient::executor_type;
+    [[nodiscard]] executor_type get_executor() const { return m_httpClient->get_executor(); }
+    [[nodiscard]] const AVEVA::HttpRequestOptions& GetDefaultRequestOptions() const noexcept {
+        return m_defaultRequestOptions;
+    }
 
     // The blob: its bytes (whose length is the capacity), the size recorded in its metadata, and its ETag.
     std::vector<char> Data;
@@ -126,8 +136,83 @@ class FakePageBlobClient : public AzureClient::PageBlobClient {
             [shared](AzureClient::BlobStorageError error) { (*shared)(std::unexpected(std::move(error))); }};
     }
 
+    // The public operations mirror the signatures of the real page blob client that the plugin calls. Each forwards to
+    // the matching private ...AsyncImpl through the library's own initiation, so every completion token works.
+    template <class Token>
+    [[nodiscard]] auto GetPropertiesAsync(Token&& token,
+                                          std::optional<AVEVA::HttpRequestOptions> requestOptions = std::nullopt) {
+        return AzureClient::Private::InitiateClientOperation<AzureClient::Models::BlobProperties>(
+            this, [](auto& c, auto&&... a) { c.GetPropertiesAsyncImpl(std::forward<decltype(a)>(a)...); },
+            std::forward<Token>(token), std::move(requestOptions), AzureClient::GetBlobPropertiesOptions{});
+    }
+    template <class Token>
+    [[nodiscard]] auto SetMetadataAsync(AzureClient::SetBlobMetadataOptions options, Token&& token,
+                                        std::optional<AVEVA::HttpRequestOptions> requestOptions = std::nullopt) {
+        return AzureClient::Private::InitiateClientOperation<AzureClient::Models::SetBlobMetadataResult>(
+            this, [](auto& c, auto&&... a) { c.SetMetadataAsyncImpl(std::forward<decltype(a)>(a)...); },
+            std::forward<Token>(token), std::move(requestOptions), std::move(options));
+    }
+    template <class Token>
+    [[nodiscard]] auto ResizeAsync(std::uint64_t newSize, AzureClient::ResizePageBlobOptions options, Token&& token,
+                                   std::optional<AVEVA::HttpRequestOptions> requestOptions = std::nullopt) {
+        return AzureClient::Private::InitiateClientOperation<AzureClient::Models::ResizePageBlobResult>(
+            this, [](auto& c, auto&&... a) { c.ResizeAsyncImpl(std::forward<decltype(a)>(a)...); },
+            std::forward<Token>(token), std::move(requestOptions), newSize, std::move(options));
+    }
+    template <class Token>
+    [[nodiscard]] auto UploadPagesAsync(std::uint64_t offset, std::span<const std::byte> content, Token&& token,
+                                        std::optional<AVEVA::HttpRequestOptions> requestOptions = std::nullopt) {
+        return AzureClient::Private::InitiateClientOperation<AzureClient::Models::UploadPagesResult>(
+            this, [](auto& c, auto&&... a) { c.UploadPagesBytesAsyncImpl(std::forward<decltype(a)>(a)...); },
+            std::forward<Token>(token), std::move(requestOptions), offset, content, AzureClient::UploadPagesOptions{});
+    }
+    template <class Token>
+    [[nodiscard]] auto UploadPagesAsync(std::uint64_t offset, std::shared_ptr<const std::vector<char>> content,
+                                        Token&& token,
+                                        std::optional<AVEVA::HttpRequestOptions> requestOptions = std::nullopt) {
+        return AzureClient::Private::InitiateClientOperation<AzureClient::Models::UploadPagesResult>(
+            this, [](auto& c, auto&&... a) { c.UploadPagesSharedAsyncImpl(std::forward<decltype(a)>(a)...); },
+            std::forward<Token>(token), std::move(requestOptions), offset, std::move(content),
+            AzureClient::UploadPagesOptions{});
+    }
+    template <class Token>
+    [[nodiscard]] auto UploadPagesAsync(std::uint64_t offset, std::string content, Token&& token,
+                                        std::optional<AVEVA::HttpRequestOptions> requestOptions = std::nullopt) {
+        return AzureClient::Private::InitiateClientOperation<AzureClient::Models::UploadPagesResult>(
+            this, [](auto& c, auto&&... a) { c.UploadPagesStringAsyncImpl(std::forward<decltype(a)>(a)...); },
+            std::forward<Token>(token), std::move(requestOptions), offset, std::move(content),
+            AzureClient::UploadPagesOptions{});
+    }
+    template <class Token>
+    [[nodiscard]] auto DownloadToAsync(std::span<char> destination, AzureClient::DownloadBlobOptions options,
+                                       Token&& token,
+                                       std::optional<AVEVA::HttpRequestOptions> requestOptions = std::nullopt) {
+        return AzureClient::Private::InitiateClientOperation<AzureClient::Models::DownloadBlobToResult>(
+            this, [](auto& c, auto&&... a) { c.DownloadRangeToSpanAsyncImpl(std::forward<decltype(a)>(a)...); },
+            std::forward<Token>(token), std::move(requestOptions), destination, std::move(options));
+    }
+    // The fake has no filesystem; this exists so BlobOperations::DownloadToFile compiles and fails loudly if reached.
+    template <class Token>
+    [[nodiscard]] auto DownloadToAsync(const std::filesystem::path&, AzureClient::DownloadToOptions, Token&& token,
+                                       std::optional<AVEVA::HttpRequestOptions> requestOptions = std::nullopt) {
+        return AzureClient::Private::InitiateClientOperation<AzureClient::Models::DownloadBlobToResult>(
+            this, [](auto&, auto&& handler, auto&&) { handler(std::unexpected(Error(0, "NotSupported"))); },
+            std::forward<Token>(token), std::move(requestOptions));
+    }
+    template <class Token>
+    [[nodiscard]] auto DownloadAsync(AzureClient::DownloadBlobOptions options, Token&& token,
+                                     std::optional<AVEVA::HttpRequestOptions> requestOptions = std::nullopt) {
+        return AzureClient::Private::InitiateClientOperation<AzureClient::Models::DownloadBlobResult>(
+            this, [](auto& c, auto&&... a) { c.DownloadAsyncImpl(std::forward<decltype(a)>(a)...); },
+            std::forward<Token>(token), std::move(requestOptions), std::move(options));
+    }
+
   private:
     template <class T> using Response = AzureClient::Response<T>;
+    template <class T>
+    using Completion = std::move_only_function<void(std::expected<Response<T>, AzureClient::BlobStorageError>)>;
+    using UploadPagesCompletionHandler = Completion<AzureClient::Models::UploadPagesResult>;
+    using DownloadCompletionHandler = Completion<AzureClient::Models::DownloadBlobResult>;
     struct PendingUpload {
         int64_t Offset = 0;
         std::vector<char> Content;
@@ -138,6 +223,8 @@ class FakePageBlobClient : public AzureClient::PageBlobClient {
         DownloadCompletionHandler Completion;
     };
 
+    ::AVEVA::HttpClient* m_httpClient;
+    AVEVA::HttpRequestOptions m_defaultRequestOptions;
     std::mutex m_mutex;
     std::deque<PendingUpload> m_pendingUploads;
     std::deque<PendingDownloadEntry> m_pendingDownloads;
@@ -196,8 +283,9 @@ class FakePageBlobClient : public AzureClient::PageBlobClient {
         return request;
     }
 
-    void GetPropertiesAsyncImpl(const AzureClient::GetBlobPropertiesOptions&, GetPropertiesCompletionHandler completion,
-                                AVEVA::HttpRequestOptions) override {
+    template <class THandler>
+    void GetPropertiesAsyncImpl(const AzureClient::GetBlobPropertiesOptions&, THandler completion,
+                                AVEVA::HttpRequestOptions) {
         if (const auto fault = FaultFor(Operation::GetProperties)) {
             completion(std::unexpected(*fault));
             return;
@@ -213,8 +301,9 @@ class FakePageBlobClient : public AzureClient::PageBlobClient {
         completion(Response<AzureClient::Models::BlobProperties>(std::move(properties), HttpResponse{200, {}, {}}));
     }
 
-    void SetMetadataAsyncImpl(const AzureClient::SetBlobMetadataOptions& options,
-                              SetMetadataCompletionHandler completion, AVEVA::HttpRequestOptions) override {
+    template <class THandler>
+    void SetMetadataAsyncImpl(const AzureClient::SetBlobMetadataOptions& options, THandler completion,
+                              AVEVA::HttpRequestOptions) {
         if (const auto fault = FaultFor(Operation::SetMetadata)) {
             completion(std::unexpected(*fault));
             return;
@@ -228,8 +317,9 @@ class FakePageBlobClient : public AzureClient::PageBlobClient {
         completion(Response<AzureClient::Models::SetBlobMetadataResult>({}, HttpResponse{200, {}, {}}));
     }
 
-    void ResizeAsyncImpl(std::uint64_t newSize, const AzureClient::ResizePageBlobOptions&,
-                         ResizeCompletionHandler completion, AVEVA::HttpRequestOptions) override {
+    template <class THandler>
+    void ResizeAsyncImpl(std::uint64_t newSize, const AzureClient::ResizePageBlobOptions&, THandler completion,
+                         AVEVA::HttpRequestOptions) {
         if (const auto fault = FaultFor(Operation::Resize)) {
             completion(std::unexpected(*fault));
             return;
@@ -261,17 +351,19 @@ class FakePageBlobClient : public AzureClient::PageBlobClient {
         completion(Response<AzureClient::Models::UploadPagesResult>({}, HttpResponse{201, {}, {}}));
     }
 
+    template <class THandler>
     void UploadPagesBytesAsyncImpl(std::uint64_t offset, std::span<const std::byte> content,
-                                   const AzureClient::UploadPagesOptions&, UploadPagesCompletionHandler completion,
-                                   AVEVA::HttpRequestOptions) override {
+                                   const AzureClient::UploadPagesOptions&, THandler completion,
+                                   AVEVA::HttpRequestOptions) {
         const auto* begin = reinterpret_cast<const char*>(content.data());
         StartUpload(static_cast<int64_t>(offset), std::vector<char>(begin, begin + content.size()),
                     std::move(completion));
     }
 
+    template <class THandler>
     void UploadPagesSharedAsyncImpl(std::uint64_t offset, std::shared_ptr<const std::vector<char>> content,
-                                    const AzureClient::UploadPagesOptions&, UploadPagesCompletionHandler completion,
-                                    AVEVA::HttpRequestOptions) override {
+                                    const AzureClient::UploadPagesOptions&, THandler completion,
+                                    AVEVA::HttpRequestOptions) {
         {
             std::scoped_lock lock(m_mutex);
             SharedUploadPayloadAddresses.push_back(content->data());
@@ -279,15 +371,16 @@ class FakePageBlobClient : public AzureClient::PageBlobClient {
         StartUpload(static_cast<int64_t>(offset), *content, std::move(completion));
     }
 
+    template <class THandler>
     void UploadPagesStringAsyncImpl(std::uint64_t offset, std::string content, const AzureClient::UploadPagesOptions&,
-                                    UploadPagesCompletionHandler completion, AVEVA::HttpRequestOptions) override {
+                                    THandler completion, AVEVA::HttpRequestOptions) {
         StartUpload(static_cast<int64_t>(offset), std::vector<char>(content.begin(), content.end()),
                     std::move(completion));
     }
 
+    template <class THandler>
     void DownloadRangeToSpanAsyncImpl(std::span<char> destination, AzureClient::DownloadBlobOptions options,
-                                      DownloadToCompletionHandler completion,
-                                      AVEVA::HttpRequestOptions requestOptions) override {
+                                      THandler completion, AVEVA::HttpRequestOptions requestOptions) {
         if (const auto fault = FaultFor(Operation::DownloadToBuffer)) {
             completion(std::unexpected(*fault));
             return;
@@ -307,8 +400,9 @@ class FakePageBlobClient : public AzureClient::PageBlobClient {
         completion(Response<AzureClient::Models::DownloadBlobToResult>(std::move(result), HttpResponse{206, {}, {}}));
     }
 
-    void DownloadAsyncImpl(AzureClient::DownloadBlobOptions options, DownloadCompletionHandler completion,
-                           AVEVA::HttpRequestOptions requestOptions) override {
+    template <class THandler>
+    void DownloadAsyncImpl(AzureClient::DownloadBlobOptions options, THandler completion,
+                           AVEVA::HttpRequestOptions requestOptions) {
         if (const auto fault = FaultFor(Operation::Download)) {
             completion(std::unexpected(*fault));
             return;

@@ -7,9 +7,9 @@
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
 #include <AVEVA/AzureClient/HttpClientLike.hpp>
-#include <AVEVA/AzureClient/ITokenCredential.hpp>
 #include <AVEVA/AzureClient/Models/BlobContainerModels.hpp>
 #include <AVEVA/AzureClient/Response.hpp>
+#include <AVEVA/AzureClient/TokenCredential.hpp>
 #include <AVEVA/HttpClient/HttpClient.hpp>
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 
@@ -33,23 +33,6 @@ namespace Private {
 struct ConnectionState;
 } // namespace Private
 
-template <HttpClientLike THttp> class BasicBlobContainerClient;
-
-struct BlobServiceClientOptions {
-    std::string ServiceEndpoint;
-    // Authorization precedence is SAS > SharedKey > TokenCredential > BearerToken (see BlobClientOptions).
-    // BearerToken/TokenCredential require https unless the host is loopback (see BlobClientOptions).
-    std::string SasToken;
-    std::string BearerToken;
-    std::shared_ptr<ITokenCredential> TokenCredential;
-    std::vector<std::string> TokenScopes{"https://storage.azure.com/.default"};
-    SharedKeyCredentialOptions SharedKey;
-    std::string ApiVersion = std::string(DefaultApiVersion);
-
-    RetryOptions Retry;
-    HttpRequestOptions DefaultRequestOptions;
-};
-
 // Account-level operations, and the factory for container clients.
 //
 // Thread safety: concurrent ...Async calls on one instance are supported. Caller-supplied buffers are
@@ -68,16 +51,17 @@ struct BlobServiceClientOptions {
 // Omitting the token yields a deferred, directly co_await-able operation, e.g. `co_await
 // client.GetBlobContainerClient(...);`. Overloads that also take an options struct exclude it from the defaulted
 // token via `requires`.
-template <HttpClientLike THttp> class BasicBlobServiceClient {
+template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobServiceClient {
   public:
-    using ContainerClientType = BasicBlobContainerClient<THttp>;
+    using ContainerClientType = BasicBlobContainerClient<THttp, TCred>;
 
-    BasicBlobServiceClient(THttp& httpClient, BlobServiceClientOptions options);
+    BasicBlobServiceClient(THttp& httpClient, BlobServiceClientOptions options,
+                           std::shared_ptr<TCred> credential = nullptr);
     BasicBlobServiceClient(const BasicBlobServiceClient&) = delete;
     BasicBlobServiceClient& operator=(const BasicBlobServiceClient&) = delete;
     BasicBlobServiceClient(BasicBlobServiceClient&&) noexcept = default;
     BasicBlobServiceClient& operator=(BasicBlobServiceClient&&) noexcept = default;
-    virtual ~BasicBlobServiceClient() = default;
+    ~BasicBlobServiceClient() = default;
 
     // The executor associated with this client's underlying HTTP client; usable as the default
     // executor argument for a boost::asio::default_completion_token_t, or to schedule work that
@@ -94,13 +78,17 @@ template <HttpClientLike THttp> class BasicBlobServiceClient {
     // (matching this client's executor_type, per boost::asio::default_completion_token).
     using DefaultCompletionToken = boost::asio::default_completion_token<executor_type>::type;
 
-    [[nodiscard]] virtual std::unique_ptr<ContainerClientType> GetBlobContainerClient(std::string containerName) const;
+    [[nodiscard]] std::unique_ptr<ContainerClientType> GetBlobContainerClient(std::string containerName) const;
 
   private:
     THttp* m_httpClient = nullptr;
     // Shared immutable connection state referenced by child clients.
     std::shared_ptr<const Private::ConnectionState> m_connection;
+    std::shared_ptr<CachedTokenCredential<TCred>> m_credential;
 };
 
 using BlobServiceClient = BasicBlobServiceClient<HttpClient>;
 } // namespace AVEVA::AzureClient
+
+// Operation entry points are member templates, so their definitions must be visible to every user.
+#include <AVEVA/AzureClient/Detail/BlobServiceClientImpl.hpp>

@@ -18,8 +18,7 @@
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Util.hpp"
 
-#include <AVEVA/AzureClient/BlobContainerClient.hpp>
-#include <AVEVA/AzureClient/BlobServiceClient.hpp>
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 #include <boost/log/trivial.hpp>
 
 #include <chrono>
@@ -41,12 +40,11 @@
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 class BlobFilesystemImpl {
     struct ServiceContainer {
-        ServiceContainer(AzureClient::BlobServiceClient service,
-                         std::shared_ptr<AzureClient::BlobContainerClient> container)
+        ServiceContainer(Impl::BlobServiceClient service, std::shared_ptr<Impl::BlobContainerClient> container)
             : ServiceClient(std::move(service)), ContainerClient(std::move(container)) {}
 
-        AzureClient::BlobServiceClient ServiceClient;
-        std::shared_ptr<AzureClient::BlobContainerClient> ContainerClient;
+        Impl::BlobServiceClient ServiceClient;
+        std::shared_ptr<Impl::BlobContainerClient> ContainerClient;
     };
 
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
@@ -68,7 +66,18 @@ class BlobFilesystemImpl {
     std::vector<std::weak_ptr<LockFileImpl>> m_renewableLocks;
     std::stop_source m_filesystemStopSource;
     // Declared last: Stop()ped first thing in the destructor, before anything its callbacks use is released.
-    std::shared_ptr<LeaseRenewalLoop> m_leaseRenewal;
+    // Concrete callables for the lease renewal loop; defined in the .cpp where they can reach the private state.
+    struct RenewableLocksSnapshot {
+        BlobFilesystemImpl* Owner;
+        std::vector<std::shared_ptr<LockFileImpl>> operator()() const;
+    };
+    struct FenceWritesOnFatal {
+        BlobFilesystemImpl* Owner;
+        void operator()() const;
+    };
+    using LeaseRenewal = BasicLeaseRenewalLoop<RenewableLocksSnapshot, FenceWritesOnFatal>;
+
+    std::shared_ptr<LeaseRenewal> m_leaseRenewal;
 
   public:
     // Every constructor takes the host-owned io_context that all Azure I/O runs on. The filesystem never runs,
@@ -139,9 +148,9 @@ class BlobFilesystemImpl {
     BlobFilesystemImpl(
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>&& logger,
         boost::asio::io_context& ioContext, int64_t dataFileInitialSize, int64_t dataFileBufferSize);
-    void AddContainer(AzureClient::BlobServiceClient serviceClient, const std::string& storageAccountUrl,
+    void AddContainer(Impl::BlobServiceClient serviceClient, const std::string& storageAccountUrl,
                       const std::string& name, std::optional<std::string_view> cachePath, size_t maxCacheSize);
-    [[nodiscard]] const std::shared_ptr<AzureClient::BlobContainerClient>& GetContainer(std::string_view prefix) const;
+    [[nodiscard]] const std::shared_ptr<Impl::BlobContainerClient>& GetContainer(std::string_view prefix) const;
     void EnsureLiveness(std::source_location location = std::source_location::current()) const;
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
