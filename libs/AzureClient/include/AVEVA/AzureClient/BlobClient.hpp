@@ -5,12 +5,19 @@
 #include <AVEVA/AzureClient/BlobClientOptions.hpp>
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
+#include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 #include <AVEVA/AzureClient/ClientForwardDeclarations.hpp>
+#include <AVEVA/AzureClient/Detail/BlobDownload.hpp>
+#include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
+#include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
 #include <AVEVA/AzureClient/HttpClientLike.hpp>
 #include <AVEVA/AzureClient/Models/BlobModels.hpp>
 #include <AVEVA/AzureClient/Response.hpp>
 #include <AVEVA/HttpClient/HttpClient.hpp>
+#include <AVEVA/HttpClient/HttpMethod.hpp>
+#include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
+#include <AVEVA/HttpClient/HttpResponse.hpp>
 
 #include <boost/asio/async_result.hpp>
 
@@ -22,8 +29,11 @@
 #include <optional>
 #include <ostream>
 #include <span>
+#include <stdexcept>
 #include <string>
+#include <system_error>
 #include <type_traits>
+#include <utility>
 
 #include <AVEVA/AzureClient/Detail/AsyncInitiation.hpp>
 
@@ -52,7 +62,9 @@ namespace AVEVA::AzureClient {
 // Overloads that also take an options struct exclude it from the defaulted token via `requires`.
 template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient {
   public:
-    BasicBlobClient(THttp& httpClient, const BlobClientOptions& options, std::shared_ptr<TCred> credential = nullptr);
+    BasicBlobClient(THttp& httpClient, const BlobClientOptions& options, std::shared_ptr<TCred> credential = nullptr)
+        : m_httpClient(&httpClient), m_target(std::make_shared<const Private::BasicBlobTarget<TCred>>(
+                                         Private::MakeBlobTarget(options, std::move(credential)))) {}
     BasicBlobClient(const BasicBlobClient&) = delete;
     BasicBlobClient& operator=(const BasicBlobClient&) = delete;
     BasicBlobClient(BasicBlobClient&&) noexcept = default;
@@ -66,7 +78,9 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
 
     // Request options (timeout, response body limit, cancellation slot) applied to every operation
     // that is not given its own via WithRequestOptions(...) or the trailing requestOptions argument.
-    [[nodiscard]] const HttpRequestOptions& GetDefaultRequestOptions() const noexcept;
+    [[nodiscard]] const HttpRequestOptions& GetDefaultRequestOptions() const noexcept {
+        return m_target->Connection->DefaultRequestOptions;
+    }
 
     using DefaultCompletionToken = boost::asio::default_completion_token<executor_type>::type;
 
@@ -296,7 +310,8 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
   protected:
     template <HttpClientLike, TokenCredentialLike> friend class BasicBlobContainerClient;
     // Shares the container client's validated connection state (no re-normalisation).
-    BasicBlobClient(THttp& httpClient, std::shared_ptr<const Private::BasicBlobTarget<TCred>> target);
+    BasicBlobClient(THttp& httpClient, std::shared_ptr<const Private::BasicBlobTarget<TCred>> target)
+        : m_httpClient(&httpClient), m_target(std::move(target)) {}
 
     // Connection state owned by this client; derived blob-type clients read it to build requests.
     [[nodiscard]] THttp& Http() const noexcept { return *m_httpClient; }
@@ -314,46 +329,96 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
 
     // Operation entry points, templated on the completion handler so it is never type-erased.
     template <class THandler>
-    void DownloadAsyncImpl(DownloadBlobOptions options, THandler completion, HttpRequestOptions requestOptions);
+    void DownloadAsyncImpl(DownloadBlobOptions options, THandler completion, HttpRequestOptions requestOptions) {
+        Private::DownloadBlobAsync(*m_httpClient, *m_target, std::move(options), std::move(completion),
+                                   requestOptions);
+    }
+
     template <class THandler>
     void DownloadToStreamAsyncImpl(std::ostream& stream, DownloadToOptions options, THandler completion,
-                                   HttpRequestOptions requestOptions);
+                                   HttpRequestOptions requestOptions) {
+        Private::DownloadBlobToAsync(*m_httpClient, *m_target, std::move(options), stream, std::move(completion),
+                                     requestOptions);
+    }
+
     template <class THandler>
     void DownloadToFileAsyncImpl(const std::filesystem::path& path, DownloadToOptions options, THandler completion,
-                                 HttpRequestOptions requestOptions);
+                                 HttpRequestOptions requestOptions) {
+        Private::DownloadBlobToFileAsync(*m_httpClient, *m_target, std::move(options), path, std::move(completion),
+                                         requestOptions);
+    }
+
     template <class THandler>
     void DownloadRangeToStreamAsyncImpl(std::ostream& stream, DownloadBlobOptions options, THandler completion,
-                                        HttpRequestOptions requestOptions);
+                                        HttpRequestOptions requestOptions) {
+        DownloadToStreamAsyncImpl(stream, Private::ToDownloadToOptions(std::move(options)), std::move(completion),
+                                  requestOptions);
+    }
+
     template <class THandler>
     void DownloadRangeToSpanAsyncImpl(std::span<char> destination, DownloadBlobOptions options, THandler completion,
-                                      HttpRequestOptions requestOptions);
+                                      HttpRequestOptions requestOptions) {
+        Private::DownloadBlobToSpanAsync(*m_httpClient, *m_target, Private::ToDownloadToOptions(std::move(options)),
+                                         destination, std::move(completion), requestOptions);
+    }
+
     template <class THandler>
     void DownloadRangeToFileAsyncImpl(const std::filesystem::path& path, DownloadBlobOptions options,
-                                      THandler completion, HttpRequestOptions requestOptions);
+                                      THandler completion, HttpRequestOptions requestOptions) {
+        DownloadToFileAsyncImpl(path, Private::ToDownloadToOptions(std::move(options)), std::move(completion),
+                                requestOptions);
+    }
+
     template <class THandler>
-    void DeleteAsyncImpl(const DeleteBlobOptions& options, THandler completion, HttpRequestOptions requestOptions);
+    void DeleteAsyncImpl(const DeleteBlobOptions& options, THandler completion, HttpRequestOptions requestOptions) {
+        Private::DeleteBlobAsync(*m_httpClient, *m_target, options, std::move(completion), requestOptions);
+    }
+
     template <class THandler>
     void DeleteIfExistsAsyncImpl(const DeleteBlobOptions& options, THandler completion,
-                                 HttpRequestOptions requestOptions);
+                                 HttpRequestOptions requestOptions) {
+        Private::DeleteBlobAsync(
+            *m_httpClient, *m_target, options,
+            Private::SuppressErrors<Models::DeleteBlobResult>(
+                std::move(completion), {BlobStorageErrorCode::BlobNotFound, BlobStorageErrorCode::ResourceNotFound}),
+            requestOptions);
+    }
+
     template <class THandler>
     void GetPropertiesAsyncImpl(const GetBlobPropertiesOptions& options, THandler completion,
-                                HttpRequestOptions requestOptions);
-    template <class THandler> void ExistsAsyncImpl(THandler completion, HttpRequestOptions requestOptions);
+                                HttpRequestOptions requestOptions) {
+        Private::GetBlobPropertiesAsync(*m_httpClient, *m_target, options, std::move(completion), requestOptions);
+    }
+
+    template <class THandler> void ExistsAsyncImpl(THandler completion, HttpRequestOptions requestOptions) {
+        Private::ExistsBlobAsync(*m_httpClient, *m_target, std::move(completion), requestOptions);
+    }
+
     template <class THandler>
     void SetMetadataAsyncImpl(const SetBlobMetadataOptions& options, THandler completion,
-                              HttpRequestOptions requestOptions);
+                              HttpRequestOptions requestOptions) {
+        Private::SetBlobMetadataAsync(*m_httpClient, *m_target, options, std::move(completion), requestOptions);
+    }
+
     template <class THandler>
-    void AcquireLeaseAsyncImpl(AcquireLeaseOptions options, THandler completion, HttpRequestOptions requestOptions);
+    void AcquireLeaseAsyncImpl(AcquireLeaseOptions options, THandler completion, HttpRequestOptions requestOptions) {
+        Private::AcquireLeaseAsync(*m_httpClient, *m_target, std::move(options), std::move(completion),
+                                   requestOptions);
+    }
+
     template <class THandler>
-    void RenewLeaseAsyncImpl(RenewLeaseOptions options, THandler completion, HttpRequestOptions requestOptions);
+    void RenewLeaseAsyncImpl(RenewLeaseOptions options, THandler completion, HttpRequestOptions requestOptions) {
+        Private::RenewLeaseAsync(*m_httpClient, *m_target, std::move(options), std::move(completion),
+                                 requestOptions);
+    }
+
     template <class THandler>
-    void ReleaseLeaseAsyncImpl(ReleaseLeaseOptions options, THandler completion, HttpRequestOptions requestOptions);
+    void ReleaseLeaseAsyncImpl(ReleaseLeaseOptions options, THandler completion, HttpRequestOptions requestOptions) {
+        Private::ReleaseLeaseAsync(*m_httpClient, *m_target, std::move(options), std::move(completion),
+                                   requestOptions);
+    }
 };
 
-// The production client type. Other client types (test doubles) instantiate BasicBlobClient<T> through the
-// private definitions in src/BlobClientImpl.hpp.
+// The production client type. Other client types (test doubles) instantiate BasicBlobClient<T> explicitly.
 using BlobClient = BasicBlobClient<HttpClient>;
 } // namespace AVEVA::AzureClient
-
-// Operation entry points are member templates, so their definitions must be visible to every user.
-#include <AVEVA/AzureClient/Detail/BlobClientImpl.hpp>

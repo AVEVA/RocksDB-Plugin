@@ -5,17 +5,14 @@
 // completions for one operation genuinely arrive on several threads at once. Built as its own
 // executable with the `concurrency` label; run it under ThreadSanitizer (LinuxDebugTSan) to check
 // the engines' locking (T30).
+#include "AVEVA/AzureClient/BlobClient.hpp"
 #include "AVEVA/AzureClient/BlobContainerClient.hpp"
 #include "AVEVA/AzureClient/BlobOperationOptions.hpp"
 #include "AVEVA/AzureClient/BlobStorageError.hpp"
 #include "AVEVA/AzureClient/BlockBlobClient.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
+#include "AVEVA/AzureClient/PageBlobClient.hpp"
 #include "AVEVA/AzureClient/Response.hpp"
-
-#include <AVEVA/AzureClient/Detail/BlobClientImpl.hpp>
-#include <AVEVA/AzureClient/Detail/BlobContainerClientImpl.hpp>
-#include <AVEVA/AzureClient/Detail/BlockBlobClientImpl.hpp>
-#include <AVEVA/AzureClient/Detail/PageBlobClientImpl.hpp>
 
 #include <AVEVA/HttpClient/HttpClient.hpp>
 #include <AVEVA/HttpClient/HttpHeader.hpp>

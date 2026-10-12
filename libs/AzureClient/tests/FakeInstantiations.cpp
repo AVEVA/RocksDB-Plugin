@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
-// Instantiates the client templates for the fake transport; the definitions live in private headers.
+// Instantiates the client templates for the fake transport.
 
 #include "FakeHttpClient.hpp"
 
-#include <AVEVA/AzureClient/Detail/BlobClientImpl.hpp>
-#include <AVEVA/AzureClient/Detail/BlobContainerClientImpl.hpp>
-#include <AVEVA/AzureClient/Detail/BlobServiceClientImpl.hpp>
-#include <AVEVA/AzureClient/Detail/BlockBlobClientImpl.hpp>
-#include <AVEVA/AzureClient/Detail/CredentialsImpl.hpp>
-#include <AVEVA/AzureClient/Detail/PageBlobClientImpl.hpp>
+#include <AVEVA/AzureClient/BlobClient.hpp>
+#include <AVEVA/AzureClient/BlobContainerClient.hpp>
+#include <AVEVA/AzureClient/BlobServiceClient.hpp>
+#include <AVEVA/AzureClient/BlockBlobClient.hpp>
+#include <AVEVA/AzureClient/Credentials.hpp>
+#include <AVEVA/AzureClient/PageBlobClient.hpp>
 
 namespace AVEVA::AzureClient {
 template class BasicBlobClient<Tests::FakeHttpClient>;

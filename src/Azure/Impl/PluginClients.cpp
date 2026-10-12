@@ -3,11 +3,11 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 
-#include <AVEVA/AzureClient/Detail/BlobClientImpl.hpp>
-#include <AVEVA/AzureClient/Detail/BlobContainerClientImpl.hpp>
-#include <AVEVA/AzureClient/Detail/BlobServiceClientImpl.hpp>
-#include <AVEVA/AzureClient/Detail/BlockBlobClientImpl.hpp>
-#include <AVEVA/AzureClient/Detail/PageBlobClientImpl.hpp>
+#include <AVEVA/AzureClient/BlobClient.hpp>
+#include <AVEVA/AzureClient/BlobContainerClient.hpp>
+#include <AVEVA/AzureClient/BlobServiceClient.hpp>
+#include <AVEVA/AzureClient/BlockBlobClient.hpp>
+#include <AVEVA/AzureClient/PageBlobClient.hpp>
 
 namespace AVEVA::AzureClient {
 template class BasicBlobClient<::AVEVA::HttpClient, RocksDB::Plugin::Azure::Impl::PluginCredential>;

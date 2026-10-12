@@ -8,6 +8,8 @@
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
 #include <AVEVA/AzureClient/HttpClientLike.hpp>
 #include <AVEVA/AzureClient/Models/BlobContainerModels.hpp>
+#include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
+#include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
 #include <AVEVA/AzureClient/Response.hpp>
 #include <AVEVA/AzureClient/TokenCredential.hpp>
 #include <AVEVA/HttpClient/HttpClient.hpp>
@@ -56,7 +58,10 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobServic
     using ContainerClientType = BasicBlobContainerClient<THttp, TCred>;
 
     BasicBlobServiceClient(THttp& httpClient, BlobServiceClientOptions options,
-                           std::shared_ptr<TCred> credential = nullptr);
+                           std::shared_ptr<TCred> credential = nullptr)
+        : m_httpClient(&httpClient),
+          m_connection(Private::MakeConnectionState(std::move(options), credential != nullptr)),
+          m_credential(Private::MakeCachedCredential(std::move(credential))) {}
     BasicBlobServiceClient(const BasicBlobServiceClient&) = delete;
     BasicBlobServiceClient& operator=(const BasicBlobServiceClient&) = delete;
     BasicBlobServiceClient(BasicBlobServiceClient&&) noexcept = default;
@@ -72,13 +77,18 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobServic
 
     // Request options (timeout, response body limit, cancellation slot) applied to every operation
     // that is not given its own via WithRequestOptions(...) or the trailing requestOptions argument.
-    [[nodiscard]] const HttpRequestOptions& GetDefaultRequestOptions() const noexcept;
+    [[nodiscard]] const HttpRequestOptions& GetDefaultRequestOptions() const noexcept {
+        return m_connection->DefaultRequestOptions;
+    }
 
     // The default completion token used when a ...Async call omits an explicit token
     // (matching this client's executor_type, per boost::asio::default_completion_token).
     using DefaultCompletionToken = boost::asio::default_completion_token<executor_type>::type;
 
-    [[nodiscard]] std::unique_ptr<ContainerClientType> GetBlobContainerClient(std::string containerName) const;
+    [[nodiscard]] std::unique_ptr<ContainerClientType> GetBlobContainerClient(std::string containerName) const {
+        return std::unique_ptr<ContainerClientType>(
+            new ContainerClientType{*m_httpClient, m_connection, m_credential, std::move(containerName)});
+    }
 
   private:
     THttp* m_httpClient = nullptr;
@@ -89,6 +99,3 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobServic
 
 using BlobServiceClient = BasicBlobServiceClient<HttpClient>;
 } // namespace AVEVA::AzureClient
-
-// Operation entry points are member templates, so their definitions must be visible to every user.
-#include <AVEVA/AzureClient/Detail/BlobServiceClientImpl.hpp>
