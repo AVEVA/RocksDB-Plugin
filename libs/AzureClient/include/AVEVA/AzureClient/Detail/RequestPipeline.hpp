@@ -30,7 +30,6 @@
 #include <cstdint>
 #include <deque>
 #include <exception>
-#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -38,7 +37,9 @@
 #include <random>
 #include <string_view>
 #include <system_error>
+#include <type_traits>
 #include <utility>
+#include <variant>
 
 namespace AVEVA::AzureClient::Private {
 namespace RetryDetail {
@@ -63,11 +64,11 @@ inline constexpr int MaxBackoffExponent = RetryPolicyConstants::MaxBackoffExpone
     return std::make_error_code(std::errc::operation_canceled);
 }
 
-template <HttpClientLike THttp, TokenCredentialLike TCred>
-class RetryOperation final : public std::enable_shared_from_this<RetryOperation<THttp, TCred>> {
+template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
+class RetryOperation final : public std::enable_shared_from_this<RetryOperation<THttp, TCred, THandler>> {
   public:
     RetryOperation(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
-                   HttpRequest request, HttpCompletion completion, HttpRequestOptions requestOptions,
+                   HttpRequest request, THandler completion, HttpRequestOptions requestOptions,
                    bool retryNotFoundAndGone)
         : m_httpClient(httpClient), m_auth(std::move(auth)), m_credential(std::move(credential)), m_retry(retry),
           m_request(std::move(request)), m_completion(std::move(completion)), m_requestOptions(requestOptions),
@@ -87,39 +88,86 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         }
 
         m_initiating.store(true, std::memory_order_release);
-        Run([this] { StartAttempt(); });
+        Run(StartAttemptEvent{});
         m_initiating.store(false, std::memory_order_release);
     }
 
   private:
+    // The units of work serialized by Run. They are plain data rather than closures so the queue needs
+    // no type erasure.
+    struct StartAttemptEvent {};
+    struct CancelEvent {
+        boost::asio::cancellation_type_t Type;
+    };
+    struct TokenEvent {
+        std::error_code Error;
+        AccessToken Token;
+        HttpRequest Attempt;
+    };
+    struct AttemptCompleteEvent {
+        std::error_code Error;
+        HttpResponse Response;
+    };
+    struct BackoffElapsedEvent {
+        bool Aborted;
+    };
+    struct FinishEvent {
+        std::error_code Error;
+    };
+    using Event = std::variant<StartAttemptEvent, CancelEvent, TokenEvent, AttemptCompleteEvent, BackoffElapsedEvent,
+                               FinishEvent>;
+
+    void Dispatch(Event& event) {
+        std::visit(
+            [this](auto& e) {
+                using TEvent = std::decay_t<decltype(e)>;
+                if constexpr (std::is_same_v<TEvent, StartAttemptEvent>) {
+                    StartAttempt();
+                } else if constexpr (std::is_same_v<TEvent, CancelEvent>) {
+                    OnCancelOnStrand(e.Type);
+                } else if constexpr (std::is_same_v<TEvent, TokenEvent>) {
+                    OnTokenOnStrand(e.Error, e.Token, std::move(e.Attempt));
+                } else if constexpr (std::is_same_v<TEvent, AttemptCompleteEvent>) {
+                    OnAttemptCompleteOnStrand(e.Error, std::move(e.Response));
+                } else if constexpr (std::is_same_v<TEvent, BackoffElapsedEvent>) {
+                    if (m_cancelled || e.Aborted) {
+                        Finish(CanceledError(), HttpResponse{});
+                    } else {
+                        StartAttempt();
+                    }
+                } else {
+                    Finish(e.Error, HttpResponse{});
+                }
+            },
+            event);
+    }
+
     // Serializes all state mutation: transport, timer, token and cancellation callbacks may
-    // arrive from different threads. Runs inline when idle (so initiation stays synchronous,
-    // and nothing is allocated or queued) and queues work that arrives while another thread,
-    // or an outer call, is running.
-    template <typename F> void Run(F&& work) {
+    // arrive from different threads. Runs inline when idle (so initiation stays synchronous)
+    // and queues work that arrives while another thread, or an outer call, is running.
+    void Run(Event event) {
         {
             const std::scoped_lock lock(m_queueMutex);
             if (m_draining) {
-                m_queue.emplace_back(std::forward<F>(work));
+                m_queue.push_back(std::move(event));
                 return;
             }
             m_draining = true;
         }
 
         const auto keepAlive = this->shared_from_this();
-        std::forward<F>(work)();
+        Dispatch(event);
         for (;;) {
-            std::move_only_function<void()> next;
             {
                 const std::scoped_lock lock(m_queueMutex);
                 if (m_queue.empty()) {
                     m_draining = false;
                     return;
                 }
-                next = std::move(m_queue.front());
+                event = std::move(m_queue.front());
                 m_queue.pop_front();
             }
-            next();
+            Dispatch(event);
         }
     }
 
@@ -128,7 +176,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
             return;
         }
         m_cancelled.store(true, std::memory_order_release);
-        Run([this, type] { OnCancelOnStrand(type); });
+        Run(CancelEvent{type});
     }
 
     void OnCancelOnStrand(boost::asio::cancellation_type_t type) {
@@ -237,9 +285,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     }
 
     void OnToken(std::error_code error, AccessToken token, HttpRequest attempt) {
-        Run([this, error, token = std::move(token), attempt = std::move(attempt)]() mutable {
-            OnTokenOnStrand(error, token, std::move(attempt));
-        });
+        Run(TokenEvent{error, std::move(token), std::move(attempt)});
     }
 
     void OnTokenOnStrand(std::error_code error, const AccessToken& token, HttpRequest attempt) {
@@ -285,9 +331,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     }
 
     void OnAttemptComplete(std::error_code error, HttpResponse response) {
-        Run([this, error, response = std::move(response)]() mutable {
-            OnAttemptCompleteOnStrand(error, std::move(response));
-        });
+        Run(AttemptCompleteEvent{error, std::move(response)});
     }
 
     [[nodiscard]] bool IsRetriableNotFoundOrGone(std::error_code error, const HttpResponse& response) const noexcept {
@@ -322,20 +366,13 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         m_timer.expires_after(delay);
         auto self = this->shared_from_this();
         m_timer.async_wait([self](const boost::system::error_code& waitError) {
-            self->Run([self, waitError] {
-                if (self->m_cancelled || waitError) {
-                    self->Finish(CanceledError(), HttpResponse{});
-                    return;
-                }
-                self->StartAttempt();
-            });
+            self->Run(BackoffElapsedEvent{static_cast<bool>(waitError)});
         });
     }
 
     void PostFinish(std::error_code error) {
         auto self = this->shared_from_this();
-        boost::asio::post(m_httpClient.get_executor(),
-                          [self, error]() { self->Run([self, error] { self->Finish(error, HttpResponse{}); }); });
+        boost::asio::post(m_httpClient.get_executor(), [self, error]() { self->Run(FinishEvent{error}); });
     }
 
     void Finish(std::error_code error, HttpResponse response) {
@@ -346,7 +383,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         // The parent slot is deliberately not cleared here: clearing on the transport thread would race with
         // the caller emitting on its own executor. Its handler only holds a weak_ptr and is inert once
         // finished; the caller's slot is cleared on its executor when the completion is dispatched.
-        HttpCompletion completion = std::move(m_completion);
+        THandler completion = std::move(m_completion);
         completion(error, std::move(response));
     }
 
@@ -356,14 +393,14 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     RetryOptions m_retry;
     HttpRequest m_request;
     std::shared_ptr<const std::string> m_sharedBody;
-    HttpCompletion m_completion;
+    THandler m_completion;
     HttpRequestOptions m_requestOptions;
     bool m_retryNotFoundAndGone;
     boost::asio::cancellation_slot m_parentSlot;
     boost::asio::cancellation_signal m_attemptSignal;
     boost::asio::steady_timer m_timer;
     std::mutex m_queueMutex;
-    std::deque<std::move_only_function<void()>> m_queue;
+    std::deque<Event> m_queue;
     bool m_draining = false;
     int m_maxAttempts = 1;
     int m_attempt = 0;
@@ -374,19 +411,19 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
 };
 } // namespace RetryDetail
 
-template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
 void SendWithRetryAsync(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
-                        HttpRequest request, HttpCompletion completion, HttpRequestOptions requestOptions,
+                        HttpRequest request, THandler completion, HttpRequestOptions requestOptions,
                         bool retryNotFoundAndGone) {
-    auto operation = std::make_shared<RetryDetail::RetryOperation<THttp, TCred>>(
+    auto operation = std::make_shared<RetryDetail::RetryOperation<THttp, TCred, THandler>>(
         httpClient, std::move(auth), std::move(credential), retry, std::move(request), std::move(completion),
         requestOptions, retryNotFoundAndGone);
     operation->Start();
 }
 
-template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
 void SendAuthorizedRequestAsync(THttp& httpClient, const ConnectionState& connection, std::shared_ptr<TCred> credential,
-                                HttpRequest request, HttpCompletion completion, HttpRequestOptions requestOptions) {
+                                HttpRequest request, THandler completion, HttpRequestOptions requestOptions) {
     // Checked here rather than per operation so every request carrying metadata, including the
     // internal commits issued by multi-part uploads, is rejected before reaching the service.
     for (const HttpHeader& header : request.GetHeaders()) {

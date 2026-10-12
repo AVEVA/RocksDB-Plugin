@@ -500,36 +500,33 @@ struct RequestAuth {
 // Server-provided retry delay (x-ms-retry-after-ms, then Retry-After in seconds), if any.
 [[nodiscard]] std::optional<std::chrono::milliseconds> ParseRetryAfter(const HttpResponse& response) noexcept;
 
-// Erased completion for one HTTP exchange; the Azure clients' own operation entry points are already
-// erased (virtual), so this keeps the pipeline non-templated on the handler.
-using HttpCompletion = std::move_only_function<void(std::error_code, HttpResponse)>;
-
 // Sends `request` with per-attempt authorization and retry/backoff according to `retry`.
 // All state is owned by the operation (no references to the caller's options are retained);
 // only `httpClient` must outlive the operation. A cancellation slot on `requestOptions` cancels
 // the in-flight attempt or the pending backoff, completing with std::errc::operation_canceled.
 // `retryNotFoundAndGone` additionally retries HTTP 404/410 (managed identity endpoints answer these while
 // starting). Defined in RequestPipeline.hpp.
-template <HttpClientLike THttp, TokenCredentialLike TCred>
+// `completion` is invoked as completion(std::error_code, HttpResponse).
+template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
 void SendWithRetryAsync(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
-                        HttpRequest request, HttpCompletion completion, HttpRequestOptions requestOptions,
+                        HttpRequest request, THandler completion, HttpRequestOptions requestOptions,
                         bool retryNotFoundAndGone = false);
 
 // Defined in RequestPipeline.hpp.
-template <HttpClientLike THttp, TokenCredentialLike TCred>
+template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
 void SendAuthorizedRequestAsync(THttp& httpClient, const ConnectionState& connection, std::shared_ptr<TCred> credential,
-                                HttpRequest request, HttpCompletion completion, HttpRequestOptions requestOptions);
+                                HttpRequest request, THandler completion, HttpRequestOptions requestOptions);
 
-template <HttpClientLike THttp, class TCred>
+template <HttpClientLike THttp, class TCred, class THandler>
 void SendAuthorizedRequestAsync(THttp& httpClient, const BasicContainerTarget<TCred>& target, HttpRequest request,
-                                HttpCompletion completion, HttpRequestOptions requestOptions) {
+                                THandler completion, HttpRequestOptions requestOptions) {
     SendAuthorizedRequestAsync(httpClient, *target.Connection, target.Credential, std::move(request),
                                std::move(completion), requestOptions);
 }
 
-template <HttpClientLike THttp, class TCred>
+template <HttpClientLike THttp, class TCred, class THandler>
 void SendAuthorizedRequestAsync(THttp& httpClient, const BasicBlobTarget<TCred>& target, HttpRequest request,
-                                HttpCompletion completion, HttpRequestOptions requestOptions) {
+                                THandler completion, HttpRequestOptions requestOptions) {
     SendAuthorizedRequestAsync(httpClient, *target.Connection, target.Credential, std::move(request),
                                std::move(completion), requestOptions);
 }

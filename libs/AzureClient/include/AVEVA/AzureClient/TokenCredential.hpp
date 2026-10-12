@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <boost/asio/any_completion_handler.hpp>
 #include <boost/asio/append.hpp>
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/detached.hpp>
@@ -142,7 +143,8 @@ concept TokenClockLike =
 // may run inline on the calling thread or on the executor of the underlying credential.
 //
 // Callers coalesced onto one refresh come with different handler types, so the handlers waiting on a refresh
-// are stored as std::move_only_function; this is the only type erasure left in the credential path.
+// are stored as boost::asio::any_completion_handler, Asio's own erased handler; this is the only type
+// erasure left in the credential path.
 template <TokenCredentialLike TInner, TokenClockLike TClock = SystemTokenClock>
 class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenCredential<TInner, TClock>> {
     // Keeps the constructor unusable outside Create while still allowing std::make_shared.
@@ -150,7 +152,7 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         explicit CreateKey() = default;
     };
 
-    using Waiter = std::move_only_function<TokenSignature>;
+    using Waiter = boost::asio::any_completion_handler<TokenSignature>;
 
   public:
     // The cache relies on shared ownership, so instances can only be created through this factory.
