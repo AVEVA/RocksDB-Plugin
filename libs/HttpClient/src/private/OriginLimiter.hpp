@@ -17,24 +17,51 @@
 
 namespace AVEVA::Private
 {
-    // Caps in-flight requests per origin. Requests over the cap wait in FIFO order and start as earlier ones
-    // finish. A waiting request can still be cancelled, and Close() fails whatever is left when the client dies.
+    /// <summary>
+    /// Caps in-flight requests per origin. Requests over the cap wait in FIFO order and start as earlier ones
+    /// finish. A waiting request can still be cancelled, and <see cref="Close"/> fails whatever is left when the
+    /// owner dies. All operations are thread-safe, and the callbacks it holds are always invoked outside the
+    /// lock.
+    /// </summary>
     class OriginLimiter : public std::enable_shared_from_this<OriginLimiter>
     {
       public:
+        /// <summary>
+        /// Begins a request that has been given a slot.
+        /// </summary>
         using Start = std::move_only_function<void()>;
+
+        /// <summary>
+        /// Fails a request that never got a slot, with the reason it was dropped.
+        /// </summary>
         using Abort = std::move_only_function<void(std::error_code)>;
 
+        /// <summary>
+        /// Constructs a limiter with a per-origin concurrency cap.
+        /// </summary>
+        /// <param name="maxPerOrigin">How many requests may run at once per origin.</param>
         explicit OriginLimiter(std::size_t maxPerOrigin) : m_max(maxPerOrigin)
         {
         }
 
+        /// <summary>
+        /// Issues an identifier for one queued request, for use with <see cref="Run"/> and
+        /// <see cref="Cancel"/>.
+        /// </summary>
+        /// <returns>A ticket unique within this limiter.</returns>
         std::uint64_t NextTicket() noexcept
         {
             return ++m_nextTicket;
         }
 
-        // Runs `start` now if the origin has capacity, otherwise queues it under `ticket` (see Cancel).
+        /// <summary>
+        /// Runs the request now if the origin has capacity, otherwise queues it to be started by a later
+        /// <see cref="Release"/> or failed through its abort.
+        /// </summary>
+        /// <param name="origin">The origin the request counts against.</param>
+        /// <param name="ticket">Identifies the request while it waits (see <see cref="Cancel"/>).</param>
+        /// <param name="start">Begins the request; invoked once, outside the lock.</param>
+        /// <param name="abort">Fails the request if it never gets a slot.</param>
         void Run(const std::string& origin, std::uint64_t ticket, Start start, Abort abort)
         {
             std::unique_lock<std::mutex> lock(m_mutex);
@@ -49,7 +76,11 @@ namespace AVEVA::Private
             state.waiters.push_back(Waiter{ticket, std::move(start), std::move(abort)});
         }
 
-        // Hands the finished request's slot to the next waiter, or frees it.
+        /// <summary>
+        /// Hands the finished request's slot to the next waiter, or frees it. Must be called exactly once per
+        /// started request.
+        /// </summary>
+        /// <param name="origin">The origin the finished request counted against.</param>
         void Release(const std::string& origin)
         {
             Start next;
@@ -74,7 +105,12 @@ namespace AVEVA::Private
             next();
         }
 
-        // Removes a queued request and fails it; a no-op if it already started.
+        /// <summary>
+        /// Removes a queued request and fails it with <c>operation_canceled</c>; a no-op if it already started
+        /// or never existed.
+        /// </summary>
+        /// <param name="origin">The origin the request was queued under.</param>
+        /// <param name="ticket">The ticket the request was queued with.</param>
         void Cancel(const std::string& origin, std::uint64_t ticket)
         {
             Abort abort;
@@ -97,6 +133,10 @@ namespace AVEVA::Private
             abort(std::make_error_code(std::errc::operation_canceled));
         }
 
+        /// <summary>
+        /// Fails every queued request with <c>operation_canceled</c>. Requests already started are left alone,
+        /// and may still call <see cref="Release"/>.
+        /// </summary>
         void Close()
         {
             std::vector<Abort> aborts;
@@ -118,6 +158,9 @@ namespace AVEVA::Private
         }
 
       private:
+        /// <summary>
+        /// A request waiting for a slot, identified by its ticket so it can be cancelled before it starts.
+        /// </summary>
         struct Waiter
         {
             std::uint64_t ticket;
@@ -125,6 +168,9 @@ namespace AVEVA::Private
             Abort abort;
         };
 
+        /// <summary>
+        /// One origin's running count and its FIFO queue of waiting requests.
+        /// </summary>
         struct OriginState
         {
             std::size_t active = 0;

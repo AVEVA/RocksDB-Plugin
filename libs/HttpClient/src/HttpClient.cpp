@@ -57,9 +57,21 @@ namespace AVEVA
         using Private::IdleSweeper;
         using Private::OriginLimiter;
 
+        /// <summary>
+        /// The concrete client: owns the TLS context, the plain and TLS connection pools, the idle sweeper, and
+        /// (when configured) the per-origin limiter, and turns each send into a RequestOperation on its own
+        /// strand.
+        /// </summary>
         class HttpClient final : public IHttpClient
         {
           public:
+            /// <summary>
+            /// Builds the TLS context and the pools and wires the pools to the sweeper. Throws if the requested
+            /// TLS settings cannot be applied.
+            /// </summary>
+            /// <param name="runtime">The io_context every connection and timer runs on; must outlive the
+            /// client.</param>
+            /// <param name="options">The TLS, pooling, and concurrency settings to build from.</param>
             HttpClient(asio::io_context& runtime, const HttpClientOptions& options)
                 : context_(runtime), m_tlsContext(std::make_shared<asio::ssl::context>(asio::ssl::context::tls_client)),
                   m_plainPool(std::make_shared<ConnectionPool<PlainStream>>(options.GetMaxIdleConnectionsPerHost(),
@@ -97,6 +109,10 @@ namespace AVEVA
                 return asio::any_io_executor(context_.get_executor());
             }
 
+            /// <summary>
+            /// Fails every request still waiting for a slot. Requests already running keep the state they need
+            /// alive on their own.
+            /// </summary>
             ~HttpClient() override
             {
                 if (m_limiter)
@@ -105,6 +121,13 @@ namespace AVEVA
                 }
             }
 
+            /// <summary>
+            /// Sends a request, routing it through the per-origin limiter when one is configured.
+            /// </summary>
+            /// <param name="request">The request to send.</param>
+            /// <param name="completion">Invoked exactly once with the outcome.</param>
+            /// <param name="options">The timeout, response limits, and cancellation slot for this request.</param>
+            /// <exception cref="std::invalid_argument">The completion handler is empty.</exception>
             void SendAsyncErased(HttpRequest request, CompletionHandler completion, HttpRequestOptions options) override
             {
                 if (!completion)
@@ -119,7 +142,12 @@ namespace AVEVA
             }
 
           private:
-            // Unparseable URLs bypass the cap; they fail fast and never open a connection.
+            /// <summary>
+            /// Derives the "scheme://host:port" the limiter counts against, with the default port filled in.
+            /// Unparseable URLs bypass the cap; they fail fast and never open a connection.
+            /// </summary>
+            /// <param name="url">The request URL to take the origin from.</param>
+            /// <returns>The origin, or nullopt when the URL cannot be parsed.</returns>
             static std::optional<std::string> OriginOf(std::string_view url)
             {
                 const auto parsed = urls::parse_uri(url);
@@ -132,11 +160,20 @@ namespace AVEVA
                        (parsed->has_port() ? std::string(parsed->port()) : (isTls ? "443" : "80"));
             }
 
-            // Cancellation-slot ownership: a caller's slot holds exactly one handler at a time, so ownership is
-            // handed over rather than shared. While a request waits in the limiter, the handler installed here
-            // removes it from the queue. When the request starts, RequestOperation::BindCancellationSlot replaces
-            // that handler with one that cancels the running operation. After that the limiter can no longer be
-            // reached through the slot, which is correct: a started request holds its slot until it completes.
+            /// <summary>
+            /// Queues the request behind the origin's cap and sends it once a slot is free, releasing that slot
+            /// when it completes.
+            ///
+            /// Cancellation-slot ownership: a caller's slot holds exactly one handler at a time, so ownership is
+            /// handed over rather than shared. While a request waits in the limiter, the handler installed here
+            /// removes it from the queue. When the request starts, RequestOperation::BindCancellationSlot replaces
+            /// that handler with one that cancels the running operation. After that the limiter can no longer be
+            /// reached through the slot, which is correct: a started request holds its slot until it completes.
+            /// </summary>
+            /// <param name="origin">The origin whose cap the request counts against.</param>
+            /// <param name="request">The request to send.</param>
+            /// <param name="completion">Invoked exactly once with the outcome.</param>
+            /// <param name="options">The timeout, response limits, and cancellation slot for this request.</param>
             void SendLimited(std::string origin, HttpRequest request, CompletionHandler completion, HttpRequestOptions options)
             {
                 struct Pending
@@ -184,6 +221,13 @@ namespace AVEVA
                 });
             }
 
+            /// <summary>
+            /// Sends the request immediately, reusing a pooled connection to its origin when one is available
+            /// and the request may be sent on one, and otherwise opening a fresh connection on a new strand.
+            /// </summary>
+            /// <param name="request">The request to send.</param>
+            /// <param name="completion">Invoked exactly once with the outcome.</param>
+            /// <param name="options">The timeout, response limits, and cancellation slot for this request.</param>
             void SendUnlimited(HttpRequest request, CompletionHandler completion, HttpRequestOptions options)
             {
                 // Invalid requests take the fresh-connection path, which fails them without closing a healthy
@@ -260,6 +304,13 @@ namespace AVEVA
             }
 
           private:
+            /// <summary>
+            /// Whether the request is one that may be sent on a pooled connection. An invalid request is not,
+            /// so that failing it cannot cost a healthy pooled connection.
+            /// </summary>
+            /// <param name="request">The request to classify.</param>
+            /// <param name="options">The options the request would be sent with.</param>
+            /// <returns>True if the request may use a pooled connection.</returns>
             static bool IsPoolableRequest(const HttpRequest& request, const HttpRequestOptions& options)
             {
                 const HttpMethod method = request.GetMethod();
@@ -276,6 +327,16 @@ namespace AVEVA
                 });
             }
 
+            /// <summary>
+            /// Starts the request on an already-connected pooled stream, on the executor that stream was
+            /// created with.
+            /// </summary>
+            /// <param name="pooled">The connection and read buffer taken from the pool.</param>
+            /// <param name="key">The origin the connection belongs to.</param>
+            /// <param name="request">The request to send.</param>
+            /// <param name="completion">Invoked exactly once with the outcome.</param>
+            /// <param name="options">The timeout, response limits, and cancellation slot for this request.</param>
+            /// <param name="pool">The pool the connection is returned to if the response allows reuse.</param>
             template <typename Stream>
             void ResumeWithPooledConnection(PooledConnection<Stream> pooled,
                 ConnectionKey<Stream> key,

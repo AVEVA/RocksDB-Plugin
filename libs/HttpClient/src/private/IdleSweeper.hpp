@@ -19,14 +19,26 @@
 
 namespace AVEVA::Private
 {
-    // Closes expired idle pooled sockets even when no request arrives. It sleeps until a pool gains an idle
-    // connection, and goes back to sleep once both pools are empty. A dedicated thread is used instead of an
-    // io_context timer so a pending timer cannot keep the caller's io_context::run() from returning.
+    /// <summary>
+    /// Closes expired idle pooled sockets even when no request arrives. It sleeps until a pool gains an idle
+    /// connection, and goes back to sleep once both pools are empty. A dedicated thread is used instead of an
+    /// io_context timer so a pending timer cannot keep the caller's io_context::run() from returning.
+    /// </summary>
     class IdleSweeper
     {
       public:
+        /// <summary>
+        /// Sweeps one pool and returns how many idle connections it still holds.
+        /// </summary>
         using SweepFunction = std::function<std::size_t()>;
 
+        /// <summary>
+        /// Constructs a sweeper over a plain and a TLS pool.
+        /// </summary>
+        /// <param name="plainSweep">Sweeps the plain pool and returns how many idle connections remain.</param>
+        /// <param name="tlsSweep">Sweeps the TLS pool and returns how many idle connections remain.</param>
+        /// <param name="idleTimeout">How often to sweep while either pool is non-empty; clamped to at least one
+        /// second.</param>
         IdleSweeper(SweepFunction plainSweep, SweepFunction tlsSweep, std::chrono::seconds idleTimeout)
             : m_plainSweep(std::move(plainSweep)), m_tlsSweep(std::move(tlsSweep)),
               m_interval(std::clamp(idleTimeout, std::chrono::seconds{1}, std::chrono::seconds{EffectivelyInfinite}))
@@ -36,7 +48,9 @@ namespace AVEVA::Private
         IdleSweeper(const IdleSweeper&) = delete;
         IdleSweeper& operator=(const IdleSweeper&) = delete;
 
-        // Called when a pool gains an idle connection; schedules a sweep unless one is already pending.
+        /// <summary>
+        /// Called when a pool gains an idle connection; schedules a sweep unless one is already pending.
+        /// </summary>
         void Notify()
         {
             if (!m_scheduled.exchange(true))
@@ -45,8 +59,11 @@ namespace AVEVA::Private
             }
         }
 
-        // Runs on the scheduler thread. The flag is cleared before sweeping so a release that lands during the
-        // sweep schedules itself instead of being lost.
+        /// <summary>
+        /// Sweeps both pools and schedules the next sweep while either still holds idle connections. Runs on
+        /// the scheduler thread. The pending flag is cleared before sweeping so a release that lands during the
+        /// sweep schedules itself instead of being lost.
+        /// </summary>
         void RunSweep()
         {
             m_scheduled = false;
@@ -56,24 +73,40 @@ namespace AVEVA::Private
             }
         }
 
-        // Must be called once the sweeper is owned by a shared_ptr.
+        /// <summary>
+        /// Must be called once the sweeper is owned by a shared_ptr, so it can be scheduled weakly and simply
+        /// be skipped once it is gone.
+        /// </summary>
+        /// <param name="self">The shared_ptr that owns this sweeper.</param>
         void BindSelf(const std::shared_ptr<IdleSweeper>& self)
         {
             m_self = self;
         }
 
       private:
-        // One thread for the whole process, started on first use, that runs every client's sweeps in deadline
-        // order. A per-client thread would cost a stack for each of many short-lived clients.
+        /// <summary>
+        /// One thread for the whole process, started on first use, that runs every sweeper's sweeps in deadline
+        /// order. A per-sweeper thread would cost a stack for each of many short-lived clients.
+        /// </summary>
         class SweepScheduler
         {
           public:
+            /// <summary>
+            /// The process-wide scheduler.
+            /// </summary>
+            /// <returns>The shared scheduler.</returns>
             static SweepScheduler& Instance()
             {
                 static SweepScheduler scheduler;
                 return scheduler;
             }
 
+            /// <summary>
+            /// Queues a sweeper to run after a delay, starting the thread if it is not yet running. The weak
+            /// reference means a sweeper destroyed in the meantime is skipped.
+            /// </summary>
+            /// <param name="sweeper">The sweeper to run.</param>
+            /// <param name="delay">How long to wait before running it.</param>
             void Schedule(const std::weak_ptr<IdleSweeper>& sweeper, std::chrono::seconds delay)
             {
                 {
@@ -99,6 +132,11 @@ namespace AVEVA::Private
           private:
             using Clock = std::chrono::steady_clock;
 
+            /// <summary>
+            /// Waits for the earliest due sweep and runs it, until a stop is requested. A sweep that throws is
+            /// swallowed so it cannot end the thread that serves everyone else.
+            /// </summary>
+            /// <param name="stop">Signals that the thread should return.</param>
             void Run(std::stop_token stop)
             {
                 std::unique_lock<std::mutex> lock(m_mutex);

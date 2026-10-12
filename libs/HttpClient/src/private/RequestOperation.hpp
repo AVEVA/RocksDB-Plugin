@@ -36,17 +36,41 @@
 
 namespace AVEVA::Private
 {
-    // Any error raised by Beast's HTTP parser (bad status line, bad header, bad chunk, ...) means the peer sent
-    // something that is not valid HTTP, as opposed to a transport failure.
+    /// <summary>
+    /// Any error raised by Beast's HTTP parser (bad status line, bad header, bad chunk, ...) means the peer sent
+    /// something that is not valid HTTP, as opposed to a transport failure.
+    /// </summary>
+    /// <param name="error">The error to classify.</param>
+    /// <returns>True if it came from the HTTP parser.</returns>
     inline bool IsBeastHttpError(const boost::system::error_code& error) noexcept
     {
         return error.category() == boost::beast::http::make_error_code(boost::beast::http::error{}).category();
     }
 
+    /// <summary>
+    /// One HTTP request from start to completion over a <see cref="PlainStream"/> or <see cref="TlsStream"/>:
+    /// building the message, resolving, connecting, handshaking, writing, reading the response, and then either
+    /// returning the connection to its pool or closing it.
+    ///
+    /// The operation keeps itself alive through <c>shared_from_this()</c> for the duration, and runs entirely on
+    /// one strand; only cancellation may arrive from another thread, and it posts to that strand. The completion
+    /// handler is invoked exactly once, on every path including a thrown exception.
+    /// </summary>
     template <typename Stream>
     class RequestOperation final : public std::enable_shared_from_this<RequestOperation<Stream>>
     {
       public:
+        /// <summary>
+        /// Constructs an operation over an already-created stream.
+        /// </summary>
+        /// <param name="tlsContext">The TLS context, held so a retry can build a replacement stream; unused for
+        /// a plain stream.</param>
+        /// <param name="stream">The stream to send over; its executor becomes the operation's strand.</param>
+        /// <param name="completion">Invoked exactly once with the outcome.</param>
+        /// <param name="options">The timeout, response limits, and cancellation slot for this request.</param>
+        /// <param name="pool">The pool the connection is returned to if the response allows reuse.</param>
+        /// <param name="key">The origin the connection belongs to.</param>
+        /// <param name="buffer">The read buffer carried over from a reused connection; empty otherwise.</param>
         RequestOperation(std::shared_ptr<asio::ssl::context> tlsContext,
             std::unique_ptr<Stream> stream,
             IHttpClient::CompletionHandler completion,
@@ -60,6 +84,10 @@ namespace AVEVA::Private
         {
         }
 
+        /// <summary>
+        /// Subscribes to the cancellation slot in the options, if one is connected. Must be called before the
+        /// operation is started.
+        /// </summary>
         void BindCancellationSlot()
         {
             auto slot = m_options.GetCancellationSlot();
@@ -82,7 +110,10 @@ namespace AVEVA::Private
             });
         }
 
-        // Fresh connection: resolve, connect, (TLS handshake), then send.
+        /// <summary>
+        /// Fresh connection: resolve, connect, (TLS handshake), then send. Must run on the operation's strand.
+        /// </summary>
+        /// <param name="request">The request to send; its owned body is moved out.</param>
         void Start(HttpRequest request)
         {
             if (IsCancellationRequested())
@@ -109,7 +140,11 @@ namespace AVEVA::Private
             Resolve();
         }
 
-        // Reused pooled connection: already connected (and, for TLS, already handshaked).
+        /// <summary>
+        /// Reused pooled connection: already connected (and, for TLS, already handshaked), so this writes
+        /// straight away. Must run on the operation's strand.
+        /// </summary>
+        /// <param name="request">The request to send; its owned body is moved out.</param>
         void StartReused(HttpRequest request)
         {
             if (IsCancellationRequested())
@@ -130,8 +165,14 @@ namespace AVEVA::Private
         }
 
       private:
-        // Anything that still throws (for example an oversized Host authority) must complete the request exactly
-        // once instead of escaping onto the host's io_context thread and dropping the completion handler.
+        /// <summary>
+        /// Translates the request into the Beast message to be sent, failing the operation if it cannot be.
+        /// Anything that still throws (for example an oversized Host authority) must complete the request
+        /// exactly once instead of escaping onto the host's io_context thread and dropping the completion
+        /// handler.
+        /// </summary>
+        /// <param name="request">The request to translate; its owned body is moved out.</param>
+        /// <returns>True if the operation may continue.</returns>
         bool BuildRequest(HttpRequest& request)
         {
             try
@@ -145,6 +186,13 @@ namespace AVEVA::Private
             }
         }
 
+        /// <summary>
+        /// Validates the URL, method, headers and options, and fills in the Beast request: target, Host,
+        /// keep-alive, body and Content-Length. Fails the operation on anything invalid. May throw, which is
+        /// why callers go through <see cref="BuildRequest"/>.
+        /// </summary>
+        /// <param name="request">The request to translate; its owned body is moved out.</param>
+        /// <returns>True if the operation may continue.</returns>
         bool BuildRequestUnchecked(HttpRequest& request)
         {
             auto parsed = urls::parse_uri(request.GetUrl());
@@ -223,6 +271,9 @@ namespace AVEVA::Private
             return true;
         }
 
+        /// <summary>
+        /// Starts the deadline covering the whole operation, failing it with TimedOut when it elapses.
+        /// </summary>
         void ArmTimer()
         {
             // Clamp so huge timeouts (e.g. milliseconds::max()) cannot overflow the clock's duration or time_point.
@@ -239,6 +290,11 @@ namespace AVEVA::Private
             });
         }
 
+        /// <summary>
+        /// Prepares the TLS stream for this origin: offers a resumable session, installs host name verification
+        /// when verification is on, and sets SNI for a named host. Fails the operation if SNI could not be set.
+        /// </summary>
+        /// <returns>True if the operation may continue.</returns>
         bool ConfigureTlsForHost()
         {
             PrepareTlsSessionResumption(m_stream->native_handle(), m_key.host, m_key.service);
@@ -254,10 +310,16 @@ namespace AVEVA::Private
             return true;
         }
 
-        // A pooled connection may have been closed by the peer while idle. If nothing has been
-        // parsed yet, it is safe to silently retry once on a brand-new connection.
-        // Because the request may already have been processed by the time the failure is seen, a request
-        // that could have reached the server is only re-sent when its method is idempotent.
+        /// <summary>
+        /// A pooled connection may have been closed by the peer while idle. If nothing has been
+        /// parsed yet, it is safe to silently retry once on a brand-new connection.
+        /// Because the request may already have been processed by the time the failure is seen, a request that
+        /// could have reached the server is only re-sent when its method is idempotent.
+        /// </summary>
+        /// <param name="requestMayHaveBeenSent">Whether the bytes of the request could already have reached the
+        /// server.</param>
+        /// <returns>True if a retry was started, in which case the caller must not also fail the
+        /// operation.</returns>
         bool MaybeRetryAfterReuseFailure(bool requestMayHaveBeenSent)
         {
             if (IsCancellationRequested() || !m_reused || m_retried || m_receivedAnyResponse || m_parser->got_some() ||
@@ -289,6 +351,12 @@ namespace AVEVA::Private
             return true;
         }
 
+        /// <summary>
+        /// Whether re-sending a method cannot have an effect beyond that of sending it once, and so may be
+        /// retried after a failure that might have reached the server.
+        /// </summary>
+        /// <param name="method">The method to classify.</param>
+        /// <returns>True if the method is idempotent.</returns>
         static bool IsIdempotentMethod(http::verb method) noexcept
         {
             switch (method)
@@ -305,6 +373,10 @@ namespace AVEVA::Private
             }
         }
 
+        /// <summary>
+        /// Installs a fresh response parser carrying the request's limits, and skips the body for a HEAD
+        /// response, which has none despite its Content-Length.
+        /// </summary>
         void ResetParser()
         {
             m_parser.emplace();
@@ -313,9 +385,11 @@ namespace AVEVA::Private
             m_parser->skip(m_request.method() == http::verb::head);
         }
 
-        // Serves a recent result from the shared cache and collapses concurrent lookups for one origin into a
-        // single resolve. Every caller already runs on this operation's strand, so a hit is dispatched (run inline)
-        // instead of posted; completions are always posted, so the caller's handler is still never re-entered.
+        /// <summary>
+        /// Serves a recent result from the shared cache and collapses concurrent lookups for one origin into a
+        /// single resolve. Every caller already runs on this operation's strand, so a hit is dispatched (run inline)
+        /// instead of posted; completions are always posted, so the caller's handler is still never re-entered.
+        /// </summary>
         void Resolve()
         {
             auto& cache = DnsCache::Shared();
@@ -373,6 +447,11 @@ namespace AVEVA::Private
             });
         }
 
+        /// <summary>
+        /// Connects to the resolved endpoints, or fails the operation if the lookup did not succeed.
+        /// </summary>
+        /// <param name="error">The outcome of the lookup.</param>
+        /// <param name="results">The endpoints to connect to.</param>
         void OnResolve(boost::system::error_code error, Tcp::resolver::results_type results)
         {
             if (finished_)
@@ -394,6 +473,11 @@ namespace AVEVA::Private
             });
         }
 
+        /// <summary>
+        /// Performs the TLS handshake on a secure stream and then writes, or writes straight away on a plain
+        /// one. Fails the operation if the connect or the handshake did not succeed.
+        /// </summary>
+        /// <param name="error">The outcome of the connect.</param>
         void OnConnect(boost::system::error_code error)
         {
             if (finished_)
@@ -434,6 +518,10 @@ namespace AVEVA::Private
             }
         }
 
+        /// <summary>
+        /// Writes the request, then starts reading. A failure on a reused connection may be retried instead of
+        /// reported.
+        /// </summary>
         void Write()
         {
             if (finished_)
@@ -468,6 +556,9 @@ namespace AVEVA::Private
             });
         }
 
+        /// <summary>
+        /// Reads one complete response message into the parser.
+        /// </summary>
         void Read()
         {
             if (finished_)
@@ -487,6 +578,12 @@ namespace AVEVA::Private
             });
         }
 
+        /// <summary>
+        /// Completes the operation with the response just read: skips informational (1xx) responses, classifies
+        /// a read failure, and then either returns the connection to the pool or shuts it down before handing
+        /// the response to the completion handler.
+        /// </summary>
+        /// <param name="error">The outcome of the read.</param>
         void OnRead(boost::system::error_code error)
         {
             if (finished_)
@@ -605,6 +702,10 @@ namespace AVEVA::Private
             completion({}, std::move(response));
         }
 
+        /// <summary>
+        /// Shuts down and closes the underlying socket, ignoring errors; a no-op once the stream has been
+        /// released to the pool.
+        /// </summary>
         void Close()
         {
             if (!m_stream)
@@ -617,16 +718,29 @@ namespace AVEVA::Private
             socket.close(ignored);
         }
 
+        /// <summary>
+        /// Completes the operation with an error and an empty response.
+        /// </summary>
+        /// <param name="error">The error to complete with.</param>
         void Fail(HttpClientError error)
         {
             Finish(error, {});
         }
 
+        /// <summary>
+        /// Completes the operation with <c>operation_canceled</c> and an empty response.
+        /// </summary>
         void Cancel()
         {
             Finish(std::make_error_code(std::errc::operation_canceled), {});
         }
 
+        /// <summary>
+        /// Stops the timer and the resolver, closes the connection, and invokes the completion handler. Only the
+        /// first call has an effect, so a failure that races the deadline is reported once.
+        /// </summary>
+        /// <param name="error">The outcome to report; empty on success.</param>
+        /// <param name="response">The response to report; empty on failure.</param>
         void Finish(std::error_code error, HttpResponse response)
         {
             if (finished_)
@@ -641,6 +755,10 @@ namespace AVEVA::Private
             completion(error, std::move(response));
         }
 
+        /// <summary>
+        /// Records that cancellation was asked for and posts the cancellation to the strand. Safe to call from
+        /// any thread, and only the first call has an effect.
+        /// </summary>
         void RequestCancellation()
         {
             if (m_cancellationRequested.exchange(true))
@@ -654,6 +772,11 @@ namespace AVEVA::Private
             });
         }
 
+        /// <summary>
+        /// Whether cancellation has been asked for. Checked at every step so a cancelled operation stops as
+        /// soon as the strand next runs.
+        /// </summary>
+        /// <returns>True once cancellation has been requested.</returns>
         [[nodiscard]] bool IsCancellationRequested() const noexcept
         {
             return m_cancellationRequested.load();

@@ -9,8 +9,11 @@
 
 namespace AVEVA::Private
 {
-    // The public enum stays Beast-free; this is the only place that knows how it maps onto Beast's verbs.
-    // Returns verb::unknown for a value outside the enumeration.
+    /// <summary>
+    /// The public enum stays Beast-free; this is the only place that knows how it maps onto Beast's verbs.
+    /// </summary>
+    /// <param name="method">The method to map.</param>
+    /// <returns>The matching Beast verb, or verb::unknown for a value outside the enumeration.</returns>
     inline boost::beast::http::verb ToBeastVerb(HttpMethod method) noexcept
     {
         using boost::beast::http::verb;

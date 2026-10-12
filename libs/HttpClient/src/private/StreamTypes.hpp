@@ -17,6 +17,14 @@ namespace AVEVA::Private
     namespace http = beast::http;
     namespace urls = boost::urls;
     using Tcp = asio::ip::tcp;
+
+    /// <summary>
+    /// The stream used for plain HTTP: a TCP socket with Beast's expiry support.
+    /// </summary>
     using PlainStream = beast::tcp_stream;
+
+    /// <summary>
+    /// The stream used for HTTPS: TLS layered over <see cref="PlainStream"/>.
+    /// </summary>
     using TlsStream = beast::ssl_stream<PlainStream>;
 } // namespace AVEVA::Private

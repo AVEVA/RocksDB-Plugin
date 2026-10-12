@@ -27,10 +27,11 @@
 
 namespace AVEVA::Private
 {
-    // Identifies the (host, service) origin a pooled connection belongs to. Parameterized on
-    // Stream so a key is only ever valid for the ConnectionPool<Stream> it was created for;
-    // use it via the BasicConnectionKey/TlsConnectionKey aliases below rather than naming
-    // ConnectionKey<Stream> directly.
+    /// <summary>
+    /// Identifies the (host, service) origin a pooled connection belongs to. Parameterized on Stream so a key is
+    /// only ever valid for the ConnectionPool&lt;Stream&gt; it was created for; use it via the
+    /// BasicConnectionKey/TlsConnectionKey aliases below rather than naming ConnectionKey&lt;Stream&gt; directly.
+    /// </summary>
     template <typename Stream> struct ConnectionKey
     {
         std::string host;
@@ -42,6 +43,9 @@ namespace AVEVA::Private
         }
     };
 
+    /// <summary>
+    /// Hashes a <see cref="ConnectionKey"/> by combining its host and service.
+    /// </summary>
     template <typename Stream> struct ConnectionKeyHash
     {
         std::size_t operator()(const ConnectionKey<Stream>& key) const noexcept
@@ -52,6 +56,9 @@ namespace AVEVA::Private
         }
     };
 
+    /// <summary>
+    /// Compares two <see cref="ConnectionKey"/> values for equality.
+    /// </summary>
     template <typename Stream> struct ConnectionKeyEqual
     {
         bool operator()(const ConnectionKey<Stream>& lhs, const ConnectionKey<Stream>& rhs) const noexcept
@@ -60,10 +67,16 @@ namespace AVEVA::Private
         }
     };
 
-    // Buffers up to this capacity are kept as-is when a connection is pooled so the next response on it does
-    // not have to reallocate; larger ones are released so an idle connection does not pin a big response.
+    /// <summary>
+    /// Buffers up to this capacity are kept as-is when a connection is pooled so the next response on it does
+    /// not have to reallocate; larger ones are released so an idle connection does not pin a big response.
+    /// </summary>
     inline constexpr std::size_t MaxRetainedBufferCapacity = 64 * 1024;
 
+    /// <summary>
+    /// Releases a buffer's memory if it grew past <see cref="MaxRetainedBufferCapacity"/>.
+    /// </summary>
+    /// <param name="buffer">The buffer of a connection about to be pooled.</param>
     inline void TrimIdleBuffer(beast::flat_buffer& buffer)
     {
         if (buffer.capacity() > MaxRetainedBufferCapacity)
@@ -72,14 +85,24 @@ namespace AVEVA::Private
         }
     }
 
+    /// <summary>
+    /// A connection held in (or taken from) the pool, together with the read buffer that belongs to it, which
+    /// may still hold bytes the stream has read.
+    /// </summary>
     template <typename Stream> struct PooledConnection
     {
         std::unique_ptr<Stream> stream;
         beast::flat_buffer buffer;
     };
 
-    // Aliases for the two connection pool element types used by HttpClient.
+    /// <summary>
+    /// The key type for a pool of plain HTTP connections.
+    /// </summary>
     using BasicConnectionKey = ConnectionKey<PlainStream>;
+
+    /// <summary>
+    /// The key type for a pool of HTTPS connections.
+    /// </summary>
     using TlsConnectionKey = ConnectionKey<TlsStream>;
 
     namespace ConnectionPoolDetail
@@ -96,24 +119,41 @@ namespace AVEVA::Private
         using LruHook = intrusive::list_base_hook<intrusive::tag<LruTag>, intrusive::link_mode<intrusive::normal_link>>;
     } // namespace ConnectionPoolDetail
 
-    // Caches idle keep-alive connections per (scheme, host, port) so repeated requests to the
-    // same origin can skip DNS resolution, TCP connect, and (for HTTPS) the TLS handshake.
-    //
-    // Every cached connection lives in a node that is threaded onto two intrusive lists at once:
-    // the per-origin idle list that Acquire searches, and a single pool-wide LRU list ordered
-    // oldest-first that makes expiry a bounded walk from the front instead of a per-origin scan.
-    // Because the lists are intrusive, linking, unlinking, and moving a connection between them
-    // costs a few pointer writes and never allocates, and retired nodes are recycled rather than
-    // freed so a steady request stream performs no node allocation at all.
+    /// <summary>
+    /// Caches idle keep-alive connections per (scheme, host, port) so repeated requests to the
+    /// same origin can skip DNS resolution, TCP connect, and (for HTTPS) the TLS handshake.
+    ///
+    /// Every cached connection lives in a node that is threaded onto two intrusive lists at once:
+    /// the per-origin idle list that Acquire searches, and a single pool-wide LRU list ordered
+    /// oldest-first that makes expiry a bounded walk from the front instead of a per-origin scan.
+    /// Because the lists are intrusive, linking, unlinking, and moving a connection between them
+    /// costs a few pointer writes and never allocates, and retired nodes are recycled rather than
+    /// freed so a steady request stream performs no node allocation at all.
+    ///
+    /// All public operations are thread-safe. Retired sockets are always destroyed outside the lock.
+    /// </summary>
     template <typename Stream, typename Clock = std::chrono::steady_clock> class ConnectionPool
     {
       public:
-        // Bounds idle sockets across all origins, so a client that talks to many hosts cannot hold them unboundedly.
+        /// <summary>
+        /// Bounds idle sockets across all origins, so a client that talks to many hosts cannot hold them
+        /// unboundedly.
+        /// </summary>
         static constexpr std::size_t DefaultMaxTotalIdle = 256;
 
-        // Larger values would overflow when converted to the clock's nanosecond ticks.
+        /// <summary>
+        /// The largest idle timeout accepted; larger values would overflow when converted to the clock's
+        /// nanosecond ticks, so they are clamped to this.
+        /// </summary>
         static constexpr std::chrono::seconds MaxIdleTimeout{EffectivelyInfinite};
 
+        /// <summary>
+        /// Constructs a pool of idle keep-alive connections.
+        /// </summary>
+        /// <param name="maxIdlePerKey">How many idle connections to keep per origin; 0 disables pooling.</param>
+        /// <param name="idleTimeout">How long a connection may sit idle before it is closed; clamped to
+        /// <see cref="MaxIdleTimeout"/>.</param>
+        /// <param name="maxTotalIdle">How many idle connections to keep across all origins.</param>
         ConnectionPool(std::size_t maxIdlePerKey,
             std::chrono::seconds idleTimeout,
             std::size_t maxTotalIdle = DefaultMaxTotalIdle)
@@ -123,14 +163,21 @@ namespace AVEVA::Private
         {
         }
 
-        // Called (outside the lock) when a release makes an empty pool non-empty, so an owner can schedule Sweep().
+        /// <summary>
+        /// Called (outside the lock) when a release makes an empty pool non-empty, so an owner can schedule
+        /// Sweep().
+        /// </summary>
+        /// <param name="callback">The notification to invoke; replaces any previous one.</param>
         void SetOnBecameNonEmpty(std::function<void()> callback)
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_onBecameNonEmpty = std::move(callback);
         }
 
-        // Closes connections idle past the timeout without needing a request to arrive; returns how many remain.
+        /// <summary>
+        /// Closes connections idle past the timeout without needing a request to arrive.
+        /// </summary>
+        /// <returns>How many idle connections remain.</returns>
         std::size_t Sweep()
         {
             LruList retired;
@@ -144,6 +191,10 @@ namespace AVEVA::Private
             return remaining;
         }
 
+        /// <summary>
+        /// The number of idle connections currently held across every origin.
+        /// </summary>
+        /// <returns>The idle connection count.</returns>
         std::size_t IdleCount()
         {
             std::lock_guard<std::mutex> lock(m_mutex);
@@ -161,8 +212,13 @@ namespace AVEVA::Private
             m_recycled.clear_and_dispose(NodeDisposer{});
         }
 
-        // Returns a connection the peer has not closed. A server may drop an idle keep-alive socket at any time,
-        // and a non-idempotent request sent on it could not be retried safely, so dead ones are discarded here.
+        /// <summary>
+        /// Returns a connection the peer has not closed. A server may drop an idle keep-alive socket at any
+        /// time, and a non-idempotent request sent on it could not be retried safely, so dead ones are discarded
+        /// here.
+        /// </summary>
+        /// <param name="key">The origin to take a connection for.</param>
+        /// <returns>A usable connection, or nullopt when the origin has none.</returns>
         std::optional<PooledConnection<Stream>> Acquire(const ConnectionKey<Stream>& key)
         {
             typename Clock::duration idleFor{};
@@ -178,12 +234,25 @@ namespace AVEVA::Private
             return std::nullopt;
         }
 
+        /// <summary>
+        /// Like <see cref="Acquire"/>, but without probing whether the peer has closed the connection.
+        /// </summary>
+        /// <param name="key">The origin to take a connection for.</param>
+        /// <returns>The newest idle connection, or nullopt when the origin has none.</returns>
         std::optional<PooledConnection<Stream>> AcquireUnchecked(const ConnectionKey<Stream>& key)
         {
             typename Clock::duration idleFor{};
             return AcquireAged(key, idleFor);
         }
 
+        /// <summary>
+        /// Removes the newest idle connection for an origin without probing it. Expired connections are dropped
+        /// first, so whatever is returned was within the idle timeout.
+        /// </summary>
+        /// <param name="key">The origin to take a connection for.</param>
+        /// <param name="idleFor">Set to how long the returned connection had been idle; untouched when there is
+        /// none.</param>
+        /// <returns>The newest idle connection, or nullopt when the origin has none.</returns>
         std::optional<PooledConnection<Stream>> AcquireAged(const ConnectionKey<Stream>& key,
             typename Clock::duration& idleFor)
         {
@@ -216,6 +285,14 @@ namespace AVEVA::Private
             return connection;
         }
 
+        /// <summary>
+        /// Returns a finished connection to the pool for reuse, evicting the oldest idle connection of the
+        /// origin, and then of the pool, if either cap is exceeded. Does nothing when pooling is disabled or
+        /// the connection holds no stream. Strongly exception-safe: if a node or map entry cannot be allocated
+        /// the pool is left unchanged and the connection stays with the caller.
+        /// </summary>
+        /// <param name="key">The origin the connection belongs to.</param>
+        /// <param name="connection">The connection and its read buffer, taken over on success.</param>
         void Release(const ConnectionKey<Stream>& key, PooledConnection<Stream> connection)
         {
             if (m_maxIdlePerKey == 0 || !connection.stream)
@@ -302,7 +379,12 @@ namespace AVEVA::Private
         }
 
       private:
-        // An idle socket must have nothing to read: pending data or EOF both mean the peer closed or misbehaved.
+        /// <summary>
+        /// An idle socket must have nothing to read: pending data or EOF both mean the peer closed or
+        /// misbehaved. Stream types without a real socket cannot be probed and are assumed alive.
+        /// </summary>
+        /// <param name="connection">The idle connection to probe.</param>
+        /// <returns>True if the connection still looks usable.</returns>
         static bool IsAlive(PooledConnection<Stream>& connection) noexcept
         {
             if constexpr (!requires { beast::get_lowest_layer(*connection.stream).socket(); })
@@ -343,6 +425,9 @@ namespace AVEVA::Private
 
         struct Origin;
 
+        /// <summary>
+        /// A cached connection, linked into both its origin's idle list and the pool-wide LRU list.
+        /// </summary>
         struct Node : ConnectionPoolDetail::IdleHook, ConnectionPoolDetail::LruHook
         {
             PooledConnection<Stream> connection;
@@ -357,12 +442,19 @@ namespace AVEVA::Private
             boost::intrusive::base_hook<ConnectionPoolDetail::LruHook>,
             boost::intrusive::constant_time_size<true>>;
 
+        /// <summary>
+        /// One origin's idle connections, oldest first, plus a pointer back to the key that owns them so a node
+        /// can erase its origin in O(1).
+        /// </summary>
         struct Origin
         {
             IdleList idle;
             const ConnectionKey<Stream>* key = nullptr;
         };
 
+        /// <summary>
+        /// Destroys a node (and with it its socket) when an intrusive list is cleared.
+        /// </summary>
         struct NodeDisposer
         {
             void operator()(Node* node) const noexcept
@@ -371,9 +463,13 @@ namespace AVEVA::Private
             }
         };
 
-        // Unlinks every connection that has been idle past the timeout and hands it to the caller
-        // for destruction outside the lock. The LRU list is ordered oldest-first, so the walk stops
-        // at the first live node.
+        /// <summary>
+        /// Unlinks every connection that has been idle past the timeout and hands it to the caller
+        /// for destruction outside the lock. The LRU list is ordered oldest-first, so the walk stops
+        /// at the first live node.
+        /// </summary>
+        /// <param name="now">The current time to measure idleness against.</param>
+        /// <param name="retired">Receives the expired nodes, to be disposed of by the caller.</param>
         void DropExpired(typename Clock::time_point now, LruList& retired)
         {
             while (!m_lru.empty())
@@ -394,6 +490,10 @@ namespace AVEVA::Private
             }
         }
 
+        /// <summary>
+        /// Returns a node to hold a connection, reusing a retired one when possible. May throw.
+        /// </summary>
+        /// <returns>An unlinked node owned by the pool.</returns>
         Node* Obtain()
         {
             if (m_recycled.empty())
@@ -405,6 +505,10 @@ namespace AVEVA::Private
             return &node;
         }
 
+        /// <summary>
+        /// Clears a node and keeps it for reuse, freeing it once enough are already held.
+        /// </summary>
+        /// <param name="node">The node to recycle; must already be unlinked from both lists.</param>
         void Recycle(Node& node)
         {
             node.connection = PooledConnection<Stream>{};
@@ -417,7 +521,15 @@ namespace AVEVA::Private
             m_recycled.push_back(node);
         }
 
+        /// <summary>
+        /// How many retired nodes are kept for reuse before they are freed.
+        /// </summary>
         static constexpr std::size_t MaxRecycledNodes = 32;
+
+        /// <summary>
+        /// A connection idle for less than this is handed out without a liveness probe, since the peer has had
+        /// no real chance to close it.
+        /// </summary>
         static constexpr std::chrono::milliseconds SkipProbeBelow{50};
 
         std::size_t m_maxIdlePerKey;
