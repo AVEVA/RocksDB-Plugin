@@ -3,8 +3,10 @@
 
 #pragma once
 #include <AVEVA/AzureClient/BlobClientOptions.hpp>
+#include <AVEVA/AzureClient/BlobContainerClient.hpp>
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
+#include <AVEVA/AzureClient/HttpClientLike.hpp>
 #include <AVEVA/AzureClient/ITokenCredential.hpp>
 #include <AVEVA/AzureClient/Models/BlobContainerModels.hpp>
 #include <AVEVA/AzureClient/Response.hpp>
@@ -26,82 +28,79 @@
 
 #include <AVEVA/AzureClient/Detail/AsyncInitiation.hpp>
 
-namespace AVEVA::AzureClient
-{
-    namespace Private
-    {
-        struct ConnectionState;
-    } // namespace Private
+namespace AVEVA::AzureClient {
+namespace Private {
+struct ConnectionState;
+} // namespace Private
 
-    class BlobContainerClient;
+template <HttpClientLike THttp> class BasicBlobContainerClient;
 
-    struct BlobServiceClientOptions
-    {
-        std::string ServiceEndpoint;
-        // Authorization precedence is SAS > SharedKey > TokenCredential > BearerToken (see BlobClientOptions).
-        // BearerToken/TokenCredential require https unless the host is loopback (see BlobClientOptions).
-        std::string SasToken;
-        std::string BearerToken;
-        std::shared_ptr<ITokenCredential> TokenCredential;
-        std::vector<std::string> TokenScopes{"https://storage.azure.com/.default"};
-        SharedKeyCredentialOptions SharedKey;
-        std::string ApiVersion = std::string(DefaultApiVersion);
+struct BlobServiceClientOptions {
+    std::string ServiceEndpoint;
+    // Authorization precedence is SAS > SharedKey > TokenCredential > BearerToken (see BlobClientOptions).
+    // BearerToken/TokenCredential require https unless the host is loopback (see BlobClientOptions).
+    std::string SasToken;
+    std::string BearerToken;
+    std::shared_ptr<ITokenCredential> TokenCredential;
+    std::vector<std::string> TokenScopes{"https://storage.azure.com/.default"};
+    SharedKeyCredentialOptions SharedKey;
+    std::string ApiVersion = std::string(DefaultApiVersion);
 
-        RetryOptions Retry;
-        HttpRequestOptions DefaultRequestOptions;
-    };
+    RetryOptions Retry;
+    HttpRequestOptions DefaultRequestOptions;
+};
 
-    // Account-level operations, and the factory for container clients.
-    //
-    // Thread safety: concurrent ...Async calls on one instance are supported. Caller-supplied buffers are
-    // not synchronized by the library. Completion handlers are not serialized with each other and may run
-    // inline, before the initiating call returns.
-    //
-    // Lifetime: stores a non-owning reference to the IHttpClient, which must outlive this client and every
-    // in-flight ...Async operation; destroying either before a completion handler runs is undefined behavior.
-    //
-    // Cancellation: HttpRequestOptions carries a boost::asio::cancellation_slot that aborts in-flight work
-    // (completing with an operation_aborted-flavored BlobStorageError); a slot associated with the
-    // completion token is adopted when HttpRequestOptions has none.
-    //
-    // Completion tokens: every ...Async operation accepts any Boost.Asio CompletionToken (callback,
-    // use_future, use_awaitable, ...) and completes with std::expected<Response<T>, BlobStorageError>.
-    // Omitting the token yields a deferred, directly co_await-able operation, e.g. `co_await
-    // client.GetBlobContainerClient(...);`. Overloads that also take an options struct exclude it from the defaulted
-    // token via `requires`.
-    class BlobServiceClient
-    {
-      public:
-        BlobServiceClient(IHttpClient& httpClient, BlobServiceClientOptions options);
-        BlobServiceClient(const BlobServiceClient&) = delete;
-        BlobServiceClient& operator=(const BlobServiceClient&) = delete;
-        BlobServiceClient(BlobServiceClient&&) noexcept = default;
-        BlobServiceClient& operator=(BlobServiceClient&&) noexcept = default;
-        virtual ~BlobServiceClient() = default;
+// Account-level operations, and the factory for container clients.
+//
+// Thread safety: concurrent ...Async calls on one instance are supported. Caller-supplied buffers are
+// not synchronized by the library. Completion handlers are not serialized with each other and may run
+// inline, before the initiating call returns.
+//
+// Lifetime: stores a non-owning reference to the HTTP client, which must outlive this client and every
+// in-flight ...Async operation; destroying either before a completion handler runs is undefined behavior.
+//
+// Cancellation: HttpRequestOptions carries a boost::asio::cancellation_slot that aborts in-flight work
+// (completing with an operation_aborted-flavored BlobStorageError); a slot associated with the
+// completion token is adopted when HttpRequestOptions has none.
+//
+// Completion tokens: every ...Async operation accepts any Boost.Asio CompletionToken (callback,
+// use_future, use_awaitable, ...) and completes with std::expected<Response<T>, BlobStorageError>.
+// Omitting the token yields a deferred, directly co_await-able operation, e.g. `co_await
+// client.GetBlobContainerClient(...);`. Overloads that also take an options struct exclude it from the defaulted
+// token via `requires`.
+template <HttpClientLike THttp> class BasicBlobServiceClient {
+  public:
+    using ContainerClientType = BasicBlobContainerClient<THttp>;
 
-        // The executor associated with this client's underlying IHttpClient; usable as the default
-        // executor argument for a boost::asio::default_completion_token_t, or to schedule work that
-        // must run on the same executor as this client's completions.
-        using executor_type = IHttpClient::executor_type;
+    BasicBlobServiceClient(THttp& httpClient, BlobServiceClientOptions options);
+    BasicBlobServiceClient(const BasicBlobServiceClient&) = delete;
+    BasicBlobServiceClient& operator=(const BasicBlobServiceClient&) = delete;
+    BasicBlobServiceClient(BasicBlobServiceClient&&) noexcept = default;
+    BasicBlobServiceClient& operator=(BasicBlobServiceClient&&) noexcept = default;
+    virtual ~BasicBlobServiceClient() = default;
 
-        [[nodiscard]] executor_type get_executor() const
-        {
-            return m_httpClient->get_executor();
-        }
+    // The executor associated with this client's underlying HTTP client; usable as the default
+    // executor argument for a boost::asio::default_completion_token_t, or to schedule work that
+    // must run on the same executor as this client's completions.
+    using executor_type = typename THttp::executor_type;
 
-        // Request options (timeout, response body limit, cancellation slot) applied to every operation
-        // that is not given its own via WithRequestOptions(...) or the trailing requestOptions argument.
-        [[nodiscard]] const HttpRequestOptions& GetDefaultRequestOptions() const noexcept;
+    [[nodiscard]] executor_type get_executor() const { return m_httpClient->get_executor(); }
 
-        // The default completion token used when a ...Async call omits an explicit token
-        // (matching this client's executor_type, per boost::asio::default_completion_token).
-        using DefaultCompletionToken = boost::asio::default_completion_token<executor_type>::type;
+    // Request options (timeout, response body limit, cancellation slot) applied to every operation
+    // that is not given its own via WithRequestOptions(...) or the trailing requestOptions argument.
+    [[nodiscard]] const HttpRequestOptions& GetDefaultRequestOptions() const noexcept;
 
-        [[nodiscard]] virtual std::unique_ptr<BlobContainerClient> GetBlobContainerClient(std::string containerName) const;
+    // The default completion token used when a ...Async call omits an explicit token
+    // (matching this client's executor_type, per boost::asio::default_completion_token).
+    using DefaultCompletionToken = boost::asio::default_completion_token<executor_type>::type;
 
-      private:
-        IHttpClient* m_httpClient = nullptr;
-        // Shared immutable connection state referenced by child clients.
-        std::shared_ptr<const Private::ConnectionState> m_connection;
-    };
+    [[nodiscard]] virtual std::unique_ptr<ContainerClientType> GetBlobContainerClient(std::string containerName) const;
+
+  private:
+    THttp* m_httpClient = nullptr;
+    // Shared immutable connection state referenced by child clients.
+    std::shared_ptr<const Private::ConnectionState> m_connection;
+};
+
+using BlobServiceClient = BasicBlobServiceClient<HttpClient>;
 } // namespace AVEVA::AzureClient

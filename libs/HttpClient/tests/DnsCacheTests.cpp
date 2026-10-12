@@ -10,23 +10,37 @@
 #include <chrono>
 #include <thread>
 
-namespace
-{
-    using AVEVA::Private::BasicDnsCache;
-    using AVEVA::Private::Tcp;
+namespace {
+using AVEVA::Private::BasicDnsCache;
+using AVEVA::Private::Tcp;
 
-    Tcp::resolver::results_type Loopback(boost::asio::io_context& io)
-    {
-        Tcp::resolver resolver(io);
-        return resolver.resolve("127.0.0.1", "80");
+// Records deliveries into caller-owned storage, so the tests need no type-erased callback.
+struct RecordingWaiter {
+    int* delivered = nullptr;
+    boost::system::error_code* seenError = nullptr;
+
+    void operator()(boost::system::error_code error, Tcp::resolver::results_type) const {
+        if (delivered) {
+            ++*delivered;
+        }
+        if (seenError) {
+            *seenError = error;
+        }
     }
+};
+
+using TestDnsCache = BasicDnsCache<std::chrono::steady_clock, RecordingWaiter>;
+
+Tcp::resolver::results_type Loopback(boost::asio::io_context& io) {
+    Tcp::resolver resolver(io);
+    return resolver.resolve("127.0.0.1", "80");
+}
 } // namespace
 
-TEST(DnsCacheTests, ReturnsAStoredResultUntilTheTtlElapses)
-{
+TEST(DnsCacheTests, ReturnsAStoredResultUntilTheTtlElapses) {
     boost::asio::io_context io;
     const auto results = Loopback(io);
-    BasicDnsCache<> cache(std::chrono::seconds{1});
+    TestDnsCache cache(std::chrono::seconds{1});
 
     EXPECT_FALSE(cache.Find("host", "80").has_value());
     cache.Store("host", "80", results);
@@ -41,27 +55,21 @@ TEST(DnsCacheTests, ReturnsAStoredResultUntilTheTtlElapses)
     EXPECT_FALSE(cache.Find("host", "80").has_value());
 }
 
-TEST(DnsCacheTests, ConcurrentLookupsForOneOriginShareASingleLeader)
-{
+TEST(DnsCacheTests, ConcurrentLookupsForOneOriginShareASingleLeader) {
     boost::asio::io_context io;
     const auto results = Loopback(io);
-    BasicDnsCache<> cache;
+    TestDnsCache cache;
 
-    BasicDnsCache<>::Waiter leader = [](boost::system::error_code, Tcp::resolver::results_type) {};
+    RecordingWaiter leader;
     ASSERT_TRUE(cache.JoinOrLead("host", "80", leader));
 
     int delivered = 0;
     boost::system::error_code seenError = boost::asio::error::operation_aborted;
-    for (int i = 0; i < 3; ++i)
-    {
-        BasicDnsCache<>::Waiter waiter = [&](boost::system::error_code error, Tcp::resolver::results_type)
-        {
-            ++delivered;
-            seenError = error;
-        };
+    for (int i = 0; i < 3; ++i) {
+        RecordingWaiter waiter{&delivered, &seenError};
         EXPECT_FALSE(cache.JoinOrLead("host", "80", waiter));
     }
-    BasicDnsCache<>::Waiter other = [](boost::system::error_code, Tcp::resolver::results_type) {};
+    RecordingWaiter other;
     EXPECT_TRUE(cache.JoinOrLead("host", "81", other));
 
     cache.Finish("host", "80", {}, results);
@@ -70,14 +78,13 @@ TEST(DnsCacheTests, ConcurrentLookupsForOneOriginShareASingleLeader)
     EXPECT_TRUE(cache.Find("host", "80").has_value());
 
     // The key is free again once the leader has finished.
-    BasicDnsCache<>::Waiter next = [](boost::system::error_code, Tcp::resolver::results_type) {};
+    RecordingWaiter next;
     EXPECT_TRUE(cache.JoinOrLead("host", "80", next));
     cache.Finish("host", "80", boost::asio::error::host_not_found, {});
 }
 
-TEST(DnsCacheTests, EmptyResultsAreNotCached)
-{
-    BasicDnsCache<> cache;
+TEST(DnsCacheTests, EmptyResultsAreNotCached) {
+    TestDnsCache cache;
     cache.Store("host", "80", Tcp::resolver::results_type{});
     EXPECT_FALSE(cache.Find("host", "80").has_value());
 }

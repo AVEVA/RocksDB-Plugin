@@ -7,8 +7,8 @@
 #include "FakeHttpClient.hpp"
 #include "TestFixtures.hpp"
 
-#include <AVEVA/AzureClient/PageBlobClient.hpp>
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
+#include <AVEVA/AzureClient/PageBlobClient.hpp>
 
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 #include <gtest/gtest.h>
@@ -23,60 +23,47 @@
 #include <string>
 #include <system_error>
 
-namespace
-{
-    using AVEVA::HttpResponse;
-    using AVEVA::AzureClient::PageBlobClient;
-    using AVEVA::AzureClient::BlobClientOptions;
-    using AVEVA::AzureClient::BlobStorageError;
-    using AVEVA::AzureClient::Response;
-    using AVEVA::AzureClient::Models::DownloadBlobToResult;
-    using AVEVA::AzureClient::Tests::FakeHttpClient;
-    using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
-    using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
+namespace {
+using AVEVA::HttpResponse;
+using AVEVA::AzureClient::BlobClientOptions;
+using AVEVA::AzureClient::BlobStorageError;
+using AVEVA::AzureClient::Response;
+using AVEVA::AzureClient::Models::DownloadBlobToResult;
+using AVEVA::AzureClient::Tests::FakeHttpClient;
+using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
+using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
+using AVEVA::AzureClient::Tests::PageBlobClient;
 
-    [[nodiscard]] BlobClientOptions BuildOptions()
-    {
-        return MakeBlobClientOptions("logs", "t06.txt");
-    }
+[[nodiscard]] BlobClientOptions BuildOptions() { return MakeBlobClientOptions("logs", "t06.txt"); }
 
-    void VerifyDownloadToPathSuccess(const std::expected<Response<DownloadBlobToResult>, BlobStorageError>& result,
-        bool& invoked)
-    {
-        ASSERT_TRUE(result.has_value());
-        EXPECT_EQ(result->Value().BytesWritten, 10U);
-        invoked = true;
-    }
+void VerifyDownloadToPathSuccess(const std::expected<Response<DownloadBlobToResult>, BlobStorageError>& result,
+                                 bool& invoked) {
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->Value().BytesWritten, 10U);
+    invoked = true;
+}
 
-    void StartDownloadToPathAndVerifySuccess(PageBlobClient& client, const std::filesystem::path& path, bool& invoked)
-    {
-        client.DownloadToAsync(path,
-            [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result)
-        {
-            VerifyDownloadToPathSuccess(result, invoked);
-        });
-    }
+void StartDownloadToPathAndVerifySuccess(PageBlobClient& client, const std::filesystem::path& path, bool& invoked) {
+    client.DownloadToAsync(path, [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result) {
+        VerifyDownloadToPathSuccess(result, invoked);
+    });
+}
 
-    void VerifyDownloadToPathFailure(const std::expected<Response<DownloadBlobToResult>, BlobStorageError>& result,
-        bool& invoked)
-    {
-        ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::connection_reset));
-        invoked = true;
-    }
+void VerifyDownloadToPathFailure(const std::expected<Response<DownloadBlobToResult>, BlobStorageError>& result,
+                                 bool& invoked) {
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::connection_reset));
+    invoked = true;
+}
 
-    void StartDownloadToPathAndVerifyFailure(PageBlobClient& client, const std::filesystem::path& path, bool& invoked)
-    {
-        client.DownloadToAsync(path,
-            [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result)
-        {
-            VerifyDownloadToPathFailure(result, invoked);
-        });
-    }
+void StartDownloadToPathAndVerifyFailure(PageBlobClient& client, const std::filesystem::path& path, bool& invoked) {
+    client.DownloadToAsync(path, [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result) {
+        VerifyDownloadToPathFailure(result, invoked);
+    });
+}
 } // namespace
 
-TEST(T06_DownloadToFileTests, SuccessRenamesAtomic)
-{
+TEST(T06_DownloadToFileTests, SuccessRenamesAtomic) {
     FakeHttpClient httpClient;
     // Prepare a single successful response containing "downloaded"
     httpClient.DefaultResponse() =
@@ -110,8 +97,7 @@ TEST(T06_DownloadToFileTests, SuccessRenamesAtomic)
     std::filesystem::remove(path, ignored);
 }
 
-TEST(T06_DownloadToFileTests, DirectoryTargetReportsIsADirectory)
-{
+TEST(T06_DownloadToFileTests, DirectoryTargetReportsIsADirectory) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() =
         HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "10"}}), "downloaded"};
@@ -121,9 +107,7 @@ TEST(T06_DownloadToFileTests, DirectoryTargetReportsIsADirectory)
     std::filesystem::create_directories(dir);
 
     bool invoked = false;
-    client.DownloadToAsync(dir,
-        [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result)
-    {
+    client.DownloadToAsync(dir, [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result) {
         invoked = true;
         ASSERT_FALSE(result.has_value());
         EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::is_a_directory));
@@ -136,8 +120,7 @@ TEST(T06_DownloadToFileTests, DirectoryTargetReportsIsADirectory)
     std::filesystem::remove_all(dir, ignored);
 }
 
-TEST(T06_DownloadToFileTests, HttpFailureRemovesPartialAndLeavesTargetUntouched)
-{
+TEST(T06_DownloadToFileTests, HttpFailureRemovesPartialAndLeavesTargetUntouched) {
     FakeHttpClient httpClient;
     // Simulate a transport failure for the request
     httpClient.EnqueueResponse(HttpResponse{}, std::make_error_code(std::errc::connection_reset));
@@ -164,10 +147,8 @@ TEST(T06_DownloadToFileTests, HttpFailureRemovesPartialAndLeavesTargetUntouched)
 
     // Ensure no partial files remain (look for filename.partial-*)
     bool foundPartial = false;
-    for (const auto& p : std::filesystem::directory_iterator(std::filesystem::temp_directory_path()))
-    {
-        if (p.path().filename().string().starts_with("t06-download-output-failure.txt.partial-"))
-        {
+    for (const auto& p : std::filesystem::directory_iterator(std::filesystem::temp_directory_path())) {
+        if (p.path().filename().string().starts_with("t06-download-output-failure.txt.partial-")) {
             foundPartial = true;
             break;
         }
@@ -183,34 +164,24 @@ TEST(T06_DownloadToFileTests, HttpFailureRemovesPartialAndLeavesTargetUntouched)
     std::filesystem::remove(path, ignored);
 }
 
-TEST(T06_DownloadToFileTests, StreamWriteFailureReportsIoError)
-{
+TEST(T06_DownloadToFileTests, StreamWriteFailureReportsIoError) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "4"}}), "data"};
 
     PageBlobClient client{httpClient, BuildOptions()};
 
     // Create a failing streambuf that refuses writes
-    struct FailBuf : std::streambuf
-    {
+    struct FailBuf : std::streambuf {
       protected:
-        std::streamsize xsputn(const char* /*s*/, std::streamsize /*n*/) override
-        {
-            return 0;
-        }
+        std::streamsize xsputn(const char* /*s*/, std::streamsize /*n*/) override { return 0; }
 
-        int_type overflow(int_type /*ch*/) override
-        {
-            return traits_type::eof();
-        }
+        int_type overflow(int_type /*ch*/) override { return traits_type::eof(); }
     } failbuf;
 
     std::ostream failingStream(&failbuf);
 
     bool invoked = false;
-    client.DownloadToAsync(failingStream,
-        [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result)
-    {
+    client.DownloadToAsync(failingStream, [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result) {
         ASSERT_FALSE(result.has_value());
         // Expect an io_error transported
         EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::io_error));

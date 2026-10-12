@@ -14,76 +14,58 @@
 #include <string>
 #include <string_view>
 
-namespace
-{
-    using AVEVA::AzureClient::BlobClient;
-    using AVEVA::AzureClient::BlobContainerClient;
-    using AVEVA::AzureClient::PageBlobClient;
-    using AVEVA::AzureClient::Tests::FakeHttpClient;
-    using AVEVA::AzureClient::Tests::MakeAzureErrorResponse;
-    using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
-    using AVEVA::AzureClient::Tests::MakeBlobContainerClientOptions;
+namespace {
+using AVEVA::AzureClient::Tests::BlobClient;
+using AVEVA::AzureClient::Tests::BlobContainerClient;
+using AVEVA::AzureClient::Tests::FakeHttpClient;
+using AVEVA::AzureClient::Tests::MakeAzureErrorResponse;
+using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
+using AVEVA::AzureClient::Tests::MakeBlobContainerClientOptions;
+using AVEVA::AzureClient::Tests::PageBlobClient;
 
-    struct Observed
-    {
-        bool Succeeded = false;
-        unsigned int RawStatus = 0;
-        std::string RawRequestId;
-        std::string ErrorRequestId;
-    };
+struct Observed {
+    bool Succeeded = false;
+    unsigned int RawStatus = 0;
+    std::string RawRequestId;
+    std::string ErrorRequestId;
+};
 
-    // Runs a suppressing operation against `status`/`code` and records what the caller sees.
-    template <class TStart>
-    [[nodiscard]] Observed RunSuppressed(FakeHttpClient& httpClient,
-        unsigned int status,
-        std::string_view code,
-        TStart start)
-    {
-        httpClient.EnqueueResponse(MakeAzureErrorResponse(status, code, "suppressed", "req-1"));
-        std::optional<Observed> observed;
-        start([&](auto result)
-        {
-            Observed value;
-            value.Succeeded = result.has_value();
-            if (result.has_value())
-            {
-                value.RawStatus = result->RawResponse().GetStatus();
-                for (const auto& header : result->RawResponse().GetHeaders())
-                {
-                    if (header.GetName() == "x-ms-request-id")
-                    {
-                        value.RawRequestId = header.GetValue();
-                    }
+// Runs a suppressing operation against `status`/`code` and records what the caller sees.
+template <class TStart>
+[[nodiscard]] Observed RunSuppressed(FakeHttpClient& httpClient, unsigned int status, std::string_view code,
+                                     TStart start) {
+    httpClient.EnqueueResponse(MakeAzureErrorResponse(status, code, "suppressed", "req-1"));
+    std::optional<Observed> observed;
+    start([&](auto result) {
+        Observed value;
+        value.Succeeded = result.has_value();
+        if (result.has_value()) {
+            value.RawStatus = result->RawResponse().GetStatus();
+            for (const auto& header : result->RawResponse().GetHeaders()) {
+                if (header.GetName() == "x-ms-request-id") {
+                    value.RawRequestId = header.GetValue();
                 }
-                value.ErrorRequestId = result->Error().has_value() ? result->Error()->RequestId : std::string{};
             }
-            observed = value;
-        });
-        httpClient.Poll();
-        EXPECT_TRUE(observed.has_value());
-        return observed.value_or(Observed{});
-    }
+            value.ErrorRequestId = result->Error().has_value() ? result->Error()->RequestId : std::string{};
+        }
+        observed = value;
+    });
+    httpClient.Poll();
+    EXPECT_TRUE(observed.has_value());
+    return observed.value_or(Observed{});
+}
 
 } // namespace
 
-TEST(SuppressedErrorResponseTests, OtherFailuresAreStillReported)
-{
+TEST(SuppressedErrorResponseTests, OtherFailuresAreStillReported) {
     FakeHttpClient httpClient;
     PageBlobClient blockBlob{httpClient, MakeBlobClientOptions()};
     BlobContainerClient container{httpClient, MakeBlobContainerClientOptions()};
 
-    EXPECT_FALSE(RunSuppressed(httpClient,
-        403,
-        "AuthorizationFailure",
-        [&](auto completion)
-    {
-        blockBlob.DeleteIfExistsAsync(std::move(completion));
-    }).Succeeded);
-    EXPECT_FALSE(RunSuppressed(httpClient,
-        409,
-        "ContainerBeingDeleted",
-        [&](auto completion)
-    {
-        container.CreateIfNotExistsAsync(std::move(completion));
-    }).Succeeded);
+    EXPECT_FALSE(RunSuppressed(httpClient, 403, "AuthorizationFailure", [&](auto completion) {
+                     blockBlob.DeleteIfExistsAsync(std::move(completion));
+                 }).Succeeded);
+    EXPECT_FALSE(RunSuppressed(httpClient, 409, "ContainerBeingDeleted", [&](auto completion) {
+                     container.CreateIfNotExistsAsync(std::move(completion));
+                 }).Succeeded);
 }

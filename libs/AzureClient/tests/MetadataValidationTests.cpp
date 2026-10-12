@@ -22,49 +22,41 @@
 
 using AVEVA::AzureClient::Tests::ValueOrFail;
 
-namespace
-{
-    using AVEVA::AzureClient::BlobClient;
-    using AVEVA::AzureClient::BlobContainerClient;
-    using AVEVA::AzureClient::BlobStorageError;
-    using AVEVA::AzureClient::BlobStorageErrorCode;
-    using AVEVA::AzureClient::BlockBlobClient;
-    using AVEVA::AzureClient::CreateBlobContainerOptions;
-    using AVEVA::AzureClient::SetBlobMetadataOptions;
-    using AVEVA::AzureClient::UploadBlockBlobOptions;
-    using AVEVA::AzureClient::Models::MetadataMap;
-    using AVEVA::AzureClient::Tests::FakeHttpClient;
-    using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
-    using AVEVA::AzureClient::Tests::MakeBlobContainerClientOptions;
+namespace {
+using AVEVA::AzureClient::BlobStorageError;
+using AVEVA::AzureClient::BlobStorageErrorCode;
+using AVEVA::AzureClient::CreateBlobContainerOptions;
+using AVEVA::AzureClient::SetBlobMetadataOptions;
+using AVEVA::AzureClient::UploadBlockBlobOptions;
+using AVEVA::AzureClient::Models::MetadataMap;
+using AVEVA::AzureClient::Tests::BlobClient;
+using AVEVA::AzureClient::Tests::BlobContainerClient;
+using AVEVA::AzureClient::Tests::BlockBlobClient;
+using AVEVA::AzureClient::Tests::FakeHttpClient;
+using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
+using AVEVA::AzureClient::Tests::MakeBlobContainerClientOptions;
 
-    // Calls SetMetadataAsync with a single `name` entry; returns the error, or nullopt on success.
-    [[nodiscard]] std::optional<BlobStorageError> SetMetadataWithName(FakeHttpClient& httpClient,
-        const std::string& name)
-    {
-        BlobClient client{httpClient, MakeBlobClientOptions()};
-        SetBlobMetadataOptions options;
-        options.Metadata.emplace(name, "value");
-        std::optional<BlobStorageError> error;
-        bool completed = false;
-        client.SetMetadataAsync(std::move(options),
-            [&](auto result)
-        {
-            completed = true;
-            if (!result.has_value())
-            {
-                error = result.error();
-            }
-        });
-        httpClient.Poll();
-        EXPECT_TRUE(completed);
-        return error;
-    }
+// Calls SetMetadataAsync with a single `name` entry; returns the error, or nullopt on success.
+[[nodiscard]] std::optional<BlobStorageError> SetMetadataWithName(FakeHttpClient& httpClient, const std::string& name) {
+    BlobClient client{httpClient, MakeBlobClientOptions()};
+    SetBlobMetadataOptions options;
+    options.Metadata.emplace(name, "value");
+    std::optional<BlobStorageError> error;
+    bool completed = false;
+    client.SetMetadataAsync(std::move(options), [&](auto result) {
+        completed = true;
+        if (!result.has_value()) {
+            error = result.error();
+        }
+    });
+    httpClient.Poll();
+    EXPECT_TRUE(completed);
+    return error;
+}
 } // namespace
 
-TEST(MetadataValidationTests, InvalidNamesAreRejectedBeforeSending)
-{
-    for (const std::string name : {"", "1leading", "has-dash", "has space", "dot.ted", "caf\xC3\xA9"})
-    {
+TEST(MetadataValidationTests, InvalidNamesAreRejectedBeforeSending) {
+    for (const std::string name : {"", "1leading", "has-dash", "has space", "dot.ted", "caf\xC3\xA9"}) {
         SCOPED_TRACE(name);
         FakeHttpClient httpClient;
         const std::optional<BlobStorageError> error = SetMetadataWithName(httpClient, name);
@@ -75,10 +67,8 @@ TEST(MetadataValidationTests, InvalidNamesAreRejectedBeforeSending)
     }
 }
 
-TEST(MetadataValidationTests, IdentifierNamesAreSent)
-{
-    for (const std::string name : {"a", "_", "_private", "Name_42", "ALLCAPS"})
-    {
+TEST(MetadataValidationTests, IdentifierNamesAreSent) {
+    for (const std::string name : {"a", "_", "_private", "Name_42", "ALLCAPS"}) {
         SCOPED_TRACE(name);
         FakeHttpClient httpClient;
         httpClient.EnqueueResponse(AVEVA::HttpResponse{200, {}, {}});
@@ -88,8 +78,7 @@ TEST(MetadataValidationTests, IdentifierNamesAreSent)
     }
 }
 
-TEST(MetadataValidationTests, CaseInsensitiveDuplicateKeysCollapseToOneEntry)
-{
+TEST(MetadataValidationTests, CaseInsensitiveDuplicateKeysCollapseToOneEntry) {
     MetadataMap metadata;
     metadata.emplace("Owner", "first");
     const bool inserted = metadata.emplace("OWNER", "second").second;
@@ -99,8 +88,7 @@ TEST(MetadataValidationTests, CaseInsensitiveDuplicateKeysCollapseToOneEntry)
     EXPECT_EQ(metadata.begin()->second, "first");
 }
 
-TEST(MetadataValidationTests, ValidationAppliesToUploadAndContainerCreate)
-{
+TEST(MetadataValidationTests, ValidationAppliesToUploadAndContainerCreate) {
     FakeHttpClient httpClient;
     BlockBlobClient blockBlob{httpClient, MakeBlobClientOptions()};
     BlobContainerClient container{httpClient, MakeBlobContainerClientOptions()};
@@ -108,19 +96,14 @@ TEST(MetadataValidationTests, ValidationAppliesToUploadAndContainerCreate)
     UploadBlockBlobOptions uploadOptions;
     uploadOptions.Metadata.emplace("bad-name", "v");
     std::optional<std::error_code> uploadError;
-    blockBlob.UploadAsync(std::string{"content"},
-        std::move(uploadOptions),
-        [&](auto result)
-    {
+    blockBlob.UploadAsync(std::string{"content"}, std::move(uploadOptions), [&](auto result) {
         uploadError = result.has_value() ? std::error_code{} : result.error().Code;
     });
 
     CreateBlobContainerOptions createOptions;
     createOptions.Metadata.emplace("9lives", "v");
     std::optional<std::error_code> createError;
-    container.CreateAsync(std::move(createOptions),
-        [&](auto result)
-    {
+    container.CreateAsync(std::move(createOptions), [&](auto result) {
         createError = result.has_value() ? std::error_code{} : result.error().Code;
     });
 

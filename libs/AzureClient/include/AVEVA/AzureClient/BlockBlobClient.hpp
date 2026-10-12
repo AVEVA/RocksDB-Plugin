@@ -25,281 +25,194 @@
 
 #include <AVEVA/AzureClient/Detail/AsyncInitiation.hpp>
 
-namespace AVEVA::AzureClient
-{
-    // Block blob operations; the common blob operations, lifetime, cancellation and completion-token
-    // contracts come from BlobClient.
-    class BlockBlobClient : public BlobClient
-    {
-      public:
-        using UploadCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::UploadBlockBlobResult>, BlobStorageError>)>;
-        using StageBlockCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::StageBlockResult>, BlobStorageError>)>;
-        using CommitBlockListCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::CommitBlockListResult>, BlobStorageError>)>;
+namespace AVEVA::AzureClient {
+// Block blob operations; the common blob operations, lifetime, cancellation and completion-token
+// contracts come from BlobClient.
+template <HttpClientLike THttp> class BasicBlockBlobClient : public BasicBlobClient<THttp> {
+    using Base = BasicBlobClient<THttp>;
 
-        BlockBlobClient(IHttpClient& httpClient, const BlobClientOptions& options);
+  public:
+    using typename Base::DefaultCompletionToken;
 
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, UploadBlockBlobOptions>)
-        [[nodiscard]] auto UploadAsync(std::string content,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::UploadBlockBlobResult>(this,
-                &BlockBlobClient::UploadStringAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(content),
-                UploadBlockBlobOptions{});
-        }
+    using UploadCompletionHandler =
+        std::move_only_function<void(std::expected<Response<Models::UploadBlockBlobResult>, BlobStorageError>)>;
+    using StageBlockCompletionHandler =
+        std::move_only_function<void(std::expected<Response<Models::StageBlockResult>, BlobStorageError>)>;
+    using CommitBlockListCompletionHandler =
+        std::move_only_function<void(std::expected<Response<Models::CommitBlockListResult>, BlobStorageError>)>;
 
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto UploadAsync(std::string content,
-            UploadBlockBlobOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::UploadBlockBlobResult>(this,
-                &BlockBlobClient::UploadStringAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(content),
-                std::move(options));
-        }
+    BasicBlockBlobClient(THttp& httpClient, const BlobClientOptions& options);
 
-        // `content` is read when the operation is *initiated*; it must stay valid until then. With the default
-        // deferred completion token, initiation happens when the returned operation is `co_await`ed or
-        // launched, which may be long after this call returns. See the README lifetime section.
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, UploadBlockBlobOptions>)
-        [[nodiscard]] auto UploadAsync(std::span<const std::byte> content,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::UploadBlockBlobResult>(this,
-                &BlockBlobClient::UploadBytesAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                content,
-                UploadBlockBlobOptions{});
-        }
+    template <class CompletionToken = DefaultCompletionToken>
+        requires(!std::same_as<std::remove_cvref_t<CompletionToken>, UploadBlockBlobOptions>)
+    [[nodiscard]] auto UploadAsync(std::string content, CompletionToken&& token = CompletionToken{},
+                                   std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::UploadBlockBlobResult>(
+            this, &BasicBlockBlobClient::UploadStringAsyncImpl, std::forward<CompletionToken>(token),
+            std::move(requestOptions), std::move(content), UploadBlockBlobOptions{});
+    }
 
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto UploadAsync(std::span<const std::byte> content,
-            UploadBlockBlobOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::UploadBlockBlobResult>(this,
-                &BlockBlobClient::UploadBytesAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                content,
-                std::move(options));
-        }
+    template <class CompletionToken = DefaultCompletionToken>
+    [[nodiscard]] auto UploadAsync(std::string content, UploadBlockBlobOptions options,
+                                   CompletionToken&& token = CompletionToken{},
+                                   std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::UploadBlockBlobResult>(
+            this, &BasicBlockBlobClient::UploadStringAsyncImpl, std::forward<CompletionToken>(token),
+            std::move(requestOptions), std::move(content), std::move(options));
+    }
 
-        // Zero-copy upload: the request body views `content`, which the request keeps alive until the HTTP
-        // operation (including retries) has finished, so the caller may drop its reference immediately.
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, UploadBlockBlobOptions>)
-        [[nodiscard]] auto UploadAsync(std::shared_ptr<const std::vector<char>> content,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::UploadBlockBlobResult>(this,
-                &BlockBlobClient::UploadSharedAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(content),
-                UploadBlockBlobOptions{});
-        }
+    // `content` is read when the operation is *initiated*; it must stay valid until then. With the default
+    // deferred completion token, initiation happens when the returned operation is `co_await`ed or
+    // launched, which may be long after this call returns. See the README lifetime section.
+    template <class CompletionToken = DefaultCompletionToken>
+        requires(!std::same_as<std::remove_cvref_t<CompletionToken>, UploadBlockBlobOptions>)
+    [[nodiscard]] auto UploadAsync(std::span<const std::byte> content, CompletionToken&& token = CompletionToken{},
+                                   std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::UploadBlockBlobResult>(
+            this, &BasicBlockBlobClient::UploadBytesAsyncImpl, std::forward<CompletionToken>(token),
+            std::move(requestOptions), content, UploadBlockBlobOptions{});
+    }
 
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto UploadAsync(std::shared_ptr<const std::vector<char>> content,
-            UploadBlockBlobOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::UploadBlockBlobResult>(this,
-                &BlockBlobClient::UploadSharedAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(content),
-                std::move(options));
-        }
+    template <class CompletionToken = DefaultCompletionToken>
+    [[nodiscard]] auto UploadAsync(std::span<const std::byte> content, UploadBlockBlobOptions options,
+                                   CompletionToken&& token = CompletionToken{},
+                                   std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::UploadBlockBlobResult>(
+            this, &BasicBlockBlobClient::UploadBytesAsyncImpl, std::forward<CompletionToken>(token),
+            std::move(requestOptions), content, std::move(options));
+    }
 
-        // Zero-copy variant of StageBlockAsync; see UploadAsync(shared_ptr) for the lifetime contract.
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, UploadBlockBlobOptions> &&
-                     !std::same_as<std::remove_cvref_t<CompletionToken>, StageBlockOptions>)
-        [[nodiscard]] auto StageBlockAsync(std::string blockId,
-            std::shared_ptr<const std::vector<char>> content,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::StageBlockResult>(this,
-                &BlockBlobClient::StageBlockSharedAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(blockId),
-                std::move(content),
-                StageBlockOptions{});
-        }
+    // Zero-copy upload: the request body views `content`, which the request keeps alive until the HTTP
+    // operation (including retries) has finished, so the caller may drop its reference immediately.
+    template <class CompletionToken = DefaultCompletionToken>
+        requires(!std::same_as<std::remove_cvref_t<CompletionToken>, UploadBlockBlobOptions>)
+    [[nodiscard]] auto UploadAsync(std::shared_ptr<const std::vector<char>> content,
+                                   CompletionToken&& token = CompletionToken{},
+                                   std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::UploadBlockBlobResult>(
+            this, &BasicBlockBlobClient::UploadSharedAsyncImpl, std::forward<CompletionToken>(token),
+            std::move(requestOptions), std::move(content), UploadBlockBlobOptions{});
+    }
 
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto StageBlockAsync(std::string blockId,
-            std::shared_ptr<const std::vector<char>> content,
-            StageBlockOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::StageBlockResult>(this,
-                &BlockBlobClient::StageBlockSharedAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(blockId),
-                std::move(content),
-                std::move(options));
-        }
+    template <class CompletionToken = DefaultCompletionToken>
+    [[nodiscard]] auto UploadAsync(std::shared_ptr<const std::vector<char>> content, UploadBlockBlobOptions options,
+                                   CompletionToken&& token = CompletionToken{},
+                                   std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::UploadBlockBlobResult>(
+            this, &BasicBlockBlobClient::UploadSharedAsyncImpl, std::forward<CompletionToken>(token),
+            std::move(requestOptions), std::move(content), std::move(options));
+    }
 
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, UploadBlockBlobOptions> &&
-                     !std::same_as<std::remove_cvref_t<CompletionToken>, StageBlockOptions>)
-        [[nodiscard]] auto StageBlockAsync(std::string blockId,
-            std::string content,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::StageBlockResult>(this,
-                &BlockBlobClient::StageBlockStringAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(blockId),
-                StageBlockOptions{},
-                std::move(content));
-        }
+    // Zero-copy variant of StageBlockAsync; see UploadAsync(shared_ptr) for the lifetime contract.
+    template <class CompletionToken = DefaultCompletionToken>
+        requires(!std::same_as<std::remove_cvref_t<CompletionToken>, UploadBlockBlobOptions> &&
+                 !std::same_as<std::remove_cvref_t<CompletionToken>, StageBlockOptions>)
+    [[nodiscard]] auto StageBlockAsync(std::string blockId, std::shared_ptr<const std::vector<char>> content,
+                                       CompletionToken&& token = CompletionToken{},
+                                       std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::StageBlockResult>(
+            this, &BasicBlockBlobClient::StageBlockSharedAsyncImpl, std::forward<CompletionToken>(token),
+            std::move(requestOptions), std::move(blockId), std::move(content), StageBlockOptions{});
+    }
 
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto StageBlockAsync(std::string blockId,
-            std::string content,
-            StageBlockOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::StageBlockResult>(this,
-                &BlockBlobClient::StageBlockStringAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(blockId),
-                std::move(options),
-                std::move(content));
-        }
+    template <class CompletionToken = DefaultCompletionToken>
+    [[nodiscard]] auto StageBlockAsync(std::string blockId, std::shared_ptr<const std::vector<char>> content,
+                                       StageBlockOptions options, CompletionToken&& token = CompletionToken{},
+                                       std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::StageBlockResult>(
+            this, &BasicBlockBlobClient::StageBlockSharedAsyncImpl, std::forward<CompletionToken>(token),
+            std::move(requestOptions), std::move(blockId), std::move(content), std::move(options));
+    }
 
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, UploadBlockBlobOptions> &&
-                     !std::same_as<std::remove_cvref_t<CompletionToken>, StageBlockOptions>)
-        [[nodiscard]] auto StageBlockAsync(std::string blockId,
-            std::span<const std::byte> content,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::StageBlockResult>(this,
-                &BlockBlobClient::StageBlockBytesAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(blockId),
-                content,
-                StageBlockOptions{});
-        }
+    template <class CompletionToken = DefaultCompletionToken>
+        requires(!std::same_as<std::remove_cvref_t<CompletionToken>, UploadBlockBlobOptions> &&
+                 !std::same_as<std::remove_cvref_t<CompletionToken>, StageBlockOptions>)
+    [[nodiscard]] auto StageBlockAsync(std::string blockId, std::string content,
+                                       CompletionToken&& token = CompletionToken{},
+                                       std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::StageBlockResult>(
+            this, &BasicBlockBlobClient::StageBlockStringAsyncImpl, std::forward<CompletionToken>(token),
+            std::move(requestOptions), std::move(blockId), StageBlockOptions{}, std::move(content));
+    }
 
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto StageBlockAsync(std::string blockId,
-            std::span<const std::byte> content,
-            StageBlockOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::StageBlockResult>(this,
-                &BlockBlobClient::StageBlockBytesAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(blockId),
-                content,
-                std::move(options));
-        }
+    template <class CompletionToken = DefaultCompletionToken>
+    [[nodiscard]] auto StageBlockAsync(std::string blockId, std::string content, StageBlockOptions options,
+                                       CompletionToken&& token = CompletionToken{},
+                                       std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::StageBlockResult>(
+            this, &BasicBlockBlobClient::StageBlockStringAsyncImpl, std::forward<CompletionToken>(token),
+            std::move(requestOptions), std::move(blockId), std::move(options), std::move(content));
+    }
 
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, CommitBlockListOptions>)
-        [[nodiscard]] auto CommitBlockListAsync(std::vector<std::string> blockIds,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::CommitBlockListResult>(this,
-                &BlockBlobClient::CommitBlockListAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(blockIds),
-                CommitBlockListOptions{});
-        }
+    template <class CompletionToken = DefaultCompletionToken>
+        requires(!std::same_as<std::remove_cvref_t<CompletionToken>, UploadBlockBlobOptions> &&
+                 !std::same_as<std::remove_cvref_t<CompletionToken>, StageBlockOptions>)
+    [[nodiscard]] auto StageBlockAsync(std::string blockId, std::span<const std::byte> content,
+                                       CompletionToken&& token = CompletionToken{},
+                                       std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::StageBlockResult>(
+            this, &BasicBlockBlobClient::StageBlockBytesAsyncImpl, std::forward<CompletionToken>(token),
+            std::move(requestOptions), std::move(blockId), content, StageBlockOptions{});
+    }
 
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto CommitBlockListAsync(std::vector<std::string> blockIds,
-            CommitBlockListOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::CommitBlockListResult>(this,
-                &BlockBlobClient::CommitBlockListAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(blockIds),
-                std::move(options));
-        }
+    template <class CompletionToken = DefaultCompletionToken>
+    [[nodiscard]] auto StageBlockAsync(std::string blockId, std::span<const std::byte> content,
+                                       StageBlockOptions options, CompletionToken&& token = CompletionToken{},
+                                       std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::StageBlockResult>(
+            this, &BasicBlockBlobClient::StageBlockBytesAsyncImpl, std::forward<CompletionToken>(token),
+            std::move(requestOptions), std::move(blockId), content, std::move(options));
+    }
 
-      private:
-        friend class BlobContainerClient;
-        BlockBlobClient(IHttpClient& httpClient, std::shared_ptr<const Private::BlobTarget> target);
+    template <class CompletionToken = DefaultCompletionToken>
+        requires(!std::same_as<std::remove_cvref_t<CompletionToken>, CommitBlockListOptions>)
+    [[nodiscard]] auto CommitBlockListAsync(std::vector<std::string> blockIds,
+                                            CompletionToken&& token = CompletionToken{},
+                                            std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::CommitBlockListResult>(
+            this, &BasicBlockBlobClient::CommitBlockListAsyncImpl, std::forward<CompletionToken>(token),
+            std::move(requestOptions), std::move(blockIds), CommitBlockListOptions{});
+    }
 
-        virtual void UploadBytesAsyncImpl(std::span<const std::byte> content,
-            const UploadBlockBlobOptions& options,
-            UploadCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        // Moves the caller's std::string straight into the request body (no copy via a byte span).
-        virtual void UploadStringAsyncImpl(std::string content,
-            const UploadBlockBlobOptions& options,
-            UploadCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        virtual void UploadSharedAsyncImpl(std::shared_ptr<const std::vector<char>> content,
-            const UploadBlockBlobOptions& options,
-            UploadCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        virtual void StageBlockSharedAsyncImpl(const std::string& blockId,
-            std::shared_ptr<const std::vector<char>> content,
-            const StageBlockOptions& options,
-            StageBlockCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        void SendUploadRequest(HttpRequest request,
-            const UploadBlockBlobOptions& options,
-            UploadCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        virtual void StageBlockBytesAsyncImpl(const std::string& blockId,
-            std::span<const std::byte> content,
-            const StageBlockOptions& options,
-            StageBlockCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        virtual void StageBlockStringAsyncImpl(const std::string& blockId,
-            const StageBlockOptions& options,
-            std::string content,
-            StageBlockCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        void SendStageBlockRequest(HttpRequest request,
-            StageBlockCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        virtual void CommitBlockListAsyncImpl(const std::vector<std::string>& blockIds,
-            const CommitBlockListOptions& options,
-            CommitBlockListCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-    };
+    template <class CompletionToken = DefaultCompletionToken>
+    [[nodiscard]] auto CommitBlockListAsync(std::vector<std::string> blockIds, CommitBlockListOptions options,
+                                            CompletionToken&& token = CompletionToken{},
+                                            std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::CommitBlockListResult>(
+            this, &BasicBlockBlobClient::CommitBlockListAsyncImpl, std::forward<CompletionToken>(token),
+            std::move(requestOptions), std::move(blockIds), std::move(options));
+    }
+
+  private:
+    template <HttpClientLike> friend class BasicBlobContainerClient;
+    BasicBlockBlobClient(THttp& httpClient, std::shared_ptr<const Private::BlobTarget> target);
+
+    virtual void UploadBytesAsyncImpl(std::span<const std::byte> content, const UploadBlockBlobOptions& options,
+                                      UploadCompletionHandler completion, HttpRequestOptions requestOptions);
+    // Moves the caller's std::string straight into the request body (no copy via a byte span).
+    virtual void UploadStringAsyncImpl(std::string content, const UploadBlockBlobOptions& options,
+                                       UploadCompletionHandler completion, HttpRequestOptions requestOptions);
+    virtual void UploadSharedAsyncImpl(std::shared_ptr<const std::vector<char>> content,
+                                       const UploadBlockBlobOptions& options, UploadCompletionHandler completion,
+                                       HttpRequestOptions requestOptions);
+    virtual void StageBlockSharedAsyncImpl(const std::string& blockId, std::shared_ptr<const std::vector<char>> content,
+                                           const StageBlockOptions& options, StageBlockCompletionHandler completion,
+                                           HttpRequestOptions requestOptions);
+    void SendUploadRequest(HttpRequest request, const UploadBlockBlobOptions& options,
+                           UploadCompletionHandler completion, HttpRequestOptions requestOptions);
+    virtual void StageBlockBytesAsyncImpl(const std::string& blockId, std::span<const std::byte> content,
+                                          const StageBlockOptions& options, StageBlockCompletionHandler completion,
+                                          HttpRequestOptions requestOptions);
+    virtual void StageBlockStringAsyncImpl(const std::string& blockId, const StageBlockOptions& options,
+                                           std::string content, StageBlockCompletionHandler completion,
+                                           HttpRequestOptions requestOptions);
+    void SendStageBlockRequest(HttpRequest request, StageBlockCompletionHandler completion,
+                               HttpRequestOptions requestOptions);
+    virtual void CommitBlockListAsyncImpl(const std::vector<std::string>& blockIds,
+                                          const CommitBlockListOptions& options,
+                                          CommitBlockListCompletionHandler completion,
+                                          HttpRequestOptions requestOptions);
+};
+
+using BlockBlobClient = BasicBlockBlobClient<HttpClient>;
 } // namespace AVEVA::AzureClient

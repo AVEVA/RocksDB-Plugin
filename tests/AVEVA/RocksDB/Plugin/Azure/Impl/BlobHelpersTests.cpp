@@ -4,13 +4,15 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
+#include "FakeHttpBridge.hpp"
 #include "FakeHttpClient.hpp"
-#include "FakeHttpPump.hpp"
 #include "TestFixtures.hpp"
 
 #include <AVEVA/AzureClient/Credentials.hpp>
 
 #include <gtest/gtest.h>
+
+#include <memory>
 
 #include <chrono>
 #include <cstdlib>
@@ -33,16 +35,16 @@ class BlobHelpersTests : public ::testing::Test {
   protected:
     void SetUp() override {
         m_httpClient.CompleteInline() = true;
-        m_pump = AVEVA::RocksDB::Plugin::Azure::Impl::Tests::StartFakeHttpPump(m_httpClient);
+        m_bridge = std::make_unique<AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeHttpBridge>(m_httpClient);
     }
 
     FakeHttpClient m_httpClient;
-    std::jthread m_pump;
+    std::unique_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeHttpBridge> m_bridge;
 };
 
 TEST_F(BlobHelpersTests, ForbiddenIsNotRetried) {
     m_httpClient.EnqueueResponse(MakeAzureErrorResponse(403, "AuthorizationFailure", "no", "id"));
-    BlobContainerClient client(m_httpClient, MakeBlobContainerClientOptions("cont"));
+    BlobContainerClient client(m_bridge->Client(), MakeBlobContainerClientOptions("cont"));
 
     EXPECT_THROW(BlobHelpers::CreateContainerIfNotExists(client, 5, std::chrono::milliseconds(1)),
                  RequestFailedException);
@@ -53,7 +55,7 @@ TEST_F(BlobHelpersTests, ConflictIsRetriedUntilSuccess) {
     m_httpClient.EnqueueResponse(MakeAzureErrorResponse(409, "ContainerBeingDeleted", "busy", "id"));
     m_httpClient.EnqueueResponse(MakeAzureErrorResponse(409, "ContainerBeingDeleted", "busy", "id"));
     m_httpClient.EnqueueResponse(HttpResponse{201, MakeCanonicalSuccessHeaders({}), ""});
-    BlobContainerClient client(m_httpClient, MakeBlobContainerClientOptions("cont"));
+    BlobContainerClient client(m_bridge->Client(), MakeBlobContainerClientOptions("cont"));
 
     EXPECT_NO_THROW(BlobHelpers::CreateContainerIfNotExists(client, 5, std::chrono::milliseconds(1)));
     EXPECT_EQ(m_httpClient.RequestCount(), 3U);
@@ -63,7 +65,7 @@ TEST_F(BlobHelpersTests, RetriesAreBounded) {
     for (int i = 0; i < 3; ++i) {
         m_httpClient.EnqueueResponse(MakeAzureErrorResponse(409, "ContainerBeingDeleted", "busy", "id"));
     }
-    BlobContainerClient client(m_httpClient, MakeBlobContainerClientOptions("cont"));
+    BlobContainerClient client(m_bridge->Client(), MakeBlobContainerClientOptions("cont"));
 
     EXPECT_THROW(BlobHelpers::CreateContainerIfNotExists(client, 3, std::chrono::milliseconds(1)),
                  RequestFailedException);

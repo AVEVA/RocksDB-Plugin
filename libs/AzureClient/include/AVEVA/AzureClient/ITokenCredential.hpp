@@ -36,7 +36,7 @@ namespace AVEVA::AzureClient
         // reported through it as a non-zero std::error_code (the AccessToken is then unspecified); the
         // method itself does not throw for such failures. The completion may run inline, before
         // GetTokenAsync returns, or later on an executor or transport thread. Concrete credentials that
-        // take an IHttpClient borrow it: it must outlive any in-flight token acquisition.
+        // take an HttpClient borrow it: it must outlive any in-flight token acquisition.
         using GetTokenCompletionHandler = std::move_only_function<void(std::error_code, AccessToken)>;
 
         ITokenCredential() = default;

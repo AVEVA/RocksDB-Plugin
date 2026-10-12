@@ -3,8 +3,8 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/TokenCredentials.hpp"
 
+#include "FakeHttpBridge.hpp"
 #include "FakeHttpClient.hpp"
-#include "FakeHttpPump.hpp"
 
 #include <gtest/gtest.h>
 
@@ -29,7 +29,7 @@ class TokenCredentialsTests : public ::testing::Test {
   protected:
     void SetUp() override {
         m_httpClient.CompleteInline() = true;
-        m_pump = AVEVA::RocksDB::Plugin::Azure::Impl::Tests::StartFakeHttpPump(m_httpClient);
+        m_bridge = std::make_unique<AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeHttpBridge>(m_httpClient);
     }
 
     std::pair<std::error_code, AccessToken> GetToken(AVEVA::AzureClient::ITokenCredential& credential) {
@@ -45,13 +45,14 @@ class TokenCredentialsTests : public ::testing::Test {
         return future.get();
     }
 
-    static AzurePipelinesCredentialOptions PipelineOptions() {
+    AzurePipelinesCredentialOptions PipelineOptions() const {
         AzurePipelinesCredentialOptions options;
         options.TenantId = "tenant";
         options.ClientId = "client";
         options.ServiceConnectionId = "connection";
         options.SystemAccessToken = "system";
-        options.OidcRequestUri = "https://pipelines.example/oidc";
+        options.OidcRequestUri = m_bridge->Endpoint() + "/oidc";
+        options.AuthorityHost = m_bridge->Endpoint() + "/";
         options.MaxRetries = 2;
         return options;
     }
@@ -63,11 +64,11 @@ class TokenCredentialsTests : public ::testing::Test {
     }
 
     FakeHttpClient m_httpClient;
-    std::jthread m_pump;
+    std::unique_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeHttpBridge> m_bridge;
 };
 
 TEST_F(TokenCredentialsTests, ChainFallsThroughToLaterSource) {
-    auto failing = std::make_shared<ClientSecretCredential>(m_httpClient, ClientSecretCredentialOptions{});
+    auto failing = std::make_shared<ClientSecretCredential>(m_bridge->Client(), ClientSecretCredentialOptions{});
     auto working = std::make_shared<StaticTokenCredential>("static");
     auto chain = std::make_shared<ChainedTokenCredential>(
         std::vector<std::shared_ptr<AVEVA::AzureClient::ITokenCredential>>{failing, working});
@@ -79,8 +80,8 @@ TEST_F(TokenCredentialsTests, ChainFallsThroughToLaterSource) {
 }
 
 TEST_F(TokenCredentialsTests, ChainReportsLastErrorWhenAllSourcesFail) {
-    auto first = std::make_shared<ClientSecretCredential>(m_httpClient, ClientSecretCredentialOptions{});
-    auto second = std::make_shared<ClientSecretCredential>(m_httpClient, ClientSecretCredentialOptions{});
+    auto first = std::make_shared<ClientSecretCredential>(m_bridge->Client(), ClientSecretCredentialOptions{});
+    auto second = std::make_shared<ClientSecretCredential>(m_bridge->Client(), ClientSecretCredentialOptions{});
     auto chain = std::make_shared<ChainedTokenCredential>(
         std::vector<std::shared_ptr<AVEVA::AzureClient::ITokenCredential>>{first, second});
 
@@ -93,7 +94,7 @@ TEST_F(TokenCredentialsTests, RetryAfterIsHonoredOn429) {
     m_httpClient.EnqueueResponse(HttpResponse{429, {HttpHeader{"Retry-After", "1"}}, ""});
     m_httpClient.EnqueueResponse(OidcResponse());
     m_httpClient.EnqueueResponse(TokenResponse());
-    auto credential = std::make_shared<AzurePipelinesCredential>(m_httpClient, PipelineOptions());
+    auto credential = std::make_shared<AzurePipelinesCredential>(m_bridge->Client(), PipelineOptions());
 
     const auto start = std::chrono::steady_clock::now();
     const auto [error, token] = GetToken(*credential);
@@ -136,7 +137,7 @@ TEST(RuntimeBoundCredentialTests, PendingRefreshKeepsRuntimeAliveUntilCompletion
 TEST_F(TokenCredentialsTests, TokenLifetimeBeyondMaximumIsClampedNotRejected) {
     m_httpClient.EnqueueResponse(OidcResponse());
     m_httpClient.EnqueueResponse(HttpResponse{200, {}, R"({"access_token":"tok","expires_in":"86401"})"});
-    auto credential = std::make_shared<AzurePipelinesCredential>(m_httpClient, PipelineOptions());
+    auto credential = std::make_shared<AzurePipelinesCredential>(m_bridge->Client(), PipelineOptions());
 
     const auto [error, token] = GetToken(*credential);
 
@@ -146,7 +147,7 @@ TEST_F(TokenCredentialsTests, TokenLifetimeBeyondMaximumIsClampedNotRejected) {
 
 TEST_F(TokenCredentialsTests, NonTransientFailureIsNotRetried) {
     m_httpClient.EnqueueResponse(HttpResponse{401, {}, ""});
-    auto credential = std::make_shared<AzurePipelinesCredential>(m_httpClient, PipelineOptions());
+    auto credential = std::make_shared<AzurePipelinesCredential>(m_bridge->Client(), PipelineOptions());
 
     const auto [error, token] = GetToken(*credential);
 

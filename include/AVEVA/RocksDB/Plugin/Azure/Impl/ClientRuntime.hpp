@@ -40,7 +40,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// must never be one of the threads running the io_context.
 /// </summary>
 class ClientRuntime : public std::enable_shared_from_this<ClientRuntime> {
-    std::unique_ptr<::AVEVA::IHttpClient> m_httpClient;
+    std::unique_ptr<::AVEVA::HttpClient> m_httpClient;
     std::atomic<bool> m_writesFenced{false};
 
   public:
@@ -51,7 +51,7 @@ class ClientRuntime : public std::enable_shared_from_this<ClientRuntime> {
     ClientRuntime(ClientRuntime&&) = delete;
     ClientRuntime& operator=(ClientRuntime&&) = delete;
 
-    [[nodiscard]] ::AVEVA::IHttpClient& HttpClient() const noexcept;
+    [[nodiscard]] ::AVEVA::HttpClient& HttpClient() const noexcept;
 
     /// <summary>
     /// Makes every later mutation through this runtime's blobs fail. Called once the filesystem can no longer

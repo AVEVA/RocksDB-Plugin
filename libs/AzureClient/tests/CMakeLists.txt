@@ -9,6 +9,7 @@ find_package(OpenSSL REQUIRED)
 include(GoogleTest)
 
 add_executable(aveva-azure-client-tests
+    FakeInstantiations.cpp
     AsyncBehaviorTests.cpp
     BlobContainerClientTests.cpp
     BlobRequestHelpersTests.cpp
@@ -71,6 +72,7 @@ gtest_discover_tests(aveva-azure-client-public-api-tests PROPERTIES TIMEOUT 30 L
 
 # Engines driven by a multi-threaded executor (T30). Label `concurrency`; run under LinuxDebugTSan.
 add_executable(aveva-azure-client-concurrency-tests MultiThreadedExecutorTests.cpp)
+target_include_directories(aveva-azure-client-concurrency-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_link_libraries(aveva-azure-client-concurrency-tests PRIVATE aveva::azure-client GTest::gtest_main)
 aveva_azure_client_enable_clang_tidy(aveva-azure-client-concurrency-tests)
 aveva_azure_client_instrument(aveva-azure-client-concurrency-tests)

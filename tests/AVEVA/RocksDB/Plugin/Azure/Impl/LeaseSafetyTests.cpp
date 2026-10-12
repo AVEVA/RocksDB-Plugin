@@ -6,8 +6,8 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 
+#include "FakeHttpBridge.hpp"
 #include "FakeHttpClient.hpp"
-#include "FakeHttpPump.hpp"
 #include "TestFixtures.hpp"
 
 #include <boost/asio/io_context.hpp>
@@ -128,7 +128,7 @@ class LeaseDeadlineTests : public ::testing::Test {
   protected:
     void SetUp() override {
         m_httpClient.CompleteInline() = true;
-        m_pump = AVEVA::RocksDB::Plugin::Azure::Impl::Tests::StartFakeHttpPump(m_httpClient);
+        m_bridge = std::make_unique<AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeHttpBridge>(m_httpClient);
         m_runtime = std::make_shared<ClientRuntime>(m_context);
         m_logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
     }
@@ -137,13 +137,13 @@ class LeaseDeadlineTests : public ::testing::Test {
     FakeHttpClient m_httpClient;
     std::shared_ptr<ClientRuntime> m_runtime;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
-    std::jthread m_pump;
+    std::unique_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeHttpBridge> m_bridge;
 };
 } // namespace
 
 TEST_F(LeaseDeadlineTests, NotOverdueBeforeLockedOrRightAfterAcquiring) {
-    auto client =
-        std::make_unique<AVEVA::AzureClient::PageBlobClient>(m_httpClient, MakeBlobClientOptions("locks", "LOCK"));
+    auto client = std::make_unique<AVEVA::AzureClient::PageBlobClient>(m_bridge->Client(),
+                                                                       MakeBlobClientOptions("locks", "LOCK"));
     LockFileImpl lock(m_runtime, std::move(client), 20s, m_logger, "LOCK");
     EXPECT_FALSE(lock.IsRenewalOverdue());
 

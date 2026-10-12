@@ -8,19 +8,14 @@
 
 #include <gtest/gtest.h>
 
-TEST(HttpClientConstruction, FactoryReturnsUsableClients)
-{
+TEST(HttpClientConstruction, FactoryReturnsUsableClients) {
     boost::asio::io_context context;
     bool handlerRan = false;
-    boost::asio::post(context,
-        [&handlerRan]
-    {
-        handlerRan = true;
-    });
+    boost::asio::post(context, [&handlerRan] { handlerRan = true; });
 
     {
-        auto client = AVEVA::IHttpClient::Create(context);
-        auto secondClient = AVEVA::IHttpClient::Create(context);
+        auto client = AVEVA::HttpClient::Create(context);
+        auto secondClient = AVEVA::HttpClient::Create(context);
 
         ASSERT_TRUE(client);
         ASSERT_TRUE(secondClient);
@@ -33,11 +28,7 @@ TEST(HttpClientConstruction, FactoryReturnsUsableClients)
 
     EXPECT_FALSE(context.stopped());
     handlerRan = false;
-    boost::asio::post(context,
-        [&handlerRan]
-    {
-        handlerRan = true;
-    });
+    boost::asio::post(context, [&handlerRan] { handlerRan = true; });
     EXPECT_EQ(context.run(), 1);
     EXPECT_TRUE(handlerRan);
 }

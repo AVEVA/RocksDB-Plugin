@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <expected>
+#include <functional>
 #include <optional>
 #include <random>
 #include <sstream>
@@ -95,8 +96,9 @@ std::error_code InvalidResponse() {
     return AzureClient::make_error_code(AzureClient::BlobStorageErrorCode::InvalidResponse);
 }
 
-void CompleteOnExecutor(IHttpClient& httpClient, AzureClient::ITokenCredential::GetTokenCompletionHandler completion,
-                        std::error_code error, AzureClient::AccessToken token = {}) {
+void CompleteOnExecutor(::AVEVA::HttpClient& httpClient,
+                        AzureClient::ITokenCredential::GetTokenCompletionHandler completion, std::error_code error,
+                        AzureClient::AccessToken token = {}) {
     boost::asio::post(httpClient.get_executor(),
                       [completion = std::move(completion), error, token = std::move(token)]() mutable {
                           completion(error, std::move(token));
@@ -132,11 +134,13 @@ std::optional<std::chrono::milliseconds> RetryAfter(const HttpResponse& response
 
 // Sends a request and retries transport failures, throttling (429) and server errors (5xx) with jittered
 // exponential backoff (honouring Retry-After on 429 and 503); any other response is passed to the completion handler.
-void SendWithRetry(IHttpClient& httpClient, HttpRequest request, HttpRequestOptions options, int retriesLeft,
-                   std::chrono::milliseconds delay, IHttpClient::CompletionHandler completion) {
+using HttpCompletion = std::move_only_function<void(std::error_code, HttpResponse)>;
+
+void SendWithRetry(::AVEVA::HttpClient& httpClient, HttpRequest request, HttpRequestOptions options, int retriesLeft,
+                   std::chrono::milliseconds delay, HttpCompletion completion) {
     auto attempt = request;
-    httpClient.SendAsyncErased(
-        std::move(attempt),
+    httpClient.SendAsync(
+        std::move(attempt), options,
         [&httpClient, request = std::move(request), options, retriesLeft, delay,
          completion = std::move(completion)](std::error_code error, HttpResponse response) mutable {
             const bool transient =
@@ -162,8 +166,7 @@ void SendWithRetry(IHttpClient& httpClient, HttpRequest request, HttpRequestOpti
                 SendWithRetry(httpClient, std::move(request), options, retriesLeft - 1,
                               std::min(delay * 2, g_maxRetryDelay), std::move(completion));
             });
-        },
-        options);
+        });
 }
 
 std::expected<AzureClient::AccessToken, std::error_code> ParseAccessToken(std::error_code error,
@@ -253,7 +256,8 @@ void RuntimeBoundCredential::GetTokenAsync(std::vector<std::string> scopes, GetT
         });
 }
 
-AzurePipelinesCredential::AzurePipelinesCredential(IHttpClient& httpClient, AzurePipelinesCredentialOptions options)
+AzurePipelinesCredential::AzurePipelinesCredential(::AVEVA::HttpClient& httpClient,
+                                                   AzurePipelinesCredentialOptions options)
     : m_httpClient(&httpClient), m_options(std::move(options)) {
     if (m_options.OidcRequestUri.empty()) {
         m_options.OidcRequestUri = GetEnvironmentValue("SYSTEM_OIDCREQUESTURI");

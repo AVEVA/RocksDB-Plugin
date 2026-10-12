@@ -30,7 +30,7 @@ class ChainedTokenCredential final : public AzureClient::ITokenCredential,
 };
 
 /// <summary>
-/// Keeps a ClientRuntime (and thus the IHttpClient the wrapped credential borrows) alive until every in-flight
+/// Keeps a ClientRuntime (and thus the HttpClient the wrapped credential borrows) alive until every in-flight
 /// GetTokenAsync has completed, so a token refresh that outlives the filesystem cannot touch a destroyed client.
 /// The runtime is released from a handler posted to its own executor rather than from inside the HTTP client's
 /// completion callback, so the client is never destroyed while it is still running that callback.
@@ -65,14 +65,14 @@ struct AzurePipelinesCredentialOptions {
 /// </summary>
 class AzurePipelinesCredential final : public AzureClient::ITokenCredential,
                                        public std::enable_shared_from_this<AzurePipelinesCredential> {
-    IHttpClient* m_httpClient;
+    ::AVEVA::HttpClient* m_httpClient;
     AzurePipelinesCredentialOptions m_options;
 
     void ExchangeOidcToken(const std::string& oidcToken, const std::vector<std::string>& scopes,
                            GetTokenCompletionHandler completion);
 
   public:
-    AzurePipelinesCredential(IHttpClient& httpClient, AzurePipelinesCredentialOptions options);
+    AzurePipelinesCredential(::AVEVA::HttpClient& httpClient, AzurePipelinesCredentialOptions options);
     void GetTokenAsync(std::vector<std::string> scopes, GetTokenCompletionHandler completion) override;
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

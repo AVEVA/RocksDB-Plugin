@@ -9,7 +9,6 @@
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
 #include "FakeBlobEnvironment.hpp"
-#include "FakeHttpClient.hpp"
 
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
@@ -26,7 +25,6 @@
 #include <thread>
 #include <vector>
 
-using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::RocksDB::Plugin::Azure::ReadableFile;
 using AVEVA::RocksDB::Plugin::Azure::RequestFailedException;
 using AVEVA::RocksDB::Plugin::Azure::Impl::AbortAsyncReads;
@@ -574,9 +572,8 @@ TEST_F(AsyncReadTests, ReadAsync_HandleAndFilesystemDroppedMidRead_DrainWaitsUnt
     HostIoContext host;
     auto tracker = std::make_shared<AsyncReadTracker>(host.Context().get_executor());
     boost::asio::io_context io;
-    FakeHttpClient http;
     auto runtime = std::make_shared<ClientRuntime>(io);
-    auto client = std::make_shared<FakePageBlobClient>(http);
+    auto client = std::make_shared<FakePageBlobClient>(runtime->HttpClient());
     client->SetCapacity(BlobSize);
     client->Size = BlobSize;
     client->ETag = "etag";

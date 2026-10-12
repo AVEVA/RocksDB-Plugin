@@ -4,6 +4,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AzureContainerClient.hpp"
 
 #include "BlobContainerClientMock.hpp"
+#include "FakeHttpBridge.hpp"
 #include "FakeHttpClient.hpp"
 #include "FakePageBlobClient.hpp"
 #include "TestFixtures.hpp"
@@ -20,11 +21,14 @@ using AVEVA::AzureClient::Tests::MakeBlobContainerClientOptions;
 using AVEVA::RocksDB::Plugin::Azure::Impl::AzureContainerClient;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::BlobContainerClientMock;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeHttpBridge;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakePageBlobClient;
 
 TEST(AzureContainerClientTests, GetBlobSizeReadsTheSizeFromThePageBlobHandedOutByTheContainer) {
     boost::asio::io_context context;
-    FakeHttpClient httpClient;
+    FakeHttpClient fake;
+    FakeHttpBridge bridge(fake);
+    ::AVEVA::HttpClient& httpClient = bridge.Client();
 
     auto pageBlob = std::make_unique<FakePageBlobClient>(httpClient);
     pageBlob->Size = 1234;
@@ -37,5 +41,5 @@ TEST(AzureContainerClientTests, GetBlobSizeReadsTheSizeFromThePageBlobHandedOutB
     AzureContainerClient adapter(std::make_shared<ClientRuntime>(context), container);
 
     EXPECT_EQ(1234, adapter.GetBlobSize("000001.sst"));
-    EXPECT_TRUE(httpClient.NoRequestMade());
+    EXPECT_TRUE(fake.NoRequestMade());
 }

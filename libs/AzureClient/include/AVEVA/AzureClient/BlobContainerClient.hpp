@@ -28,186 +28,159 @@
 
 #include <AVEVA/AzureClient/Detail/AsyncInitiation.hpp>
 
-namespace AVEVA::AzureClient
-{
-    namespace Private
-    {
-        struct ConnectionState;
-        struct ContainerTarget;
-    } // namespace Private
+namespace AVEVA::AzureClient {
+namespace Private {
+struct ConnectionState;
+struct ContainerTarget;
+} // namespace Private
 
-    class BlobServiceClient;
+template <HttpClientLike THttp> class BasicBlobServiceClient;
 
-    struct BlobContainerClientOptions
-    {
-        std::string ServiceEndpoint;
-        std::string ContainerName;
-        // Authorization precedence is SAS > SharedKey > TokenCredential > BearerToken (see BlobClientOptions).
-        // BearerToken/TokenCredential require https unless the host is loopback (see BlobClientOptions).
-        std::string SasToken;
-        std::string BearerToken;
-        std::shared_ptr<ITokenCredential> TokenCredential;
-        std::vector<std::string> TokenScopes{"https://storage.azure.com/.default"};
-        SharedKeyCredentialOptions SharedKey;
-        std::string ApiVersion = std::string(DefaultApiVersion);
+struct BlobContainerClientOptions {
+    std::string ServiceEndpoint;
+    std::string ContainerName;
+    // Authorization precedence is SAS > SharedKey > TokenCredential > BearerToken (see BlobClientOptions).
+    // BearerToken/TokenCredential require https unless the host is loopback (see BlobClientOptions).
+    std::string SasToken;
+    std::string BearerToken;
+    std::shared_ptr<ITokenCredential> TokenCredential;
+    std::vector<std::string> TokenScopes{"https://storage.azure.com/.default"};
+    SharedKeyCredentialOptions SharedKey;
+    std::string ApiVersion = std::string(DefaultApiVersion);
 
-        RetryOptions Retry;
-        HttpRequestOptions DefaultRequestOptions;
-    };
+    RetryOptions Retry;
+    HttpRequestOptions DefaultRequestOptions;
+};
 
-    // Container operations, and the factory for clients of the blobs it contains.
-    //
-    // Thread safety: concurrent ...Async calls on one instance are supported. Stream and span arguments are
-    // not synchronized by the library and must not be touched until the operation completes. Completion
-    // handlers are not serialized with each other and may run inline, before the initiating call returns.
-    //
-    // Lifetime: stores a non-owning reference to the IHttpClient, which must outlive this client and every
-    // in-flight ...Async operation; destroying either before a completion handler runs is undefined behavior.
-    //
-    // Cancellation: HttpRequestOptions carries a boost::asio::cancellation_slot that aborts in-flight work
-    // (completing with an operation_aborted-flavored BlobStorageError); a slot associated with the
-    // completion token is adopted when HttpRequestOptions has none.
-    //
-    // Completion tokens: every ...Async operation accepts any Boost.Asio CompletionToken (callback,
-    // use_future, use_awaitable, ...) and completes with std::expected<Response<T>, BlobStorageError>.
-    // Omitting the token yields a deferred, directly co_await-able operation, e.g. `co_await client.ListBlobsAsync();`.
-    // Overloads that also take an options struct exclude it from the defaulted token via `requires`.
-    class BlobContainerClient
-    {
-      public:
-        using CreateCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::CreateBlobContainerResult>, BlobStorageError>)>;
-        using ListBlobsCompletionHandler =
-            std::move_only_function<void(std::expected<Response<Models::ListBlobsResult>, BlobStorageError>)>;
+// Container operations, and the factory for clients of the blobs it contains.
+//
+// Thread safety: concurrent ...Async calls on one instance are supported. Stream and span arguments are
+// not synchronized by the library and must not be touched until the operation completes. Completion
+// handlers are not serialized with each other and may run inline, before the initiating call returns.
+//
+// Lifetime: stores a non-owning reference to the HTTP client, which must outlive this client and every
+// in-flight ...Async operation; destroying either before a completion handler runs is undefined behavior.
+//
+// Cancellation: HttpRequestOptions carries a boost::asio::cancellation_slot that aborts in-flight work
+// (completing with an operation_aborted-flavored BlobStorageError); a slot associated with the
+// completion token is adopted when HttpRequestOptions has none.
+//
+// Completion tokens: every ...Async operation accepts any Boost.Asio CompletionToken (callback,
+// use_future, use_awaitable, ...) and completes with std::expected<Response<T>, BlobStorageError>.
+// Omitting the token yields a deferred, directly co_await-able operation, e.g. `co_await client.ListBlobsAsync();`.
+// Overloads that also take an options struct exclude it from the defaulted token via `requires`.
+template <HttpClientLike THttp> class BasicBlobContainerClient {
+  public:
+    using CreateCompletionHandler =
+        std::move_only_function<void(std::expected<Response<Models::CreateBlobContainerResult>, BlobStorageError>)>;
+    using ListBlobsCompletionHandler =
+        std::move_only_function<void(std::expected<Response<Models::ListBlobsResult>, BlobStorageError>)>;
 
-        BlobContainerClient(IHttpClient& httpClient, const BlobContainerClientOptions& options);
-        BlobContainerClient(const BlobContainerClient&) = delete;
-        BlobContainerClient& operator=(const BlobContainerClient&) = delete;
-        BlobContainerClient(BlobContainerClient&&) noexcept = default;
-        BlobContainerClient& operator=(BlobContainerClient&&) noexcept = default;
-        virtual ~BlobContainerClient() = default;
+    using BlobClientType = BasicBlobClient<THttp>;
+    using BlockBlobClientType = BasicBlockBlobClient<THttp>;
+    using PageBlobClientType = BasicPageBlobClient<THttp>;
 
-        // The executor associated with this client's underlying IHttpClient; usable as the default
-        // executor argument for a boost::asio::default_completion_token_t, or to schedule work that
-        // must run on the same executor as this client's completions.
-        using executor_type = IHttpClient::executor_type;
+    BasicBlobContainerClient(THttp& httpClient, const BlobContainerClientOptions& options);
+    BasicBlobContainerClient(const BasicBlobContainerClient&) = delete;
+    BasicBlobContainerClient& operator=(const BasicBlobContainerClient&) = delete;
+    BasicBlobContainerClient(BasicBlobContainerClient&&) noexcept = default;
+    BasicBlobContainerClient& operator=(BasicBlobContainerClient&&) noexcept = default;
+    virtual ~BasicBlobContainerClient() = default;
 
-        [[nodiscard]] executor_type get_executor() const
-        {
-            return m_httpClient->get_executor();
-        }
+    // The executor associated with this client's underlying HTTP client; usable as the default
+    // executor argument for a boost::asio::default_completion_token_t, or to schedule work that
+    // must run on the same executor as this client's completions.
+    using executor_type = typename THttp::executor_type;
 
-        // Request options (timeout, response body limit, cancellation slot) applied to every operation
-        // that is not given its own via WithRequestOptions(...) or the trailing requestOptions argument.
-        [[nodiscard]] const HttpRequestOptions& GetDefaultRequestOptions() const noexcept;
+    [[nodiscard]] executor_type get_executor() const { return m_httpClient->get_executor(); }
 
-        // The default completion token used when a ...Async call omits an explicit token
-        // (matching this client's executor_type, per boost::asio::default_completion_token).
-        using DefaultCompletionToken = boost::asio::default_completion_token<executor_type>::type;
+    // Request options (timeout, response body limit, cancellation slot) applied to every operation
+    // that is not given its own via WithRequestOptions(...) or the trailing requestOptions argument.
+    [[nodiscard]] const HttpRequestOptions& GetDefaultRequestOptions() const noexcept;
 
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, CreateBlobContainerOptions>)
-        [[nodiscard]] auto CreateAsync(CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::CreateBlobContainerResult>(this,
-                &BlobContainerClient::CreateAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                CreateBlobContainerOptions{});
-        }
+    // The default completion token used when a ...Async call omits an explicit token
+    // (matching this client's executor_type, per boost::asio::default_completion_token).
+    using DefaultCompletionToken = boost::asio::default_completion_token<executor_type>::type;
 
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto CreateAsync(CreateBlobContainerOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::CreateBlobContainerResult>(this,
-                &BlobContainerClient::CreateAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(options));
-        }
+    template <class CompletionToken = DefaultCompletionToken>
+        requires(!std::same_as<std::remove_cvref_t<CompletionToken>, CreateBlobContainerOptions>)
+    [[nodiscard]] auto CreateAsync(CompletionToken&& token = CompletionToken{},
+                                   std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::CreateBlobContainerResult>(
+            this, &BasicBlobContainerClient::CreateAsyncImpl, std::forward<CompletionToken>(token),
+            std::move(requestOptions), CreateBlobContainerOptions{});
+    }
 
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, ListBlobsOptions>)
-        [[nodiscard]] auto ListBlobsAsync(CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::ListBlobsResult>(this,
-                &BlobContainerClient::ListBlobsAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                ListBlobsOptions{});
-        }
+    template <class CompletionToken = DefaultCompletionToken>
+    [[nodiscard]] auto CreateAsync(CreateBlobContainerOptions options, CompletionToken&& token = CompletionToken{},
+                                   std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::CreateBlobContainerResult>(
+            this, &BasicBlobContainerClient::CreateAsyncImpl, std::forward<CompletionToken>(token),
+            std::move(requestOptions), std::move(options));
+    }
 
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto ListBlobsAsync(ListBlobsOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::ListBlobsResult>(this,
-                &BlobContainerClient::ListBlobsAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(options));
-        }
+    template <class CompletionToken = DefaultCompletionToken>
+        requires(!std::same_as<std::remove_cvref_t<CompletionToken>, ListBlobsOptions>)
+    [[nodiscard]] auto ListBlobsAsync(CompletionToken&& token = CompletionToken{},
+                                      std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::ListBlobsResult>(
+            this, &BasicBlobContainerClient::ListBlobsAsyncImpl, std::forward<CompletionToken>(token),
+            std::move(requestOptions), ListBlobsOptions{});
+    }
 
-        // Suppressed-error contract (applies to every *IfNotExists / *IfExists method): when the target already
-        // exists (or, for delete, is absent) the expected is engaged, Value() is default-constructed, and
-        // Response::Error() carries the suppressed service error. Any other failure arrives as
-        // `unexpected(BlobStorageError)`. Check Response::Error() before treating the call as a real success.
-        template <class CompletionToken = DefaultCompletionToken>
-            requires(!std::same_as<std::remove_cvref_t<CompletionToken>, CreateBlobContainerOptions>)
-        [[nodiscard]] auto CreateIfNotExistsAsync(CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::CreateBlobContainerResult>(this,
-                &BlobContainerClient::CreateIfNotExistsAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                CreateBlobContainerOptions{});
-        }
+    template <class CompletionToken = DefaultCompletionToken>
+    [[nodiscard]] auto ListBlobsAsync(ListBlobsOptions options, CompletionToken&& token = CompletionToken{},
+                                      std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::ListBlobsResult>(
+            this, &BasicBlobContainerClient::ListBlobsAsyncImpl, std::forward<CompletionToken>(token),
+            std::move(requestOptions), std::move(options));
+    }
 
-        template <class CompletionToken = DefaultCompletionToken>
-        [[nodiscard]] auto CreateIfNotExistsAsync(CreateBlobContainerOptions options,
-            CompletionToken&& token = CompletionToken{},
-            std::optional<HttpRequestOptions> requestOptions = std::nullopt)
-        {
-            return Private::InitiateClientOperation<Models::CreateBlobContainerResult>(this,
-                &BlobContainerClient::CreateIfNotExistsAsyncImpl,
-                std::forward<CompletionToken>(token),
-                std::move(requestOptions),
-                std::move(options));
-        }
+    // Suppressed-error contract (applies to every *IfNotExists / *IfExists method): when the target already
+    // exists (or, for delete, is absent) the expected is engaged, Value() is default-constructed, and
+    // Response::Error() carries the suppressed service error. Any other failure arrives as
+    // `unexpected(BlobStorageError)`. Check Response::Error() before treating the call as a real success.
+    template <class CompletionToken = DefaultCompletionToken>
+        requires(!std::same_as<std::remove_cvref_t<CompletionToken>, CreateBlobContainerOptions>)
+    [[nodiscard]] auto CreateIfNotExistsAsync(CompletionToken&& token = CompletionToken{},
+                                              std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::CreateBlobContainerResult>(
+            this, &BasicBlobContainerClient::CreateIfNotExistsAsyncImpl, std::forward<CompletionToken>(token),
+            std::move(requestOptions), CreateBlobContainerOptions{});
+    }
 
-        [[nodiscard]] virtual std::unique_ptr<BlobClient> GetBlobClient(std::string blobName) const;
-        [[nodiscard]] virtual std::unique_ptr<BlockBlobClient> GetBlockBlobClient(std::string blobName) const;
-        [[nodiscard]] virtual std::unique_ptr<PageBlobClient> GetPageBlobClient(std::string blobName) const;
+    template <class CompletionToken = DefaultCompletionToken>
+    [[nodiscard]] auto CreateIfNotExistsAsync(CreateBlobContainerOptions options,
+                                              CompletionToken&& token = CompletionToken{},
+                                              std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::CreateBlobContainerResult>(
+            this, &BasicBlobContainerClient::CreateIfNotExistsAsyncImpl, std::forward<CompletionToken>(token),
+            std::move(requestOptions), std::move(options));
+    }
 
-      private:
-        friend class BlobServiceClient;
-        // Shares the service client's validated connection state (no re-normalisation).
-        BlobContainerClient(IHttpClient& httpClient,
-            std::shared_ptr<const Private::ConnectionState> connection,
-            std::string containerName);
+    [[nodiscard]] virtual std::unique_ptr<BlobClientType> GetBlobClient(std::string blobName) const;
+    [[nodiscard]] virtual std::unique_ptr<BlockBlobClientType> GetBlockBlobClient(std::string blobName) const;
+    [[nodiscard]] virtual std::unique_ptr<PageBlobClientType> GetPageBlobClient(std::string blobName) const;
 
-        // Type-erased operation entry points; virtual so tests can substitute a mock (see BlobClient).
-        virtual void CreateAsyncImpl(const CreateBlobContainerOptions& options,
-            CreateCompletionHandler completion,
-            HttpRequestOptions requestOptions = {});
-        virtual void ListBlobsAsyncImpl(ListBlobsOptions options,
-            ListBlobsCompletionHandler completion,
-            HttpRequestOptions requestOptions = {});
-        static void ListBlobsPageAsync(IHttpClient& httpClient,
-            const std::shared_ptr<const Private::ContainerTarget>& target,
-            ListBlobsOptions options,
-            ListBlobsCompletionHandler completion,
-            HttpRequestOptions requestOptions);
-        virtual void CreateIfNotExistsAsyncImpl(const CreateBlobContainerOptions& options,
-            CreateCompletionHandler completion,
-            HttpRequestOptions requestOptions = {});
-        IHttpClient* m_httpClient = nullptr;
-        std::shared_ptr<const Private::ContainerTarget> m_target;
-    };
+  private:
+    template <HttpClientLike> friend class BasicBlobServiceClient;
+    // Shares the service client's validated connection state (no re-normalisation).
+    BasicBlobContainerClient(THttp& httpClient, std::shared_ptr<const Private::ConnectionState> connection,
+                             std::string containerName);
+
+    // Type-erased operation entry points; virtual so tests can substitute a mock (see BasicBlobClient).
+    virtual void CreateAsyncImpl(const CreateBlobContainerOptions& options, CreateCompletionHandler completion,
+                                 HttpRequestOptions requestOptions = {});
+    virtual void ListBlobsAsyncImpl(ListBlobsOptions options, ListBlobsCompletionHandler completion,
+                                    HttpRequestOptions requestOptions = {});
+    static void ListBlobsPageAsync(THttp& httpClient, const std::shared_ptr<const Private::ContainerTarget>& target,
+                                   ListBlobsOptions options, ListBlobsCompletionHandler completion,
+                                   HttpRequestOptions requestOptions);
+    virtual void CreateIfNotExistsAsyncImpl(const CreateBlobContainerOptions& options,
+                                            CreateCompletionHandler completion, HttpRequestOptions requestOptions = {});
+    THttp* m_httpClient = nullptr;
+    std::shared_ptr<const Private::ContainerTarget> m_target;
+};
+
+using BlobContainerClient = BasicBlobContainerClient<HttpClient>;
 } // namespace AVEVA::AzureClient

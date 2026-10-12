@@ -71,7 +71,7 @@ const std::string& WindowsRootCertificatePem() {
 }
 #endif
 
-std::unique_ptr<::AVEVA::IHttpClient> CreateHttpClient(boost::asio::io_context& context) {
+std::unique_ptr<::AVEVA::HttpClient> CreateHttpClient(boost::asio::io_context& context) {
     ::AVEVA::HttpClientOptions options;
     // MultiRead waves, directory deletes and per-file uploads run in parallel; the default of 6 idle connections
     // would close and re-handshake most of them after every burst.
@@ -83,7 +83,7 @@ std::unique_ptr<::AVEVA::IHttpClient> CreateHttpClient(boost::asio::io_context& 
     }
 #endif
 
-    return ::AVEVA::IHttpClient::Create(context, std::move(options));
+    return std::make_unique<::AVEVA::HttpClient>(context, std::move(options));
 }
 } // namespace
 
@@ -92,7 +92,7 @@ ClientRuntime::ClientRuntime(boost::asio::io_context& context) : m_httpClient(Cr
 // The io_context belongs to the host, which keeps running it; only the HTTP client created here is released.
 ClientRuntime::~ClientRuntime() = default;
 
-::AVEVA::IHttpClient& ClientRuntime::HttpClient() const noexcept { return *m_httpClient; }
+::AVEVA::HttpClient& ClientRuntime::HttpClient() const noexcept { return *m_httpClient; }
 
 void ClientRuntime::FenceWrites() noexcept { m_writesFenced.store(true); }
 

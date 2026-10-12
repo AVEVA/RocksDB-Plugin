@@ -4,7 +4,8 @@
 #pragma once
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
 
-#include "FakeHttpClient.hpp"
+#include <AVEVA/HttpClient/HttpClient.hpp>
+
 #include "TestFixtures.hpp"
 
 #include <algorithm>
@@ -47,7 +48,7 @@ class FakePageBlobClient : public AzureClient::PageBlobClient {
     };
 
     explicit FakePageBlobClient(
-        AzureClient::Tests::FakeHttpClient& httpClient,
+        ::AVEVA::HttpClient& httpClient,
         const AzureClient::BlobClientOptions& options = AzureClient::Tests::MakeBlobClientOptions("files", "test.sst"))
         : AzureClient::PageBlobClient(httpClient, options) {}
 

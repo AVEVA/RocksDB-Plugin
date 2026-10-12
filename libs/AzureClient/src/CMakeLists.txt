@@ -28,7 +28,6 @@ add_library(aveva-azure-client
     ITokenCredential.cpp
     PageBlobClient.cpp
     RequestPipeline.cpp
-    BlobDownload.cpp
 )
 
 set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../include")
@@ -58,6 +57,7 @@ target_sources(aveva-azure-client
         "${base-include-dir}/AVEVA/AzureClient/BlobStorageErrorCode.hpp"
         "${base-include-dir}/AVEVA/AzureClient/BlockBlobClient.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Detail/AsyncInitiation.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/HttpClientLike.hpp"
         "${base-include-dir}/AVEVA/AzureClient/ITokenCredential.hpp"
         "${base-include-dir}/AVEVA/AzureClient/PageBlobClient.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Response.hpp"

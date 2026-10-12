@@ -46,203 +46,165 @@
 
 using AVEVA::AzureClient::Tests::ValueOrFail;
 
-namespace
-{
-    using AVEVA::HttpMethod;
-    using AVEVA::HttpResponse;
-    using AVEVA::AzureClient::BlobClientOptions;
-    using AVEVA::AzureClient::BlobStorageError;
-    using AVEVA::AzureClient::BlobStorageErrorCode;
-    using AVEVA::AzureClient::BlockBlobClient;
-    using AVEVA::AzureClient::Response;
-    using AVEVA::AzureClient::Models::AcquireBlobLeaseResult;
-    using AVEVA::AzureClient::Models::BlobProperties;
-    using AVEVA::AzureClient::Models::BlobType;
-    using AVEVA::AzureClient::Models::CommitBlockListResult;
-    using AVEVA::AzureClient::Models::DeleteBlobResult;
-    using AVEVA::AzureClient::Models::DownloadBlobResult;
-    using AVEVA::AzureClient::Models::DownloadBlobToResult;
-    using AVEVA::AzureClient::Models::ReleaseBlobLeaseResult;
-    using AVEVA::AzureClient::Models::SetBlobMetadataResult;
-    using AVEVA::AzureClient::Models::StageBlockResult;
-    using AVEVA::AzureClient::Models::UploadBlockBlobResult;
-    using AVEVA::AzureClient::Private::ParseHttpDateHeader;
-    using AVEVA::AzureClient::Tests::CallbackExpectation;
-    using AVEVA::AzureClient::Tests::DefaultETag;
-    using AVEVA::AzureClient::Tests::ExpectRequestContract;
-    using AVEVA::AzureClient::Tests::FakeHttpClient;
-    using AVEVA::AzureClient::Tests::MakeAzureErrorResponse;
-    using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
-    using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
+namespace {
+using AVEVA::HttpMethod;
+using AVEVA::HttpResponse;
+using AVEVA::AzureClient::BlobClientOptions;
+using AVEVA::AzureClient::BlobStorageError;
+using AVEVA::AzureClient::BlobStorageErrorCode;
+using AVEVA::AzureClient::Response;
+using AVEVA::AzureClient::Models::AcquireBlobLeaseResult;
+using AVEVA::AzureClient::Models::BlobProperties;
+using AVEVA::AzureClient::Models::BlobType;
+using AVEVA::AzureClient::Models::CommitBlockListResult;
+using AVEVA::AzureClient::Models::DeleteBlobResult;
+using AVEVA::AzureClient::Models::DownloadBlobResult;
+using AVEVA::AzureClient::Models::DownloadBlobToResult;
+using AVEVA::AzureClient::Models::ReleaseBlobLeaseResult;
+using AVEVA::AzureClient::Models::SetBlobMetadataResult;
+using AVEVA::AzureClient::Models::StageBlockResult;
+using AVEVA::AzureClient::Models::UploadBlockBlobResult;
+using AVEVA::AzureClient::Private::ParseHttpDateHeader;
+using AVEVA::AzureClient::Tests::BlockBlobClient;
+using AVEVA::AzureClient::Tests::CallbackExpectation;
+using AVEVA::AzureClient::Tests::DefaultETag;
+using AVEVA::AzureClient::Tests::ExpectRequestContract;
+using AVEVA::AzureClient::Tests::FakeHttpClient;
+using AVEVA::AzureClient::Tests::MakeAzureErrorResponse;
+using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
+using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
 
-    [[nodiscard]] BlobClientOptions BuildOptions()
-    {
-        return MakeBlobClientOptions();
-    }
+[[nodiscard]] BlobClientOptions BuildOptions() { return MakeBlobClientOptions(); }
 
-    void ExpectUuidV4(std::string_view value)
-    {
-        EXPECT_TRUE(std::regex_match(std::string{value},
-            std::regex{"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}));
-    }
+void ExpectUuidV4(std::string_view value) {
+    EXPECT_TRUE(std::regex_match(std::string{value},
+                                 std::regex{"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}));
+}
 
-    void ExpectBearerAuthorization(std::string_view value, std::string_view token)
-    {
-        EXPECT_FALSE(value.empty());
-        EXPECT_EQ(value, "Bearer " + std::string(token));
-    }
+void ExpectBearerAuthorization(std::string_view value, std::string_view token) {
+    EXPECT_FALSE(value.empty());
+    EXPECT_EQ(value, "Bearer " + std::string(token));
+}
 
+void AssertBlobPropertiesResultHasValue(const std::expected<Response<BlobProperties>, BlobStorageError>& result) {
+    ASSERT_TRUE(result.has_value());
+}
 
-    void AssertBlobPropertiesResultHasValue(const std::expected<Response<BlobProperties>, BlobStorageError>& result)
-    {
+void VerifyBlobPropertiesEdgeCasesValue(const Response<BlobProperties>& response) {
+    EXPECT_EQ(response.Value().Type, BlobType::Unknown);
+    EXPECT_EQ(response.Value().ContentLength, 0U);
+    EXPECT_EQ(response.Value().ContentType, "image/png");
+    EXPECT_EQ(response.Value().Metadata.at("project"), "aveva");
+    EXPECT_EQ(response.Value().Metadata.at("owner"), "storage");
+    EXPECT_NE(response.Value().LastModified, std::chrono::system_clock::time_point{});
+}
+
+void VerifyDeleteMissingStorageCodeServiceErrorResult(
+    const std::expected<Response<DeleteBlobResult>, BlobStorageError>& result) {
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, BlobStorageErrorCode::ServiceError);
+    EXPECT_EQ(result.error().StatusCode, 500U);
+    EXPECT_TRUE(result.error().ErrorCode.empty());
+    EXPECT_EQ(result.error().Message, "boom");
+    EXPECT_EQ(result.error().RequestId, "req-500");
+}
+
+void VerifyDeleteUnrecognizedServiceErrorResult(
+    const std::expected<Response<DeleteBlobResult>, BlobStorageError>& result) {
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, BlobStorageErrorCode::ServiceError);
+    EXPECT_EQ(result.error().ErrorCode, "WeirdProblem");
+    EXPECT_EQ(result.error().Message, "Unexpected detail");
+    EXPECT_EQ(result.error().RequestId, "req-409");
+}
+
+void VerifyDefaultDownloadResult(const std::expected<Response<DownloadBlobResult>, BlobStorageError>& result) {
+    ASSERT_TRUE(result.has_value());
+    const Response<DownloadBlobResult>& response = *result;
+    EXPECT_EQ(response.Value().Properties.Type, BlobType::BlockBlob);
+    EXPECT_EQ(response.Value().Properties.ContentLength, 4U);
+    EXPECT_EQ(response.Value().Properties.ContentType, "text/plain");
+    EXPECT_EQ(response.Value().Content, "data");
+}
+
+void StartCommitBlockListAsyncAndVerify(BlockBlobClient& client, const std::vector<std::string>& blockIds,
+                                        bool& callbackInvoked) {
+    client.CommitBlockListAsync(blockIds, [&](std::expected<Response<CommitBlockListResult>, BlobStorageError> result) {
         ASSERT_TRUE(result.has_value());
-    }
+        const Response<CommitBlockListResult>& response = *result;
+        EXPECT_EQ(response.Value().ETag, "\"0x8D1234\"");
+        callbackInvoked = true;
+    });
+}
 
-    void VerifyBlobPropertiesEdgeCasesValue(const Response<BlobProperties>& response)
-    {
-        EXPECT_EQ(response.Value().Type, BlobType::Unknown);
-        EXPECT_EQ(response.Value().ContentLength, 0U);
-        EXPECT_EQ(response.Value().ContentType, "image/png");
-        EXPECT_EQ(response.Value().Metadata.at("project"), "aveva");
-        EXPECT_EQ(response.Value().Metadata.at("owner"), "storage");
-        EXPECT_NE(response.Value().LastModified, std::chrono::system_clock::time_point{});
-    }
+void StartGetPropertiesAsyncAndVerifyEdgeCases(BlockBlobClient& client) {
+    client.GetPropertiesAsync([](std::expected<Response<BlobProperties>, BlobStorageError> result) {
+        AssertBlobPropertiesResultHasValue(result);
+        VerifyBlobPropertiesEdgeCasesValue(*result);
+    });
+}
 
-    void VerifyDeleteMissingStorageCodeServiceErrorResult(
-        const std::expected<Response<DeleteBlobResult>, BlobStorageError>& result)
-    {
-        ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().Code, BlobStorageErrorCode::ServiceError);
-        EXPECT_EQ(result.error().StatusCode, 500U);
-        EXPECT_TRUE(result.error().ErrorCode.empty());
-        EXPECT_EQ(result.error().Message, "boom");
-        EXPECT_EQ(result.error().RequestId, "req-500");
-    }
+void StartDeleteAsyncExpectingMissingStorageCodeServiceError(BlockBlobClient& client, CallbackExpectation& callback) {
+    client.DeleteAsync([&](std::expected<Response<DeleteBlobResult>, BlobStorageError> result) {
+        VerifyDeleteMissingStorageCodeServiceErrorResult(result);
+        callback.MarkInvoked();
+    });
+}
 
-    void VerifyDeleteUnrecognizedServiceErrorResult(
-        const std::expected<Response<DeleteBlobResult>, BlobStorageError>& result)
-    {
-        ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().Code, BlobStorageErrorCode::ServiceError);
-        EXPECT_EQ(result.error().ErrorCode, "WeirdProblem");
-        EXPECT_EQ(result.error().Message, "Unexpected detail");
-        EXPECT_EQ(result.error().RequestId, "req-409");
-    }
+void StartDeleteAsyncExpectingUnrecognizedServiceError(BlockBlobClient& client, CallbackExpectation& callback) {
+    client.DeleteAsync([&](std::expected<Response<DeleteBlobResult>, BlobStorageError> result) {
+        VerifyDeleteUnrecognizedServiceErrorResult(result);
+        callback.MarkInvoked();
+    });
+}
 
-    void VerifyDefaultDownloadResult(const std::expected<Response<DownloadBlobResult>, BlobStorageError>& result)
-    {
+void StartDownloadAsyncAndVerifyDefaultContent(BlockBlobClient& client, CallbackExpectation& callback) {
+    client.DownloadAsync([&](std::expected<Response<DownloadBlobResult>, BlobStorageError> result) {
+        VerifyDefaultDownloadResult(result);
+        callback.MarkInvoked();
+    });
+}
+
+void StartDownloadAsyncAndVerifyRangedContent(BlockBlobClient& client,
+                                              const AVEVA::AzureClient::DownloadBlobOptions& options,
+                                              CallbackExpectation& callback) {
+    client.DownloadAsync(options, [&](std::expected<Response<DownloadBlobResult>, BlobStorageError> result) {
         ASSERT_TRUE(result.has_value());
         const Response<DownloadBlobResult>& response = *result;
-        EXPECT_EQ(response.Value().Properties.Type, BlobType::BlockBlob);
-        EXPECT_EQ(response.Value().Properties.ContentLength, 4U);
-        EXPECT_EQ(response.Value().Properties.ContentType, "text/plain");
-        EXPECT_EQ(response.Value().Content, "data");
-    }
+        EXPECT_EQ(response.Value().Properties.ContentLength, 2U);
+        callback.MarkInvoked();
+    });
+}
 
-    void StartCommitBlockListAsyncAndVerify(BlockBlobClient& client,
-        const std::vector<std::string>& blockIds,
-        bool& callbackInvoked)
-    {
-        client.CommitBlockListAsync(blockIds,
-            [&](std::expected<Response<CommitBlockListResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            const Response<CommitBlockListResult>& response = *result;
-            EXPECT_EQ(response.Value().ETag, "\"0x8D1234\"");
-            callbackInvoked = true;
-        });
-    }
+void StartDownloadToStreamAsyncAndVerify(BlockBlobClient& client, std::ostringstream& stream,
+                                         CallbackExpectation& callback) {
+    client.DownloadToAsync(stream, [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result) {
+        ASSERT_TRUE(result.has_value());
+        const Response<DownloadBlobToResult>& response = *result;
+        EXPECT_EQ(response.Value().BytesWritten, 4U);
+        callback.MarkInvoked();
+    });
+}
 
-    void StartGetPropertiesAsyncAndVerifyEdgeCases(BlockBlobClient& client)
-    {
-        client.GetPropertiesAsync([](std::expected<Response<BlobProperties>, BlobStorageError> result)
-        {
-            AssertBlobPropertiesResultHasValue(result);
-            VerifyBlobPropertiesEdgeCasesValue(*result);
-        });
-    }
-
-    void StartDeleteAsyncExpectingMissingStorageCodeServiceError(BlockBlobClient& client, CallbackExpectation& callback)
-    {
-        client.DeleteAsync([&](std::expected<Response<DeleteBlobResult>, BlobStorageError> result)
-        {
-            VerifyDeleteMissingStorageCodeServiceErrorResult(result);
-            callback.MarkInvoked();
-        });
-    }
-
-    void StartDeleteAsyncExpectingUnrecognizedServiceError(BlockBlobClient& client, CallbackExpectation& callback)
-    {
-        client.DeleteAsync([&](std::expected<Response<DeleteBlobResult>, BlobStorageError> result)
-        {
-            VerifyDeleteUnrecognizedServiceErrorResult(result);
-            callback.MarkInvoked();
-        });
-    }
-
-    void StartDownloadAsyncAndVerifyDefaultContent(BlockBlobClient& client, CallbackExpectation& callback)
-    {
-        client.DownloadAsync([&](std::expected<Response<DownloadBlobResult>, BlobStorageError> result)
-        {
-            VerifyDefaultDownloadResult(result);
-            callback.MarkInvoked();
-        });
-    }
-
-    void StartDownloadAsyncAndVerifyRangedContent(BlockBlobClient& client,
-        const AVEVA::AzureClient::DownloadBlobOptions& options,
-        CallbackExpectation& callback)
-    {
-        client.DownloadAsync(options,
-            [&](std::expected<Response<DownloadBlobResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            const Response<DownloadBlobResult>& response = *result;
-            EXPECT_EQ(response.Value().Properties.ContentLength, 2U);
-            callback.MarkInvoked();
-        });
-    }
-
-    void StartDownloadToStreamAsyncAndVerify(BlockBlobClient& client,
-        std::ostringstream& stream,
-        CallbackExpectation& callback)
-    {
-        client.DownloadToAsync(stream,
-            [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            const Response<DownloadBlobToResult>& response = *result;
-            EXPECT_EQ(response.Value().BytesWritten, 4U);
-            callback.MarkInvoked();
-        });
-    }
-
-    void StartDownloadToFilesystemPathAsyncAndVerify(BlockBlobClient& client,
-        const std::filesystem::path& path,
-        CallbackExpectation& callback)
-    {
-        client.DownloadToAsync(path,
-            [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            const Response<DownloadBlobToResult>& response = *result;
-            EXPECT_EQ(response.Value().BytesWritten, 5U);
-            callback.MarkInvoked();
-        });
-    }
+void StartDownloadToFilesystemPathAsyncAndVerify(BlockBlobClient& client, const std::filesystem::path& path,
+                                                 CallbackExpectation& callback) {
+    client.DownloadToAsync(path, [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result) {
+        ASSERT_TRUE(result.has_value());
+        const Response<DownloadBlobToResult>& response = *result;
+        EXPECT_EQ(response.Value().BytesWritten, 5U);
+        callback.MarkInvoked();
+    });
+}
 
 } // namespace
 
-TEST(BlockBlobClientTests, UploadAsync_BuildsPutRequestWithBlockBlobType)
-{
+TEST(BlockBlobClientTests, UploadAsync_BuildsPutRequestWithBlockBlobType) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{201, MakeCanonicalSuccessHeaders(), ""};
     BlockBlobClient client{httpClient, BuildOptions()};
 
     CallbackExpectation callback;
-    client.UploadAsync("hello world",
-        [&](std::expected<Response<UploadBlockBlobResult>, BlobStorageError> result)
-    {
+    client.UploadAsync("hello world", [&](std::expected<Response<UploadBlockBlobResult>, BlobStorageError> result) {
         ASSERT_TRUE(result.has_value());
         const Response<UploadBlockBlobResult>& response = *result;
         EXPECT_EQ(response.Value().ETag, DefaultETag);
@@ -252,15 +214,13 @@ TEST(BlockBlobClientTests, UploadAsync_BuildsPutRequestWithBlockBlobType)
     httpClient.Poll(); // drive the posted (async) completion (T26)
     ASSERT_EQ(httpClient.RequestCount(), 1U);
     const auto& request = httpClient.LastRequest();
-    ExpectRequestContract(request,
-        HttpMethod::Put,
-        "https://storageaccount.blob.core.windows.net/images/photo.png?sv=2025-01-05&sig=fakesig",
-        "hello world");
+    ExpectRequestContract(request, HttpMethod::Put,
+                          "https://storageaccount.blob.core.windows.net/images/photo.png?sv=2025-01-05&sig=fakesig",
+                          "hello world");
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-blob-type"), "BlockBlob");
 }
 
-TEST(BlockBlobClientTests, UploadAsync_UsesBearerAuthorizationAndRequiredHeaders)
-{
+TEST(BlockBlobClientTests, UploadAsync_UsesBearerAuthorizationAndRequiredHeaders) {
     FakeHttpClient httpClient;
     BlobClientOptions options = BuildOptions();
     options.ServiceEndpoint = "https://storageaccount.blob.core.windows.net";
@@ -280,28 +240,26 @@ TEST(BlockBlobClientTests, UploadAsync_UsesBearerAuthorizationAndRequiredHeaders
     ExpectUuidV4(FakeHttpClient::FindHeaderValue(request, "x-ms-client-request-id"));
 
     const std::string dateHeader = FakeHttpClient::FindHeaderValue(request, "x-ms-date");
-    EXPECT_TRUE(std::regex_match(dateHeader,
-        std::regex{"^[A-Z][a-z]{2}, [0-9]{2} [A-Z][a-z]{2} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT$"}));
+    EXPECT_TRUE(std::regex_match(
+        dateHeader, std::regex{"^[A-Z][a-z]{2}, [0-9]{2} [A-Z][a-z]{2} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT$"}));
     EXPECT_TRUE(ParseHttpDateHeader(dateHeader).has_value());
 
     ExpectBearerAuthorization(FakeHttpClient::FindHeaderValue(request, "Authorization"), "bearer-token");
 }
 
-TEST(BlockBlobClientTests, UploadAsync_SpanOverloadUsesSingleRequestPath)
-{
+TEST(BlockBlobClientTests, UploadAsync_SpanOverloadUsesSingleRequestPath) {
     FakeHttpClient httpClient;
     BlockBlobClient client{httpClient, BuildOptions()};
 
     const std::vector<std::byte> content{std::byte{'a'}, std::byte{'b'}, std::byte{'c'}};
     client.UploadAsync(std::span<const std::byte>{content},
-        [](std::expected<Response<UploadBlockBlobResult>, BlobStorageError>) {});
+                       [](std::expected<Response<UploadBlockBlobResult>, BlobStorageError>) {});
 
     ASSERT_EQ(httpClient.RequestCount(), 1U);
     EXPECT_EQ(httpClient.LastRequest().GetBody(), "abc");
 }
 
-TEST(BlockBlobClientTests, UploadAsync_SharedBufferOverloadSendsViewWithoutCopying)
-{
+TEST(BlockBlobClientTests, UploadAsync_SharedBufferOverloadSendsViewWithoutCopying) {
     FakeHttpClient httpClient;
     BlockBlobClient client{httpClient, BuildOptions()};
 
@@ -318,8 +276,7 @@ TEST(BlockBlobClientTests, UploadAsync_SharedBufferOverloadSendsViewWithoutCopyi
     EXPECT_EQ(request.GetBodyView().size(), 3U);
 }
 
-TEST(BlockBlobClientTests, StageBlockAsync_SharedBufferOverloadSendsViewWithoutCopying)
-{
+TEST(BlockBlobClientTests, StageBlockAsync_SharedBufferOverloadSendsViewWithoutCopying) {
     FakeHttpClient httpClient;
     BlockBlobClient client{httpClient, BuildOptions()};
 
@@ -334,54 +291,48 @@ TEST(BlockBlobClientTests, StageBlockAsync_SharedBufferOverloadSendsViewWithoutC
     EXPECT_NE(request.GetUrl().find("comp=block&blockid=AAAAAA%3D%3D"), std::string::npos);
 }
 
-TEST(BlockBlobClientTests, StageBlockAsync_EncodesBlockIdInQuery)
-{
+TEST(BlockBlobClientTests, StageBlockAsync_EncodesBlockIdInQuery) {
     FakeHttpClient httpClient;
     BlockBlobClient client{httpClient, BuildOptions()};
 
-    client.StageBlockAsync("AAAAAA==", "chunk-data", [](std::expected<Response<StageBlockResult>, BlobStorageError>) {
-    });
+    client.StageBlockAsync("AAAAAA==", "chunk-data",
+                           [](std::expected<Response<StageBlockResult>, BlobStorageError>) {});
 
     ASSERT_EQ(httpClient.RequestCount(), 1U);
     const auto& request = httpClient.LastRequest();
     EXPECT_EQ(request.GetMethod(), HttpMethod::Put);
-    EXPECT_EQ(request.GetUrl(),
-        "https://storageaccount.blob.core.windows.net/images/"
-        "photo.png?comp=block&blockid=AAAAAA%3D%3D&sv=2025-01-05&sig=fakesig");
+    EXPECT_EQ(request.GetUrl(), "https://storageaccount.blob.core.windows.net/images/"
+                                "photo.png?comp=block&blockid=AAAAAA%3D%3D&sv=2025-01-05&sig=fakesig");
     EXPECT_EQ(request.GetBody(), "chunk-data");
 }
 
-TEST(BlockBlobClientTests, StageBlockAsync_EncodesPlusSlashAndEqualsInBlockIdQueryAndPreservesSasToken)
-{
+TEST(BlockBlobClientTests, StageBlockAsync_EncodesPlusSlashAndEqualsInBlockIdQueryAndPreservesSasToken) {
     FakeHttpClient httpClient;
     BlobClientOptions options = BuildOptions();
     options.SasToken = "?sv=2025-01-05&sig=a%2Bb%26c%3D1";
     BlockBlobClient client{httpClient, options};
 
-    client.StageBlockAsync("++//AA==", "chunk-data", [](std::expected<Response<StageBlockResult>, BlobStorageError>) {
-    });
+    client.StageBlockAsync("++//AA==", "chunk-data",
+                           [](std::expected<Response<StageBlockResult>, BlobStorageError>) {});
 
     ASSERT_EQ(httpClient.RequestCount(), 1U);
     EXPECT_EQ(httpClient.LastRequest().GetUrl(),
-        "https://storageaccount.blob.core.windows.net/images/"
-        "photo.png?comp=block&blockid=%2B%2B%2F%2FAA%3D%3D&sv=2025-01-05&sig=a%2Bb%26c%3D1");
+              "https://storageaccount.blob.core.windows.net/images/"
+              "photo.png?comp=block&blockid=%2B%2B%2F%2FAA%3D%3D&sv=2025-01-05&sig=a%2Bb%26c%3D1");
     EXPECT_TRUE(FakeHttpClient::FindHeaderValue(httpClient.LastRequest(), "Authorization").empty());
 }
 
-TEST(BlockBlobClientTests, StageBlockAsync_ReportsInvalidBase64BlockIdViaCompletion)
-{
+TEST(BlockBlobClientTests, StageBlockAsync_ReportsInvalidBase64BlockIdViaCompletion) {
     FakeHttpClient httpClient;
     BlockBlobClient client{httpClient, BuildOptions()};
 
     bool callbackInvoked = false;
-    client.StageBlockAsync("not-base64!",
-        "data",
-        [&](std::expected<Response<StageBlockResult>, BlobStorageError> result)
-    {
-        ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
-        callbackInvoked = true;
-    });
+    client.StageBlockAsync("not-base64!", "data",
+                           [&](std::expected<Response<StageBlockResult>, BlobStorageError> result) {
+                               ASSERT_FALSE(result.has_value());
+                               EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
+                               callbackInvoked = true;
+                           });
 
     EXPECT_FALSE(callbackInvoked);
     httpClient.Poll();
@@ -389,8 +340,7 @@ TEST(BlockBlobClientTests, StageBlockAsync_ReportsInvalidBase64BlockIdViaComplet
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
-TEST(BlockBlobClientTests, CommitBlockListAsync_BuildsXmlBody)
-{
+TEST(BlockBlobClientTests, CommitBlockListAsync_BuildsXmlBody) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{201, {{"ETag", "\"0x8D1234\""}}, ""};
     BlockBlobClient client{httpClient, BuildOptions()};
@@ -404,13 +354,12 @@ TEST(BlockBlobClientTests, CommitBlockListAsync_BuildsXmlBody)
     EXPECT_TRUE(callbackInvoked);
     const auto& request = httpClient.LastRequest();
     EXPECT_EQ(request.GetUrl(),
-        "https://storageaccount.blob.core.windows.net/images/photo.png?comp=blocklist&sv=2025-01-05&sig=fakesig");
+              "https://storageaccount.blob.core.windows.net/images/photo.png?comp=blocklist&sv=2025-01-05&sig=fakesig");
     EXPECT_NE(request.GetBody().find("<Latest>YmxvY2swMQ==</Latest>"), std::string::npos);
     EXPECT_NE(request.GetBody().find("<Latest>YmxvY2swMg==</Latest>"), std::string::npos);
 }
 
-TEST(BlockBlobClientTests, CommitBlockListAsync_AllowsEmptyBlockLists)
-{
+TEST(BlockBlobClientTests, CommitBlockListAsync_AllowsEmptyBlockLists) {
     FakeHttpClient httpClient;
     BlockBlobClient client{httpClient, BuildOptions()};
 
@@ -420,19 +369,17 @@ TEST(BlockBlobClientTests, CommitBlockListAsync_AllowsEmptyBlockLists)
     EXPECT_EQ(httpClient.LastRequest().GetBody(), "<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList></BlockList>");
 }
 
-TEST(BlockBlobClientTests, CommitBlockListAsync_ReportsDifferentBlockIdLengthsViaCompletion)
-{
+TEST(BlockBlobClientTests, CommitBlockListAsync_ReportsDifferentBlockIdLengthsViaCompletion) {
     FakeHttpClient httpClient;
     BlockBlobClient client{httpClient, BuildOptions()};
 
     bool callbackInvoked = false;
     client.CommitBlockListAsync({"YQ==", "YmxvY2swMQ=="},
-        [&](std::expected<Response<CommitBlockListResult>, BlobStorageError> result)
-    {
-        ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
-        callbackInvoked = true;
-    });
+                                [&](std::expected<Response<CommitBlockListResult>, BlobStorageError> result) {
+                                    ASSERT_FALSE(result.has_value());
+                                    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
+                                    callbackInvoked = true;
+                                });
 
     EXPECT_FALSE(callbackInvoked);
     httpClient.Poll();
@@ -440,8 +387,7 @@ TEST(BlockBlobClientTests, CommitBlockListAsync_ReportsDifferentBlockIdLengthsVi
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
-TEST(BlockBlobClientTests, DeleteAsync_UsesDeleteMethod)
-{
+TEST(BlockBlobClientTests, DeleteAsync_UsesDeleteMethod) {
     FakeHttpClient httpClient;
     BlockBlobClient client{httpClient, BuildOptions()};
 
@@ -451,18 +397,17 @@ TEST(BlockBlobClientTests, DeleteAsync_UsesDeleteMethod)
     EXPECT_EQ(httpClient.LastRequest().GetMethod(), HttpMethod::Delete);
 }
 
-TEST(BlockBlobClientTests, GetPropertiesAsync_ParsesBlobPropertiesAcrossEdgeCases)
-{
+TEST(BlockBlobClientTests, GetPropertiesAsync_ParsesBlobPropertiesAcrossEdgeCases) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{200,
-        {
-            {"Last-Modified", "Fri, 26 Jun 2015 18:59:17 GMT"},
-            {"x-ms-blob-type", "SomethingUnexpected"},
-            {"Content-Type", "image/png"},
-            {"x-ms-meta-Project", "aveva"},
-            {"X-Ms-MeTa-OWNER", "storage"},
-        },
-        ""};
+                                                {
+                                                    {"Last-Modified", "Fri, 26 Jun 2015 18:59:17 GMT"},
+                                                    {"x-ms-blob-type", "SomethingUnexpected"},
+                                                    {"Content-Type", "image/png"},
+                                                    {"x-ms-meta-Project", "aveva"},
+                                                    {"X-Ms-MeTa-OWNER", "storage"},
+                                                },
+                                                ""};
     BlockBlobClient client{httpClient, BuildOptions()};
 
     StartGetPropertiesAsyncAndVerifyEdgeCases(client);
@@ -470,17 +415,14 @@ TEST(BlockBlobClientTests, GetPropertiesAsync_ParsesBlobPropertiesAcrossEdgeCase
     EXPECT_EQ(httpClient.LastRequest().GetMethod(), HttpMethod::Head);
 }
 
-TEST(BlockBlobClientTests, UploadAsync_MapsBlobNotFoundErrorWithoutParsingResult)
-{
+TEST(BlockBlobClientTests, UploadAsync_MapsBlobNotFoundErrorWithoutParsingResult) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() =
         HttpResponse{404, {{"x-ms-error-code", "BlobNotFound"}, {"ETag", "\"should-not-parse\""}}, ""};
     BlockBlobClient client{httpClient, BuildOptions()};
 
     bool callbackInvoked = false;
-    client.UploadAsync("data",
-        [&](std::expected<Response<UploadBlockBlobResult>, BlobStorageError> result)
-    {
+    client.UploadAsync("data", [&](std::expected<Response<UploadBlockBlobResult>, BlobStorageError> result) {
         ASSERT_FALSE(result.has_value());
         EXPECT_EQ(result.error().Code, BlobStorageErrorCode::BlobNotFound);
         callbackInvoked = true;
@@ -490,16 +432,14 @@ TEST(BlockBlobClientTests, UploadAsync_MapsBlobNotFoundErrorWithoutParsingResult
     EXPECT_TRUE(callbackInvoked);
 }
 
-TEST(BlockBlobClientTests, DeleteAsync_PropagatesTransportErrorWithoutInspectingHttpStatus)
-{
+TEST(BlockBlobClientTests, DeleteAsync_PropagatesTransportErrorWithoutInspectingHttpStatus) {
     FakeHttpClient httpClient;
     httpClient.DefaultError() = std::make_error_code(std::errc::connection_reset);
     httpClient.DefaultResponse() = HttpResponse{404, {{"x-ms-error-code", "BlobNotFound"}}, ""};
     BlockBlobClient client{httpClient, BuildOptions()};
 
     CallbackExpectation callback;
-    client.DeleteAsync([&](std::expected<Response<DeleteBlobResult>, BlobStorageError> result)
-    {
+    client.DeleteAsync([&](std::expected<Response<DeleteBlobResult>, BlobStorageError> result) {
         ASSERT_FALSE(result.has_value());
         EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::connection_reset));
         callback.MarkInvoked();
@@ -508,15 +448,13 @@ TEST(BlockBlobClientTests, DeleteAsync_PropagatesTransportErrorWithoutInspecting
     httpClient.Poll(); // drive the posted (async) completion (T26)
 }
 
-TEST(BlockBlobClientTests, DeleteAsync_TreatsRedirectAsServiceError)
-{
+TEST(BlockBlobClientTests, DeleteAsync_TreatsRedirectAsServiceError) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{307, {{"x-ms-request-id", "redirect-1"}}, ""};
     BlockBlobClient client{httpClient, BuildOptions()};
 
     CallbackExpectation callback;
-    client.DeleteAsync([&](std::expected<Response<DeleteBlobResult>, BlobStorageError> result)
-    {
+    client.DeleteAsync([&](std::expected<Response<DeleteBlobResult>, BlobStorageError> result) {
         ASSERT_FALSE(result.has_value());
         EXPECT_EQ(result.error().Code, BlobStorageErrorCode::ServiceError);
         EXPECT_EQ(result.error().StatusCode, 307U);
@@ -527,8 +465,7 @@ TEST(BlockBlobClientTests, DeleteAsync_TreatsRedirectAsServiceError)
     httpClient.Poll(); // drive the posted (async) completion (T26)
 }
 
-TEST(BlockBlobClientTests, DeleteAsync_FallsBackToServiceErrorWhenNoStorageCodeIsPresent)
-{
+TEST(BlockBlobClientTests, DeleteAsync_FallsBackToServiceErrorWhenNoStorageCodeIsPresent) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() =
         HttpResponse{500, {{"x-ms-request-id", "req-500"}}, "<Error><Message>boom</Message></Error>"};
@@ -540,12 +477,11 @@ TEST(BlockBlobClientTests, DeleteAsync_FallsBackToServiceErrorWhenNoStorageCodeI
     httpClient.Poll(); // drive the posted (async) completion (T26)
 }
 
-TEST(BlockBlobClientTests, DeleteAsync_UnrecognizedStorageCodeFallsBackToServiceErrorButPreservesDetails)
-{
+TEST(BlockBlobClientTests, DeleteAsync_UnrecognizedStorageCodeFallsBackToServiceErrorButPreservesDetails) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{409,
-        {{"x-ms-error-code", "WeirdProblem"}, {"x-ms-request-id", "req-409"}},
-        "<Error><Message>Unexpected detail</Message></Error>"};
+                                                {{"x-ms-error-code", "WeirdProblem"}, {"x-ms-request-id", "req-409"}},
+                                                "<Error><Message>Unexpected detail</Message></Error>"};
     BlockBlobClient client{httpClient, BuildOptions()};
 
     CallbackExpectation callback;
@@ -554,28 +490,26 @@ TEST(BlockBlobClientTests, DeleteAsync_UnrecognizedStorageCodeFallsBackToService
     httpClient.Poll(); // drive the posted (async) completion (T26)
 }
 
-TEST(BlockBlobClientTests, DownloadToAsync_PathOpenFailureReportsIoError)
-{
+TEST(BlockBlobClientTests, DownloadToAsync_PathOpenFailureReportsIoError) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{200, {{"Content-Length", "4"}}, "data"};
     BlockBlobClient client{httpClient, BuildOptions()};
 
     bool callbackInvoked = false;
-    client.DownloadToAsync(std::filesystem::temp_directory_path(), // a directory cannot be opened as the output file
-        [&](std::expected<Response<AVEVA::AzureClient::Models::DownloadBlobToResult>, BlobStorageError> result)
-    {
-        ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::is_a_directory));
-        callbackInvoked = true;
-    });
+    client.DownloadToAsync(
+        std::filesystem::temp_directory_path(), // a directory cannot be opened as the output file
+        [&](std::expected<Response<AVEVA::AzureClient::Models::DownloadBlobToResult>, BlobStorageError> result) {
+            ASSERT_FALSE(result.has_value());
+            EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::is_a_directory));
+            callbackInvoked = true;
+        });
 
     httpClient.Poll(); // early failures are posted, never invoked inline (T26)
     EXPECT_TRUE(callbackInvoked);
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
-TEST(BlockBlobClientTests, Constructor_ThrowsForMissingBlobName)
-{
+TEST(BlockBlobClientTests, Constructor_ThrowsForMissingBlobName) {
     FakeHttpClient httpClient;
     BlobClientOptions options = BuildOptions();
     options.BlobName.clear();
@@ -583,8 +517,7 @@ TEST(BlockBlobClientTests, Constructor_ThrowsForMissingBlobName)
     EXPECT_THROW((BlockBlobClient{httpClient, options}), std::invalid_argument);
 }
 
-TEST(BlockBlobClientTests, Constructor_ThrowsForConflictingCredentials)
-{
+TEST(BlockBlobClientTests, Constructor_ThrowsForConflictingCredentials) {
     FakeHttpClient httpClient;
     BlobClientOptions options = BuildOptions();
     options.BearerToken = "bearer-token";
@@ -592,8 +525,7 @@ TEST(BlockBlobClientTests, Constructor_ThrowsForConflictingCredentials)
     EXPECT_THROW((BlockBlobClient{httpClient, options}), std::invalid_argument);
 }
 
-TEST(BlockBlobClientTests, Constructor_ThrowsForInvalidSharedKeyBase64)
-{
+TEST(BlockBlobClientTests, Constructor_ThrowsForInvalidSharedKeyBase64) {
     FakeHttpClient httpClient;
     BlobClientOptions options = BuildOptions();
     options.SasToken.clear();
@@ -602,8 +534,7 @@ TEST(BlockBlobClientTests, Constructor_ThrowsForInvalidSharedKeyBase64)
     EXPECT_THROW((BlockBlobClient{httpClient, options}), std::invalid_argument);
 }
 
-TEST(BlockBlobClientTests, BuildRequest_GeneratesUuidV4ClientRequestId)
-{
+TEST(BlockBlobClientTests, BuildRequest_GeneratesUuidV4ClientRequestId) {
     FakeHttpClient httpClient;
     BlockBlobClient client{httpClient, BuildOptions()};
 
@@ -612,8 +543,7 @@ TEST(BlockBlobClientTests, BuildRequest_GeneratesUuidV4ClientRequestId)
     ExpectUuidV4(FakeHttpClient::FindHeaderValue(httpClient.LastRequest(), "x-ms-client-request-id"));
 }
 
-TEST(BlockBlobClientTests, BuildRequest_NormalizesEndpointsWithAndWithoutTrailingSlash)
-{
+TEST(BlockBlobClientTests, BuildRequest_NormalizesEndpointsWithAndWithoutTrailingSlash) {
     FakeHttpClient withSlashHttpClient;
     BlockBlobClient withSlashClient{withSlashHttpClient, BuildOptions()};
     withSlashClient.DeleteAsync([](std::expected<Response<DeleteBlobResult>, BlobStorageError>) {});
@@ -627,16 +557,15 @@ TEST(BlockBlobClientTests, BuildRequest_NormalizesEndpointsWithAndWithoutTrailin
     EXPECT_EQ(withSlashHttpClient.LastRequest().GetUrl(), withoutSlashHttpClient.LastRequest().GetUrl());
 }
 
-TEST(BlockBlobClientTests, DownloadAsync_DefaultAndOptionsOverloadsParseContent)
-{
+TEST(BlockBlobClientTests, DownloadAsync_DefaultAndOptionsOverloadsParseContent) {
     FakeHttpClient httpClient;
-    httpClient.EnqueueResponse(HttpResponse{200,
-        MakeCanonicalSuccessHeaders(
-            {{"Content-Length", "4"}, {"Content-Type", "text/plain"}, {"x-ms-blob-type", "BlockBlob"}}),
-        "data"});
-    httpClient.EnqueueResponse(HttpResponse{206,
-        MakeCanonicalSuccessHeaders({{"Content-Length", "2"}, {"x-ms-blob-type", "BlockBlob"}}),
-        "ta"});
+    httpClient.EnqueueResponse(
+        HttpResponse{200,
+                     MakeCanonicalSuccessHeaders(
+                         {{"Content-Length", "4"}, {"Content-Type", "text/plain"}, {"x-ms-blob-type", "BlockBlob"}}),
+                     "data"});
+    httpClient.EnqueueResponse(HttpResponse{
+        206, MakeCanonicalSuccessHeaders({{"Content-Length", "2"}, {"x-ms-blob-type", "BlockBlob"}}), "ta"});
     BlockBlobClient client{httpClient, BuildOptions()};
 
     CallbackExpectation firstCallback;
@@ -654,15 +583,12 @@ TEST(BlockBlobClientTests, DownloadAsync_DefaultAndOptionsOverloadsParseContent)
     httpClient.Poll(); // drive the two posted (async) completions (T26)
 }
 
-TEST(BlockBlobClientTests, DownloadToAsync_StreamAndFilesystemPathWriteBytes)
-{
+TEST(BlockBlobClientTests, DownloadToAsync_StreamAndFilesystemPathWriteBytes) {
     FakeHttpClient httpClient;
-    httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "4"}}), "data"},
-        {},
-        true);
-    httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "5"}}), "bytes"},
-        {},
-        true);
+    httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "4"}}), "data"}, {},
+                               true);
+    httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "5"}}), "bytes"}, {},
+                               true);
     BlockBlobClient client{httpClient, BuildOptions()};
 
     std::ostringstream stream;
@@ -684,18 +610,14 @@ TEST(BlockBlobClientTests, DownloadToAsync_StreamAndFilesystemPathWriteBytes)
     std::filesystem::remove(fsPath, ignored);
 }
 
-TEST(BlockBlobClientTests, EmptyBlobRangeFromOffsetZeroSucceedsForDownloadAsyncAndDownloadToAsync)
-{
+TEST(BlockBlobClientTests, EmptyBlobRangeFromOffsetZeroSucceedsForDownloadAsyncAndDownloadToAsync) {
     FakeHttpClient httpClient;
-    httpClient.EnqueueResponse(HttpResponse{416,
-        MakeCanonicalSuccessHeaders({{"x-ms-error-code", "InvalidRange"}, {"Content-Range", "bytes */0"}}),
-        ""});
-    httpClient.EnqueueResponse(HttpResponse{200,
-        MakeCanonicalSuccessHeaders({{"Content-Length", "0"}, {"x-ms-blob-type", "BlockBlob"}}),
-        ""});
-    httpClient.EnqueueResponse(HttpResponse{416,
-        MakeCanonicalSuccessHeaders({{"x-ms-error-code", "InvalidRange"}, {"Content-Range", "bytes */0"}}),
-        ""});
+    httpClient.EnqueueResponse(HttpResponse{
+        416, MakeCanonicalSuccessHeaders({{"x-ms-error-code", "InvalidRange"}, {"Content-Range", "bytes */0"}}), ""});
+    httpClient.EnqueueResponse(
+        HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "0"}, {"x-ms-blob-type", "BlockBlob"}}), ""});
+    httpClient.EnqueueResponse(HttpResponse{
+        416, MakeCanonicalSuccessHeaders({{"x-ms-error-code", "InvalidRange"}, {"Content-Range", "bytes */0"}}), ""});
     httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "0"}}), ""});
     BlockBlobClient client{httpClient, BuildOptions()};
 
@@ -703,15 +625,10 @@ TEST(BlockBlobClientTests, EmptyBlobRangeFromOffsetZeroSucceedsForDownloadAsyncA
     std::optional<BlobStorageError> downloadError;
     AVEVA::AzureClient::DownloadBlobOptions downloadOptions;
     downloadOptions.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 0U};
-    client.DownloadAsync(downloadOptions,
-        [&](std::expected<Response<DownloadBlobResult>, BlobStorageError> result)
-    {
-        if (result.has_value())
-        {
+    client.DownloadAsync(downloadOptions, [&](std::expected<Response<DownloadBlobResult>, BlobStorageError> result) {
+        if (result.has_value()) {
             download = std::move(result).value();
-        }
-        else
-        {
+        } else {
             downloadError = std::move(result).error();
         }
     });
@@ -727,19 +644,14 @@ TEST(BlockBlobClientTests, EmptyBlobRangeFromOffsetZeroSucceedsForDownloadAsyncA
     std::optional<BlobStorageError> streamedError;
     AVEVA::AzureClient::DownloadToOptions streamOptions;
     streamOptions.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 0U};
-    client.DownloadToAsync(stream,
-        streamOptions,
-        [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result)
-    {
-        if (result.has_value())
-        {
-            streamed = std::move(result).value();
-        }
-        else
-        {
-            streamedError = std::move(result).error();
-        }
-    });
+    client.DownloadToAsync(stream, streamOptions,
+                           [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result) {
+                               if (result.has_value()) {
+                                   streamed = std::move(result).value();
+                               } else {
+                                   streamedError = std::move(result).error();
+                               }
+                           });
     httpClient.Poll();
 
     ASSERT_TRUE(streamed.has_value());
@@ -754,23 +666,19 @@ TEST(BlockBlobClientTests, EmptyBlobRangeFromOffsetZeroSucceedsForDownloadAsyncA
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(3).Request, "Range"), "");
 }
 
-TEST(BlockBlobClientTests, DownloadToAsync_LargeBodyStreamsDirectlyWithoutDuplicatingContent)
-{
+TEST(BlockBlobClientTests, DownloadToAsync_LargeBodyStreamsDirectlyWithoutDuplicatingContent) {
     // Regression test for the interim Task 3 fix: the body must reach the destination stream
     // byte-for-byte via the direct-streaming path (Private::DownloadBlobToAsync), without ever
     // being materialized into Models::DownloadBlobResult::Content.
     const std::string largeBody(std::size_t{8} * 1024U * 1024U, 'x');
     FakeHttpClient httpClient;
-    httpClient.EnqueueResponse(HttpResponse{200,
-        MakeCanonicalSuccessHeaders({{"Content-Length", std::to_string(largeBody.size())}}),
-        largeBody});
+    httpClient.EnqueueResponse(HttpResponse{
+        200, MakeCanonicalSuccessHeaders({{"Content-Length", std::to_string(largeBody.size())}}), largeBody});
     BlockBlobClient client{httpClient, BuildOptions()};
 
     std::ostringstream stream;
     CallbackExpectation callback;
-    client.DownloadToAsync(stream,
-        [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result)
-    {
+    client.DownloadToAsync(stream, [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result) {
         ASSERT_TRUE(result.has_value());
         EXPECT_EQ(result->Value().BytesWritten, largeBody.size());
         callback.MarkInvoked();
@@ -780,8 +688,7 @@ TEST(BlockBlobClientTests, DownloadToAsync_LargeBodyStreamsDirectlyWithoutDuplic
     EXPECT_EQ(stream.str(), largeBody);
 }
 
-TEST(BlockBlobClientTests, ExistsAsyncAcceptsUseFutureCompletionToken)
-{
+TEST(BlockBlobClientTests, ExistsAsyncAcceptsUseFutureCompletionToken) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{200, MakeCanonicalSuccessHeaders(), ""};
     BlockBlobClient client{httpClient, BuildOptions()};
@@ -795,8 +702,7 @@ TEST(BlockBlobClientTests, ExistsAsyncAcceptsUseFutureCompletionToken)
     EXPECT_TRUE(result->Value());
 }
 
-TEST(BlockBlobClientTests, DownloadAsyncAcceptsUseFutureCompletionToken)
-{
+TEST(BlockBlobClientTests, DownloadAsyncAcceptsUseFutureCompletionToken) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{200, MakeCanonicalSuccessHeaders(), "hello"};
     BlockBlobClient client{httpClient, BuildOptions()};
@@ -812,16 +718,13 @@ TEST(BlockBlobClientTests, DownloadAsyncAcceptsUseFutureCompletionToken)
     EXPECT_EQ(std::string(content.data(), content.size()), "hello");
 }
 
-TEST(BlockBlobClientTests, UploadAsyncAcceptsUseFutureCompletionTokenAndReportsFailure)
-{
+TEST(BlockBlobClientTests, UploadAsyncAcceptsUseFutureCompletionTokenAndReportsFailure) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(MakeAzureErrorResponse(409, "BlobAlreadyExists", "conflict", "upload-request"));
     BlockBlobClient client{httpClient, BuildOptions()};
 
-    std::future<std::expected<Response<UploadBlockBlobResult>, BlobStorageError>> future =
-        client.UploadAsync(std::span<const std::byte>{},
-            AVEVA::AzureClient::UploadBlockBlobOptions{},
-            boost::asio::use_future);
+    std::future<std::expected<Response<UploadBlockBlobResult>, BlobStorageError>> future = client.UploadAsync(
+        std::span<const std::byte>{}, AVEVA::AzureClient::UploadBlockBlobOptions{}, boost::asio::use_future);
 
     httpClient.Poll(); // drive the posted (async) completion so the future becomes ready (T26)
     ASSERT_EQ(future.wait_for(std::chrono::seconds{30}), std::future_status::ready);
@@ -831,8 +734,7 @@ TEST(BlockBlobClientTests, UploadAsyncAcceptsUseFutureCompletionTokenAndReportsF
     EXPECT_EQ(result.error().RequestId, "upload-request");
 }
 
-TEST(BlockBlobClientTests, DeleteAsyncAcceptsUseFutureCompletionToken)
-{
+TEST(BlockBlobClientTests, DeleteAsyncAcceptsUseFutureCompletionToken) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{202, MakeCanonicalSuccessHeaders(), ""};
     BlockBlobClient client{httpClient, BuildOptions()};
@@ -846,8 +748,7 @@ TEST(BlockBlobClientTests, DeleteAsyncAcceptsUseFutureCompletionToken)
     EXPECT_TRUE(result.has_value());
 }
 
-TEST(BlockBlobClientTests, GetPropertiesAsyncAcceptsUseFutureCompletionToken)
-{
+TEST(BlockBlobClientTests, GetPropertiesAsyncAcceptsUseFutureCompletionToken) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{200, MakeCanonicalSuccessHeaders(), ""};
     BlockBlobClient client{httpClient, BuildOptions()};
@@ -866,20 +767,15 @@ TEST(BlockBlobClientTests, GetPropertiesAsyncAcceptsUseFutureCompletionToken)
 // executor_type does not specialize default_completion_token_type). Omitting the token entirely
 // therefore yields a deferred, directly co_await-able operation -- this is the ergonomics win the
 // task set out to prove: no explicit boost::asio::use_awaitable is required at the call site.
-TEST(BlockBlobClientTests, ExistsAsyncSupportsCoAwaitWithNoExplicitCompletionToken)
-{
+TEST(BlockBlobClientTests, ExistsAsyncSupportsCoAwaitWithNoExplicitCompletionToken) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{200, MakeCanonicalSuccessHeaders(), ""};
     BlockBlobClient client{httpClient, BuildOptions()};
 
     std::optional<std::expected<Response<bool>, BlobStorageError>> result;
     boost::asio::co_spawn(httpClient.get_executor(),
-        AVEVA::AzureClient::Tests::AwaitInto(&result,
-            [&]
-    {
-        return client.ExistsAsync();
-    }),
-        boost::asio::detached);
+                          AVEVA::AzureClient::Tests::AwaitInto(&result, [&] { return client.ExistsAsync(); }),
+                          boost::asio::detached);
 
     httpClient.Poll();
 
@@ -890,8 +786,7 @@ TEST(BlockBlobClientTests, ExistsAsyncSupportsCoAwaitWithNoExplicitCompletionTok
 
 // Same as above, but for an overload that takes both a leading content parameter and an options
 // struct (UploadAsync), the exact shape Task 14's ambiguity-avoidance requires clauses target.
-TEST(BlockBlobClientTests, UploadAsyncSupportsCoAwaitWithNoExplicitCompletionToken)
-{
+TEST(BlockBlobClientTests, UploadAsyncSupportsCoAwaitWithNoExplicitCompletionToken) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{201, MakeCanonicalSuccessHeaders(), ""};
     BlockBlobClient client{httpClient, BuildOptions()};
@@ -899,12 +794,9 @@ TEST(BlockBlobClientTests, UploadAsyncSupportsCoAwaitWithNoExplicitCompletionTok
     const std::vector<std::byte> content{std::byte{'a'}, std::byte{'b'}, std::byte{'c'}};
     std::optional<std::expected<Response<UploadBlockBlobResult>, BlobStorageError>> result;
     boost::asio::co_spawn(httpClient.get_executor(),
-        AVEVA::AzureClient::Tests::AwaitInto(&result,
-            [&]
-    {
-        return client.UploadAsync(std::span<const std::byte>{content});
-    }),
-        boost::asio::detached);
+                          AVEVA::AzureClient::Tests::AwaitInto(
+                              &result, [&] { return client.UploadAsync(std::span<const std::byte>{content}); }),
+                          boost::asio::detached);
 
     httpClient.Poll();
 
@@ -915,50 +807,44 @@ TEST(BlockBlobClientTests, UploadAsyncSupportsCoAwaitWithNoExplicitCompletionTok
 // Compile-only proof that defaulting CompletionToken did not introduce ambiguity between the
 // "options" and "no options" overloads of UploadAsync/StageBlockAsync (and analogues): every
 // combination below must resolve to exactly one overload. Never run; only needs to compile.
-namespace
-{
-    [[maybe_unused]] void BlockBlobClientNoTokenOverloadsCompile(BlockBlobClient& client)
-    {
-        using AVEVA::AzureClient::CommitBlockListOptions;
-        using AVEVA::AzureClient::StageBlockOptions;
-        using AVEVA::AzureClient::UploadBlockBlobOptions;
+namespace {
+[[maybe_unused]] void BlockBlobClientNoTokenOverloadsCompile(BlockBlobClient& client) {
+    using AVEVA::AzureClient::CommitBlockListOptions;
+    using AVEVA::AzureClient::StageBlockOptions;
+    using AVEVA::AzureClient::UploadBlockBlobOptions;
 
-        const std::vector<std::byte> bytes;
-        const std::span<const std::byte> span{bytes};
-        std::string const str;
-        std::vector<std::string> const blockIds;
+    const std::vector<std::byte> bytes;
+    const std::span<const std::byte> span{bytes};
+    std::string const str;
+    std::vector<std::string> const blockIds;
 
-        static_cast<void>(client.UploadAsync(str));
-        static_cast<void>(client.UploadAsync(str, UploadBlockBlobOptions{}));
-        static_cast<void>(client.UploadAsync(span));
-        static_cast<void>(client.UploadAsync(span, UploadBlockBlobOptions{}));
+    static_cast<void>(client.UploadAsync(str));
+    static_cast<void>(client.UploadAsync(str, UploadBlockBlobOptions{}));
+    static_cast<void>(client.UploadAsync(span));
+    static_cast<void>(client.UploadAsync(span, UploadBlockBlobOptions{}));
 
-        static_cast<void>(client.StageBlockAsync(str, str));
-        static_cast<void>(client.StageBlockAsync(str, str, StageBlockOptions{}));
-        static_cast<void>(client.StageBlockAsync(str, span));
-        static_cast<void>(client.StageBlockAsync(str, span, StageBlockOptions{}));
+    static_cast<void>(client.StageBlockAsync(str, str));
+    static_cast<void>(client.StageBlockAsync(str, str, StageBlockOptions{}));
+    static_cast<void>(client.StageBlockAsync(str, span));
+    static_cast<void>(client.StageBlockAsync(str, span, StageBlockOptions{}));
 
-        static_cast<void>(client.CommitBlockListAsync(blockIds));
-        static_cast<void>(client.CommitBlockListAsync(blockIds, CommitBlockListOptions{}));
+    static_cast<void>(client.CommitBlockListAsync(blockIds));
+    static_cast<void>(client.CommitBlockListAsync(blockIds, CommitBlockListOptions{}));
 
-        static_cast<void>(client.DownloadAsync());
-        static_cast<void>(client.DownloadAsync(AVEVA::AzureClient::DownloadBlobOptions{}));
+    static_cast<void>(client.DownloadAsync());
+    static_cast<void>(client.DownloadAsync(AVEVA::AzureClient::DownloadBlobOptions{}));
 
-        static_cast<void>(client.DeleteAsync());
-        static_cast<void>(client.DeleteAsync(AVEVA::AzureClient::DeleteBlobOptions{}));
+    static_cast<void>(client.DeleteAsync());
+    static_cast<void>(client.DeleteAsync(AVEVA::AzureClient::DeleteBlobOptions{}));
 
-        static_cast<void>(client.GetPropertiesAsync());
-        static_cast<void>(client.GetPropertiesAsync(AVEVA::AzureClient::GetBlobPropertiesOptions{}));
+    static_cast<void>(client.GetPropertiesAsync());
+    static_cast<void>(client.GetPropertiesAsync(AVEVA::AzureClient::GetBlobPropertiesOptions{}));
 
+    static_cast<void>(client.AcquireLeaseAsync());
+    static_cast<void>(client.AcquireLeaseAsync(AVEVA::AzureClient::AcquireLeaseOptions{}));
 
-        static_cast<void>(client.AcquireLeaseAsync());
-        static_cast<void>(client.AcquireLeaseAsync(AVEVA::AzureClient::AcquireLeaseOptions{}));
-
-
-
-
-        static_cast<void>(client.ExistsAsync());
-        static_cast<void>(client.DeleteIfExistsAsync());
-        static_cast<void>(client.DeleteIfExistsAsync(AVEVA::AzureClient::DeleteBlobOptions{}));
-    }
+    static_cast<void>(client.ExistsAsync());
+    static_cast<void>(client.DeleteIfExistsAsync());
+    static_cast<void>(client.DeleteIfExistsAsync(AVEVA::AzureClient::DeleteBlobOptions{}));
+}
 } // namespace

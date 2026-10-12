@@ -5,8 +5,8 @@
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
 #include "FakeBlobEnvironment.hpp"
+#include "FakeHttpBridge.hpp"
 #include "FakeHttpClient.hpp"
-#include "FakeHttpPump.hpp"
 #include "TestFixtures.hpp"
 
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
@@ -41,13 +41,13 @@ class BlobOperationsTests : public ::testing::Test {
   protected:
     void SetUp() override {
         // Completions are posted to the fake's own io_context while the operation blocks on a future.
-        m_pump = AVEVA::RocksDB::Plugin::Azure::Impl::Tests::StartFakeHttpPump(m_httpClient);
-        m_blob = std::make_unique<AVEVA::AzureClient::PageBlobClient>(m_httpClient,
+        m_bridge = std::make_unique<AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeHttpBridge>(m_httpClient);
+        m_blob = std::make_unique<AVEVA::AzureClient::PageBlobClient>(m_bridge->Client(),
                                                                       MakeBlobClientOptions("files", "000001.sst"));
     }
 
     FakeHttpClient m_httpClient;
-    std::jthread m_pump;
+    std::unique_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeHttpBridge> m_bridge;
     std::unique_ptr<AVEVA::AzureClient::PageBlobClient> m_blob;
 };
 } // namespace
@@ -87,7 +87,7 @@ TEST_F(BlobOperationsTests, DownloadToBufferAcceptsResponseWithoutContentRange) 
 
 TEST_F(BlobOperationsTests, BlockingFromTheIoContextThreadThrowsInsteadOfDeadlocking) {
     std::promise<bool> threw;
-    boost::asio::post(m_httpClient.get_executor(), [&] {
+    boost::asio::post(m_bridge->Context().get_executor(), [&] {
         try {
             std::vector<char> buffer(8);
             (void)BlobOperations::DownloadToBuffer(*m_blob, std::span<char>(buffer), 0, 8);
@@ -120,7 +120,6 @@ TEST_F(BlobOperationsFakeBlobTests, GetEtagReadsThePropertiesOfTheBlob) {
     m_env.Blob->ETag = "\"fake\"";
 
     EXPECT_EQ("\"fake\"", BlobOperations::GetEtag(*m_env.Blob));
-    EXPECT_TRUE(m_env.Http.NoRequestMade());
 }
 
 TEST_F(BlobOperationsFakeBlobTests, SetCapacityResizesTheBlobToTheRequestedSize) {
@@ -128,7 +127,6 @@ TEST_F(BlobOperationsFakeBlobTests, SetCapacityResizesTheBlobToTheRequestedSize)
 
     EXPECT_EQ((std::vector<int64_t>{1024}), m_env.Blob->CapacityWrites);
     EXPECT_EQ(1024, BlobOperations::GetCapacity(*m_env.Blob));
-    EXPECT_TRUE(m_env.Http.NoRequestMade());
 }
 
 TEST_F(BlobOperationsFakeBlobTests, SetSizeRecordsTheSizeInTheBlobMetadata) {

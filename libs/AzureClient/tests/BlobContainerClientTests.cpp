@@ -42,78 +42,65 @@
 
 using AVEVA::AzureClient::Tests::ValueOrFail;
 
-namespace
-{
-    using AVEVA::HttpMethod;
-    using AVEVA::HttpRequestOptions;
-    using AVEVA::HttpResponse;
-    using AVEVA::AzureClient::BlobClient;
-    using AVEVA::AzureClient::BlobContainerClient;
-    using AVEVA::AzureClient::BlobContainerClientOptions;
-    using AVEVA::AzureClient::BlobStorageError;
-    using AVEVA::AzureClient::BlobStorageErrorCode;
-    using AVEVA::AzureClient::Response;
-    using AVEVA::AzureClient::Models::CreateBlobContainerResult;
-    using AVEVA::AzureClient::Models::ListBlobsResult;
-    using AVEVA::AzureClient::Private::ParseHttpDateHeader;
-    using AVEVA::AzureClient::Tests::CallbackExpectation;
-    using AVEVA::AzureClient::Tests::DefaultETag;
-    using AVEVA::AzureClient::Tests::ExpectRequestContract;
-    using AVEVA::AzureClient::Tests::FakeHttpClient;
-    using AVEVA::AzureClient::Tests::MakeAzureErrorResponse;
-    using AVEVA::AzureClient::Tests::MakeBlobContainerClientOptions;
-    using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
+namespace {
+using AVEVA::HttpMethod;
+using AVEVA::HttpRequestOptions;
+using AVEVA::HttpResponse;
+using AVEVA::AzureClient::BlobContainerClientOptions;
+using AVEVA::AzureClient::BlobStorageError;
+using AVEVA::AzureClient::BlobStorageErrorCode;
+using AVEVA::AzureClient::Response;
+using AVEVA::AzureClient::Models::CreateBlobContainerResult;
+using AVEVA::AzureClient::Models::ListBlobsResult;
+using AVEVA::AzureClient::Private::ParseHttpDateHeader;
+using AVEVA::AzureClient::Tests::BlobClient;
+using AVEVA::AzureClient::Tests::BlobContainerClient;
+using AVEVA::AzureClient::Tests::CallbackExpectation;
+using AVEVA::AzureClient::Tests::DefaultETag;
+using AVEVA::AzureClient::Tests::ExpectRequestContract;
+using AVEVA::AzureClient::Tests::FakeHttpClient;
+using AVEVA::AzureClient::Tests::MakeAzureErrorResponse;
+using AVEVA::AzureClient::Tests::MakeBlobContainerClientOptions;
+using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
 
-    [[nodiscard]] BlobContainerClientOptions BuildOptions()
-    {
-        return MakeBlobContainerClientOptions();
-    }
+[[nodiscard]] BlobContainerClientOptions BuildOptions() { return MakeBlobContainerClientOptions(); }
 
-    void VerifyMalformedListBlobsErrorCode(const BlobStorageError& error)
-    {
-        EXPECT_EQ(error.Code, BlobStorageErrorCode::InvalidResponse);
-        EXPECT_EQ(error.Code, std::errc::bad_message);
-    }
+void VerifyMalformedListBlobsErrorCode(const BlobStorageError& error) {
+    EXPECT_EQ(error.Code, BlobStorageErrorCode::InvalidResponse);
+    EXPECT_EQ(error.Code, std::errc::bad_message);
+}
 
-    void VerifyMalformedListBlobsStatusAndMessage(const BlobStorageError& error, bool& callbackInvoked)
-    {
-        EXPECT_EQ(error.StatusCode, 200U);
-        EXPECT_FALSE(error.Message.empty());
-        callbackInvoked = true;
-    }
+void VerifyMalformedListBlobsStatusAndMessage(const BlobStorageError& error, bool& callbackInvoked) {
+    EXPECT_EQ(error.StatusCode, 200U);
+    EXPECT_FALSE(error.Message.empty());
+    callbackInvoked = true;
+}
 
-    void VerifyListBlobsWithOptionsMarkers(const ListBlobsResult& result)
-    {
-        EXPECT_EQ(result.Prefix, "pref/");
-        EXPECT_EQ(result.Delimiter, "/");
-    }
+void VerifyListBlobsWithOptionsMarkers(const ListBlobsResult& result) {
+    EXPECT_EQ(result.Prefix, "pref/");
+    EXPECT_EQ(result.Delimiter, "/");
+}
 
-    void VerifyListBlobsWithOptionsPaging(const ListBlobsResult& result)
-    {
-        EXPECT_EQ(result.Marker, "page-1");
-        EXPECT_EQ(result.NextMarker, "page-2");
-    }
+void VerifyListBlobsWithOptionsPaging(const ListBlobsResult& result) {
+    EXPECT_EQ(result.Marker, "page-1");
+    EXPECT_EQ(result.NextMarker, "page-2");
+}
 
-    void VerifyListBlobsWithOptionsItems(const ListBlobsResult& result)
-    {
-        ASSERT_EQ(result.Blobs.size(), 1U);
-        EXPECT_EQ(result.Blobs.at(0).Name, "pref/blob.txt");
-    }
+void VerifyListBlobsWithOptionsItems(const ListBlobsResult& result) {
+    ASSERT_EQ(result.Blobs.size(), 1U);
+    EXPECT_EQ(result.Blobs.at(0).Name, "pref/blob.txt");
+}
 
-    void VerifyListBlobsWithOptionsPrefixes(const ListBlobsResult& result, CallbackExpectation& callback)
-    {
-        ASSERT_EQ(result.BlobPrefixes.size(), 1U);
-        EXPECT_EQ(result.BlobPrefixes.at(0), "pref/folder/");
-        callback.MarkInvoked();
-    }
+void VerifyListBlobsWithOptionsPrefixes(const ListBlobsResult& result, CallbackExpectation& callback) {
+    ASSERT_EQ(result.BlobPrefixes.size(), 1U);
+    EXPECT_EQ(result.BlobPrefixes.at(0), "pref/folder/");
+    callback.MarkInvoked();
+}
 
-    void CreateContainerAndVerifySuccess(BlobContainerClient& client,
-        const HttpRequestOptions& requestOptions,
-        bool& callbackInvoked)
-    {
-        client.CreateAsync(
-            [&](std::expected<Response<CreateBlobContainerResult>, BlobStorageError> result)
-        {
+void CreateContainerAndVerifySuccess(BlobContainerClient& client, const HttpRequestOptions& requestOptions,
+                                     bool& callbackInvoked) {
+    client.CreateAsync(
+        [&](std::expected<Response<CreateBlobContainerResult>, BlobStorageError> result) {
             ASSERT_TRUE(result.has_value());
             const Response<CreateBlobContainerResult>& response = *result;
             EXPECT_EQ(response.RawResponse().GetStatus(), 201U);
@@ -121,107 +108,87 @@ namespace
             EXPECT_NE(response.Value().LastModified.time_since_epoch().count(), 0);
             callbackInvoked = true;
         },
-            requestOptions);
-    }
+        requestOptions);
+}
 
-    void CreateContainerAndVerifyMappedServiceError(BlobContainerClient& client, bool& callbackInvoked)
-    {
-        client.CreateAsync([&](std::expected<Response<CreateBlobContainerResult>, BlobStorageError> result)
-        {
-            ASSERT_FALSE(result.has_value());
-            EXPECT_EQ(result.error().Code, BlobStorageErrorCode::ContainerAlreadyExists);
-            callbackInvoked = true;
-        });
-    }
+void CreateContainerAndVerifyMappedServiceError(BlobContainerClient& client, bool& callbackInvoked) {
+    client.CreateAsync([&](std::expected<Response<CreateBlobContainerResult>, BlobStorageError> result) {
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().Code, BlobStorageErrorCode::ContainerAlreadyExists);
+        callbackInvoked = true;
+    });
+}
 
-    void ListBlobsAndVerifyMalformedXml(BlobContainerClient& client, bool& callbackInvoked)
-    {
-        client.ListBlobsAsync([&](std::expected<Response<ListBlobsResult>, BlobStorageError> result)
-        {
-            ASSERT_FALSE(result.has_value());
-            VerifyMalformedListBlobsErrorCode(result.error());
-            VerifyMalformedListBlobsStatusAndMessage(result.error(), callbackInvoked);
-        });
-    }
+void ListBlobsAndVerifyMalformedXml(BlobContainerClient& client, bool& callbackInvoked) {
+    client.ListBlobsAsync([&](std::expected<Response<ListBlobsResult>, BlobStorageError> result) {
+        ASSERT_FALSE(result.has_value());
+        VerifyMalformedListBlobsErrorCode(result.error());
+        VerifyMalformedListBlobsStatusAndMessage(result.error(), callbackInvoked);
+    });
+}
 
-    void VerifyBlobClientAndContainerOperations(BlobContainerClient& container,
-        BlobClient& blob,
-        FakeHttpClient& httpClient,
-        int& completions)
-    {
-        container.CreateAsync([&](auto result)
-        {
-            EXPECT_TRUE(result.has_value());
-            ++completions;
-        });
-        blob.GetPropertiesAsync([&](auto result)
-        {
-            EXPECT_TRUE(result.has_value());
-            ++completions;
-        });
-        httpClient.Poll();
-    }
+void VerifyBlobClientAndContainerOperations(BlobContainerClient& container, BlobClient& blob,
+                                            FakeHttpClient& httpClient, int& completions) {
+    container.CreateAsync([&](auto result) {
+        EXPECT_TRUE(result.has_value());
+        ++completions;
+    });
+    blob.GetPropertiesAsync([&](auto result) {
+        EXPECT_TRUE(result.has_value());
+        ++completions;
+    });
+    httpClient.Poll();
+}
 
-    void VerifySharedKeyAuthorizationForBlobClientRequests(FakeHttpClient& httpClient)
-    {
-        for (const auto& record : httpClient.Requests())
-        {
-            AVEVA::HttpRequest unsignedRequest = record.Request;
-            std::erase_if(unsignedRequest.GetHeaders(),
-                [](const AVEVA::HttpHeader& header)
-            {
-                return header.GetName() == "Authorization";
-            });
-            AVEVA::AzureClient::Private::AuthorizeRequest(
-                AVEVA::AzureClient::SharedKeyCredentialOptions{.AccountName = "storageaccount",
-                    .AccountKey = "MDEyMzQ1Njc4OWFiY2RlZg=="},
-                unsignedRequest);
-            EXPECT_EQ(FakeHttpClient::FindHeaderValue(record.Request, "Authorization"),
-                FakeHttpClient::FindHeaderValue(unsignedRequest, "Authorization"))
-                << record.Request.GetUrl();
-        }
+void VerifySharedKeyAuthorizationForBlobClientRequests(FakeHttpClient& httpClient) {
+    for (const auto& record : httpClient.Requests()) {
+        AVEVA::HttpRequest unsignedRequest = record.Request;
+        std::erase_if(unsignedRequest.GetHeaders(),
+                      [](const AVEVA::HttpHeader& header) { return header.GetName() == "Authorization"; });
+        AVEVA::AzureClient::Private::AuthorizeRequest(
+            AVEVA::AzureClient::SharedKeyCredentialOptions{.AccountName = "storageaccount",
+                                                           .AccountKey = "MDEyMzQ1Njc4OWFiY2RlZg=="},
+            unsignedRequest);
+        EXPECT_EQ(FakeHttpClient::FindHeaderValue(record.Request, "Authorization"),
+                  FakeHttpClient::FindHeaderValue(unsignedRequest, "Authorization"))
+            << record.Request.GetUrl();
     }
+}
 
-    void ListBlobsWithOptionsAndVerifyResult(BlobContainerClient& client, CallbackExpectation& callback)
-    {
-        AVEVA::AzureClient::ListBlobsOptions options;
-        options.Prefix = "pref/";
-        options.Delimiter = "/";
-        options.Marker = "page-1";
-        options.MaxResults = 7U;
-        options.IncludeMetadata = true;
+void ListBlobsWithOptionsAndVerifyResult(BlobContainerClient& client, CallbackExpectation& callback) {
+    AVEVA::AzureClient::ListBlobsOptions options;
+    options.Prefix = "pref/";
+    options.Delimiter = "/";
+    options.Marker = "page-1";
+    options.MaxResults = 7U;
+    options.IncludeMetadata = true;
 
-        client.ListBlobsAsync(options,
-            [&](std::expected<Response<ListBlobsResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            VerifyListBlobsWithOptionsMarkers(result->Value());
-            VerifyListBlobsWithOptionsPaging(result->Value());
-            VerifyListBlobsWithOptionsItems(result->Value());
-            VerifyListBlobsWithOptionsPrefixes(result->Value(), callback);
-        });
-    }
+    client.ListBlobsAsync(options, [&](std::expected<Response<ListBlobsResult>, BlobStorageError> result) {
+        ASSERT_TRUE(result.has_value());
+        VerifyListBlobsWithOptionsMarkers(result->Value());
+        VerifyListBlobsWithOptionsPaging(result->Value());
+        VerifyListBlobsWithOptionsItems(result->Value());
+        VerifyListBlobsWithOptionsPrefixes(result->Value(), callback);
+    });
+}
 
-    void CreateContainerIfMissingAndVerifyExpectedConflict(BlobContainerClient& client, CallbackExpectation& callback)
-    {
-        AVEVA::AzureClient::CreateBlobContainerOptions createOptions;
-        createOptions.Metadata["project"] = "tests";
-        client.CreateIfNotExistsAsync(createOptions,
-            [&](std::expected<Response<CreateBlobContainerResult>, BlobStorageError> result)
-        {
-            ASSERT_TRUE(result.has_value());
-            const Response<CreateBlobContainerResult>& response = *result;
-            ASSERT_TRUE(response.Error().has_value());
-            EXPECT_EQ(response.Error()->RequestId, "create-request");
-            EXPECT_TRUE(response.Value().ETag.empty());
-            callback.MarkInvoked();
-        });
-    }
+void CreateContainerIfMissingAndVerifyExpectedConflict(BlobContainerClient& client, CallbackExpectation& callback) {
+    AVEVA::AzureClient::CreateBlobContainerOptions createOptions;
+    createOptions.Metadata["project"] = "tests";
+    client.CreateIfNotExistsAsync(createOptions,
+                                  [&](std::expected<Response<CreateBlobContainerResult>, BlobStorageError> result) {
+                                      ASSERT_TRUE(result.has_value());
+                                      const Response<CreateBlobContainerResult>& response = *result;
+                                      ASSERT_TRUE(response.Error().has_value());
+                                      EXPECT_EQ(response.Error()->RequestId, "create-request");
+                                      EXPECT_TRUE(response.Value().ETag.empty());
+                                      callback.MarkInvoked();
+                                  });
+}
 
 } // namespace
 
-TEST(BlobContainerClientTests, CreateAsync_BuildsPutRequestAndParsesResult)
-{
+TEST(BlobContainerClientTests, CreateAsync_BuildsPutRequestAndParsesResult) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{201, MakeCanonicalSuccessHeaders(), ""};
     BlobContainerClient client{httpClient, BuildOptions()};
@@ -237,23 +204,22 @@ TEST(BlobContainerClientTests, CreateAsync_BuildsPutRequestAndParsesResult)
     EXPECT_EQ(httpClient.RequestCount(), 1U);
 
     const auto& request = httpClient.LastRequest();
-    ExpectRequestContract(request,
-        HttpMethod::Put,
+    ExpectRequestContract(
+        request, HttpMethod::Put,
         "https://storageaccount.blob.core.windows.net/images?restype=container&sv=2025-01-05&sig=fakesig");
 
     const std::string dateHeader = FakeHttpClient::FindHeaderValue(request, "x-ms-date");
-    EXPECT_TRUE(std::regex_match(dateHeader,
-        std::regex{"^[A-Z][a-z]{2}, [0-9]{2} [A-Z][a-z]{2} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT$"}));
+    EXPECT_TRUE(std::regex_match(
+        dateHeader, std::regex{"^[A-Z][a-z]{2}, [0-9]{2} [A-Z][a-z]{2} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT$"}));
     EXPECT_TRUE(ParseHttpDateHeader(dateHeader).has_value());
 
     const std::string requestId = FakeHttpClient::FindHeaderValue(request, "x-ms-client-request-id");
     EXPECT_TRUE(std::regex_match(requestId,
-        std::regex{"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}));
+                                 std::regex{"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}));
     EXPECT_EQ(httpClient.LastRequestOptions().GetTimeout(), std::chrono::milliseconds{1234});
 }
 
-TEST(BlobContainerClientTests, CreateAsync_BuildsUrlWhenEndpointHasNoTrailingSlash)
-{
+TEST(BlobContainerClientTests, CreateAsync_BuildsUrlWhenEndpointHasNoTrailingSlash) {
     FakeHttpClient httpClient;
     BlobContainerClientOptions options = BuildOptions();
     options.ServiceEndpoint = "https://storageaccount.blob.core.windows.net";
@@ -262,11 +228,10 @@ TEST(BlobContainerClientTests, CreateAsync_BuildsUrlWhenEndpointHasNoTrailingSla
     client.CreateAsync([](std::expected<Response<CreateBlobContainerResult>, BlobStorageError>) {});
 
     EXPECT_EQ(httpClient.LastRequest().GetUrl(),
-        "https://storageaccount.blob.core.windows.net/images?restype=container&sv=2025-01-05&sig=fakesig");
+              "https://storageaccount.blob.core.windows.net/images?restype=container&sv=2025-01-05&sig=fakesig");
 }
 
-TEST(BlobContainerClientTests, CreateAsync_MapsServiceErrorCodeWithoutParsingResult)
-{
+TEST(BlobContainerClientTests, CreateAsync_MapsServiceErrorCodeWithoutParsingResult) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() =
         HttpResponse{409, {{"x-ms-error-code", "ContainerAlreadyExists"}, {"ETag", "\"should-not-parse\""}}, ""};
@@ -280,8 +245,7 @@ TEST(BlobContainerClientTests, CreateAsync_MapsServiceErrorCodeWithoutParsingRes
     EXPECT_TRUE(callbackInvoked);
 }
 
-TEST(BlobContainerClientTests, Constructor_ThrowsForMissingEndpoint)
-{
+TEST(BlobContainerClientTests, Constructor_ThrowsForMissingEndpoint) {
     FakeHttpClient httpClient;
 
     BlobContainerClientOptions options;
@@ -291,8 +255,7 @@ TEST(BlobContainerClientTests, Constructor_ThrowsForMissingEndpoint)
     EXPECT_THROW((BlobContainerClient{httpClient, options}), std::invalid_argument);
 }
 
-TEST(BlobContainerClientTests, Constructor_ThrowsForInvalidContainerName)
-{
+TEST(BlobContainerClientTests, Constructor_ThrowsForInvalidContainerName) {
     FakeHttpClient httpClient;
     BlobContainerClientOptions options = BuildOptions();
     options.ContainerName = "Bad--Name";
@@ -300,8 +263,7 @@ TEST(BlobContainerClientTests, Constructor_ThrowsForInvalidContainerName)
     EXPECT_THROW((BlobContainerClient{httpClient, options}), std::invalid_argument);
 }
 
-TEST(BlobContainerClientTests, Constructor_ThrowsForEndpointWithoutScheme)
-{
+TEST(BlobContainerClientTests, Constructor_ThrowsForEndpointWithoutScheme) {
     FakeHttpClient httpClient;
     BlobContainerClientOptions options = BuildOptions();
     options.ServiceEndpoint = "storageaccount.blob.core.windows.net";
@@ -309,8 +271,7 @@ TEST(BlobContainerClientTests, Constructor_ThrowsForEndpointWithoutScheme)
     EXPECT_THROW((BlobContainerClient{httpClient, options}), std::invalid_argument);
 }
 
-TEST(BlobContainerClientTests, Constructor_ThrowsForEndpointWithPathOrQuery)
-{
+TEST(BlobContainerClientTests, Constructor_ThrowsForEndpointWithPathOrQuery) {
     FakeHttpClient httpClient;
     BlobContainerClientOptions options = BuildOptions();
     options.ServiceEndpoint = "https://storageaccount.blob.core.windows.net/account?x=1";
@@ -318,8 +279,7 @@ TEST(BlobContainerClientTests, Constructor_ThrowsForEndpointWithPathOrQuery)
     EXPECT_THROW((BlobContainerClient{httpClient, options}), std::invalid_argument);
 }
 
-TEST(BlobContainerClientTests, Constructor_ThrowsForEndpointWithFragment)
-{
+TEST(BlobContainerClientTests, Constructor_ThrowsForEndpointWithFragment) {
     FakeHttpClient httpClient;
     BlobContainerClientOptions options = BuildOptions();
     options.ServiceEndpoint = "https://storageaccount.blob.core.windows.net#fragment";
@@ -327,8 +287,7 @@ TEST(BlobContainerClientTests, Constructor_ThrowsForEndpointWithFragment)
     EXPECT_THROW((BlobContainerClient{httpClient, options}), std::invalid_argument);
 }
 
-TEST(BlobContainerClientTests, Constructor_ThrowsForConflictingCredentials)
-{
+TEST(BlobContainerClientTests, Constructor_ThrowsForConflictingCredentials) {
     FakeHttpClient httpClient;
     BlobContainerClientOptions options = BuildOptions();
     options.BearerToken = "bearer-token";
@@ -336,8 +295,7 @@ TEST(BlobContainerClientTests, Constructor_ThrowsForConflictingCredentials)
     EXPECT_THROW((BlobContainerClient{httpClient, options}), std::invalid_argument);
 }
 
-TEST(BlobContainerClientTests, Constructor_ThrowsForInvalidSharedKeyBase64)
-{
+TEST(BlobContainerClientTests, Constructor_ThrowsForInvalidSharedKeyBase64) {
     FakeHttpClient httpClient;
     BlobContainerClientOptions options = BuildOptions();
     options.SasToken.clear();
@@ -346,8 +304,7 @@ TEST(BlobContainerClientTests, Constructor_ThrowsForInvalidSharedKeyBase64)
     EXPECT_THROW((BlobContainerClient{httpClient, options}), std::invalid_argument);
 }
 
-TEST(BlobContainerClientTests, Constructor_ThrowsForPartialSharedKeys)
-{
+TEST(BlobContainerClientTests, Constructor_ThrowsForPartialSharedKeys) {
     FakeHttpClient httpClient;
 
     BlobContainerClientOptions accountOnly = BuildOptions();
@@ -361,8 +318,7 @@ TEST(BlobContainerClientTests, Constructor_ThrowsForPartialSharedKeys)
     EXPECT_THROW((BlobContainerClient{httpClient, keyOnly}), std::invalid_argument);
 }
 
-TEST(BlobContainerClientTests, Constructor_EnforcesContainerNameBoundariesAndDashRules)
-{
+TEST(BlobContainerClientTests, Constructor_EnforcesContainerNameBoundariesAndDashRules) {
     FakeHttpClient httpClient;
 
     BlobContainerClientOptions shortName = BuildOptions();
@@ -386,8 +342,7 @@ TEST(BlobContainerClientTests, Constructor_EnforcesContainerNameBoundariesAndDas
     EXPECT_THROW((BlobContainerClient{httpClient, consecutiveDash}), std::invalid_argument);
 }
 
-TEST(BlobContainerClientTests, CreateAsync_UsesBearerAuthorizationExactly)
-{
+TEST(BlobContainerClientTests, CreateAsync_UsesBearerAuthorizationExactly) {
     FakeHttpClient httpClient;
     BlobContainerClientOptions options = BuildOptions();
     options.SasToken.clear();
@@ -404,8 +359,7 @@ TEST(BlobContainerClientTests, CreateAsync_UsesBearerAuthorizationExactly)
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.LastRequest(), "Authorization"), "Bearer container-token");
 }
 
-TEST(BlobContainerClientTests, ListBlobsAsync_PreservesSpecialSasValuesAlongsideOperationQuery)
-{
+TEST(BlobContainerClientTests, ListBlobsAsync_PreservesSpecialSasValuesAlongsideOperationQuery) {
     FakeHttpClient httpClient;
     BlobContainerClientOptions options = BuildOptions();
     options.SasToken = "?sv=2025-01-05&sig=a%2Bb%26c%3D1&se=2025-01-05T00%3A00%3A00Z";
@@ -414,18 +368,18 @@ TEST(BlobContainerClientTests, ListBlobsAsync_PreservesSpecialSasValuesAlongside
     AVEVA::AzureClient::ListBlobsOptions listOptions;
     listOptions.Marker = "next+page&marker=%";
     listOptions.IncludeMetadata = true;
-    client.ListBlobsAsync(listOptions,
-        [](std::expected<Response<AVEVA::AzureClient::Models::ListBlobsResult>, BlobStorageError>) {});
+    client.ListBlobsAsync(
+        listOptions, [](std::expected<Response<AVEVA::AzureClient::Models::ListBlobsResult>, BlobStorageError>) {});
 
-    EXPECT_EQ(httpClient.LastRequest().GetUrl(),
+    EXPECT_EQ(
+        httpClient.LastRequest().GetUrl(),
         "https://storageaccount.blob.core.windows.net/"
         "images?restype=container&comp=list&marker=next%2Bpage%26marker%3D%25&include=metadata&sv=2025-01-05&sig=a%2Bb%"
         "26c%3D1&se=2025-01-05T00%3A00%3A00Z");
     EXPECT_TRUE(FakeHttpClient::FindHeaderValue(httpClient.LastRequest(), "Authorization").empty());
 }
 
-TEST(BlobContainerClientTests, ListBlobsAsync_ReportsMalformedXmlAsInvalidResponse)
-{
+TEST(BlobContainerClientTests, ListBlobsAsync_ReportsMalformedXmlAsInvalidResponse) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{200, {}, "<EnumerationResults><Blobs>"};
     BlobContainerClient client{httpClient, BuildOptions()};
@@ -437,8 +391,7 @@ TEST(BlobContainerClientTests, ListBlobsAsync_ReportsMalformedXmlAsInvalidRespon
     EXPECT_TRUE(callbackInvoked);
 }
 
-TEST(BlobContainerClientTests, GetBlockBlobClient_BuildsBlobScopedClient)
-{
+TEST(BlobContainerClientTests, GetBlockBlobClient_BuildsBlobScopedClient) {
     FakeHttpClient httpClient;
     BlobContainerClient client{httpClient, BuildOptions()};
 
@@ -447,11 +400,10 @@ TEST(BlobContainerClientTests, GetBlockBlobClient_BuildsBlobScopedClient)
         [](std::expected<Response<AVEVA::AzureClient::Models::DeleteBlobResult>, BlobStorageError>) {});
 
     EXPECT_EQ(httpClient.LastRequest().GetUrl(),
-        "https://storageaccount.blob.core.windows.net/images/photo.png?sv=2025-01-05&sig=fakesig");
+              "https://storageaccount.blob.core.windows.net/images/photo.png?sv=2025-01-05&sig=fakesig");
 }
 
-TEST(BlobContainerClientTests, GetPageBlobClient_BuildsBlobScopedClient)
-{
+TEST(BlobContainerClientTests, GetPageBlobClient_BuildsBlobScopedClient) {
     FakeHttpClient httpClient;
     BlobContainerClient client{httpClient, BuildOptions()};
 
@@ -460,11 +412,10 @@ TEST(BlobContainerClientTests, GetPageBlobClient_BuildsBlobScopedClient)
         [](std::expected<Response<AVEVA::AzureClient::Models::DeleteBlobResult>, BlobStorageError>) {});
 
     EXPECT_EQ(httpClient.LastRequest().GetUrl(),
-        "https://storageaccount.blob.core.windows.net/images/disk.vhd?sv=2025-01-05&sig=fakesig");
+              "https://storageaccount.blob.core.windows.net/images/disk.vhd?sv=2025-01-05&sig=fakesig");
 }
 
-TEST(BlobContainerClientTests, GetBlockBlobClient_UrlEncodesBlobNameAndPreservesSlashes)
-{
+TEST(BlobContainerClientTests, GetBlockBlobClient_UrlEncodesBlobNameAndPreservesSlashes) {
     FakeHttpClient httpClient;
     BlobContainerClient client{httpClient, BuildOptions()};
 
@@ -472,12 +423,12 @@ TEST(BlobContainerClientTests, GetBlockBlobClient_UrlEncodesBlobNameAndPreserves
     blockBlobClient->DeleteAsync(
         [](std::expected<Response<AVEVA::AzureClient::Models::DeleteBlobResult>, BlobStorageError>) {});
 
-    EXPECT_EQ(httpClient.LastRequest().GetUrl(),
+    EXPECT_EQ(
+        httpClient.LastRequest().GetUrl(),
         "https://storageaccount.blob.core.windows.net/images/folder%20name/file%3F.txt?sv=2025-01-05&sig=fakesig");
 }
 
-TEST(BlobContainerClientTests, GetBlobClient_TargetsTheBlobAndSharesTheConnection)
-{
+TEST(BlobContainerClientTests, GetBlobClient_TargetsTheBlobAndSharesTheConnection) {
     FakeHttpClient httpClient;
     BlobContainerClientOptions options = BuildOptions();
     options.SasToken.clear();
@@ -485,7 +436,7 @@ TEST(BlobContainerClientTests, GetBlobClient_TargetsTheBlobAndSharesTheConnectio
     BlobContainerClient container{httpClient, options};
 
     const auto blobPtr = container.GetBlobClient("folder name/photo.png");
-    AVEVA::AzureClient::BlobClient& blob = *blobPtr;
+    AVEVA::AzureClient::Tests::BlobClient& blob = *blobPtr;
     EXPECT_EQ(blob.get_executor(), httpClient.get_executor());
 
     int completions = 0;
@@ -496,30 +447,26 @@ TEST(BlobContainerClientTests, GetBlobClient_TargetsTheBlobAndSharesTheConnectio
     VerifySharedKeyAuthorizationForBlobClientRequests(httpClient);
     EXPECT_EQ(httpClient.Requests().at(1).Request.GetMethod(), HttpMethod::Head);
     EXPECT_EQ(httpClient.Requests().at(1).Request.GetUrl(),
-        "https://storageaccount.blob.core.windows.net/images/folder%20name/photo.png");
+              "https://storageaccount.blob.core.windows.net/images/folder%20name/photo.png");
     EXPECT_THROW(static_cast<void>(container.GetBlobClient("")), std::invalid_argument);
 }
 
-TEST(BlobContainerClientTests, GetBlockBlobClient_ThrowsForEmptyBlobName)
-{
+TEST(BlobContainerClientTests, GetBlockBlobClient_ThrowsForEmptyBlobName) {
     FakeHttpClient httpClient;
     BlobContainerClient client{httpClient, BuildOptions()};
 
     EXPECT_THROW(
-        [&client]
-    {
-        auto unusedClient = client.GetBlockBlobClient("");
-        static_cast<void>(unusedClient);
-    }(),
+        [&client] {
+            auto unusedClient = client.GetBlockBlobClient("");
+            static_cast<void>(unusedClient);
+        }(),
         std::invalid_argument);
 }
 
-TEST(BlobContainerClientTests, ListBlobsAsync_OptionsOverloadIncludesAllSupportedQueryParametersAndParsesPagination)
-{
+TEST(BlobContainerClientTests, ListBlobsAsync_OptionsOverloadIncludesAllSupportedQueryParametersAndParsesPagination) {
     FakeHttpClient httpClient;
-    httpClient.DefaultResponse() = HttpResponse{200,
-        MakeCanonicalSuccessHeaders(),
-        R"(<?xml version="1.0" encoding="utf-8"?>
+    httpClient.DefaultResponse() = HttpResponse{200, MakeCanonicalSuccessHeaders(),
+                                                R"(<?xml version="1.0" encoding="utf-8"?>
             <EnumerationResults>
               <Prefix>pref/</Prefix>
               <Delimiter>/</Delimiter>
@@ -536,14 +483,14 @@ TEST(BlobContainerClientTests, ListBlobsAsync_OptionsOverloadIncludesAllSupporte
     ListBlobsWithOptionsAndVerifyResult(client, callback);
 
     httpClient.Poll(); // drive the posted (async) completion (T26)
-    EXPECT_EQ(httpClient.LastRequest().GetUrl(),
+    EXPECT_EQ(
+        httpClient.LastRequest().GetUrl(),
         "https://storageaccount.blob.core.windows.net/"
         "images?restype=container&comp=list&prefix=pref%2F&delimiter=%2F&marker=page-1&maxresults=7&include=metadata&"
         "sv=2025-01-05&sig=fakesig");
 }
 
-TEST(BlobContainerClientTests, CreateIfNotExists_TreatsAlreadyExistsAsNonFatal)
-{
+TEST(BlobContainerClientTests, CreateIfNotExists_TreatsAlreadyExistsAsNonFatal) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(MakeAzureErrorResponse(409, "ContainerAlreadyExists", "", "create-request"));
     BlobContainerClient client{httpClient, BuildOptions()};
@@ -555,8 +502,7 @@ TEST(BlobContainerClientTests, CreateIfNotExists_TreatsAlreadyExistsAsNonFatal)
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(0).Request, "x-ms-meta-project"), "tests");
 }
 
-TEST(BlobContainerClientTests, CreateAsyncAcceptsUseFutureCompletionToken)
-{
+TEST(BlobContainerClientTests, CreateAsyncAcceptsUseFutureCompletionToken) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{201, MakeCanonicalSuccessHeaders(), ""};
     BlobContainerClient client{httpClient, BuildOptions()};
@@ -572,8 +518,7 @@ TEST(BlobContainerClientTests, CreateAsyncAcceptsUseFutureCompletionToken)
 
 // Task 14: omitting the completion token entirely yields a deferred, directly co_await-able
 // operation (see BlockBlobClientTests.cpp for the detailed rationale).
-TEST(BlobContainerClientTests, ListBlobsAsyncSupportsCoAwaitWithNoExplicitCompletionToken)
-{
+TEST(BlobContainerClientTests, ListBlobsAsyncSupportsCoAwaitWithNoExplicitCompletionToken) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() =
         HttpResponse{200, MakeCanonicalSuccessHeaders(), "<EnumerationResults></EnumerationResults>"};
@@ -581,12 +526,8 @@ TEST(BlobContainerClientTests, ListBlobsAsyncSupportsCoAwaitWithNoExplicitComple
 
     std::optional<std::expected<Response<AVEVA::AzureClient::Models::ListBlobsResult>, BlobStorageError>> result;
     boost::asio::co_spawn(httpClient.get_executor(),
-        AVEVA::AzureClient::Tests::AwaitInto(&result,
-            [&]
-    {
-        return client.ListBlobsAsync();
-    }),
-        boost::asio::detached);
+                          AVEVA::AzureClient::Tests::AwaitInto(&result, [&] { return client.ListBlobsAsync(); }),
+                          boost::asio::detached);
 
     httpClient.Poll();
 
@@ -596,20 +537,18 @@ TEST(BlobContainerClientTests, ListBlobsAsyncSupportsCoAwaitWithNoExplicitComple
 
 // Compile-only proof that defaulting CompletionToken did not introduce ambiguity between the
 // "options" and "no options" overloads. Never run; only needs to compile.
-namespace
-{
-    [[maybe_unused]] void BlobContainerClientNoTokenOverloadsCompile(BlobContainerClient& client)
-    {
-        using AVEVA::AzureClient::CreateBlobContainerOptions;
-        using AVEVA::AzureClient::ListBlobsOptions;
+namespace {
+[[maybe_unused]] void BlobContainerClientNoTokenOverloadsCompile(BlobContainerClient& client) {
+    using AVEVA::AzureClient::CreateBlobContainerOptions;
+    using AVEVA::AzureClient::ListBlobsOptions;
 
-        static_cast<void>(client.CreateAsync());
-        static_cast<void>(client.CreateAsync(CreateBlobContainerOptions{}));
+    static_cast<void>(client.CreateAsync());
+    static_cast<void>(client.CreateAsync(CreateBlobContainerOptions{}));
 
-        static_cast<void>(client.ListBlobsAsync());
-        static_cast<void>(client.ListBlobsAsync(ListBlobsOptions{}));
+    static_cast<void>(client.ListBlobsAsync());
+    static_cast<void>(client.ListBlobsAsync(ListBlobsOptions{}));
 
-        static_cast<void>(client.CreateIfNotExistsAsync());
-        static_cast<void>(client.CreateIfNotExistsAsync(CreateBlobContainerOptions{}));
-    }
+    static_cast<void>(client.CreateIfNotExistsAsync());
+    static_cast<void>(client.CreateIfNotExistsAsync(CreateBlobContainerOptions{}));
+}
 } // namespace

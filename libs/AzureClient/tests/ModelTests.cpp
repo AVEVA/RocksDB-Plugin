@@ -30,103 +30,89 @@
 #include <utility>
 #include <vector>
 
-namespace
-{
-    using AVEVA::HttpHeader;
-    using AVEVA::HttpMethod;
-    using AVEVA::HttpRequest;
-    using AVEVA::HttpResponse;
-    using AVEVA::AzureClient::AcquireLeaseOptions;
-    using AVEVA::AzureClient::BlockBlobClient;
-    using AVEVA::AzureClient::DeleteBlobOptions;
-    using AVEVA::AzureClient::PageBlobClient;
-    using AVEVA::AzureClient::ResizePageBlobOptions;
-    using AVEVA::AzureClient::UploadBlockBlobOptions;
-    using AVEVA::AzureClient::Models::AccessTier;
-    using AVEVA::AzureClient::Models::LeaseDurationType;
-    using AVEVA::AzureClient::Models::LeaseState;
-    using AVEVA::AzureClient::Models::LeaseStatus;
-    using AVEVA::AzureClient::Tests::FakeHttpClient;
-    using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
-    namespace Private = AVEVA::AzureClient::Private;
-    using namespace std::chrono_literals;
+namespace {
+using AVEVA::HttpHeader;
+using AVEVA::HttpMethod;
+using AVEVA::HttpRequest;
+using AVEVA::HttpResponse;
+using AVEVA::AzureClient::AcquireLeaseOptions;
+using AVEVA::AzureClient::DeleteBlobOptions;
+using AVEVA::AzureClient::ResizePageBlobOptions;
+using AVEVA::AzureClient::UploadBlockBlobOptions;
+using AVEVA::AzureClient::Models::AccessTier;
+using AVEVA::AzureClient::Models::LeaseDurationType;
+using AVEVA::AzureClient::Models::LeaseState;
+using AVEVA::AzureClient::Models::LeaseStatus;
+using AVEVA::AzureClient::Tests::BlockBlobClient;
+using AVEVA::AzureClient::Tests::FakeHttpClient;
+using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
+using AVEVA::AzureClient::Tests::PageBlobClient;
+namespace Private = AVEVA::AzureClient::Private;
+using namespace std::chrono_literals;
 
-    constexpr auto IgnoreResult = [](auto&&) {};
+constexpr auto IgnoreResult = [](auto&&) {};
 
-    [[nodiscard]] bool HasHeader(const HttpRequest& request, std::string_view name)
-    {
-        return std::ranges::any_of(request.GetHeaders(),
-            [name](const auto& header)
-        {
-            return Private::IEquals(header.GetName(), name);
-        });
+[[nodiscard]] bool HasHeader(const HttpRequest& request, std::string_view name) {
+    return std::ranges::any_of(request.GetHeaders(),
+                               [name](const auto& header) { return Private::IEquals(header.GetName(), name); });
+}
+
+[[nodiscard]] std::string Header(const HttpRequest& request, std::string_view name) {
+    return FakeHttpClient::FindHeaderValue(request, name);
+}
+
+void ExpectMalformedExtendedHeaderIsRejected(std::string_view name, std::string_view value) {
+    EXPECT_THROW(static_cast<void>(
+                     Private::ParseBlobProperties(HttpResponse{200, {{std::string{name}, std::string{value}}}, ""})),
+                 std::invalid_argument)
+        << name;
+}
+
+void ExpectMalformedExtendedHeadersAreRejected() {
+    for (const auto& [name, value] :
+         std::vector<std::pair<std::string, std::string>>{{"x-ms-creation-time", "yesterday"},
+                                                          {"x-ms-server-encrypted", "maybe"},
+                                                          {"x-ms-access-tier-inferred", "1"},
+                                                          {"x-ms-blob-sequence-number", "-1"},
+                                                          {"x-ms-is-current-version", "yes"}}) {
+        ExpectMalformedExtendedHeaderIsRejected(name, value);
     }
+}
 
-    [[nodiscard]] std::string Header(const HttpRequest& request, std::string_view name)
-    {
-        return FakeHttpClient::FindHeaderValue(request, name);
+void ExpectAcquireLeaseRejectsInvalidDurations(BlockBlobClient& client, FakeHttpClient& httpClient,
+                                               std::initializer_list<std::chrono::seconds> durations) {
+    for (const auto duration : durations) {
+        std::optional<std::error_code> error;
+        client.AcquireLeaseAsync(AcquireLeaseOptions{.Conditions = {}, .ProposedLeaseId = {}, .Duration = duration},
+                                 [&](auto result) {
+                                     ASSERT_FALSE(result.has_value());
+                                     error = result.error().Code;
+                                 });
+        httpClient.Poll();
+        EXPECT_EQ(error, std::make_error_code(std::errc::invalid_argument)) << duration.count();
     }
-
-    void ExpectMalformedExtendedHeaderIsRejected(std::string_view name, std::string_view value)
-    {
-        EXPECT_THROW(static_cast<void>(Private::ParseBlobProperties(
-                         HttpResponse{200, {{std::string{name}, std::string{value}}}, ""})),
-            std::invalid_argument)
-            << name;
-    }
-
-    void ExpectMalformedExtendedHeadersAreRejected()
-    {
-        for (const auto& [name, value] :
-            std::vector<std::pair<std::string, std::string>>{{"x-ms-creation-time", "yesterday"},
-                {"x-ms-server-encrypted", "maybe"},
-                {"x-ms-access-tier-inferred", "1"},
-                {"x-ms-blob-sequence-number", "-1"},
-                {"x-ms-is-current-version", "yes"}})
-        {
-            ExpectMalformedExtendedHeaderIsRejected(name, value);
-        }
-    }
-
-    void ExpectAcquireLeaseRejectsInvalidDurations(BlockBlobClient& client,
-        FakeHttpClient& httpClient,
-        std::initializer_list<std::chrono::seconds> durations)
-    {
-        for (const auto duration : durations)
-        {
-            std::optional<std::error_code> error;
-            client.AcquireLeaseAsync(AcquireLeaseOptions{.Conditions = {}, .ProposedLeaseId = {}, .Duration = duration},
-                [&](auto result)
-            {
-                ASSERT_FALSE(result.has_value());
-                error = result.error().Code;
-            });
-            httpClient.Poll();
-            EXPECT_EQ(error, std::make_error_code(std::errc::invalid_argument)) << duration.count();
-        }
-    }
+}
 } // namespace
 
-TEST(ModelTests, GetPropertiesParsesExtendedHeaders)
-{
+TEST(ModelTests, GetPropertiesParsesExtendedHeaders) {
     const HttpResponse response{200,
-        {{"ETag", "\"0x1\""},
-            {"Content-Length", "10"},
-            {"Content-Encoding", "gzip"},
-            {"Content-Language", "en-GB"},
-            {"Content-Disposition", "attachment; filename=a.txt"},
-            {"x-ms-blob-type", "AppendBlob"},
-            {"x-ms-creation-time", "Wed, 01 Oct 2025 10:00:00 GMT"},
-            {"x-ms-access-tier", "Cool"},
-            {"x-ms-access-tier-inferred", "true"},
-            {"x-ms-lease-status", "locked"},
-            {"x-ms-lease-state", "leased"},
-            {"x-ms-lease-duration", "infinite"},
-            {"x-ms-server-encrypted", "true"},
-            {"x-ms-version-id", "2025-10-01T10:00:00.0000000Z"},
-            {"x-ms-is-current-version", "false"},
-            {"x-ms-blob-sequence-number", "42"}},
-        ""};
+                                {{"ETag", "\"0x1\""},
+                                 {"Content-Length", "10"},
+                                 {"Content-Encoding", "gzip"},
+                                 {"Content-Language", "en-GB"},
+                                 {"Content-Disposition", "attachment; filename=a.txt"},
+                                 {"x-ms-blob-type", "AppendBlob"},
+                                 {"x-ms-creation-time", "Wed, 01 Oct 2025 10:00:00 GMT"},
+                                 {"x-ms-access-tier", "Cool"},
+                                 {"x-ms-access-tier-inferred", "true"},
+                                 {"x-ms-lease-status", "locked"},
+                                 {"x-ms-lease-state", "leased"},
+                                 {"x-ms-lease-duration", "infinite"},
+                                 {"x-ms-server-encrypted", "true"},
+                                 {"x-ms-version-id", "2025-10-01T10:00:00.0000000Z"},
+                                 {"x-ms-is-current-version", "false"},
+                                 {"x-ms-blob-sequence-number", "42"}},
+                                ""};
 
     const auto properties = Private::ParseBlobProperties(response);
 
@@ -146,8 +132,7 @@ TEST(ModelTests, GetPropertiesParsesExtendedHeaders)
     EXPECT_EQ(properties.SequenceNumber, std::optional<std::uint64_t>{42});
 }
 
-TEST(ModelTests, GetPropertiesLeavesAbsentExtendedFieldsUnset)
-{
+TEST(ModelTests, GetPropertiesLeavesAbsentExtendedFieldsUnset) {
     const auto properties = Private::ParseBlobProperties(HttpResponse{200, {{"ETag", "\"0x1\""}}, ""});
 
     EXPECT_FALSE(properties.CreatedOn.has_value());
@@ -159,13 +144,9 @@ TEST(ModelTests, GetPropertiesLeavesAbsentExtendedFieldsUnset)
     EXPECT_FALSE(properties.SequenceNumber.has_value());
 }
 
-TEST(ModelTests, GetPropertiesRejectsMalformedExtendedHeaders)
-{
-    ExpectMalformedExtendedHeadersAreRejected();
-}
+TEST(ModelTests, GetPropertiesRejectsMalformedExtendedHeaders) { ExpectMalformedExtendedHeadersAreRejected(); }
 
-TEST(ModelTests, ListBlobsParsesExtendedPropertiesAndVersionSiblings)
-{
+TEST(ModelTests, ListBlobsParsesExtendedPropertiesAndVersionSiblings) {
     const auto result = Private::ParseListBlobsResultXml(R"(<?xml version="1.0" encoding="utf-8"?>
 <EnumerationResults><Blobs><Blob>
   <Name>a.txt</Name>
@@ -202,8 +183,7 @@ TEST(ModelTests, ListBlobsParsesExtendedPropertiesAndVersionSiblings)
     EXPECT_EQ(properties.ServerEncrypted, std::optional<bool>{true});
 }
 
-TEST(ModelTests, UploadSendsContentEncodingLanguageAndDisposition)
-{
+TEST(ModelTests, UploadSendsContentEncodingLanguageAndDisposition) {
     FakeHttpClient httpClient;
     BlockBlobClient client{httpClient, MakeBlobClientOptions()};
 
@@ -227,8 +207,7 @@ TEST(ModelTests, UploadSendsContentEncodingLanguageAndDisposition)
     EXPECT_FALSE(HasHeader(httpClient.LastRequest(), "x-ms-access-tier"));
 }
 
-TEST(ModelTests, SharedKeyStringToSignIncludesContentEncodingAndLanguage)
-{
+TEST(ModelTests, SharedKeyStringToSignIncludesContentEncodingAndLanguage) {
     HttpRequest request;
     request.SetMethod(HttpMethod::Put);
     request.SetUrl("https://account.blob.core.windows.net/c/b");
@@ -243,8 +222,7 @@ TEST(ModelTests, SharedKeyStringToSignIncludesContentEncodingAndLanguage)
     EXPECT_TRUE(Private::BuildSharedKeyStringToSign("account", plain).starts_with("GET\n\n\n\n\n\n\n"));
 }
 
-TEST(ModelTests, AcquireLeaseDurationIsInfiniteByDefaultAndValidated)
-{
+TEST(ModelTests, AcquireLeaseDurationIsInfiniteByDefaultAndValidated) {
     FakeHttpClient httpClient;
     BlockBlobClient client{httpClient, MakeBlobClientOptions()};
 
@@ -253,7 +231,7 @@ TEST(ModelTests, AcquireLeaseDurationIsInfiniteByDefaultAndValidated)
     EXPECT_EQ(Header(httpClient.LastRequest(), "x-ms-lease-duration"), "-1");
 
     client.AcquireLeaseAsync(AcquireLeaseOptions{.Conditions = {}, .ProposedLeaseId = {}, .Duration = 15s},
-        IgnoreResult);
+                             IgnoreResult);
     httpClient.Poll();
     EXPECT_EQ(Header(httpClient.LastRequest(), "x-ms-lease-duration"), "15");
     const std::size_t sent = httpClient.RequestCount();
@@ -262,9 +240,7 @@ TEST(ModelTests, AcquireLeaseDurationIsInfiniteByDefaultAndValidated)
     EXPECT_EQ(httpClient.RequestCount(), sent);
 }
 
-
-TEST(ModelTests, ResizeUsesResizePageBlobOptionsConditions)
-{
+TEST(ModelTests, ResizeUsesResizePageBlobOptionsConditions) {
     FakeHttpClient httpClient;
     PageBlobClient client{httpClient, MakeBlobClientOptions()};
 
@@ -277,8 +253,7 @@ TEST(ModelTests, ResizeUsesResizePageBlobOptionsConditions)
     EXPECT_EQ(Header(httpClient.LastRequest(), "If-Match"), "\"etag\"");
 }
 
-TEST(ModelTests, ExtensibleEnumComparesInBothOrdersAndKeepsEmbeddedNulls)
-{
+TEST(ModelTests, ExtensibleEnumComparesInBothOrdersAndKeepsEmbeddedNulls) {
     const AccessTier tier = "Hot";
     EXPECT_TRUE(tier == "Hot");
     EXPECT_TRUE("Hot" == tier);

@@ -21,7 +21,7 @@ TEST(ClientRuntimeTests, HttpClientUsesProvidedContext) {
     ClientRuntime runtime(context);
 
     auto executor = runtime.HttpClient().get_executor();
-    ASSERT_TRUE(executor == boost::asio::any_io_executor(context.get_executor()));
+    ASSERT_TRUE(executor == context.get_executor());
 }
 
 TEST(ClientRuntimeTests, DoesNotRunContext) {

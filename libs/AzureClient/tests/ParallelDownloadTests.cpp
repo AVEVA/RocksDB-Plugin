@@ -27,6 +27,7 @@
 #include <fstream>
 #include <ios>
 #include <iterator>
+#include <mutex>
 #include <optional>
 #include <ostream>
 #include <span>
@@ -35,257 +36,193 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
-#include <mutex>
-#include <vector>
 #include <utility>
+#include <vector>
 
 // T11: parallel chunked DownloadToAsync (Concurrency > 1).
 
-namespace
-{
-    using AVEVA::HttpRequestOptions;
-    using AVEVA::HttpResponse;
-    using AVEVA::AzureClient::BlobClientOptions;
-    using AVEVA::AzureClient::BlobStorageError;
-    using AVEVA::AzureClient::BlockBlobClient;
-    using AVEVA::AzureClient::DownloadToOptions;
-    using AVEVA::AzureClient::PageBlobClient;
-    using AVEVA::AzureClient::Response;
-    using AVEVA::AzureClient::Models::DownloadBlobToResult;
-    using AVEVA::AzureClient::Tests::EnqueueChunks;
-    using AVEVA::AzureClient::Tests::EnqueueForRange;
-    using AVEVA::AzureClient::Tests::FakeHttpClient;
-    using AVEVA::AzureClient::Tests::FindRequestByRange;
-    using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
-    using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
-    using AVEVA::AzureClient::Tests::RangeHeader;
-    using AVEVA::AzureClient::Tests::RangeResponse;
+namespace {
+using AVEVA::HttpRequestOptions;
+using AVEVA::HttpResponse;
+using AVEVA::AzureClient::BlobClientOptions;
+using AVEVA::AzureClient::BlobStorageError;
+using AVEVA::AzureClient::DownloadToOptions;
+using AVEVA::AzureClient::Response;
+using AVEVA::AzureClient::Models::DownloadBlobToResult;
+using AVEVA::AzureClient::Tests::BlockBlobClient;
+using AVEVA::AzureClient::Tests::EnqueueChunks;
+using AVEVA::AzureClient::Tests::EnqueueForRange;
+using AVEVA::AzureClient::Tests::FakeHttpClient;
+using AVEVA::AzureClient::Tests::FindRequestByRange;
+using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
+using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
+using AVEVA::AzureClient::Tests::PageBlobClient;
+using AVEVA::AzureClient::Tests::RangeHeader;
+using AVEVA::AzureClient::Tests::RangeResponse;
 
-    using DownloadToResult = std::expected<Response<DownloadBlobToResult>, BlobStorageError>;
+using DownloadToResult = std::expected<Response<DownloadBlobToResult>, BlobStorageError>;
 
-    [[nodiscard]] BlobClientOptions BuildOptions()
-    {
-        return MakeBlobClientOptions("logs", "t11.txt");
+[[nodiscard]] BlobClientOptions BuildOptions() { return MakeBlobClientOptions("logs", "t11.txt"); }
+
+[[nodiscard]] std::string MakeContent(std::size_t size) {
+    std::string content;
+    for (std::size_t i = 0; i < size; ++i) {
+        content += static_cast<char>('a' + (i % 26U));
+    }
+    return content;
+}
+
+// Tags the concurrency parameter with its own type so it's never adjacent-and-same-type with
+// the chunk size parameter (see bugprone-easily-swappable-parameters).
+struct Concurrency {
+    std::size_t Value;
+
+    constexpr Concurrency(std::size_t value) noexcept : Value(value) {}
+};
+
+[[nodiscard]] DownloadToOptions Parallel(std::size_t chunkSize, Concurrency concurrency) {
+    DownloadToOptions options;
+    options.ChunkSize = chunkSize;
+    options.Concurrency = concurrency.Value;
+    return options;
+}
+
+// Writes only through sputc/xsputn; any seek fails, so out-of-order writes would be detected.
+class AppendOnlyBuffer final : public std::stringbuf {
+  protected:
+    pos_type seekoff(off_type /*_Off*/, std::ios_base::seekdir /*_Way*/, std::ios_base::openmode /*_Mode*/) override {
+        return {static_cast<off_type>(-1)};
     }
 
-    [[nodiscard]] std::string MakeContent(std::size_t size)
-    {
-        std::string content;
-        for (std::size_t i = 0; i < size; ++i)
-        {
-            content += static_cast<char>('a' + (i % 26U));
-        }
-        return content;
+    pos_type seekpos(pos_type /*_Pos*/, std::ios_base::openmode /*_Mode*/) override {
+        return {static_cast<off_type>(-1)};
+    }
+};
+
+// Records the thread of every write.
+class ThreadRecordingBuffer final : public std::stringbuf {
+  public:
+    [[nodiscard]] std::vector<std::thread::id> WriteThreads() const {
+        const std::scoped_lock lock(m_mutex);
+        return m_threads;
     }
 
-    // Tags the concurrency parameter with its own type so it's never adjacent-and-same-type with
-    // the chunk size parameter (see bugprone-easily-swappable-parameters).
-    struct Concurrency
-    {
-        std::size_t Value;
-
-        constexpr Concurrency(std::size_t value) noexcept : Value(value)
-        {
-        }
-    };
-
-    [[nodiscard]] DownloadToOptions Parallel(std::size_t chunkSize, Concurrency concurrency)
-    {
-        DownloadToOptions options;
-        options.ChunkSize = chunkSize;
-        options.Concurrency = concurrency.Value;
-        return options;
-    }
-
-    // Writes only through sputc/xsputn; any seek fails, so out-of-order writes would be detected.
-    class AppendOnlyBuffer final : public std::stringbuf
-    {
-      protected:
-        pos_type seekoff(off_type /*_Off*/, std::ios_base::seekdir /*_Way*/, std::ios_base::openmode /*_Mode*/) override
-        {
-            return {static_cast<off_type>(-1)};
-        }
-
-        pos_type seekpos(pos_type /*_Pos*/, std::ios_base::openmode /*_Mode*/) override
-        {
-            return {static_cast<off_type>(-1)};
-        }
-    };
-
-    // Records the thread of every write.
-    class ThreadRecordingBuffer final : public std::stringbuf
-    {
-      public:
-        [[nodiscard]] std::vector<std::thread::id> WriteThreads() const
+  protected:
+    std::streamsize xsputn(const char* data, std::streamsize count) override {
         {
             const std::scoped_lock lock(m_mutex);
-            return m_threads;
+            m_threads.push_back(std::this_thread::get_id());
         }
+        return std::stringbuf::xsputn(data, count);
+    }
 
-      protected:
-        std::streamsize xsputn(const char* data, std::streamsize count) override
-        {
-            {
-                const std::scoped_lock lock(m_mutex);
-                m_threads.push_back(std::this_thread::get_id());
-            }
-            return std::stringbuf::xsputn(data, count);
+  private:
+    mutable std::mutex m_mutex;
+    std::vector<std::thread::id> m_threads;
+};
+
+// Completes the most recently issued pending request.
+[[nodiscard]] bool CompleteNewest(FakeHttpClient& httpClient) {
+    for (std::size_t index = httpClient.RequestCount(); index-- > 0U;) {
+        if (httpClient.CompleteRequest(index)) {
+            return true;
         }
+    }
+    return false;
+}
 
-      private:
-        mutable std::mutex m_mutex;
-        std::vector<std::thread::id> m_threads;
-    };
+[[nodiscard]] std::string ReadFile(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return std::string{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
 
-    // Completes the most recently issued pending request.
-    [[nodiscard]] bool CompleteNewest(FakeHttpClient& httpClient)
-    {
-        for (std::size_t index = httpClient.RequestCount(); index-- > 0U;)
-        {
-            if (httpClient.CompleteRequest(index))
-            {
-                return true;
-            }
+[[nodiscard]] bool HasPartialFiles(const std::filesystem::path& target) {
+    const std::string prefix = target.filename().string() + ".partial-";
+    const std::filesystem::directory_iterator entries(target.parent_path());
+    return std::any_of(begin(entries), end(entries),
+                       [&prefix](const auto& entry) { return entry.path().filename().string().starts_with(prefix); });
+}
+
+void StartDownloadToAsyncAndExpectSuccess(BlockBlobClient& client, std::ostream& out, const DownloadToOptions& options,
+                                          int& callbackCount, std::size_t expectedBytes) {
+    client.DownloadToAsync(out, options, [&callbackCount, expectedBytes](DownloadToResult result) {
+        ++callbackCount;
+        ASSERT_TRUE(result.has_value());
+        EXPECT_EQ(result->Value().BytesWritten, expectedBytes);
+    });
+}
+
+void StartDownloadToAsyncAndExpectSuccess(PageBlobClient& client, const std::filesystem::path& target,
+                                          const DownloadToOptions& options, int& callbackCount,
+                                          std::size_t expectedBytes) {
+    client.DownloadToAsync(target, options, [&callbackCount, expectedBytes](DownloadToResult result) {
+        ++callbackCount;
+        ASSERT_TRUE(result.has_value());
+        EXPECT_EQ(result->Value().BytesWritten, expectedBytes);
+    });
+}
+
+void StartDownloadToAsyncAndExpectStatus(BlockBlobClient& client, std::ostream& out, const DownloadToOptions& options,
+                                         int& callbackCount, unsigned expectedStatus,
+                                         std::string_view expectedErrorCode = {}) {
+    client.DownloadToAsync(out, options, [&callbackCount, expectedStatus, expectedErrorCode](DownloadToResult result) {
+        ++callbackCount;
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().StatusCode, expectedStatus);
+        if (!expectedErrorCode.empty()) {
+            EXPECT_EQ(result.error().ErrorCode, expectedErrorCode);
         }
-        return false;
-    }
+    });
+}
 
-    [[nodiscard]] std::string ReadFile(const std::filesystem::path& path)
-    {
-        std::ifstream input(path, std::ios::binary);
-        return std::string{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
-    }
+void StartDownloadToAsyncAndExpectStatus(BlockBlobClient& client, const std::filesystem::path& target,
+                                         const DownloadToOptions& options, int& callbackCount,
+                                         unsigned expectedStatus) {
+    client.DownloadToAsync(target, options, [&callbackCount, expectedStatus](DownloadToResult result) {
+        ++callbackCount;
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().StatusCode, expectedStatus);
+    });
+}
 
-    [[nodiscard]] bool HasPartialFiles(const std::filesystem::path& target)
-    {
-        const std::string prefix = target.filename().string() + ".partial-";
-        const std::filesystem::directory_iterator entries(target.parent_path());
-        return std::any_of(begin(entries),
-            end(entries),
-            [&prefix](const auto& entry)
-        {
-            return entry.path().filename().string().starts_with(prefix);
-        });
-    }
-
-    void StartDownloadToAsyncAndExpectSuccess(BlockBlobClient& client,
-        std::ostream& out,
-        const DownloadToOptions& options,
-        int& callbackCount,
-        std::size_t expectedBytes)
-    {
-        client.DownloadToAsync(out,
-            options,
-            [&callbackCount, expectedBytes](DownloadToResult result)
-        {
-            ++callbackCount;
-            ASSERT_TRUE(result.has_value());
-            EXPECT_EQ(result->Value().BytesWritten, expectedBytes);
-        });
-    }
-
-    void StartDownloadToAsyncAndExpectSuccess(PageBlobClient& client,
-        const std::filesystem::path& target,
-        const DownloadToOptions& options,
-        int& callbackCount,
-        std::size_t expectedBytes)
-    {
-        client.DownloadToAsync(target,
-            options,
-            [&callbackCount, expectedBytes](DownloadToResult result)
-        {
-            ++callbackCount;
-            ASSERT_TRUE(result.has_value());
-            EXPECT_EQ(result->Value().BytesWritten, expectedBytes);
-        });
-    }
-
-    void StartDownloadToAsyncAndExpectStatus(BlockBlobClient& client,
-        std::ostream& out,
-        const DownloadToOptions& options,
-        int& callbackCount,
-        unsigned expectedStatus,
-        std::string_view expectedErrorCode = {})
-    {
-        client.DownloadToAsync(out,
-            options,
-            [&callbackCount, expectedStatus, expectedErrorCode](DownloadToResult result)
-        {
-            ++callbackCount;
-            ASSERT_FALSE(result.has_value());
-            EXPECT_EQ(result.error().StatusCode, expectedStatus);
-            if (!expectedErrorCode.empty())
-            {
-                EXPECT_EQ(result.error().ErrorCode, expectedErrorCode);
-            }
-        });
-    }
-
-    void StartDownloadToAsyncAndExpectStatus(BlockBlobClient& client,
-        const std::filesystem::path& target,
-        const DownloadToOptions& options,
-        int& callbackCount,
-        unsigned expectedStatus)
-    {
-        client.DownloadToAsync(target,
-            options,
-            [&callbackCount, expectedStatus](DownloadToResult result)
-        {
-            ++callbackCount;
-            ASSERT_FALSE(result.has_value());
-            EXPECT_EQ(result.error().StatusCode, expectedStatus);
-        });
-    }
-
-    void StartDownloadToAsyncAndExpectCancellation(BlockBlobClient& client,
-        std::ostream& out,
-        const DownloadToOptions& options,
-        int& callbackCount,
-        const HttpRequestOptions& requestOptions)
-    {
-        client.DownloadToAsync(out,
-            options,
-            [&](DownloadToResult result)
-        {
+void StartDownloadToAsyncAndExpectCancellation(BlockBlobClient& client, std::ostream& out,
+                                               const DownloadToOptions& options, int& callbackCount,
+                                               const HttpRequestOptions& requestOptions) {
+    client.DownloadToAsync(
+        out, options,
+        [&](DownloadToResult result) {
             ++callbackCount;
             ASSERT_FALSE(result.has_value());
             EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::operation_canceled));
         },
-            requestOptions);
-    }
+        requestOptions);
+}
 
-    [[nodiscard]] std::size_t CompleteNewestUntilCallback(FakeHttpClient& httpClient,
-        std::size_t maxPending,
-        int& callbackCount)
-    {
-        std::size_t peakPending = 0;
-        for (int guard = 0; guard < 100 && callbackCount == 0; ++guard)
-        {
-            peakPending = std::max(peakPending, httpClient.PendingCount());
-            EXPECT_LE(httpClient.PendingCount(), maxPending);
-            EXPECT_TRUE(CompleteNewest(httpClient));
-            httpClient.Poll();
-        }
-        return peakPending;
+[[nodiscard]] std::size_t CompleteNewestUntilCallback(FakeHttpClient& httpClient, std::size_t maxPending,
+                                                      int& callbackCount) {
+    std::size_t peakPending = 0;
+    for (int guard = 0; guard < 100 && callbackCount == 0; ++guard) {
+        peakPending = std::max(peakPending, httpClient.PendingCount());
+        EXPECT_LE(httpClient.PendingCount(), maxPending);
+        EXPECT_TRUE(CompleteNewest(httpClient));
+        httpClient.Poll();
     }
+    return peakPending;
+}
 
-    void VerifyIfMatchHeaderOnChunkRequests(const FakeHttpClient& httpClient, std::string_view etag)
-    {
-        for (std::size_t index = 1; index < httpClient.RequestCount(); ++index)
-        {
-            EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(index).Request, "If-Match"), etag);
-        }
+void VerifyIfMatchHeaderOnChunkRequests(const FakeHttpClient& httpClient, std::string_view etag) {
+    for (std::size_t index = 1; index < httpClient.RequestCount(); ++index) {
+        EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(index).Request, "If-Match"), etag);
     }
+}
 
-    void CreateFileWithContents(const std::filesystem::path& path, std::string_view contents)
-    {
-        std::ofstream output(path, std::ios::binary | std::ios::trunc);
-        output << contents;
-    }
+void CreateFileWithContents(const std::filesystem::path& path, std::string_view contents) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output << contents;
+}
 } // namespace
 
-TEST(T11_ParallelDownloadAcceptanceTests, OutOfOrderCompletionIsWrittenInOrderToANonSeekableStream)
-{
+TEST(T11_ParallelDownloadAcceptanceTests, OutOfOrderCompletionIsWrittenInOrderToANonSeekableStream) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(18);
     EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
@@ -309,8 +246,7 @@ TEST(T11_ParallelDownloadAcceptanceTests, OutOfOrderCompletionIsWrittenInOrderTo
     VerifyIfMatchHeaderOnChunkRequests(httpClient, "\"etag-a\"");
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, SinkWritesRunOffTheIoThreadAndStayInOrder)
-{
+TEST(T11_ParallelDownloadAcceptanceTests, SinkWritesRunOffTheIoThreadAndStayInOrder) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(18);
     EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
@@ -327,14 +263,12 @@ TEST(T11_ParallelDownloadAcceptanceTests, SinkWritesRunOffTheIoThreadAndStayInOr
     EXPECT_EQ(buffer.str(), content);
     const auto threads = buffer.WriteThreads();
     ASSERT_FALSE(threads.empty());
-    for (const auto& thread : threads)
-    {
+    for (const auto& thread : threads) {
         EXPECT_NE(thread, std::this_thread::get_id());
     }
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, ReorderWindowBoundsBufferedChunksToConcurrency)
-{
+TEST(T11_ParallelDownloadAcceptanceTests, ReorderWindowBoundsBufferedChunksToConcurrency) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(30);
     EnqueueChunks(httpClient, content, 3U);
@@ -364,16 +298,14 @@ TEST(T11_ParallelDownloadAcceptanceTests, ReorderWindowBoundsBufferedChunksToCon
     EXPECT_EQ(out.str(), content);
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, ETagChangeMidDownloadReportsConditionNotMet)
-{
+TEST(T11_ParallelDownloadAcceptanceTests, ETagChangeMidDownloadReportsConditionNotMet) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(12);
     EnqueueForRange(httpClient, RangeHeader(0, 6), RangeResponse(0, content.substr(0, 6), content.size(), "\"etagA\""));
-    EnqueueForRange(httpClient,
-        RangeHeader(6, 6),
-        HttpResponse{412,
-            MakeCanonicalSuccessHeaders({{"x-ms-error-code", "ConditionNotMet"}, {"ETag", "\"etagB\""}}),
-            ""});
+    EnqueueForRange(
+        httpClient, RangeHeader(6, 6),
+        HttpResponse{412, MakeCanonicalSuccessHeaders({{"x-ms-error-code", "ConditionNotMet"}, {"ETag", "\"etagB\""}}),
+                     ""});
     BlockBlobClient client{httpClient, BuildOptions()};
 
     std::ostringstream out;
@@ -387,15 +319,13 @@ TEST(T11_ParallelDownloadAcceptanceTests, ETagChangeMidDownloadReportsConditionN
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(1).Request, "If-Match"), "\"etagA\"");
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, ChunkFailureCancelsInFlightChunksAndReportsOnce)
-{
+TEST(T11_ParallelDownloadAcceptanceTests, ChunkFailureCancelsInFlightChunksAndReportsOnce) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(20);
     EnqueueForRange(httpClient, RangeHeader(0, 4), RangeResponse(0, content.substr(0, 4), content.size()));
     EnqueueForRange(httpClient, RangeHeader(4, 4), RangeResponse(4, content.substr(4, 4), content.size()));
-    EnqueueForRange(httpClient,
-        RangeHeader(8, 4),
-        HttpResponse{500, MakeCanonicalSuccessHeaders({{"x-ms-error-code", "InternalError"}}), ""});
+    EnqueueForRange(httpClient, RangeHeader(8, 4),
+                    HttpResponse{500, MakeCanonicalSuccessHeaders({{"x-ms-error-code", "InternalError"}}), ""});
     EnqueueForRange(httpClient, RangeHeader(12, 4), RangeResponse(12, content.substr(12, 4), content.size()));
     BlockBlobClient client{httpClient, BuildOptions()};
 
@@ -414,8 +344,7 @@ TEST(T11_ParallelDownloadAcceptanceTests, ChunkFailureCancelsInFlightChunksAndRe
     EXPECT_EQ(httpClient.RequestCount(), 4U);
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, ParentCancellationCancelsAllInFlightChunks)
-{
+TEST(T11_ParallelDownloadAcceptanceTests, ParentCancellationCancelsAllInFlightChunks) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(40);
     EnqueueChunks(httpClient, content, 4U);
@@ -438,8 +367,7 @@ TEST(T11_ParallelDownloadAcceptanceTests, ParentCancellationCancelsAllInFlightCh
     EXPECT_EQ(httpClient.RequestCount(), 5U);
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, ParallelFileDownloadReplacesTheTargetOnSuccess)
-{
+TEST(T11_ParallelDownloadAcceptanceTests, ParallelFileDownloadReplacesTheTargetOnSuccess) {
     const std::filesystem::path target =
         std::filesystem::temp_directory_path() / "azure-client-t11-parallel-success.bin";
     CreateFileWithContents(target, "old contents that are longer than the new blob");
@@ -461,8 +389,7 @@ TEST(T11_ParallelDownloadAcceptanceTests, ParallelFileDownloadReplacesTheTargetO
     std::filesystem::remove(target, ignored);
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, ParallelFileDownloadFailureLeavesTheTargetUntouched)
-{
+TEST(T11_ParallelDownloadAcceptanceTests, ParallelFileDownloadFailureLeavesTheTargetUntouched) {
     const std::filesystem::path target =
         std::filesystem::temp_directory_path() / "azure-client-t11-parallel-failure.bin";
     CreateFileWithContents(target, "previous");
@@ -471,9 +398,8 @@ TEST(T11_ParallelDownloadAcceptanceTests, ParallelFileDownloadFailureLeavesTheTa
     const std::string content = MakeContent(16);
     EnqueueForRange(httpClient, RangeHeader(0, 4), RangeResponse(0, content.substr(0, 4), content.size()));
     EnqueueForRange(httpClient, RangeHeader(4, 4), RangeResponse(4, content.substr(4, 4), content.size()));
-    EnqueueForRange(httpClient,
-        RangeHeader(8, 4),
-        HttpResponse{412, MakeCanonicalSuccessHeaders({{"x-ms-error-code", "ConditionNotMet"}}), ""});
+    EnqueueForRange(httpClient, RangeHeader(8, 4),
+                    HttpResponse{412, MakeCanonicalSuccessHeaders({{"x-ms-error-code", "ConditionNotMet"}}), ""});
     EnqueueForRange(httpClient, RangeHeader(12, 4), RangeResponse(12, content.substr(12, 4), content.size()));
     BlockBlobClient client{httpClient, BuildOptions()};
 
@@ -490,8 +416,7 @@ TEST(T11_ParallelDownloadAcceptanceTests, ParallelFileDownloadFailureLeavesTheTa
     std::filesystem::remove(target, ignored);
 }
 
-TEST(B05_DownloadIgnoredRangeTests, OffsetRangeAnswered200IsInvalidResponse)
-{
+TEST(B05_DownloadIgnoredRangeTests, OffsetRangeAnswered200IsInvalidResponse) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(20);
     httpClient.DefaultResponse() = HttpResponse{200, MakeCanonicalSuccessHeaders(), content};
@@ -501,24 +426,15 @@ TEST(B05_DownloadIgnoredRangeTests, OffsetRangeAnswered200IsInvalidResponse)
     options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 10U};
     std::ostringstream out;
     std::optional<DownloadToResult> result;
-    client.DownloadToAsync(out,
-        options,
-        [&](DownloadToResult value)
-    {
-        result = std::move(value);
-    });
-    ASSERT_TRUE(httpClient.RunUntil([&]
-    {
-        return result.has_value();
-    }));
+    client.DownloadToAsync(out, options, [&](DownloadToResult value) { result = std::move(value); });
+    ASSERT_TRUE(httpClient.RunUntil([&] { return result.has_value(); }));
 
     ASSERT_FALSE(result->has_value());
     EXPECT_EQ(result->error().Code, AVEVA::AzureClient::BlobStorageErrorCode::InvalidResponse);
     EXPECT_TRUE(out.str().empty());
 }
 
-TEST(B05_DownloadIgnoredRangeTests, LengthRangeAnswered200IsTruncatedToTheRequestedLength)
-{
+TEST(B05_DownloadIgnoredRangeTests, LengthRangeAnswered200IsTruncatedToTheRequestedLength) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(20);
     httpClient.DefaultResponse() = HttpResponse{200, MakeCanonicalSuccessHeaders(), content};
@@ -528,27 +444,17 @@ TEST(B05_DownloadIgnoredRangeTests, LengthRangeAnswered200IsTruncatedToTheReques
     options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 0U, .Length = 5U};
     std::ostringstream out;
     std::optional<DownloadToResult> result;
-    client.DownloadToAsync(out,
-        options,
-        [&](DownloadToResult value)
-    {
-        result = std::move(value);
-    });
-    ASSERT_TRUE(httpClient.RunUntil([&]
-    {
-        return result.has_value();
-    }));
+    client.DownloadToAsync(out, options, [&](DownloadToResult value) { result = std::move(value); });
+    ASSERT_TRUE(httpClient.RunUntil([&] { return result.has_value(); }));
 
     ASSERT_TRUE(result->has_value());
     EXPECT_EQ(result->value().Value().BytesWritten, 5U);
     EXPECT_EQ(out.str(), content.substr(0, 5U));
 }
 
-TEST(A3_DownloadIntoSpanTests, FullAndPartialRangesAreWrittenByteForByte)
-{
+TEST(A3_DownloadIntoSpanTests, FullAndPartialRangesAreWrittenByteForByte) {
     const std::string content = MakeContent(18);
-    for (const auto [offset, length] : {std::pair{0U, 18U}, std::pair{4U, 7U}})
-    {
+    for (const auto [offset, length] : {std::pair{0U, 18U}, std::pair{4U, 7U}}) {
         FakeHttpClient httpClient;
         httpClient.EnqueueResponse(RangeResponse(offset, content.substr(offset, length), content.size()), {}, true);
         PageBlobClient client{httpClient, BuildOptions()};
@@ -557,8 +463,9 @@ TEST(A3_DownloadIntoSpanTests, FullAndPartialRangesAreWrittenByteForByte)
         AVEVA::AzureClient::DownloadBlobOptions options;
         options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = offset, .Length = length};
         std::optional<DownloadToResult> result;
-        client.DownloadToAsync(std::span<char>(destination), options, [&](DownloadToResult r) { result = std::move(r); });
-    ASSERT_TRUE(httpClient.CompleteRequest(0U));
+        client.DownloadToAsync(std::span<char>(destination), options,
+                               [&](DownloadToResult r) { result = std::move(r); });
+        ASSERT_TRUE(httpClient.CompleteRequest(0U));
 
         ASSERT_TRUE(result.has_value());
         ASSERT_TRUE(result->has_value());
@@ -567,8 +474,7 @@ TEST(A3_DownloadIntoSpanTests, FullAndPartialRangesAreWrittenByteForByte)
     }
 }
 
-TEST(A3_DownloadIntoSpanTests, BlobShorterThanTheRequestedRangeReportsTheBytesWritten)
-{
+TEST(A3_DownloadIntoSpanTests, BlobShorterThanTheRequestedRangeReportsTheBytesWritten) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(18);
     httpClient.EnqueueResponse(RangeResponse(0, content, content.size()), {}, true);
@@ -588,8 +494,7 @@ TEST(A3_DownloadIntoSpanTests, BlobShorterThanTheRequestedRangeReportsTheBytesWr
     EXPECT_EQ(destination.substr(18), "##");
 }
 
-TEST(A3_DownloadIntoSpanTests, ResponseLargerThanTheDestinationFailsWithoutWritingPastIt)
-{
+TEST(A3_DownloadIntoSpanTests, ResponseLargerThanTheDestinationFailsWithoutWritingPastIt) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(18);
     httpClient.EnqueueResponse(RangeResponse(0, content, content.size()), {}, true);
@@ -600,7 +505,8 @@ TEST(A3_DownloadIntoSpanTests, ResponseLargerThanTheDestinationFailsWithoutWriti
     options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 0, .Length = 18};
     std::optional<DownloadToResult> result;
     // Only the first 10 bytes are offered; the rest of `storage` acts as a guard region.
-    client.DownloadToAsync(std::span<char>(storage).first(10), options, [&](DownloadToResult r) { result = std::move(r); });
+    client.DownloadToAsync(std::span<char>(storage).first(10), options,
+                           [&](DownloadToResult r) { result = std::move(r); });
     ASSERT_TRUE(httpClient.CompleteRequest(0U));
 
     ASSERT_TRUE(result.has_value());
