@@ -92,13 +92,6 @@ template <class TArg, class RawHandler, class TExecutor>
     return BoundHandler<TArg, RawHandler, Executor, decltype(allocator), decltype(slot)>{
         std::move(handler), executor, allocator, slot, adoptedSlot, direct, std::move(work)};
 }
-// Forwards the completion token as an rvalue so move-only tokens remain move-only.
-template <class Signature, class Initiation, class CompletionToken, class... Args>
-auto InitiateAsync(Initiation&& initiation, CompletionToken&& token, Args&&... args) {
-    return boost::asio::async_initiate<Signature>(std::forward<Initiation>(initiation),
-                                                  std::forward<CompletionToken>(token), std::forward<Args>(args)...);
-}
-
 // Initiates a client operation completing with std::expected<Response<Result>, BlobStorageError>:
 // at initiation, binds the handler, then calls (client->*impl)(args..., handler, requestOptions).
 // `args` are decay-copied into the initiation so deferred tokens never dangle (pass std::ref to
@@ -108,25 +101,32 @@ auto InitiateAsync(Initiation&& initiation, CompletionToken&& token, Args&&... a
 template <class Result, class Client, class Impl, class CompletionToken, class... Args>
 auto InitiateClientOperation(Client* client, Impl impl, CompletionToken&& token,
                              std::optional<HttpRequestOptions> requestOptions, Args&&... args) {
+    using Signature = void(std::expected<Response<Result>, BlobStorageError>);
+
+    HttpRequestOptions effectiveOptions =
+        requestOptions ? std::move(*requestOptions) : client->GetDefaultRequestOptions();
     if constexpr (IsRequestOptionsToken<std::remove_cvref_t<CompletionToken>>) {
-        std::remove_cvref_t<CompletionToken> wrapper = std::forward<CompletionToken>(token);
-        return InitiateClientOperation<Result>(client, impl, std::move(wrapper.Token),
-                                               std::optional<HttpRequestOptions>{std::move(wrapper.Options)},
-                                               std::forward<Args>(args)...);
-    } else {
-        using Signature = void(std::expected<Response<Result>, BlobStorageError>);
-        HttpRequestOptions effectiveOptions =
-            requestOptions ? std::move(*requestOptions) : client->GetDefaultRequestOptions();
-        return InitiateAsync<Signature>(
-            [client, impl](auto handler, HttpRequestOptions initiationRequestOptions, auto... initiationArgs) {
-                auto boundHandler =
-                    BindAssociationsAndAdoptCancellationOn<std::expected<Response<Result>, BlobStorageError>>(
-                        handler, client->get_executor(), initiationRequestOptions);
-                std::invoke(impl, *client, std::move(initiationArgs)..., std::move(boundHandler),
-                            std::move(initiationRequestOptions));
-            },
-            std::forward<CompletionToken>(token), std::move(effectiveOptions), std::forward<Args>(args)...);
+        effectiveOptions = token.Options;
     }
+
+    // A WithRequestOptions(...) wrapper is transparent: the token it carries is what gets initiated.
+    auto&& innerToken = [&]() -> decltype(auto) {
+        if constexpr (IsRequestOptionsToken<std::remove_cvref_t<CompletionToken>>) {
+            return (std::forward<CompletionToken>(token).Token);
+        } else {
+            return std::forward<CompletionToken>(token);
+        }
+    }();
+
+    return boost::asio::async_initiate<Signature>(
+        [client, impl](auto handler, HttpRequestOptions initiationRequestOptions, auto... initiationArgs) {
+            auto boundHandler =
+                BindAssociationsAndAdoptCancellationOn<std::expected<Response<Result>, BlobStorageError>>(
+                    handler, client->get_executor(), initiationRequestOptions);
+            std::invoke(impl, *client, std::move(initiationArgs)..., std::move(boundHandler),
+                        std::move(initiationRequestOptions));
+        },
+        std::forward<decltype(innerToken)>(innerToken), std::move(effectiveOptions), std::forward<Args>(args)...);
 }
 
 // Asio requires that a completion handler never run before its initiating function returns.
