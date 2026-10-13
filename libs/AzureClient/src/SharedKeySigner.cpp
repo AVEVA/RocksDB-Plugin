@@ -114,8 +114,8 @@ constexpr std::array<int, 128> CultureTableLevel4 = MakeCultureTableLevel4();
     ParsedUrl parsed;
     const auto parseResult = boost::urls::parse_uri(url);
     if (!parseResult.has_value()) {
-        parsed.Path = "/";
-        return parsed;
+        // Signing "/" for an unparseable URL would yield a signature for a different resource.
+        throw std::invalid_argument("Cannot compute a Shared Key signature for an unparseable request URL.");
     }
 
     const boost::urls::url_view& parsedUrl = parseResult.value();

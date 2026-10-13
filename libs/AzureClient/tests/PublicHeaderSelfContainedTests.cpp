@@ -142,7 +142,8 @@ boost::asio::awaitable<void> AwaitHasValue(bool* out, bool* done, MakeOperation 
     return BlobClientOptions{.ServiceEndpoint = loopback.Endpoint(),
                              .ContainerName = "container",
                              .BlobName = "blob",
-                             .SasToken = TestSasToken};
+                             .SasToken = TestSasToken,
+                             .AllowInsecureHttp = true};
 }
 
 // Exercises one operation of `client` with (a) a lambda, (b) use_future and (c) the default
@@ -197,7 +198,8 @@ TEST(PublicHeaderSelfContainedTests, BlobContainerClient) {
     Loopback http;
     BlobContainerClient client{http.Http(), BlobContainerClientOptions{.ServiceEndpoint = http.Endpoint(),
                                                                        .ContainerName = "container",
-                                                                       .SasToken = TestSasToken}};
+                                                                       .SasToken = TestSasToken,
+                                                                       .AllowInsecureHttp = true}};
     ExerciseAllTokenKinds(http, client, [](BlobContainerClient& c, auto&& token) {
         return c.ListBlobsAsync(std::forward<decltype(token)>(token));
     });

@@ -159,6 +159,7 @@ using StaticServiceClient =
 
 template <class TOptions> void ApplyCase(TOptions& options, const TokenTransportCase& testCase) {
     options.ServiceEndpoint = testCase.Endpoint;
+    options.AllowInsecureHttp = true;
     options.SasToken.clear();
     if (testCase.UseBearerToken) {
         options.BearerToken = "token";
@@ -203,3 +204,41 @@ INSTANTIATE_TEST_SUITE_P(Matrix, TokenTransportTests, ::testing::ValuesIn(MakeTo
                          [](const ::testing::TestParamInfo<TokenTransportCase>& paramInfo) {
                              return paramInfo.param.Name;
                          });
+
+TEST(InsecureHttpTests, HttpEndpointIsRejectedUnlessExplicitlyAllowed) {
+    FakeHttpClient httpClient;
+    auto options = MakeBlobClientOptions();
+    options.SasToken.clear();
+    for (const char* endpoint : {"http://127.0.0.1:10000/devstoreaccount1", "HTTP://account.blob.core.windows.net"}) {
+        options.ServiceEndpoint = endpoint;
+        options.AllowInsecureHttp = false;
+        EXPECT_THROW((BlockBlobClient{httpClient, options}), std::invalid_argument) << endpoint;
+        options.AllowInsecureHttp = true;
+        EXPECT_NO_THROW((BlockBlobClient{httpClient, options})) << endpoint;
+    }
+}
+
+TEST(InsecureHttpTests, HttpsEndpointNeedsNoOptIn) {
+    FakeHttpClient httpClient;
+    auto options = MakeBlobClientOptions();
+    options.ServiceEndpoint = "https://account.blob.core.windows.net";
+    ASSERT_FALSE(options.AllowInsecureHttp);
+    EXPECT_NO_THROW((BlockBlobClient{httpClient, options}));
+}
+
+TEST(SasTokenValidationTests, ControlCharactersFragmentsAndEmbeddedQuestionMarksAreRejected) {
+    FakeHttpClient httpClient;
+    for (const std::string token : {std::string{"sv=1&sig=a\r\nx-ms-evil: 1"}, std::string{"sv=1#frag"},
+                                    std::string{"sv=1?sig=x"}, std::string{"sv=1 &sig=x"}, std::string{"sv=1\0x", 6}}) {
+        auto options = MakeBlobClientOptions();
+        options.SasToken = token;
+        EXPECT_THROW((BlockBlobClient{httpClient, options}), std::invalid_argument) << token;
+    }
+}
+
+TEST(SasTokenValidationTests, OrdinaryTokenWithOneLeadingQuestionMarkIsAccepted) {
+    FakeHttpClient httpClient;
+    auto options = MakeBlobClientOptions();
+    options.SasToken = "?sv=2023-11-03&sig=abc%2Bdef%3D";
+    EXPECT_NO_THROW((BlockBlobClient{httpClient, options}));
+}

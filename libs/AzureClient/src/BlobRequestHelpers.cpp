@@ -301,9 +301,24 @@ void ValidateTokenTransport(std::string_view endpoint) {
     }
 }
 
+// A SAS token / query string is spliced verbatim into the URL, so control characters, fragments or an embedded
+// '?' would change what is requested or signed.
+void ValidateSasToken(std::string_view sasToken) {
+    for (const char value : sasToken) {
+        const auto code = static_cast<unsigned char>(value);
+        if (code < 0x20U || code == 0x7FU || value == ' ' || value == '#' || value == '?') {
+            throw std::invalid_argument("SasToken must not contain control characters, spaces, '#' or '?'.");
+        }
+    }
+}
+
 template <class TOptions> void ValidateConnectionOptions(const TOptions& options, bool hasTokenCredential) {
     ValidateEndpoint(options.ServiceEndpoint);
     ValidateSharedKey(options.SharedKey);
+    ValidateSasToken(options.SasToken);
+    if (!options.AllowInsecureHttp && ToLowerAscii(options.ServiceEndpoint.substr(0, 5U)) == "http:") {
+        throw std::invalid_argument("ServiceEndpoint must use https unless AllowInsecureHttp is set.");
+    }
 
     std::size_t credentialCount = 0U;
     credentialCount += options.SasToken.empty() ? 0U : 1U;

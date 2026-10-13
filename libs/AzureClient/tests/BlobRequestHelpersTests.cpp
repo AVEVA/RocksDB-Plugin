@@ -657,8 +657,8 @@ TEST(BlobRequestHelpersTests, MakeConnectionState_NormalisesOptionsOnce) {
 
     const auto sharedKey = MakeConnectionState(BlobServiceClientOptions{
         .ServiceEndpoint = "http://127.0.0.1:10000/devstoreaccount1/",
-        .SharedKey = {.AccountName = "devstoreaccount1", .AccountKey = "MDEyMzQ1Njc4OWFiY2RlZg=="}});
-    ASSERT_NE(sharedKey->Signer, nullptr);
+        .SharedKey = {.AccountName = "devstoreaccount1", .AccountKey = "MDEyMzQ1Njc4OWFiY2RlZg=="},
+        .AllowInsecureHttp = true});
     EXPECT_EQ(sharedKey->Signer->AccountName(), "devstoreaccount1");
     EXPECT_EQ(sharedKey->BasePrefix, "http://127.0.0.1:10000");
     EXPECT_EQ(sharedKey->BasePath, "/devstoreaccount1");
@@ -760,6 +760,15 @@ TEST(SharedKeyCanonicalizationTests, RepeatedHeadersAndQueryParametersAreGrouped
     const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
     EXPECT_NE(toSign.find("x-ms-a:first\nx-ms-meta-k:v1,v2\n"), std::string::npos) << toSign;
     EXPECT_NE(toSign.find("/account/container/blob\na:y,z\nb:2\ncomp:list"), std::string::npos) << toSign;
+}
+
+TEST(SharedKeyCanonicalizationTests, UnparseableUrlIsRejectedInsteadOfSigningTheRootPath) {
+    AVEVA::HttpRequest request;
+    request.SetMethod(HttpMethod::Get);
+    request.SetUrl("not a url");
+
+    EXPECT_THROW((void)AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request),
+                 std::invalid_argument);
 }
 
 TEST(SharedKeyCanonicalizationTests, InternalWhitespaceRunsInHeaderValuesAreCollapsed) {

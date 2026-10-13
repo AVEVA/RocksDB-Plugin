@@ -57,6 +57,10 @@ struct BlobClientOptions {
     HttpRequestOptions DefaultRequestOptions;
 
     std::string ApiVersion = std::string(DefaultApiVersion);
+
+    // http endpoints are rejected with std::invalid_argument unless this is set (intended for Azurite and
+    // other local emulators). Credentials additionally still require a loopback host over http.
+    bool AllowInsecureHttp = false;
 };
 
 struct BlobContainerClientOptions {
@@ -72,6 +76,9 @@ struct BlobContainerClientOptions {
 
     RetryOptions Retry;
     HttpRequestOptions DefaultRequestOptions;
+
+    // See BlobClientOptions::AllowInsecureHttp.
+    bool AllowInsecureHttp = false;
 };
 
 struct BlobServiceClientOptions {
@@ -86,5 +93,8 @@ struct BlobServiceClientOptions {
 
     RetryOptions Retry;
     HttpRequestOptions DefaultRequestOptions;
+
+    // See BlobClientOptions::AllowInsecureHttp.
+    bool AllowInsecureHttp = false;
 };
 } // namespace AVEVA::AzureClient

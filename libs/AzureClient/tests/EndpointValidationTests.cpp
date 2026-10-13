@@ -18,6 +18,7 @@ using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 TEST(T07_ValidateEndpointTests, PathStyleServiceEndpoint_AppendsAccountPath) {
     BlobClientOptions opts = MakeBlobClientOptions();
     opts.ServiceEndpoint = "http://127.0.0.1:10000/devstoreaccount1"; // Azurite-style
+    opts.AllowInsecureHttp = true;
     opts.ContainerName = "mycontainer";
     opts.BlobName = "path/to/blob.txt";
 
