@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -143,6 +144,103 @@ TEST_F(BlobFilesystemFakeTests, TruncateShrinksTheLogicalSize) {
     m_fs->Truncate(Path("a.log"), 4);
 
     EXPECT_EQ(m_fs->GetFileSize(Path("a.log")), 4);
+}
+
+TEST_F(BlobFilesystemFakeTests, FailedTruncateResizeKeepsTheOriginalLogicalSize) {
+    Write("a.log", "0123456789");
+    m_server->Fault = [](const auto operation) -> std::optional<AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::Resize) {
+            return FakeBlobServer::Error(400U, "InvalidInput");
+        }
+        return std::nullopt;
+    };
+
+    EXPECT_ANY_THROW(m_fs->Truncate(Path("a.log"), 4));
+
+    m_server->Fault = nullptr;
+    EXPECT_EQ(m_fs->GetFileSize(Path("a.log")), 10);
+    EXPECT_EQ(Read("a.log"), "0123456789");
+}
+
+// Rename failures: whichever step fails, the source survives and an existing destination keeps its content.
+class RenameFailureTests : public BlobFilesystemFakeTests, public ::testing::WithParamInterface<FakeBlobServer::Operation> {
+  protected:
+    // Fails the `occurrence`-th (1-based) request of the given operation, and only that one.
+    void FailNth(const FakeBlobServer::Operation target, const int occurrence) {
+        m_server->Fault = [target, occurrence, seen = 0](const auto operation) mutable
+            -> std::optional<AzureClient::BlobStorageError> {
+            if (operation == target && ++seen == occurrence) {
+                return FakeBlobServer::Error(400U, "InvalidInput");
+            }
+            return std::nullopt;
+        };
+    }
+
+    [[nodiscard]] std::vector<std::string> Children() {
+        auto children = m_fs->GetChildren(Path("d"));
+        std::ranges::sort(children);
+        return children;
+    }
+};
+
+TEST_P(RenameFailureTests, FailureWhileCopyingOverAnExistingDestinationLeavesBothFilesIntactAndNoTemporaryBlob) {
+    Write("d/old", "source content");
+    Write("d/new", "original destination");
+    FailNth(GetParam(), 1);
+
+    EXPECT_ANY_THROW(m_fs->RenameFile(Path("d/old"), Path("d/new")));
+
+    m_server->Fault = nullptr;
+    EXPECT_EQ(Read("d/old"), "source content");
+    EXPECT_EQ(Read("d/new"), "original destination");
+    EXPECT_EQ(Children(), (std::vector<std::string>{"new", "old"}));
+}
+
+TEST_P(RenameFailureTests, FailureWhileCopyingToANewDestinationLeavesNoPartialDestination) {
+    Write("d/old", "source content");
+    FailNth(GetParam(), 1);
+
+    EXPECT_ANY_THROW(m_fs->RenameFile(Path("d/old"), Path("d/new")));
+
+    m_server->Fault = nullptr;
+    EXPECT_EQ(Read("d/old"), "source content");
+    EXPECT_EQ(Children(), (std::vector<std::string>{"old"}));
+}
+
+INSTANTIATE_TEST_SUITE_P(CopyAndSizeSteps, RenameFailureTests,
+                         ::testing::Values(FakeBlobServer::Operation::UploadPagesFromUrl,
+                                           FakeBlobServer::Operation::SetMetadata));
+
+TEST_F(BlobFilesystemFakeTests, FailureToDeleteTheSourceKeepsTheNewDestinationAndLeavesNoTemporaryBlob) {
+    Write("d/old", "source content");
+    Write("d/new", "original destination");
+    // The first delete removes the temporary blob; the second is the source.
+    int deletes = 0;
+    m_server->Fault = [&deletes](const auto operation) -> std::optional<AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::DeleteBlob && ++deletes == 2) {
+            return FakeBlobServer::Error(400U, "InvalidInput");
+        }
+        return std::nullopt;
+    };
+
+    EXPECT_ANY_THROW(m_fs->RenameFile(Path("d/old"), Path("d/new")));
+
+    m_server->Fault = nullptr;
+    EXPECT_EQ(Read("d/new"), "source content");
+    auto children = m_fs->GetChildren(Path("d"));
+    std::ranges::sort(children);
+    EXPECT_EQ(children, (std::vector<std::string>{"new", "old"}));
+}
+
+TEST_F(BlobFilesystemFakeTests, RenameOverAnExistingDestinationReplacesItsContent) {
+    Write("d/old", "short");
+    Write("d/new", "a much longer original destination");
+
+    m_fs->RenameFile(Path("d/old"), Path("d/new"));
+
+    EXPECT_EQ(Read("d/new"), "short");
+    EXPECT_EQ(m_fs->GetFileSize(Path("d/new")), 5);
+    EXPECT_EQ(m_fs->GetChildren(Path("d")), (std::vector<std::string>{"new"}));
 }
 
 TEST_F(BlobFilesystemFakeTests, LockFileHoldsTheLeaseUntilUnlocked) {

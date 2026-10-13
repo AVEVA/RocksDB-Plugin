@@ -14,6 +14,8 @@
 
 #include <boost/asio/use_future.hpp>
 #include <boost/scope/scope_fail.hpp>
+#include <boost/uuid/random_generator.hpp>
+#include <boost/uuid/uuid_io.hpp>
 
 #include <algorithm>
 #include <cassert>
@@ -512,14 +514,13 @@ void BasicBlobFilesystemImpl<THttp>::Truncate(const std::string& filePath, int64
     auto [prefix, realPath, clientPtr] = ResolveBlob(filePath);
 
     auto& client = *clientPtr;
-    const auto fileSize = BlobOperations::GetSize(client);
-    if (fileSize > size) {
-        BlobOperations::SetSize(*m_runtime, client, size);
-        // The service only accepts page-aligned blob sizes; the logical size lives in the metadata set above.
+    const auto info = BlobOperations::GetInfo(client);
+    if (info.Size > size) {
+        // Resize before recording the new logical size: if the resize fails the metadata still matches the blob.
+        // The service only accepts page-aligned blob sizes; the logical size lives in the metadata set afterwards.
         const auto [partialPage, alignedSize] = BlobHelpers::RoundToEndOfNearestPage(size);
-        Call(client, [&](auto token) {
-            return client.ResizeAsync(static_cast<uint64_t>(alignedSize), AzureClient::ResizePageBlobOptions{}, token);
-        });
+        BlobOperations::SetCapacity(*m_runtime, client, alignedSize);
+        BlobOperations::SetSize(*m_runtime, client, size);
     }
 }
 
@@ -550,6 +551,12 @@ template <typename THttp> size_t BasicBlobFilesystemImpl<THttp>::GetLeaseClientC
 /// Copies the blob's populated pages to its new name inside the storage service (or, when the service cannot
 /// authorize the source, in page-aligned chunks through this process), carries over the logical file size and
 /// then deletes the source. Both paths must live in the same storage account and container.
+///
+/// The storage service has no atomic blob replace, so an existing destination is only overwritten after the
+/// content has been fully copied to a temporary blob: a failure while copying leaves the destination and the
+/// source untouched. The final commit (copy from the temporary blob over the destination) is not atomic; if it
+/// fails the source is still intact and the destination may hold partial data, so the rename can be retried.
+/// A destination that does not exist is written directly and removed again on failure.
 /// </summary>
 template <typename THttp>
 void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath, const std::string& toFilePath) const {
@@ -572,18 +579,59 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
     auto destClient = container->GetPageBlobClient(std::string(realPathTo));
 
     const auto [size, cap, etag, modified] = BlobOperations::GetInfo(srcClient);
-    // Destination replaced via the same overwriting create.
-    BlobOperations::CreateOrReplace(*m_runtime, destClient, cap);
 
-    // Server-side copy first; it needs the source to be readable by the service with the client's credential.
-    if (!BlobOperations::CopyPagesServerSide(*m_runtime, srcClient, destClient, size, etag)) {
-        BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
-            << "Server-side copy of " << realPathFrom
-            << " was refused (the source could not be authorized); copying through the client instead";
-        BlobOperations::CopyPages(*m_runtime, srcClient, destClient, size, etag);
+    // Copies the source's content (and logical size) into `target`, which must already exist with the source's
+    // capacity. Server-side copy comes first; it needs the source to be readable by the service with the client's
+    // credential.
+    const auto copyInto = [&](auto& target) {
+        if (!BlobOperations::CopyPagesServerSide(*m_runtime, srcClient, target, size, etag)) {
+            BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
+                << "Server-side copy of " << realPathFrom
+                << " was refused (the source could not be authorized); copying through the client instead";
+            BlobOperations::CopyPages(*m_runtime, srcClient, target, size, etag);
+        }
+        BlobOperations::SetSize(*m_runtime, target, size);
+    };
+    // Best-effort cleanup that never masks the failure being unwound.
+    const auto deleteQuietly = [this](auto& blob, const std::string_view name) {
+        try {
+            CallResponse(blob, [&](auto token) { return blob.DeleteIfExistsAsync(token); });
+        } catch (const std::exception& e) {
+            BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
+                << "Could not delete '" << name << "' while rolling back a rename: " << e.what();
+        }
+    };
+
+    if (BlobOperations::CreateIfNotExists(*m_runtime, destClient, cap)) {
+        // Nothing to lose at the destination, so write it in place and remove the partial blob on failure.
+        boost::scope::scope_fail rollback{[&] { deleteQuietly(destClient, realPathTo); }};
+        copyInto(destClient);
+    } else {
+        const auto tempName = std::string(realPathTo) + ".rename-" + boost::uuids::to_string(boost::uuids::random_generator()());
+        auto tempClient = container->GetPageBlobClient(tempName);
+        BlobOperations::CreateOrReplace(*m_runtime, tempClient, cap);
+        {
+            boost::scope::scope_fail rollback{[&] { deleteQuietly(tempClient, tempName); }};
+            copyInto(tempClient);
+
+            // Commit: replace the destination from the fully written temporary blob.
+            const auto tempInfo = BlobOperations::GetInfo(tempClient);
+            BlobOperations::CreateOrReplace(*m_runtime, destClient, tempInfo.Capacity);
+            if (!BlobOperations::CopyPagesServerSide(*m_runtime, tempClient, destClient, size, tempInfo.ETag)) {
+                BlobOperations::CopyPages(*m_runtime, tempClient, destClient, size, tempInfo.ETag);
+            }
+            BlobOperations::SetSize(*m_runtime, destClient, size);
+        }
+        deleteQuietly(tempClient, tempName);
     }
-    BlobOperations::SetSize(*m_runtime, destClient, size);
+
     CallResponse(srcClient, [&](auto token) { return srcClient.DeleteIfExistsAsync(token); });
+
+    // Both names now hold different content than any cached copy.
+    if (const auto cache = m_fileCaches.find(prefixAccountTo); cache != m_fileCaches.end()) {
+        cache->second->RemoveFile(std::string(realPathFrom));
+        cache->second->RemoveFile(std::string(realPathTo));
+    }
 }
 
 template <typename THttp>
