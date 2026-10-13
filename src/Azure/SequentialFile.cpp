@@ -14,15 +14,7 @@
 namespace AVEVA::RocksDB::Plugin::Azure {
 namespace {
 rocksdb::IOStatus StatusFromException(const std::exception_ptr& error) {
-    try {
-        std::rethrow_exception(error);
-    } catch (const RequestFailedException& e) {
-        return AzureErrorTranslator::IOStatusFromError(e);
-    } catch (const std::exception& e) {
-        return rocksdb::IOStatus::IOError(e.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Failed to Read from file");
-    }
+    return AzureErrorTranslator::FromException(error);
 }
 } // namespace
 

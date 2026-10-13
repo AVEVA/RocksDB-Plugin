@@ -13,7 +13,7 @@
 using namespace AVEVA::RocksDB::Plugin::Azure::Impl;
 using namespace AVEVA::RocksDB::Plugin::Core;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobEnvironment;
-using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakePageBlobClient;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobServer;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadableFile;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadableFileImpl;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadWriteFileImpl;
@@ -32,7 +32,7 @@ class ReadWriteFileImplTests : public ::testing::Test {
     }
 
     std::unique_ptr<FakeReadWriteFileImpl> CreateFile() {
-        return std::make_unique<FakeReadWriteFileImpl>(m_testFileName, m_env.Runtime, m_env.Blob, nullptr, m_logger);
+        return std::make_unique<FakeReadWriteFileImpl>(m_testFileName, m_env.Runtime, m_env.Client, nullptr, m_logger);
     }
 };
 TEST_F(ReadWriteFileImplTests, Constructor_InitializesCorrectly) {
@@ -162,6 +162,54 @@ TEST_F(ReadWriteFileImplTests, Flush_PartialFirstPage_MergesExistingData) {
     EXPECT_EQ(newData, newDataBuffer);
 }
 
+TEST_F(ReadWriteFileImplTests, Flush_WritesOnDifferentPages_EachMergesItsOwnExistingData) {
+    // Arrange - existing data on three separate pages
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    const int64_t total = 3 * page;
+    std::fill_n(m_env.Blob->Data.begin(), total, 'X');
+    m_env.Blob->Size = total;
+    auto file = CreateFile();
+
+    // Act - a small write in the middle of each page, so every chunk needs pre and post padding
+    const std::string payload(10, 'Y');
+    for (int64_t pageIndex = 0; pageIndex < 3; ++pageIndex) {
+        file->Write(pageIndex * page + 100, payload.data(), static_cast<int64_t>(payload.size()));
+    }
+    file->Sync();
+
+    // Assert
+    std::vector<char> actual(static_cast<size_t>(total));
+    ASSERT_EQ(total, file->Read(0, total, actual.data()));
+    std::vector<char> expected(static_cast<size_t>(total), 'X');
+    for (int64_t pageIndex = 0; pageIndex < 3; ++pageIndex) {
+        std::fill_n(expected.begin() + pageIndex * page + 100, payload.size(), 'Y');
+    }
+    EXPECT_EQ(expected, actual);
+}
+
+TEST_F(ReadWriteFileImplTests, Flush_WritesSharingAPage_KeepEarlierWrites) {
+    // Arrange
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    std::fill_n(m_env.Blob->Data.begin(), page, 'X');
+    m_env.Blob->Size = page;
+    auto file = CreateFile();
+
+    // Act - two writes inside the same page: the second chunk's padding must include the first chunk's bytes
+    const std::string first(10, 'A');
+    const std::string second(10, 'B');
+    file->Write(100, first.data(), static_cast<int64_t>(first.size()));
+    file->Write(200, second.data(), static_cast<int64_t>(second.size()));
+    file->Sync();
+
+    // Assert
+    std::vector<char> actual(static_cast<size_t>(page));
+    ASSERT_EQ(page, file->Read(0, page, actual.data()));
+    std::vector<char> expected(static_cast<size_t>(page), 'X');
+    std::fill_n(expected.begin() + 100, first.size(), 'A');
+    std::fill_n(expected.begin() + 200, second.size(), 'B');
+    EXPECT_EQ(expected, actual);
+}
+
 // Test Sync updates file size metadata
 TEST_F(ReadWriteFileImplTests, Sync_UpdatesFileSizeMetadata) {
     // Arrange
@@ -286,16 +334,16 @@ TEST_F(ReadWriteFileImplTests, Destructor_RetriesCloseOnFailure) {
     int sizeWriteAttempts = 0;
     m_env.Blob->Fault =
         [&sizeWriteAttempts](
-            const FakePageBlobClient::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
-        if (operation == FakePageBlobClient::Operation::SetMetadata && ++sizeWriteAttempts <= 2) {
-            return FakePageBlobClient::Error(500, "InternalError");
+            const FakeBlobServer::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::SetMetadata && ++sizeWriteAttempts <= 2) {
+            return FakeBlobServer::Error(500, "InternalError");
         }
         return std::nullopt;
     };
 
     // Act - destructor should retry
     {
-        FakeReadWriteFileImpl file(m_testFileName, m_env.Runtime, m_env.Blob, nullptr, m_logger);
+        FakeReadWriteFileImpl file(m_testFileName, m_env.Runtime, m_env.Client, nullptr, m_logger);
     } // Destructor called here
 
     // Assert

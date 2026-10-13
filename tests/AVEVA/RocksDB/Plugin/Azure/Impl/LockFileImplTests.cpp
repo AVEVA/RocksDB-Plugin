@@ -5,7 +5,6 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
-#include "FakeHttpBridge.hpp"
 #include "FakeHttpClient.hpp"
 #include "TestFixtures.hpp"
 
@@ -33,8 +32,9 @@ using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
 using AVEVA::RocksDB::Plugin::Azure::RequestFailedException;
 using AVEVA::RocksDB::Plugin::Azure::Impl::BasicLeaseRenewalLoop;
-using AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime;
-using AVEVA::RocksDB::Plugin::Azure::Impl::LockFileImpl;
+using AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntimeBase;
+// The lock over the library's page blob client on the fake transport.
+using LockFileImpl = AVEVA::RocksDB::Plugin::Azure::Impl::BasicLockFileImpl<AVEVA::AzureClient::Tests::PageBlobClient>;
 
 namespace {
 class LockFileImplTests : public ::testing::Test {
@@ -42,14 +42,14 @@ class LockFileImplTests : public ::testing::Test {
     void SetUp() override {
         m_httpClient.CompleteInline() = true;
         // Some completions are posted to the fake's own io_context while Lock() blocks on a future.
-        m_bridge = std::make_unique<AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeHttpBridge>(m_httpClient);
-        m_runtime = std::make_shared<ClientRuntime>(m_context);
+        m_httpClient.StartBackgroundPump();
+        m_runtime = std::make_shared<ClientRuntimeBase>();
         m_logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
     }
 
     std::unique_ptr<LockFileImpl> CreateLock(std::chrono::seconds leaseLength) {
-        auto client = std::make_unique<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient>(
-            m_bridge->Client(), MakeBlobClientOptions("locks", "LOCK"));
+        auto client = std::make_unique<AVEVA::AzureClient::Tests::PageBlobClient>(
+            m_httpClient, MakeBlobClientOptions("locks", "LOCK"));
         return std::make_unique<LockFileImpl>(m_runtime, std::move(client), leaseLength, m_logger, "LOCK");
     }
 
@@ -63,9 +63,8 @@ class LockFileImplTests : public ::testing::Test {
 
     boost::asio::io_context m_context;
     FakeHttpClient m_httpClient;
-    std::shared_ptr<ClientRuntime> m_runtime;
+    std::shared_ptr<ClientRuntimeBase> m_runtime;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
-    std::unique_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeHttpBridge> m_bridge;
 };
 } // namespace
 
@@ -270,7 +269,7 @@ class LeaseRenewalLoopTests : public LockFileImplTests {
         std::atomic<int>* Count;
         void operator()() const { ++*Count; }
     };
-    using Loop = BasicLeaseRenewalLoop<FixedSnapshot, CountFatal>;
+    using Loop = BasicLeaseRenewalLoop<FixedSnapshot, CountFatal, LockFileImpl>;
 
   protected:
     void SetUp() override {

@@ -12,17 +12,20 @@
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 template <typename TBlob>
 AVEVA::RocksDB::Plugin::Azure::Impl::BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(
-    const std::string_view name, std::shared_ptr<ClientRuntime> runtime, std::shared_ptr<TBlob> blob,
+    const std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
     std::shared_ptr<Core::FileCache> fileCache,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     const int64_t bufferSize)
     : BasicWriteableFileImpl<TBlob>(name, std::move(runtime), blob, std::move(fileCache), std::move(logger), bufferSize,
-                                    // Braced initialisation guarantees GetSize runs before GetCapacity.
-                                    BlobState{BlobOperations::GetSize(*blob), BlobOperations::GetCapacity(*blob)}) {}
+                                    // One GetProperties call yields both the size and the capacity.
+                                    [&blob] {
+                                        const auto info = BlobOperations::GetInfo(*blob);
+                                        return BlobState{info.Size, info.Capacity};
+                                    }()) {}
 
 template <typename TBlob>
 BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(
-    const std::string_view name, std::shared_ptr<ClientRuntime> runtime, std::shared_ptr<TBlob> blob,
+    const std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
     std::shared_ptr<Core::FileCache> fileCache,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     const int64_t bufferSize, const BlobState knownState)

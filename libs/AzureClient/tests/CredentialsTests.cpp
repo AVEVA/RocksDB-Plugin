@@ -14,8 +14,10 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <initializer_list>
 #include <ios>
 #include <optional>
@@ -32,9 +34,12 @@ using AVEVA::HttpRequest;
 using AVEVA::HttpResponse;
 using AVEVA::AzureClient::AccessToken;
 using AVEVA::AzureClient::BlobStorageErrorCode;
+using AVEVA::AzureClient::AssertionCompletion;
+using AVEVA::AzureClient::ClientAssertionCredentialOptions;
 using AVEVA::AzureClient::ClientSecretCredentialOptions;
 using AVEVA::AzureClient::ManagedIdentityCredentialOptions;
 using AVEVA::AzureClient::WorkloadIdentityCredentialOptions;
+using AVEVA::AzureClient::Tests::ClientAssertionCredential;
 using AVEVA::AzureClient::Tests::ClientSecretCredential;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::ManagedIdentityCredential;
@@ -234,6 +239,87 @@ TEST(CredentialsTests, WorkloadIdentityCredentialSendsFederatedTokenAsClientAsse
     EXPECT_EQ(httpClient.Requests().size(), 1U);
 }
 
+[[nodiscard]] ClientAssertionCredentialOptions AssertionOptions(std::function<void(AssertionCompletion)> provider) {
+    ClientAssertionCredentialOptions options;
+    options.TenantId = "contoso.onmicrosoft.com";
+    options.ClientId = "app";
+    options.AssertionProvider = std::move(provider);
+    options.Retry.MaxRetries = 0;
+    return options;
+}
+
+TEST(CredentialsTests, ClientAssertionCredentialSendsTheProvidedAssertion) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(Json(200, R"({"expires_in":3600,"access_token":"ca-token"})"));
+    int calls = 0;
+    ClientAssertionCredential credential{httpClient, AssertionOptions([&calls](AssertionCompletion done) {
+                                             ++calls;
+                                             done(std::error_code{}, "a.b+c");
+                                         })};
+
+    const TokenResult result = GetToken(httpClient, credential);
+    ASSERT_FALSE(result.Error) << result.Error.message();
+    EXPECT_EQ(result.Token.Token, "ca-token");
+    EXPECT_EQ(calls, 1);
+    EXPECT_EQ(httpClient.LastRequest().GetUrl(),
+              "https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/token");
+    EXPECT_EQ(FakeHttpClient::BodyAsString(httpClient.LastRequest()),
+              "grant_type=client_credentials&client_id=app"
+              "&client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer"
+              "&client_assertion=a.b%2Bc&scope=https%3A%2F%2Fstorage.azure.com%2F.default");
+}
+
+TEST(CredentialsTests, ClientAssertionCredentialRequestsAFreshAssertionEachTime) {
+    FakeHttpClient httpClient;
+    httpClient.DefaultResponse() = Json(200, R"({"expires_in":3600,"access_token":"t"})");
+    int calls = 0;
+    ClientAssertionCredential credential{httpClient, AssertionOptions([&calls](AssertionCompletion done) {
+                                             done(std::error_code{}, "assertion" + std::to_string(++calls));
+                                         })};
+
+    ASSERT_FALSE(GetToken(httpClient, credential).Error);
+    EXPECT_NE(FakeHttpClient::BodyAsString(httpClient.LastRequest()).find("client_assertion=assertion1&"),
+              std::string::npos);
+    ASSERT_FALSE(GetToken(httpClient, credential).Error);
+    EXPECT_NE(FakeHttpClient::BodyAsString(httpClient.LastRequest()).find("client_assertion=assertion2&"),
+              std::string::npos);
+}
+
+TEST(CredentialsTests, ClientAssertionProviderErrorIsPassedThroughWithoutARequest) {
+    FakeHttpClient httpClient;
+    const auto providerError = make_error_code(BlobStorageErrorCode::AuthenticationFailed);
+    ClientAssertionCredential credential{
+        httpClient, AssertionOptions([providerError](AssertionCompletion done) { done(providerError, {}); })};
+
+    EXPECT_EQ(GetToken(httpClient, credential).Error, providerError);
+    EXPECT_EQ(httpClient.Requests().size(), 0U);
+}
+
+TEST(CredentialsTests, ClientAssertionInvalidConfigurationFailsWithoutARequest) {
+    FakeHttpClient httpClient;
+    const auto provider = [](AssertionCompletion done) { done(std::error_code{}, "assertion"); };
+    const auto invalid = std::make_error_code(std::errc::invalid_argument);
+
+    ClientAssertionCredential noProvider{httpClient, AssertionOptions({})};
+    EXPECT_EQ(GetToken(httpClient, noProvider).Error, invalid);
+
+    auto badTenant = AssertionOptions(provider);
+    badTenant.TenantId = "../evil";
+    ClientAssertionCredential badTenantCredential{httpClient, badTenant};
+    EXPECT_EQ(GetToken(httpClient, badTenantCredential).Error, invalid);
+
+    ClientAssertionCredential emptyAssertion{
+        httpClient, AssertionOptions([](AssertionCompletion done) { done(std::error_code{}, {}); })};
+    EXPECT_EQ(GetToken(httpClient, emptyAssertion).Error, invalid);
+
+    ClientAssertionCredential noScopes{httpClient, AssertionOptions(provider)};
+    EXPECT_EQ(GetToken(httpClient, noScopes, {}).Error, invalid);
+    EXPECT_EQ(httpClient.Requests().size(), 0U);
+
+    auto badAuthority = AssertionOptions(provider);
+    badAuthority.AuthorityHost = "http://login.example/";
+    EXPECT_THROW((ClientAssertionCredential{httpClient, badAuthority}), std::invalid_argument);
+}
 TEST(CredentialsTests, ManagedIdentityCredentialUsesImds) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(Json(
@@ -490,4 +576,39 @@ TEST(CredentialsTests, AllCredentialsAreCancelledWhileTheRequestIsInFlight) {
         expectCancelled(httpClient, signal, credential);
     }
     std::filesystem::remove(tokenFile);
+}
+namespace {
+void SetEnvironmentValue(const char* name, const char* value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    if (*value == '\0') {
+        unsetenv(name);
+    } else {
+        setenv(name, value, 1);
+    }
+#endif
+}
+} // namespace
+
+TEST(CredentialsTests, ClientSecretOptionsFromEnvironmentReadsTheStandardVariables) {
+    SetEnvironmentValue("AZURE_TENANT_ID", "tenant-env");
+    SetEnvironmentValue("AZURE_CLIENT_ID", "client-env");
+    SetEnvironmentValue("AZURE_CLIENT_SECRET", "secret-env");
+    SetEnvironmentValue("AZURE_AUTHORITY_HOST", "https://authority.example/");
+
+    const auto options = ClientSecretCredentialOptions::FromEnvironment();
+    EXPECT_EQ(options.TenantId, "tenant-env");
+    EXPECT_EQ(options.ClientId, "client-env");
+    EXPECT_EQ(options.ClientSecret, "secret-env");
+    EXPECT_EQ(options.AuthorityHost, "https://authority.example/");
+
+    SetEnvironmentValue("AZURE_AUTHORITY_HOST", "");
+    EXPECT_EQ(ClientSecretCredentialOptions::FromEnvironment().AuthorityHost,
+              std::string{AVEVA::AzureClient::DefaultAuthorityHost});
+
+    SetEnvironmentValue("AZURE_TENANT_ID", "");
+    SetEnvironmentValue("AZURE_CLIENT_ID", "");
+    SetEnvironmentValue("AZURE_CLIENT_SECRET", "");
+    EXPECT_TRUE(ClientSecretCredentialOptions::FromEnvironment().TenantId.empty());
 }

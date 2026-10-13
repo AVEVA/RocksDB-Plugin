@@ -415,5 +415,24 @@ namespace AVEVA::AzureClient::Models
         std::chrono::system_clock::time_point LastModified;
     };
 
+    // A run of pages that hold data (not cleared).
+    struct PageRange
+    {
+        std::uint64_t Offset = 0;
+        std::uint64_t Length = 0;
+    };
+
+    struct GetPageRangesResult
+    {
+        // Ranges that hold data, in ascending order; cleared ranges are omitted.
+        std::vector<PageRange> Ranges;
+        std::string ETag;
+        std::chrono::system_clock::time_point LastModified;
+        // Size of the whole blob (x-ms-blob-content-length), not of the queried range.
+        std::uint64_t BlobContentLength = 0;
+        // Non-empty when the service truncated the list; pass it as GetPageRangesOptions::Marker.
+        std::string NextMarker;
+    };
+
     std::string EncodeBlockId(std::uint64_t index);
 } // namespace AVEVA::AzureClient::Models

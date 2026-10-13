@@ -222,10 +222,84 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
             std::forward<CompletionToken>(token), std::move(requestOptions), newSize, std::move(options));
     }
 
+    // Lists the pages that hold data (Get Page Ranges). A truncated result carries NextMarker; pass it back as
+    // options.Marker to continue. With Conditions.IfMatch the call fails with ConditionNotMet if the blob changed.
+    template <class CompletionToken = DefaultCompletionToken>
+        requires(!std::same_as<std::remove_cvref_t<CompletionToken>, GetPageRangesOptions>)
+    [[nodiscard]] auto GetPageRangesAsync(CompletionToken&& token = CompletionToken{},
+                                          std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::GetPageRangesResult>(
+            this,
+            [](auto& client, auto&&... args) { client.GetPageRangesAsyncImpl(std::forward<decltype(args)>(args)...); },
+            std::forward<CompletionToken>(token), std::move(requestOptions), GetPageRangesOptions{});
+    }
+
+    template <class CompletionToken = DefaultCompletionToken>
+    [[nodiscard]] auto GetPageRangesAsync(GetPageRangesOptions options, CompletionToken&& token = CompletionToken{},
+                                          std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::GetPageRangesResult>(
+            this,
+            [](auto& client, auto&&... args) { client.GetPageRangesAsyncImpl(std::forward<decltype(args)>(args)...); },
+            std::forward<CompletionToken>(token), std::move(requestOptions), std::move(options));
+    }
+
   private:
     template <HttpClientLike, TokenCredentialLike> friend class BasicBlobContainerClient;
     BasicPageBlobClient(THttp& httpClient, std::shared_ptr<const Private::BasicBlobTarget<TCred>> target)
         : Base(httpClient, std::move(target)) {}
+
+    template <class THandler>
+    void GetPageRangesAsyncImpl(const GetPageRangesOptions& options, THandler completion,
+                                HttpRequestOptions requestOptions) {
+        const auto fail = [&](std::string message) {
+            Private::PostCompletion(this->Http(), std::move(completion),
+                                    Private::MakeError<Models::GetPageRangesResult>(
+                                        std::make_error_code(std::errc::invalid_argument), std::move(message)));
+        };
+        std::optional<std::string> rangeHeader;
+        if (options.Range.has_value()) {
+            if (const auto error = Private::ValidatePageAligned(options.Range->Offset, "offset")) {
+                return fail(*error);
+            }
+            if (!options.Range->Length.has_value()) {
+                // An open-ended window is the same as no window for a whole-blob scan from the offset.
+                rangeHeader = "bytes=" + std::to_string(options.Range->Offset) + "-";
+            } else {
+                if (const auto error = Private::ValidatePageAligned(*options.Range->Length, "length")) {
+                    return fail(*error);
+                }
+                const auto header =
+                    Private::BuildPageWriteRangeHeaderValue(options.Range->Offset, *options.Range->Length);
+                if (!header.has_value()) {
+                    return fail(header.error());
+                }
+                rangeHeader = *header;
+            }
+        }
+
+        std::vector<std::pair<std::string, std::string>> queryParameters{{"comp", "pagelist"}};
+        if (!options.Marker.empty()) {
+            queryParameters.emplace_back("marker", options.Marker);
+        }
+        if (options.MaxResults.has_value()) {
+            queryParameters.emplace_back("maxresults", std::to_string(*options.MaxResults));
+        }
+        HttpRequest request =
+            Private::BuildBlobRequest(this->Target(), HttpMethod::Get, Private::BuildQueryString(queryParameters));
+        if (rangeHeader.has_value()) {
+            Private::AddHeader(request, Private::XMsRangeHeaderName, *rangeHeader);
+        }
+        Private::ApplyBlobRequestConditions(request, options.Conditions);
+
+        Private::SendAuthorizedRequestAsync(
+            this->Http(), this->Target(), std::move(request),
+            [completion = std::move(completion)](std::error_code error, HttpResponse response) mutable {
+                Private::CompleteParsed<Models::GetPageRangesResult>(error, std::move(response),
+                                                                     Private::ParseGetPageRangesResult,
+                                                                     std::move(completion));
+            },
+            requestOptions);
+    }
 
     template <class THandler>
     void CreateAsyncImpl(std::uint64_t contentLength, const CreatePageBlobOptions& options, THandler completion,

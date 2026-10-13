@@ -14,7 +14,7 @@
 using AVEVA::RocksDB::Plugin::Azure::RequestFailedException;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Configuration;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobEnvironment;
-using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakePageBlobClient;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobServer;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadableFile;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadableFileImpl;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadWriteFileImpl;
@@ -33,7 +33,7 @@ class SequentialFileTests : public ::testing::Test {
     void SetUp() override { m_env.Fill(DefaultBlobSize); }
 
     FakeReadableFileImpl MakeReadable() {
-        return FakeReadableFileImpl{"test.sst", m_env.Runtime, m_env.Blob, nullptr, m_logger};
+        return FakeReadableFileImpl{"test.sst", m_env.Runtime, m_env.Client, nullptr, m_logger};
     }
     FakeSequentialFileImpl MakeFile() { return FakeSequentialFileImpl{MakeReadable()}; }
 };
@@ -189,9 +189,9 @@ TEST_F(SequentialFileTests, GetOffset_InitiallyZero) {
 TEST_F(SequentialFileTests, SequentialRead_DownloadFails_DoesNotAdvanceOffset) {
     constexpr int64_t bytesToRead = 100;
     m_env.Blob->Fault =
-        [](const FakePageBlobClient::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
-        if (operation == FakePageBlobClient::Operation::DownloadToBuffer) {
-            return FakePageBlobClient::Error(500, "InternalError");
+        [](const FakeBlobServer::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::DownloadToBuffer) {
+            return FakeBlobServer::Error(500, "InternalError");
         }
         return std::nullopt;
     };

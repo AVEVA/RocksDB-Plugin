@@ -30,6 +30,7 @@ add_subdirectory("${PROJECT_SOURCE_DIR}/libs/AzureClient" "${PROJECT_BINARY_DIR}
 add_library(aveva-azure-client-test-support INTERFACE)
 target_include_directories(aveva-azure-client-test-support INTERFACE "${PROJECT_SOURCE_DIR}/libs/AzureClient/tests")
 target_link_libraries(aveva-azure-client-test-support INTERFACE aveva::azure-client)
+add_library(aveva::azure-client-testing ALIAS aveva-azure-client-test-support)
 
 # Asio types are shared across the plugin and both libraries, so they must agree on the Windows API level.
 foreach(_aveva_lib IN ITEMS aveva-http-client aveva-azure-client)

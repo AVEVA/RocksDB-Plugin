@@ -23,7 +23,7 @@ template <typename TBlob> class BasicWriteableFileImpl {
     std::string m_name;
     int64_t m_bufferSize;
     // Declared before the client so that it is destroyed after it: the client references the runtime's HTTP client.
-    std::shared_ptr<ClientRuntime> m_runtime;
+    std::shared_ptr<ClientRuntimeBase> m_runtime;
     std::shared_ptr<TBlob> m_blob;
     std::shared_ptr<Core::FileCache> m_fileCache;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
@@ -60,12 +60,12 @@ template <typename TBlob> class BasicWriteableFileImpl {
     };
 
     BasicWriteableFileImpl(
-        std::string_view name, std::shared_ptr<ClientRuntime> runtime, std::shared_ptr<TBlob> blob,
+        std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
         std::shared_ptr<Core::FileCache> fileCache,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         int64_t bufferSize = Configuration::PageBlob::DefaultBufferSize);
     BasicWriteableFileImpl(
-        std::string_view name, std::shared_ptr<ClientRuntime> runtime, std::shared_ptr<TBlob> blob,
+        std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
         std::shared_ptr<Core::FileCache> fileCache,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         int64_t bufferSize, BlobState knownState);

@@ -3,6 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 
+#include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 #include <AVEVA/HttpClient/HttpClientError.hpp>
 #include <gtest/gtest.h>
 
@@ -65,7 +66,7 @@ TEST(AzureErrorTranslatorTests, ThrottlingAndUnavailableAreRetryableBusy) {
 }
 
 TEST(AzureErrorTranslatorTests, ServerErrorsAreRetryableIOError) {
-    for (unsigned int code : {500u, 501u, 502u, 504u, 505u, 507u}) {
+    for (unsigned int code : {500u, 502u, 504u}) {
         auto status = AzureErrorTranslator::IOStatusFromError(Failure(code));
         EXPECT_TRUE(status.IsIOError());
         EXPECT_TRUE(status.GetRetryable());
@@ -157,11 +158,29 @@ TEST(AzureErrorTranslatorTests, StatusTextIncludesCodeAndMessage) {
 }
 
 TEST(AzureErrorTranslatorTests, TransientClassification) {
-    for (unsigned int code : {0u, 408u, 429u, 500u, 501u, 502u, 503u, 504u, 507u}) {
+    for (unsigned int code : {408u, 429u, 500u, 502u, 503u, 504u}) {
         EXPECT_TRUE(AzureErrorTranslator::IsTransient(Failure(code))) << code;
     }
 
-    for (unsigned int code : {400u, 401u, 403u, 404u, 409u, 412u}) {
+    for (unsigned int code : {0u, 400u, 401u, 403u, 404u, 409u, 412u, 501u, 505u, 507u}) {
         EXPECT_FALSE(AzureErrorTranslator::IsTransient(Failure(code))) << code;
     }
+}
+
+TEST(AzureErrorTranslatorTests, PortableNotFoundConditionWinsOverTheStatus) {
+    const auto code = std::make_error_code(std::errc::no_such_file_or_directory);
+    EXPECT_TRUE(AzureErrorTranslator::IOStatusFromError(Failure(409, "SomeCode", code)).IsNotFound());
+}
+
+TEST(AzureErrorTranslatorTests, InvalidResponseIsCorruption) {
+    const auto code =
+        ::AVEVA::AzureClient::make_error_code(::AVEVA::AzureClient::BlobStorageErrorCode::InvalidResponse);
+    EXPECT_TRUE(AzureErrorTranslator::IOStatusFromError(Failure(200, "", code)).IsCorruption());
+}
+
+TEST(AzureErrorTranslatorTests, LeaseLostIsAnIOErrorNamingTheLease) {
+    const auto code = ::AVEVA::AzureClient::make_error_code(::AVEVA::AzureClient::BlobStorageErrorCode::LeaseLost);
+    const auto status = AzureErrorTranslator::IOStatusFromError(Failure(409, "LeaseLost", code));
+    EXPECT_TRUE(status.IsIOError());
+    EXPECT_NE(status.ToString().find("Lease lost"), std::string::npos);
 }

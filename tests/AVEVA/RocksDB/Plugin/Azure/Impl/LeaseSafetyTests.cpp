@@ -6,7 +6,6 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 
-#include "FakeHttpBridge.hpp"
 #include "FakeHttpClient.hpp"
 #include "TestFixtures.hpp"
 
@@ -28,7 +27,9 @@ using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
 using AVEVA::RocksDB::Plugin::Azure::Impl::AsyncReadTracker;
 using AVEVA::RocksDB::Plugin::Azure::Impl::BlockOnFor;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime;
-using AVEVA::RocksDB::Plugin::Azure::Impl::LockFileImpl;
+using AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntimeBase;
+// The lock over the library's page blob client on the fake transport.
+using LockFileImpl = AVEVA::RocksDB::Plugin::Azure::Impl::BasicLockFileImpl<AVEVA::AzureClient::Tests::PageBlobClient>;
 
 using namespace std::chrono_literals;
 
@@ -128,22 +129,21 @@ class LeaseDeadlineTests : public ::testing::Test {
   protected:
     void SetUp() override {
         m_httpClient.CompleteInline() = true;
-        m_bridge = std::make_unique<AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeHttpBridge>(m_httpClient);
-        m_runtime = std::make_shared<ClientRuntime>(m_context);
+        m_httpClient.StartBackgroundPump();
+        m_runtime = std::make_shared<ClientRuntimeBase>();
         m_logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
     }
 
     boost::asio::io_context m_context;
     FakeHttpClient m_httpClient;
-    std::shared_ptr<ClientRuntime> m_runtime;
+    std::shared_ptr<ClientRuntimeBase> m_runtime;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
-    std::unique_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeHttpBridge> m_bridge;
 };
 } // namespace
 
 TEST_F(LeaseDeadlineTests, NotOverdueBeforeLockedOrRightAfterAcquiring) {
-    auto client = std::make_unique<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient>(
-        m_bridge->Client(), MakeBlobClientOptions("locks", "LOCK"));
+    auto client = std::make_unique<AVEVA::AzureClient::Tests::PageBlobClient>(m_httpClient,
+                                                                              MakeBlobClientOptions("locks", "LOCK"));
     LockFileImpl lock(m_runtime, std::move(client), 20s, m_logger, "LOCK");
     EXPECT_FALSE(lock.IsRenewalOverdue());
 

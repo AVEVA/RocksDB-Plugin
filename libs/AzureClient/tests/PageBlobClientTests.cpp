@@ -324,6 +324,104 @@ TEST(PageBlobClientTests, ClearPagesAsync_ReportsZeroLengthRangeViaCompletion) {
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
+TEST(PageBlobClientTests, GetPageRangesAsync_ParsesRangesAndHeaders) {
+    FakeHttpClient httpClient;
+    httpClient.DefaultResponse() = HttpResponse{
+        200,
+        {{"ETag", "\"0x1\""}, {"x-ms-blob-content-length", "8192"}},
+        R"(<?xml version="1.0" encoding="utf-8"?><PageList><PageRange><Start>0</Start><End>511</End></PageRange>)"
+        R"(<ClearRange><Start>512</Start><End>1023</End></ClearRange>)"
+        R"(<PageRange><Start>4096</Start><End>5119</End></PageRange><NextMarker>m2</NextMarker></PageList>)"};
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    bool invoked = false;
+    AVEVA::AzureClient::GetPageRangesOptions options;
+    options.Conditions.IfMatch = "\"0x1\"";
+    client.GetPageRangesAsync(
+        options, [&](std::expected<Response<AVEVA::AzureClient::Models::GetPageRangesResult>, BlobStorageError> result) {
+            ASSERT_TRUE(result.has_value());
+            const auto& value = result->Value();
+            ASSERT_EQ(value.Ranges.size(), 2U);
+            EXPECT_EQ(value.Ranges[0].Offset, 0U);
+            EXPECT_EQ(value.Ranges[0].Length, 512U);
+            EXPECT_EQ(value.Ranges[1].Offset, 4096U);
+            EXPECT_EQ(value.Ranges[1].Length, 1024U);
+            EXPECT_EQ(value.ETag, "\"0x1\"");
+            EXPECT_EQ(value.BlobContentLength, 8192U);
+            EXPECT_EQ(value.NextMarker, "m2");
+            invoked = true;
+        });
+    httpClient.Poll();
+
+    EXPECT_TRUE(invoked);
+    const auto& request = httpClient.LastRequest();
+    EXPECT_EQ(request.GetMethod(), HttpMethod::Get);
+    EXPECT_NE(request.GetUrl().find("comp=pagelist"), std::string::npos);
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "If-Match"), "\"0x1\"");
+    EXPECT_TRUE(FakeHttpClient::FindHeaderValue(request, "x-ms-range").empty());
+}
+
+TEST(PageBlobClientTests, GetPageRangesAsync_SendsRangeMarkerAndMaxResults) {
+    FakeHttpClient httpClient;
+    httpClient.DefaultResponse() = HttpResponse{200, {}, "<PageList />"};
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    AVEVA::AzureClient::GetPageRangesOptions options;
+    options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 1024, .Length = 2048};
+    options.Marker = "abc";
+    options.MaxResults = 10;
+    bool invoked = false;
+    client.GetPageRangesAsync(
+        options, [&](std::expected<Response<AVEVA::AzureClient::Models::GetPageRangesResult>, BlobStorageError> result) {
+            ASSERT_TRUE(result.has_value());
+            EXPECT_TRUE(result->Value().Ranges.empty());
+            invoked = true;
+        });
+    httpClient.Poll();
+
+    EXPECT_TRUE(invoked);
+    const auto& request = httpClient.LastRequest();
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-range"), "bytes=1024-3071");
+    EXPECT_NE(request.GetUrl().find("marker=abc"), std::string::npos);
+    EXPECT_NE(request.GetUrl().find("maxresults=10"), std::string::npos);
+}
+
+TEST(PageBlobClientTests, GetPageRangesAsync_RejectsUnalignedRangeWithoutSending) {
+    FakeHttpClient httpClient;
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    AVEVA::AzureClient::GetPageRangesOptions options;
+    options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 100, .Length = 512};
+    bool invoked = false;
+    client.GetPageRangesAsync(
+        options, [&](std::expected<Response<AVEVA::AzureClient::Models::GetPageRangesResult>, BlobStorageError> result) {
+            ASSERT_FALSE(result.has_value());
+            EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
+            invoked = true;
+        });
+    httpClient.Poll();
+
+    EXPECT_TRUE(invoked);
+    EXPECT_EQ(httpClient.RequestCount(), 0U);
+}
+
+TEST(PageBlobClientTests, GetPageRangesAsync_MalformedRangeIsInvalidResponse) {
+    FakeHttpClient httpClient;
+    httpClient.DefaultResponse() =
+        HttpResponse{200, {}, "<PageList><PageRange><Start>512</Start><End>0</End></PageRange></PageList>"};
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    bool invoked = false;
+    client.GetPageRangesAsync(
+        [&](std::expected<Response<AVEVA::AzureClient::Models::GetPageRangesResult>, BlobStorageError> result) {
+            ASSERT_FALSE(result.has_value());
+            EXPECT_EQ(result.error().Code, BlobStorageErrorCode::InvalidResponse);
+            invoked = true;
+        });
+    httpClient.Poll();
+    EXPECT_TRUE(invoked);
+}
+
 TEST(PageBlobClientTests, ResizeAsync_SetsContentLengthHeader) {
     FakeHttpClient httpClient;
     PageBlobClient client{httpClient, BuildOptions()};

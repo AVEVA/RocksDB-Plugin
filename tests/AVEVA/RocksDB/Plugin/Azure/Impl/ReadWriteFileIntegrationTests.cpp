@@ -17,7 +17,7 @@
 #include <span>
 #include <string>
 
-using AVEVA::RocksDB::Plugin::Azure::Impl::BlobHelpers;
+namespace BlobOperations = AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Configuration;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ReadWriteFileImpl;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Testing::AzureIntegrationTestBase;
@@ -171,7 +171,7 @@ TEST_F(ReadWriteFileIntegrationTests, Sync_UpdatesFileSizeInBlob) {
 
     // Assert
     const auto pageBlobClient = m_containerClient->GetPageBlobClient(m_blobName);
-    const auto actualSize = BlobHelpers::GetFileSize(*pageBlobClient);
+    const auto actualSize = BlobOperations::GetSize(*pageBlobClient);
     EXPECT_EQ(static_cast<int64_t>(testData.size()), actualSize);
 }
 
@@ -228,7 +228,7 @@ TEST_F(ReadWriteFileIntegrationTests, GetFileSize_ReturnsCorrectSize) {
 
     // Assert - Verify size through blob client
     const auto pageBlobClient = m_containerClient->GetPageBlobClient(m_blobName);
-    const auto actualSize = BlobHelpers::GetFileSize(*pageBlobClient);
+    const auto actualSize = BlobOperations::GetSize(*pageBlobClient);
     EXPECT_EQ(static_cast<int64_t>(testData.size()), actualSize);
 }
 

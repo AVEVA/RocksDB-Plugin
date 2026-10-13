@@ -16,12 +16,8 @@ rocksdb::IOStatus Directory::Fsync(const rocksdb::IOOptions&, rocksdb::IODebugCo
     try {
         m_directory->Fsync();
         return rocksdb::IOStatus::OK();
-    } catch (const RequestFailedException& e) {
-        return AzureErrorTranslator::IOStatusFromError(e);
-    } catch (const std::exception& e) {
-        return rocksdb::IOStatus::IOError(e.what());
     } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown Fsync error occurred");
+        return AzureErrorTranslator::FromException(std::current_exception());
     }
 }
 

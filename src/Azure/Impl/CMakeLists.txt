@@ -2,6 +2,7 @@ add_library(aveva-rocksdb-plugin-azure-impl
     AsyncReadRequest.cpp
     AsyncReadTracker.cpp
     BlobHelpers.cpp
+    ClientFactory.cpp
     ReadableFileImpl.cpp
     SequentialFileImpl.cpp
     WriteableFileImpl.cpp
@@ -15,7 +16,6 @@ add_library(aveva-rocksdb-plugin-azure-impl
     DirectoryImpl.cpp
     ClientRuntime.cpp
     PluginClients.cpp
-    TokenCredentials.cpp
     Environment.cpp
 )
 add_library(aveva::rocksdb-plugin-azure-impl ALIAS aveva-rocksdb-plugin-azure-impl)
@@ -28,6 +28,14 @@ target_sources(aveva-rocksdb-plugin-azure-impl
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadRequest.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadTracker.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ClientFactory.hpp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.ipp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ClientFactory.ipp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.ipp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.ipp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.ipp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/SequentialFileImpl.ipp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.ipp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/SequentialFileImpl.hpp"

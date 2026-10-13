@@ -15,6 +15,7 @@ add_executable(aveva-rocksdb-plugin-azure-impl-tests
     BlobOperationsTests.cpp
     AzureContainerClientTests.cpp
     BlobFilesystemTests.cpp
+    BlobFilesystemFakeTests.cpp
     PluginTests.cpp
     BlobHelpersTests.cpp
     TokenCredentialsTests.cpp
@@ -26,6 +27,6 @@ add_executable(aveva-rocksdb-plugin-azure-impl-tests
     PluginSecondaryCacheIntegrationTests.cpp
 )
 
-target_link_libraries(aveva-rocksdb-plugin-azure-impl-tests PRIVATE GTest::gtest GTest::gmock aveva-rocksdb-plugin-azure aveva-rocksdb-plugin-azure-impl aveva-rocksdb-plugin-core-mocks aveva-azure-client-test-support)
+target_link_libraries(aveva-rocksdb-plugin-azure-impl-tests PRIVATE GTest::gtest GTest::gmock aveva-rocksdb-plugin-azure aveva-rocksdb-plugin-azure-impl aveva-rocksdb-plugin-core-mocks aveva::azure-client-testing)
 include(GoogleTest)
 gtest_discover_tests(aveva-rocksdb-plugin-azure-impl-tests DISCOVERY_TIMEOUT 60)

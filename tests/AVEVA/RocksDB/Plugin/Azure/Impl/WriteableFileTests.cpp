@@ -17,7 +17,7 @@
 
 using AVEVA::RocksDB::Plugin::Azure::Impl::Configuration;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobEnvironment;
-using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakePageBlobClient;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobServer;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadableFile;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadableFileImpl;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadWriteFileImpl;
@@ -39,12 +39,12 @@ class WriteableFileTests : public ::testing::Test {
         std::make_shared<severity_logger_mt<severity_level>>();
 
     FakeWriteableFileImpl MakeFile(const int64_t bufferSize = Configuration::PageBlob::DefaultBufferSize) {
-        return {"test.dat", m_env.Runtime, m_env.Blob, nullptr, m_logger, bufferSize};
+        return {"test.dat", m_env.Runtime, m_env.Client, nullptr, m_logger, bufferSize};
     }
 
     FakeWriteableFileImpl MakeKnownStateFile(const FakeWriteableFileImpl::BlobState state,
                                              const int64_t bufferSize = Configuration::PageBlob::DefaultBufferSize) {
-        return {"test.dat", m_env.Runtime, m_env.Blob, nullptr, m_logger, bufferSize, state};
+        return {"test.dat", m_env.Runtime, m_env.Client, nullptr, m_logger, bufferSize, state};
     }
 };
 
@@ -107,7 +107,7 @@ TEST_F(WriteableFileTests, Destructor_UploadsStillInFlightAfterFailure_WaitsForT
     m_env.Blob->SetCapacity(16 * pageSize);
     m_env.Blob->DeferUploads = true;
 
-    auto file = std::make_unique<FakeWriteableFileImpl>("test.dat", m_env.Runtime, m_env.Blob, nullptr, m_logger);
+    auto file = std::make_unique<FakeWriteableFileImpl>("test.dat", m_env.Runtime, m_env.Client, nullptr, m_logger);
     for (int i = 0; i < 4; ++i) {
         file->Append(std::vector<char>(pageSize, 'a'));
         file->RangeSync();
@@ -115,7 +115,7 @@ TEST_F(WriteableFileTests, Destructor_UploadsStillInFlightAfterFailure_WaitsForT
     ASSERT_EQ(4U, m_env.Blob->PendingUploads());
 
     file->Append(std::vector<char>(pageSize, 'b'));
-    m_env.Blob->FailUpload(FakePageBlobClient::Error(500, "upload failed"), 0);
+    m_env.Blob->FailUpload(FakeBlobServer::Error(500, "upload failed"), 0);
     ASSERT_THROW(file->RangeSync(), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
 
     std::atomic<bool> destroyed = false;
@@ -152,7 +152,7 @@ TEST_F(WriteableFileTests, Sync_UploadFailed_ThrowsAndKeepsThrowing) {
     file.Append(std::vector<char>(Configuration::PageBlob::PageSize, 'a'));
     file.RangeSync();
     ASSERT_EQ(1U, m_env.Blob->PendingUploads());
-    m_env.Blob->FailUpload(FakePageBlobClient::Error(500, "upload failed"));
+    m_env.Blob->FailUpload(FakeBlobServer::Error(500, "upload failed"));
 
     EXPECT_THROW(file.Sync(), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
     EXPECT_THROW(file.Sync(), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
@@ -313,7 +313,7 @@ TEST_F(WriteableFileTests, Append_LargerThanTwiceCapacity_CapacityCoversPendingW
 TEST_F(WriteableFileTests, Constructor_KnownState_DoesNotQueryBlob) {
     const FakeWriteableFileImpl file{"test.dat",
                                      m_env.Runtime,
-                                     m_env.Blob,
+                                     m_env.Client,
                                      nullptr,
                                      m_logger,
                                      Configuration::PageBlob::DefaultBufferSize,
@@ -339,7 +339,7 @@ TEST_F(WriteableFileTests, Constructor_BufferSizeSmallerThanPage_ThrowsException
     constexpr size_t invalidBufferSize = Configuration::PageBlob::PageSize - 1;
 
     EXPECT_THROW([[maybe_unused]] auto file =
-                     FakeWriteableFileImpl("test.dat", m_env.Runtime, m_env.Blob, nullptr, m_logger,
+                     FakeWriteableFileImpl("test.dat", m_env.Runtime, m_env.Client, nullptr, m_logger,
                                            static_cast<int64_t>(invalidBufferSize), {0, 0}),
                  std::invalid_argument);
 }
@@ -517,7 +517,7 @@ TEST_F(WriteableFileTests, Truncate_ToPartialPage_BufferOffsetSetCorrectly) {
 
 TEST_F(WriteableFileTests, GetUniqueId_BufferLargerThanName_ReturnsFullName) {
     const FakeWriteableFileImpl file{
-        "test.dat", m_env.Runtime, m_env.Blob, nullptr, m_logger, Configuration::PageBlob::DefaultBufferSize, {0, 0}};
+        "test.dat", m_env.Runtime, m_env.Client, nullptr, m_logger, Configuration::PageBlob::DefaultBufferSize, {0, 0}};
     std::vector<char> id(100, '\0');
 
     const auto length = file.GetUniqueId(id.data(), static_cast<int64_t>(id.size()));
@@ -529,7 +529,7 @@ TEST_F(WriteableFileTests, GetUniqueId_BufferLargerThanName_ReturnsFullName) {
 TEST_F(WriteableFileTests, GetUniqueId_BufferSmallerThanName_ReturnsTruncatedName) {
     static constexpr std::string_view filename = "very_long_filename_for_testing.dat";
     const FakeWriteableFileImpl file{
-        filename, m_env.Runtime, m_env.Blob, nullptr, m_logger, Configuration::PageBlob::DefaultBufferSize, {0, 0}};
+        filename, m_env.Runtime, m_env.Client, nullptr, m_logger, Configuration::PageBlob::DefaultBufferSize, {0, 0}};
     std::vector<char> id(10, '\0');
 
     const auto length = file.GetUniqueId(id.data(), static_cast<int64_t>(id.size()));
@@ -540,7 +540,7 @@ TEST_F(WriteableFileTests, GetUniqueId_BufferSmallerThanName_ReturnsTruncatedNam
 
 TEST_F(WriteableFileTests, GetUniqueId_EmptyName_ReturnsZero) {
     const FakeWriteableFileImpl file{
-        "", m_env.Runtime, m_env.Blob, nullptr, m_logger, Configuration::PageBlob::DefaultBufferSize, {0, 0}};
+        "", m_env.Runtime, m_env.Client, nullptr, m_logger, Configuration::PageBlob::DefaultBufferSize, {0, 0}};
     std::vector<char> id(100, '\0');
 
     const auto length = file.GetUniqueId(id.data(), static_cast<int64_t>(id.size()));
@@ -552,7 +552,7 @@ TEST_F(WriteableFileTests, MoveConstructor_TransfersState_Correctly) {
     m_env.Blob->SetCapacity(Configuration::PageBlob::PageSize);
     const std::vector<char> testData(100, 'm');
 
-    FakeWriteableFileImpl file1{"test.dat", m_env.Runtime, m_env.Blob, nullptr, m_logger};
+    FakeWriteableFileImpl file1{"test.dat", m_env.Runtime, m_env.Client, nullptr, m_logger};
     file1.Append(testData);
 
     const FakeWriteableFileImpl file2{std::move(file1)};
@@ -569,8 +569,8 @@ TEST_F(WriteableFileTests, MoveAssignment_TransfersState_Correctly) {
     auto logger2 = std::make_shared<severity_logger_mt<severity_level>>();
 
     std::vector<char> testData(200, 'n');
-    FakeWriteableFileImpl file1{"test1.dat", env1.Runtime, env1.Blob, nullptr, logger1};
-    FakeWriteableFileImpl file2{"test2.dat", env2.Runtime, env2.Blob, nullptr, logger2};
+    FakeWriteableFileImpl file1{"test1.dat", env1.Runtime, env1.Client, nullptr, logger1};
+    FakeWriteableFileImpl file2{"test2.dat", env2.Runtime, env2.Client, nullptr, logger2};
     file1.Append(testData);
 
     file2 = std::move(file1);

@@ -22,15 +22,8 @@ rocksdb::IOStatus WriteableFile::Append(const rocksdb::Slice& data, const rocksd
                                         rocksdb::IODebugContext*) {
     try {
         m_file->Append(std::span(data.data(), data.size()));
-    } catch (const RequestFailedException& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
-                                        << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
     } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when appending to file");
+        return AzureErrorTranslator::FromCurrentException(*m_logger, "Append");
     }
 
     return rocksdb::IOStatus::OK();
@@ -39,15 +32,8 @@ rocksdb::IOStatus WriteableFile::Append(const rocksdb::Slice& data, const rocksd
 rocksdb::IOStatus WriteableFile::Close(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
     try {
         m_file->Close();
-    } catch (const RequestFailedException& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
-                                        << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
     } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when closing file");
+        return AzureErrorTranslator::FromCurrentException(*m_logger, "Close");
     }
 
     return rocksdb::IOStatus::OK();
@@ -56,15 +42,8 @@ rocksdb::IOStatus WriteableFile::Close(const rocksdb::IOOptions&, rocksdb::IODeb
 rocksdb::IOStatus WriteableFile::Flush(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
     try {
         m_file->Flush();
-    } catch (const RequestFailedException& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
-                                        << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
     } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when flushing file");
+        return AzureErrorTranslator::FromCurrentException(*m_logger, "Flush");
     }
 
     return rocksdb::IOStatus::OK();
@@ -81,15 +60,8 @@ rocksdb::IOStatus WriteableFile::RangeSync(uint64_t, uint64_t, const rocksdb::IO
 
     try {
         m_file->RangeSync();
-    } catch (const RequestFailedException& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
-                                        << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
     } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when range-syncing file");
+        return AzureErrorTranslator::FromCurrentException(*m_logger, "RangeSync");
     }
 
     return rocksdb::IOStatus::OK();
@@ -98,15 +70,8 @@ rocksdb::IOStatus WriteableFile::RangeSync(uint64_t, uint64_t, const rocksdb::IO
 rocksdb::IOStatus WriteableFile::Sync(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
     try {
         m_file->Sync();
-    } catch (const RequestFailedException& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
-                                        << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
-        return AzureErrorTranslator::IOStatusFromError(ex);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
     } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when syncing file");
+        return AzureErrorTranslator::FromCurrentException(*m_logger, "Sync");
     }
 
     return rocksdb::IOStatus::OK();
@@ -120,15 +85,8 @@ uint64_t WriteableFile::GetFileSize(const rocksdb::IOOptions&, rocksdb::IODebugC
         assert(fileSize <= std::numeric_limits<int64_t>::max() && "File size must fit in int64_t");
 
         return static_cast<uint64_t>(fileSize);
-    } catch (const RequestFailedException& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
-                                        << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
-        return 0;
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return 0;
     } catch (...) {
-        BOOST_LOG_SEV(*m_logger, error) << "Unknown error when syncing file";
+        AzureErrorTranslator::FromCurrentException(*m_logger, "GetFileSize");
         return 0;
     }
 }

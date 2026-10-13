@@ -2,9 +2,9 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientFactory.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
-#include "FakeHttpBridge.hpp"
 #include "FakeHttpClient.hpp"
 #include "TestFixtures.hpp"
 
@@ -27,24 +27,24 @@ using AVEVA::AzureClient::Tests::MakeAzureErrorResponse;
 using AVEVA::AzureClient::Tests::MakeBlobContainerClientOptions;
 using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
 using AVEVA::RocksDB::Plugin::Azure::RequestFailedException;
-using AVEVA::RocksDB::Plugin::Azure::Impl::BlobContainerClient;
-using AVEVA::RocksDB::Plugin::Azure::Impl::BlobHelpers;
+using BlobContainerClient = AVEVA::AzureClient::Tests::BlobContainerClient;
+namespace BlobHelpers = AVEVA::RocksDB::Plugin::Azure::Impl::BlobHelpers;
+namespace ClientFactory = AVEVA::RocksDB::Plugin::Azure::Impl::ClientFactory;
 
 namespace {
 class BlobHelpersTests : public ::testing::Test {
   protected:
     void SetUp() override {
         m_httpClient.CompleteInline() = true;
-        m_bridge = std::make_unique<AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeHttpBridge>(m_httpClient);
+        m_httpClient.StartBackgroundPump();
     }
 
     FakeHttpClient m_httpClient;
-    std::unique_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeHttpBridge> m_bridge;
 };
 
 TEST_F(BlobHelpersTests, ForbiddenIsNotRetried) {
     m_httpClient.EnqueueResponse(MakeAzureErrorResponse(403, "AuthorizationFailure", "no", "id"));
-    BlobContainerClient client(m_bridge->Client(), MakeBlobContainerClientOptions("cont"));
+    BlobContainerClient client(m_httpClient, MakeBlobContainerClientOptions("cont"));
 
     EXPECT_THROW(BlobHelpers::CreateContainerIfNotExists(client, 5, std::chrono::milliseconds(1)),
                  RequestFailedException);
@@ -55,7 +55,7 @@ TEST_F(BlobHelpersTests, ConflictIsRetriedUntilSuccess) {
     m_httpClient.EnqueueResponse(MakeAzureErrorResponse(409, "ContainerBeingDeleted", "busy", "id"));
     m_httpClient.EnqueueResponse(MakeAzureErrorResponse(409, "ContainerBeingDeleted", "busy", "id"));
     m_httpClient.EnqueueResponse(HttpResponse{201, MakeCanonicalSuccessHeaders({}), ""});
-    BlobContainerClient client(m_bridge->Client(), MakeBlobContainerClientOptions("cont"));
+    BlobContainerClient client(m_httpClient, MakeBlobContainerClientOptions("cont"));
 
     EXPECT_NO_THROW(BlobHelpers::CreateContainerIfNotExists(client, 5, std::chrono::milliseconds(1)));
     EXPECT_EQ(m_httpClient.RequestCount(), 3U);
@@ -65,7 +65,7 @@ TEST_F(BlobHelpersTests, RetriesAreBounded) {
     for (int i = 0; i < 3; ++i) {
         m_httpClient.EnqueueResponse(MakeAzureErrorResponse(409, "ContainerBeingDeleted", "busy", "id"));
     }
-    BlobContainerClient client(m_bridge->Client(), MakeBlobContainerClientOptions("cont"));
+    BlobContainerClient client(m_httpClient, MakeBlobContainerClientOptions("cont"));
 
     EXPECT_THROW(BlobHelpers::CreateContainerIfNotExists(client, 3, std::chrono::milliseconds(1)),
                  RequestFailedException);
@@ -127,7 +127,7 @@ std::vector<const std::type_info*> SourceTypes(const std::optional<std::string>&
     const AVEVA::RocksDB::Plugin::Azure::Models::ChainedCredentialInfo info(
         "db", "https://acct.blob.core.windows.net", "sp", "secret", "tenant", managedIdentityId);
     std::vector<const std::type_info*> types;
-    for (const auto& source : BlobHelpers::CreateCredentialSources(runtime, info)) {
+    for (const auto& source : ClientFactory::CreateCredentialSources(runtime, info)) {
         types.push_back(&source->Type());
     }
     return types;
@@ -173,7 +173,7 @@ TEST(BlobHelpersCredentialLifetimeTests, ServicePrincipalCredentialKeepsRuntimeA
     boost::asio::io_context context;
     auto runtime = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime>(context);
     const std::weak_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime> weak = runtime;
-    auto credential = BlobHelpers::CreateClientSecretCredential(runtime, "tenant", "client", "secret");
+    auto credential = ClientFactory::CreateClientSecretCredential(runtime, "tenant", "client", "secret");
 
     runtime.reset();
     EXPECT_FALSE(weak.expired());
@@ -186,7 +186,7 @@ TEST(BlobHelpersCredentialLifetimeTests, PipelinesCredentialKeepsRuntimeAlive) {
     boost::asio::io_context context;
     auto runtime = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime>(context);
     const std::weak_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime> weak = runtime;
-    auto credential = BlobHelpers::CreatePipelinesCredential(runtime, "tenant", "client", "connection", "token");
+    auto credential = ClientFactory::CreatePipelinesCredential(runtime, "tenant", "client", "connection", "token");
 
     runtime.reset();
     EXPECT_FALSE(weak.expired());

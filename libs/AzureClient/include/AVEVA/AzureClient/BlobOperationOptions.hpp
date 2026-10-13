@@ -88,6 +88,16 @@ namespace AVEVA::AzureClient
         Models::BlobRequestConditions Conditions;
     };
 
+    struct GetPageRangesOptions
+    {
+        // Page-aligned window to inspect; unset covers the whole blob.
+        std::optional<Models::BlobByteRange> Range;
+        // NextMarker from a previous truncated result.
+        std::string Marker;
+        std::optional<std::uint32_t> MaxResults;
+        Models::BlobRequestConditions Conditions;
+    };
+
     struct DeleteBlobOptions
     {
         Models::BlobRequestConditions Conditions;

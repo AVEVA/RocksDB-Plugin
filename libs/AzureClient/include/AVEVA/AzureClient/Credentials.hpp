@@ -32,6 +32,7 @@
 #include <cstdlib>
 #include <expected>
 #include <fstream>
+#include <functional>
 #include <ios>
 #include <iterator>
 #include <memory>
@@ -68,6 +69,10 @@ struct ClientSecretCredentialOptions {
     HttpRequestOptions RequestOptions;
     // Retries of transient token endpoint failures (408/429/5xx and transport errors).
     RetryOptions Retry;
+
+    // Reads AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET and (when set) AZURE_AUTHORITY_HOST. Unset variables
+    // leave the matching field empty, which the credential rejects when asked for a token.
+    [[nodiscard]] static ClientSecretCredentialOptions FromEnvironment();
 };
 
 struct WorkloadIdentityCredentialOptions {
@@ -85,8 +90,23 @@ struct WorkloadIdentityCredentialOptions {
     [[nodiscard]] static WorkloadIdentityCredentialOptions FromEnvironment();
 };
 
-struct ManagedIdentityCredentialOptions {
-    // A user-assigned identity, by client id or by ARM resource id (at most one); both empty selects the
+// Completes an assertion request: the signed JWT to present as the client assertion, or the reason it could not be
+// obtained.
+using AssertionCompletion = std::move_only_function<void(std::error_code, std::string)>;
+
+struct ClientAssertionCredentialOptions {
+    std::string TenantId;
+    std::string ClientId;
+    // Supplies a fresh client assertion for every token request; it must call its argument exactly once, on any
+    // thread. An error from it is passed through as the token error and no token request is sent.
+    std::function<void(AssertionCompletion)> AssertionProvider;
+    std::string AuthorityHost = std::string{DefaultAuthorityHost};
+    HttpRequestOptions RequestOptions;
+    // Retries of transient token endpoint failures (408/429/5xx and transport errors).
+    RetryOptions Retry;
+};
+
+struct ManagedIdentityCredentialOptions {    // A user-assigned identity, by client id or by ARM resource id (at most one); both empty selects the
     // system-assigned identity.
     std::string ClientId;
     std::string ResourceId;
@@ -271,6 +291,13 @@ void SendTokenRequest(THttp& httpClient, HttpRequest request, HttpRequestOptions
     return joined;
 }
 
+[[nodiscard]] inline std::string BuildClientAssertionBody(std::string_view clientId, std::string_view assertion,
+                                                          const std::vector<std::string>& scopes) {
+    return "grant_type=client_credentials&client_id=" + FormEncode(clientId) +
+           "&client_assertion_type=" + FormEncode("urn:ietf:params:oauth:client-assertion-type:jwt-bearer") +
+           "&client_assertion=" + FormEncode(assertion) + "&scope=" + FormEncode(JoinScopes(scopes));
+}
+
 // Tenant ids are GUIDs or domain names; anything else could alter the token endpoint path.
 [[nodiscard]] inline bool IsValidTenantId(std::string_view tenantId) noexcept {
     return !tenantId.empty() && std::ranges::all_of(tenantId, [](char c) {
@@ -411,10 +438,7 @@ template <HttpClientLike THttp> class BasicWorkloadIdentityCredential final {
                           std::make_error_code(std::errc::no_such_file_or_directory));
             return;
         }
-        std::string body =
-            "grant_type=client_credentials&client_id=" + FormEncode(m_options.ClientId) +
-            "&client_assertion_type=" + FormEncode("urn:ietf:params:oauth:client-assertion-type:jwt-bearer") +
-            "&client_assertion=" + FormEncode(*assertion) + "&scope=" + FormEncode(JoinScopes(scopes));
+        std::string body = BuildClientAssertionBody(m_options.ClientId, *assertion, scopes);
         Private::SendTokenRequest(
             *m_httpClient, BuildEntraTokenRequest(m_options.AuthorityHost, m_options.TenantId, std::move(body)),
             m_options.RequestOptions, m_options.Retry, false, std::move(completion));
@@ -425,6 +449,58 @@ template <HttpClientLike THttp> class BasicWorkloadIdentityCredential final {
 };
 
 using WorkloadIdentityCredential = BasicWorkloadIdentityCredential<HttpClient>;
+
+// Exchanges a caller-supplied client assertion (a signed JWT, for example an OIDC token issued by a CI system) for an
+// Entra ID token. The assertion is requested again on every token request.
+template <HttpClientLike THttp> class BasicClientAssertionCredential final {
+  public:
+    BasicClientAssertionCredential(THttp& httpClient, ClientAssertionCredentialOptions options)
+        : m_httpClient(&httpClient), m_options(std::move(options)) {
+        static_cast<void>(Private::NormalizeAuthorityHost(m_options.AuthorityHost));
+    }
+
+    template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
+    auto GetTokenAsync(std::vector<std::string> scopes, CompletionToken&& token) {
+        return boost::asio::async_initiate<TokenSignature>(
+            [this](auto handler, std::vector<std::string> requestedScopes) {
+                Begin(std::move(requestedScopes), std::move(handler));
+            },
+            token, std::move(scopes));
+    }
+
+  private:
+    template <class Handler> void Begin(std::vector<std::string> scopes, Handler completion) {
+        using namespace Private;
+        if (!IsValidTenantId(m_options.TenantId) || m_options.ClientId.empty() || !m_options.AssertionProvider ||
+            scopes.empty()) {
+            Private::Fail(*m_httpClient, std::move(completion), std::make_error_code(std::errc::invalid_argument));
+            return;
+        }
+        // The provider may complete on any thread; the token request is sent from there. Everything the continuation
+        // needs is copied or moved in, so it does not depend on this credential staying alive.
+        m_options.AssertionProvider([httpClient = m_httpClient, options = m_options, scopes = std::move(scopes),
+                                     completion = std::move(completion)](std::error_code error,
+                                                                         std::string assertion) mutable {
+            if (error) {
+                Private::Fail(*httpClient, std::move(completion), error);
+                return;
+            }
+            if (assertion.empty()) {
+                Private::Fail(*httpClient, std::move(completion), std::make_error_code(std::errc::invalid_argument));
+                return;
+            }
+            std::string body = BuildClientAssertionBody(options.ClientId, assertion, scopes);
+            Private::SendTokenRequest(*httpClient,
+                                      BuildEntraTokenRequest(options.AuthorityHost, options.TenantId, std::move(body)),
+                                      options.RequestOptions, options.Retry, false, std::move(completion));
+        });
+    }
+
+    THttp* m_httpClient;
+    ClientAssertionCredentialOptions m_options;
+};
+
+using ClientAssertionCredential = BasicClientAssertionCredential<HttpClient>;
 
 // Managed identity via IMDS (VMs, VM scale sets, AKS) or the App Service identity endpoint. Requests exactly one
 // scope, which is converted to a resource ("https://storage.azure.com/.default" -> "https://storage.azure.com").

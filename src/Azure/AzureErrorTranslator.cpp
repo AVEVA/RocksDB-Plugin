@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
+#include <AVEVA/AzureClient/BlobStorageError.hpp>
+#include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 #include <AVEVA/HttpClient/HttpClientError.hpp>
 #include <system_error>
 namespace AVEVA::RocksDB::Plugin::Azure {
@@ -46,10 +48,6 @@ rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const std::string& con
     case HttpStatus::GatewayTimeout:
         return Retryable(IOStatus::IOError(context));
     default:
-        // Matches IsTransient: every 5xx is retried internally, so it is reported as retryable too.
-        if (statusCode >= 500 && statusCode <= 599) {
-            return Retryable(IOStatus::IOError(context));
-        }
         return IOStatus::IOError(context);
     }
 }
@@ -59,6 +57,18 @@ rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const RequestFailedExc
 
     const std::string text = DescribeFailure(error);
     const std::error_code& code = error.Code;
+
+    // The library's portable conditions are more precise than the HTTP status alone (e.g. a 409 can mean a lost lease).
+    if (code == std::errc::no_such_file_or_directory) {
+        return IOStatus::NotFound(text);
+    }
+    if (code == AzureClient::BlobStorageErrorCode::InvalidResponse) {
+        return IOStatus::Corruption("Invalid service response: " + text);
+    }
+    if (code == AzureClient::BlobStorageErrorCode::LeaseLost) {
+        return IOStatus::IOError("Lease lost: " + text);
+    }
+
     switch (error.StatusCode) {
     case 0:
         if (IsTransportTimeout(code)) {
@@ -94,20 +104,45 @@ bool AzureErrorTranslator::IsTransient(const RequestFailedException& error) {
     return IsTransient(error.StatusCode, error.Code);
 }
 
-bool AzureErrorTranslator::IsTransient(unsigned int statusCode, const std::error_code& code) {
-    switch (statusCode) {
-    case 0:
-        // Status 0 also covers requests rejected client-side (bad arguments, unparsable responses) and
-        // credential failures (a rejected secret maps to permission_denied), which would fail the same way again.
-        return code != std::errc::operation_canceled && code != std::errc::state_not_recoverable &&
-               code != std::errc::invalid_argument && code != std::errc::bad_message &&
-               code != std::errc::value_too_large && code != std::errc::permission_denied &&
-               !IsPermanentHttpClientError(code);
-    case HttpStatus::RequestTimeout:
-    case HttpStatus::TooManyRequests:
-        return true;
-    default:
-        return statusCode >= 500 && statusCode <= 599;
+rocksdb::IOStatus AzureErrorTranslator::FromException(const std::exception_ptr& error) {
+    try {
+        std::rethrow_exception(error);
+    } catch (const RequestFailedException& ex) {
+        return IOStatusFromError(ex);
+    } catch (const std::exception& ex) {
+        return rocksdb::IOStatus::IOError(ex.what());
+    } catch (...) {
+        return rocksdb::IOStatus::IOError("Unknown error");
     }
+}
+
+rocksdb::IOStatus AzureErrorTranslator::FromCurrentException(
+    boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>& logger, std::string_view operation) {
+    using boost::log::trivial::debug;
+    using boost::log::trivial::error;
+    try {
+        throw;
+    } catch (const RequestFailedException& ex) {
+        // Describe() carries the status, Azure error code, message and request id.
+        BOOST_LOG_SEV(logger, error) << operation << " failed: " << ex.Describe();
+        if (!ex.AuthenticationDetail.empty()) {
+            BOOST_LOG_SEV(logger, debug) << operation << " authentication detail: " << ex.AuthenticationDetail;
+        }
+        return IOStatusFromError(ex);
+    } catch (const std::exception& ex) {
+        BOOST_LOG_SEV(logger, error) << operation << " failed: " << ex.what();
+        return rocksdb::IOStatus::IOError(ex.what());
+    } catch (...) {
+        BOOST_LOG_SEV(logger, error) << operation << " failed with an unknown error";
+        return rocksdb::IOStatus::IOError("Unknown error when calling " + std::string(operation));
+    }
+}
+
+bool AzureErrorTranslator::IsTransient(unsigned int statusCode, const std::error_code& code) {
+    // The client's own retry policy is the single definition of "transient", so the plugin never disagrees with it.
+    AzureClient::BlobStorageError error;
+    error.StatusCode = statusCode;
+    error.Code = code;
+    return AzureClient::IsTransient(error);
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure

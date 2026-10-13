@@ -347,6 +347,9 @@ struct TransactionalCrc64Tag {};
 // Content-MD5 / x-ms-content-crc64 request headers for service-side body verification.
 void ApplyTransactionalHashes(HttpRequest& request, std::string_view md5, StringLabel<TransactionalCrc64Tag> crc64);
 [[nodiscard]] Models::ListBlobsResult ParseListBlobsResultXml(std::string_view xml);
+// Parses a Get Page Ranges response: the <PageList> body plus the ETag, Last-Modified and
+// x-ms-blob-content-length headers.
+[[nodiscard]] Models::GetPageRangesResult ParseGetPageRangesResult(const HttpResponse& response);
 
 [[nodiscard]] HttpRequest BuildBlobRequest(const BlobTarget& target, HttpMethod method,
                                            std::string_view queryString = {});

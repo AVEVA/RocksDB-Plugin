@@ -31,7 +31,7 @@ using AVEVA::RocksDB::Plugin::Azure::Impl::AsyncReadTracker;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime;
 using AVEVA::RocksDB::Plugin::Azure::Impl::PollAsyncReads;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobEnvironment;
-using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakePageBlobClient;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobServer;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadableFile;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadableFileImpl;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadWriteFileImpl;
@@ -102,13 +102,13 @@ class AsyncReadTests : public ::testing::Test {
     void TearDown() override {
         while (m_deferredEnv.Blob->PendingDownloads() > 0) {
             auto download = m_deferredEnv.Blob->TakeDownload();
-            download.Fail(FakePageBlobClient::Error(500, "test finished"));
+            download.Fail(FakeBlobServer::Error(500, "test finished"));
         }
     }
 
     FakeReadableFile CreateFile(const FakeBlobEnvironment& env, std::shared_ptr<AsyncReadTracker> tracker = nullptr,
                                 std::shared_ptr<std::atomic<int64_t>> budget = nullptr) {
-        return FakeReadableFile{FakeReadableFileImpl{"test.sst", env.Runtime, env.Blob, nullptr, m_logger,
+        return FakeReadableFile{FakeReadableFileImpl{"test.sst", env.Runtime, env.Client, nullptr, m_logger,
                                                      std::move(tracker), std::move(budget)}};
     }
 
@@ -181,7 +181,7 @@ TEST_F(AsyncReadTests, ReadAsync_ChainedOntoFailedPrefetch_FallsBackToOwnDownloa
     IoHandle handle;
     ASSERT_TRUE(Submit(file, req, record, handle).ok());
 
-    m_deferredEnv.Blob->TakeDownload().Fail(FakePageBlobClient::Error(500, "boom"));
+    m_deferredEnv.Blob->TakeDownload().Fail(FakeBlobServer::Error(500, "boom"));
     ASSERT_EQ(1U, m_deferredEnv.Blob->PendingDownloads());
     auto download = m_deferredEnv.Blob->TakeDownload();
     EXPECT_EQ(1100, download.Request.Offset);
@@ -200,7 +200,14 @@ TEST_F(AsyncReadTests, Read_PartiallyOverlappingPrefetch_DownloadsOnlyTheRemaind
 
     std::vector<char> scratch(512);
     rocksdb::Slice result;
-    const auto status = file.Read(256, scratch.size(), rocksdb::IOOptions{}, &result, scratch.data(), nullptr);
+    // The deferred environment holds every GET (a blocking read is indistinguishable from an async one at the HTTP
+    // level), so the blocking Read runs on its own thread while this one serves the remainder.
+    auto reading = std::async(std::launch::async, [&] {
+        return file.Read(256, scratch.size(), rocksdb::IOOptions{}, &result, scratch.data(), nullptr);
+    });
+    ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return m_deferredEnv.Blob->PendingDownloads() == 1; }));
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(256, 'R'));
+    const auto status = reading.get();
 
     EXPECT_TRUE(status.ok()) << status.ToString();
     ASSERT_GE(m_deferredEnv.Blob->Downloads.size(), 2U);
@@ -211,8 +218,8 @@ TEST_F(AsyncReadTests, Read_PartiallyOverlappingPrefetch_DownloadsOnlyTheRemaind
 
 TEST_F(AsyncReadTests, Read_PastTheEndOfPrefetchedRange_ReleasesItsBudget) {
     auto budget = std::make_shared<std::atomic<int64_t>>(0);
-    FakeReadableFile file{FakeReadableFileImpl{"test.sst", m_deferredEnv.Runtime, m_deferredEnv.Blob, nullptr, m_logger,
-                                               nullptr, budget}};
+    FakeReadableFile file{FakeReadableFileImpl{"test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
+                                               m_logger, nullptr, budget}};
     ASSERT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
     m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'P'));
     ASSERT_EQ(512, budget->load());
@@ -229,8 +236,8 @@ TEST_F(AsyncReadTests, Read_PastTheEndOfPrefetchedRange_ReleasesItsBudget) {
 
 TEST_F(AsyncReadTests, Prefetch_DeclinedForBudget_DoesNotEvictFinishedRange) {
     auto budget = std::make_shared<std::atomic<int64_t>>(0);
-    FakeReadableFile file{FakeReadableFileImpl{"test.sst", m_deferredEnv.Runtime, m_deferredEnv.Blob, nullptr, m_logger,
-                                               nullptr, budget}};
+    FakeReadableFile file{FakeReadableFileImpl{"test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
+                                               m_logger, nullptr, budget}};
     ASSERT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
     ASSERT_TRUE(file.Prefetch(1024, 512, rocksdb::IOOptions{}, nullptr).ok());
     m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'A'));
@@ -258,12 +265,12 @@ TEST_F(AsyncReadTests, Prefetch_AllSlotsStillDownloading_ReturnsNotSupported) {
 
 TEST_F(AsyncReadTests, Prefetch_OverSharedBudget_ReturnsNotSupportedAndFailedPrefetchReleasesBytes) {
     auto budget = std::make_shared<std::atomic<int64_t>>(0);
-    FakeReadableFile file{FakeReadableFileImpl{"test.sst", m_deferredEnv.Runtime, m_deferredEnv.Blob, nullptr, m_logger,
-                                               nullptr, budget}};
+    FakeReadableFile file{FakeReadableFileImpl{"test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
+                                               m_logger, nullptr, budget}};
 
     ASSERT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
     EXPECT_EQ(512, budget->load());
-    m_deferredEnv.Blob->TakeDownload().Fail(FakePageBlobClient::Error(500, "boom"));
+    m_deferredEnv.Blob->TakeDownload().Fail(FakeBlobServer::Error(500, "boom"));
     EXPECT_EQ(0, budget->load());
 
     budget->store(FakeReadableFileImpl::kDefaultPrefetchBudgetBytes);
@@ -298,7 +305,7 @@ TEST_F(AsyncReadTests, ReadAsync_WithoutIoOptionsTimeoutRequestsNoDeadline) {
 
     ASSERT_TRUE(Submit(file, req, record, handle).ok());
     auto download = m_deferredEnv.Blob->TakeDownload();
-    EXPECT_EQ(m_deferredEnv.Blob->GetDefaultRequestOptions().GetTimeout(), download.Request.Timeout);
+    EXPECT_EQ(m_deferredEnv.Client->GetDefaultRequestOptions().GetTimeout(), download.Request.Timeout);
     download.Succeed(std::string(64, 'C'));
     std::vector<void*> handles{handle.Handle};
     ASSERT_TRUE(PollAsyncReads(handles).ok());
@@ -379,7 +386,9 @@ TEST_F(AsyncReadTests, ReadAsync_PreconditionFailed_RefreshesMetadataAndRetries)
     ASSERT_TRUE(Submit(file, req, record, handle).ok());
 
     m_deferredEnv.Blob->ETag = "etag2";
-    m_deferredEnv.Blob->TakeDownload().Fail(FakePageBlobClient::Error(412, "ConditionNotMet"));
+    m_deferredEnv.Blob->TakeDownload().Fail(FakeBlobServer::Error(412, "ConditionNotMet"));
+    // The retry is issued from the failed request's completion, after the metadata refresh.
+    ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return m_deferredEnv.Blob->PendingDownloads() == 1; }));
     auto retry = m_deferredEnv.Blob->TakeDownload();
     EXPECT_EQ("etag2", retry.Request.IfMatch);
     retry.Succeed(std::string(16, 'E'));
@@ -398,7 +407,7 @@ TEST_F(AsyncReadTests, ReadAsync_DownloadFails_PollReportsError) {
     IoHandle handle;
     ASSERT_TRUE(Submit(file, req, record, handle).ok());
 
-    m_deferredEnv.Blob->TakeDownload().Fail(FakePageBlobClient::Error(404, "BlobNotFound"));
+    m_deferredEnv.Blob->TakeDownload().Fail(FakeBlobServer::Error(404, "BlobNotFound"));
     std::vector<void*> handles{handle.Handle};
     ASSERT_TRUE(PollAsyncReads(handles).ok());
 
@@ -450,7 +459,7 @@ TEST_F(AsyncReadTests, AbortIO_AfterDownloadFailed_ReportsTheRealError) {
     CallbackRecord record;
     IoHandle handle;
     ASSERT_TRUE(Submit(file, req, record, handle).ok());
-    m_deferredEnv.Blob->TakeDownload().Fail(FakePageBlobClient::Error(404, "BlobNotFound"));
+    m_deferredEnv.Blob->TakeDownload().Fail(FakeBlobServer::Error(404, "BlobNotFound"));
 
     std::vector<void*> handles{handle.Handle};
     ASSERT_TRUE(AbortAsyncReads(handles).ok());
@@ -469,10 +478,12 @@ TEST_F(AsyncReadTests, ReadAsync_PreconditionFailedEveryTime_StopsAfterTheRetryL
     ASSERT_TRUE(Submit(file, req, record, handle).ok());
 
     for (int attempt = 0; attempt <= FakeReadableFileImpl::kMaxStaleReadRetries; ++attempt) {
-        ASSERT_EQ(1U, m_deferredEnv.Blob->PendingDownloads()) << "attempt " << attempt;
-        m_deferredEnv.Blob->TakeDownload().Fail(FakePageBlobClient::Error(412, "ConditionNotMet"));
+        ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return m_deferredEnv.Blob->PendingDownloads() == 1; }))
+            << "attempt " << attempt;
+        m_deferredEnv.Blob->TakeDownload().Fail(FakeBlobServer::Error(412, "ConditionNotMet"));
     }
-    EXPECT_EQ(0U, m_deferredEnv.Blob->PendingDownloads());
+    EXPECT_FALSE(m_deferredEnv.Http.RunUntil([&] { return m_deferredEnv.Blob->PendingDownloads() != 0; },
+                                             std::chrono::milliseconds{200}));
 
     std::vector<void*> handles{handle.Handle};
     ASSERT_TRUE(PollAsyncReads(handles).ok());
@@ -574,24 +585,27 @@ TEST_F(AsyncReadTests, Tracker_DrainWithNothingInFlightReturnsImmediately) {
 TEST_F(AsyncReadTests, ReadAsync_HandleAndFilesystemDroppedMidRead_DrainWaitsUntilFileReleased) {
     HostIoContext host;
     auto tracker = std::make_shared<AsyncReadTracker>(host.Context().get_executor());
-    boost::asio::io_context io;
-    auto runtime = std::make_shared<ClientRuntime>(io);
-    auto client = std::make_shared<FakePageBlobClient>(runtime->HttpClient());
-    client->SetCapacity(BlobSize);
-    client->Size = BlobSize;
-    client->ETag = "etag";
-    client->DeferDownloads = true;
-    std::weak_ptr<FakePageBlobClient> weakClient = client;
+    FakeBlobEnvironment standalone;
+    auto& server = *standalone.Blob;
+    server.SetCapacity(BlobSize);
+    server.Size = BlobSize;
+    server.ETag = "etag";
+    server.DeferDownloads = true;
+    // A client owned only by this test (the environment's is also held by its server), so that expiry shows when the
+    // in-flight read releases the file.
+    auto client = std::make_shared<FakeBlobServer::BlobClientType>(
+        standalone.Http, AVEVA::AzureClient::Tests::MakeBlobClientOptions("files", "test.sst"));
+    std::weak_ptr<FakeBlobServer::BlobClientType> weakClient = client;
 
     std::vector<char> scratch(32, 'x');
     auto req = MakeRequest(0, scratch);
     CallbackRecord record;
     {
-        FakeReadableFile file{FakeReadableFileImpl{"test.sst", runtime, client, nullptr, m_logger, tracker}};
+        FakeReadableFile file{FakeReadableFileImpl{"test.sst", standalone.Runtime, client, nullptr, m_logger, tracker}};
         IoHandle handle;
         ASSERT_TRUE(Submit(file, req, record, handle).ok());
     }
-    auto download = client->TakeDownload();
+    auto download = server.TakeDownload();
     client.reset();
     ASSERT_FALSE(weakClient.expired()) << "the in-flight read must keep the file alive";
     EXPECT_EQ(1U, tracker->InFlight());
@@ -618,7 +632,7 @@ TEST_F(AsyncReadTests, ReadAsync_TrackedReadEndsAfterCompletionAndPoll) {
     HostIoContext host;
     auto tracker = std::make_shared<AsyncReadTracker>(host.Context().get_executor());
     FakeReadableFile file{
-        FakeReadableFileImpl{"test.sst", m_deferredEnv.Runtime, m_deferredEnv.Blob, nullptr, m_logger, tracker}};
+        FakeReadableFileImpl{"test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr, m_logger, tracker}};
     std::vector<char> scratch(16);
     auto req = MakeRequest(0, scratch);
     CallbackRecord record;

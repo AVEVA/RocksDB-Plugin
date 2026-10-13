@@ -69,6 +69,8 @@ target_sources(aveva-azure-client
         "${base-include-dir}/AVEVA/AzureClient/Response.hpp"
         "${base-include-dir}/AVEVA/AzureClient/WithRequestOptions.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Credentials.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/CredentialVariant.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/ChainedTokenCredential.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Models/BlobContainerModels.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Models/BlobModels.hpp"
 )

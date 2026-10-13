@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/AzureContainerClient.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobAttributes.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
@@ -22,6 +23,7 @@
 #include <boost/log/trivial.hpp>
 
 #include <chrono>
+#include <concepts>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -38,22 +40,49 @@
 #undef LoadLibrary
 #endif
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-class BlobFilesystemImpl {
-    struct ServiceContainer {
-        ServiceContainer(Impl::BlobServiceClient service, std::shared_ptr<Impl::BlobContainerClient> container)
-            : ServiceClient(std::move(service)), ContainerClient(std::move(container)) {}
+/// <summary>
+/// Maps an HTTP client type to the file and directory types the filesystem hands out. The production client gets the
+/// non-template classes (which can be forward declared by the public headers); any other client gets the templates.
+/// </summary>
+template <typename THttp> struct FilesystemTypes {
+    using Blob = PageBlobClientOn<THttp>;
+    using Readable = BasicReadableFileImpl<Blob>;
+    using Sequential = BasicSequentialFileImpl<Blob>;
+    using Writeable = BasicWriteableFileImpl<Blob>;
+    using ReadWrite = BasicReadWriteFileImpl<Blob>;
+    using Directory = BasicDirectoryImpl<BlobContainerClientOn<THttp>>;
+    using Lock = BasicLockFileImpl<Blob>;
+};
+template <> struct FilesystemTypes<::AVEVA::HttpClient> {
+    using Blob = PageBlobClient;
+    using Readable = ReadableFileImpl;
+    using Sequential = SequentialFileImpl;
+    using Writeable = WriteableFileImpl;
+    using ReadWrite = ReadWriteFileImpl;
+    using Directory = DirectoryImpl;
+    using Lock = LockFileImpl;
+};
 
-        Impl::BlobServiceClient ServiceClient;
-        std::shared_ptr<Impl::BlobContainerClient> ContainerClient;
-    };
+template <typename THttp> class BasicBlobFilesystemImpl {
+    using Types = FilesystemTypes<THttp>;
+    using ReadableFileType = typename Types::Readable;
+    using SequentialFileType = typename Types::Sequential;
+    using WriteableFileType = typename Types::Writeable;
+    using ReadWriteFileType = typename Types::ReadWrite;
+    using DirectoryType = typename Types::Directory;
+    using LockFileType = typename Types::Lock;
+    using AzureContainerClient = BasicAzureContainerClient<BlobContainerClientOn<THttp>>;
 
+  private:
+    // The container client shares the connection state and credential with the service client, so it is all we keep.
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
     int64_t m_dataFileInitialSize;
     int64_t m_dataFileBufferSize;
     // HTTP client (on the injected, host-owned io_context) used by every Azure client below; declared before them
     // so it outlives them during destruction.
-    std::shared_ptr<ClientRuntime> m_runtime;
-    std::unordered_map<std::string, ServiceContainer, Core::StringHash, Core::StringEqual> m_clients;
+    std::shared_ptr<BasicClientRuntime<THttp>> m_runtime;
+    std::unordered_map<std::string, std::shared_ptr<BlobContainerClientOn<THttp>>, Core::StringHash, Core::StringEqual>
+        m_clients;
     std::unordered_map<std::string, std::shared_ptr<Core::FileCache>, Core::StringHash, Core::StringEqual> m_fileCaches;
     // Async reads still running on the io_context; drained by the destructor before the runtime and caches above
     // are released (see AsyncReadTracker).
@@ -61,82 +90,93 @@ class BlobFilesystemImpl {
     // Bytes held by per-file prefetch buffers across all open files; caps Prefetch memory.
     std::shared_ptr<std::atomic<int64_t>> m_prefetchBytes = std::make_shared<std::atomic<int64_t>>(0);
     std::mutex m_lockFilesMutex;
-    boost::intrusive::list<LockFileImpl, boost::intrusive::constant_time_size<false>> m_locks;
+    boost::intrusive::list<LockFileType, boost::intrusive::constant_time_size<false>> m_locks;
     // Parallel to m_locks; lets the renewal loop keep locks alive while it renews outside m_lockFilesMutex.
-    std::vector<std::weak_ptr<LockFileImpl>> m_renewableLocks;
-    std::stop_source m_filesystemStopSource;
+    std::vector<std::weak_ptr<LockFileType>> m_renewableLocks;
     // Declared last: Stop()ped first thing in the destructor, before anything its callbacks use is released.
     // Concrete callables for the lease renewal loop; defined in the .cpp where they can reach the private state.
     struct RenewableLocksSnapshot {
-        BlobFilesystemImpl* Owner;
-        std::vector<std::shared_ptr<LockFileImpl>> operator()() const;
+        BasicBlobFilesystemImpl* Owner;
+        std::vector<std::shared_ptr<LockFileType>> operator()() const;
     };
     struct FenceWritesOnFatal {
-        BlobFilesystemImpl* Owner;
+        BasicBlobFilesystemImpl* Owner;
         void operator()() const;
     };
-    using LeaseRenewal = BasicLeaseRenewalLoop<RenewableLocksSnapshot, FenceWritesOnFatal>;
+    using LeaseRenewal = BasicLeaseRenewalLoop<RenewableLocksSnapshot, FenceWritesOnFatal, LockFileType>;
 
     std::shared_ptr<LeaseRenewal> m_leaseRenewal;
 
   public:
-    // Every constructor takes the host-owned io_context that all Azure I/O runs on. The filesystem never runs,
-    // stops or destroys it; the host must keep it alive and running for the filesystem's whole lifetime and must
+    // Every io_context constructor takes the host-owned io_context that all Azure I/O runs on. The filesystem never
+    // runs, stops or destroys it; the host must keep it alive and running for the filesystem's whole lifetime and must
     // not call into the filesystem from the threads running it.
-    BlobFilesystemImpl(
+    BasicBlobFilesystemImpl(
         boost::asio::io_context& ioContext, const std::string& name, const std::string& storageAccountUrl,
         const std::string& storageAccountKey, int64_t dataFileInitialSize, int64_t dataFileBufferSize,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::optional<std::string_view> cachePath = {}, size_t maxCacheSize = Configuration::MaxCacheSize);
-    BlobFilesystemImpl(
+    BasicBlobFilesystemImpl(
         boost::asio::io_context& ioContext, const std::string& name, const std::string& storageAccountUrl,
         const std::string& servicePrincipalId, const std::string& servicePrincipalSecret, const std::string& tenantId,
         int64_t dataFileInitialSize, int64_t dataFileBufferSize,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::optional<std::string_view> cachePath = {}, size_t maxCacheSize = Configuration::MaxCacheSize);
-    BlobFilesystemImpl(
+    BasicBlobFilesystemImpl(
         boost::asio::io_context& ioContext, const std::string& name, const std::string& storageAccountUrl,
         const std::string& tenantId, const std::string& clientId, const std::string& serviceConnectionId,
         const std::string& accessToken, int64_t dataFileInitialSize, int64_t dataFileBufferSize,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::optional<std::string_view> cachePath = {}, size_t maxCacheSize = Configuration::MaxCacheSize);
-    BlobFilesystemImpl(
+    BasicBlobFilesystemImpl(
         boost::asio::io_context& ioContext, Models::ChainedCredentialInfo primary,
         std::optional<Models::ChainedCredentialInfo> backup, int64_t dataFileInitialSize, int64_t dataFileBufferSize,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::optional<std::string_view> cachePath = {}, size_t maxCacheSize = Configuration::MaxCacheSize);
-    BlobFilesystemImpl(
+    BasicBlobFilesystemImpl(
         boost::asio::io_context& ioContext, Models::ServicePrincipalStorageInfo primary,
         std::optional<Models::ServicePrincipalStorageInfo> backup, int64_t dataFileInitialSize,
         int64_t dataFileBufferSize,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::optional<std::string_view> cachePath = {}, size_t maxCacheSize = Configuration::MaxCacheSize);
 
+    // Builds the filesystem on an already-constructed runtime (and therefore any HTTP client). Used with shared-key
+    // credentials; the tests pass a runtime that owns an in-memory fake.
+    BasicBlobFilesystemImpl(
+        std::shared_ptr<BasicClientRuntime<THttp>> runtime, const std::string& name,
+        const std::string& storageAccountUrl, const std::string& storageAccountKey, int64_t dataFileInitialSize,
+        int64_t dataFileBufferSize,
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+        std::optional<std::string_view> cachePath = {}, size_t maxCacheSize = Configuration::MaxCacheSize);
+
     // Stops lease renewal, then blocks until reads abandoned by RocksDB mid-flight have completed, so that their
     // completions never release the HTTP client or a file cache. Requires the host io_context to still be running.
-    ~BlobFilesystemImpl();
-    BlobFilesystemImpl(const BlobFilesystemImpl&) = delete;
-    BlobFilesystemImpl& operator=(const BlobFilesystemImpl&) = delete;
-    BlobFilesystemImpl(BlobFilesystemImpl&&) = delete;
-    BlobFilesystemImpl& operator=(BlobFilesystemImpl&&) = delete;
+    ~BasicBlobFilesystemImpl();
+    BasicBlobFilesystemImpl(const BasicBlobFilesystemImpl&) = delete;
+    BasicBlobFilesystemImpl& operator=(const BasicBlobFilesystemImpl&) = delete;
+    BasicBlobFilesystemImpl(BasicBlobFilesystemImpl&&) = delete;
+    BasicBlobFilesystemImpl& operator=(BasicBlobFilesystemImpl&&) = delete;
 
-    [[nodiscard]] ReadableFileImpl CreateReadableFile(const std::string& filePath);
-    [[nodiscard]] SequentialFileImpl CreateSequentialFile(const std::string& filePath);
-    [[nodiscard]] WriteableFileImpl CreateWriteableFile(const std::string& filePath);
-    [[nodiscard]] ReadWriteFileImpl CreateReadWriteFile(const std::string& filePath);
-    [[nodiscard]] WriteableFileImpl ReopenWriteableFile(const std::string& filePath);
-    [[nodiscard]] WriteableFileImpl ReuseWritableFile(const std::string& filePath);
+    [[nodiscard]] ReadableFileType CreateReadableFile(const std::string& filePath);
+    [[nodiscard]] SequentialFileType CreateSequentialFile(const std::string& filePath);
+    [[nodiscard]] WriteableFileType CreateWriteableFile(const std::string& filePath);
+    [[nodiscard]] ReadWriteFileType CreateReadWriteFile(const std::string& filePath);
+    [[nodiscard]] WriteableFileType ReopenWriteableFile(const std::string& filePath);
+    [[nodiscard]] WriteableFileType ReuseWritableFile(const std::string& filePath);
+    // The logger wraps the production file type, so it is only available on the real HTTP client.
     LoggerImpl CreateLogger(const std::string& filePath, int logLevel,
-                            std::chrono::seconds cooldown = Configuration::LogRateLimiterCooldown);
-    std::shared_ptr<LockFileImpl> LockFile(const std::string& filePath);
-    void UnlockFile(LockFileImpl& lock);
-    DirectoryImpl CreateDirectory(const std::string& directoryPath);
+                            std::chrono::seconds cooldown = Configuration::LogRateLimiterCooldown)
+        requires std::same_as<THttp, ::AVEVA::HttpClient>;
+    std::shared_ptr<LockFileType> LockFile(const std::string& filePath);
+    void UnlockFile(LockFileType& lock);
+    DirectoryType CreateDirectory(const std::string& directoryPath);
 
     [[nodiscard]] bool FileExists(const std::string& name);
     std::vector<std::string> GetChildren(const std::string& directoryPath,
                                          int32_t sizeHint = 10000 /* hopefully plenty for now */);
     std::vector<BlobAttributes> GetChildrenFileAttributes(const std::string& directoryPath);
     [[nodiscard]] bool DeleteFile(const std::string& filePath) const;
+    // Returns 0 when nothing is left under the directory; otherwise a non-zero value (not an exact count).
     [[nodiscard]] size_t DeleteDir(const std::string& directoryPath) const;
     void Truncate(const std::string& filePath, int64_t size) const;
     [[nodiscard]] int64_t GetFileSize(const std::string& filePath) const;
@@ -145,12 +185,32 @@ class BlobFilesystemImpl {
     void RenameFile(const std::string& fromFilePath, const std::string& toFilePath) const;
 
   private:
-    BlobFilesystemImpl(
+    BasicBlobFilesystemImpl(
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>&& logger,
-        boost::asio::io_context& ioContext, int64_t dataFileInitialSize, int64_t dataFileBufferSize);
-    void AddContainer(Impl::BlobServiceClient serviceClient, const std::string& storageAccountUrl,
+        std::shared_ptr<BasicClientRuntime<THttp>> runtime, int64_t dataFileInitialSize, int64_t dataFileBufferSize);
+    void AddContainer(const BlobServiceClientOn<THttp>& serviceClient, const std::string& storageAccountUrl,
                       const std::string& name, std::optional<std::string_view> cachePath, size_t maxCacheSize);
-    [[nodiscard]] const std::shared_ptr<Impl::BlobContainerClient>& GetContainer(std::string_view prefix) const;
+    template <class TInfo>
+    void AddContainers(const TInfo& primary, const std::optional<TInfo>& backup,
+                       std::optional<std::string_view> cachePath, size_t maxCacheSize);
+    [[nodiscard]] const std::shared_ptr<BlobContainerClientOn<THttp>>& GetContainer(std::string_view prefix) const;
+    // A path split into its storage-account prefix and blob name, with the blob client. The views point into the path
+    // passed to ResolveBlob.
+    struct ResolvedBlob {
+        std::string_view Prefix;
+        std::string_view RealPath;
+        std::unique_ptr<PageBlobClientOn<THttp>> Blob;
+    };
+    [[nodiscard]] ResolvedBlob ResolveBlob(const std::string& path) const;
     void EnsureLiveness(std::source_location location = std::source_location::current()) const;
 };
+extern template class BasicBlobFilesystemImpl<::AVEVA::HttpClient>;
+
+/// <summary>The production filesystem, over the real HTTP client. Non-template so it can be forward declared.</summary>
+class BlobFilesystemImpl : public BasicBlobFilesystemImpl<::AVEVA::HttpClient> {
+  public:
+    using BasicBlobFilesystemImpl<::AVEVA::HttpClient>::BasicBlobFilesystemImpl;
+};
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
+
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.ipp"

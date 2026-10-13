@@ -87,18 +87,16 @@ std::unique_ptr<::AVEVA::HttpClient> CreateHttpClient(boost::asio::io_context& c
 }
 } // namespace
 
-ClientRuntime::ClientRuntime(boost::asio::io_context& context) : m_httpClient(CreateHttpClient(context)) {}
-
 // The io_context belongs to the host, which keeps running it; only the HTTP client created here is released.
-ClientRuntime::~ClientRuntime() = default;
+template <>
+BasicClientRuntime<::AVEVA::HttpClient>::BasicClientRuntime(boost::asio::io_context& context)
+    : m_httpClient(CreateHttpClient(context)) {}
 
-::AVEVA::HttpClient& ClientRuntime::HttpClient() const noexcept { return *m_httpClient; }
+void ClientRuntimeBase::FenceWrites() noexcept { m_writesFenced.store(true); }
 
-void ClientRuntime::FenceWrites() noexcept { m_writesFenced.store(true); }
+bool ClientRuntimeBase::WritesFenced() const noexcept { return m_writesFenced.load(); }
 
-bool ClientRuntime::WritesFenced() const noexcept { return m_writesFenced.load(); }
-
-void ClientRuntime::ThrowIfWritesFenced() const {
+void ClientRuntimeBase::ThrowIfWritesFenced() const {
     if (WritesFenced()) {
         throw std::runtime_error("Writes are disabled because the filesystem can no longer guarantee it holds its "
                                  "locks");
@@ -108,7 +106,7 @@ void ClientRuntime::ThrowIfWritesFenced() const {
 void ThrowRequestFailed(const AzureClient::BlobStorageError& error) {
     throw RequestFailedException(error.StatusCode, error.ErrorCode,
                                  error.Message.empty() ? error.Code.message() : error.Message, error.RequestId,
-                                 error.Code);
+                                 error.Code, error.AuthenticationDetail);
 }
 
 HttpRequestOptions RequestOptionsForTransfer(const HttpRequestOptions& defaults, uint64_t bytes) {

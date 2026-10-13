@@ -31,9 +31,10 @@ struct HttpStatus {
 class RequestFailedException : public std::runtime_error {
   public:
     RequestFailedException(unsigned int statusCode, std::string errorCode, std::string message, std::string requestId,
-                           std::error_code code)
+                           std::error_code code, std::string authenticationDetail = {})
         : std::runtime_error(FormatWhat(statusCode, errorCode, message, requestId, code)), StatusCode(statusCode),
-          ErrorCode(std::move(errorCode)), Message(std::move(message)), RequestId(std::move(requestId)), Code(code) {}
+          ErrorCode(std::move(errorCode)), Message(std::move(message)), RequestId(std::move(requestId)), Code(code),
+          AuthenticationDetail(std::move(authenticationDetail)) {}
 
     /// Describes the failure as "<status> <ErrorCode>: <message> (request id: <id>)"; the request id is what Azure
     /// support asks for.
@@ -44,8 +45,9 @@ class RequestFailedException : public std::runtime_error {
     std::string Message;
     std::string RequestId;
     std::error_code Code;
-
-  private:
+    /// Service diagnostics for a failed authentication. Kept out of what() because it can echo the string-to-sign;
+    /// only log it at debug level.
+    std::string AuthenticationDetail;
     static std::string FormatWhat(unsigned int statusCode, const std::string& errorCode, const std::string& message,
                                   const std::string& requestId, const std::error_code& code) {
         std::string what = message.empty() ? code.message() : message;

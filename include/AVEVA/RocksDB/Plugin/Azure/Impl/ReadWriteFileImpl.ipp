@@ -8,16 +8,25 @@
 #include <algorithm>
 #include <boost/log/trivial.hpp>
 
+#include <exception>
+#include <utility>
+#include <vector>
+
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 template <typename TBlob>
 BasicReadWriteFileImpl<TBlob>::BasicReadWriteFileImpl(
-    std::string_view name, std::shared_ptr<ClientRuntime> runtime, std::shared_ptr<TBlob> blob,
+    std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
     std::shared_ptr<Core::FileCache> fileCache,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
     : m_name(name), m_runtime(std::move(runtime)), m_blob(std::move(blob)), m_fileCache(std::move(fileCache)),
-      m_logger(std::move(logger)), m_size(BlobOperations::GetSize(*m_blob)), m_syncSize(m_size),
-      m_capacity(BlobOperations::GetCapacity(*m_blob)), m_closed(false),
-      m_buffer(Configuration::PageBlob::DefaultBufferSize) {}
+      m_logger(std::move(logger)), m_size(0), m_syncSize(0), m_capacity(0), m_closed(false),
+      m_buffer(Configuration::PageBlob::DefaultBufferSize) {
+    // One GetProperties call yields both the size and the capacity.
+    const auto info = BlobOperations::GetInfo(*m_blob);
+    m_size = info.Size;
+    m_syncSize = info.Size;
+    m_capacity = info.Capacity;
+}
 
 template <typename TBlob> BasicReadWriteFileImpl<TBlob>::~BasicReadWriteFileImpl() {
     for (int i = 0; i < 5; i++) {
@@ -81,8 +90,7 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Sync() {
 }
 
 template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
-    m_capacity = BlobOperations::GetCapacity(*m_blob);
-
+    // The capacity is tracked locally (set on open and by Expand), so no round trip is needed here.
     // Pre-calculate the maximum size we'll need and expand if necessary
     auto maxSizeNeeded = m_size;
     for (const auto& chunk : m_bufferStats) {
@@ -97,27 +105,23 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
         Expand();
     }
 
-    // Flush has to happen per chunk in the buffer and fetch any partial pages
-    // to merge in existing data from the underlying page blob improvements could include
-    // checking for all partial pages and looking more globally through the buffer
-    // Also could reduce the allocation necessary through some initial padding
-    for (const auto& chunk : m_bufferStats) {
-        assert(chunk.targetOffset >= chunk.prePadding && "Target Offset is smaller than Pre-padding");
+    using Pending = BlobOperations::PendingDownload<TBlob>;
 
+    // Starts the reads that fill a chunk's partial first and last pages with the blob's existing bytes. `sizeBefore`
+    // is the file size just before this chunk is written.
+    const auto startPaddingReads = [&](const auto& chunk, int64_t sizeBefore, std::vector<Pending>& reads) {
+        assert(chunk.targetOffset >= chunk.prePadding && "Target Offset is smaller than Pre-padding");
         const auto targetStart = chunk.targetOffset - chunk.prePadding;
         assert(targetStart % Configuration::PageBlob::PageSize == 0 && "TargetStart should be page aligned");
 
         if (chunk.prePadding > 0) {
             assert(chunk.prePadding < Configuration::PageBlob::PageSize && "Pre-padding should not exceed page size");
-
-            // read in the padding bits from first page
             std::span<char> prePaddingBuffer(m_buffer.data() + chunk.bufferOffset,
                                              static_cast<size_t>(chunk.prePadding));
-            [[maybe_unused]] const auto prePaddingRead =
-                BlobOperations::DownloadToBuffer(*m_blob, prePaddingBuffer, targetStart, chunk.prePadding);
+            reads.push_back(BlobOperations::StartDownload(*m_blob, prePaddingBuffer, targetStart, chunk.prePadding));
         }
         if (chunk.postPadding > 0) {
-            auto targetEnd = chunk.targetOffset + chunk.dataLength;
+            const auto targetEnd = chunk.targetOffset + chunk.dataLength;
             assert((targetEnd + chunk.postPadding) % Configuration::PageBlob::PageSize == 0 &&
                    "TargetEnd should be page aligned");
             assert((targetEnd + chunk.postPadding) <= m_capacity &&
@@ -125,19 +129,39 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
 
             // NOTE: If the data we're writing is APPENDED at the end, this post padding may be trash data and can be
             // skipped.
-            if (!(targetEnd > m_size)) {
+            if (!(targetEnd > sizeBefore)) {
                 assert(chunk.postPadding < Configuration::PageBlob::PageSize &&
                        "PostPadding shouldn't be greater than a page's size");
-
-                // read in the padding bits from last page
                 std::span<char> postPaddingBuffer(
                     &m_buffer[static_cast<size_t>(chunk.bufferOffset + chunk.prePadding + chunk.dataLength)],
                     static_cast<size_t>(chunk.postPadding));
-                [[maybe_unused]] const auto postPaddingRead =
-                    BlobOperations::DownloadToBuffer(*m_blob, postPaddingBuffer, targetEnd, chunk.postPadding);
+                reads.push_back(
+                    BlobOperations::StartDownload(*m_blob, postPaddingBuffer, targetEnd, chunk.postPadding));
             }
         }
+    };
 
+    // Waits for every read before reporting the first failure: the reads write into m_buffer, which must not be
+    // touched or released while any of them is still in flight.
+    const auto finishReads = [](std::vector<Pending>& reads) {
+        std::exception_ptr failure;
+        for (auto& read : reads) {
+            try {
+                [[maybe_unused]] const auto bytes = BlobOperations::FinishDownload(read);
+            } catch (...) {
+                if (!failure) {
+                    failure = std::current_exception();
+                }
+            }
+        }
+        reads.clear();
+        if (failure) {
+            std::rethrow_exception(failure);
+        }
+    };
+
+    const auto upload = [&](const auto& chunk) {
+        const auto targetStart = chunk.targetOffset - chunk.prePadding;
         if ((chunk.targetOffset + chunk.dataLength) > m_size) {
             m_size = chunk.targetOffset + chunk.dataLength;
         }
@@ -148,8 +172,47 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
 
         BOOST_LOG_SEV(*m_logger, boost::log::trivial::debug)
             << "Flushed " << chunk.ChunkSize() << " bytes to read/writeable file '" << m_name << "'";
-    }
+    };
 
+    // A chunk's padding must see the bytes earlier chunks wrote to the same page, so the reads can only all be issued
+    // up front when no two chunks touch the same page.
+    std::vector<std::pair<int64_t, int64_t>> pageRanges;
+    pageRanges.reserve(m_bufferStats.size());
+    for (const auto& chunk : m_bufferStats) {
+        pageRanges.emplace_back(chunk.targetOffset - chunk.prePadding,
+                                chunk.targetOffset + chunk.dataLength + chunk.postPadding);
+    }
+    std::ranges::sort(pageRanges);
+    const bool independentPages = std::ranges::adjacent_find(pageRanges, [](const auto& earlier, const auto& later) {
+                                      return later.first < earlier.second;
+                                  }) == pageRanges.end();
+
+    std::vector<Pending> reads;
+    if (independentPages) {
+        auto sizeBefore = m_size;
+        try {
+            for (const auto& chunk : m_bufferStats) {
+                startPaddingReads(chunk, sizeBefore, reads);
+                sizeBefore = std::max(sizeBefore, chunk.targetOffset + chunk.dataLength);
+            }
+        } catch (...) {
+            try {
+                finishReads(reads);
+            } catch (...) {
+            }
+            throw;
+        }
+        finishReads(reads);
+        for (const auto& chunk : m_bufferStats) {
+            upload(chunk);
+        }
+    } else {
+        for (const auto& chunk : m_bufferStats) {
+            startPaddingReads(chunk, m_size, reads);
+            finishReads(reads);
+            upload(chunk);
+        }
+    }
     m_bufferStats.clear();
 
 #if _DEBUG

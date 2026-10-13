@@ -239,8 +239,7 @@ rocksdb::IOStatus BlobFilesystem::DeleteDir(const std::string& d, const rocksdb:
         if (remainingFiles == 0) {
             return rocksdb::IOStatus::OK();
         } else {
-            BOOST_LOG_SEV(*m_logger, error)
-                << "Failed to delete all contents within directory. " << remainingFiles << " remaining.";
+            BOOST_LOG_SEV(*m_logger, error) << "Failed to delete all contents within directory; some remain.";
             return rocksdb::IOStatus::IOError("Failed to delete all contents within directory");
         }
     });

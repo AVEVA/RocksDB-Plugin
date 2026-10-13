@@ -29,6 +29,8 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -67,6 +69,9 @@ class FakeHttpClient final {
         // valid for inspection even after Request's completion has run and, for the internal
         // zero-copy upload path (SetBodyView), the backing buffer may have been freed.
         std::string Body;
+
+        // Position in Requests(), which is also the index CompleteRequest()/FailRequest() take.
+        std::size_t Index = 0U;
     };
 
     struct ScriptedResult {
@@ -74,7 +79,20 @@ class FakeHttpClient final {
         HttpResponse Response{200, {}, ""};
         bool Deferred = false;
         std::function<bool(const RequestRecord&)> MatchRequest;
+        // Runs just before a successful completion is delivered, so a deferred request applies its effect (e.g. a
+        // page upload's bytes) only when the test releases it. It may amend the response (e.g. with the new ETag).
+        // Not run when the request is failed instead.
+        std::function<void(HttpResponse&)> OnComplete;
     };
+
+    // Decides the result of a request before any scripted result is consulted; nullopt falls through to the
+    // scripts. Called outside the client's lock, possibly from several threads at once.
+    using Responder = std::function<std::optional<ScriptedResult>(const RequestRecord&)>;
+
+    void SetResponder(Responder responder) {
+        std::scoped_lock lock(m_mutex);
+        m_responder = std::move(responder);
+    }
 
     // Backed by a real io_context (rather than boost::asio::system_executor) so that tests can
     // deterministically observe completions posted onto this executor -- e.g. by
@@ -119,10 +137,30 @@ class FakeHttpClient final {
     }
 
     std::size_t PollRaw() {
+        // restart() must not race a poll()/run() on another thread, so every thread that drives the context
+        // (including the background pump) takes this lock.
+        std::scoped_lock lock(m_pollMutex);
         // poll() leaves the context stopped once it runs out of work; restart so repeated
         // Poll() calls keep observing newly posted handlers.
         m_context.restart();
         return m_context.poll();
+    }
+
+    // Drives completions on a background thread, so a test (or code under test) that blocks on a future gets its
+    // completion without calling Poll(). Stopped when the client is destroyed.
+    void StartBackgroundPump() {
+        if (m_pump.joinable()) {
+            return;
+        }
+        m_pump = std::jthread([this](const std::stop_token& stop) {
+            // The guard keeps run_for() waiting for work instead of returning at once when the context is idle.
+            auto guard = boost::asio::make_work_guard(m_context);
+            while (!stop.stop_requested()) {
+                std::scoped_lock lock(m_pollMutex);
+                m_context.restart();
+                m_context.run_for(std::chrono::milliseconds{1});
+            }
+        });
     }
 
     // Runs handlers (including timers such as retry backoff) until `done()` holds, blocking on the
@@ -135,6 +173,7 @@ class FakeHttpClient final {
             if (remaining <= std::chrono::steady_clock::duration::zero()) {
                 return false;
             }
+            std::scoped_lock lock(m_pollMutex);
             m_context.restart();
             m_context.run_one_for(remaining);
         }
@@ -142,7 +181,7 @@ class FakeHttpClient final {
     }
 
     [[nodiscard]] bool WaitForRequest(std::size_t count, std::chrono::milliseconds timeout = std::chrono::seconds{10}) {
-        return RunUntil([&] { return m_requests.size() >= count; }, timeout);
+        return RunUntil([&] { return RequestCount() >= count; }, timeout);
     }
 
     void SendAsyncErased(HttpRequest request, CompletionHandler completion, HttpRequestOptions options) {
@@ -150,21 +189,51 @@ class FakeHttpClient final {
         // alive (i.e. before completion runs) -- mirrors how a real transport consumes the
         // bytes up front rather than retaining a live reference across the completion.
         std::string body = BodyAsString(request);
-        m_requests.push_back(RequestRecord{.Request = std::move(request), .Options = options, .Body = std::move(body)});
 
-        ScriptedResult scripted = DequeueResult(m_requests.back());
+        // The retained record must not pin a zero-copy payload's owner for the rest of the test: a real transport
+        // releases the body once the request finishes, and callers that pool their buffers rely on that to reuse them.
+        if (request.HasBodyView() && request.GetBodyKeepAlive()) {
+            std::shared_ptr<const void> keepAlive = request.GetBodyKeepAlive();
+            request.SetBodyView(request.GetBodyView());
+            completion = [inner = std::move(completion), keepAlive = std::move(keepAlive)](
+                             std::error_code error, HttpResponse response) mutable {
+                keepAlive.reset();
+                inner(error, std::move(response));
+            };
+        }
+        const RequestRecord* record = nullptr;
+        std::size_t requestIndex = 0U;
+        Responder responder;
+        {
+            std::scoped_lock lock(m_mutex);
+            requestIndex = m_requests.size();
+            m_requests.push_back(RequestRecord{
+                .Request = std::move(request), .Options = options, .Body = std::move(body), .Index = requestIndex});
+            // A deque never relocates its elements on push_back, so this stays valid for later requests.
+            record = &m_requests.back();
+            responder = m_responder;
+        }
+
+        std::optional<ScriptedResult> custom;
+        if (responder) {
+            custom = responder(*record);
+        }
+        ScriptedResult scripted = custom.has_value() ? std::move(*custom) : DequeueResult(*record);
         if (scripted.Deferred) {
-            const std::size_t requestIndex = m_requests.size() - 1U;
-            m_pending.push_back(PendingCompletion{.Error = scripted.Error,
-                                                  .Response = std::move(scripted.Response),
-                                                  .Completion = std::move(completion),
-                                                  .RequestIndex = requestIndex});
+            {
+                std::scoped_lock lock(m_mutex);
+                m_pending.push_back(PendingCompletion{.Error = scripted.Error,
+                                                      .Response = std::move(scripted.Response),
+                                                      .Completion = std::move(completion),
+                                                      .RequestIndex = requestIndex,
+                                                      .OnComplete = std::move(scripted.OnComplete)});
+            }
 
             // Honour the HttpClient cancellation contract: if the caller attached a
             // cancellation slot to this request, forward cancellation signals into a
             // synchronous failure of the matching pending completion (if still pending),
             // mirroring how a real transport would abort an in-flight request.
-            boost::asio::cancellation_slot slot = m_requests.at(requestIndex).Options.GetCancellationSlot();
+            boost::asio::cancellation_slot slot = record->Options.GetCancellationSlot();
             if (slot.is_connected()) {
                 slot.assign([this, requestIndex](boost::asio::cancellation_type_t /*type*/) {
                     (void)this->FailRequest(requestIndex, std::make_error_code(std::errc::operation_canceled));
@@ -178,13 +247,21 @@ class FakeHttpClient final {
         // inline completion can set CompleteInline() = true.
         if (m_completeInline) {
             const std::size_t writesBefore = Private::StartedDownloadWrites().load();
+            if (scripted.OnComplete) {
+                scripted.OnComplete(scripted.Response);
+            }
             completion(scripted.Error, std::move(scripted.Response));
             SettleIfWritesStarted(writesBefore);
         } else {
             auto exec = m_context.get_executor();
-            boost::asio::post(
-                exec, [completion = std::move(completion), error = scripted.Error,
-                       response = std::move(scripted.Response)]() mutable { completion(error, std::move(response)); });
+            boost::asio::post(exec, [completion = std::move(completion), error = scripted.Error,
+                                     response = std::move(scripted.Response),
+                                     onComplete = std::move(scripted.OnComplete)]() mutable {
+                if (onComplete) {
+                    onComplete(response);
+                }
+                completion(error, std::move(response));
+            });
         }
     }
 
@@ -194,6 +271,7 @@ class FakeHttpClient final {
 
     void EnqueueResponse(HttpResponse response, std::error_code error, bool deferred,
                          std::function<bool(const RequestRecord&)> matchRequest) {
+        std::scoped_lock lock(m_mutex);
         m_scriptedResults.push_back(ScriptedResult{.Error = error,
                                                    .Response = std::move(response),
                                                    .Deferred = deferred,
@@ -204,59 +282,46 @@ class FakeHttpClient final {
         EnqueueResponse(std::move(response), error, true);
     }
 
-    [[nodiscard]] bool CompleteNext() {
-        if (m_pending.empty()) {
+    [[nodiscard]] bool CompleteNext() { return CompletePending(0U); }
+
+    [[nodiscard]] bool CompletePending(std::size_t index) {
+        auto pending = TakePending(index);
+        if (!pending.has_value()) {
             return false;
         }
 
-        PendingCompletion pending = std::move(m_pending.front());
-        m_pending.pop_front();
         // Complete immediately for test helpers: invoking the completion inline simplifies
         // test assertions that expect the callback to have been invoked after calling
         // CompleteNext/CompletePending. SendAsyncErased still posts completions when
         // CompleteInline is false, so this keeps the non-reentrant testing helper behavior.
         const std::size_t writesBefore = Private::StartedDownloadWrites().load();
-        pending.Completion(pending.Error, std::move(pending.Response));
-        SettleIfWritesStarted(writesBefore);
-        return true;
-    }
-
-    [[nodiscard]] bool CompletePending(std::size_t index) {
-        if (index >= m_pending.size()) {
-            return false;
+        if (pending->OnComplete) {
+            pending->OnComplete(pending->Response);
         }
-
-        PendingCompletion pending = std::move(m_pending.at(index));
-        m_pending.erase(m_pending.begin() + static_cast<std::ptrdiff_t>(index));
-        // Invoke inline for test helper immediacy.
-        const std::size_t writesBefore = Private::StartedDownloadWrites().load();
-        pending.Completion(pending.Error, std::move(pending.Response));
+        pending->Completion(pending->Error, std::move(pending->Response));
         SettleIfWritesStarted(writesBefore);
         return true;
     }
+
+    // True while the request is deferred and neither completed, failed nor cancelled.
+    [[nodiscard]] bool IsPending(std::size_t requestIndex) const { return FindPending(requestIndex).has_value(); }
 
     [[nodiscard]] bool CompleteRequest(std::size_t requestIndex) {
-        for (std::size_t index = 0; index < m_pending.size(); ++index) {
-            if (m_pending.at(index).RequestIndex == requestIndex) {
-                return CompletePending(index);
-            }
-        }
-
-        return false;
+        const auto index = FindPending(requestIndex);
+        return index.has_value() && CompletePending(*index);
     }
 
     // Downloads write to their sink off the I/O thread; this waits for those writes and runs the completions
     // they post back, so a test observes the same state a synchronous sink would have produced.
     [[nodiscard]] bool FailPending(std::size_t index, std::error_code error, HttpResponse response = HttpResponse{}) {
-        if (index >= m_pending.size()) {
+        auto pending = TakePending(index);
+        if (!pending.has_value()) {
             return false;
         }
 
-        PendingCompletion pending = std::move(m_pending.at(index));
-        m_pending.erase(m_pending.begin() + static_cast<std::ptrdiff_t>(index));
         // Invoke inline for test helper immediacy.
         const std::size_t writesBefore = Private::StartedDownloadWrites().load();
-        pending.Completion(error, std::move(response));
+        pending->Completion(error, std::move(response));
         SettleIfWritesStarted(writesBefore);
         return true;
     }
@@ -266,13 +331,8 @@ class FakeHttpClient final {
     // forward a cancellation_slot signal to the specific request it was attached to.
     [[nodiscard]] bool FailRequest(std::size_t requestIndex, std::error_code error,
                                    HttpResponse response = HttpResponse{}) {
-        for (std::size_t index = 0; index < m_pending.size(); ++index) {
-            if (m_pending.at(index).RequestIndex == requestIndex) {
-                return FailPending(index, error, std::move(response));
-            }
-        }
-
-        return false;
+        const auto index = FindPending(requestIndex);
+        return index.has_value() && FailPending(*index, error, std::move(response));
     }
 
     [[nodiscard]] bool TimeoutPending(std::size_t index) {
@@ -288,18 +348,30 @@ class FakeHttpClient final {
         }
     }
 
-    [[nodiscard]] std::size_t RequestCount() const noexcept { return m_requests.size(); }
+    [[nodiscard]] std::size_t RequestCount() const {
+        std::scoped_lock lock(m_mutex);
+        return m_requests.size();
+    }
 
-    [[nodiscard]] std::size_t PendingCount() const noexcept { return m_pending.size(); }
+    [[nodiscard]] std::size_t PendingCount() const {
+        std::scoped_lock lock(m_mutex);
+        return m_pending.size();
+    }
 
-    [[nodiscard]] bool NoRequestMade() const noexcept { return m_requests.empty(); }
+    [[nodiscard]] bool NoRequestMade() const { return RequestCount() == 0U; }
 
-    [[nodiscard]] const std::vector<RequestRecord>& Requests() const noexcept { return m_requests; }
+    // A deque, so references to records stay valid while other threads keep sending. Iterating while requests are
+    // still being sent is not synchronised; use RequestCount()/RequestAt() for that.
+    [[nodiscard]] const std::deque<RequestRecord>& Requests() const noexcept { return m_requests; }
 
-    [[nodiscard]] const RequestRecord& RequestAt(std::size_t index) const { return m_requests.at(index); }
+    [[nodiscard]] const RequestRecord& RequestAt(std::size_t index) const {
+        std::scoped_lock lock(m_mutex);
+        return m_requests.at(index);
+    }
 
     // Block IDs (percent-decoded) of every Put Block request seen so far, in send order.
     [[nodiscard]] std::vector<std::string> StagedBlockIds() const {
+        std::scoped_lock lock(m_mutex);
         std::vector<std::string> ids;
         for (const RequestRecord& record : m_requests) {
             const std::string& url = record.Request.GetUrl();
@@ -324,11 +396,13 @@ class FakeHttpClient final {
     }
 
     [[nodiscard]] const HttpRequest& LastRequest() const {
+        std::scoped_lock lock(m_mutex);
         assert(!m_requests.empty());
         return m_requests.back().Request;
     }
 
     [[nodiscard]] const HttpRequestOptions& LastRequestOptions() const {
+        std::scoped_lock lock(m_mutex);
         assert(!m_requests.empty());
         return m_requests.back().Options;
     }
@@ -394,9 +468,34 @@ class FakeHttpClient final {
         HttpResponse Response;
         CompletionHandler Completion;
         std::size_t RequestIndex = 0U;
+        std::function<void(HttpResponse&)> OnComplete;
     };
 
+    // Removes a pending completion under the lock; the caller invokes it outside the lock so that a completion
+    // may itself send requests.
+    [[nodiscard]] std::optional<PendingCompletion> TakePending(std::size_t index) {
+        std::scoped_lock lock(m_mutex);
+        if (index >= m_pending.size()) {
+            return std::nullopt;
+        }
+
+        PendingCompletion pending = std::move(m_pending.at(index));
+        m_pending.erase(m_pending.begin() + static_cast<std::ptrdiff_t>(index));
+        return pending;
+    }
+
+    [[nodiscard]] std::optional<std::size_t> FindPending(std::size_t requestIndex) const {
+        std::scoped_lock lock(m_mutex);
+        for (std::size_t index = 0; index < m_pending.size(); ++index) {
+            if (m_pending.at(index).RequestIndex == requestIndex) {
+                return index;
+            }
+        }
+        return std::nullopt;
+    }
+
     [[nodiscard]] ScriptedResult DequeueResult(const RequestRecord& request) {
+        std::scoped_lock lock(m_mutex);
         if (m_scriptedResults.empty()) {
             return ScriptedResult{.Error = m_defaultError, .Response = m_defaultResponse, .Deferred = m_deferByDefault};
         }
@@ -419,12 +518,19 @@ class FakeHttpClient final {
 
     // mutable: get_executor() is const (per HttpClient), but io_context::get_executor() is not.
     mutable boost::asio::io_context m_context;
+    // Guards the containers below; never held while a completion or responder runs.
+    mutable std::mutex m_mutex;
+    std::recursive_mutex m_pollMutex;
+    Responder m_responder;
     std::deque<ScriptedResult> m_scriptedResults;
     std::deque<PendingCompletion> m_pending;
-    std::vector<RequestRecord> m_requests;
+    std::deque<RequestRecord> m_requests;
 
     // Track live instances so test helpers can Poll() all clients automatically when needed.
     static inline std::vector<FakeHttpClient*> s_instances;
+
+    // Last member, so the pump thread is joined before anything it touches is destroyed.
+    std::jthread m_pump;
 };
 
 // The clients under test run on the fake transport; these shadow the HttpClient-bound aliases of the library.
@@ -436,6 +542,7 @@ using BlobContainerClient = BasicBlobContainerClient<FakeHttpClient>;
 using BlobServiceClient = BasicBlobServiceClient<FakeHttpClient>;
 using ClientSecretCredential = BasicClientSecretCredential<FakeHttpClient>;
 using WorkloadIdentityCredential = BasicWorkloadIdentityCredential<FakeHttpClient>;
+using ClientAssertionCredential = BasicClientAssertionCredential<FakeHttpClient>;
 using ManagedIdentityCredential = BasicManagedIdentityCredential<FakeHttpClient>;
 
 class ScriptedTokenCredential final {

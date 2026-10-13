@@ -6,19 +6,36 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <string_view>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-class DirectoryImpl {
-    std::shared_ptr<ClientRuntime> m_runtime;
-    std::shared_ptr<Impl::BlobContainerClient> m_client;
+template <typename TContainer> class BasicDirectoryImpl {
+    std::shared_ptr<ClientRuntimeBase> m_runtime;
+    std::shared_ptr<TContainer> m_client;
     std::string m_name;
 
   public:
-    DirectoryImpl(std::shared_ptr<ClientRuntime> runtime, std::shared_ptr<Impl::BlobContainerClient> client,
-                  std::string_view dirname);
-    void Fsync();
-    size_t GetUniqueId(char* id, size_t maxSize) const noexcept;
+    BasicDirectoryImpl(std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TContainer> client,
+                       std::string_view dirname)
+        : m_runtime(std::move(runtime)), m_client(std::move(client)), m_name(dirname) {}
+
+    void Fsync() {
+        // TODO: figure out whether this is needed
+    }
+
+    size_t GetUniqueId(char* id, size_t maxSize) const noexcept {
+        size_t res = std::min(maxSize, m_name.length());
+        std::copy_n(m_name.data(), res, id);
+        return res;
+    }
+};
+
+/// <summary>The production directory, over the real container client. Non-template so it can be forward
+/// declared.</summary>
+class DirectoryImpl : public BasicDirectoryImpl<BlobContainerClient> {
+  public:
+    using BasicDirectoryImpl<BlobContainerClient>::BasicDirectoryImpl;
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

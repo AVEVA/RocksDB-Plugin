@@ -5,6 +5,8 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
+#include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
+
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -29,8 +31,9 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// leases returned by the snapshot are renewed side by side through LockFileImpl::RenewAsync, and failed renewals
 /// are retried after `retryDelay`.
 ///
-/// A conflict, any non-HTTP failure, or a lease that is still overdue once the retries are spent is fatal: the loop
-/// stops and `onFatal` is invoked once so the owner can fence writes. Transient HTTP failures are only logged.
+/// A conflict or other lease-lost failure (by status or BlobStorageErrorCode), a non-service exception, or a lease
+/// that is still overdue once the retries are spent is fatal: the loop stops and `onFatal` is invoked once so the
+/// owner can fence writes. Other service and transport failures (status 0) are retried and only logged.
 ///
 /// While armed, the timer keeps io_context::run() from returning, so the owner must call Stop() (or destroy the
 /// loop's owner, which should) before expecting run() to drain.
@@ -38,9 +41,9 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// The snapshot and fatal callables are template parameters rather than erased functions: the loop is created once
 /// per filesystem, so there is a single instantiation per owner.
 /// </summary>
-template <std::invocable TSnapshot, std::invocable TOnFatal>
-    requires std::convertible_to<std::invoke_result_t<TSnapshot&>, std::vector<std::shared_ptr<LockFileImpl>>>
-class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRenewalLoop<TSnapshot, TOnFatal>> {
+template <std::invocable TSnapshot, std::invocable TOnFatal, typename TLock = LockFileImpl>
+    requires std::convertible_to<std::invoke_result_t<TSnapshot&>, std::vector<std::shared_ptr<TLock>>>
+class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRenewalLoop<TSnapshot, TOnFatal, TLock>> {
   public:
     using Logger = boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>;
 
@@ -94,9 +97,27 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
   private:
     static constexpr auto StopWarningInterval = std::chrono::seconds(5);
 
+    // These failures can never succeed on retry: the service no longer recognises our lease. The code is checked in
+    // addition to the status because 400/412 lease failures carry the same meaning as a 409.
+    static bool IsFatalLeaseFailure(const RequestFailedException& e) {
+        using AzureClient::BlobStorageErrorCode;
+        if (e.StatusCode == HttpStatus::Conflict) {
+            return true;
+        }
+        for (const auto code :
+             {BlobStorageErrorCode::LeaseLost, BlobStorageErrorCode::LeaseIdMissing,
+              BlobStorageErrorCode::LeaseAlreadyPresent, BlobStorageErrorCode::LeaseIdMismatchWithBlobOperation,
+              BlobStorageErrorCode::LeaseNotPresentWithBlobOperation}) {
+            if (e.Code == AzureClient::make_error_code(code)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     struct Round {
         std::mutex Mutex;
-        std::vector<std::shared_ptr<LockFileImpl>> Locks;
+        std::vector<std::shared_ptr<TLock>> Locks;
         std::vector<std::exception_ptr> Errors;
         size_t Pending = 0;
         size_t Attempt = 0;
@@ -104,7 +125,7 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
 
     // What the timer does when it fires: a regular wake-up (no state) or a retry of the leases that failed.
     struct Retry {
-        std::vector<std::shared_ptr<LockFileImpl>> Locks;
+        std::vector<std::shared_ptr<TLock>> Locks;
         size_t Attempt = 0;
     };
 
@@ -150,7 +171,7 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
     // Sleeps for `delay`, then snapshots the current leases and renews them as a fresh round.
     void ScheduleWakeUp(const std::chrono::milliseconds delay) { ArmTimer(delay, std::nullopt); }
 
-    void BeginRound(std::vector<std::shared_ptr<LockFileImpl>> locks, const size_t attempt) {
+    void BeginRound(std::vector<std::shared_ptr<TLock>> locks, const size_t attempt) {
         if (locks.empty()) {
             ScheduleWakeUp(m_interval);
             return;
@@ -195,7 +216,7 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
             return;
         }
 
-        std::vector<std::shared_ptr<LockFileImpl>> stillPending;
+        std::vector<std::shared_ptr<TLock>> stillPending;
         std::string fatal;
         for (size_t i = 0; i < round->Locks.size() && fatal.empty(); ++i) {
             if (!round->Errors[i]) {
@@ -204,9 +225,9 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
             try {
                 std::rethrow_exception(round->Errors[i]);
             } catch (const RequestFailedException& e) {
-                if (e.StatusCode == HttpStatus::Conflict) {
+                if (IsFatalLeaseFailure(e)) {
                     BOOST_LOG_SEV(*m_logger, boost::log::trivial::error)
-                        << "Failed to renew lease due to conflict, lease might be expired: " << e.what();
+                        << "Failed to renew lease, lease is lost or expired: " << e.what();
                     fatal = e.what();
                 } else {
                     BOOST_LOG_SEV(*m_logger, boost::log::trivial::error) << "Failed to renew lease: " << e.what();

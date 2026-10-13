@@ -13,7 +13,7 @@
 using AVEVA::RocksDB::Plugin::Azure::RequestFailedException;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Configuration;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobEnvironment;
-using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakePageBlobClient;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobServer;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadableFile;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadableFileImpl;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadWriteFileImpl;
@@ -30,7 +30,7 @@ class ReadableFileTests : public ::testing::Test {
         std::make_shared<severity_logger_mt<severity_level>>();
 
     FakeReadableFileImpl MakeFile() {
-        return FakeReadableFileImpl{"test.sst", m_env.Runtime, m_env.Blob, nullptr, m_logger};
+        return FakeReadableFileImpl{"test.sst", m_env.Runtime, m_env.Client, nullptr, m_logger};
     }
 };
 
@@ -99,9 +99,9 @@ TEST_F(ReadableFileTests, GetSize_ReturnsCorrectSize) {
 TEST_F(ReadableFileTests, RandomRead_DownloadFails_PropagatesTheError) {
     m_env.Fill(DefaultBlobSize);
     m_env.Blob->Fault =
-        [](const FakePageBlobClient::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
-        if (operation == FakePageBlobClient::Operation::DownloadToBuffer) {
-            return FakePageBlobClient::Error(500, "InternalError");
+        [](const FakeBlobServer::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::DownloadToBuffer) {
+            return FakeBlobServer::Error(500, "InternalError");
         }
         return std::nullopt;
     };
@@ -143,9 +143,9 @@ TEST_F(ReadableFileTests, GetSize_RefreshesWithOneMetadataCall) {
 TEST_F(ReadableFileTests, RandomRead_GivesUpWhenBlobKeepsChanging) {
     m_env.Fill(1024);
     m_env.Blob->Fault =
-        [](const FakePageBlobClient::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
-        if (operation == FakePageBlobClient::Operation::DownloadToBuffer) {
-            return FakePageBlobClient::Error(412, "ConditionNotMet");
+        [](const FakeBlobServer::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::DownloadToBuffer) {
+            return FakeBlobServer::Error(412, "ConditionNotMet");
         }
         return std::nullopt;
     };

@@ -17,11 +17,11 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// test double that hands out fake page blobs in tests.
 /// </summary>
 template <typename TContainer> class BasicAzureContainerClient final : public Core::ContainerClient {
-    std::shared_ptr<ClientRuntime> m_runtime;
+    std::shared_ptr<ClientRuntimeBase> m_runtime;
     std::shared_ptr<TContainer> m_client;
 
   public:
-    BasicAzureContainerClient(std::shared_ptr<ClientRuntime> runtime, std::shared_ptr<TContainer> client)
+    BasicAzureContainerClient(std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TContainer> client)
         : m_runtime(std::move(runtime)), m_client(std::move(client)) {}
 
     int64_t GetBlobSize(const std::string& path) override {

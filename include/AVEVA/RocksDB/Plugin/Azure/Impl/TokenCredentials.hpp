@@ -5,13 +5,21 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
+#include <AVEVA/AzureClient/ChainedTokenCredential.hpp>
+#include <AVEVA/AzureClient/CredentialVariant.hpp>
 #include <AVEVA/AzureClient/Credentials.hpp>
 #include <AVEVA/AzureClient/TokenCredential.hpp>
 #include <AVEVA/HttpClient/HttpClient.hpp>
+#include <AVEVA/HttpClient/HttpHeader.hpp>
+#include <AVEVA/HttpClient/HttpMethod.hpp>
+#include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
+#include <AVEVA/HttpClient/HttpResponse.hpp>
 
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/post.hpp>
+#include <boost/json/parse.hpp>
+#include <boost/json/value.hpp>
 #include <boost/log/trivial.hpp>
 
 #include <algorithm>
@@ -26,113 +34,22 @@
 #include <variant>
 #include <vector>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-/// <summary>
-/// A closed set of credential types behind one token-credential interface. Dispatch is a std::visit over the
-/// alternatives, so no virtual calls or type erasure are involved.
-/// </summary>
-template <class... TCreds> class CredentialVariant {
-    std::variant<std::shared_ptr<TCreds>...> m_value;
-
-    template <class Handler> void Begin(std::vector<std::string> scopes, Handler handler) {
-        std::visit([&](auto& credential) { credential->GetTokenAsync(std::move(scopes), std::move(handler)); },
-                   m_value);
-    }
-
-  public:
-    template <class T>
-        requires(std::same_as<T, TCreds> || ...)
-    explicit CredentialVariant(std::shared_ptr<T> credential) : m_value(std::move(credential)) {}
-
-    // The dynamic type of the held credential, for diagnostics and tests.
-    [[nodiscard]] const std::type_info& Type() const noexcept {
-        return std::visit([](const auto& credential) -> const std::type_info& { return typeid(*credential); }, m_value);
-    }
-
-    template <boost::asio::completion_token_for<AzureClient::TokenSignature> CompletionToken>
-    auto GetTokenAsync(std::vector<std::string> scopes, CompletionToken&& token) {
-        return boost::asio::async_initiate<AzureClient::TokenSignature>(
-            [this](auto handler, std::vector<std::string> requestedScopes) {
-                Begin(std::move(requestedScopes), std::move(handler));
-            },
-            token, std::move(scopes));
-    }
-};
+using AzureClient::ChainedTokenCredential;
+using AzureClient::CredentialVariant;
 
 /// <summary>
-/// Tries a list of credentials in order and completes with the token of the first one that succeeds.
-/// Fails with the error of the last credential when none of them succeed.
-/// </summary>
-template <AzureClient::TokenCredentialLike TSource>
-class ChainedTokenCredential final : public std::enable_shared_from_this<ChainedTokenCredential<TSource>> {
-    std::vector<std::shared_ptr<TSource>> m_sources;
-
-    // The state of one GetTokenAsync call. It is a template on the handler so that the continuation handed to each
-    // source has one fixed type however long the chain is.
-    template <class Handler> struct Run : std::enable_shared_from_this<Run<Handler>> {
-        std::shared_ptr<ChainedTokenCredential> Owner;
-        std::vector<std::string> Scopes;
-        Handler Completion;
-
-        Run(std::shared_ptr<ChainedTokenCredential> owner, std::vector<std::string> scopes, Handler completion)
-            : Owner(std::move(owner)), Scopes(std::move(scopes)), Completion(std::move(completion)) {}
-
-        void Try(std::size_t index, std::error_code lastError) {
-            if (index >= Owner->m_sources.size()) {
-                Completion(lastError, AzureClient::AccessToken{});
-                return;
-            }
-
-            Owner->m_sources[index]->GetTokenAsync(
-                Scopes, [self = this->shared_from_this(), index](std::error_code error,
-                                                                 AzureClient::AccessToken token) mutable {
-                    if (!error) {
-                        self->Completion(error, std::move(token));
-                        return;
-                    }
-
-                    // Only the last failure is surfaced to the caller; earlier ones are routine when probing sources.
-                    if (index + 1 < self->Owner->m_sources.size()) {
-                        BOOST_LOG_TRIVIAL(debug) << "Token credential source #" << index
-                                                 << " failed: " << error.message() << "; trying next source";
-                    } else {
-                        BOOST_LOG_TRIVIAL(warning) << "Token credential source #" << index
-                                                   << " failed: " << error.message() << "; no more sources";
-                    }
-                    self->Try(index + 1, error);
-                });
-        }
-    };
-
-  public:
-    explicit ChainedTokenCredential(std::vector<std::shared_ptr<TSource>> sources) : m_sources(std::move(sources)) {
-        std::erase(m_sources, nullptr);
-    }
-
-    template <boost::asio::completion_token_for<AzureClient::TokenSignature> CompletionToken>
-    auto GetTokenAsync(std::vector<std::string> scopes, CompletionToken&& token) {
-        return boost::asio::async_initiate<AzureClient::TokenSignature>(
-            [this](auto handler, std::vector<std::string> requestedScopes) {
-                using HandlerType = std::decay_t<decltype(handler)>;
-                auto run = std::make_shared<Run<HandlerType>>(this->shared_from_this(), std::move(requestedScopes),
-                                                              std::move(handler));
-                run->Try(0, AzureClient::make_error_code(AzureClient::BlobStorageErrorCode::AuthenticationFailed));
-            },
-            token, std::move(scopes));
-    }
-};
-
-/// <summary>
-/// Keeps a ClientRuntime (and thus the HttpClient the wrapped credential borrows) alive until every in-flight
+/// Keeps a runtime (and thus the HttpClient the wrapped credential borrows) alive until every in-flight
 /// GetTokenAsync has completed, so a token refresh that outlives the filesystem cannot touch a destroyed client.
 /// The runtime is released from a handler posted to its own executor rather than from inside the HTTP client's
 /// completion callback, so the client is never destroyed while it is still running that callback.
 /// </summary>
-template <AzureClient::TokenCredentialLike TInner> class RuntimeBoundCredential final {
-    std::shared_ptr<ClientRuntime> m_runtime;
+template <AzureClient::TokenCredentialLike TInner, AzureClient::HttpClientLike THttp = ::AVEVA::HttpClient>
+class RuntimeBoundCredential final {
+    std::shared_ptr<BasicClientRuntime<THttp>> m_runtime;
     std::shared_ptr<TInner> m_inner;
 
   public:
-    RuntimeBoundCredential(std::shared_ptr<ClientRuntime> runtime, std::shared_ptr<TInner> inner)
+    RuntimeBoundCredential(std::shared_ptr<BasicClientRuntime<THttp>> runtime, std::shared_ptr<TInner> inner)
         : m_runtime(std::move(runtime)), m_inner(std::move(inner)) {}
 
     template <boost::asio::completion_token_for<AzureClient::TokenSignature> CompletionToken>
@@ -165,51 +82,124 @@ struct AzurePipelinesCredentialOptions {
     std::string OidcRequestUri;
     std::string AuthorityHost = std::string{AzureClient::DefaultAuthorityHost};
     HttpRequestOptions RequestOptions;
-    int MaxRetries = 3;
+    AzureClient::RetryOptions Retry;
 };
 
 /// <summary>
 /// Authenticates as a Microsoft Entra ID application through an Azure Pipelines service connection using
 /// workload identity federation: an OIDC token issued by Azure Pipelines for the service connection is
-/// exchanged for an access token with a client-assertion grant.
+/// exchanged for an access token with a client-assertion grant. Only the OIDC token request lives here; the
+/// exchange is AzureClient::BasicClientAssertionCredential.
 /// </summary>
-class AzurePipelinesCredential final : public std::enable_shared_from_this<AzurePipelinesCredential> {
-    // The request pipeline below is compiled once in TokenCredentials.cpp, so it takes the completion in this erased
-    // form rather than as a template on the caller's handler.
-    using TokenCompletion = std::move_only_function<AzureClient::TokenSignature>;
+template <AzureClient::HttpClientLike THttp> class BasicAzurePipelinesCredential final {
+    AzureClient::BasicClientAssertionCredential<THttp> m_exchange;
 
-    ::AVEVA::HttpClient* m_httpClient;
-    AzurePipelinesCredentialOptions m_options;
+    static constexpr unsigned int FirstSuccess = 200;
+    static constexpr unsigned int LastSuccess = 299;
 
-    void Begin(std::vector<std::string> scopes, TokenCompletion completion);
-    void ExchangeOidcToken(const std::string& oidcToken, const std::vector<std::string>& scopes,
-                           TokenCompletion completion);
+    static HttpRequest BuildOidcRequest(const AzurePipelinesCredentialOptions& options) {
+        const auto separator = options.OidcRequestUri.find('?') == std::string::npos ? '?' : '&';
+        HttpRequest request;
+        request.SetMethod(HttpMethod::Post);
+        request.SetUrl(options.OidcRequestUri + separator + "api-version=7.1&serviceConnectionId=" +
+                       AzureClient::Private::FormEncode(options.ServiceConnectionId));
+        request.AddHeader(HttpHeader{"Content-Type", "application/json"});
+        request.AddHeader(HttpHeader{"Authorization", "Bearer " + options.SystemAccessToken});
+        request.SetBody(std::string{});
+        return request;
+    }
+
+    // Extracts the oidcToken member, or an empty string when the body is not the expected JSON object.
+    static std::string ParseOidcToken(const HttpResponse& response) {
+        boost::system::error_code ec;
+        const boost::json::value root = boost::json::parse(response.GetBody(), ec);
+        if (ec || !root.is_object()) {
+            return {};
+        }
+        return AzureClient::Private::JsonText(root.as_object(), "oidcToken");
+    }
+
+    static AzureClient::ClientAssertionCredentialOptions MakeExchangeOptions(THttp& httpClient,
+                                                                             AzurePipelinesCredentialOptions options) {
+        if (options.OidcRequestUri.empty()) {
+            options.OidcRequestUri = AzureClient::Private::GetEnvironmentValue("SYSTEM_OIDCREQUESTURI");
+        }
+
+        AzureClient::ClientAssertionCredentialOptions exchange;
+        exchange.TenantId = options.TenantId;
+        exchange.ClientId = options.ClientId;
+        exchange.AuthorityHost = options.AuthorityHost;
+        exchange.RequestOptions = options.RequestOptions;
+        exchange.Retry = options.Retry;
+        // The provider owns a copy of everything it needs, so in-flight requests do not depend on the credential.
+        exchange.AssertionProvider = [&httpClient,
+                                      options = std::move(options)](AzureClient::AssertionCompletion done) {
+            if (options.OidcRequestUri.empty() || options.ServiceConnectionId.empty() ||
+                options.SystemAccessToken.empty()) {
+                done(std::make_error_code(std::errc::invalid_argument), {});
+                return;
+            }
+
+            AzureClient::Private::SendWithRetryAsync(
+                httpClient, AzureClient::Private::RequestAuth{}, std::shared_ptr<AzureClient::NoTokenCredential>{},
+                options.Retry, BuildOidcRequest(options),
+                [done = std::move(done)](std::error_code error, const HttpResponse& response) mutable {
+                    if (error) {
+                        done(error, {});
+                        return;
+                    }
+                    if (response.GetStatus() < FirstSuccess || response.GetStatus() > LastSuccess) {
+                        done(AzureClient::make_error_code(AzureClient::BlobStorageErrorCode::AuthenticationFailed), {});
+                        return;
+                    }
+                    auto oidcToken = ParseOidcToken(response);
+                    if (oidcToken.empty()) {
+                        done(AzureClient::make_error_code(AzureClient::BlobStorageErrorCode::InvalidResponse), {});
+                        return;
+                    }
+                    done(std::error_code{}, std::move(oidcToken));
+                },
+                options.RequestOptions, false);
+        };
+        return exchange;
+    }
 
   public:
-    AzurePipelinesCredential(::AVEVA::HttpClient& httpClient, AzurePipelinesCredentialOptions options);
+    BasicAzurePipelinesCredential(THttp& httpClient, AzurePipelinesCredentialOptions options)
+        : m_exchange(httpClient, MakeExchangeOptions(httpClient, std::move(options))) {}
 
     template <boost::asio::completion_token_for<AzureClient::TokenSignature> CompletionToken>
     auto GetTokenAsync(std::vector<std::string> scopes, CompletionToken&& token) {
-        return boost::asio::async_initiate<AzureClient::TokenSignature>(
-            [this](auto handler, std::vector<std::string> requestedScopes) {
-                Begin(std::move(requestedScopes), TokenCompletion{std::move(handler)});
-            },
-            token, std::move(scopes));
+        return m_exchange.GetTokenAsync(std::move(scopes), std::forward<CompletionToken>(token));
     }
 };
 
-/// <summary>The credentials a single token source can be.</summary>
-using LeafCredential = CredentialVariant<AzureClient::ClientSecretCredential, AzureClient::WorkloadIdentityCredential,
-                                         AzureClient::ManagedIdentityCredential, AzurePipelinesCredential>;
+using AzurePipelinesCredential = BasicAzurePipelinesCredential<::AVEVA::HttpClient>;
+
+/// <summary>The credentials a single token source can be, over the HTTP transport `THttp`.</summary>
+template <AzureClient::HttpClientLike THttp>
+using BasicLeafCredential =
+    CredentialVariant<AzureClient::BasicClientSecretCredential<THttp>,
+                      AzureClient::BasicWorkloadIdentityCredential<THttp>,
+                      AzureClient::BasicManagedIdentityCredential<THttp>, BasicAzurePipelinesCredential<THttp>>;
 
 /// <summary>A leaf credential, or a chain of them.</summary>
-using SourceCredential = CredentialVariant<AzureClient::ClientSecretCredential, AzureClient::WorkloadIdentityCredential,
-                                           AzureClient::ManagedIdentityCredential, AzurePipelinesCredential,
-                                           ChainedTokenCredential<LeafCredential>>;
+template <AzureClient::HttpClientLike THttp>
+using BasicSourceCredential =
+    CredentialVariant<AzureClient::BasicClientSecretCredential<THttp>,
+                      AzureClient::BasicWorkloadIdentityCredential<THttp>,
+                      AzureClient::BasicManagedIdentityCredential<THttp>, BasicAzurePipelinesCredential<THttp>,
+                      ChainedTokenCredential<BasicLeafCredential<THttp>>>;
 
 /// <summary>
-/// The one credential type every plugin client is instantiated with: any source, kept alive with the
+/// The one credential type every plugin client over `THttp` is instantiated with: any source, kept alive with the
 /// runtime and cached.
 /// </summary>
-using PluginCredential = AzureClient::CachingTokenCredential<RuntimeBoundCredential<SourceCredential>>;
+template <AzureClient::HttpClientLike THttp>
+using BasicPluginCredential =
+    AzureClient::CachingTokenCredential<RuntimeBoundCredential<BasicSourceCredential<THttp>, THttp>>;
+
+using LeafCredential = BasicLeafCredential<::AVEVA::HttpClient>;
+using SourceCredential = BasicSourceCredential<::AVEVA::HttpClient>;
+using PluginCredential = BasicPluginCredential<::AVEVA::HttpClient>;
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

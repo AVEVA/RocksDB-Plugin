@@ -36,5 +36,9 @@ struct Configuration {
     static const constexpr std::chrono::seconds LogRateLimiterCooldown = std::chrono::seconds(30);
     static const constexpr size_t MaxCacheSize = static_cast<size_t>(1024) * 1024 * 1024; // 1GB
     static const constexpr int MaxClientRetries = 8;
+    // Caps the backoff between retries. With 8 retries from the 800 ms default initial delay the waits total at most
+    // about 52 s (0.8, 1.6, 3.2, 6.4 s, then 10 s each), so a single call's worst case is that plus 9 attempt
+    // timeouts, instead of several minutes with the 1 minute library default.
+    static const constexpr std::chrono::milliseconds MaxRetryDelay = std::chrono::seconds(10);
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

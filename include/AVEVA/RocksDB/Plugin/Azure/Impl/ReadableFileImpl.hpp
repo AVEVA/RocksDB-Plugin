@@ -30,7 +30,7 @@ using ReadCallback = std::function<void(std::exception_ptr error, std::string da
 template <typename TBlob> class BasicReadableFileImpl {
     std::string m_name;
     // Declared before the client so that it is destroyed after it: the client references the runtime's HTTP client.
-    std::shared_ptr<ClientRuntime> m_runtime;
+    std::shared_ptr<ClientRuntimeBase> m_runtime;
     std::shared_ptr<TBlob> m_blob;
     std::shared_ptr<Core::FileCache> m_fileCache;
     // Random (and async) reads may run concurrently on one file, so the cached blob metadata is guarded.
@@ -87,7 +87,7 @@ template <typename TBlob> class BasicReadableFileImpl {
     // A blob that keeps changing underneath the reader fails with an IOError after this many metadata refreshes.
     static constexpr int kMaxStaleReadRetries = 5;
     BasicReadableFileImpl(
-        std::string_view name, std::shared_ptr<ClientRuntime> runtime, std::shared_ptr<TBlob> blob,
+        std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
         std::shared_ptr<Core::FileCache> fileCache,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::shared_ptr<AsyncReadTracker> asyncReads = nullptr,

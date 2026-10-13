@@ -4,6 +4,7 @@
 #include "IntegrationTestHelpers.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientFactory.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
 
@@ -85,7 +86,7 @@ void AzureIntegrationTestBase::TearDown() { CleanupBlob(); }
 void AzureIntegrationTestBase::CreateContainerClient() {
     try {
         m_runtime = std::make_shared<ClientRuntime>(m_ioContext.Get());
-        const auto serviceClient = BlobHelpers::CreateServiceClient(m_runtime, *m_credentials);
+        const auto serviceClient = ClientFactory::CreateServiceClient(m_runtime, *m_credentials);
 
         m_containerClient = serviceClient.GetBlobContainerClient(m_credentials->GetDbName());
 
@@ -147,7 +148,7 @@ void AzureIntegrationTestBase::CleanupBlob() {
 std::shared_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient> AzureIntegrationTestBase::CreateEmptyBlob() {
     auto pageBlobClientPtr = m_containerClient->GetPageBlobClient(m_blobName);
     Unwrap(pageBlobClientPtr->CreateAsync(Configuration::PageBlob::DefaultSize, boost::asio::use_future).get());
-    BlobHelpers::SetFileSize(*pageBlobClientPtr, 0);
+    BlobOperations::SetSize(*m_runtime, *pageBlobClientPtr, 0);
     return pageBlobClientPtr;
 }
 
@@ -177,7 +178,7 @@ AzureIntegrationTestBase::CreateBlobWithData(const std::vector<char>& data) {
                        0, std::as_bytes(std::span<const char>(paddedData)), boost::asio::use_future,
                        RequestOptionsForTransfer(pageBlobClient.GetDefaultRequestOptions(), paddedData.size()))
                    .get());
-        BlobHelpers::SetFileSize(pageBlobClient, static_cast<int64_t>(data.size()));
+        BlobOperations::SetSize(*m_runtime, pageBlobClient, static_cast<int64_t>(data.size()));
     }
 
     return pageBlobClientPtr;
@@ -186,7 +187,7 @@ AzureIntegrationTestBase::CreateBlobWithData(const std::vector<char>& data) {
 std::vector<char> AzureIntegrationTestBase::DownloadBlobData(size_t maxSize) {
     const auto pageBlobClientPtr = m_containerClient->GetPageBlobClient(m_blobName);
     auto& pageBlobClient = *pageBlobClientPtr;
-    const auto actualSize = BlobHelpers::GetFileSize(pageBlobClient);
+    const auto actualSize = BlobOperations::GetSize(pageBlobClient);
 
     std::vector<char> data(std::min(static_cast<size_t>(actualSize), maxSize));
     if (!data.empty()) {

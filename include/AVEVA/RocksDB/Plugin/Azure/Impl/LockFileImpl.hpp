@@ -15,10 +15,11 @@
 #include <optional>
 #include <string>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-class LockFileImpl
+template <typename TBlob>
+class BasicLockFileImpl
     : public boost::intrusive::list_base_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>> {
-    std::shared_ptr<ClientRuntime> m_runtime;
-    std::unique_ptr<Impl::PageBlobClient> m_file;
+    std::shared_ptr<ClientRuntimeBase> m_runtime;
+    std::unique_ptr<TBlob> m_file;
     std::optional<std::string> m_leaseId;
     // Read by the renewal thread while Lock/Renew block on the network, hence atomic.
     mutable std::atomic<std::chrono::steady_clock::time_point> m_lastRenewalTime;
@@ -32,15 +33,15 @@ class LockFileImpl
     bool m_lockInProgress = false;
 
     [[nodiscard]] std::optional<std::string> CurrentLeaseId() const;
-    void RenewLease(const std::string& leaseId) const;
+    void RenewLease() const;
     // Throws when the lease has expired or its renewal deadline has passed; otherwise returns the time left to renew.
     [[nodiscard]] std::chrono::steady_clock::duration RenewalBudget() const;
 
   public:
-    LockFileImpl(std::shared_ptr<ClientRuntime> runtime, std::unique_ptr<Impl::PageBlobClient> file,
-                 std::chrono::seconds leaseLength,
-                 std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-                 std::string fileName);
+    BasicLockFileImpl(
+        std::shared_ptr<ClientRuntimeBase> runtime, std::unique_ptr<TBlob> file, std::chrono::seconds leaseLength,
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+        std::string fileName);
     // Returns false when the lease is already held (by this object or, until the lease length elapses, another
     // owner). Any other acquire failure throws RequestFailedException.
     bool Lock();
@@ -67,4 +68,14 @@ class LockFileImpl
     void unlink();
     bool is_linked();
 };
+extern template class BasicLockFileImpl<PageBlobClient>;
+
+/// <summary>The production lock file, over the real page blob client. Non-template so it can be forward
+/// declared.</summary>
+class LockFileImpl : public BasicLockFileImpl<PageBlobClient> {
+  public:
+    using BasicLockFileImpl<PageBlobClient>::BasicLockFileImpl;
+};
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
+
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.ipp"

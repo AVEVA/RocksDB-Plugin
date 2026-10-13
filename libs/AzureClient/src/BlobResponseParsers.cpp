@@ -756,8 +756,32 @@ Models::ReleaseBlobLeaseResult ParseReleaseBlobLeaseResult(const HttpResponse& r
     return ParseETagAndLastModified<Models::ReleaseBlobLeaseResult>(response);
 }
 
+Models::GetPageRangesResult ParseGetPageRangesResult(const HttpResponse& response) {
+    auto result = ParseETagAndLastModified<Models::GetPageRangesResult>(response);
+    result.BlobContentLength =
+        ParseOptionalUnsigned(FindHeaderValue(response, XMsBlobContentLengthHeaderName), "x-ms-blob-content-length")
+            .value_or(0U);
+
+    const auto tree = TryReadXmlOrThrow(response.GetBody(), "Get page ranges response", "PageList");
+    const XmlNode* root = tree ? tree->Root() : nullptr;
+    if (root == nullptr) {
+        return result;
+    }
+
+    result.NextMarker = GetChildTextOrEmpty(*root, "NextMarker");
+    for (const XmlNode* range : GetChildrenByLocalName(*root, "PageRange")) {
+        const auto start = ParseUnsigned(GetChildTextOrEmpty(*range, "Start"));
+        const auto end = ParseUnsigned(GetChildTextOrEmpty(*range, "End"));
+        if (!start.has_value() || !end.has_value() || *end < *start) {
+            throw std::invalid_argument("PageRange must have unsigned Start and End with End >= Start.");
+        }
+        result.Ranges.push_back({.Offset = *start, .Length = *end - *start + 1U});
+    }
+    return result;
+}
+
 namespace {
-// <Name Encoded="true"> carries a percent-encoded name (used for names with characters invalid in XML).
+// The Name element's Encoded="true" attribute marks a percent-encoded name (used for names with characters invalid in XML).
 [[nodiscard]] std::string GetBlobItemName(const XmlNode& item) {
     const XmlNode* name = FindChildByLocalName(item, "Name");
     if (name == nullptr) {

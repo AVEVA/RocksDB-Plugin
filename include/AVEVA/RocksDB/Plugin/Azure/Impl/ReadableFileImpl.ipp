@@ -32,7 +32,7 @@ void FinishRead(std::shared_ptr<const BasicReadableFileImpl<TBlob>>& self, ReadC
 } // namespace
 template <typename TBlob>
 BasicReadableFileImpl<TBlob>::BasicReadableFileImpl(
-    std::string_view name, std::shared_ptr<ClientRuntime> runtime, std::shared_ptr<TBlob> blob,
+    std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
     std::shared_ptr<Core::FileCache> fileCache,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     std::shared_ptr<AsyncReadTracker> asyncReads, std::shared_ptr<std::atomic<int64_t>> prefetchBudget)

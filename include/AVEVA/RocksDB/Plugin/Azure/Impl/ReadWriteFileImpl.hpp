@@ -21,7 +21,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 template <typename TBlob> class BasicReadWriteFileImpl {
     std::string m_name;
     // Declared before the client so that it is destroyed after it: the client references the runtime's HTTP client.
-    std::shared_ptr<ClientRuntime> m_runtime;
+    std::shared_ptr<ClientRuntimeBase> m_runtime;
     std::shared_ptr<TBlob> m_blob;
     std::shared_ptr<Core::FileCache> m_fileCache;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
@@ -35,7 +35,7 @@ template <typename TBlob> class BasicReadWriteFileImpl {
     std::vector<BufferChunkInfo> m_bufferStats; // to track where page info is to be inserted
   public:
     BasicReadWriteFileImpl(
-        std::string_view name, std::shared_ptr<ClientRuntime> runtime, std::shared_ptr<TBlob> blob,
+        std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
         std::shared_ptr<Core::FileCache> fileCache,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
     ~BasicReadWriteFileImpl();

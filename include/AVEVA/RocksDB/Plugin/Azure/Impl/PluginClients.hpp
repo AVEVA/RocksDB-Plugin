@@ -12,7 +12,17 @@
 #include <AVEVA/HttpClient/HttpClient.hpp>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-// The Azure clients the plugin uses: the real HTTP transport authenticating with the plugin's credential.
+// The Azure clients the plugin uses over the HTTP transport `THttp`, authenticating with the plugin's credential.
+template <AzureClient::HttpClientLike THttp>
+using BlobClientOn = AzureClient::BasicBlobClient<THttp, BasicPluginCredential<THttp>>;
+template <AzureClient::HttpClientLike THttp>
+using PageBlobClientOn = AzureClient::BasicPageBlobClient<THttp, BasicPluginCredential<THttp>>;
+template <AzureClient::HttpClientLike THttp>
+using BlobContainerClientOn = AzureClient::BasicBlobContainerClient<THttp, BasicPluginCredential<THttp>>;
+template <AzureClient::HttpClientLike THttp>
+using BlobServiceClientOn = AzureClient::BasicBlobServiceClient<THttp, BasicPluginCredential<THttp>>;
+
+// The same over the real HTTP transport.
 using BlobClient = AzureClient::BasicBlobClient<::AVEVA::HttpClient, PluginCredential>;
 using BlockBlobClient = AzureClient::BasicBlockBlobClient<::AVEVA::HttpClient, PluginCredential>;
 using PageBlobClient = AzureClient::BasicPageBlobClient<::AVEVA::HttpClient, PluginCredential>;
