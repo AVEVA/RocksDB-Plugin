@@ -127,7 +127,8 @@ namespace AVEVA
         /// How long a pooled connection may stay idle before it is closed.
         /// </summary>
         /// <param name="idleConnectionTimeout">The idle timeout.</param>
-        void SetIdleConnectionTimeout(std::chrono::seconds idleConnectionTimeout) noexcept;
+        /// <exception cref="std::invalid_argument">Thrown when the timeout is negative.</exception>
+        void SetIdleConnectionTimeout(std::chrono::seconds idleConnectionTimeout);
 
         /// <summary>
         /// Caps in-flight requests per origin (scheme, host, port); further requests wait in FIFO order until one

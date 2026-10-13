@@ -3,6 +3,7 @@
 
 #include "AVEVA/HttpClient/HttpClientOptions.hpp"
 
+#include <stdexcept>
 #include <utility>
 
 namespace AVEVA
@@ -82,8 +83,12 @@ namespace AVEVA
         m_maxIdleConnectionsPerHost = maxIdleConnectionsPerHost;
     }
 
-    void HttpClientOptions::SetIdleConnectionTimeout(std::chrono::seconds idleConnectionTimeout) noexcept
+    void HttpClientOptions::SetIdleConnectionTimeout(std::chrono::seconds idleConnectionTimeout)
     {
+        if (idleConnectionTimeout < std::chrono::seconds::zero())
+        {
+            throw std::invalid_argument("The idle connection timeout must not be negative.");
+        }
         m_idleConnectionTimeout = idleConnectionTimeout;
     }
     void HttpClientOptions::SetMaxConnectionsPerHost(std::size_t maxConnectionsPerHost) noexcept

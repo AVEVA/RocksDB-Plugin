@@ -52,10 +52,14 @@ int64_t BasicSequentialFileImpl<TBlob>::ReadThroughReadahead(const int64_t bytes
         m_readahead = std::make_unique_for_overwrite<char[]>(static_cast<size_t>(kReadaheadBytes));
     }
     m_readaheadLength = 0;
+    // Captured before the read: if the read refreshes the metadata, the buffer is tagged with the older ETag and
+    // simply refetched next time, whereas tagging it afterwards could vouch for bytes downloaded under an older
+    // ETag.
+    const auto etagBeforeRead = m_file.GetETag();
     const auto fetched = std::max<int64_t>(m_file.RandomRead(m_offset + served, kReadaheadBytes, m_readahead.get()), 0);
     m_readaheadLength = fetched;
     m_readaheadStart = m_offset + served;
-    m_readaheadEtag = m_file.GetETag();
+    m_readaheadEtag = etagBeforeRead;
 
     const auto n = std::min(bytesToRead - served, fetched);
     std::copy_n(m_readahead.get(), n, buffer + served);

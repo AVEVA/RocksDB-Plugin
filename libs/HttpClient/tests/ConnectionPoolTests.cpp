@@ -236,6 +236,17 @@ TEST(ConnectionPool, TotalIdleCapEvictsTheOldestAcrossOrigins) {
     EXPECT_TRUE(pool.Acquire(MakeKey("c.com")).has_value());
 }
 
+TEST(ConnectionPool, ZeroTotalIdleLimitDisablesPooling) {
+    int live = 0;
+    Pool pool(4, LongTimeout, 0);
+    const auto key = MakeKey("example.com");
+    pool.Release(key, MakeConnection(1, live));
+
+    EXPECT_EQ(live, 0);
+    EXPECT_EQ(pool.IdleCount(), 0U);
+    EXPECT_FALSE(pool.Acquire(key).has_value());
+}
+
 struct CountingNotifier {
     int* notifications = nullptr;
 

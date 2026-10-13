@@ -48,6 +48,9 @@ template <typename TBlob> class BasicReadWriteFileImpl {
     void Sync();
     void Flush();
     void Write(int64_t offset, const char* data, int64_t size);
+    /// Reads only data made durable by <see cref="Sync"/> (bounded by the size at open or at the last Sync). Bytes
+    /// passed to Write, or flushed with Flush, are not visible to Read until Sync is called. RocksDB uses
+    /// random-RW files only to write and then sync, so a read-your-writes guarantee is deliberately not provided.
     int64_t Read(int64_t offset, int64_t bytesRequested, char* buffer) const;
 
   private:

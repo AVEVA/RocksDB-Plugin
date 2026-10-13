@@ -141,7 +141,7 @@ class ConnectionPool {
     /// <param name="maxIdlePerKey">How many idle connections to keep per origin; 0 disables pooling.</param>
     /// <param name="idleTimeout">How long a connection may sit idle before it is closed; clamped to
     /// <see cref="MaxIdleTimeout"/>.</param>
-    /// <param name="maxTotalIdle">How many idle connections to keep across all origins.</param>
+    /// <param name="maxTotalIdle">How many idle connections to keep across all origins; 0 disables pooling.</param>
     ConnectionPool(std::size_t maxIdlePerKey, std::chrono::seconds idleTimeout,
                    std::size_t maxTotalIdle = DefaultMaxTotalIdle)
         : m_maxIdlePerKey(maxIdlePerKey),
@@ -269,7 +269,7 @@ class ConnectionPool {
     /// <param name="key">The origin the connection belongs to.</param>
     /// <param name="connection">The connection and its read buffer, taken over on success.</param>
     void Release(const ConnectionKey<Stream>& key, PooledConnection<Stream> connection) {
-        if (m_maxIdlePerKey == 0 || !connection.stream) {
+        if (m_maxIdlePerKey == 0 || m_maxTotalIdle == 0 || !connection.stream) {
             return;
         }
         LruList retired;

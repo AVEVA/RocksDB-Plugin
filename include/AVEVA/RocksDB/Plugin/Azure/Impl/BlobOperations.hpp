@@ -294,7 +294,7 @@ template <typename TBlob>
         return true;
     }
     AzureClient::ThrowIfRunningOn(destination.get_executor());
-
+    AzureClient::ThrowIfRunningOn(source.get_executor());
     constexpr auto PageSize = static_cast<int64_t>(Configuration::PageBlob::PageSize);
     const auto sourceUrl = source.Url();
     const auto start = [&](const PageChunk& chunk, auto token) {

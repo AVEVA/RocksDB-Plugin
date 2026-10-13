@@ -3,6 +3,8 @@
 
 #include "AVEVA/HttpClient/HttpRequestOptions.hpp"
 
+#include <stdexcept>
+
 namespace AVEVA {
 std::chrono::milliseconds HttpRequestOptions::GetTimeout() const noexcept { return m_timeout; }
 
@@ -36,5 +38,10 @@ void HttpRequestOptions::SetTotalDeadline(std::chrono::milliseconds totalDeadlin
     m_totalDeadline = totalDeadline;
 }
 
-void HttpRequestOptions::SetMaxRetries(int maxRetries) noexcept { m_maxRetries = maxRetries; }
+void HttpRequestOptions::SetMaxRetries(int maxRetries) {
+    if (maxRetries < 0) {
+        throw std::invalid_argument("The retry count must not be negative.");
+    }
+    m_maxRetries = maxRetries;
+}
 } // namespace AVEVA

@@ -96,7 +96,8 @@ class HttpRequestOptions {
     /// Replaces the client's retry count for this request (0 disables retries).
     /// </summary>
     /// <param name="maxRetries">Retries after the first attempt.</param>
-    void SetMaxRetries(int maxRetries) noexcept;
+    /// <exception cref="std::invalid_argument">Thrown when <paramref name="maxRetries"/> is negative.</exception>
+    void SetMaxRetries(int maxRetries);
 
   private:
     std::chrono::milliseconds m_timeout{30000};
