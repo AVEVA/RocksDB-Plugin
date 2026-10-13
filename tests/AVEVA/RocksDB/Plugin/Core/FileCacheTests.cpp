@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <stdexcept>
 #include <unordered_set>
 using AVEVA::RocksDB::Plugin::Core::FileCache;
 using AVEVA::RocksDB::Plugin::Core::Mocks::ContainerClientMock;
@@ -224,6 +225,52 @@ TEST_F(FileCacheTests, CacheSizeExceeded) {
     // Assert
     ASSERT_EQ(fileSize, m_cache.CacheSize());
     ASSERT_EQ(3, m_removedFiles.size());
+}
+
+TEST_F(FileCacheTests, SetCacheSize_EvictsTheOnlyEntry) {
+    // Arrange
+    const auto fileSize = static_cast<size_t>(20000);
+    EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(fileSize));
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
+        auto file = std::make_unique<FileMock>();
+        EXPECT_CALL(*file, Read(_, _, _)).WillRepeatedly([](char*, uint64_t offset, uint64_t length) {
+            return length - offset;
+        });
+        return file;
+    });
+    EnsureReadFromCache("only.sst");
+    ASSERT_EQ(fileSize, m_cache.CacheSize());
+
+    // Act
+    m_cache.SetCacheSize(0);
+
+    // Assert
+    EXPECT_EQ(0U, m_cache.CacheSize());
+    EXPECT_FALSE(m_cache.HasFile("only.sst"));
+}
+
+TEST_F(FileCacheTests, FailedSizeLookupLeavesTheEntryDownloadableAgain) {
+    // Arrange
+    std::atomic<int> sizeCalls = 0;
+    EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly([&sizeCalls](const std::string&) -> int64_t {
+        if (sizeCalls++ == 0) {
+            throw std::runtime_error("boom");
+        }
+        return 10;
+    });
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
+        auto file = std::make_unique<FileMock>();
+        EXPECT_CALL(*file, Read(_, _, _)).WillRepeatedly([](char*, uint64_t, uint64_t length) { return length; });
+        return file;
+    });
+
+    // Act: the first queued download fails, but later reads must be able to queue it again.
+    EnsureReadFromCache("retry.sst");
+
+    // Assert
+    EXPECT_GE(sizeCalls.load(), 2);
 }
 
 TEST_F(FileCacheTests, ReadFile_FirstAccess_DoesNotStartDownload) {

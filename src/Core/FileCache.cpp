@@ -103,12 +103,19 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
         EntryAccessedUnsafe(fileEntry);
 
         auto cachedFilePath = m_cachePath / fileEntry.GetFilePath();
-        auto file = m_filesystem->Open(cachedFilePath);
-        if (buffer != nullptr) {
-            const auto bytesRead = file->Read(buffer, offset, bytesToRead);
-            return bytesRead;
-        } else {
+
+        // The read is disk I/O, so it must not hold the cache-wide mutex. If an eviction removes the file after the
+        // lock is released, the read fails and the caller falls back to the blob.
+        lock.unlock();
+        if (buffer == nullptr) {
             return 0;
+        }
+        try {
+            auto file = m_filesystem->Open(cachedFilePath);
+            return file->Read(buffer, offset, bytesToRead);
+        } catch (const std::exception& e) {
+            BOOST_LOG_SEV(*m_logger, debug) << "Cached read of '" << filePath << "' failed, falling back: " << e.what();
+            return std::nullopt;
         }
     }
 }
@@ -203,6 +210,13 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
             } catch (std::exception& e) {
                 BOOST_LOG_SEV(*m_logger, error)
                     << "Failed to get file size for '" << filePath << "'. Error: " << e.what();
+
+                // Without this the entry stays QueuedForDownload and is never queued again.
+                std::scoped_lock lock(m_mutex);
+                if (const auto failed = m_cache.find(filePath);
+                    failed != m_cache.end() && failed->second.GetState() == FileCacheEntry::State::QueuedForDownload) {
+                    failed->second.SetState(FileCacheEntry::State::Stale);
+                }
                 continue;
             }
 
@@ -333,26 +347,38 @@ bool FileCache::EvictAtLeast(const int64_t bytes) {
 
     BOOST_LOG_SEV(*m_logger, debug) << "Attempting to evict " << bytes << " (bytes) from the file cache.";
     int64_t bytesEvicted = 0;
+    if (m_entryList.empty()) {
+        return bytesEvicted >= bytes;
+    }
+
+    // Walk from the least recently used entry towards the front. The next candidate is captured before the current
+    // one is removed, and the front entry is processed too (the loop ends after it).
     auto tail = m_entryList.s_iterator_to(m_entryList.back());
-    while (bytesEvicted < bytes && tail != m_entryList.begin()) {
-        // Don't evict downloading files. They could be files that we are making space for.
-        const auto state = tail->GetState();
-        if (state == FileCacheEntry::State::Downloading || state == FileCacheEntry::State::QueuedForDownload) {
-            BOOST_LOG_SEV(*m_logger, debug) << "Skipping eviction of '" << tail->GetFilePath()
-                                            << "'. It is currently downloading or queued for download";
-            tail = --tail;
-            continue;
+    while (bytesEvicted < bytes) {
+        const auto current = tail;
+        const bool atFront = current == m_entryList.begin();
+        if (!atFront) {
+            --tail;
         }
 
-        const std::string filePath = tail->GetFilePath();
-        const auto fileSize = tail->GetSize();
+        // Don't evict downloading files. They could be files that we are making space for.
+        const auto state = current->GetState();
+        if (state == FileCacheEntry::State::Downloading || state == FileCacheEntry::State::QueuedForDownload) {
+            BOOST_LOG_SEV(*m_logger, debug) << "Skipping eviction of '" << current->GetFilePath()
+                                            << "'. It is currently downloading or queued for download";
+        } else {
+            const std::string filePath = current->GetFilePath();
+            const auto fileSize = current->GetSize();
 
-        BOOST_LOG_SEV(*m_logger, debug) << "Evicting '" << filePath << "' of size " << fileSize
-                                        << "'bytes' from file cache";
-        tail = --tail;
-        bytesEvicted += fileSize;
+            BOOST_LOG_SEV(*m_logger, debug) << "Evicting '" << filePath << "' of size " << fileSize
+                                            << "'bytes' from file cache";
+            bytesEvicted += fileSize;
+            RemoveFileUnsafe(filePath);
+        }
 
-        RemoveFileUnsafe(filePath);
+        if (atFront) {
+            break;
+        }
     }
 
     return bytesEvicted >= bytes;
