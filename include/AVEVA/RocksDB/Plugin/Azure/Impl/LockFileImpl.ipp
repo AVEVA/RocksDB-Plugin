@@ -45,9 +45,10 @@ template <typename TBlob>
 BasicLockFileImpl<TBlob>::BasicLockFileImpl(
     std::shared_ptr<ClientRuntimeBase> runtime, std::unique_ptr<TBlob> file, std::chrono::seconds leaseLength,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-    std::string fileName)
+    std::string fileName, std::optional<std::chrono::milliseconds> acquireTimeout)
     : m_runtime(std::move(runtime)), m_file(std::move(file)), m_lastRenewalTime(std::chrono::steady_clock::now()),
-      m_leaseLength(leaseLength), m_logger(std::move(logger)), m_fileName(std::move(fileName)) {
+      m_leaseLength(leaseLength), m_acquireTimeout(acquireTimeout.value_or(leaseLength)), m_logger(std::move(logger)),
+      m_fileName(std::move(fileName)) {
     if (m_logger == nullptr) {
         throw std::runtime_error("logger cannot be null.");
     }
@@ -75,7 +76,8 @@ template <typename TBlob> bool BasicLockFileImpl<TBlob>::Lock() {
     });
 
     BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::debug)
-        << "Attempting to acquire blob lease for '" << m_fileName << "' (timeout: " << m_leaseLength.count() << "s)";
+        << "Attempting to acquire blob lease for '" << m_fileName
+        << "' (timeout: " << std::chrono::duration_cast<std::chrono::seconds>(m_acquireTimeout).count() << "s)";
     auto start = std::chrono::steady_clock::now();
     auto end = start;
     // The service starts the lease clock when it receives the request, so the renewal time is taken before sending.
@@ -84,7 +86,7 @@ template <typename TBlob> bool BasicLockFileImpl<TBlob>::Lock() {
     // The proposed ID is reused on every attempt: if an acquire succeeded but its response was lost, the retry
     // with the same ID is accepted by the service instead of failing with a conflict until the lease expires.
     const auto leaseId = LockFileDetail::NewLeaseId();
-    while ((end - start) < m_leaseLength) {
+    while ((end - start) < m_acquireTimeout) {
         attemptStart = std::chrono::steady_clock::now();
         AzureClient::AcquireLeaseOptions options;
         options.ProposedLeaseId = leaseId;
@@ -92,7 +94,7 @@ template <typename TBlob> bool BasicLockFileImpl<TBlob>::Lock() {
         // Each attempt inherits the client's retry policy, which can run for minutes; cancel it once the overall
         // lock budget is spent so Lock() cannot block far beyond the lease length.
         auto result =
-            BlockOnWithin(*m_file, m_leaseLength - (attemptStart - start), [&](auto token, auto requestOptions) {
+            BlockOnWithin(*m_file, m_acquireTimeout - (attemptStart - start), [&](auto token, auto requestOptions) {
                 return m_file->AcquireLeaseAsync(std::move(options), std::move(token), std::move(requestOptions));
             });
         if (result.has_value()) {

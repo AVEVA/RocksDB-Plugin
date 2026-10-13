@@ -88,9 +88,9 @@ std::unique_ptr<::AVEVA::HttpClient> CreateHttpClient(boost::asio::io_context& c
 } // namespace
 
 // The io_context belongs to the host, which keeps running it; only the HTTP client created here is released.
-template <>
-BasicClientRuntime<::AVEVA::HttpClient>::BasicClientRuntime(boost::asio::io_context& context)
-    : m_httpClient(CreateHttpClient(context)) {}
+std::unique_ptr<::AVEVA::HttpClient> HttpClientFactory<::AVEVA::HttpClient>::Create(boost::asio::io_context& context) {
+    return CreateHttpClient(context);
+}
 
 void ClientRuntimeBase::FenceWrites() noexcept { m_writesFenced.store(true); }
 

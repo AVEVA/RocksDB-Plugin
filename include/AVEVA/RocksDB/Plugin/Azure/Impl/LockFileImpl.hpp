@@ -25,6 +25,8 @@ class BasicLockFileImpl
     mutable std::atomic<std::chrono::steady_clock::time_point> m_lastRenewalTime;
     std::atomic<bool> m_held{false};
     std::chrono::seconds m_leaseLength;
+    // How long Lock() keeps retrying against a lease held by another owner; the lease length unless overridden.
+    std::chrono::milliseconds m_acquireTimeout;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
     std::string m_fileName;
     // Guards only m_leaseId and m_lockInProgress and is never held across network I/O or sleeps, so a slow Lock
@@ -41,7 +43,7 @@ class BasicLockFileImpl
     BasicLockFileImpl(
         std::shared_ptr<ClientRuntimeBase> runtime, std::unique_ptr<TBlob> file, std::chrono::seconds leaseLength,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-        std::string fileName);
+        std::string fileName, std::optional<std::chrono::milliseconds> acquireTimeout = {});
     // Returns false when the lease is already held (by this object or, until the lease length elapses, another
     // owner). Any other acquire failure throws RequestFailedException.
     bool Lock();

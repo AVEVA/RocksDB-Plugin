@@ -125,6 +125,7 @@ class FakeBlobServer {
     int LeaseAcquisitions = 0;
     int LeaseRenewals = 0;
     int LeaseReleases = 0;
+    int LeaseBreaks = 0;
     // Replaces the page listing, which otherwise reports every 512-byte page that holds a non-zero byte.
     std::optional<std::vector<AzureClient::Models::PageRange>> PageRangeOverride;
 
@@ -519,6 +520,14 @@ class FakeBlobServer {
             ++LeaseReleases;
             blob.LeaseId.clear();
             return Success(MakeResponse(200U, {HttpHeader("ETag", blob.ETag)}));
+        }
+        if (action == "break") {
+            if (blob.LeaseId.empty()) {
+                return Failure(409U, "LeaseNotPresentWithLeaseOperation");
+            }
+            ++LeaseBreaks;
+            blob.LeaseExpiry = now;
+            return Success(MakeResponse(202U, {HttpHeader("ETag", blob.ETag), HttpHeader("x-ms-lease-time", "0")}));
         }
         return Failure(400U, "InvalidHeaderValue");
     }

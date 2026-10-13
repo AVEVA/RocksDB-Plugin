@@ -44,7 +44,10 @@ class FakeHttpClient final {
     using executor_type = boost::asio::io_context::executor_type;
     using CompletionHandler = std::move_only_function<void(std::error_code, HttpResponse)>;
 
-    FakeHttpClient() { s_instances.push_back(this); }
+    FakeHttpClient() : m_context(m_ownedContext) { s_instances.push_back(this); }
+
+    // Runs on the caller's io_context, the way the production client is built; the caller then drives it.
+    explicit FakeHttpClient(boost::asio::io_context& context) : m_context(context) { s_instances.push_back(this); }
 
     ~FakeHttpClient() {
         auto it = std::ranges::find(s_instances, this);
@@ -195,8 +198,8 @@ class FakeHttpClient final {
         if (request.HasBodyView() && request.GetBodyKeepAlive()) {
             std::shared_ptr<const void> keepAlive = request.GetBodyKeepAlive();
             request.SetBodyView(request.GetBodyView());
-            completion = [inner = std::move(completion), keepAlive = std::move(keepAlive)](
-                             std::error_code error, HttpResponse response) mutable {
+            completion = [inner = std::move(completion),
+                          keepAlive = std::move(keepAlive)](std::error_code error, HttpResponse response) mutable {
                 keepAlive.reset();
                 inner(error, std::move(response));
             };
@@ -284,8 +287,10 @@ class FakeHttpClient final {
 
     [[nodiscard]] bool CompleteNext() { return CompletePending(0U); }
 
-    [[nodiscard]] bool CompletePending(std::size_t index) {
-        auto pending = TakePending(index);
+    [[nodiscard]] bool CompletePending(std::size_t index) { return CompleteTaken(TakePending(index)); }
+
+    // Templated only because PendingCompletion is declared further down.
+    template <class TPending> [[nodiscard]] bool CompleteTaken(TPending pending) {
         if (!pending.has_value()) {
             return false;
         }
@@ -307,14 +312,17 @@ class FakeHttpClient final {
     [[nodiscard]] bool IsPending(std::size_t requestIndex) const { return FindPending(requestIndex).has_value(); }
 
     [[nodiscard]] bool CompleteRequest(std::size_t requestIndex) {
-        const auto index = FindPending(requestIndex);
-        return index.has_value() && CompletePending(*index);
+        return CompleteTaken(TakePendingRequest(requestIndex));
     }
 
     // Downloads write to their sink off the I/O thread; this waits for those writes and runs the completions
     // they post back, so a test observes the same state a synchronous sink would have produced.
     [[nodiscard]] bool FailPending(std::size_t index, std::error_code error, HttpResponse response = HttpResponse{}) {
-        auto pending = TakePending(index);
+        return FailTaken(TakePending(index), error, std::move(response));
+    }
+
+    template <class TPending>
+    [[nodiscard]] bool FailTaken(TPending pending, std::error_code error, HttpResponse response) {
         if (!pending.has_value()) {
             return false;
         }
@@ -331,8 +339,7 @@ class FakeHttpClient final {
     // forward a cancellation_slot signal to the specific request it was attached to.
     [[nodiscard]] bool FailRequest(std::size_t requestIndex, std::error_code error,
                                    HttpResponse response = HttpResponse{}) {
-        const auto index = FindPending(requestIndex);
-        return index.has_value() && FailPending(*index, error, std::move(response));
+        return FailTaken(TakePendingRequest(requestIndex), error, std::move(response));
     }
 
     [[nodiscard]] bool TimeoutPending(std::size_t index) {
@@ -484,6 +491,19 @@ class FakeHttpClient final {
         return pending;
     }
 
+    // Finds and removes in one critical section: looking up the position first and taking it later lets another
+    // thread shift the queue in between, so the wrong request would be completed.
+    [[nodiscard]] std::optional<PendingCompletion> TakePendingRequest(std::size_t requestIndex) {
+        std::scoped_lock lock(m_mutex);
+        const auto it = std::ranges::find(m_pending, requestIndex, &PendingCompletion::RequestIndex);
+        if (it == m_pending.end()) {
+            return std::nullopt;
+        }
+        PendingCompletion pending = std::move(*it);
+        m_pending.erase(it);
+        return pending;
+    }
+
     [[nodiscard]] std::optional<std::size_t> FindPending(std::size_t requestIndex) const {
         std::scoped_lock lock(m_mutex);
         for (std::size_t index = 0; index < m_pending.size(); ++index) {
@@ -516,8 +536,9 @@ class FakeHttpClient final {
     bool m_deferByDefault = false;
     bool m_completeInline = false; // default to async (posted) completions per the HttpClient contract (T26)
 
-    // mutable: get_executor() is const (per HttpClient), but io_context::get_executor() is not.
-    mutable boost::asio::io_context m_context;
+    // Backs m_context unless the client is built on a caller-owned io_context.
+    boost::asio::io_context m_ownedContext;
+    boost::asio::io_context& m_context;
     // Guards the containers below; never held while a completion or responder runs.
     mutable std::mutex m_mutex;
     std::recursive_mutex m_pollMutex;

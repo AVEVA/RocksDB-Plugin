@@ -4,11 +4,18 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LoggerImpl.hpp"
 #include <format>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-LoggerImpl::LoggerImpl(std::unique_ptr<WriteableFileImpl> file, int logLevel)
+LoggerImpl::LoggerImpl(std::unique_ptr<LogSink> file, int logLevel)
     : m_file(std::move(file)), m_logLevel(logLevel), m_buffer(4096) {}
 
-LoggerImpl::LoggerImpl(std::unique_ptr<WriteableFileImpl> file, int logLevel, std::unique_ptr<LogRateLimiter> rateLimiter)
+LoggerImpl::LoggerImpl(std::unique_ptr<LogSink> file, int logLevel, std::unique_ptr<LogRateLimiter> rateLimiter)
     : m_file(std::move(file)), m_logLevel(logLevel), m_buffer(4096), m_rateLimiter(std::move(rateLimiter)) {}
+
+LoggerImpl::LoggerImpl(std::unique_ptr<WriteableFileImpl> file, int logLevel)
+    : LoggerImpl(std::make_unique<FileLogSink<WriteableFileImpl>>(std::move(file)), logLevel) {}
+
+LoggerImpl::LoggerImpl(std::unique_ptr<WriteableFileImpl> file, int logLevel,
+                       std::unique_ptr<LogRateLimiter> rateLimiter)
+    : LoggerImpl(std::make_unique<FileLogSink<WriteableFileImpl>>(std::move(file)), logLevel, std::move(rateLimiter)) {}
 
 void LoggerImpl::Logv(const int logLevel, const char* format, ...) {
     va_list va;
@@ -31,8 +38,8 @@ void LoggerImpl::Logv(const int logLevel, const char* format, va_list ap) {
             // Emit the suppression summary as its own line before the current message.
             // Format: "[N similar messages suppressed in last 30s]\n"
             const auto seconds = m_rateLimiter->Cooldown().count();
-            const auto summary = std::format("[{} similar messages suppressed in last {}s]\n",
-                result.suppressedCount, seconds);
+            const auto summary =
+                std::format("[{} similar messages suppressed in last {}s]\n", result.suppressedCount, seconds);
             m_file->Append(std::span(summary.data(), summary.data() + summary.size()));
         }
     }

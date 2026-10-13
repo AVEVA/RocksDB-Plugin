@@ -295,17 +295,15 @@ BasicBlobFilesystemImpl<THttp>::ReuseWritableFile(const std::string& filePath) {
 
 template <typename THttp>
 LoggerImpl BasicBlobFilesystemImpl<THttp>::CreateLogger(const std::string& filePath, const int logLevel,
-                                                        const std::chrono::seconds cooldown)
-    requires std::same_as<THttp, ::AVEVA::HttpClient>
-{
+                                                        const std::chrono::seconds cooldown) {
     EnsureLiveness();
 
     auto [prefix, realPath, clientPtr] = ResolveBlob(filePath);
 
     BlobOperations::CreateIfNotExists(*m_runtime, *clientPtr, Configuration::PageBlob::DefaultSize);
 
-    auto impl = std::make_unique<WriteableFileType>(realPath, m_runtime, std::move(clientPtr), nullptr, m_logger,
-                                                    Configuration::PageBlob::DefaultSize);
+    auto impl = std::make_unique<FileLogSink<WriteableFileType>>(std::make_unique<WriteableFileType>(
+        realPath, m_runtime, std::move(clientPtr), nullptr, m_logger, Configuration::PageBlob::DefaultSize));
     return LoggerImpl{
         std::move(impl), logLevel,
         std::make_unique<LogRateLimiter>(
@@ -321,7 +319,7 @@ BasicBlobFilesystemImpl<THttp>::LockFile(const std::string& filePath) {
 
     BlobOperations::CreateIfNotExists(*m_runtime, *client, Configuration::PageBlob::DefaultSize);
     auto lockFile = std::make_shared<LockFileType>(m_runtime, std::move(client), Configuration::LeaseLength, m_logger,
-                                                   std::string(realPath));
+                                                   std::string(realPath), m_lockAcquireTimeout);
     // Lock() can retry for the full lease length. The mutex must not be held across it, or the renewal thread
     // would stall and the leases this Env already holds would expire.
     if (lockFile->Lock()) {
@@ -605,9 +603,10 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
 template <typename THttp>
 BasicBlobFilesystemImpl<THttp>::BasicBlobFilesystemImpl(
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>&& logger,
-    std::shared_ptr<BasicClientRuntime<THttp>> runtime, int64_t dataFileInitialSize, int64_t dataFileBufferSize)
+    std::shared_ptr<BasicClientRuntime<THttp>> runtime, int64_t dataFileInitialSize, int64_t dataFileBufferSize,
+    std::optional<std::chrono::milliseconds> lockAcquireTimeout)
     : m_logger(std::move(logger)), m_dataFileInitialSize(dataFileInitialSize), m_dataFileBufferSize(dataFileBufferSize),
-      m_runtime(std::move(runtime)),
+      m_lockAcquireTimeout(lockAcquireTimeout), m_runtime(std::move(runtime)),
       m_asyncReads(std::make_shared<AsyncReadTracker>(m_runtime->HttpClient().get_executor())),
       m_leaseRenewal{LeaseRenewal::Start(
           m_runtime->HttpClient().get_executor(), m_logger, RenewableLocksSnapshot{this}, FenceWritesOnFatal{this},
@@ -681,8 +680,10 @@ BasicBlobFilesystemImpl<THttp>::BasicBlobFilesystemImpl(
     std::shared_ptr<BasicClientRuntime<THttp>> runtime, const std::string& name, const std::string& storageAccountUrl,
     const std::string& storageAccountKey, int64_t dataFileInitialSize, int64_t dataFileBufferSize,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-    std::optional<std::string_view> cachePath, size_t maxCacheSize)
-    : BasicBlobFilesystemImpl(std::move(logger), std::move(runtime), dataFileInitialSize, dataFileBufferSize) {
+    std::optional<std::string_view> cachePath, size_t maxCacheSize,
+    std::optional<std::chrono::milliseconds> lockAcquireTimeout)
+    : BasicBlobFilesystemImpl(std::move(logger), std::move(runtime), dataFileInitialSize, dataFileBufferSize,
+                              lockAcquireTimeout) {
     AddContainer(ClientFactory::CreateSharedKeyServiceClient(m_runtime, storageAccountUrl, storageAccountKey),
                  storageAccountUrl, name, cachePath, maxCacheSize);
 }

@@ -136,6 +136,58 @@ TEST_F(BlobFilesystemFakeTests, LockFileHoldsTheLeaseUntilUnlocked) {
     EXPECT_EQ(m_server->LeaseReleases, 1);
 }
 
+TEST_F(BlobFilesystemFakeTests, SecondFilesystemCannotLockWhileTheLeaseIsHeldAndCanOnceItIsReleased) {
+    auto first = m_fs->LockFile(Path("LOCK"));
+    ASSERT_EQ(m_server->LeaseAcquisitions, 1);
+
+    // A short timeout bounds how long the contender waits on the held 20 second lease.
+    FakeFilesystem second(
+        m_runtime, Container, AccountUrl, AccountKey, 4096, 1024,
+        std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>(), {},
+        Configuration::MaxCacheSize, std::chrono::milliseconds(500));
+
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_THROW((void)second.LockFile(Path("LOCK")), std::runtime_error);
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(10));
+    EXPECT_EQ(second.GetLeaseClientCount(), 0U);
+    EXPECT_EQ(m_server->LeaseAcquisitions, 1);
+
+    m_fs->UnlockFile(*first);
+
+    auto acquired = second.LockFile(Path("LOCK"));
+    EXPECT_EQ(m_server->LeaseAcquisitions, 2);
+    EXPECT_EQ(second.GetLeaseClientCount(), 1U);
+    second.UnlockFile(*acquired);
+    EXPECT_EQ(m_server->LeaseReleases, 2);
+}
+
+TEST_F(BlobFilesystemFakeTests, LockFileOnADifferentBlobIsNotBlockedByAHeldLease) {
+    auto first = m_fs->LockFile(Path("LOCK"));
+
+    auto other = m_fs->LockFile(Path("OTHER"));
+
+    EXPECT_EQ(m_server->LeaseAcquisitions, 2);
+    m_fs->UnlockFile(*other);
+    m_fs->UnlockFile(*first);
+}
+
+TEST_F(BlobFilesystemFakeTests, LoggerWritesRateLimitedLinesToTheBlob) {
+    {
+        auto logger = m_fs->CreateLogger(Path("LOG"), 0);
+        logger.Logv(1, "hello %s", "logger");
+        logger.Flush();
+    }
+
+    EXPECT_NE(Read("LOG").find("hello logger"), std::string::npos);
+}
+
+TEST(BlobFilesystemFakeRuntimeTests, RuntimeBuiltOnAnIoContextRunsTheTransportOnIt) {
+    boost::asio::io_context context;
+    BasicClientRuntime<FakeHttpClient> runtime(context);
+
+    EXPECT_EQ(runtime.HttpClient().get_executor(), context.get_executor());
+}
+
 TEST_F(BlobFilesystemFakeTests, FencedRuntimeRejectsFurtherOperations) {
     m_runtime->FenceWrites();
 

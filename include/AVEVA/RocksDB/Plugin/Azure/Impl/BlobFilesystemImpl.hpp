@@ -78,6 +78,8 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
     int64_t m_dataFileInitialSize;
     int64_t m_dataFileBufferSize;
+    // How long LockFile waits on a lease held by another owner; the lease length when unset.
+    std::optional<std::chrono::milliseconds> m_lockAcquireTimeout;
     // HTTP client (on the injected, host-owned io_context) used by every Azure client below; declared before them
     // so it outlives them during destruction.
     std::shared_ptr<BasicClientRuntime<THttp>> m_runtime;
@@ -141,13 +143,15 @@ template <typename THttp> class BasicBlobFilesystemImpl {
         std::optional<std::string_view> cachePath = {}, size_t maxCacheSize = Configuration::MaxCacheSize);
 
     // Builds the filesystem on an already-constructed runtime (and therefore any HTTP client). Used with shared-key
-    // credentials; the tests pass a runtime that owns an in-memory fake.
+    // credentials. The tests pass a runtime that owns an in-memory fake and a short lock timeout, so that contention
+    // does not take the production 20 seconds to give up.
     BasicBlobFilesystemImpl(
         std::shared_ptr<BasicClientRuntime<THttp>> runtime, const std::string& name,
         const std::string& storageAccountUrl, const std::string& storageAccountKey, int64_t dataFileInitialSize,
         int64_t dataFileBufferSize,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-        std::optional<std::string_view> cachePath = {}, size_t maxCacheSize = Configuration::MaxCacheSize);
+        std::optional<std::string_view> cachePath = {}, size_t maxCacheSize = Configuration::MaxCacheSize,
+        std::optional<std::chrono::milliseconds> lockAcquireTimeout = {});
 
     // Stops lease renewal, then blocks until reads abandoned by RocksDB mid-flight have completed, so that their
     // completions never release the HTTP client or a file cache. Requires the host io_context to still be running.
@@ -163,10 +167,8 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     [[nodiscard]] ReadWriteFileType CreateReadWriteFile(const std::string& filePath);
     [[nodiscard]] WriteableFileType ReopenWriteableFile(const std::string& filePath);
     [[nodiscard]] WriteableFileType ReuseWritableFile(const std::string& filePath);
-    // The logger wraps the production file type, so it is only available on the real HTTP client.
     LoggerImpl CreateLogger(const std::string& filePath, int logLevel,
-                            std::chrono::seconds cooldown = Configuration::LogRateLimiterCooldown)
-        requires std::same_as<THttp, ::AVEVA::HttpClient>;
+                            std::chrono::seconds cooldown = Configuration::LogRateLimiterCooldown);
     std::shared_ptr<LockFileType> LockFile(const std::string& filePath);
     void UnlockFile(LockFileType& lock);
     DirectoryType CreateDirectory(const std::string& directoryPath);
@@ -187,7 +189,8 @@ template <typename THttp> class BasicBlobFilesystemImpl {
   private:
     BasicBlobFilesystemImpl(
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>&& logger,
-        std::shared_ptr<BasicClientRuntime<THttp>> runtime, int64_t dataFileInitialSize, int64_t dataFileBufferSize);
+        std::shared_ptr<BasicClientRuntime<THttp>> runtime, int64_t dataFileInitialSize, int64_t dataFileBufferSize,
+        std::optional<std::chrono::milliseconds> lockAcquireTimeout = {});
     void AddContainer(const BlobServiceClientOn<THttp>& serviceClient, const std::string& storageAccountUrl,
                       const std::string& name, std::optional<std::string_view> cachePath, size_t maxCacheSize);
     template <class TInfo>
