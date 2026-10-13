@@ -76,8 +76,16 @@ TEST_F(BlobOperationsTests, DownloadLargerThanTheBufferFailsWithoutWritingPastIt
     EXPECT_EQ(std::string(8, '#'), std::string(storage.begin() + 8, storage.end()));
 }
 
-TEST_F(BlobOperationsTests, DownloadToBufferAcceptsResponseWithoutContentRange) {
+TEST_F(BlobOperationsTests, DownloadToBufferRejectsPartialContentWithoutContentRange) {
     m_httpClient.EnqueueResponse(HttpResponse{206, MakeCanonicalSuccessHeaders({}), std::string(4, 'y')});
+
+    std::vector<char> buffer(8);
+    EXPECT_ANY_THROW((void)BlobOperations::DownloadToBuffer(*m_blob, std::span<char>(buffer), 0, 4));
+}
+
+TEST_F(BlobOperationsTests, DownloadToBufferAcceptsPartialContentWithMatchingContentRange) {
+    m_httpClient.EnqueueResponse(
+        HttpResponse{206, MakeCanonicalSuccessHeaders({{"Content-Range", "bytes 0-3/8"}}), std::string(4, 'y')});
 
     std::vector<char> buffer(8);
     EXPECT_EQ(4, BlobOperations::DownloadToBuffer(*m_blob, std::span<char>(buffer), 0, 4));

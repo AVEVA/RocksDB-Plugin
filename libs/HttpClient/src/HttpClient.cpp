@@ -63,6 +63,7 @@ struct PendingRequest {
     HttpRequest request;
     HttpRequestOptions options;
     Detail::CompletionPointer completion;
+    std::shared_ptr<std::atomic<bool>> cancelled;
 };
 } // namespace
 
@@ -184,19 +185,24 @@ class HttpClient::Impl {
     void SendLimited(std::string origin, HttpRequest request, Detail::CompletionPointer completion,
                      HttpRequestOptions options) {
         const auto ticket = m_limiter->NextTicket();
+        auto cancelled = std::make_shared<std::atomic<bool>>(false);
         // Set before queueing so a cancellation cannot slip in between; a started request replaces it with
         // its own handler.
         if (auto slot = options.GetCancellationSlot(); slot.is_connected()) {
-            slot.assign([weak = std::weak_ptr{m_limiter}, origin, ticket](asio::cancellation_type type) {
+            slot.assign([weak = std::weak_ptr{m_limiter}, origin, ticket, cancelled](asio::cancellation_type type) {
                 if (type != asio::cancellation_type::none) {
+                    // Recorded first: a request dequeued but not yet bound to its own handler is invisible to
+                    // Cancel(), so StartLimited replays this flag once the operation owns the slot.
+                    cancelled->store(true);
                     if (auto limiter = weak.lock()) {
                         limiter->Cancel(origin, ticket);
                     }
                 }
             });
         }
-        m_limiter->Run(origin, ticket,
-                       PendingRequest{origin, std::move(request), std::move(options), std::move(completion)});
+        m_limiter->Run(
+            origin, ticket,
+            PendingRequest{origin, std::move(request), std::move(options), std::move(completion), std::move(cancelled)});
     }
 
     /// <summary>
@@ -210,7 +216,9 @@ class HttpClient::Impl {
                 limiter->Release(origin);
                 Detail::Complete(std::move(inner), error, std::move(response));
             });
-        SendUnlimited(std::move(pending.request), std::move(wrapped), std::move(pending.options));
+        auto slot = pending.options.GetCancellationSlot();
+        SendUnlimited(std::move(pending.request), std::move(wrapped), std::move(pending.options),
+                      std::move(pending.cancelled));
     }
 
     /// <summary>
@@ -232,7 +240,10 @@ class HttpClient::Impl {
     /// <param name="request">The request to send.</param>
     /// <param name="completion">Invoked exactly once with the outcome.</param>
     /// <param name="options">The timeout, response limits, and cancellation slot for this request.</param>
-    void SendUnlimited(HttpRequest request, Detail::CompletionPointer completion, HttpRequestOptions options) {
+    /// <param name="cancelled">Set by the limiter's handler if the caller cancelled while the request was
+    /// queued or being dequeued; the operation checks it once it owns the slot.</param>
+    void SendUnlimited(HttpRequest request, Detail::CompletionPointer completion, HttpRequestOptions options,
+                       std::shared_ptr<std::atomic<bool>> cancelled = nullptr) {
         // Invalid requests take the fresh-connection path, which fails them without closing a healthy
         // pooled connection.
         auto parsed = urls::parse_uri(request.GetUrl());
@@ -242,14 +253,16 @@ class HttpClient::Impl {
                 TlsConnectionKey key{parsed->host_address(), parsed->has_port() ? std::string(parsed->port()) : "443"};
                 if (auto pooled = m_tlsPool->Acquire(key)) {
                     return ResumeWithPooledConnection<TlsStream>(std::move(*pooled), std::move(key), std::move(request),
-                                                                 std::move(completion), std::move(options), m_tlsPool);
+                                                                 std::move(completion), std::move(options), m_tlsPool,
+                                                                 std::move(cancelled));
                 }
             } else {
                 BasicConnectionKey key{parsed->host_address(), parsed->has_port() ? std::string(parsed->port()) : "80"};
                 if (auto pooled = m_plainPool->Acquire(key)) {
                     return ResumeWithPooledConnection<PlainStream>(std::move(*pooled), std::move(key),
                                                                    std::move(request), std::move(completion),
-                                                                   std::move(options), m_plainPool);
+                                                                   std::move(options), m_plainPool,
+                                                                   std::move(cancelled));
                 }
             }
         }
@@ -262,7 +275,7 @@ class HttpClient::Impl {
             auto stream = std::make_unique<TlsStream>(executor, *m_tlsContext);
             auto operation = std::make_shared<RequestOperation<TlsStream>>(
                 m_tlsContext, std::move(stream), std::move(completion), std::move(options), m_tlsPool, std::move(key));
-            operation->BindCancellationSlot();
+            operation->BindCancellationSlot(cancelled.get());
             asio::post(executor,
                        [operation, request = std::move(request)]() mutable { operation->Start(std::move(request)); });
             return;
@@ -273,7 +286,7 @@ class HttpClient::Impl {
         auto stream = std::make_unique<PlainStream>(executor);
         auto operation = std::make_shared<RequestOperation<PlainStream>>(
             m_tlsContext, std::move(stream), std::move(completion), std::move(options), m_plainPool, std::move(key));
-        operation->BindCancellationSlot();
+        operation->BindCancellationSlot(cancelled.get());
         asio::post(executor,
                    [operation, request = std::move(request)]() mutable { operation->Start(std::move(request)); });
     }
@@ -310,12 +323,13 @@ class HttpClient::Impl {
     template <typename Stream>
     void ResumeWithPooledConnection(PooledConnection<Stream> pooled, ConnectionKey<Stream> key, HttpRequest request,
                                     Detail::CompletionPointer completion, HttpRequestOptions options,
-                                    std::shared_ptr<ConnectionPool<Stream>> pool) {
+                                    std::shared_ptr<ConnectionPool<Stream>> pool,
+                                    std::shared_ptr<std::atomic<bool>> cancelled) {
         auto executor = pooled.stream->get_executor();
         auto operation = std::make_shared<RequestOperation<Stream>>(
             m_tlsContext, std::move(pooled.stream), std::move(completion), std::move(options), std::move(pool),
             std::move(key), std::move(pooled.buffer));
-        operation->BindCancellationSlot();
+        operation->BindCancellationSlot(cancelled.get());
         asio::post(executor,
                    [operation, request = std::move(request)]() mutable { operation->StartReused(std::move(request)); });
     }

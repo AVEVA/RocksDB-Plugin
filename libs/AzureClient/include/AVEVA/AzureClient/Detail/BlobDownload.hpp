@@ -333,17 +333,22 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
             return;
         }
 
-        std::optional<std::uint64_t> total;
-        if (const std::string_view header = FindHeaderValue(response, "Content-Range"); !header.empty()) {
-            const auto parsed = ParseContentRange(header);
-            if (!parsed.has_value() || parsed->Start != m_begin) {
-                Fail(MakeInvalidResponse("The download response has an unexpected Content-Range."));
-                return;
-            }
-            total = parsed->Total;
+        // A 206 without a valid Content-Range cannot be placed or validated; refuse it rather than guess.
+        const std::string_view rangeHeader = FindHeaderValue(response, "Content-Range");
+        const auto parsedRange = rangeHeader.empty() ? std::nullopt : ParseContentRange(rangeHeader);
+        if (!parsedRange.has_value() || parsedRange->Unsatisfied || parsedRange->Start != m_begin ||
+            parsedRange->End < parsedRange->Start) {
+            Fail(MakeInvalidResponse("The download response has an unexpected Content-Range."));
+            return;
         }
+        const std::optional<std::uint64_t> total = parsedRange->Total;
+        m_total = total;
 
         std::string body = TakeBody(response);
+        if (body.empty() || parsedRange->End - parsedRange->Start != body.size() - 1U) {
+            Fail(MakeInvalidResponse("The download response has an unexpected Content-Range."));
+            return;
+        }
         if (total.has_value()) {
             m_end = m_end.has_value() ? std::min(*m_end, *total) : *total;
         } else if (body.size() < probeLength) {
@@ -402,10 +407,15 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         // A server that answers a different range would otherwise be written at the wrong offset.
         if (const std::string_view header = FindHeaderValue(response, "Content-Range"); !header.empty()) {
             const auto parsed = ParseContentRange(header);
-            if (!parsed.has_value() || parsed->Unsatisfied || parsed->Start != offset) {
+            if (!parsed.has_value() || parsed->Unsatisfied || parsed->Start != offset ||
+                parsed->End < parsed->Start || body.empty() || parsed->End - parsed->Start != body.size() - 1U ||
+                (m_total.has_value() && parsed->Total.has_value() && *parsed->Total != *m_total)) {
                 Fail(MakeInvalidResponse("The download response has an unexpected Content-Range."));
                 return;
             }
+        } else {
+            Fail(MakeInvalidResponse("The download response has an unexpected Content-Range."));
+            return;
         }
         Deliver(offset, std::move(body));
     }
@@ -526,7 +536,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         if (m_done || !m_inFlight.empty() || m_writing) {
             return;
         }
-        if (!m_failure.has_value() && (!m_end.has_value() || m_begin + m_written != *m_end)) {
+        if (!m_failure.has_value() && (!m_end.has_value() || *m_end < m_begin || m_written != *m_end - m_begin)) {
             Fail(MakeInvalidResponse("The download ended before all data was received."));
         }
         if (m_failure.has_value()) {
@@ -576,6 +586,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
     std::string m_etag;
     std::uint64_t m_begin = 0;
     std::optional<std::uint64_t> m_end;
+    std::optional<std::uint64_t> m_total;
     std::uint64_t m_next = 0;
     std::uint64_t m_written = 0;
     bool m_ranged = false;

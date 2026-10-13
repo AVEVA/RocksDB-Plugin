@@ -564,8 +564,11 @@ TEST(BlockBlobClientTests, DownloadAsync_DefaultAndOptionsOverloadsParseContent)
                      MakeCanonicalSuccessHeaders(
                          {{"Content-Length", "4"}, {"Content-Type", "text/plain"}, {"x-ms-blob-type", "BlockBlob"}}),
                      "data"});
-    httpClient.EnqueueResponse(HttpResponse{
-        206, MakeCanonicalSuccessHeaders({{"Content-Length", "2"}, {"x-ms-blob-type", "BlockBlob"}}), "ta"});
+    httpClient.EnqueueResponse(HttpResponse{206,
+                                            MakeCanonicalSuccessHeaders({{"Content-Length", "2"},
+                                                                         {"Content-Range", "bytes 2-3/4"},
+                                                                         {"x-ms-blob-type", "BlockBlob"}}),
+                                            "ta"});
     BlockBlobClient client{httpClient, BuildOptions()};
 
     CallbackExpectation firstCallback;

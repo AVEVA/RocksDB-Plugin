@@ -114,7 +114,9 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// Subscribes to the cancellation slot in the options, if one is connected. Must be called before the
     /// operation is started.
     /// </summary>
-    void BindCancellationSlot() {
+    /// <param name="cancelledEarlier">Optional flag set by an earlier owner of the slot (the limiter); if set,
+    /// the operation is cancelled right after binding so a cancel that fell between owners is not lost.</param>
+    void BindCancellationSlot(const std::atomic<bool>* cancelledEarlier = nullptr) {
         auto slot = m_options.GetCancellationSlot();
         if (!slot.is_connected()) {
             return;
@@ -129,6 +131,9 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
                 self->RequestCancellation();
             }
         });
+        if (cancelledEarlier != nullptr && cancelledEarlier->load()) {
+            RequestCancellation();
+        }
     }
 
     /// <summary>

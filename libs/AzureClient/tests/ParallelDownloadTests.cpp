@@ -416,6 +416,41 @@ TEST(T11_ParallelDownloadAcceptanceTests, ParallelFileDownloadFailureLeavesTheTa
     std::filesystem::remove(target, ignored);
 }
 
+namespace {
+// Answers every request with a 206 whose Content-Range is `contentRange` (omitted when empty).
+[[nodiscard]] std::optional<DownloadToResult> DownloadAgainstFixed206(const std::string& body,
+                                                                      const std::string& contentRange) {
+    FakeHttpClient httpClient;
+    auto headers = MakeCanonicalSuccessHeaders();
+    if (!contentRange.empty()) {
+        headers.emplace_back("Content-Range", contentRange);
+    }
+    httpClient.DefaultResponse() = HttpResponse{206, std::move(headers), body};
+    BlockBlobClient client{httpClient, BuildOptions()};
+
+    std::ostringstream out;
+    std::optional<DownloadToResult> result;
+    client.DownloadToAsync(out, DownloadToOptions{}, [&](DownloadToResult value) { result = std::move(value); });
+    (void)httpClient.RunUntil([&] { return result.has_value(); });
+    EXPECT_TRUE(out.str().empty());
+    return result;
+}
+} // namespace
+
+TEST(T08_DownloadContentRangeTests, PartialContentWithoutContentRangeIsInvalidResponse) {
+    const auto result = DownloadAgainstFixed206(MakeContent(10), "");
+    ASSERT_TRUE(result.has_value());
+    ASSERT_FALSE(result->has_value());
+    EXPECT_EQ(result->error().Code, AVEVA::AzureClient::BlobStorageErrorCode::InvalidResponse);
+}
+
+TEST(T08_DownloadContentRangeTests, ContentRangeEndThatDisagreesWithTheBodyIsInvalidResponse) {
+    const auto result = DownloadAgainstFixed206(MakeContent(10), "bytes 0-4/10");
+    ASSERT_TRUE(result.has_value());
+    ASSERT_FALSE(result->has_value());
+    EXPECT_EQ(result->error().Code, AVEVA::AzureClient::BlobStorageErrorCode::InvalidResponse);
+}
+
 TEST(B05_DownloadIgnoredRangeTests, OffsetRangeAnswered200IsInvalidResponse) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(20);

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -53,6 +54,11 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
     /// <param name="pending">The request; started once, outside the lock, or aborted through the sink.</param>
     void Run(const std::string& origin, std::uint64_t ticket, Pending pending) {
         std::unique_lock<std::mutex> lock(m_mutex);
+        if (m_closed) {
+            lock.unlock();
+            m_sink.Abort(std::move(pending), std::make_error_code(std::errc::operation_canceled));
+            return;
+        }
         auto& state = m_origins[origin];
         if (state.active < m_max) {
             ++state.active;
@@ -77,6 +83,7 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
                 return;
             }
             if (it->second.waiters.empty()) {
+                assert(it->second.active > 0);
                 if (--it->second.active == 0) {
                     m_origins.erase(it);
                 }
@@ -121,6 +128,7 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
         std::vector<Pending> aborts;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
+            m_closed = true;
             for (auto& [origin, state] : m_origins) {
                 for (auto& waiter : state.waiters) {
                     aborts.push_back(std::move(waiter.pending));
@@ -153,6 +161,7 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
     std::size_t m_max;
     Sink m_sink;
     std::mutex m_mutex;
+    bool m_closed = false;
     std::atomic<std::uint64_t> m_nextTicket{0};
     std::unordered_map<std::string, OriginState> m_origins;
 };
