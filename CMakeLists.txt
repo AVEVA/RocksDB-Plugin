@@ -10,7 +10,7 @@ if (${AVEVA_ROCKSDB_BUILD_DB_BENCH})
     list(APPEND VCPKG_MANIFEST_FEATURES "db-bench")
 endif()
 
-project(aveva-rocksdb-plugin LANGUAGES CXX VERSION 0.1.0)
+project(aveva-rocksdb-plugin LANGUAGES CXX VERSION 0.2.0)
 option(AVEVA_ROCKSDB_TESTS "Build tests for the plugins and the vendored AzureClient/HttpClient libraries" ON)
 list(APPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/infrastructure/cmake")
 

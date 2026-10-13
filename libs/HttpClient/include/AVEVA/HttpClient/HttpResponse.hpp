@@ -6,6 +6,7 @@
 #include <AVEVA/HttpClient/HttpHeader.hpp>
 
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace AVEVA
@@ -68,9 +69,24 @@ namespace AVEVA
         /// <param name="header">The header to append.</param>
         void AddHeader(HttpHeader header);
 
+        /// <summary>
+        /// The underlying transport error (an asio, TLS or socket code) behind a failed request, which the
+        /// <c>HttpClientError</c> reported alongside the response collapses to a coarse category. Useful for
+        /// telling, for example, a certificate verification failure from a refused connection.
+        /// </summary>
+        /// <returns>The cause; empty on success or when the failure had no lower-level code.</returns>
+        std::error_code GetCause() const noexcept;
+
+        /// <summary>
+        /// Records the underlying transport error of a failed request.
+        /// </summary>
+        /// <param name="cause">The lower-level error code.</param>
+        void SetCause(std::error_code cause) noexcept;
+
       private:
         unsigned int m_status = 0;
         std::vector<HttpHeader> m_headers;
         std::string m_body;
+        std::error_code m_cause;
     };
 } // namespace AVEVA

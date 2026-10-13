@@ -43,4 +43,14 @@ namespace AVEVA
     {
         m_headers.push_back(std::move(header));
     }
+
+    std::error_code HttpResponse::GetCause() const noexcept
+    {
+        return m_cause;
+    }
+
+    void HttpResponse::SetCause(std::error_code cause) noexcept
+    {
+        m_cause = cause;
+    }
 } // namespace AVEVA

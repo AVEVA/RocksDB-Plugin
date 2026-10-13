@@ -241,6 +241,18 @@ TEST(BlobStorageErrorCategoryTests, TransportFailureHasZeroStatusAndNoServiceFie
     EXPECT_FALSE(failure.Details.has_value());
 }
 
+TEST(BlobStorageErrorCategoryTests, TransportFailureWithCauseCarriesTheCauseInTheMessage) {
+    AVEVA::HttpResponse response;
+    response.SetCause(std::make_error_code(std::errc::connection_refused));
+    const auto failure = AVEVA::AzureClient::Private::DetermineBlobStorageFailure(
+        AVEVA::make_error_code(AVEVA::HttpClientError::ConnectFailed), response);
+    EXPECT_EQ(failure.Error, AVEVA::make_error_code(AVEVA::HttpClientError::ConnectFailed));
+    ASSERT_TRUE(failure.Details.has_value());
+    EXPECT_NE(ValueOrFail(failure.Details).Message.find(std::make_error_code(std::errc::connection_refused).message()),
+              std::string::npos);
+    EXPECT_EQ(ValueOrFail(failure.Details).StatusCode, 0U);
+}
+
 TEST(BlobStorageErrorCategoryTests, DetermineFailure_Maps304WithoutErrorCodeToConditionNotMet) {
     using AVEVA::AzureClient::Private::DetermineBlobStorageFailure;
     const auto failure =

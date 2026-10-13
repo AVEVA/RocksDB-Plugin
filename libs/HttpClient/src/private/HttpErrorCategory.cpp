@@ -33,7 +33,7 @@ namespace AVEVA::Private
         case HttpClientError::TimedOut:
             return "Request timed out";
         case HttpClientError::ResponseTooLarge:
-            return "Response body limit exceeded";
+            return "Response body or header limit exceeded";
         case HttpClientError::ProtocolError:
             return "Invalid or unsupported HTTP response";
         default:

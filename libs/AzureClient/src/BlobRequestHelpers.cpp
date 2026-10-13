@@ -474,6 +474,13 @@ std::string BuildRangeHeaderValue(const Models::BlobByteRange& range) {
 
 RequestFailure DetermineBlobStorageFailure(std::error_code transportError, const HttpResponse& response) {
     if (transportError) {
+        // The coarse HttpClientError hides what actually failed (e.g. a certificate rejection vs a refused
+        // connection), so the lower-level cause is surfaced in the message.
+        if (const auto cause = response.GetCause()) {
+            BlobStorageError details;
+            details.Message = transportError.message() + ": " + cause.message();
+            return {.Error = transportError, .Details = std::move(details)};
+        }
         return {.Error = transportError, .Details = std::nullopt};
     }
 

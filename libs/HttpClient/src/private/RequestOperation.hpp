@@ -440,7 +440,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
             return Cancel();
         }
         if (error) {
-            return Fail(HttpClientError::ResolveFailed);
+            return Fail(HttpClientError::ResolveFailed, error);
         }
         beast::get_lowest_layer(*m_stream).async_connect(
             results, [self = this->shared_from_this()](boost::system::error_code connectError, const Tcp::endpoint&) {
@@ -461,7 +461,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
             return Cancel();
         }
         if (error) {
-            return Fail(HttpClientError::ConnectFailed);
+            return Fail(HttpClientError::ConnectFailed, error);
         }
         if constexpr (std::is_same_v<Stream, TlsStream>) {
             m_stream->async_handshake(asio::ssl::stream_base::client,
@@ -473,7 +473,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
                                               return self->Cancel();
                                           }
                                           if (handshakeError) {
-                                              return self->Fail(HttpClientError::TlsFailed);
+                                              return self->Fail(HttpClientError::TlsFailed, handshakeError);
                                           }
                                           self->Write();
                                       });
@@ -505,7 +505,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
                                   if (self->MaybeRetryAfterReuseFailure(bytesWritten != 0)) {
                                       return;
                                   }
-                                  return self->Fail(HttpClientError::WriteFailed);
+                                  return self->Fail(HttpClientError::WriteFailed, error);
                               }
                               self->Read();
                           });
@@ -553,10 +553,10 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
         }
         if (error) {
             if (error == http::error::body_limit) {
-                return Fail(HttpClientError::ResponseTooLarge);
+                return Fail(HttpClientError::ResponseTooLarge, error);
             }
             if (error == http::error::header_limit) {
-                return Fail(HttpClientError::ResponseTooLarge);
+                return Fail(HttpClientError::ResponseTooLarge, error);
             }
             // The request was fully written before the read started.
             if (MaybeRetryAfterReuseFailure(true)) {
@@ -565,7 +565,8 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
             // A connection that ends mid-message is a transport failure, not a malformed response.
             const bool truncated = error == http::error::end_of_stream || error == http::error::partial_message;
             return Fail(!truncated && IsBeastHttpError(error) ? HttpClientError::ProtocolError
-                                                              : HttpClientError::ReadFailed);
+                                                              : HttpClientError::ReadFailed,
+                        error);
         }
         const auto status = m_parser->get().result_int();
         if (status == 101) {
@@ -640,7 +641,14 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// Completes the operation with an error and an empty response.
     /// </summary>
     /// <param name="error">The error to complete with.</param>
-    void Fail(HttpClientError error) { Finish(error, {}); }
+    /// <param name="cause">The underlying transport error, kept on the response for diagnostics.</param>
+    void Fail(HttpClientError error, boost::system::error_code cause = {}) {
+        HttpResponse response;
+        if (cause) {
+            response.SetCause(static_cast<std::error_code>(cause));
+        }
+        Finish(error, std::move(response));
+    }
 
     /// <summary>
     /// Completes the operation with <c>operation_canceled</c> and an empty response.

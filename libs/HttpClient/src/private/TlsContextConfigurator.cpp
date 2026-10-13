@@ -7,6 +7,7 @@
 
 #include <openssl/ssl.h>
 
+#include <list>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -35,14 +36,23 @@ namespace AVEVA::Private
             // Bounds memory when a client talks to many origins.
             static constexpr std::size_t MaxEntries = 128;
 
+            // Evicts the least recently used origin once full.
             void Store(const std::string& origin, UniqueSession session)
             {
                 const std::scoped_lock lock(m_mutex);
-                if (m_sessions.size() >= MaxEntries && !m_sessions.contains(origin))
+                if (const auto found = m_sessions.find(origin); found != m_sessions.end())
                 {
-                    m_sessions.erase(m_sessions.begin());
+                    found->second->session = std::move(session);
+                    m_order.splice(m_order.begin(), m_order, found->second);
+                    return;
                 }
-                m_sessions.insert_or_assign(origin, std::move(session));
+                if (m_sessions.size() >= MaxEntries)
+                {
+                    m_sessions.erase(m_order.back().origin);
+                    m_order.pop_back();
+                }
+                m_order.push_front(Entry{origin, std::move(session)});
+                m_sessions.emplace(origin, m_order.begin());
             }
 
             // A TLS 1.3 ticket must not be presented twice, so it is handed out once; older sessions are reusable.
@@ -54,19 +64,29 @@ namespace AVEVA::Private
                 {
                     return nullptr;
                 }
-                if (SSL_SESSION_get_protocol_version(found->second.get()) == TLS1_3_VERSION)
+                const auto entry = found->second;
+                if (SSL_SESSION_get_protocol_version(entry->session.get()) == TLS1_3_VERSION)
                 {
-                    UniqueSession session = std::move(found->second);
+                    UniqueSession session = std::move(entry->session);
+                    m_order.erase(entry);
                     m_sessions.erase(found);
                     return session;
                 }
-                SSL_SESSION_up_ref(found->second.get());
-                return UniqueSession{found->second.get()};
+                m_order.splice(m_order.begin(), m_order, entry);
+                SSL_SESSION_up_ref(entry->session.get());
+                return UniqueSession{entry->session.get()};
             }
 
           private:
+            struct Entry
+            {
+                std::string origin;
+                UniqueSession session;
+            };
+
             std::mutex m_mutex;
-            std::unordered_map<std::string, UniqueSession> m_sessions;
+            std::list<Entry> m_order; // Most recently used first.
+            std::unordered_map<std::string, std::list<Entry>::iterator> m_sessions;
         };
 
         void FreeCache(void* /*parent*/, void* data, CRYPTO_EX_DATA* /*ad*/, int /*index*/, long /*argl*/, void* /*argp*/)
@@ -129,7 +149,8 @@ namespace AVEVA::Private
         auto origin = std::make_unique<std::string>(host + ':' + service);
         if (UniqueSession session = cache->Take(*origin))
         {
-            // SSL_set_session takes its own reference; a rejected session simply falls back to a full handshake.
+            // SSL_set_session takes its own reference. If it is refused, no session is set and the handshake is a
+            // full one, which is exactly a cache miss.
             SSL_set_session(ssl, session.get());
         }
         if (SSL_set_ex_data(ssl, OriginIndex(), origin.get()) == 1)

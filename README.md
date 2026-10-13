@@ -124,6 +124,16 @@ Plugins are compiled with RocksDB and can be optionally enabled at runtime. To l
 plugins, please check out RocksDB's documentation on [building plugins](https://github.com/facebook/rocksdb/blob/main/plugin/README.md)
 and the list of [known plugins](https://github.com/facebook/rocksdb/blob/main/PLUGINS.md) that are being developed. Below is the list of plugins that exist in this repository and are actively being developed and maintained by AVEVA.
 
+## Breaking changes / migration (0.2.0)
+
+The Azure client is now trimmed and in-tree, which changed the public surface:
+
+* `AVEVA/RocksDB/Plugin/Core/BlobClient.hpp` and `Impl/PageBlob.hpp` were removed. Use the `AzureClient` page blob client instead.
+* The constructors of `BlobFilesystem`, `ReadableFile`, `WriteableFile`, `ReadWriteFile`, `LockFile`, `Directory`, `Logger` and the `Plugin` registration now take the injected `io_context`/client types; update call sites accordingly.
+* `http:` endpoints are rejected unless `AllowInsecureHttp = true` is set on the client options (credentials are still refused over non-loopback `http`).
+* Ranged downloads now require a valid `Content-Range` on every `206` response.
+* `HttpRequestOptions::SetMaxRetries` and `HttpClientOptions::SetIdleConnectionTimeout` throw `std::invalid_argument` for negative values.
+
 ## Building
 
 1. Ensure that vcpkg is installed and in the PATH

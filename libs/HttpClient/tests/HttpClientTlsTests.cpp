@@ -83,6 +83,7 @@ TEST(HttpClientTls, UntrustedCertificateReturnsTlsError) {
                           ++completions;
                           EXPECT_EQ(error, AVEVA::make_error_code(AVEVA::HttpClientError::TlsFailed));
                           EXPECT_EQ(response.GetStatus(), 0u);
+                          EXPECT_TRUE(response.GetCause());
                           boost::system::error_code ignored;
                           stream.next_layer().close(ignored);
                       });
