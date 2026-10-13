@@ -169,10 +169,10 @@ TEST(CredentialChainTests, PartialEnvironmentIsIgnored) {
 
     EXPECT_EQ(SourceTypes(std::nullopt).size(), 2U);
 }
-TEST(BlobHelpersCredentialLifetimeTests, ServicePrincipalCredentialKeepsRuntimeAlive) {
+TEST(BlobHelpersCredentialLifetimeTests, ServicePrincipalCredentialKeepsHttpClientAlive) {
     boost::asio::io_context context;
     auto runtime = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime>(context);
-    const std::weak_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime> weak = runtime;
+    const std::weak_ptr<AVEVA::HttpClient> weak = runtime->SharedHttpClient();
     auto credential = ClientFactory::CreateClientSecretCredential(runtime, "tenant", "client", "secret");
 
     runtime.reset();
@@ -182,10 +182,10 @@ TEST(BlobHelpersCredentialLifetimeTests, ServicePrincipalCredentialKeepsRuntimeA
     EXPECT_TRUE(weak.expired());
 }
 
-TEST(BlobHelpersCredentialLifetimeTests, PipelinesCredentialKeepsRuntimeAlive) {
+TEST(BlobHelpersCredentialLifetimeTests, PipelinesCredentialKeepsHttpClientAlive) {
     boost::asio::io_context context;
     auto runtime = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime>(context);
-    const std::weak_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime> weak = runtime;
+    const std::weak_ptr<AVEVA::HttpClient> weak = runtime->SharedHttpClient();
     auto credential = ClientFactory::CreatePipelinesCredential(runtime, "tenant", "client", "connection", "token");
 
     runtime.reset();

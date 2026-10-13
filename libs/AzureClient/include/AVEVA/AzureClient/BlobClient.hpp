@@ -65,6 +65,12 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
     BasicBlobClient(THttp& httpClient, const BlobClientOptions& options, std::shared_ptr<TCred> credential = nullptr)
         : m_httpClient(&httpClient), m_target(std::make_shared<const Private::BasicBlobTarget<TCred>>(
                                          Private::MakeBlobTarget(options, std::move(credential)))) {}
+    // Shares ownership of the HTTP client, so this client (and clients made from it) keep it alive.
+    BasicBlobClient(std::shared_ptr<THttp> httpClient, const BlobClientOptions& options,
+                    std::shared_ptr<TCred> credential = nullptr)
+        : BasicBlobClient(Private::RequireHttpClient(httpClient), options, std::move(credential)) {
+        m_httpOwner = std::move(httpClient);
+    }
     BasicBlobClient(const BasicBlobClient&) = delete;
     BasicBlobClient& operator=(const BasicBlobClient&) = delete;
     BasicBlobClient(BasicBlobClient&&) noexcept = default;
@@ -75,6 +81,9 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
     using executor_type = typename THttp::executor_type;
 
     [[nodiscard]] executor_type get_executor() const { return m_httpClient->get_executor(); }
+
+    // The blob's URL, carrying the client's SAS token when it has one. Use it as the source of a server-side copy.
+    [[nodiscard]] std::string Url() const { return Private::BuildBlobUrl(*m_target); }
 
     // Request options (timeout, response body limit, cancellation slot) applied to every operation
     // that is not given its own via WithRequestOptions(...) or the trailing requestOptions argument.
@@ -310,11 +319,13 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
   protected:
     template <HttpClientLike, TokenCredentialLike> friend class BasicBlobContainerClient;
     // Shares the container client's validated connection state (no re-normalisation).
-    BasicBlobClient(THttp& httpClient, std::shared_ptr<const Private::BasicBlobTarget<TCred>> target)
-        : m_httpClient(&httpClient), m_target(std::move(target)) {}
+    BasicBlobClient(THttp& httpClient, std::shared_ptr<const Private::BasicBlobTarget<TCred>> target,
+                    std::shared_ptr<THttp> owner = nullptr)
+        : m_httpClient(&httpClient), m_httpOwner(std::move(owner)), m_target(std::move(target)) {}
 
     // Connection state owned by this client; derived blob-type clients read it to build requests.
     [[nodiscard]] THttp& Http() const noexcept { return *m_httpClient; }
+    [[nodiscard]] const std::shared_ptr<THttp>& HttpOwner() const noexcept { return m_httpOwner; }
 
     [[nodiscard]] const Private::BasicBlobTarget<TCred>& Target() const noexcept { return *m_target; }
 
@@ -325,13 +336,14 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
 
   private:
     THttp* m_httpClient = nullptr;
+    // Set when the client was given shared ownership of the HTTP client; null when it only borrows it.
+    std::shared_ptr<THttp> m_httpOwner;
     std::shared_ptr<const Private::BasicBlobTarget<TCred>> m_target;
 
     // Operation entry points, templated on the completion handler so it is never type-erased.
     template <class THandler>
     void DownloadAsyncImpl(DownloadBlobOptions options, THandler completion, HttpRequestOptions requestOptions) {
-        Private::DownloadBlobAsync(*m_httpClient, *m_target, std::move(options), std::move(completion),
-                                   requestOptions);
+        Private::DownloadBlobAsync(*m_httpClient, *m_target, std::move(options), std::move(completion), requestOptions);
     }
 
     template <class THandler>
@@ -402,20 +414,17 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
 
     template <class THandler>
     void AcquireLeaseAsyncImpl(AcquireLeaseOptions options, THandler completion, HttpRequestOptions requestOptions) {
-        Private::AcquireLeaseAsync(*m_httpClient, *m_target, std::move(options), std::move(completion),
-                                   requestOptions);
+        Private::AcquireLeaseAsync(*m_httpClient, *m_target, std::move(options), std::move(completion), requestOptions);
     }
 
     template <class THandler>
     void RenewLeaseAsyncImpl(RenewLeaseOptions options, THandler completion, HttpRequestOptions requestOptions) {
-        Private::RenewLeaseAsync(*m_httpClient, *m_target, std::move(options), std::move(completion),
-                                 requestOptions);
+        Private::RenewLeaseAsync(*m_httpClient, *m_target, std::move(options), std::move(completion), requestOptions);
     }
 
     template <class THandler>
     void ReleaseLeaseAsyncImpl(ReleaseLeaseOptions options, THandler completion, HttpRequestOptions requestOptions) {
-        Private::ReleaseLeaseAsync(*m_httpClient, *m_target, std::move(options), std::move(completion),
-                                   requestOptions);
+        Private::ReleaseLeaseAsync(*m_httpClient, *m_target, std::move(options), std::move(completion), requestOptions);
     }
 };
 

@@ -35,6 +35,8 @@
 
 namespace AVEVA::AzureClient {
 inline constexpr std::size_t PageBlobPageSize = 512;
+// Largest range one Put Page From URL request can copy.
+inline constexpr std::uint64_t MaxPagesFromUrlBytes = std::uint64_t{4} * 1024U * 1024U;
 
 namespace Private {
 constexpr std::string_view PageBlobTypeValue = "PageBlob";
@@ -79,6 +81,9 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     BasicPageBlobClient(THttp& httpClient, const BlobClientOptions& options,
                         std::shared_ptr<TCred> credential = nullptr)
         : Base(httpClient, options, std::move(credential)) {}
+    BasicPageBlobClient(std::shared_ptr<THttp> httpClient, const BlobClientOptions& options,
+                        std::shared_ptr<TCred> credential = nullptr)
+        : Base(std::move(httpClient), options, std::move(credential)) {}
 
     template <class CompletionToken = DefaultCompletionToken>
         requires(!std::same_as<std::remove_cvref_t<CompletionToken>, CreatePageBlobOptions>)
@@ -95,6 +100,32 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
                                    std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
         return Private::InitiateClientOperation<Models::CreatePageBlobResult>(
             this, [](auto& client, auto&&... args) { client.CreateAsyncImpl(std::forward<decltype(args)>(args)...); },
+            std::forward<CompletionToken>(token), std::move(requestOptions), contentLength, std::move(options));
+    }
+
+    // Suppressed-error contract: if the blob already exists nothing is changed, the expected is engaged,
+    // Value() is default-constructed and Response::Error() carries the suppressed service error.
+    template <class CompletionToken = DefaultCompletionToken>
+        requires(!std::same_as<std::remove_cvref_t<CompletionToken>, CreatePageBlobOptions>)
+    [[nodiscard]] auto CreateIfNotExistsAsync(std::uint64_t contentLength, CompletionToken&& token = CompletionToken{},
+                                              std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::CreatePageBlobResult>(
+            this,
+            [](auto& client, auto&&... args) {
+                client.CreateIfNotExistsAsyncImpl(std::forward<decltype(args)>(args)...);
+            },
+            std::forward<CompletionToken>(token), std::move(requestOptions), contentLength, CreatePageBlobOptions{});
+    }
+
+    template <class CompletionToken = DefaultCompletionToken>
+    [[nodiscard]] auto CreateIfNotExistsAsync(std::uint64_t contentLength, CreatePageBlobOptions options,
+                                              CompletionToken&& token = CompletionToken{},
+                                              std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::CreatePageBlobResult>(
+            this,
+            [](auto& client, auto&&... args) {
+                client.CreateIfNotExistsAsyncImpl(std::forward<decltype(args)>(args)...);
+            },
             std::forward<CompletionToken>(token), std::move(requestOptions), contentLength, std::move(options));
     }
 
@@ -243,10 +274,44 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
             std::forward<CompletionToken>(token), std::move(requestOptions), std::move(options));
     }
 
+    // Server-side copy (Put Page From URL): the service copies `length` bytes at `sourceOffset` of the blob at
+    // `sourceUrl` into this blob at `offset`; the data never passes through the client. `offset`, `sourceOffset` and
+    // `length` must be multiples of PageBlobPageSize and `length` at most MaxPagesFromUrlBytes (4 MiB); anything else
+    // is rejected before a request is sent with std::errc::invalid_argument. The destination must already exist
+    // with enough capacity. See UploadPagesFromUrlOptions for how the source is authorized.
+    template <class CompletionToken = DefaultCompletionToken>
+        requires(!std::same_as<std::remove_cvref_t<CompletionToken>, UploadPagesFromUrlOptions>)
+    [[nodiscard]] auto UploadPagesFromUrlAsync(std::uint64_t offset, std::string sourceUrl, std::uint64_t sourceOffset,
+                                               std::uint64_t length, CompletionToken&& token = CompletionToken{},
+                                               std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::UploadPagesResult>(
+            this,
+            [](auto& client, auto&&... args) {
+                client.UploadPagesFromUrlAsyncImpl(std::forward<decltype(args)>(args)...);
+            },
+            std::forward<CompletionToken>(token), std::move(requestOptions), offset, std::move(sourceUrl), sourceOffset,
+            length, UploadPagesFromUrlOptions{});
+    }
+
+    template <class CompletionToken = DefaultCompletionToken>
+    [[nodiscard]] auto UploadPagesFromUrlAsync(std::uint64_t offset, std::string sourceUrl, std::uint64_t sourceOffset,
+                                               std::uint64_t length, UploadPagesFromUrlOptions options,
+                                               CompletionToken&& token = CompletionToken{},
+                                               std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::UploadPagesResult>(
+            this,
+            [](auto& client, auto&&... args) {
+                client.UploadPagesFromUrlAsyncImpl(std::forward<decltype(args)>(args)...);
+            },
+            std::forward<CompletionToken>(token), std::move(requestOptions), offset, std::move(sourceUrl), sourceOffset,
+            length, std::move(options));
+    }
+
   private:
     template <HttpClientLike, TokenCredentialLike> friend class BasicBlobContainerClient;
-    BasicPageBlobClient(THttp& httpClient, std::shared_ptr<const Private::BasicBlobTarget<TCred>> target)
-        : Base(httpClient, std::move(target)) {}
+    BasicPageBlobClient(THttp& httpClient, std::shared_ptr<const Private::BasicBlobTarget<TCred>> target,
+                        std::shared_ptr<THttp> owner = nullptr)
+        : Base(httpClient, std::move(target), std::move(owner)) {}
 
     template <class THandler>
     void GetPageRangesAsyncImpl(const GetPageRangesOptions& options, THandler completion,
@@ -294,9 +359,47 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
         Private::SendAuthorizedRequestAsync(
             this->Http(), this->Target(), std::move(request),
             [completion = std::move(completion)](std::error_code error, HttpResponse response) mutable {
-                Private::CompleteParsed<Models::GetPageRangesResult>(error, std::move(response),
-                                                                     Private::ParseGetPageRangesResult,
-                                                                     std::move(completion));
+                Private::CompleteParsed<Models::GetPageRangesResult>(
+                    error, std::move(response), Private::ParseGetPageRangesResult, std::move(completion));
+            },
+            requestOptions);
+    }
+
+    [[nodiscard]] HttpRequest BuildCreateRequest(std::uint64_t contentLength,
+                                                 const CreatePageBlobOptions& options) const {
+        HttpRequest request = Private::BuildBlobRequest(this->Target(), HttpMethod::Put);
+        Private::AddHeader(request, Private::XMsBlobTypeHeaderName, Private::PageBlobTypeValue);
+        Private::AddHeader(request, Private::XMsBlobContentLengthHeaderName, std::to_string(contentLength));
+        Private::ApplyBlobHttpHeadersForUpload(request, options.HttpHeaders);
+        Private::ApplyMetadata(request, options.Metadata);
+        Private::AddHeaderIfNotEmpty(request, Private::XMsAccessTierHeaderName, options.AccessTier.ToString());
+        Private::ApplyBlobRequestConditions(request, options.Conditions);
+        return request;
+    }
+
+    // Create with If-None-Match: * so an existing blob is left untouched; BlobAlreadyExists (409) and
+    // ConditionNotMet (412) are suppressed per the *IfNotExists contract (Response::Error() stays engaged).
+    template <class THandler>
+    void CreateIfNotExistsAsyncImpl(std::uint64_t contentLength, CreatePageBlobOptions options, THandler completion,
+                                    HttpRequestOptions requestOptions) {
+        if (const auto validationError = Private::ValidatePageAligned(contentLength, "contentLength");
+            validationError.has_value()) {
+            Private::PostCompletion(this->Http(), std::move(completion),
+                                    Private::MakeError<Models::CreatePageBlobResult>(
+                                        std::make_error_code(std::errc::invalid_argument), *validationError));
+            return;
+        }
+        if (options.Conditions.IfNoneMatch.empty()) {
+            options.Conditions.IfNoneMatch = "*";
+        }
+        Private::SendAuthorizedRequestAsync(
+            this->Http(), this->Target(), BuildCreateRequest(contentLength, options),
+            [completion = std::move(completion)](std::error_code error, HttpResponse response) mutable {
+                Private::CompleteParsed<Models::CreatePageBlobResult>(
+                    error, std::move(response), Private::ParseETagAndLastModified<Models::CreatePageBlobResult>,
+                    Private::SuppressErrors<Models::CreatePageBlobResult>(
+                        std::move(completion),
+                        {BlobStorageErrorCode::BlobAlreadyExists, BlobStorageErrorCode::ConditionNotMet}));
             },
             requestOptions);
     }
@@ -311,13 +414,7 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
                                         std::make_error_code(std::errc::invalid_argument), *validationError));
             return;
         }
-        HttpRequest request = Private::BuildBlobRequest(this->Target(), HttpMethod::Put);
-        Private::AddHeader(request, Private::XMsBlobTypeHeaderName, Private::PageBlobTypeValue);
-        Private::AddHeader(request, Private::XMsBlobContentLengthHeaderName, std::to_string(contentLength));
-        Private::ApplyBlobHttpHeadersForUpload(request, options.HttpHeaders);
-        Private::ApplyMetadata(request, options.Metadata);
-        Private::AddHeaderIfNotEmpty(request, Private::XMsAccessTierHeaderName, options.AccessTier.ToString());
-        Private::ApplyBlobRequestConditions(request, options.Conditions);
+        HttpRequest request = BuildCreateRequest(contentLength, options);
 
         Private::SendAuthorizedRequestAsync(
             this->Http(), this->Target(), std::move(request),
@@ -392,8 +489,7 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
                                         std::make_error_code(std::errc::invalid_argument), std::string{message}));
             return std::nullopt;
         };
-        if (const auto validationError = Private::ValidatePageAligned(offset, "offset");
-            validationError.has_value()) {
+        if (const auto validationError = Private::ValidatePageAligned(offset, "offset"); validationError.has_value()) {
             return fail(*validationError);
         }
         if (const auto validationError = Private::ValidatePageAligned(contentSize, "content size");
@@ -428,17 +524,72 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     }
 
     template <class THandler>
+    void UploadPagesFromUrlAsyncImpl(std::uint64_t offset, std::string sourceUrl, std::uint64_t sourceOffset,
+                                     std::uint64_t length, const UploadPagesFromUrlOptions& options,
+                                     THandler completion, HttpRequestOptions requestOptions) {
+        const auto fail = [&](std::string message) {
+            Private::PostCompletion(this->Http(), std::move(completion),
+                                    Private::MakeError<Models::UploadPagesResult>(
+                                        std::make_error_code(std::errc::invalid_argument), std::move(message)));
+        };
+        if (const auto error = Private::ValidatePageAligned(offset, "offset")) {
+            return fail(*error);
+        }
+        if (const auto error = Private::ValidatePageAligned(sourceOffset, "sourceOffset")) {
+            return fail(*error);
+        }
+        if (const auto error = Private::ValidatePageAligned(length, "length")) {
+            return fail(*error);
+        }
+        if (length > MaxPagesFromUrlBytes) {
+            return fail("length must not exceed 4 MiB.");
+        }
+        if (sourceUrl.empty()) {
+            return fail("sourceUrl must not be empty.");
+        }
+        const auto rangeHeader = Private::BuildPageWriteRangeHeaderValue(offset, length);
+        if (!rangeHeader.has_value()) {
+            return fail(rangeHeader.error());
+        }
+        const auto sourceRangeHeader = Private::BuildPageWriteRangeHeaderValue(sourceOffset, length);
+        if (!sourceRangeHeader.has_value()) {
+            return fail(sourceRangeHeader.error());
+        }
+
+        HttpRequest request = Private::BuildBlobRequest(this->Target(), HttpMethod::Put, "comp=page");
+        Private::AddHeader(request, Private::XMsPageWriteHeaderName, Private::PageWriteUpdateValue);
+        Private::AddHeader(request, Private::XMsRangeHeaderName, *rangeHeader);
+        Private::AddHeader(request, Private::XMsCopySourceHeaderName, sourceUrl);
+        Private::AddHeader(request, Private::XMsSourceRangeHeaderName, *sourceRangeHeader);
+        Private::AddHeaderIfNotEmpty(request, Private::XMsSourceIfMatchHeaderName, options.SourceIfMatch);
+        if (!options.SourceAuthorization.empty()) {
+            Private::AddHeader(request, Private::XMsCopySourceAuthorizationHeaderName, options.SourceAuthorization);
+        } else if (options.AuthorizeSourceWithClientCredential) {
+            Private::AddHeader(request, Private::XMsCopySourceAuthorizationHeaderName,
+                               Private::CopySourceClientCredentialMarker);
+        }
+        Private::ApplyBlobRequestConditions(request, options.Conditions);
+
+        Private::SendAuthorizedRequestAsync(
+            this->Http(), this->Target(), std::move(request),
+            [completion = std::move(completion)](std::error_code error, HttpResponse response) mutable {
+                Private::CompleteParsed<Models::UploadPagesResult>(
+                    error, std::move(response), Private::ParseETagAndLastModified<Models::UploadPagesResult>,
+                    std::move(completion));
+            },
+            requestOptions);
+    }
+
+    template <class THandler>
     void ClearPagesAsyncImpl(std::uint64_t offset, std::uint64_t length, const ClearPagesOptions& options,
                              THandler completion, HttpRequestOptions requestOptions) {
-        if (const auto validationError = Private::ValidatePageAligned(offset, "offset");
-            validationError.has_value()) {
+        if (const auto validationError = Private::ValidatePageAligned(offset, "offset"); validationError.has_value()) {
             Private::PostCompletion(this->Http(), std::move(completion),
                                     Private::MakeError<Models::ClearPagesResult>(
                                         std::make_error_code(std::errc::invalid_argument), *validationError));
             return;
         }
-        if (const auto validationError = Private::ValidatePageAligned(length, "length");
-            validationError.has_value()) {
+        if (const auto validationError = Private::ValidatePageAligned(length, "length"); validationError.has_value()) {
             Private::PostCompletion(this->Http(), std::move(completion),
                                     Private::MakeError<Models::ClearPagesResult>(
                                         std::make_error_code(std::errc::invalid_argument), *validationError));
@@ -446,8 +597,8 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
         }
 
         HttpRequest request = Private::BuildBlobRequest(this->Target(), HttpMethod::Put, "comp=page");
-        Private::AddHeader(request, Private::        XMsPageWriteHeaderName, Private::PageWriteClearValue);
-                const auto rangeHeader = Private::BuildPageWriteRangeHeaderValue(offset, length);
+        Private::AddHeader(request, Private::XMsPageWriteHeaderName, Private::PageWriteClearValue);
+        const auto rangeHeader = Private::BuildPageWriteRangeHeaderValue(offset, length);
         if (!rangeHeader.has_value()) {
             Private::PostCompletion(this->Http(), std::move(completion),
                                     Private::MakeError<Models::ClearPagesResult>(

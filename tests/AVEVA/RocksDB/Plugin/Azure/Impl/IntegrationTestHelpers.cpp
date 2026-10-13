@@ -135,8 +135,8 @@ void AzureIntegrationTestBase::HandleAuthenticationError(const RequestFailedExce
 void AzureIntegrationTestBase::CleanupBlob() {
     if (m_containerClient && !m_blobName.empty()) {
         try {
-            const auto pageBlobClient = m_containerClient->GetPageBlobClient(m_blobName);
-            Unwrap(pageBlobClient->DeleteAsync(boost::asio::use_future).get());
+            auto pageBlobClient = m_containerClient->GetPageBlobClient(m_blobName);
+            Unwrap(pageBlobClient.DeleteAsync(boost::asio::use_future).get());
         } catch (const std::exception& e) {
             BOOST_LOG_SEV(*m_logger, error) << e.what();
         } catch (...) {
@@ -146,7 +146,8 @@ void AzureIntegrationTestBase::CleanupBlob() {
 }
 
 std::shared_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient> AzureIntegrationTestBase::CreateEmptyBlob() {
-    auto pageBlobClientPtr = m_containerClient->GetPageBlobClient(m_blobName);
+    const auto pageBlobClientPtr = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient>(
+        m_containerClient->GetPageBlobClient(m_blobName));
     Unwrap(pageBlobClientPtr->CreateAsync(Configuration::PageBlob::DefaultSize, boost::asio::use_future).get());
     BlobOperations::SetSize(*m_runtime, *pageBlobClientPtr, 0);
     return pageBlobClientPtr;
@@ -154,7 +155,8 @@ std::shared_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient> AzureIntegr
 
 std::shared_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient>
 AzureIntegrationTestBase::CreateBlobWithData(const std::vector<char>& data) {
-    auto pageBlobClientPtr = m_containerClient->GetPageBlobClient(m_blobName);
+    const auto pageBlobClientPtr = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient>(
+        m_containerClient->GetPageBlobClient(m_blobName));
     auto& pageBlobClient = *pageBlobClientPtr;
 
     // Calculate capacity rounded to page size
@@ -185,7 +187,8 @@ AzureIntegrationTestBase::CreateBlobWithData(const std::vector<char>& data) {
 }
 
 std::vector<char> AzureIntegrationTestBase::DownloadBlobData(size_t maxSize) {
-    const auto pageBlobClientPtr = m_containerClient->GetPageBlobClient(m_blobName);
+    const auto pageBlobClientPtr = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient>(
+        m_containerClient->GetPageBlobClient(m_blobName));
     auto& pageBlobClient = *pageBlobClientPtr;
     const auto actualSize = BlobOperations::GetSize(pageBlobClient);
 

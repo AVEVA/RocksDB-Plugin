@@ -17,9 +17,12 @@ struct Configuration {
     struct Transfer {
         // The service accepts at most 5000 results per List Blobs page.
         static const constexpr int32_t MaxListPageSize = 5000;
-        // Delete requests kept in flight at once by DeleteDir; bounds sockets and memory on huge directories.
-        static const constexpr std::size_t MaxConcurrentDeletes = 256;
-        // Largest range downloaded and uploaded per request when copying a blob in RenameFile.
+        // Batch delete requests kept in flight at once by DeleteDir (each carries up to 256 blobs).
+        static const constexpr std::size_t MaxConcurrentDeleteBatches = 4;
+        // Server-side page copy requests kept in flight at once when copying a blob in RenameFile.
+        static const constexpr std::size_t MaxConcurrentPageCopies = 4;
+        // Largest range copied per request when copying a blob in RenameFile (the service caps Put Page From URL at
+        // 4 MiB, and a range must be a multiple of the page size).
         static const constexpr int64_t MaxCopyChunkSize = static_cast<int64_t>(4) * 1024 * 1024;
         // Chunking used when downloading a blob range into a local file: big enough to amortise request
         // latency, with a few chunks overlapping to keep the link busy.

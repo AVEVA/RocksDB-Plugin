@@ -45,6 +45,7 @@ class FakeBlobServer {
         SetMetadata,
         Resize,
         UploadPages,
+        UploadPagesFromUrl,
         DownloadToBuffer,
         Download,
         DownloadToFile,
@@ -59,6 +60,15 @@ class FakeBlobServer {
     struct Upload {
         int64_t Offset = 0;
         std::vector<char> Data;
+    };
+    // One Put Page From URL request as the service saw it.
+    struct PageCopy {
+        int64_t Offset = 0;
+        int64_t Length = 0;
+        std::string SourceUrl;
+        int64_t SourceOffset = 0;
+        std::string SourceIfMatch;
+        std::string SourceAuthorization;
     };
     struct DownloadRequest {
         int64_t Offset = 0;
@@ -101,6 +111,24 @@ class FakeBlobServer {
 
     ~FakeBlobServer() { m_http->SetResponder({}); }
 
+    // Adds a blob of `capacity` zero bytes to the same container and returns a real client addressing it.
+    [[nodiscard]] std::shared_ptr<BlobClientType> AddBlob(const std::string& blob, const int64_t capacity) {
+        {
+            std::scoped_lock lock(m_mutex);
+            auto& stored = m_blobs[ContainerOfPrimary() + "/" + blob];
+            stored.Data.assign(static_cast<size_t>(capacity), '\0');
+            stored.Exists = true;
+        }
+        return std::make_shared<BlobClientType>(*m_http,
+                                                AzureClient::Tests::MakeBlobClientOptions(ContainerOfPrimary(), blob));
+    }
+
+    // The bytes of a blob added with AddBlob (or created through the service).
+    [[nodiscard]] std::vector<char> BlobBytes(const std::string& blob) {
+        std::scoped_lock lock(m_mutex);
+        return m_blobs.at(ContainerOfPrimary() + "/" + blob).Data;
+    }
+
     FakeBlobServer(const FakeBlobServer&) = delete;
     FakeBlobServer& operator=(const FakeBlobServer&) = delete;
 
@@ -126,6 +154,10 @@ class FakeBlobServer {
     int LeaseRenewals = 0;
     int LeaseReleases = 0;
     int LeaseBreaks = 0;
+    // One entry per Put Page From URL request that reached the service, whether or not it succeeded.
+    std::vector<PageCopy> PageCopies;
+    // Like a private source: a copy without x-ms-copy-source-authorization fails with 401 CannotVerifyCopySource.
+    bool RequireCopySourceAuthorization = false;
     // Replaces the page listing, which otherwise reports every 512-byte page that holds a non-zero byte.
     std::optional<std::vector<AzureClient::Models::PageRange>> PageRangeOverride;
 
@@ -368,6 +400,8 @@ class FakeBlobServer {
         return MakeResponse(206U, std::move(headers), std::move(content));
     }
 
+    [[nodiscard]] std::string ContainerOfPrimary() const { return m_primaryPath.substr(0, m_primaryPath.find('/')); }
+
     // ---- request handling ----
 
     [[nodiscard]] std::optional<Result> Respond(const FakeHttpClient::RequestRecord& record) {
@@ -378,7 +412,7 @@ class FakeBlobServer {
         const HttpMethod method = request.GetMethod();
 
         if (QueryValue(url, "restype") == "container") {
-            return ContainerRequest(method, comp, url, path);
+            return ContainerRequest(method, comp, url, path, record.Body);
         }
         if (method == HttpMethod::Put && comp.empty()) {
             return Create(request, path);
@@ -567,8 +601,11 @@ class FakeBlobServer {
 
     // Container operations: create (the plugin only ever creates if missing) and list blobs.
     Result ContainerRequest(const HttpMethod method, const std::string& comp, const std::string& url,
-                            const std::string& container) {
+                            const std::string& container, const std::string& body) {
         std::scoped_lock lock(m_mutex);
+        if (method == HttpMethod::Post && comp == "batch") {
+            return BatchDelete(body);
+        }
         if (method == HttpMethod::Put && comp.empty()) {
             if (!m_containers.insert(container).second) {
                 return Failure(409U, "ContainerAlreadyExists");
@@ -579,6 +616,50 @@ class FakeBlobServer {
             return ListBlobs(url, container);
         }
         return Failure(400U, "UnsupportedHeaderOrQuery");
+    }
+
+    // Blob Batch: answers each DELETE sub-request in order with its own status, like the service's multipart reply.
+    Result BatchDelete(const std::string& body) {
+        constexpr std::string_view marker = "DELETE ";
+        std::string reply;
+        std::size_t position = 0;
+        int contentId = 0;
+        while ((position = body.find(marker, position)) != std::string::npos) {
+            const auto urlStart = position + marker.size();
+            const auto urlEnd = body.find(' ', urlStart);
+            if (urlEnd == std::string::npos) {
+                break;
+            }
+            position = urlEnd;
+            const auto path = PathOf(body.substr(urlStart, urlEnd - urlStart));
+            const auto it = m_blobs.find(path);
+
+            std::optional<AzureClient::BlobStorageError> error;
+            if (it == m_blobs.end() || !it->second.Exists) {
+                error = Error(404U, "BlobNotFound");
+            } else if ((error = FaultFor(Operation::DeleteBlob)).has_value()) {
+                // Keep the fault's error.
+            } else {
+                StoredBlob& blob = it->second;
+                blob.Exists = false;
+                blob.Data.clear();
+                blob.Size = 0;
+                blob.Metadata.clear();
+                blob.LeaseId.clear();
+            }
+
+            reply += "--fakeresponse\r\nContent-Type: application/http\r\nContent-ID: " + std::to_string(contentId++) +
+                     "\r\n\r\n";
+            if (error) {
+                reply += "HTTP/1.1 " + std::to_string(error->StatusCode) +
+                         " Error\r\nx-ms-error-code: " + error->ErrorCode + "\r\nContent-Length: 0\r\n\r\n\r\n";
+            } else {
+                reply += "HTTP/1.1 202 Accepted\r\nx-ms-request-id: fake-request-id\r\nContent-Length: 0\r\n\r\n\r\n";
+            }
+        }
+        reply += "--fakeresponse--\r\n";
+        return Success(MakeResponse(202U, {HttpHeader("Content-Type", "multipart/mixed; boundary=fakeresponse")},
+                                    std::move(reply)));
     }
 
     Result ListBlobs(const std::string& url, const std::string& container) {
@@ -708,8 +789,56 @@ class FakeBlobServer {
                                     std::move(body)));
     }
 
+    // Put Page From URL: the service copies the range itself, so no body is expected and none is recorded as an upload.
+    Result PageCopyFromUrl(const HttpRequest& request, StoredBlob& blob) {
+        const auto range = ParseRange(Header(request, "x-ms-range"));
+        const auto sourceRange = ParseRange(Header(request, "x-ms-source-range"));
+        if (!range || !sourceRange || range->second <= 0 || range->second != sourceRange->second) {
+            return Failure(400U, "InvalidHeaderValue");
+        }
+        PageCopy copy{range->first,
+                      range->second,
+                      Header(request, "x-ms-copy-source"),
+                      sourceRange->first,
+                      Header(request, "x-ms-source-if-match"),
+                      Header(request, "x-ms-copy-source-authorization")};
+        PageCopies.push_back(copy);
+
+        if (const auto fault = FaultFor(Operation::UploadPagesFromUrl)) {
+            return FailureResult(*fault);
+        }
+        if (range->second > 4 * 1024 * 1024 || range->first % 512 != 0 || range->second % 512 != 0 ||
+            sourceRange->first % 512 != 0) {
+            return Failure(400U, "InvalidHeaderValue");
+        }
+        if (RequireCopySourceAuthorization && copy.SourceAuthorization.empty()) {
+            return Failure(401U, "CannotVerifyCopySource");
+        }
+        const auto source = m_blobs.find(PathOf(copy.SourceUrl));
+        if (source == m_blobs.end() || !source->second.Exists) {
+            return Failure(404U, "CannotVerifyCopySource");
+        }
+        if (!copy.SourceIfMatch.empty() && copy.SourceIfMatch != source->second.ETag) {
+            return Failure(412U, "SourceConditionNotMet");
+        }
+        if (IfMatchFails(request, blob)) {
+            return Failure(412U, "ConditionNotMet");
+        }
+        const auto capacity = static_cast<int64_t>(blob.Data.size());
+        if (copy.Offset + copy.Length > capacity ||
+            copy.SourceOffset + copy.Length > static_cast<int64_t>(source->second.Data.size())) {
+            return Failure(416U, "InvalidPageRange");
+        }
+        const std::string payload(source->second.Data.begin() + copy.SourceOffset,
+                                  source->second.Data.begin() + copy.SourceOffset + copy.Length);
+        return Success(MakeResponse(201U, {HttpHeader("ETag", Apply(blob, copy.Offset, payload))}));
+    }
+
     Result PageWrite(const FakeHttpClient::RequestRecord& record, const std::string& path, StoredBlob& blob) {
         const HttpRequest& request = record.Request;
+        if (!Header(request, "x-ms-copy-source").empty()) {
+            return PageCopyFromUrl(request, blob);
+        }
         const auto range = ParseRange(Header(request, "x-ms-range"));
         if (!range || range->second <= 0) {
             return Failure(400U, "InvalidHeaderValue");

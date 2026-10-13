@@ -242,6 +242,14 @@ inline constexpr std::string_view XMsBlobContentLanguageHeaderName = "x-ms-blob-
 inline constexpr std::string_view XMsBlobContentDispositionHeaderName = "x-ms-blob-content-disposition";
 inline constexpr std::string_view XMsPageWriteHeaderName = "x-ms-page-write";
 inline constexpr std::string_view XMsRangeHeaderName = "x-ms-range";
+inline constexpr std::string_view XMsCopySourceHeaderName = "x-ms-copy-source";
+inline constexpr std::string_view XMsSourceRangeHeaderName = "x-ms-source-range";
+inline constexpr std::string_view XMsSourceIfMatchHeaderName = "x-ms-source-if-match";
+inline constexpr std::string_view XMsCopySourceAuthorizationHeaderName = "x-ms-copy-source-authorization";
+// Placeholder value of x-ms-copy-source-authorization that the request pipeline replaces, per attempt, with the
+// credential the client itself authorizes with (a fresh token on every retry), or removes when that credential
+// is not a bearer token.
+inline constexpr std::string_view CopySourceClientCredentialMarker = "{client-credential}";
 inline constexpr std::string_view XMsAccessTierHeaderName = "x-ms-access-tier";
 inline constexpr std::string_view XMsLeaseIdHeaderName = "x-ms-lease-id";
 inline constexpr std::string_view XMsLeaseActionHeaderName = "x-ms-lease-action";
@@ -269,6 +277,14 @@ struct RequestFailure {
 // Locale-free ASCII folding: the std::locale based algorithms take a process-wide lock on MSVC per character.
 [[nodiscard]] constexpr char FoldAscii(char value) noexcept {
     return (value >= 'A' && value <= 'Z') ? static_cast<char>(value | 0x20) : value;
+}
+
+// The HTTP client a shared_ptr constructor keeps alive; a null handle is a caller error.
+template <class THttp> THttp& RequireHttpClient(const std::shared_ptr<THttp>& httpClient) {
+    if (!httpClient) {
+        throw std::invalid_argument("The HTTP client must not be null.");
+    }
+    return *httpClient;
 }
 
 [[nodiscard]] constexpr bool IEquals(std::string_view lhs, std::string_view rhs) noexcept {

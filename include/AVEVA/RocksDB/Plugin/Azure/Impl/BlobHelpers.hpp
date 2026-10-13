@@ -2,9 +2,10 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlockOn.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
+
+#include <AVEVA/AzureClient/BlockOn.hpp>
 
 #include <chrono>
 #include <cstdint>
@@ -31,7 +32,7 @@ void CreateContainerIfNotExists(TContainer& client, int maxRetries = 5,
                                 std::chrono::milliseconds baseDelay = std::chrono::seconds(1)) {
     int retries = 1;
     while (true) {
-        auto result = BlockOn(client, [&](auto token) { return client.CreateIfNotExistsAsync(token); });
+        auto result = client.CreateIfNotExistsAsync(AzureClient::block_on);
         if (result.has_value()) {
             return;
         }

@@ -226,6 +226,72 @@ TEST(PageBlobClientTests, CreateAsync_ReportsUnalignedLengthViaCompletion) {
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
+TEST(PageBlobClientTests, CreateIfNotExistsAsync_SendsIfNoneMatchStar) {
+    FakeHttpClient httpClient;
+    httpClient.DefaultResponse() = HttpResponse{201, MakeCanonicalSuccessHeaders(), ""};
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    CallbackExpectation callback;
+    client.CreateIfNotExistsAsync(PageBlobPageSize,
+                                  [&](std::expected<Response<CreatePageBlobResult>, BlobStorageError> result) {
+                                      ASSERT_TRUE(result.has_value());
+                                      EXPECT_FALSE(result->Error().has_value());
+                                      EXPECT_EQ(result->Value().ETag, DefaultETag);
+                                      callback.MarkInvoked();
+                                  });
+
+    httpClient.Poll();
+    const auto& request = httpClient.LastRequest();
+    EXPECT_EQ(request.GetMethod(), HttpMethod::Put);
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "If-None-Match"), "*");
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-blob-type"), "PageBlob");
+}
+
+TEST(PageBlobClientTests, CreateIfNotExistsAsync_SuppressesAlreadyExists) {
+    for (const auto& [status, code] : {std::pair<unsigned, const char*>{409, "BlobAlreadyExists"},
+                                       std::pair<unsigned, const char*>{412, "ConditionNotMet"}}) {
+        FakeHttpClient httpClient;
+        httpClient.DefaultResponse() = HttpResponse{status, {{"x-ms-error-code", code}}, ""};
+        PageBlobClient client{httpClient, BuildOptions()};
+
+        CallbackExpectation callback;
+        client.CreateIfNotExistsAsync(PageBlobPageSize,
+                                      [&](std::expected<Response<CreatePageBlobResult>, BlobStorageError> result) {
+                                          ASSERT_TRUE(result.has_value());
+                                          ASSERT_TRUE(result->Error().has_value());
+                                          EXPECT_EQ(result->Error()->StatusCode, status);
+                                          callback.MarkInvoked();
+                                      });
+        httpClient.Poll();
+    }
+}
+
+TEST(PageBlobClientTests, CreateIfNotExistsAsync_OtherErrorsAndValidationStillFail) {
+    FakeHttpClient httpClient;
+    httpClient.DefaultResponse() = HttpResponse{404, {{"x-ms-error-code", "ContainerNotFound"}}, ""};
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    bool failedOnService = false;
+    client.CreateIfNotExistsAsync(PageBlobPageSize,
+                                  [&](std::expected<Response<CreatePageBlobResult>, BlobStorageError> result) {
+                                      ASSERT_FALSE(result.has_value());
+                                      EXPECT_EQ(result.error().Code, BlobStorageErrorCode::ContainerNotFound);
+                                      failedOnService = true;
+                                  });
+    httpClient.Poll();
+    EXPECT_TRUE(failedOnService);
+
+    bool failedValidation = false;
+    client.CreateIfNotExistsAsync(100, [&](std::expected<Response<CreatePageBlobResult>, BlobStorageError> result) {
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
+        failedValidation = true;
+    });
+    httpClient.Poll();
+    EXPECT_TRUE(failedValidation);
+    EXPECT_EQ(httpClient.RequestCount(), 1U);
+}
+
 TEST(PageBlobClientTests, UploadPagesAsync_SetsRangeAndPageWriteHeaders) {
     FakeHttpClient httpClient;
     PageBlobClient client{httpClient, BuildOptions()};
@@ -300,6 +366,90 @@ TEST(PageBlobClientTests, UploadPagesAsync_ReportsZeroLengthContentViaCompletion
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
+TEST(PageBlobClientTests, UploadPagesFromUrlAsync_SendsCopySourceHeadersAndNoBody) {
+    FakeHttpClient httpClient;
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    client.UploadPagesFromUrlAsync(1024, "https://account.blob.core.windows.net/files/src.sst", 512, 2048,
+                                   AVEVA::AzureClient::UploadPagesFromUrlOptions{.SourceIfMatch = "\"etag\""},
+                                   [](std::expected<Response<UploadPagesResult>, BlobStorageError>) {});
+
+    const auto& request = httpClient.LastRequest();
+    EXPECT_EQ(request.GetMethod(), HttpMethod::Put);
+    EXPECT_EQ(request.GetUrl(),
+              "https://storageaccount.blob.core.windows.net/disks/disk.vhd?comp=page&sv=2025-01-05&sig=fakesig");
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-page-write"), "update");
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-range"), "bytes=1024-3071");
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-copy-source"),
+              "https://account.blob.core.windows.net/files/src.sst");
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-source-range"), "bytes=512-2559");
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-source-if-match"), "\"etag\"");
+    EXPECT_TRUE(request.GetBody().empty());
+}
+
+TEST(PageBlobClientTests, UploadPagesFromUrlAsync_ExplicitSourceAuthorizationIsForwarded) {
+    FakeHttpClient httpClient;
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    client.UploadPagesFromUrlAsync(0, "https://a/b/c", 0, 512,
+                                   AVEVA::AzureClient::UploadPagesFromUrlOptions{.SourceAuthorization = "Bearer abc"},
+                                   [](std::expected<Response<UploadPagesResult>, BlobStorageError>) {});
+
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.LastRequest(), "x-ms-copy-source-authorization"),
+              "Bearer abc");
+}
+
+TEST(PageBlobClientTests, UploadPagesFromUrlAsync_ClientCredentialIsForwardedAsBearerToken) {
+    FakeHttpClient httpClient;
+    auto options = BuildOptions();
+    options.SasToken.clear();
+    options.BearerToken = "client-token";
+    PageBlobClient client{httpClient, options};
+
+    client.UploadPagesFromUrlAsync(
+        0, "https://a/b/c", 0, 512,
+        AVEVA::AzureClient::UploadPagesFromUrlOptions{.AuthorizeSourceWithClientCredential = true},
+        [](std::expected<Response<UploadPagesResult>, BlobStorageError>) {});
+    httpClient.Poll();
+
+    const auto& request = httpClient.LastRequest();
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-copy-source-authorization"), "Bearer client-token");
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "Authorization"), "Bearer client-token");
+}
+
+TEST(PageBlobClientTests, UploadPagesFromUrlAsync_ClientCredentialMarkerIsDroppedForSasClients) {
+    FakeHttpClient httpClient;
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    client.UploadPagesFromUrlAsync(
+        0, "https://a/b/c", 0, 512,
+        AVEVA::AzureClient::UploadPagesFromUrlOptions{.AuthorizeSourceWithClientCredential = true},
+        [](std::expected<Response<UploadPagesResult>, BlobStorageError>) {});
+
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.LastRequest(), "x-ms-copy-source-authorization"), "");
+}
+
+TEST(PageBlobClientTests, UploadPagesFromUrlAsync_RejectsBadRangesBeforeSending) {
+    FakeHttpClient httpClient;
+    PageBlobClient client{httpClient, BuildOptions()};
+    int failures = 0;
+    const auto expectInvalid = [&](std::expected<Response<UploadPagesResult>, BlobStorageError> result) {
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
+        ++failures;
+    };
+
+    client.UploadPagesFromUrlAsync(1, "https://a/b/c", 0, 512, expectInvalid);
+    client.UploadPagesFromUrlAsync(0, "https://a/b/c", 100, 512, expectInvalid);
+    client.UploadPagesFromUrlAsync(0, "https://a/b/c", 0, 0, expectInvalid);
+    client.UploadPagesFromUrlAsync(0, "https://a/b/c", 0, 4U * 1024U * 1024U + 512U, expectInvalid);
+    client.UploadPagesFromUrlAsync(0, "", 0, 512, expectInvalid);
+    httpClient.Poll();
+
+    EXPECT_EQ(failures, 5);
+    EXPECT_EQ(httpClient.RequestCount(), 0U);
+}
+
 TEST(PageBlobClientTests, ClearPagesAsync_SetsRangeAndPageWriteHeaders) {
     FakeHttpClient httpClient;
     PageBlobClient client{httpClient, BuildOptions()};
@@ -338,7 +488,8 @@ TEST(PageBlobClientTests, GetPageRangesAsync_ParsesRangesAndHeaders) {
     AVEVA::AzureClient::GetPageRangesOptions options;
     options.Conditions.IfMatch = "\"0x1\"";
     client.GetPageRangesAsync(
-        options, [&](std::expected<Response<AVEVA::AzureClient::Models::GetPageRangesResult>, BlobStorageError> result) {
+        options,
+        [&](std::expected<Response<AVEVA::AzureClient::Models::GetPageRangesResult>, BlobStorageError> result) {
             ASSERT_TRUE(result.has_value());
             const auto& value = result->Value();
             ASSERT_EQ(value.Ranges.size(), 2U);
@@ -372,7 +523,8 @@ TEST(PageBlobClientTests, GetPageRangesAsync_SendsRangeMarkerAndMaxResults) {
     options.MaxResults = 10;
     bool invoked = false;
     client.GetPageRangesAsync(
-        options, [&](std::expected<Response<AVEVA::AzureClient::Models::GetPageRangesResult>, BlobStorageError> result) {
+        options,
+        [&](std::expected<Response<AVEVA::AzureClient::Models::GetPageRangesResult>, BlobStorageError> result) {
             ASSERT_TRUE(result.has_value());
             EXPECT_TRUE(result->Value().Ranges.empty());
             invoked = true;
@@ -394,7 +546,8 @@ TEST(PageBlobClientTests, GetPageRangesAsync_RejectsUnalignedRangeWithoutSending
     options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 100, .Length = 512};
     bool invoked = false;
     client.GetPageRangesAsync(
-        options, [&](std::expected<Response<AVEVA::AzureClient::Models::GetPageRangesResult>, BlobStorageError> result) {
+        options,
+        [&](std::expected<Response<AVEVA::AzureClient::Models::GetPageRangesResult>, BlobStorageError> result) {
             ASSERT_FALSE(result.has_value());
             EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
             invoked = true;

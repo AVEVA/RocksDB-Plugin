@@ -33,12 +33,13 @@ using AVEVA::HttpMethod;
 using AVEVA::HttpRequest;
 using AVEVA::HttpResponse;
 using AVEVA::AzureClient::AccessToken;
-using AVEVA::AzureClient::BlobStorageErrorCode;
 using AVEVA::AzureClient::AssertionCompletion;
+using AVEVA::AzureClient::BlobStorageErrorCode;
 using AVEVA::AzureClient::ClientAssertionCredentialOptions;
 using AVEVA::AzureClient::ClientSecretCredentialOptions;
 using AVEVA::AzureClient::ManagedIdentityCredentialOptions;
 using AVEVA::AzureClient::WorkloadIdentityCredentialOptions;
+using AVEVA::AzureClient::Tests::AzurePipelinesCredential;
 using AVEVA::AzureClient::Tests::ClientAssertionCredential;
 using AVEVA::AzureClient::Tests::ClientSecretCredential;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
@@ -611,4 +612,131 @@ TEST(CredentialsTests, ClientSecretOptionsFromEnvironmentReadsTheStandardVariabl
     SetEnvironmentValue("AZURE_CLIENT_ID", "");
     SetEnvironmentValue("AZURE_CLIENT_SECRET", "");
     EXPECT_TRUE(ClientSecretCredentialOptions::FromEnvironment().TenantId.empty());
+}
+
+namespace {
+[[nodiscard]] AVEVA::AzureClient::AzurePipelinesCredentialOptions PipelinesOptions() {
+    AVEVA::AzureClient::AzurePipelinesCredentialOptions options;
+    options.TenantId = "tenant";
+    options.ClientId = "client";
+    options.ServiceConnectionId = "conn&id";
+    options.SystemAccessToken = "system";
+    options.OidcRequestUri = "https://pipelines.example/oidc";
+    options.Retry.MaxRetries = 0;
+    return options;
+}
+} // namespace
+
+TEST(CredentialsTests, AzurePipelinesCredentialExchangesTheOidcTokenAsClientAssertion) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(Json(200, R"({"oidcToken":"oidc-jwt"})"));
+    httpClient.EnqueueResponse(Json(200, R"({"access_token":"tok","expires_in":3600})"));
+    AzurePipelinesCredential credential{httpClient, PipelinesOptions()};
+
+    const TokenResult result = GetToken(httpClient, credential);
+
+    EXPECT_FALSE(result.Error);
+    EXPECT_EQ(result.Token.Token, "tok");
+    ASSERT_EQ(httpClient.Requests().size(), 2U);
+    const HttpRequest& oidc = httpClient.Requests().front().Request;
+    EXPECT_EQ(oidc.GetMethod(), HttpMethod::Post);
+    EXPECT_EQ(oidc.GetUrl(), "https://pipelines.example/oidc?api-version=7.1&serviceConnectionId=conn%26id");
+    EXPECT_EQ(Header(oidc, "Authorization"), "Bearer system");
+    const std::string exchangeBody = FakeHttpClient::BodyAsString(httpClient.LastRequest());
+    EXPECT_NE(exchangeBody.find("client_assertion=oidc-jwt"), std::string::npos);
+}
+
+TEST(CredentialsTests, AzurePipelinesCredentialAppendsToAnExistingQueryString) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(Json(401, ""));
+    auto options = PipelinesOptions();
+    options.OidcRequestUri = "https://pipelines.example/oidc?x=1";
+    AzurePipelinesCredential credential{httpClient, options};
+
+    static_cast<void>(GetToken(httpClient, credential));
+
+    ASSERT_EQ(httpClient.Requests().size(), 1U);
+    EXPECT_EQ(httpClient.Requests().front().Request.GetUrl(),
+              "https://pipelines.example/oidc?x=1&api-version=7.1&serviceConnectionId=conn%26id");
+}
+
+TEST(CredentialsTests, AzurePipelinesCredentialRejectsMissingConfigurationWithoutSendingRequests) {
+    FakeHttpClient httpClient;
+    for (const auto clear :
+         {+[](AVEVA::AzureClient::AzurePipelinesCredentialOptions& o) { o.OidcRequestUri.clear(); },
+          +[](AVEVA::AzureClient::AzurePipelinesCredentialOptions& o) { o.ServiceConnectionId.clear(); },
+          +[](AVEVA::AzureClient::AzurePipelinesCredentialOptions& o) { o.SystemAccessToken.clear(); }}) {
+        auto options = PipelinesOptions();
+        clear(options);
+        SetEnvironmentValue("SYSTEM_OIDCREQUESTURI", "");
+        AzurePipelinesCredential credential{httpClient, options};
+        EXPECT_EQ(GetToken(httpClient, credential).Error, std::make_error_code(std::errc::invalid_argument));
+    }
+    EXPECT_TRUE(httpClient.Requests().empty());
+}
+
+TEST(CredentialsTests, AzurePipelinesCredentialDefaultsTheOidcUriFromTheEnvironment) {
+    SetEnvironmentValue("SYSTEM_OIDCREQUESTURI", "https://env.example/oidc");
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(Json(401, ""));
+    auto options = PipelinesOptions();
+    options.OidcRequestUri.clear();
+    AzurePipelinesCredential credential{httpClient, options};
+
+    static_cast<void>(GetToken(httpClient, credential));
+    SetEnvironmentValue("SYSTEM_OIDCREQUESTURI", "");
+
+    ASSERT_EQ(httpClient.Requests().size(), 1U);
+    EXPECT_TRUE(httpClient.Requests().front().Request.GetUrl().starts_with("https://env.example/oidc?api-version=7.1"));
+}
+
+TEST(CredentialsTests, AzurePipelinesCredentialMapsOidcFailuresToErrorCodes) {
+    FakeHttpClient httpClient;
+    AzurePipelinesCredential credential{httpClient, PipelinesOptions()};
+
+    httpClient.EnqueueResponse(Json(401, ""));
+    EXPECT_EQ(GetToken(httpClient, credential).Error, std::error_code{BlobStorageErrorCode::AuthenticationFailed});
+
+    for (const std::string body : {"not json", "[]", R"({"other":"x"})", R"({"oidcToken":""})"}) {
+        httpClient.EnqueueResponse(Json(200, body));
+        EXPECT_EQ(GetToken(httpClient, credential).Error, std::error_code{BlobStorageErrorCode::InvalidResponse})
+            << body;
+    }
+
+    const auto transport = std::make_error_code(std::errc::connection_refused);
+    httpClient.EnqueueResponse(HttpResponse{}, transport);
+    EXPECT_EQ(GetToken(httpClient, credential).Error, transport);
+    EXPECT_EQ(httpClient.Requests().size(), 6U);
+}
+
+TEST(CredentialsTests, AzurePipelinesCredentialHonorsRetryAfterOnTheOidcRequest) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{429, {AVEVA::HttpHeader{"Retry-After", "1"}}, ""});
+    httpClient.EnqueueResponse(Json(200, R"({"oidcToken":"oidc"})"));
+    httpClient.EnqueueResponse(Json(200, R"({"access_token":"tok","expires_in":"3600"})"));
+    auto options = PipelinesOptions();
+    options.Retry.MaxRetries = 2;
+    AzurePipelinesCredential credential{httpClient, options};
+
+    std::optional<TokenResult> result;
+    const auto start = std::chrono::steady_clock::now();
+    credential.GetTokenAsync(StorageScope(), [&](std::error_code error, AccessToken token) {
+        result = TokenResult{.Error = error, .Token = std::move(token)};
+    });
+    ASSERT_TRUE(httpClient.RunUntil([&] { return result.has_value(); }));
+
+    EXPECT_FALSE(result->Error);
+    EXPECT_EQ(result->Token.Token, "tok");
+    EXPECT_GE(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(900));
+}
+
+TEST(CredentialsTests, AzurePipelinesCredentialDoesNotRetryNonTransientOidcFailures) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(Json(401, ""));
+    auto options = PipelinesOptions();
+    options.Retry.MaxRetries = 2;
+    AzurePipelinesCredential credential{httpClient, options};
+
+    EXPECT_TRUE(GetToken(httpClient, credential).Error);
+    EXPECT_EQ(httpClient.RequestCount(), 1U);
 }

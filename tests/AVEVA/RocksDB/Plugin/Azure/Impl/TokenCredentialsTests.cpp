@@ -16,12 +16,12 @@
 using AVEVA::HttpHeader;
 using AVEVA::HttpResponse;
 using AVEVA::AzureClient::AccessToken;
+using AVEVA::AzureClient::AzurePipelinesCredentialOptions;
+using AVEVA::AzureClient::BasicAzurePipelinesCredential;
 using AVEVA::AzureClient::ClientSecretCredentialOptions;
 using AVEVA::AzureClient::StaticTokenCredential;
 using AVEVA::AzureClient::Tests::ClientSecretCredential;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
-using AVEVA::RocksDB::Plugin::Azure::Impl::AzurePipelinesCredentialOptions;
-using AVEVA::RocksDB::Plugin::Azure::Impl::BasicAzurePipelinesCredential;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ChainedTokenCredential;
 using AVEVA::RocksDB::Plugin::Azure::Impl::CredentialVariant;
 using PipelinesCredential = BasicAzurePipelinesCredential<FakeHttpClient>;
@@ -118,38 +118,6 @@ TEST_F(TokenCredentialsTests, RetryAfterIsHonoredOn429) {
     EXPECT_FALSE(error);
     EXPECT_EQ(token.Token, "tok");
     EXPECT_GE(elapsed, std::chrono::milliseconds(900));
-}
-
-class DeferredCredential final {
-  public:
-    template <boost::asio::completion_token_for<AVEVA::AzureClient::TokenSignature> CompletionToken>
-    auto GetTokenAsync(std::vector<std::string> scopes, CompletionToken&& token) {
-        return boost::asio::async_initiate<AVEVA::AzureClient::TokenSignature>(
-            [this](auto handler, std::vector<std::string>) { Pending = std::move(handler); }, token, std::move(scopes));
-    }
-    std::move_only_function<AVEVA::AzureClient::TokenSignature> Pending;
-};
-
-TEST(RuntimeBoundCredentialTests, PendingRefreshKeepsRuntimeAliveUntilCompletion) {
-    boost::asio::io_context context;
-    auto runtime = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime>(context);
-    const std::weak_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime> weak = runtime;
-    auto inner = std::make_shared<DeferredCredential>();
-    auto bound = std::make_unique<AVEVA::RocksDB::Plugin::Azure::Impl::RuntimeBoundCredential<DeferredCredential>>(
-        runtime, inner);
-    bool completed = false;
-    bound->GetTokenAsync({"scope"}, [&completed](std::error_code, AccessToken) { completed = true; });
-
-    // The filesystem goes away while the refresh is pending.
-    bound.reset();
-    runtime.reset();
-    EXPECT_FALSE(weak.expired());
-
-    inner->Pending(std::error_code{}, AccessToken{"tok"});
-    EXPECT_TRUE(completed);
-    inner.reset();
-    context.run();
-    EXPECT_TRUE(weak.expired());
 }
 
 TEST_F(TokenCredentialsTests, TokenLifetimeBeyondMaximumIsClampedNotRejected) {

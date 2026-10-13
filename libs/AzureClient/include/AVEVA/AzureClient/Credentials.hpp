@@ -106,7 +106,8 @@ struct ClientAssertionCredentialOptions {
     RetryOptions Retry;
 };
 
-struct ManagedIdentityCredentialOptions {    // A user-assigned identity, by client id or by ARM resource id (at most one); both empty selects the
+struct ManagedIdentityCredentialOptions { // A user-assigned identity, by client id or by ARM resource id (at most one);
+                                          // both empty selects the
     // system-assigned identity.
     std::string ClientId;
     std::string ResourceId;
@@ -375,6 +376,11 @@ template <HttpClientLike THttp> class BasicClientSecretCredential final {
         : m_httpClient(&httpClient), m_options(std::move(options)) {
         static_cast<void>(Private::NormalizeAuthorityHost(m_options.AuthorityHost));
     }
+    // Shares ownership of the HTTP client, so the credential keeps it alive.
+    BasicClientSecretCredential(std::shared_ptr<THttp> httpClient, ClientSecretCredentialOptions options)
+        : BasicClientSecretCredential(Private::RequireHttpClient(httpClient), std::move(options)) {
+        m_httpOwner = std::move(httpClient);
+    }
 
     template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
     auto GetTokenAsync(std::vector<std::string> scopes, CompletionToken&& token) {
@@ -396,12 +402,13 @@ template <HttpClientLike THttp> class BasicClientSecretCredential final {
         std::string body = "grant_type=client_credentials&client_id=" + FormEncode(m_options.ClientId) +
                            "&client_secret=" + FormEncode(m_options.ClientSecret) +
                            "&scope=" + FormEncode(JoinScopes(scopes));
-        Private::SendTokenRequest(
-            *m_httpClient, BuildEntraTokenRequest(m_options.AuthorityHost, m_options.TenantId, std::move(body)),
-            m_options.RequestOptions, m_options.Retry, false, std::move(completion));
+        Private::SendTokenRequest(*m_httpClient,
+                                  BuildEntraTokenRequest(m_options.AuthorityHost, m_options.TenantId, std::move(body)),
+                                  m_options.RequestOptions, m_options.Retry, false, std::move(completion));
     }
 
     THttp* m_httpClient;
+    std::shared_ptr<THttp> m_httpOwner;
     ClientSecretCredentialOptions m_options;
 };
 
@@ -413,6 +420,11 @@ template <HttpClientLike THttp> class BasicWorkloadIdentityCredential final {
     BasicWorkloadIdentityCredential(THttp& httpClient, WorkloadIdentityCredentialOptions options)
         : m_httpClient(&httpClient), m_options(std::move(options)) {
         static_cast<void>(Private::NormalizeAuthorityHost(m_options.AuthorityHost));
+    }
+    // Shares ownership of the HTTP client, so the credential keeps it alive.
+    BasicWorkloadIdentityCredential(std::shared_ptr<THttp> httpClient, WorkloadIdentityCredentialOptions options)
+        : BasicWorkloadIdentityCredential(Private::RequireHttpClient(httpClient), std::move(options)) {
+        m_httpOwner = std::move(httpClient);
     }
 
     template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
@@ -439,12 +451,13 @@ template <HttpClientLike THttp> class BasicWorkloadIdentityCredential final {
             return;
         }
         std::string body = BuildClientAssertionBody(m_options.ClientId, *assertion, scopes);
-        Private::SendTokenRequest(
-            *m_httpClient, BuildEntraTokenRequest(m_options.AuthorityHost, m_options.TenantId, std::move(body)),
-            m_options.RequestOptions, m_options.Retry, false, std::move(completion));
+        Private::SendTokenRequest(*m_httpClient,
+                                  BuildEntraTokenRequest(m_options.AuthorityHost, m_options.TenantId, std::move(body)),
+                                  m_options.RequestOptions, m_options.Retry, false, std::move(completion));
     }
 
     THttp* m_httpClient;
+    std::shared_ptr<THttp> m_httpOwner;
     WorkloadIdentityCredentialOptions m_options;
 };
 
@@ -457,6 +470,11 @@ template <HttpClientLike THttp> class BasicClientAssertionCredential final {
     BasicClientAssertionCredential(THttp& httpClient, ClientAssertionCredentialOptions options)
         : m_httpClient(&httpClient), m_options(std::move(options)) {
         static_cast<void>(Private::NormalizeAuthorityHost(m_options.AuthorityHost));
+    }
+    // Shares ownership of the HTTP client, so the credential (and requests it has in flight) keep it alive.
+    BasicClientAssertionCredential(std::shared_ptr<THttp> httpClient, ClientAssertionCredentialOptions options)
+        : BasicClientAssertionCredential(Private::RequireHttpClient(httpClient), std::move(options)) {
+        m_httpOwner = std::move(httpClient);
     }
 
     template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
@@ -478,9 +496,9 @@ template <HttpClientLike THttp> class BasicClientAssertionCredential final {
         }
         // The provider may complete on any thread; the token request is sent from there. Everything the continuation
         // needs is copied or moved in, so it does not depend on this credential staying alive.
-        m_options.AssertionProvider([httpClient = m_httpClient, options = m_options, scopes = std::move(scopes),
-                                     completion = std::move(completion)](std::error_code error,
-                                                                         std::string assertion) mutable {
+        m_options.AssertionProvider([httpClient = m_httpClient, owner = m_httpOwner, options = m_options,
+                                     scopes = std::move(scopes), completion = std::move(completion)](
+                                        std::error_code error, std::string assertion) mutable {
             if (error) {
                 Private::Fail(*httpClient, std::move(completion), error);
                 return;
@@ -497,6 +515,7 @@ template <HttpClientLike THttp> class BasicClientAssertionCredential final {
     }
 
     THttp* m_httpClient;
+    std::shared_ptr<THttp> m_httpOwner;
     ClientAssertionCredentialOptions m_options;
 };
 
@@ -508,6 +527,11 @@ template <HttpClientLike THttp> class BasicManagedIdentityCredential final {
   public:
     BasicManagedIdentityCredential(THttp& httpClient, ManagedIdentityCredentialOptions options)
         : m_httpClient(&httpClient), m_options(std::move(options)) {}
+    // Shares ownership of the HTTP client, so the credential keeps it alive.
+    BasicManagedIdentityCredential(std::shared_ptr<THttp> httpClient, ManagedIdentityCredentialOptions options)
+        : BasicManagedIdentityCredential(Private::RequireHttpClient(httpClient), std::move(options)) {
+        m_httpOwner = std::move(httpClient);
+    }
 
     template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
     auto GetTokenAsync(std::vector<std::string> scopes, CompletionToken&& token) {
@@ -557,8 +581,118 @@ template <HttpClientLike THttp> class BasicManagedIdentityCredential final {
     }
 
     THttp* m_httpClient;
+    std::shared_ptr<THttp> m_httpOwner;
     ManagedIdentityCredentialOptions m_options;
 };
 
 using ManagedIdentityCredential = BasicManagedIdentityCredential<HttpClient>;
+
+struct AzurePipelinesCredentialOptions {
+    std::string TenantId;
+    std::string ClientId;
+    std::string ServiceConnectionId;
+    std::string SystemAccessToken;
+    // The Azure Pipelines OIDC token endpoint; defaults to the SYSTEM_OIDCREQUESTURI environment variable.
+    std::string OidcRequestUri;
+    std::string AuthorityHost = std::string{DefaultAuthorityHost};
+    HttpRequestOptions RequestOptions;
+    // Retries of transient failures of the OIDC token request and of the token exchange.
+    RetryOptions Retry;
+};
+
+// Authenticates as a Microsoft Entra ID application through an Azure Pipelines service connection using workload
+// identity federation: the OIDC token Azure Pipelines issues for the service connection is exchanged for an access
+// token with a client-assertion grant. Only the OIDC token request lives here; the exchange is
+// BasicClientAssertionCredential. Missing OidcRequestUri, ServiceConnectionId or SystemAccessToken ->
+// std::errc::invalid_argument; a non-2xx OIDC response -> BlobStorageErrorCode::AuthenticationFailed; a 2xx response
+// without an oidcToken -> BlobStorageErrorCode::InvalidResponse.
+template <HttpClientLike THttp> class BasicAzurePipelinesCredential final {
+  public:
+    BasicAzurePipelinesCredential(THttp& httpClient, AzurePipelinesCredentialOptions options)
+        : m_exchange(httpClient, MakeExchangeOptions(httpClient, nullptr, std::move(options))) {}
+    // Shares ownership of the HTTP client; the OIDC token request keeps it alive too.
+    BasicAzurePipelinesCredential(std::shared_ptr<THttp> httpClient, AzurePipelinesCredentialOptions options)
+        : m_exchange(httpClient,
+                     MakeExchangeOptions(Private::RequireHttpClient(httpClient), httpClient, std::move(options))) {}
+
+    template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
+    auto GetTokenAsync(std::vector<std::string> scopes, CompletionToken&& token) {
+        return m_exchange.GetTokenAsync(std::move(scopes), std::forward<CompletionToken>(token));
+    }
+
+  private:
+    static constexpr unsigned int FirstSuccess = 200;
+    static constexpr unsigned int LastSuccess = 299;
+
+    static HttpRequest BuildOidcRequest(const AzurePipelinesCredentialOptions& options) {
+        const auto separator = options.OidcRequestUri.find('?') == std::string::npos ? '?' : '&';
+        HttpRequest request;
+        request.SetMethod(HttpMethod::Post);
+        request.SetUrl(options.OidcRequestUri + separator +
+                       "api-version=7.1&serviceConnectionId=" + Private::FormEncode(options.ServiceConnectionId));
+        request.AddHeader(HttpHeader{"Content-Type", "application/json"});
+        request.AddHeader(HttpHeader{"Authorization", "Bearer " + options.SystemAccessToken});
+        request.SetBody(std::string{});
+        return request;
+    }
+
+    // Extracts the oidcToken member, or an empty string when the body is not the expected JSON object.
+    static std::string ParseOidcToken(const HttpResponse& response) {
+        boost::system::error_code ec;
+        const boost::json::value root = boost::json::parse(response.GetBody(), ec);
+        if (ec || !root.is_object()) {
+            return {};
+        }
+        return Private::JsonText(root.as_object(), "oidcToken");
+    }
+
+    static ClientAssertionCredentialOptions MakeExchangeOptions(THttp& httpClient, std::shared_ptr<THttp> owner,
+                                                                AzurePipelinesCredentialOptions options) {
+        if (options.OidcRequestUri.empty()) {
+            options.OidcRequestUri = Private::GetEnvironmentValue("SYSTEM_OIDCREQUESTURI");
+        }
+
+        ClientAssertionCredentialOptions exchange;
+        exchange.TenantId = options.TenantId;
+        exchange.ClientId = options.ClientId;
+        exchange.AuthorityHost = options.AuthorityHost;
+        exchange.RequestOptions = options.RequestOptions;
+        exchange.Retry = options.Retry;
+        // The provider owns a copy of everything it needs, so in-flight requests do not depend on the credential.
+        exchange.AssertionProvider = [&httpClient, owner = std::move(owner),
+                                      options = std::move(options)](AssertionCompletion done) {
+            if (options.OidcRequestUri.empty() || options.ServiceConnectionId.empty() ||
+                options.SystemAccessToken.empty()) {
+                done(std::make_error_code(std::errc::invalid_argument), {});
+                return;
+            }
+
+            Private::SendWithRetryAsync(
+                httpClient, Private::RequestAuth{}, std::shared_ptr<NoTokenCredential>{}, options.Retry,
+                BuildOidcRequest(options),
+                [done = std::move(done)](std::error_code error, const HttpResponse& response) mutable {
+                    if (error) {
+                        done(error, {});
+                        return;
+                    }
+                    if (response.GetStatus() < FirstSuccess || response.GetStatus() > LastSuccess) {
+                        done(make_error_code(BlobStorageErrorCode::AuthenticationFailed), {});
+                        return;
+                    }
+                    auto oidcToken = ParseOidcToken(response);
+                    if (oidcToken.empty()) {
+                        done(make_error_code(BlobStorageErrorCode::InvalidResponse), {});
+                        return;
+                    }
+                    done(std::error_code{}, std::move(oidcToken));
+                },
+                options.RequestOptions, false);
+        };
+        return exchange;
+    }
+
+    BasicClientAssertionCredential<THttp> m_exchange;
+};
+
+using AzurePipelinesCredential = BasicAzurePipelinesCredential<HttpClient>;
 } // namespace AVEVA::AzureClient

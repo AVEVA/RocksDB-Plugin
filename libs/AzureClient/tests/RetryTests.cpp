@@ -12,9 +12,11 @@
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 
 #include <AVEVA/AzureClient/BlockBlobClient.hpp>
+#include <AVEVA/AzureClient/WithRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpClientError.hpp>
 #include <AVEVA/HttpClient/HttpHeader.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
+#include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 #include <algorithm>
 #include <boost/asio/bind_cancellation_slot.hpp>
@@ -395,6 +397,103 @@ TEST(RetryTests, CancellationOfInFlightAttemptIsNotRetried) {
     ASSERT_FALSE(ValueOrFail(observed).has_value());
     EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::operation_canceled));
     EXPECT_EQ(httpClient.RequestCount(), 1U);
+}
+
+TEST(RetryTests, MaxRetriesOverrideReplacesClientPolicy) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
+    httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
+    BlockBlobClient client{httpClient, MakeRetryOptions(3)};
+
+    AVEVA::HttpRequestOptions requestOptions;
+    requestOptions.SetMaxRetries(0);
+    std::optional<DeleteResult> observed;
+    client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) { observed = std::move(result); }));
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
+    EXPECT_EQ(httpClient.RequestCount(), 1U);
+    ASSERT_FALSE(ValueOrFail(observed).has_value());
+    EXPECT_EQ(ValueOrFail(observed).error().StatusCode, 503U);
+}
+
+TEST(RetryTests, MaxRetriesOverrideCanEnableRetriesDisabledOnTheClient) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
+    httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
+    BlockBlobClient client{httpClient, MakeRetryOptions(0)};
+
+    AVEVA::HttpRequestOptions requestOptions;
+    requestOptions.SetMaxRetries(1);
+    std::optional<DeleteResult> observed;
+    client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) { observed = std::move(result); }));
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
+    EXPECT_EQ(httpClient.RequestCount(), 2U);
+    EXPECT_TRUE(ValueOrFail(observed).has_value());
+}
+
+TEST(RetryTests, TotalDeadlineEndsRetryBackoffWithTimedOut) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
+    httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
+    BlockBlobClient client{httpClient, MakeRetryOptions(3, std::chrono::minutes{1})};
+
+    AVEVA::HttpRequestOptions requestOptions;
+    requestOptions.SetTotalDeadline(std::chrono::milliseconds{50});
+    std::optional<DeleteResult> observed;
+    client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) { observed = std::move(result); }));
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{5}));
+    ASSERT_FALSE(ValueOrFail(observed).has_value());
+    EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::timed_out));
+    EXPECT_EQ(httpClient.RequestCount(), 1U);
+}
+
+TEST(RetryTests, TotalDeadlineCancelsInFlightAttemptAndIsNotRetried) {
+    FakeHttpClient httpClient;
+    httpClient.DeferByDefault() = true;
+    BlockBlobClient client{httpClient, MakeRetryOptions(3)};
+
+    AVEVA::HttpRequestOptions requestOptions;
+    requestOptions.SetTotalDeadline(std::chrono::milliseconds{50});
+    std::optional<DeleteResult> observed;
+    client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) { observed = std::move(result); }));
+    ASSERT_EQ(httpClient.PendingCount(), 1U);
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{5}));
+    ASSERT_FALSE(ValueOrFail(observed).has_value());
+    EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::timed_out));
+    EXPECT_EQ(httpClient.RequestCount(), 1U);
+}
+
+TEST(RetryTests, TotalDeadlineClampsAttemptTimeoutAndDoesNotFireAfterSuccess) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
+    BlockBlobClient client{httpClient, MakeRetryOptions(3)};
+
+    AVEVA::HttpRequestOptions requestOptions;
+    requestOptions.SetTimeout(std::chrono::seconds{30});
+    requestOptions.SetTotalDeadline(std::chrono::milliseconds{200});
+    std::optional<DeleteResult> observed;
+    int completions = 0;
+    client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) {
+        ++completions;
+        observed = std::move(result);
+    }));
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
+    EXPECT_TRUE(ValueOrFail(observed).has_value());
+    EXPECT_LE(httpClient.LastRequestOptions().GetTimeout(), std::chrono::milliseconds{200});
+
+    // Let the (cancelled) deadline timer's would-be expiry pass; the operation must not complete twice.
+    (void)PollUntil(httpClient, [] { return false; }, std::chrono::milliseconds{300});
+    EXPECT_EQ(completions, 1);
+}
+
+TEST(RetryTests, RequestOptionsWithoutOverridesKeepClientPolicy) {
+    const AVEVA::HttpRequestOptions defaults;
+    EXPECT_FALSE(defaults.GetTotalDeadline().has_value());
+    EXPECT_FALSE(defaults.GetMaxRetries().has_value());
 }
 
 TEST(RetryTests, RetryReSignsSharedKeyAndRefreshesDateHeader) {

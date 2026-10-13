@@ -78,8 +78,7 @@ TEST(BlobServiceClientTests, DerivedClientsSignWithTheSharedConnectionSigner) {
 
     const auto containerPtr = service.GetBlobContainerClient("images");
     AVEVA::AzureClient::Tests::BlobContainerClient& container = *containerPtr;
-    const auto blobPtr = container.GetBlockBlobClient("folder/photo.png");
-    AVEVA::AzureClient::Tests::BlockBlobClient& blob = *blobPtr;
+    auto blob = container.GetBlockBlobClient("folder/photo.png");
 
     int completions = 0;
     container.CreateAsync([&](auto result) {

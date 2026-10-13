@@ -3,7 +3,6 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlockOn.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>

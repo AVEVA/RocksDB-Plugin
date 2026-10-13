@@ -23,8 +23,7 @@ std::string AccountNameFromUrl(const std::string& storageAccountUrl);
 // ClientFactory.ipp.
 // Wraps `source` so that in-flight token refreshes keep `runtime` (and its HttpClient) alive, and caches tokens.
 template <AzureClient::HttpClientLike THttp>
-std::shared_ptr<BasicPluginCredential<THttp>>
-MakePluginCredential(const std::shared_ptr<BasicClientRuntime<THttp>>& runtime, BasicSourceCredential<THttp> source);
+std::shared_ptr<BasicPluginCredential<THttp>> MakePluginCredential(BasicSourceCredential<THttp> source);
 template <AzureClient::HttpClientLike THttp>
 std::shared_ptr<BasicPluginCredential<THttp>>
 CreateClientSecretCredential(const std::shared_ptr<BasicClientRuntime<THttp>>& runtime, const std::string& tenantId,
@@ -70,8 +69,7 @@ BlobServiceClientOn<THttp> CreatePipelinesServiceClient(const std::shared_ptr<Ba
 // The production instantiations are compiled once, in ClientFactory.cpp, so that every file that builds a filesystem
 // over the real HTTP client does not instantiate the credential and client construction again.
 namespace AVEVA::RocksDB::Plugin::Azure::Impl::ClientFactory {
-extern template std::shared_ptr<PluginCredential>
-MakePluginCredential<::AVEVA::HttpClient>(const std::shared_ptr<ClientRuntime>&, SourceCredential);
+extern template std::shared_ptr<PluginCredential> MakePluginCredential<::AVEVA::HttpClient>(SourceCredential);
 extern template std::shared_ptr<PluginCredential>
 CreateClientSecretCredential<::AVEVA::HttpClient>(const std::shared_ptr<ClientRuntime>&, const std::string&,
                                                   const std::string&, const std::string&);

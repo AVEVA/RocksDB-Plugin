@@ -12,12 +12,9 @@
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl::ClientFactory {
 template <AzureClient::HttpClientLike THttp>
-std::shared_ptr<BasicPluginCredential<THttp>>
-MakePluginCredential(const std::shared_ptr<BasicClientRuntime<THttp>>& runtime, BasicSourceCredential<THttp> source) {
-    // Token refreshes can still be in flight when the filesystem goes away; they must keep the HTTP client alive.
-    return AzureClient::MakeCachingTokenCredential(
-        std::make_shared<RuntimeBoundCredential<BasicSourceCredential<THttp>, THttp>>(
-            runtime, std::make_shared<BasicSourceCredential<THttp>>(std::move(source))));
+std::shared_ptr<BasicPluginCredential<THttp>> MakePluginCredential(BasicSourceCredential<THttp> source) {
+    // The source credential owns the HTTP client, so a token refresh still in flight keeps it alive.
+    return AzureClient::MakeCachingTokenCredential(std::make_shared<BasicSourceCredential<THttp>>(std::move(source)));
 }
 
 template <AzureClient::HttpClientLike THttp>
@@ -30,8 +27,8 @@ CreateClientSecretCredential(const std::shared_ptr<BasicClientRuntime<THttp>>& r
     options.ClientSecret = clientSecret;
     options.Retry = CreateRetryOptions();
     return MakePluginCredential<THttp>(
-        runtime, BasicSourceCredential<THttp>{std::make_shared<AzureClient::BasicClientSecretCredential<THttp>>(
-                     runtime->HttpClient(), std::move(options))});
+        BasicSourceCredential<THttp>{std::make_shared<AzureClient::BasicClientSecretCredential<THttp>>(
+            runtime->SharedHttpClient(), std::move(options))});
 }
 
 template <AzureClient::HttpClientLike THttp>
@@ -39,15 +36,15 @@ std::shared_ptr<BasicPluginCredential<THttp>>
 CreatePipelinesCredential(const std::shared_ptr<BasicClientRuntime<THttp>>& runtime, const std::string& tenantId,
                           const std::string& clientId, const std::string& serviceConnectionId,
                           const std::string& systemAccessToken) {
-    AzurePipelinesCredentialOptions options;
+    AzureClient::AzurePipelinesCredentialOptions options;
     options.TenantId = tenantId;
     options.ClientId = clientId;
     options.ServiceConnectionId = serviceConnectionId;
     options.SystemAccessToken = systemAccessToken;
     options.Retry = CreateRetryOptions();
     return MakePluginCredential<THttp>(
-        runtime, BasicSourceCredential<THttp>{std::make_shared<BasicAzurePipelinesCredential<THttp>>(
-                     runtime->HttpClient(), std::move(options))});
+        BasicSourceCredential<THttp>{std::make_shared<AzureClient::BasicAzurePipelinesCredential<THttp>>(
+            runtime->SharedHttpClient(), std::move(options))});
 }
 
 template <AzureClient::HttpClientLike THttp>
@@ -64,7 +61,7 @@ CreateCredentialSources(const std::shared_ptr<BasicClientRuntime<THttp>>& runtim
         options.ClientSecret = chainedCredential.GetServicePrincipalSecret();
         options.Retry = CreateRetryOptions();
         sources.push_back(std::make_shared<BasicLeafCredential<THttp>>(
-            std::make_shared<AzureClient::BasicClientSecretCredential<THttp>>(runtime->HttpClient(),
+            std::make_shared<AzureClient::BasicClientSecretCredential<THttp>>(runtime->SharedHttpClient(),
                                                                               std::move(options))));
     }
 
@@ -78,7 +75,7 @@ CreateCredentialSources(const std::shared_ptr<BasicClientRuntime<THttp>>& runtim
         }
         options.Retry = CreateRetryOptions();
         sources.push_back(std::make_shared<BasicLeafCredential<THttp>>(
-            std::make_shared<AzureClient::BasicManagedIdentityCredential<THttp>>(runtime->HttpClient(),
+            std::make_shared<AzureClient::BasicManagedIdentityCredential<THttp>>(runtime->SharedHttpClient(),
                                                                                  std::move(options))));
     }
 
@@ -88,7 +85,7 @@ CreateCredentialSources(const std::shared_ptr<BasicClientRuntime<THttp>>& runtim
         options.Retry = CreateRetryOptions();
         if (!options.TenantId.empty() && !options.ClientId.empty() && !options.ClientSecret.empty()) {
             sources.push_back(std::make_shared<BasicLeafCredential<THttp>>(
-                std::make_shared<AzureClient::BasicClientSecretCredential<THttp>>(runtime->HttpClient(),
+                std::make_shared<AzureClient::BasicClientSecretCredential<THttp>>(runtime->SharedHttpClient(),
                                                                                   std::move(options))));
         }
     }
@@ -99,7 +96,7 @@ CreateCredentialSources(const std::shared_ptr<BasicClientRuntime<THttp>>& runtim
         options.Retry = CreateRetryOptions();
         if (!options.TenantId.empty() && !options.ClientId.empty() && !options.TokenFilePath.empty()) {
             sources.push_back(std::make_shared<BasicLeafCredential<THttp>>(
-                std::make_shared<AzureClient::BasicWorkloadIdentityCredential<THttp>>(runtime->HttpClient(),
+                std::make_shared<AzureClient::BasicWorkloadIdentityCredential<THttp>>(runtime->SharedHttpClient(),
                                                                                       std::move(options))));
         }
     }
@@ -122,8 +119,8 @@ CreateChainedCredential(const std::shared_ptr<BasicClientRuntime<THttp>>& runtim
         }
     };
     return MakePluginCredential<THttp>(
-        runtime, BasicSourceCredential<THttp>{std::make_shared<ChainedTokenCredential<BasicLeafCredential<THttp>>>(
-                     CreateCredentialSources<THttp>(runtime, chainedCredential), logFailure)});
+        BasicSourceCredential<THttp>{std::make_shared<ChainedTokenCredential<BasicLeafCredential<THttp>>>(
+            CreateCredentialSources<THttp>(runtime, chainedCredential), logFailure)});
 }
 
 template <AzureClient::HttpClientLike THttp>
@@ -133,7 +130,7 @@ BlobServiceClientOn<THttp> CreateSharedKeyServiceClient(const std::shared_ptr<Ba
     auto options = CreateServiceClientOptions(storageAccountUrl);
     options.SharedKey.AccountName = AccountNameFromUrl(storageAccountUrl);
     options.SharedKey.AccountKey = storageAccountKey;
-    return BlobServiceClientOn<THttp>{runtime->HttpClient(), std::move(options)};
+    return BlobServiceClientOn<THttp>{runtime->SharedHttpClient(), std::move(options)};
 }
 
 template <AzureClient::HttpClientLike THttp>
@@ -141,7 +138,7 @@ BlobServiceClientOn<THttp> CreateClientSecretServiceClient(const std::shared_ptr
                                                            const std::string& storageAccountUrl,
                                                            const std::string& tenantId, const std::string& clientId,
                                                            const std::string& clientSecret) {
-    return BlobServiceClientOn<THttp>{runtime->HttpClient(), CreateServiceClientOptions(storageAccountUrl),
+    return BlobServiceClientOn<THttp>{runtime->SharedHttpClient(), CreateServiceClientOptions(storageAccountUrl),
                                       CreateClientSecretCredential<THttp>(runtime, tenantId, clientId, clientSecret)};
 }
 
@@ -152,7 +149,7 @@ BlobServiceClientOn<THttp> CreatePipelinesServiceClient(const std::shared_ptr<Ba
                                                         const std::string& serviceConnectionId,
                                                         const std::string& systemAccessToken) {
     return BlobServiceClientOn<THttp>{
-        runtime->HttpClient(), CreateServiceClientOptions(storageAccountUrl),
+        runtime->SharedHttpClient(), CreateServiceClientOptions(storageAccountUrl),
         CreatePipelinesCredential<THttp>(runtime, tenantId, clientId, serviceConnectionId, systemAccessToken)};
 }
 
@@ -167,7 +164,7 @@ BlobServiceClientOn<THttp> CreateServiceClient(const std::shared_ptr<BasicClient
 template <AzureClient::HttpClientLike THttp>
 BlobServiceClientOn<THttp> CreateServiceClient(const std::shared_ptr<BasicClientRuntime<THttp>>& runtime,
                                                const Models::ChainedCredentialInfo& chainedCredential) {
-    return BlobServiceClientOn<THttp>{runtime->HttpClient(),
+    return BlobServiceClientOn<THttp>{runtime->SharedHttpClient(),
                                       CreateServiceClientOptions(chainedCredential.GetStorageAccountUrl()),
                                       CreateChainedCredential<THttp>(runtime, chainedCredential)};
 }

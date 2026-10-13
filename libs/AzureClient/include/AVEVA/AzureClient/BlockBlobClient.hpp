@@ -167,6 +167,9 @@ class BasicBlockBlobClient : public BasicBlobClient<THttp, TCred> {
     BasicBlockBlobClient(THttp& httpClient, const BlobClientOptions& options,
                          std::shared_ptr<TCred> credential = nullptr)
         : Base(httpClient, options, std::move(credential)) {}
+    BasicBlockBlobClient(std::shared_ptr<THttp> httpClient, const BlobClientOptions& options,
+                         std::shared_ptr<TCred> credential = nullptr)
+        : Base(std::move(httpClient), options, std::move(credential)) {}
 
     template <class CompletionToken = DefaultCompletionToken>
         requires(!std::same_as<std::remove_cvref_t<CompletionToken>, UploadBlockBlobOptions>)
@@ -349,8 +352,9 @@ class BasicBlockBlobClient : public BasicBlobClient<THttp, TCred> {
 
   private:
     template <HttpClientLike, TokenCredentialLike> friend class BasicBlobContainerClient;
-    BasicBlockBlobClient(THttp& httpClient, std::shared_ptr<const Private::BasicBlobTarget<TCred>> target)
-        : Base(httpClient, std::move(target)) {}
+    BasicBlockBlobClient(THttp& httpClient, std::shared_ptr<const Private::BasicBlobTarget<TCred>> target,
+                         std::shared_ptr<THttp> owner = nullptr)
+        : Base(httpClient, std::move(target), std::move(owner)) {}
 
     template <class THandler>
     void UploadBytesAsyncImpl(std::span<const std::byte> content, const UploadBlockBlobOptions& options,
@@ -470,9 +474,8 @@ class BasicBlockBlobClient : public BasicBlobClient<THttp, TCred> {
         Private::SendAuthorizedRequestAsync(
             this->Http(), this->Target(), std::move(request),
             [completion = std::move(completion)](std::error_code error, HttpResponse response) mutable {
-                Private::CompleteParsed<Models::StageBlockResult>(error, std::move(response),
-                                                                  Private::ParseStageBlockResult,
-                                                                  std::move(completion));
+                Private::CompleteParsed<Models::StageBlockResult>(
+                    error, std::move(response), Private::ParseStageBlockResult, std::move(completion));
             },
             requestOptions);
     }

@@ -27,8 +27,8 @@ TEST(AzureContainerClientTests, GetBlobSizeReadsTheSizeFromThePageBlobHandedOutB
     FakeBlobEnvironment env;
     env.Blob->Size = 1234;
 
-    auto pageBlob = std::make_unique<FakeBlobServer::BlobClientType>(
-        env.Http, AVEVA::AzureClient::Tests::MakeBlobClientOptions("files", "test.sst"));
+    FakeBlobServer::BlobClientType pageBlob(env.Http,
+                                            AVEVA::AzureClient::Tests::MakeBlobClientOptions("files", "test.sst"));
     auto container = std::make_shared<::testing::StrictMock<BlobContainerClientMock>>();
     EXPECT_CALL(*container, GetPageBlobClient("000001.sst")).WillOnce([&pageBlob](std::string) {
         return std::move(pageBlob);

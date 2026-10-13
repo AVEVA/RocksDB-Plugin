@@ -140,7 +140,9 @@ TEST_F(ReadWriteFileIntegrationTests, Flush_PersistsChangesToBlob) {
 
     // Assert - Data should be persisted, but size metadata may not be updated yet
     // Download the actual uploaded data (rounded to page size)
-    const auto pageBlobClientPtr = m_containerClient->GetPageBlobClient(m_blobName);
+    auto pageBlobClientPtr =
+        std::make_unique<std::remove_cvref_t<decltype(m_containerClient->GetPageBlobClient(m_blobName))>>(
+            m_containerClient->GetPageBlobClient(m_blobName));
     auto& pageBlobClient = *pageBlobClientPtr;
     size_t downloadSize = testData.size();
     if (downloadSize % Configuration::PageBlob::PageSize != 0) {
@@ -170,8 +172,8 @@ TEST_F(ReadWriteFileIntegrationTests, Sync_UpdatesFileSizeInBlob) {
     file.Sync();
 
     // Assert
-    const auto pageBlobClient = m_containerClient->GetPageBlobClient(m_blobName);
-    const auto actualSize = BlobOperations::GetSize(*pageBlobClient);
+    auto pageBlobClient = m_containerClient->GetPageBlobClient(m_blobName);
+    const auto actualSize = BlobOperations::GetSize(pageBlobClient);
     EXPECT_EQ(static_cast<int64_t>(testData.size()), actualSize);
 }
 
@@ -227,8 +229,8 @@ TEST_F(ReadWriteFileIntegrationTests, GetFileSize_ReturnsCorrectSize) {
     file.Sync();
 
     // Assert - Verify size through blob client
-    const auto pageBlobClient = m_containerClient->GetPageBlobClient(m_blobName);
-    const auto actualSize = BlobOperations::GetSize(*pageBlobClient);
+    auto pageBlobClient = m_containerClient->GetPageBlobClient(m_blobName);
+    const auto actualSize = BlobOperations::GetSize(pageBlobClient);
     EXPECT_EQ(static_cast<int64_t>(testData.size()), actualSize);
 }
 

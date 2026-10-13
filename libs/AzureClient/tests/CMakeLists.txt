@@ -36,6 +36,9 @@ add_executable(aveva-azure-client-tests
     SuppressedErrorResponseTests.cpp
     PageBlobClientTests.cpp
     ResponseTests.cpp
+    BatchDeleteTests.cpp
+    BlockOnTests.cpp
+    SharedHttpOwnershipTests.cpp
 )
 target_include_directories(aveva-azure-client-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_link_libraries(aveva-azure-client-tests

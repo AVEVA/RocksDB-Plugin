@@ -5,7 +5,6 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AzureContainerClient.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlockOn.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientFactory.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
@@ -363,7 +362,7 @@ template <typename THttp> bool BasicBlobFilesystemImpl<THttp>::FileExists(const 
     auto [prefix, realPath, clientPtr] = ResolveBlob(name);
 
     auto& client = *clientPtr;
-    auto exists = BlockOn(client, [&](auto token) { return client.ExistsAsync(token); });
+    auto exists = client.ExistsAsync(AzureClient::block_on);
     if (!exists.has_value()) {
         ThrowRequestFailed(exists.error());
     }
@@ -472,45 +471,27 @@ template <typename THttp> size_t BasicBlobFilesystemImpl<THttp>::DeleteDir(const
     BlobFilesystemDetail::ForEachBlob(
         *container, options, [&blobs](const AzureClient::Models::BlobItem& blob) { blobs.push_back(blob.Name); });
 
-    // Delete with a bounded number of requests in flight. Every blob is attempted, then the first failure (if any)
-    // is thrown so callers never mistake a partial delete for success.
-    std::optional<AzureClient::BlobStorageError> firstFailure;
-    // A sliding window: as soon as the oldest delete finishes, the next one starts, so one slow request does not
-    // hold back a whole batch.
-    struct PendingDelete {
-        std::unique_ptr<typename BlobContainerClientOn<THttp>::BlobClientType> client;
-        std::future<
-            std::expected<AzureClient::Response<AzureClient::Models::DeleteBlobResult>, AzureClient::BlobStorageError>>
-            result;
-        size_t index;
-    };
-    std::deque<PendingDelete> window;
-    const auto finishOldest = [&] {
-        auto& oldest = window.front();
-        auto result = BlockOn(oldest.client->get_executor(), std::move(oldest.result));
-        if (!result.has_value()) {
-            BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
-                << "Failed to delete blob '" << blobs[oldest.index] << "': " << result.error().Message;
-            if (!firstFailure) {
-                firstFailure = result.error();
+    if (!blobs.empty()) {
+        // Batched deletes cut the request count by up to 256x. Every blob is attempted, then the first failure (if
+        // any) is thrown so callers never mistake a partial delete for success.
+        AzureClient::DeleteBlobsOptions deleteOptions;
+        deleteOptions.MaxConcurrentRequests = Configuration::Transfer::MaxConcurrentDeleteBatches;
+        const auto result =
+            Call(*container, [&](auto token) { return container->DeleteBlobsAsync(blobs, deleteOptions, token); });
+
+        std::optional<AzureClient::BlobStorageError> firstFailure;
+        for (const auto& item : result.Items) {
+            if (item.Error) {
+                BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
+                    << "Failed to delete blob '" << item.Name << "': " << item.Error->Message;
+                if (!firstFailure) {
+                    firstFailure = item.Error;
+                }
             }
         }
-        window.pop_front();
-    };
-    for (size_t i = 0; i < blobs.size(); i++) {
-        if (window.size() >= Configuration::Transfer::MaxConcurrentDeletes) {
-            finishOldest();
+        if (firstFailure) {
+            ThrowRequestFailed(*firstFailure);
         }
-        auto client = container->GetBlobClient(blobs[i]);
-        auto result = client->DeleteIfExistsAsync(boost::asio::use_future);
-        window.push_back(PendingDelete{std::move(client), std::move(result), i});
-    }
-    while (!window.empty()) {
-        finishOldest();
-    }
-
-    if (firstFailure) {
-        ThrowRequestFailed(*firstFailure);
     }
 
     // Only "is anything left" matters to callers (a delete that raced with a create), so one result is enough
@@ -566,7 +547,8 @@ template <typename THttp> size_t BasicBlobFilesystemImpl<THttp>::GetLeaseClientC
 }
 
 /// <summary>
-/// Copies the blob's populated pages to its new name in page-aligned chunks, carries over the logical file size and
+/// Copies the blob's populated pages to its new name inside the storage service (or, when the service cannot
+/// authorize the source, in page-aligned chunks through this process), carries over the logical file size and
 /// then deletes the source. Both paths must live in the same storage account and container.
 /// </summary>
 template <typename THttp>
@@ -586,16 +568,20 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
 
     const auto& container = GetContainer(prefixAccountTo);
 
-    const auto srcClientPtr = container->GetPageBlobClient(std::string(realPathFrom));
-    const auto destClientPtr = container->GetPageBlobClient(std::string(realPathTo));
-    auto& srcClient = *srcClientPtr;
-    auto& destClient = *destClientPtr;
+    auto srcClient = container->GetPageBlobClient(std::string(realPathFrom));
+    auto destClient = container->GetPageBlobClient(std::string(realPathTo));
 
     const auto [size, cap, etag, modified] = BlobOperations::GetInfo(srcClient);
     // Destination replaced via the same overwriting create.
     BlobOperations::CreateOrReplace(*m_runtime, destClient, cap);
 
-    BlobOperations::CopyPages(*m_runtime, srcClient, destClient, size, etag);
+    // Server-side copy first; it needs the source to be readable by the service with the client's credential.
+    if (!BlobOperations::CopyPagesServerSide(*m_runtime, srcClient, destClient, size, etag)) {
+        BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
+            << "Server-side copy of " << realPathFrom
+            << " was refused (the source could not be authorized); copying through the client instead";
+        BlobOperations::CopyPages(*m_runtime, srcClient, destClient, size, etag);
+    }
     BlobOperations::SetSize(*m_runtime, destClient, size);
     CallResponse(srcClient, [&](auto token) { return srcClient.DeleteIfExistsAsync(token); });
 }
@@ -664,7 +650,8 @@ template <typename THttp>
 typename BasicBlobFilesystemImpl<THttp>::ResolvedBlob
 BasicBlobFilesystemImpl<THttp>::ResolveBlob(const std::string& path) const {
     const auto [prefix, realPath] = StorageAccount::StripPrefix(path);
-    return {prefix, realPath, GetContainer(prefix)->GetPageBlobClient(std::string(realPath))};
+    return {prefix, realPath,
+            std::make_unique<PageBlobClientOn<THttp>>(GetContainer(prefix)->GetPageBlobClient(std::string(realPath)))};
 }
 
 template <typename THttp>

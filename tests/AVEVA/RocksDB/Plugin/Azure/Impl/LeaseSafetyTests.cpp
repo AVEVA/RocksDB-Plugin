@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadTracker.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlockOn.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 
@@ -25,54 +24,12 @@ using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
 using AVEVA::RocksDB::Plugin::Azure::Impl::AsyncReadTracker;
-using AVEVA::RocksDB::Plugin::Azure::Impl::BlockOnFor;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntimeBase;
 // The lock over the library's page blob client on the fake transport.
 using LockFileImpl = AVEVA::RocksDB::Plugin::Azure::Impl::BasicLockFileImpl<AVEVA::AzureClient::Tests::PageBlobClient>;
 
 using namespace std::chrono_literals;
-
-TEST(BlockOnForTests, ReturnsValueWithoutCallingOnTimeout) {
-    boost::asio::io_context context;
-    std::promise<int> value;
-    value.set_value(7);
-
-    int timeouts = 0;
-    EXPECT_EQ(BlockOnFor(context.get_executor(), value.get_future(), 5s, [&] { ++timeouts; }), 7);
-    EXPECT_EQ(timeouts, 0);
-}
-
-TEST(BlockOnForTests, CallsOnTimeoutOnceThenStillWaitsForTheResult) {
-    boost::asio::io_context context;
-    std::promise<int> value;
-
-    int timeouts = 0;
-    std::jthread producer([&] {
-        std::this_thread::sleep_for(300ms);
-        value.set_value(11);
-    });
-
-    EXPECT_EQ(BlockOnFor(context.get_executor(), value.get_future(), 50ms, [&] { ++timeouts; }), 11);
-    EXPECT_EQ(timeouts, 1);
-}
-
-TEST(BlockOnForTests, ThrowsWhenCalledFromContextThread) {
-    boost::asio::io_context context;
-    std::promise<bool> threw;
-    boost::asio::post(context, [&] {
-        std::promise<int> value;
-        value.set_value(1);
-        try {
-            BlockOnFor(context.get_executor(), value.get_future(), 1s, [] {});
-            threw.set_value(false);
-        } catch (const std::logic_error&) {
-            threw.set_value(true);
-        }
-    });
-    context.run();
-    EXPECT_TRUE(threw.get_future().get());
-}
 
 TEST(WriteFenceTests, WritesAreAllowedUntilFenced) {
     boost::asio::io_context context;

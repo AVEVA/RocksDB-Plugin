@@ -31,4 +31,5 @@ template class BasicBlobServiceClient<Tests::FakeHttpClient, StaticTokenCredenti
 template class BasicClientSecretCredential<Tests::FakeHttpClient>;
 template class BasicWorkloadIdentityCredential<Tests::FakeHttpClient>;
 template class BasicManagedIdentityCredential<Tests::FakeHttpClient>;
+template class BasicAzurePipelinesCredential<Tests::FakeHttpClient>;
 } // namespace AVEVA::AzureClient

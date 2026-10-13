@@ -34,8 +34,7 @@ std::string AccountNameFromUrl(const std::string& storageAccountUrl) {
     return storageAccountUrl.substr(hostStart, hostEnd == std::string::npos ? std::string::npos : hostEnd - hostStart);
 }
 
-template std::shared_ptr<PluginCredential>
-MakePluginCredential<::AVEVA::HttpClient>(const std::shared_ptr<ClientRuntime>&, SourceCredential);
+template std::shared_ptr<PluginCredential> MakePluginCredential<::AVEVA::HttpClient>(SourceCredential);
 template std::shared_ptr<PluginCredential>
 CreateClientSecretCredential<::AVEVA::HttpClient>(const std::shared_ptr<ClientRuntime>&, const std::string&,
                                                   const std::string&, const std::string&);

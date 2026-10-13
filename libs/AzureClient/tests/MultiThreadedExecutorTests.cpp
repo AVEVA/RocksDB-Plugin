@@ -249,7 +249,7 @@ struct BlobSizeValue {
 }
 
 struct ConcurrentBlobData {
-    std::vector<std::unique_ptr<PoolBlockBlobClient>> Clients;
+    std::vector<PoolBlockBlobClient> Clients;
     std::vector<std::string> Contents;
 };
 
@@ -265,12 +265,12 @@ struct ConcurrentBlobData {
     return data;
 }
 
-void UploadAllBlobs(std::vector<std::unique_ptr<PoolBlockBlobClient>>& clients,
-                    const std::vector<std::string>& contents, const UploadBlockBlobOptions& uploadOptions) {
+void UploadAllBlobs(std::vector<PoolBlockBlobClient>& clients, const std::vector<std::string>& contents,
+                    const UploadBlockBlobOptions& uploadOptions) {
     std::vector<std::future<std::expected<Response<Models::UploadBlockBlobResult>, BlobStorageError>>> uploads;
     uploads.reserve(clients.size());
     for (std::size_t i = 0; i < clients.size(); ++i) {
-        uploads.push_back(clients.at(i)->UploadAsync(contents.at(i), uploadOptions, boost::asio::use_future));
+        uploads.push_back(clients.at(i).UploadAsync(contents.at(i), uploadOptions, boost::asio::use_future));
     }
     for (auto& upload : uploads) {
         const auto result = upload.get();
@@ -278,13 +278,13 @@ void UploadAllBlobs(std::vector<std::unique_ptr<PoolBlockBlobClient>>& clients,
     }
 }
 
-void DownloadAndVerifyAllBlobs(std::vector<std::unique_ptr<PoolBlockBlobClient>>& clients,
-                               const std::vector<std::string>& contents, const DownloadToOptions& downloadOptions) {
+void DownloadAndVerifyAllBlobs(std::vector<PoolBlockBlobClient>& clients, const std::vector<std::string>& contents,
+                               const DownloadToOptions& downloadOptions) {
     std::vector<std::ostringstream> sinks(clients.size());
     std::vector<std::future<std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>>> downloads;
     downloads.reserve(clients.size());
     for (std::size_t i = 0; i < clients.size(); ++i) {
-        downloads.push_back(clients.at(i)->DownloadToAsync(sinks.at(i), downloadOptions, boost::asio::use_future));
+        downloads.push_back(clients.at(i).DownloadToAsync(sinks.at(i), downloadOptions, boost::asio::use_future));
     }
     for (std::size_t i = 0; i < clients.size(); ++i) {
         const auto result = downloads.at(i).get();
@@ -318,8 +318,7 @@ TEST(MultiThreadedExecutorTests, ClientsAreSafeToInitiateFromManyThreads) {
 
     ThreadPoolBlobService service;
     const PoolBlobContainerClient container{service, SharedKeyContainerOptions()};
-    const auto sharedPtr = container.GetBlockBlobClient("shared");
-    PoolBlockBlobClient& shared = *sharedPtr;
+    auto shared = container.GetBlockBlobClient("shared");
     ASSERT_TRUE(shared.UploadAsync(std::string{"payload"}, boost::asio::use_future).get().has_value());
 
     std::atomic<std::size_t> succeeded{0};
@@ -329,8 +328,7 @@ TEST(MultiThreadedExecutorTests, ClientsAreSafeToInitiateFromManyThreads) {
         threads.emplace_back([&, t] {
             // Mix the shared client with per-thread derived clients so both the shared target and
             // the shared signer are used concurrently.
-            const auto ownPtr = container.GetBlockBlobClient("shared");
-            PoolBlockBlobClient& own = *ownPtr;
+            auto own = container.GetBlockBlobClient("shared");
             for (std::size_t call = 0; call < CallsPerThread; ++call) {
                 PoolBlockBlobClient& client = (call + t) % 2 == 0 ? shared : own;
                 if (client.GetPropertiesAsync(boost::asio::use_future).get().has_value()) {

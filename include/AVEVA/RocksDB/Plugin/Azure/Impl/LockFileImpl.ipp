@@ -2,24 +2,22 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlockOn.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
-#include <boost/asio/bind_executor.hpp>
-#include <boost/asio/cancellation_signal.hpp>
-#include <boost/asio/post.hpp>
-#include <boost/asio/steady_timer.hpp>
-#include <boost/asio/strand.hpp>
-#include <boost/asio/use_future.hpp>
+#include <AVEVA/AzureClient/BlockOn.hpp>
+#include <AVEVA/AzureClient/WithRequestOptions.hpp>
+
 #include <boost/scope/scope_exit.hpp>
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid_io.hpp>
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
+#include <exception>
 #include <future>
 #include <optional>
 #include <stdexcept>
@@ -32,6 +30,11 @@ namespace LockFileDetail {
 inline std::string NewLeaseId() {
     thread_local boost::uuids::random_generator generator;
     return boost::uuids::to_string(generator());
+}
+
+// The request deadline for a remaining budget: at least 1 ms, since a zero deadline means already expired.
+inline std::chrono::milliseconds TotalDeadlineFor(std::chrono::nanoseconds budget) {
+    return (std::max)(std::chrono::milliseconds{1}, std::chrono::ceil<std::chrono::milliseconds>(budget));
 }
 
 // A held lease (409) is ordinary contention that this loop exists to wait out, so it is retried like a transient
@@ -91,12 +94,12 @@ template <typename TBlob> bool BasicLockFileImpl<TBlob>::Lock() {
         AzureClient::AcquireLeaseOptions options;
         options.ProposedLeaseId = leaseId;
         options.Duration = m_leaseLength;
-        // Each attempt inherits the client's retry policy, which can run for minutes; cancel it once the overall
-        // lock budget is spent so Lock() cannot block far beyond the lease length.
-        auto result =
-            BlockOnWithin(*m_file, m_acquireTimeout - (attemptStart - start), [&](auto token, auto requestOptions) {
-                return m_file->AcquireLeaseAsync(std::move(options), std::move(token), std::move(requestOptions));
-            });
+        // Each attempt inherits the client's retry policy, which can run for minutes; bound it by the remaining lock
+        // budget so Lock() cannot block far beyond the lease length.
+        auto requestOptions = m_file->GetDefaultRequestOptions();
+        requestOptions.SetTotalDeadline(LockFileDetail::TotalDeadlineFor(m_acquireTimeout - (attemptStart - start)));
+        auto result = m_file->AcquireLeaseAsync(
+            std::move(options), AzureClient::WithRequestOptions(std::move(requestOptions), AzureClient::block_on));
         if (result.has_value()) {
             {
                 const std::scoped_lock lock(m_stateMutex);
@@ -209,58 +212,33 @@ template <typename TBlob> void BasicLockFileImpl<TBlob>::RenewAsync(RenewCallbac
     AzureClient::RenewLeaseOptions options;
     options.LeaseId = *leaseId;
 
-    // The timer, the cancellation signal and every completion are serialised on one strand: asio timers and
-    // cancellation signals are not thread safe, and the AzureClient requires slots to be emitted on its executor.
-    struct State {
-        State(const boost::asio::io_context::executor_type& executor)
-            : Strand(boost::asio::make_strand(executor)), Deadline(Strand) {}
-        boost::asio::strand<boost::asio::io_context::executor_type> Strand;
-        boost::asio::steady_timer Deadline;
-        boost::asio::cancellation_signal Cancel;
-        RenewCallback Done;
-    };
-    auto state = std::make_shared<State>(m_file->get_executor());
-    state->Done = std::move(callback);
+    // The client bounds the whole request, retries included, by the renewal deadline.
+    auto requestOptions = m_file->GetDefaultRequestOptions();
+    requestOptions.SetTotalDeadline(LockFileDetail::TotalDeadlineFor(budget));
     const auto requestStart = std::chrono::steady_clock::now();
-
-    boost::asio::post(
-        state->Strand, [this, state, leaseId = *leaseId, requestStart, budget, options = std::move(options)]() mutable {
-            state->Deadline.expires_after(budget);
-            state->Deadline.async_wait([state](const boost::system::error_code& error) {
-                if (!error) {
-                    state->Cancel.emit(boost::asio::cancellation_type::terminal);
+    m_file->RenewLeaseAsync(
+        std::move(options),
+        [this, leaseId = *leaseId, requestStart, callback = std::move(callback)](auto result) mutable {
+            std::exception_ptr error;
+            bool renewed = true;
+            try {
+                Unwrap(std::move(result));
+                m_lastRenewalTime = requestStart;
+            } catch (...) {
+                // An Unlock that raced with this renewal makes the failure expected, not an error.
+                if (CurrentLeaseId() != leaseId) {
+                    renewed = false;
+                } else {
+                    error = std::current_exception();
                 }
-            });
-            auto requestOptions = m_file->GetDefaultRequestOptions();
-            requestOptions.SetCancellationSlot(state->Cancel.slot());
-            // The handler is bound to the strand: the library clears the cancellation slot on the handler's
-            // executor, so emitting from the same strand cannot race with that.
-            m_file->RenewLeaseAsync(std::move(options),
-                                    boost::asio::bind_executor(state->Strand,
-                                                               [this, state, leaseId, requestStart](auto result) {
-                                                                   state->Deadline.cancel();
-                                                                   std::exception_ptr error;
-                                                                   bool renewed = true;
-                                                                   try {
-                                                                       Unwrap(std::move(result));
-                                                                       m_lastRenewalTime = requestStart;
-                                                                   } catch (...) {
-                                                                       // An Unlock that raced with this renewal makes
-                                                                       // the failure expected, not an error.
-                                                                       if (CurrentLeaseId() != leaseId) {
-                                                                           renewed = false;
-                                                                       } else {
-                                                                           error = std::current_exception();
-                                                                       }
-                                                                   }
-                                                                   state->Done(error, renewed);
-                                                               }),
-                                    std::move(requestOptions));
-        });
+            }
+            callback(error, renewed);
+        },
+        std::move(requestOptions));
 }
 
 template <typename TBlob> void BasicLockFileImpl<TBlob>::RenewLease() const {
-    ThrowIfRunningOn(m_file->get_executor());
+    AzureClient::ThrowIfRunningOn(m_file->get_executor());
     // One cancellation path: the synchronous renewal waits on the asynchronous one.
     auto outcome = std::make_shared<std::promise<bool>>();
     auto future = outcome->get_future();
@@ -297,7 +275,7 @@ template <typename TBlob> void BasicLockFileImpl<TBlob>::Unlock() {
         }
         m_held = false;
     });
-    Call(*m_file, [&](auto token) { return m_file->ReleaseLeaseAsync(std::move(options), token); });
+    Unwrap(m_file->ReleaseLeaseAsync(std::move(options), AzureClient::block_on));
     BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::debug)
         << "Successfully released blob lease for '" << m_fileName << "'";
 }

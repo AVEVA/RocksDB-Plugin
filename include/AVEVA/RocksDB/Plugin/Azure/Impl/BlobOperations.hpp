@@ -3,9 +3,10 @@
 
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlockOn.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
+
+#include <AVEVA/AzureClient/BlockOn.hpp>
 
 #include <boost/asio/use_future.hpp>
 
@@ -14,6 +15,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -101,19 +103,10 @@ template <typename TBlob> void CreateOrReplace(const ClientRuntimeBase& runtime,
 // Creates the page blob with the given capacity unless it already exists. Returns true if it was created.
 template <typename TBlob> bool CreateIfNotExists(const ClientRuntimeBase& runtime, TBlob& client, int64_t capacity) {
     runtime.ThrowIfWritesFenced();
-    AzureClient::CreatePageBlobOptions options;
-    options.Conditions.IfNoneMatch = "*";
-    auto result = BlockOn(client, [&](auto token) {
-        return client.CreateAsync(static_cast<uint64_t>(capacity), std::move(options), token);
-    });
-    if (result.has_value()) {
-        return true;
-    }
-    const auto& error = result.error();
-    if (error.Code == AzureClient::make_error_code(AzureClient::BlobStorageErrorCode::BlobAlreadyExists)) {
-        return false;
-    }
-    ThrowRequestFailed(error);
+    // The client suppresses BlobAlreadyExists and reports it through Response::Error() instead of failing.
+    const auto response = CallResponse(
+        client, [&](auto token) { return client.CreateIfNotExistsAsync(static_cast<uint64_t>(capacity), token); });
+    return !response.Error().has_value();
 }
 // Downloads [offset, offset + length) to a local file; a non-positive length produces an empty file.
 template <typename TBlob> void DownloadToFile(TBlob& client, const std::string& path, int64_t offset, int64_t length) {
@@ -145,7 +138,7 @@ template <typename TBlob> struct PendingDownload {
 template <typename TBlob>
 [[nodiscard]] PendingDownload<TBlob> StartDownload(TBlob& client, std::span<char> buffer, int64_t offset,
                                                    int64_t length, const std::string& ifMatch = {}) {
-    ThrowIfRunningOn(client.get_executor());
+    AzureClient::ThrowIfRunningOn(client.get_executor());
     AzureClient::DownloadBlobOptions options;
     options.Range = Detail::ToRange(offset, length);
     if (!ifMatch.empty()) {
@@ -277,6 +270,80 @@ void CopyPages(const ClientRuntimeBase& runtime, TBlob& source, TBlob& destinati
         next.clear();
     }
 }
+// True when the service refused to read the copy source for lack of authorization, which says nothing about the
+// destination: the caller may still copy the bytes through the client.
+[[nodiscard]] inline bool IsCopySourceUnauthorized(const AzureClient::BlobStorageError& error) {
+    return error.StatusCode == 401U || error.StatusCode == 403U || error.ErrorCode == "CannotVerifyCopySource";
+}
+
+// Copies the populated pages of `source` into `destination` (which must already exist with enough capacity) inside
+// the storage service with Put Page From URL, so the data never crosses the network to this process. Several
+// requests are kept in flight. The listing and every copied range are guarded by `etag` (ignored when empty), so a
+// write to the source mid-copy fails instead of producing a torn destination. A final chunk that is not page sized
+// is rounded up to a whole page; the logical size is carried separately by SetSize.
+//
+// The first request runs alone: if the service refuses to authorize the source (a client whose credential cannot be
+// forwarded, e.g. Shared Key) nothing has been copied yet and false is returned so the caller can fall back to
+// CopyPages. Any other failure throws.
+template <typename TBlob>
+[[nodiscard]] bool CopyPagesServerSide(const ClientRuntimeBase& runtime, TBlob& source, TBlob& destination,
+                                       int64_t size, const std::string& etag) {
+    runtime.ThrowIfWritesFenced();
+    const auto chunks = PlanPageCopy(source, size, etag);
+    if (chunks.empty()) {
+        return true;
+    }
+    AzureClient::ThrowIfRunningOn(destination.get_executor());
+
+    constexpr auto PageSize = static_cast<int64_t>(Configuration::PageBlob::PageSize);
+    const auto sourceUrl = source.Url();
+    const auto start = [&](const PageChunk& chunk, auto token) {
+        AzureClient::UploadPagesFromUrlOptions options;
+        options.SourceIfMatch = etag;
+        options.AuthorizeSourceWithClientCredential = true;
+        const auto length = (chunk.Length + PageSize - 1) / PageSize * PageSize;
+        return destination.UploadPagesFromUrlAsync(static_cast<uint64_t>(chunk.Offset), sourceUrl,
+                                                   static_cast<uint64_t>(chunk.Offset), static_cast<uint64_t>(length),
+                                                   std::move(options), token);
+    };
+
+    auto first = start(chunks.front(), AzureClient::block_on);
+    if (!first.has_value()) {
+        if (IsCopySourceUnauthorized(first.error())) {
+            return false;
+        }
+        ThrowRequestFailed(first.error());
+    }
+
+    using Pending = decltype(start(chunks.front(), boost::asio::use_future));
+    std::deque<Pending> inFlight;
+    const auto drain = [&inFlight] {
+        for (auto& pending : inFlight) {
+            if (pending.valid()) {
+                pending.wait();
+            }
+        }
+    };
+    try {
+        for (size_t index = 1; index < chunks.size(); ++index) {
+            if (inFlight.size() >= Configuration::Transfer::MaxConcurrentPageCopies) {
+                Unwrap(inFlight.front().get());
+                inFlight.pop_front();
+            }
+            runtime.ThrowIfWritesFenced();
+            inFlight.push_back(start(chunks[index], boost::asio::use_future));
+        }
+        while (!inFlight.empty()) {
+            Unwrap(inFlight.front().get());
+            inFlight.pop_front();
+        }
+    } catch (...) {
+        drain();
+        throw;
+    }
+    return true;
+}
+
 // The asynchronous operations never block; completions run on the host io_context's threads (or inline when the
 // request cannot be started) and must not block on further blob I/O.
 

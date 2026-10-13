@@ -15,6 +15,7 @@ add_library(aveva-azure-client
     BlobClient.cpp
     BlobClientOptions.cpp
     BlobContainerClient.cpp
+    BlobBatch.cpp
     BlobRequestHelpers.cpp
     SharedKeySigner.cpp
     BlobXmlParser.cpp
@@ -56,6 +57,7 @@ target_sources(aveva-azure-client
         "${base-include-dir}/AVEVA/AzureClient/BlobStorageErrorCode.hpp"
         "${base-include-dir}/AVEVA/AzureClient/BlockBlobClient.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Detail/AsyncInitiation.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/Detail/BlobBatch.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Detail/BlobDownload.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Detail/RequestPipeline.hpp"
@@ -71,6 +73,7 @@ target_sources(aveva-azure-client
         "${base-include-dir}/AVEVA/AzureClient/Credentials.hpp"
         "${base-include-dir}/AVEVA/AzureClient/CredentialVariant.hpp"
         "${base-include-dir}/AVEVA/AzureClient/ChainedTokenCredential.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/BlockOn.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Models/BlobContainerModels.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Models/BlobModels.hpp"
 )

@@ -2,10 +2,10 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #pragma once
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlockOn.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
+#include <AVEVA/AzureClient/BlockOn.hpp>
 #include <AVEVA/AzureClient/HttpClientLike.hpp>
 #include <AVEVA/AzureClient/Response.hpp>
 #include <AVEVA/HttpClient/HttpClient.hpp>
@@ -33,9 +33,9 @@
 #endif
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// <summary>
-/// What every file, lock and blob operation needs from the runtime, independent of the HTTP transport: shared
-/// ownership that keeps the HTTP client alive for as long as an Azure client that borrows it exists, and the write
-/// fence. Kept non-template so those classes need not know which transport they run on.
+/// What every file, lock and blob operation needs from the runtime, independent of the HTTP transport: the write
+/// fence shared by every file, lock and directory of a filesystem. Kept non-template so those classes need not know
+/// which transport they run on.
 /// </summary>
 class ClientRuntimeBase {
     std::atomic<bool> m_writesFenced{false};
@@ -63,32 +63,33 @@ class ClientRuntimeBase {
 /// the production one is specialised (in ClientRuntime.cpp) to configure connection pooling and trust roots.
 /// </summary>
 template <AzureClient::HttpClientLike THttp> struct HttpClientFactory {
-    static std::unique_ptr<THttp> Create(boost::asio::io_context& context) { return std::make_unique<THttp>(context); }
+    static std::shared_ptr<THttp> Create(boost::asio::io_context& context) { return std::make_shared<THttp>(context); }
 };
 template <> struct HttpClientFactory<::AVEVA::HttpClient> {
-    static std::unique_ptr<::AVEVA::HttpClient> Create(boost::asio::io_context& context);
+    static std::shared_ptr<::AVEVA::HttpClient> Create(boost::asio::io_context& context);
 };
 
 /// <summary>
 /// Holds the HTTP client that every Azure Blob Storage client of a filesystem uses, bound to an io_context
 /// owned and run by the host application. The runtime never runs, stops or destroys that io_context: the host
 /// must keep it alive and running on at least one thread for as long as the runtime exists.
-/// The AVEVA Azure clients only hold a reference to the HTTP client, so every object that owns such a
-/// client also shares ownership of the runtime to keep it alive for as long as the client exists.
+/// The HTTP client is shared with the Azure clients and credentials, which keep it alive for as long as they exist.
 /// Operations are started with boost::asio::use_future and waited for on the caller's thread, which
 /// must never be one of the threads running the io_context.
 /// </summary>
 template <AzureClient::HttpClientLike THttp> class BasicClientRuntime : public ClientRuntimeBase {
-    std::unique_ptr<THttp> m_httpClient;
+    std::shared_ptr<THttp> m_httpClient;
 
   public:
-    /// <summary>Takes ownership of an already constructed transport (the way tests inject a fake).</summary>
-    explicit BasicClientRuntime(std::unique_ptr<THttp> httpClient) : m_httpClient(std::move(httpClient)) {}
+    /// <summary>    Shares an already constructed transport (the way tests inject a fake).</summary>
+    explicit BasicClientRuntime(std::shared_ptr<THttp> httpClient) : m_httpClient(std::move(httpClient)) {}
     /// <summary>Creates the transport on the host's io_context through HttpClientFactory.</summary>
     explicit BasicClientRuntime(boost::asio::io_context& context)
         : m_httpClient(HttpClientFactory<THttp>::Create(context)) {}
 
     [[nodiscard]] THttp& HttpClient() const noexcept { return *m_httpClient; }
+    /// <summary>The owning handle to pass to Azure clients and credentials.</summary>
+    [[nodiscard]] const std::shared_ptr<THttp>& SharedHttpClient() const noexcept { return m_httpClient; }
 };
 
 /// <summary>The production runtime, over the real HTTP transport.</summary>
@@ -130,16 +131,17 @@ template <class T> T Unwrap(std::expected<AzureClient::Response<T>, AzureClient:
 
 /// <summary>
 /// Starts an operation, waits for it on the calling thread and returns its value, throwing RequestFailedException on
-/// failure. The thread is checked before the request starts. `start` receives the completion token, e.g.
+/// failure. The library's block_on token checks the thread before the request starts. `start` receives the completion
+/// token, e.g.
 /// `Call(c, [&](auto token) { return c.GetPropertiesAsync(token); })`.
 /// </summary>
-template <class Client, class Start> auto Call(Client& client, Start&& start) {
-    return Unwrap(BlockOn(client, std::forward<Start>(start)));
+template <class Client, class Start> auto Call(Client&, Start&& start) {
+    return Unwrap(std::forward<Start>(start)(AzureClient::block_on));
 }
 
 /// <summary>As Call, but returns the full response (for operations whose Response::Error() carries
 /// information).</summary>
-template <class Client, class Start> auto CallResponse(Client& client, Start&& start) {
-    return UnwrapResponse(BlockOn(client, std::forward<Start>(start)));
+template <class Client, class Start> auto CallResponse(Client&, Start&& start) {
+    return UnwrapResponse(std::forward<Start>(start)(AzureClient::block_on));
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

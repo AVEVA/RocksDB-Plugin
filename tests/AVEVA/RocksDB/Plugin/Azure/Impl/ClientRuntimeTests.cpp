@@ -55,3 +55,17 @@ TEST(ClientRuntimeTests, ContextKeepsRunningAfterRuntimeDestruction) {
     workGuard.reset();
     worker.join();
 }
+
+TEST(ClientRuntimeTests, HttpClientOutlivesRuntimeWhileSharedWithAClient) {
+    boost::asio::io_context context;
+    auto runtime = std::make_unique<ClientRuntime>(context);
+    auto shared = runtime->SharedHttpClient();
+    const std::weak_ptr<AVEVA::HttpClient> weak = shared;
+
+    runtime.reset();
+    ASSERT_FALSE(weak.expired());
+    ASSERT_TRUE(shared->get_executor() == context.get_executor());
+
+    shared.reset();
+    ASSERT_TRUE(weak.expired());
+}

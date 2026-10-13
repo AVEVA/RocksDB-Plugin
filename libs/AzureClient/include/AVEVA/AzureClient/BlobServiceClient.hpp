@@ -6,10 +6,10 @@
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
-#include <AVEVA/AzureClient/HttpClientLike.hpp>
-#include <AVEVA/AzureClient/Models/BlobContainerModels.hpp>
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 #include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
+#include <AVEVA/AzureClient/HttpClientLike.hpp>
+#include <AVEVA/AzureClient/Models/BlobContainerModels.hpp>
 #include <AVEVA/AzureClient/Response.hpp>
 #include <AVEVA/AzureClient/TokenCredential.hpp>
 #include <AVEVA/HttpClient/HttpClient.hpp>
@@ -62,6 +62,12 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobServic
         : m_httpClient(&httpClient),
           m_connection(Private::MakeConnectionState(std::move(options), credential != nullptr)),
           m_credential(Private::MakeCachedCredential(std::move(credential))) {}
+    // Shares ownership of the HTTP client, so this client (and the clients made from it) keep it alive.
+    BasicBlobServiceClient(std::shared_ptr<THttp> httpClient, BlobServiceClientOptions options,
+                           std::shared_ptr<TCred> credential = nullptr)
+        : BasicBlobServiceClient(Private::RequireHttpClient(httpClient), std::move(options), std::move(credential)) {
+        m_httpOwner = std::move(httpClient);
+    }
     BasicBlobServiceClient(const BasicBlobServiceClient&) = delete;
     BasicBlobServiceClient& operator=(const BasicBlobServiceClient&) = delete;
     BasicBlobServiceClient(BasicBlobServiceClient&&) noexcept = default;
@@ -87,11 +93,13 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobServic
 
     [[nodiscard]] std::unique_ptr<ContainerClientType> GetBlobContainerClient(std::string containerName) const {
         return std::unique_ptr<ContainerClientType>(
-            new ContainerClientType{*m_httpClient, m_connection, m_credential, std::move(containerName)});
+            new ContainerClientType{*m_httpClient, m_connection, m_credential, std::move(containerName), m_httpOwner});
     }
 
   private:
     THttp* m_httpClient = nullptr;
+    // Set when the client was given shared ownership of the HTTP client; null when it only borrows it.
+    std::shared_ptr<THttp> m_httpOwner;
     // Shared immutable connection state referenced by child clients.
     std::shared_ptr<const Private::ConnectionState> m_connection;
     std::shared_ptr<CachedTokenCredential<TCred>> m_credential;

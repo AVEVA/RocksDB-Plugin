@@ -396,7 +396,7 @@ TEST(BlobContainerClientTests, GetBlockBlobClient_BuildsBlobScopedClient) {
     BlobContainerClient client{httpClient, BuildOptions()};
 
     auto blockBlobClient = client.GetBlockBlobClient("photo.png");
-    blockBlobClient->DeleteAsync(
+    blockBlobClient.DeleteAsync(
         [](std::expected<Response<AVEVA::AzureClient::Models::DeleteBlobResult>, BlobStorageError>) {});
 
     EXPECT_EQ(httpClient.LastRequest().GetUrl(),
@@ -408,7 +408,7 @@ TEST(BlobContainerClientTests, GetPageBlobClient_BuildsBlobScopedClient) {
     BlobContainerClient client{httpClient, BuildOptions()};
 
     auto pageBlobClient = client.GetPageBlobClient("disk.vhd");
-    pageBlobClient->DeleteAsync(
+    pageBlobClient.DeleteAsync(
         [](std::expected<Response<AVEVA::AzureClient::Models::DeleteBlobResult>, BlobStorageError>) {});
 
     EXPECT_EQ(httpClient.LastRequest().GetUrl(),
@@ -420,7 +420,7 @@ TEST(BlobContainerClientTests, GetBlockBlobClient_UrlEncodesBlobNameAndPreserves
     BlobContainerClient client{httpClient, BuildOptions()};
 
     auto blockBlobClient = client.GetBlockBlobClient("folder name/file?.txt");
-    blockBlobClient->DeleteAsync(
+    blockBlobClient.DeleteAsync(
         [](std::expected<Response<AVEVA::AzureClient::Models::DeleteBlobResult>, BlobStorageError>) {});
 
     EXPECT_EQ(
@@ -435,8 +435,7 @@ TEST(BlobContainerClientTests, GetBlobClient_TargetsTheBlobAndSharesTheConnectio
     options.SharedKey = {.AccountName = "storageaccount", .AccountKey = "MDEyMzQ1Njc4OWFiY2RlZg=="};
     BlobContainerClient container{httpClient, options};
 
-    const auto blobPtr = container.GetBlobClient("folder name/photo.png");
-    AVEVA::AzureClient::Tests::BlobClient& blob = *blobPtr;
+    auto blob = container.GetBlobClient("folder name/photo.png");
     EXPECT_EQ(blob.get_executor(), httpClient.get_executor());
 
     int completions = 0;

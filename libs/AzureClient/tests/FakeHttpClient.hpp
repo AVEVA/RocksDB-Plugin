@@ -565,6 +565,7 @@ using ClientSecretCredential = BasicClientSecretCredential<FakeHttpClient>;
 using WorkloadIdentityCredential = BasicWorkloadIdentityCredential<FakeHttpClient>;
 using ClientAssertionCredential = BasicClientAssertionCredential<FakeHttpClient>;
 using ManagedIdentityCredential = BasicManagedIdentityCredential<FakeHttpClient>;
+using AzurePipelinesCredential = BasicAzurePipelinesCredential<FakeHttpClient>;
 
 class ScriptedTokenCredential final {
   public:

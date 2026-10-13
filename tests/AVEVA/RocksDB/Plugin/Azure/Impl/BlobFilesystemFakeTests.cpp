@@ -116,6 +116,27 @@ TEST_F(BlobFilesystemFakeTests, RenameMovesTheContentAndRemovesTheSource) {
     EXPECT_EQ(m_fs->GetFileSize(Path("new.sst")), 7);
 }
 
+TEST_F(BlobFilesystemFakeTests, RenameCopiesInsideTheServiceWithoutDownloadingTheData) {
+    Write("old.sst", "payload");
+
+    m_fs->RenameFile(Path("old.sst"), Path("new.sst"));
+
+    EXPECT_FALSE(m_server->PageCopies.empty());
+    EXPECT_TRUE(m_server->Downloads.empty());
+    EXPECT_EQ(Read("new.sst"), "payload");
+}
+
+TEST_F(BlobFilesystemFakeTests, RenameFallsBackToCopyingThroughTheClientWhenTheSourceCannotBeAuthorized) {
+    Write("old.sst", "payload");
+    m_server->RequireCopySourceAuthorization = true;
+
+    m_fs->RenameFile(Path("old.sst"), Path("new.sst"));
+
+    EXPECT_FALSE(m_fs->FileExists(Path("old.sst")));
+    EXPECT_EQ(Read("new.sst"), "payload");
+    EXPECT_EQ(m_fs->GetFileSize(Path("new.sst")), 7);
+}
+
 TEST_F(BlobFilesystemFakeTests, TruncateShrinksTheLogicalSize) {
     Write("a.log", "0123456789");
 

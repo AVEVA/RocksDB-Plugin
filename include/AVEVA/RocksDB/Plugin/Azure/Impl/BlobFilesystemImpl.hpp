@@ -80,8 +80,8 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     int64_t m_dataFileBufferSize;
     // How long LockFile waits on a lease held by another owner; the lease length when unset.
     std::optional<std::chrono::milliseconds> m_lockAcquireTimeout;
-    // HTTP client (on the injected, host-owned io_context) used by every Azure client below; declared before them
-    // so it outlives them during destruction.
+    // Holds the HTTP client (on the injected, host-owned io_context) and the write fence; the Azure clients below
+    // share ownership of the HTTP client themselves.
     std::shared_ptr<BasicClientRuntime<THttp>> m_runtime;
     std::unordered_map<std::string, std::shared_ptr<BlobContainerClientOn<THttp>>, Core::StringHash, Core::StringEqual>
         m_clients;

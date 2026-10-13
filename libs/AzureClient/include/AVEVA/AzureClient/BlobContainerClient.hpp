@@ -10,6 +10,7 @@
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 #include <AVEVA/AzureClient/BlockBlobClient.hpp>
 #include <AVEVA/AzureClient/ClientForwardDeclarations.hpp>
+#include <AVEVA/AzureClient/Detail/BlobBatch.hpp>
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 #include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
 #include <AVEVA/AzureClient/Models/BlobContainerModels.hpp>
@@ -81,6 +82,12 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContai
                              std::shared_ptr<TCred> credential = nullptr)
         : m_httpClient(&httpClient), m_target(std::make_shared<const Private::BasicContainerTarget<TCred>>(
                                          Private::MakeContainerTarget(options, std::move(credential)))) {}
+    // Shares ownership of the HTTP client, so this client (and the blob clients made from it) keep it alive.
+    BasicBlobContainerClient(std::shared_ptr<THttp> httpClient, const BlobContainerClientOptions& options,
+                             std::shared_ptr<TCred> credential = nullptr)
+        : BasicBlobContainerClient(Private::RequireHttpClient(httpClient), options, std::move(credential)) {
+        m_httpOwner = std::move(httpClient);
+    }
     BasicBlobContainerClient(const BasicBlobContainerClient&) = delete;
     BasicBlobContainerClient& operator=(const BasicBlobContainerClient&) = delete;
     BasicBlobContainerClient(BasicBlobContainerClient&&) noexcept = default;
@@ -168,24 +175,50 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContai
             std::forward<CompletionToken>(token), std::move(requestOptions), std::move(options));
     }
 
-    [[nodiscard]] std::unique_ptr<BlobClientType> GetBlobClient(std::string blobName) const {
-        return std::unique_ptr<BlobClientType>(new BlobClientType{*m_httpClient, MakeBlobTarget(std::move(blobName))});
+    // Clients are cheap, movable values (one shared target allocation each); no heap-allocated wrapper is needed.
+    [[nodiscard]] BlobClientType GetBlobClient(std::string blobName) const {
+        return BlobClientType{*m_httpClient, MakeBlobTarget(std::move(blobName)), m_httpOwner};
     }
-    [[nodiscard]] std::unique_ptr<BlockBlobClientType> GetBlockBlobClient(std::string blobName) const {
-        return std::unique_ptr<BlockBlobClientType>(
-            new BlockBlobClientType{*m_httpClient, MakeBlobTarget(std::move(blobName))});
+    [[nodiscard]] BlockBlobClientType GetBlockBlobClient(std::string blobName) const {
+        return BlockBlobClientType{*m_httpClient, MakeBlobTarget(std::move(blobName)), m_httpOwner};
     }
-    [[nodiscard]] std::unique_ptr<PageBlobClientType> GetPageBlobClient(std::string blobName) const {
-        return std::unique_ptr<PageBlobClientType>(
-            new PageBlobClientType{*m_httpClient, MakeBlobTarget(std::move(blobName))});
+    [[nodiscard]] PageBlobClientType GetPageBlobClient(std::string blobName) const {
+        return PageBlobClientType{*m_httpClient, MakeBlobTarget(std::move(blobName)), m_httpOwner};
+    }
+
+    // Deletes the named blobs with Blob Batch requests (up to 256 deletes per request; longer lists are split and
+    // run DeleteBlobsOptions::MaxConcurrentRequests at a time). The result holds one item per name, in order:
+    // a blob that no longer exists counts as deleted (like DeleteIfExistsAsync), any other per-blob failure is in
+    // that item's Error. Failure of a whole request, or an invalid name (empty or over 1024 characters), completes
+    // as `unexpected(BlobStorageError)`; blobs of the requests that did complete may then already be deleted.
+    template <class CompletionToken = DefaultCompletionToken>
+        requires(!std::same_as<std::remove_cvref_t<CompletionToken>, DeleteBlobsOptions>)
+    [[nodiscard]] auto DeleteBlobsAsync(std::vector<std::string> blobNames, CompletionToken&& token = CompletionToken{},
+                                        std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::DeleteBlobsResult>(
+            this,
+            [](auto& client, auto&&... args) { client.DeleteBlobsAsyncImpl(std::forward<decltype(args)>(args)...); },
+            std::forward<CompletionToken>(token), std::move(requestOptions), std::move(blobNames),
+            DeleteBlobsOptions{});
+    }
+
+    template <class CompletionToken = DefaultCompletionToken>
+    [[nodiscard]] auto DeleteBlobsAsync(std::vector<std::string> blobNames, DeleteBlobsOptions options,
+                                        CompletionToken&& token = CompletionToken{},
+                                        std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
+        return Private::InitiateClientOperation<Models::DeleteBlobsResult>(
+            this,
+            [](auto& client, auto&&... args) { client.DeleteBlobsAsyncImpl(std::forward<decltype(args)>(args)...); },
+            std::forward<CompletionToken>(token), std::move(requestOptions), std::move(blobNames), std::move(options));
     }
 
   private:
     template <HttpClientLike, TokenCredentialLike> friend class BasicBlobServiceClient;
     // Shares the service client's validated connection state (no re-normalisation).
     BasicBlobContainerClient(THttp& httpClient, std::shared_ptr<const Private::ConnectionState> connection,
-                             std::shared_ptr<CachedTokenCredential<TCred>> credential, std::string containerName)
-        : m_httpClient(&httpClient),
+                             std::shared_ptr<CachedTokenCredential<TCred>> credential, std::string containerName,
+                             std::shared_ptr<THttp> owner = nullptr)
+        : m_httpClient(&httpClient), m_httpOwner(std::move(owner)),
           m_target(std::make_shared<const Private::BasicContainerTarget<TCred>>(Private::MakeContainerTarget<TCred>(
               std::move(connection), std::move(credential), std::move(containerName)))) {}
 
@@ -270,7 +303,16 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContai
             requestOptions);
     }
 
+    template <class THandler>
+    void DeleteBlobsAsyncImpl(std::vector<std::string> blobNames, const DeleteBlobsOptions& options,
+                              THandler completion, HttpRequestOptions requestOptions = {}) {
+        Private::DeleteBlobsAsync(*m_httpClient, m_target, std::move(blobNames), options, std::move(completion),
+                                  requestOptions);
+    }
+
     THttp* m_httpClient = nullptr;
+    // Set when the client was given shared ownership of the HTTP client; null when it only borrows it.
+    std::shared_ptr<THttp> m_httpOwner;
     std::shared_ptr<const Private::BasicContainerTarget<TCred>> m_target;
 };
 

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
+#include <AVEVA/AzureClient/BlockOn.hpp>
 #include <AVEVA/AzureClient/HttpClientLike.hpp>
 #include <AVEVA/AzureClient/Response.hpp>
 #include <AVEVA/AzureClient/WithRequestOptions.hpp>
@@ -117,6 +118,11 @@ auto InitiateClientOperation(Client* client, Impl impl, CompletionToken&& token,
             return std::forward<CompletionToken>(token);
         }
     }();
+
+    // Checked before initiating so misuse never leaves a request in flight, also behind WithRequestOptions(...).
+    if constexpr (IsBlockOnToken<decltype(innerToken)>) {
+        ThrowIfRunningOn(client->get_executor());
+    }
 
     return boost::asio::async_initiate<Signature>(
         [client, impl](auto handler, HttpRequestOptions initiationRequestOptions, auto... initiationArgs) {

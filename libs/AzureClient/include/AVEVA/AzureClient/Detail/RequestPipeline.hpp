@@ -60,6 +60,25 @@ inline constexpr int MaxBackoffExponent = RetryPolicyConstants::MaxBackoffExpone
     return std::chrono::milliseconds{static_cast<std::int64_t>(std::llround(delay))};
 }
 
+// Resolves the x-ms-copy-source-authorization placeholder (see CopySourceClientCredentialMarker): an empty
+// `bearerToken` means the client has no bearer token to forward, so the header is dropped before the request is
+// signed or sent.
+inline void ResolveCopySourceAuthorization(HttpRequest& request, std::string_view bearerToken) {
+    auto& headers = request.GetHeaders();
+    for (auto it = headers.begin(); it != headers.end(); ++it) {
+        if (!IEquals(it->GetName(), XMsCopySourceAuthorizationHeaderName) ||
+            it->GetValue() != CopySourceClientCredentialMarker) {
+            continue;
+        }
+        if (bearerToken.empty()) {
+            headers.erase(it);
+        } else {
+            it->SetValue("Bearer " + std::string{bearerToken});
+        }
+        return;
+    }
+}
+
 [[nodiscard]] inline std::error_code CanceledError() noexcept {
     return std::make_error_code(std::errc::operation_canceled);
 }
@@ -73,9 +92,9 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         : m_httpClient(httpClient), m_auth(std::move(auth)), m_credential(std::move(credential)), m_retry(retry),
           m_request(std::move(request)), m_completion(std::move(completion)), m_requestOptions(requestOptions),
           m_retryNotFoundAndGone(retryNotFoundAndGone), m_parentSlot(m_requestOptions.GetCancellationSlot()),
-          m_timer(httpClient.get_executor()),
-          m_maxAttempts(retry.MaxRetries >= std::numeric_limits<int>::max() - 1 ? std::numeric_limits<int>::max()
-                                                                                : std::max(0, retry.MaxRetries) + 1) {}
+          m_timer(httpClient.get_executor()), m_deadlineTimer(httpClient.get_executor()),
+          m_totalDeadline(m_requestOptions.GetTotalDeadline()), m_start(std::chrono::steady_clock::now()),
+          m_maxAttempts(ComputeMaxAttempts(m_requestOptions.GetMaxRetries().value_or(retry.MaxRetries))) {}
 
     void Start() {
         if (m_parentSlot.is_connected()) {
@@ -83,6 +102,16 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
             m_parentSlot.assign([weak](boost::asio::cancellation_type_t type) {
                 if (auto self = weak.lock()) {
                     self->OnCancel(type);
+                }
+            });
+        }
+
+        if (m_totalDeadline) {
+            // Bounds retries and backoff together; the per-attempt timeout only bounds one send.
+            m_deadlineTimer.expires_after(*m_totalDeadline);
+            m_deadlineTimer.async_wait([weak = this->weak_from_this()](const boost::system::error_code& waitError) {
+                if (auto self = weak.lock(); self && !waitError) {
+                    self->Run(DeadlineEvent{});
                 }
             });
         }
@@ -111,11 +140,12 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     struct BackoffElapsedEvent {
         bool Aborted;
     };
+    struct DeadlineEvent {};
     struct FinishEvent {
         std::error_code Error;
     };
     using Event = std::variant<StartAttemptEvent, CancelEvent, TokenEvent, AttemptCompleteEvent, BackoffElapsedEvent,
-                               FinishEvent>;
+                               DeadlineEvent, FinishEvent>;
 
     void Dispatch(Event& event) {
         std::visit(
@@ -129,9 +159,11 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
                     OnTokenOnStrand(e.Error, e.Token, std::move(e.Attempt));
                 } else if constexpr (std::is_same_v<TEvent, AttemptCompleteEvent>) {
                     OnAttemptCompleteOnStrand(e.Error, std::move(e.Response));
+                } else if constexpr (std::is_same_v<TEvent, DeadlineEvent>) {
+                    OnDeadlineOnStrand();
                 } else if constexpr (std::is_same_v<TEvent, BackoffElapsedEvent>) {
                     if (m_cancelled || e.Aborted) {
-                        Finish(CanceledError(), HttpResponse{});
+                        Finish(CancelError(), HttpResponse{});
                     } else {
                         StartAttempt();
                     }
@@ -190,8 +222,29 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         // Token credentials have no cancellation hook, so don't wait for a slow credential:
         // complete now and ignore the token when it eventually arrives.
         if (m_awaitingToken.load(std::memory_order_acquire)) {
-            PostFinish(CanceledError());
+            PostFinish(CancelError());
         }
+    }
+
+    void OnDeadlineOnStrand() {
+        if (m_finished.load(std::memory_order_acquire)) {
+            return;
+        }
+        if (!m_cancelled.load(std::memory_order_acquire)) {
+            m_timedOut = true;
+            m_cancelled.store(true, std::memory_order_release);
+        }
+        OnCancelOnStrand(boost::asio::cancellation_type::terminal);
+    }
+
+    // A caller cancellation reports operation_canceled; an expired total deadline reports timed_out.
+    [[nodiscard]] std::error_code CancelError() const noexcept {
+        return m_timedOut ? std::make_error_code(std::errc::timed_out) : CanceledError();
+    }
+
+    [[nodiscard]] static int ComputeMaxAttempts(int maxRetries) noexcept {
+        return maxRetries >= std::numeric_limits<int>::max() - 1 ? std::numeric_limits<int>::max()
+                                                                 : std::max(0, maxRetries) + 1;
     }
 
     [[nodiscard]] HttpRequest BuildAttemptRequest() {
@@ -233,6 +286,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
 
         switch (m_auth.Type) {
         case RequestAuth::Kind::SharedKey:
+            ResolveCopySourceAuthorization(attempt, {});
             try {
                 AuthorizeRequest(*m_auth.Signer, attempt);
             } catch (const std::bad_alloc&) {
@@ -253,11 +307,13 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
             return;
 
         case RequestAuth::Kind::Bearer:
+            ResolveCopySourceAuthorization(attempt, m_auth.BearerToken);
             attempt.AddHeader(HttpHeader{std::string{AuthorizationHeaderName}, "Bearer " + m_auth.BearerToken});
             Send(std::move(attempt));
             return;
 
         case RequestAuth::Kind::None:
+            ResolveCopySourceAuthorization(attempt, {});
             break;
         }
 
@@ -294,7 +350,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
             return;
         }
         if (m_cancelled.load(std::memory_order_acquire)) {
-            Finish(CanceledError(), HttpResponse{});
+            Finish(CancelError(), HttpResponse{});
             return;
         }
         if (error) {
@@ -304,6 +360,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
 
         std::erase_if(attempt.GetHeaders(),
                       [](const HttpHeader& header) { return IEquals(header.GetName(), AuthorizationHeaderName); });
+        ResolveCopySourceAuthorization(attempt, token.Token);
         attempt.AddHeader(HttpHeader{std::string{AuthorizationHeaderName}, "Bearer " + token.Token});
         Send(std::move(attempt));
     }
@@ -311,8 +368,13 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     void Send(HttpRequest attempt) {
         HttpRequestOptions options = m_requestOptions;
         m_attemptSignal.slot().clear();
-        options.SetCancellationSlot(m_parentSlot.is_connected() ? m_attemptSignal.slot()
-                                                                : boost::asio::cancellation_slot{});
+        if (m_totalDeadline) {
+            const auto remaining = *m_totalDeadline - std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                          std::chrono::steady_clock::now() - m_start);
+            options.SetTimeout(std::min(options.GetTimeout(), std::max(remaining, std::chrono::milliseconds{1})));
+        }
+        options.SetCancellationSlot(m_parentSlot.is_connected() || m_totalDeadline ? m_attemptSignal.slot()
+                                                                                   : boost::asio::cancellation_slot{});
 
         auto self = this->shared_from_this();
         m_httpClient.SendAsync(std::move(attempt), std::move(options),
@@ -342,7 +404,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
 
     void OnAttemptCompleteOnStrand(std::error_code error, HttpResponse response) {
         if (m_cancelled) {
-            Finish(CanceledError(), std::move(response));
+            Finish(CancelError(), std::move(response));
             return;
         }
 
@@ -383,6 +445,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         // The parent slot is deliberately not cleared here: clearing on the transport thread would race with
         // the caller emitting on its own executor. Its handler only holds a weak_ptr and is inert once
         // finished; the caller's slot is cleared on its executor when the completion is dispatched.
+        m_deadlineTimer.cancel();
         THandler completion = std::move(m_completion);
         completion(error, std::move(response));
     }
@@ -399,6 +462,9 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     boost::asio::cancellation_slot m_parentSlot;
     boost::asio::cancellation_signal m_attemptSignal;
     boost::asio::steady_timer m_timer;
+    boost::asio::steady_timer m_deadlineTimer;
+    std::optional<std::chrono::milliseconds> m_totalDeadline;
+    std::chrono::steady_clock::time_point m_start;
     std::mutex m_queueMutex;
     std::deque<Event> m_queue;
     bool m_draining = false;
@@ -408,6 +474,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     std::atomic<bool> m_awaitingToken{false};
     std::atomic<bool> m_cancelled{false};
     std::atomic<bool> m_finished{false};
+    bool m_timedOut = false;
 };
 } // namespace RetryDetail
 

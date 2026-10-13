@@ -234,6 +234,96 @@ TEST_F(BlobOperationsFakeBlobTests, CopyPagesSplitsRangesLargerThanTheCopyChunk)
     EXPECT_EQ(m_env.Blob->Data, destination.Blob->Data);
 }
 
+TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyTransfersOnlyThePopulatedRangesWithoutDownloading) {
+    m_env.Fill(4096, '\0');
+    std::fill_n(m_env.Blob->Data.begin(), 512, 'a');
+    std::fill_n(m_env.Blob->Data.begin() + 2048, 1024, 'b');
+    const auto destination = m_env.Blob->AddBlob("copy.sst", 4096);
+
+    EXPECT_TRUE(
+        BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 4096, m_env.Blob->ETag));
+
+    EXPECT_EQ(m_env.Blob->Data, m_env.Blob->BlobBytes("copy.sst"));
+    ASSERT_EQ(2U, m_env.Blob->PageCopies.size());
+    EXPECT_EQ(0, m_env.Blob->PageCopies[0].Offset);
+    EXPECT_EQ(2048, m_env.Blob->PageCopies[1].Offset);
+    EXPECT_EQ(1024, m_env.Blob->PageCopies[1].Length);
+    EXPECT_EQ(m_env.Blob->ETag, m_env.Blob->PageCopies[1].SourceIfMatch);
+    EXPECT_TRUE(m_env.Blob->Downloads.empty());
+    EXPECT_TRUE(m_env.Blob->Uploads.empty());
+}
+
+TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyOfAnEmptyBlobSendsNothing) {
+    m_env.Fill(2048, '\0');
+    const auto destination = m_env.Blob->AddBlob("copy.sst", 2048);
+
+    EXPECT_TRUE(BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 0, m_env.Blob->ETag));
+
+    EXPECT_TRUE(m_env.Blob->PageCopies.empty());
+}
+
+TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyRoundsTheLastChunkUpToAWholePage) {
+    m_env.Fill(2048, 'z');
+    const auto destination = m_env.Blob->AddBlob("copy.sst", 2048);
+
+    EXPECT_TRUE(
+        BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 700, m_env.Blob->ETag));
+
+    ASSERT_EQ(1U, m_env.Blob->PageCopies.size());
+    EXPECT_EQ(1024, m_env.Blob->PageCopies[0].Length);
+}
+
+TEST_F(BlobOperationsFakeBlobTests, ServerSideCopySplitsRangesLargerThanTheCopyChunkAndKeepsSeveralInFlight) {
+    const auto chunk = AVEVA::RocksDB::Plugin::Azure::Impl::Configuration::Transfer::MaxCopyChunkSize;
+    const auto total = chunk * 6 + 1024;
+    m_env.Fill(total, 'c');
+    const auto destination = m_env.Blob->AddBlob("copy.sst", total);
+
+    EXPECT_TRUE(
+        BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, total, m_env.Blob->ETag));
+
+    EXPECT_EQ(7U, m_env.Blob->PageCopies.size());
+    EXPECT_EQ(m_env.Blob->Data, m_env.Blob->BlobBytes("copy.sst"));
+}
+
+TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyReportsAnUnauthorizedSourceSoTheCallerCanFallBack) {
+    m_env.Fill(1024, 'q');
+    m_env.Blob->RequireCopySourceAuthorization = true;
+    const auto destination = m_env.Blob->AddBlob("copy.sst", 1024);
+
+    EXPECT_FALSE(
+        BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 1024, m_env.Blob->ETag));
+
+    EXPECT_EQ(1U, m_env.Blob->PageCopies.size());
+}
+
+TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyFailsWhenTheSourceChangedSincePlanning) {
+    m_env.Fill(1024, 'q');
+    const auto destination = m_env.Blob->AddBlob("copy.sst", 1024);
+
+    EXPECT_THROW(
+        (void)BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 1024, "\"stale\""),
+        RequestFailedException);
+}
+
+TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyFailsWhenTheSourceChangesMidCopy) {
+    const auto chunk = AVEVA::RocksDB::Plugin::Azure::Impl::Configuration::Transfer::MaxCopyChunkSize;
+    m_env.Fill(chunk * 2, 'q');
+    int copies = 0;
+    m_env.Blob->Fault =
+        [&copies](const FakeBlobServer::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::UploadPagesFromUrl && ++copies == 2) {
+            return FakeBlobServer::Error(412, "SourceConditionNotMet");
+        }
+        return std::nullopt;
+    };
+    const auto destination = m_env.Blob->AddBlob("copy.sst", chunk * 2);
+
+    EXPECT_THROW((void)BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, chunk * 2,
+                                                           m_env.Blob->ETag),
+                 RequestFailedException);
+}
+
 TEST_F(BlobOperationsFakeBlobTests, CopyPagesFailsWhenTheSourceChangedSincePlanning) {
     m_env.Fill(1024, 'q');
     const auto destinationBlob = MakeDestination(1024);
