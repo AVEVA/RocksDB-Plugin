@@ -201,20 +201,54 @@ TEST(RetryTests, DoesNotRetryNonTransientStatus) {
 }
 
 TEST(RetryTests, RetriesTransientTransportErrors) {
+    // The upload is a plain overwrite, so it is safe to replay after any transport failure.
     for (const std::error_code error :
          {std::error_code{AVEVA::HttpClientError::TimedOut}, std::error_code{AVEVA::HttpClientError::ConnectFailed},
           std::make_error_code(std::errc::connection_reset)}) {
         FakeHttpClient httpClient;
         httpClient.EnqueueResponse(HttpResponse{}, error);
-        httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
+        httpClient.EnqueueResponse(HttpResponse{201, {}, ""});
         BlockBlobClient client{httpClient, MakeRetryOptions(1)};
+
+        UploadState state;
+        StartUploadAsync(client, "payload", state);
+
+        ASSERT_TRUE(PollUntil(httpClient, [&] { return state.Done; })) << error.message();
+        EXPECT_EQ(httpClient.RequestCount(), 2U) << error.message();
+        EXPECT_TRUE(state.Succeeded) << error.message();
+    }
+}
+
+TEST(RetryTests, DeleteIsRetriedAfterFailuresThatHappenedBeforeAnythingWasSent) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ConnectFailed);
+    httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
+    BlockBlobClient client{httpClient, MakeRetryOptions(1)};
+
+    std::optional<DeleteResult> observed;
+    client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
+    EXPECT_EQ(httpClient.RequestCount(), 2U);
+    EXPECT_TRUE(ValueOrFail(observed).has_value());
+}
+
+TEST(RetryTests, DeleteIsNotReplayedAfterAnAmbiguousTransportErrorBecauseItsOutcomeIsUnknown) {
+    for (const std::error_code error :
+         {std::error_code{AVEVA::HttpClientError::TimedOut}, std::error_code{AVEVA::HttpClientError::ReadFailed},
+          std::make_error_code(std::errc::connection_reset)}) {
+        FakeHttpClient httpClient;
+        httpClient.EnqueueResponse(HttpResponse{}, error);
+        // A replay would find the blob already gone and answer 404.
+        httpClient.EnqueueResponse(HttpResponse{404, {{"x-ms-error-code", "BlobNotFound"}}, ""});
+        BlockBlobClient client{httpClient, MakeRetryOptions(3)};
 
         std::optional<DeleteResult> observed;
         client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
 
         ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); })) << error.message();
-        EXPECT_EQ(httpClient.RequestCount(), 2U) << error.message();
-        EXPECT_TRUE(ValueOrFail(observed).has_value()) << error.message();
+        EXPECT_EQ(httpClient.RequestCount(), 1U) << error.message();
+        EXPECT_FALSE(ValueOrFail(observed).has_value()) << error.message();
     }
 }
 
@@ -444,6 +478,26 @@ TEST(RetryTests, TotalDeadlineEndsRetryBackoffWithTimedOut) {
     client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) { observed = std::move(result); }));
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{5}));
+    ASSERT_FALSE(ValueOrFail(observed).has_value());
+    EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::timed_out));
+    EXPECT_EQ(httpClient.RequestCount(), 1U);
+}
+
+TEST(RetryTests, TotalDeadlineFailsImmediatelyWhenTheBackoffWouldOutlastIt) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
+    httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
+    BlockBlobClient client{httpClient, MakeRetryOptions(3, std::chrono::minutes{1})};
+
+    AVEVA::HttpRequestOptions requestOptions;
+    requestOptions.SetTotalDeadline(std::chrono::seconds{10});
+    std::optional<DeleteResult> observed;
+    const auto start = std::chrono::steady_clock::now();
+    client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) { observed = std::move(result); }));
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{5}));
+    // Without the check the operation would idle until the 10 second deadline fired.
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds{5});
     ASSERT_FALSE(ValueOrFail(observed).has_value());
     EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::timed_out));
     EXPECT_EQ(httpClient.RequestCount(), 1U);

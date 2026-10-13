@@ -43,6 +43,12 @@ bool IsRetriableTransportError(std::error_code error) noexcept {
            error == std::errc::connection_refused;
 }
 
+bool IsAmbiguousTransportError(std::error_code error) noexcept {
+    return error == HttpClientError::WriteFailed || error == HttpClientError::ReadFailed ||
+           error == HttpClientError::TimedOut || error == std::errc::timed_out ||
+           error == std::errc::connection_reset || error == std::errc::connection_aborted;
+}
+
 bool IsRetriableStatus(unsigned int status) noexcept {
     switch (status) {
     case HttpStatusRequestTimeout:

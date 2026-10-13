@@ -513,6 +513,9 @@ struct RequestAuth {
 
 // True for HTTP statuses and transport errors that Azure Storage documents as transient.
 [[nodiscard]] bool IsRetriableTransportError(std::error_code error) noexcept;
+// True for transport errors raised after the request may have reached the service (the outcome is unknown), as
+// opposed to failures that happened before anything was sent (resolve, connect).
+[[nodiscard]] bool IsAmbiguousTransportError(std::error_code error) noexcept;
 [[nodiscard]] bool IsRetriableStatus(unsigned int status) noexcept;
 [[nodiscard]] bool IsRetriableFailure(std::error_code error, const HttpResponse& response) noexcept;
 

@@ -83,6 +83,24 @@ inline void ResolveCopySourceAuthorization(HttpRequest& request, std::string_vie
     return std::make_error_code(std::errc::operation_canceled);
 }
 
+// Replaces any Authorization header with the bearer token, so exactly one is ever sent.
+inline void SetBearerAuthorization(HttpRequest& request, std::string_view token) {
+    std::erase_if(request.GetHeaders(),
+                  [](const HttpHeader& header) { return IEquals(header.GetName(), AuthorizationHeaderName); });
+    request.AddHeader(HttpHeader{std::string{AuthorizationHeaderName}, "Bearer " + std::string{token}});
+}
+
+// A request that cannot be replayed safely after an ambiguous transport failure: a conditional create
+// (If-None-Match: *) would answer 409 BlobAlreadyExists and a delete 404 if the first attempt had in fact succeeded.
+[[nodiscard]] inline bool IsReplaySafe(const HttpRequest& request) {
+    if (request.GetMethod() == HttpMethod::Delete) {
+        return false;
+    }
+    return std::ranges::none_of(request.GetHeaders(), [](const HttpHeader& header) {
+        return IEquals(header.GetName(), IfNoneMatchHeaderName) && header.GetValue() == "*";
+    });
+}
+
 template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
 class RetryOperation final : public std::enable_shared_from_this<RetryOperation<THttp, TCred, THandler>> {
   public:
@@ -91,7 +109,8 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
                    bool retryNotFoundAndGone)
         : m_httpClient(httpClient), m_auth(std::move(auth)), m_credential(std::move(credential)), m_retry(retry),
           m_request(std::move(request)), m_completion(std::move(completion)), m_requestOptions(requestOptions),
-          m_retryNotFoundAndGone(retryNotFoundAndGone), m_parentSlot(m_requestOptions.GetCancellationSlot()),
+          m_retryNotFoundAndGone(retryNotFoundAndGone), m_replaySafe(IsReplaySafe(m_request)),
+          m_parentSlot(m_requestOptions.GetCancellationSlot()),
           m_timer(httpClient.get_executor()), m_deadlineTimer(httpClient.get_executor()),
           m_totalDeadline(m_requestOptions.GetTotalDeadline()), m_start(std::chrono::steady_clock::now()),
           m_maxAttempts(ComputeMaxAttempts(m_requestOptions.GetMaxRetries().value_or(retry.MaxRetries))) {}
@@ -308,7 +327,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
 
         case RequestAuth::Kind::Bearer:
             ResolveCopySourceAuthorization(attempt, m_auth.BearerToken);
-            attempt.AddHeader(HttpHeader{std::string{AuthorizationHeaderName}, "Bearer " + m_auth.BearerToken});
+            SetBearerAuthorization(attempt, m_auth.BearerToken);
             Send(std::move(attempt));
             return;
 
@@ -358,10 +377,8 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
             return;
         }
 
-        std::erase_if(attempt.GetHeaders(),
-                      [](const HttpHeader& header) { return IEquals(header.GetName(), AuthorizationHeaderName); });
         ResolveCopySourceAuthorization(attempt, token.Token);
-        attempt.AddHeader(HttpHeader{std::string{AuthorizationHeaderName}, "Bearer " + token.Token});
+        SetBearerAuthorization(attempt, token.Token);
         Send(std::move(attempt));
     }
 
@@ -371,7 +388,13 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         if (m_totalDeadline) {
             const auto remaining = *m_totalDeadline - std::chrono::duration_cast<std::chrono::milliseconds>(
                                                           std::chrono::steady_clock::now() - m_start);
-            options.SetTimeout(std::min(options.GetTimeout(), std::max(remaining, std::chrono::milliseconds{1})));
+            if (remaining <= std::chrono::milliseconds{0}) {
+                // The deadline has passed (its timer may not have run yet): never start a fresh attempt.
+                m_timedOut = true;
+                PostFinish(std::make_error_code(std::errc::timed_out));
+                return;
+            }
+            options.SetTimeout(std::min(options.GetTimeout(), remaining));
         }
         options.SetCancellationSlot(m_parentSlot.is_connected() || m_totalDeadline ? m_attemptSignal.slot()
                                                                                    : boost::asio::cancellation_slot{});
@@ -414,6 +437,14 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
             return;
         }
 
+        // After an ambiguous transport failure the request may already have been applied, so replaying one that
+        // cannot be repeated safely would misreport the outcome (e.g. 409 for a create that succeeded). Surface the
+        // transport error as "outcome unknown" and let the caller decide.
+        if (error && !m_replaySafe && IsAmbiguousTransportError(error)) {
+            Finish(error, std::move(response));
+            return;
+        }
+
         // A server hint may exceed MaxDelay (the service knows when it will recover) but is capped so a
         // bogus value cannot stall a request for hours.
         constexpr std::chrono::milliseconds maxHint{std::chrono::minutes{1}};
@@ -425,6 +456,16 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
                                std::max(m_retry.MaxDelay, std::chrono::milliseconds{0}));
         }
 
+        if (m_totalDeadline) {
+            const auto remaining = *m_totalDeadline - std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                          std::chrono::steady_clock::now() - m_start);
+            if (remaining <= delay) {
+                // The backoff alone would outlast the deadline, so another attempt can never be made.
+                m_timedOut = true;
+                Finish(std::make_error_code(std::errc::timed_out), std::move(response));
+                return;
+            }
+        }
         m_timer.expires_after(delay);
         auto self = this->shared_from_this();
         m_timer.async_wait([self](const boost::system::error_code& waitError) {
@@ -459,6 +500,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     THandler m_completion;
     HttpRequestOptions m_requestOptions;
     bool m_retryNotFoundAndGone;
+    bool m_replaySafe;
     boost::asio::cancellation_slot m_parentSlot;
     boost::asio::cancellation_signal m_attemptSignal;
     boost::asio::steady_timer m_timer;
