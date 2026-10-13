@@ -304,13 +304,18 @@ template <typename TBlob> std::vector<char> BasicWriteableFileImpl<TBlob>::RentB
 }
 
 // Blocks the calling (RocksDB) thread, never an io_context thread. The first upload failure is sticky: the data of a
-// failed upload is gone, so every later Sync/Close must keep reporting it rather than claim durability.
+// failed upload is gone, so every later Sync/Close must keep reporting it rather than claim durability. Writes that
+// were fenced (lease lost) while uploads were in flight are reported too, even if those uploads succeeded: the
+// service may have accepted them after another process took over, so they cannot be claimed as durable.
 template <typename TBlob> void BasicWriteableFileImpl<TBlob>::WaitForUploads(const size_t maxRemaining) {
-    std::unique_lock lock(m_uploads->Mutex);
-    m_uploads->Done.wait(lock, [&] { return m_uploads->InFlight <= maxRemaining; });
-    if (m_uploads->Error) {
-        std::rethrow_exception(m_uploads->Error);
+    {
+        std::unique_lock lock(m_uploads->Mutex);
+        m_uploads->Done.wait(lock, [&] { return m_uploads->InFlight <= maxRemaining; });
+        if (m_uploads->Error) {
+            std::rethrow_exception(m_uploads->Error);
+        }
     }
+    m_runtime->ThrowIfWritesFenced();
 }
 
 template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Truncate(int64_t size) {

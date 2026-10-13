@@ -145,6 +145,22 @@ TEST_F(WriteableFileTests, RangeSync_UploadInFlight_ReturnsWithoutWaitingAndSync
     EXPECT_NO_THROW(file.Sync());
 }
 
+TEST_F(WriteableFileTests, Sync_WritesFencedWhileAnUploadWasInFlight_FailsEvenThoughTheUploadSucceeded) {
+    m_env.Blob->DeferUploads = true;
+
+    auto file = MakeFile();
+    file.Append(std::vector<char>(Configuration::PageBlob::PageSize, 'a'));
+    file.RangeSync();
+    ASSERT_EQ(1U, m_env.Blob->PendingUploads());
+
+    m_env.Runtime->FenceWrites();
+    m_env.Blob->CompleteUpload();
+
+    EXPECT_THROW(file.Sync(), std::runtime_error);
+    EXPECT_THROW(file.Close(), std::runtime_error);
+    EXPECT_THROW(file.Flush(), std::runtime_error);
+}
+
 TEST_F(WriteableFileTests, Sync_UploadFailed_ThrowsAndKeepsThrowing) {
     m_env.Blob->DeferUploads = true;
 

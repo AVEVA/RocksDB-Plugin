@@ -31,9 +31,10 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// leases returned by the snapshot are renewed side by side through LockFileImpl::RenewAsync, and failed renewals
 /// are retried after `retryDelay`.
 ///
-/// A conflict or other lease-lost failure (by status or BlobStorageErrorCode), a non-service exception, or a lease
+/// A conflict or other lease-lost failure (by status or BlobStorageErrorCode), any other permanent failure (a status
+/// that is not 408, 429 or 5xx, e.g. 401/403/404), a non-service exception, or a lease
 /// that is still overdue once the retries are spent is fatal: the loop stops and `onFatal` is invoked once so the
-/// owner can fence writes. Other service and transport failures (status 0) are retried and only logged.
+/// owner can fence writes. Transient failures (transport errors with status 0, 408, 429, 5xx) are retried and only logged.
 ///
 /// While armed, the timer keeps io_context::run() from returning, so the owner must call Stop() (or destroy the
 /// loop's owner, which should) before expecting run() to drain.
@@ -50,7 +51,8 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
     /// <summary>
     /// Creates the loop and arms the first wake-up. `snapshot` and `onFatal` are only invoked while the loop is
     /// running, never after Stop() returns; they run with the loop's internal mutex held and so must not block or
-    /// call back into the loop.
+    /// call back into the loop. Renewals (LockFileImpl::RenewAsync) are started with the mutex released, and their
+    /// completions run on whatever thread finishes them without taking it.
     /// </summary>
     static std::shared_ptr<BasicLeaseRenewalLoop>
     Start(boost::asio::io_context::executor_type executor, std::shared_ptr<Logger> logger, TSnapshot snapshot,
@@ -115,6 +117,14 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
         return false;
     }
 
+    // Only these can plausibly succeed on retry: transport-level failures (no HTTP status), request timeouts,
+    // throttling and server-side errors. Anything else (400, 401, 403, 404, ...) is permanent for a renewal, and
+    // retrying it would only delay fencing until the lease is overdue.
+    static bool IsTransient(const RequestFailedException& e) {
+        return e.StatusCode == 0 || e.StatusCode == HttpStatus::RequestTimeout ||
+               e.StatusCode == HttpStatus::TooManyRequests || e.StatusCode >= HttpStatus::InternalServerError;
+    }
+
     struct Round {
         std::mutex Mutex;
         std::vector<std::shared_ptr<TLock>> Locks;
@@ -139,7 +149,8 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
     // All of the following require m_mutex.
 
     // Every wake-up re-checks m_stopped under the mutex, so a cancelled or already-queued timer completion can never
-    // start a round once Stop() has run. The action is performed with the mutex held.
+    // start a round once Stop() has run. The snapshot is taken and the round registered with the mutex held; the
+    // renewals themselves are started after it is released (see StartRound).
     void ArmTimer(const std::chrono::milliseconds delay, std::optional<Retry> retry) {
         if (m_stopped) {
             return;
@@ -147,23 +158,29 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
         m_timer.expires_after(delay);
         m_timer.async_wait(
             [self = this->shared_from_this(), retry = std::move(retry)](const boost::system::error_code& ec) mutable {
-                std::scoped_lock lock(self->m_mutex);
-                if (ec || self->m_stopped) {
-                    return;
-                }
-                try {
-                    if (retry) {
-                        self->BeginRound(std::move(retry->Locks), retry->Attempt);
-                    } else {
-                        auto locks = self->m_snapshot();
-                        BOOST_LOG_SEV(*self->m_logger, boost::log::trivial::debug)
-                            << "Attempting to renew " << locks.size() << " leases";
-                        self->BeginRound(std::move(locks), 0);
+                std::shared_ptr<Round> round;
+                {
+                    std::scoped_lock lock(self->m_mutex);
+                    if (ec || self->m_stopped) {
+                        return;
                     }
-                } catch (const std::exception& e) {
-                    self->Fail(e.what());
-                } catch (...) {
-                    self->Fail("unknown error");
+                    try {
+                        if (retry) {
+                            round = self->PrepareRound(std::move(retry->Locks), retry->Attempt);
+                        } else {
+                            auto locks = self->m_snapshot();
+                            BOOST_LOG_SEV(*self->m_logger, boost::log::trivial::debug)
+                                << "Attempting to renew " << locks.size() << " leases";
+                            round = self->PrepareRound(std::move(locks), 0);
+                        }
+                    } catch (const std::exception& e) {
+                        self->Fail(e.what());
+                    } catch (...) {
+                        self->Fail("unknown error");
+                    }
+                }
+                if (round) {
+                    self->StartRound(round);
                 }
             });
     }
@@ -171,10 +188,12 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
     // Sleeps for `delay`, then snapshots the current leases and renews them as a fresh round.
     void ScheduleWakeUp(const std::chrono::milliseconds delay) { ArmTimer(delay, std::nullopt); }
 
-    void BeginRound(std::vector<std::shared_ptr<TLock>> locks, const size_t attempt) {
+    // Registers a round for the given leases and returns it, or re-arms the timer and returns null when there is
+    // nothing to renew. Counting the round before the mutex is released keeps Stop() waiting for it.
+    std::shared_ptr<Round> PrepareRound(std::vector<std::shared_ptr<TLock>> locks, const size_t attempt) {
         if (locks.empty()) {
             ScheduleWakeUp(m_interval);
-            return;
+            return nullptr;
         }
 
         auto round = std::make_shared<Round>();
@@ -183,24 +202,43 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
         round->Pending = round->Locks.size();
         round->Attempt = attempt;
         ++m_activeRounds;
+        return round;
+    }
 
-        // RenewAsync may complete inline (e.g. the lease is not held), possibly while this thread holds m_mutex, so
-        // the completion only touches the round's own mutex and hands the rest to the executor.
-        for (size_t i = 0; i < round->Locks.size(); ++i) {
-            round->Locks[i]->RenewAsync([self = this->shared_from_this(), round, i](std::exception_ptr error, bool) {
-                bool last = false;
-                {
-                    std::scoped_lock guard(round->Mutex);
-                    round->Errors[i] = std::move(error);
-                    last = --round->Pending == 0;
-                }
-                if (last) {
-                    boost::asio::post(self->m_executor, [self, round] {
-                        std::scoped_lock lock(self->m_mutex);
-                        self->OnRoundDone(round);
-                    });
-                }
-            });
+    // Must be called WITHOUT m_mutex: RenewAsync may complete inline and does network setup, and a completion that is
+    // the last of its round posts back to the executor, where OnRoundDone takes the mutex.
+    void StartRound(const std::shared_ptr<Round>& round) {
+        try {
+            for (size_t i = 0; i < round->Locks.size(); ++i) {
+                round->Locks[i]->RenewAsync([self = this->shared_from_this(), round, i](std::exception_ptr error, bool) {
+                    bool last = false;
+                    {
+                        std::scoped_lock guard(round->Mutex);
+                        round->Errors[i] = std::move(error);
+                        last = --round->Pending == 0;
+                    }
+                    if (last) {
+                        boost::asio::post(self->m_executor, [self, round] {
+                            std::scoped_lock lock(self->m_mutex);
+                            self->OnRoundDone(round);
+                        });
+                    }
+                });
+            }
+        } catch (const std::exception& e) {
+            AbandonRound(e.what());
+        } catch (...) {
+            AbandonRound("unknown error");
+        }
+    }
+
+    // A renewal that could not even be started: the round can never complete, so release it and stop.
+    void AbandonRound(const std::string& reason) {
+        std::scoped_lock lock(m_mutex);
+        --m_activeRounds;
+        m_roundsIdle.notify_all();
+        if (!m_stopped) {
+            Fail(reason);
         }
     }
 
@@ -225,9 +263,9 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
             try {
                 std::rethrow_exception(round->Errors[i]);
             } catch (const RequestFailedException& e) {
-                if (IsFatalLeaseFailure(e)) {
+                if (IsFatalLeaseFailure(e) || !IsTransient(e)) {
                     BOOST_LOG_SEV(*m_logger, boost::log::trivial::error)
-                        << "Failed to renew lease, lease is lost or expired: " << e.what();
+                        << "Failed to renew lease, lease is lost or expired, or the failure is permanent: " << e.what();
                     fatal = e.what();
                 } else {
                     BOOST_LOG_SEV(*m_logger, boost::log::trivial::error) << "Failed to renew lease: " << e.what();

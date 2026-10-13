@@ -359,6 +359,26 @@ TEST_F(LeaseRenewalLoopTests, ConflictIsFatalAndStopsTheLoop) {
     EXPECT_TRUE(m_loop->IsStopped());
 }
 
+TEST_F(LeaseRenewalLoopTests, ForbiddenRenewalFencesOnTheFirstRoundWithoutRetrying) {
+    auto lock = AcquireLock();
+    const auto before = m_httpClient.RequestCount();
+    m_httpClient.EnqueueResponse(MakeAzureErrorResponse(403, "AuthorizationFailure", "denied", "r2"));
+    // Would be consumed only by a retry.
+    for (int i = 0; i < 5; ++i) {
+        m_httpClient.EnqueueResponse(Renewed());
+    }
+    StartLoop(lock);
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (m_fatalCount == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    m_loop->Stop();
+
+    EXPECT_EQ(m_fatalCount, 1);
+    EXPECT_EQ(m_httpClient.RequestCount(), before + 1);
+}
+
 TEST_F(LeaseRenewalLoopTests, TransientFailureIsRetriedWithoutBeingFatal) {
     auto lock = AcquireLock();
     m_httpClient.EnqueueResponse(MakeAzureErrorResponse(500, "InternalError", "boom", "r2"));
