@@ -117,6 +117,7 @@ function New-LoadedDb($backend, $tag) {
 $sw0 = [Diagnostics.Stopwatch]::StartNew()
 Write-Host "Output: $OutDir`nAccount: $Account  num=$Num reps=$Reps quick=$Quick`n"
 
+try {
 for ($rep = 1; $rep -le $Reps; $rep++) {
     # Alternate which backend goes first so drift in the network or account throttling doesn't favor one.
     $order = if ($rep % 2) { 'sdk', 'asio' } else { 'asio', 'sdk' }
@@ -177,6 +178,11 @@ for ($rep = 1; $rep -le $Reps; $rep++) {
             }
         }
     }
+}
+}
+finally {
+    # Don't leave the client secret in the caller's session environment.
+    Remove-Item Env:AVEVA_DB_BENCH_CLIENT_SECRET -ErrorAction SilentlyContinue
 }
 
 function Mean($values) { if ($values.Count) { ($values | Measure-Object -Average).Average } else { $null } }

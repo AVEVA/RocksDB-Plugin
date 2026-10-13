@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.22)
 project(aveva-azure-client LANGUAGES CXX VERSION 0.0.1)
 
-option(AVEVA_AZURE_CLIENT_TESTS "Build tests" ON)
+option(AVEVA_AZURE_CLIENT_TESTS "Build tests" ${PROJECT_IS_TOP_LEVEL})
 option(AVEVA_AZURE_CLIENT_ENABLE_ASAN "Enable AddressSanitizer instrumentation" OFF)
 option(AVEVA_AZURE_CLIENT_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer instrumentation" OFF)
 option(AVEVA_AZURE_CLIENT_ENABLE_TSAN "Enable ThreadSanitizer instrumentation (incompatible with AVEVA_AZURE_CLIENT_ENABLE_ASAN)" OFF)

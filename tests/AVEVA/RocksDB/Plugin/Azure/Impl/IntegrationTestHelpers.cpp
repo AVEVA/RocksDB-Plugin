@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <string_view>
 using namespace boost::log::trivial;
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl::Testing {
@@ -35,19 +36,25 @@ TestIoContext::~TestIoContext() {
 }
 
 std::optional<Models::ServicePrincipalStorageInfo> LoadAzureCredentialsFromEnvironment() {
+    // Credentials alone must never make a plain test run mutate cloud storage.
+    const char* optIn = std::getenv("AVEVA_RUN_AZURE_INTEGRATION_TESTS");
+    if (optIn == nullptr || std::string_view(optIn) != "1") {
+        return std::nullopt;
+    }
+
     const char* spId = std::getenv("AZURE_SERVICE_PRINCIPAL_ID");
     const char* spSecret = std::getenv("AZURE_SERVICE_PRINCIPAL_SECRET");
     const char* tenant = std::getenv("AZURE_TENANT_ID");
     const char* storageAccountName = std::getenv("AZURE_STORAGE_ACCOUNT_NAME");
     const char* container = std::getenv("AZURE_TEST_CONTAINER");
 
-    if (!spId || !spSecret || !storageAccountName) {
+    if (!spId || !spSecret || !storageAccountName || !container || std::string_view(container).empty()) {
         return std::nullopt;
     }
 
     std::string tenantId = tenant ? tenant : "";
     std::string storageAccountUrl = "https://" + std::string(storageAccountName) + ".blob.core.windows.net/";
-    std::string containerName = container ? container : "aveva-rocksdb-plugin-integration-tests";
+    std::string containerName = container;
 
     return Models::ServicePrincipalStorageInfo(containerName, // Using container name as dbName
                                                storageAccountUrl, spId, spSecret, tenantId);
@@ -69,9 +76,9 @@ bool IsAuthenticationError(const std::exception& e) {
 void AzureIntegrationTestBase::SetUp() {
     m_credentials = LoadAzureCredentialsFromEnvironment();
     if (!m_credentials) {
-        GTEST_SKIP() << "Azure credentials not found in environment variables. "
-                     << "Set AZURE_SERVICE_PRINCIPAL_ID, AZURE_SERVICE_PRINCIPAL_SECRET, and "
-                        "AZURE_STORAGE_ACCOUNT_NAME to run integration tests.";
+        GTEST_SKIP() << "Live Azure tests are opt-in. Set AVEVA_RUN_AZURE_INTEGRATION_TESTS=1, "
+                     << "AZURE_SERVICE_PRINCIPAL_ID, AZURE_SERVICE_PRINCIPAL_SECRET, AZURE_STORAGE_ACCOUNT_NAME and "
+                        "AZURE_TEST_CONTAINER to run them.";
     }
 
     m_blobName = GenerateRandomBlobName(GetBlobNamePrefix());

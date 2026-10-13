@@ -26,8 +26,9 @@ SequentialFile::~SequentialFile() = default;
 rocksdb::IOStatus SequentialFile::Read(const size_t n, const rocksdb::IOOptions&, rocksdb::Slice* result, char* scratch,
                                        rocksdb::IODebugContext*) {
     try {
-        assert(n <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) &&
-               "size_t value exceeds int64_t max value");
+        if (n > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+            return rocksdb::IOStatus::InvalidArgument("Read size is out of range");
+        }
         const auto bytesRead = m_file->SequentialRead(static_cast<int64_t>(n), scratch);
         assert(bytesRead >= 0 && "SequentialRead should not return negative values");
         *result = rocksdb::Slice(scratch, static_cast<size_t>(bytesRead));
@@ -39,8 +40,9 @@ rocksdb::IOStatus SequentialFile::Read(const size_t n, const rocksdb::IOOptions&
 
 rocksdb::IOStatus SequentialFile::Skip(const uint64_t n) {
     try {
-        assert(n <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) &&
-               "skip value exceeds int64_t max value");
+        if (n > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+            return rocksdb::IOStatus::InvalidArgument("Skip size is out of range");
+        }
         m_file->Skip(static_cast<int64_t>(n));
         return rocksdb::IOStatus::OK();
     } catch (...) {

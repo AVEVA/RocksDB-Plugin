@@ -23,9 +23,11 @@
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl::Testing {
 /// <summary>
-/// Loads Azure credentials from environment variables and creates a ServicePrincipalStorageInfo.
-/// Required: AZURE_SERVICE_PRINCIPAL_ID, AZURE_SERVICE_PRINCIPAL_SECRET, AZURE_STORAGE_ACCOUNT_NAME
-/// Optional: AZURE_TENANT_ID, AZURE_TEST_CONTAINER
+/// Loads Azure credentials from environment variables and creates a ServicePrincipalStorageInfo. Live tests are
+/// opt-in: nothing is returned unless AVEVA_RUN_AZURE_INTEGRATION_TESTS=1.
+/// Required: AVEVA_RUN_AZURE_INTEGRATION_TESTS=1, AZURE_SERVICE_PRINCIPAL_ID, AZURE_SERVICE_PRINCIPAL_SECRET,
+/// AZURE_STORAGE_ACCOUNT_NAME, AZURE_TEST_CONTAINER
+/// Optional: AZURE_TENANT_ID
 /// </summary>
 std::optional<Models::ServicePrincipalStorageInfo> LoadAzureCredentialsFromEnvironment();
 

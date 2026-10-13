@@ -20,9 +20,10 @@ ReadWriteFile::~ReadWriteFile() = default;
 rocksdb::IOStatus ReadWriteFile::Write(uint64_t offset, const rocksdb::Slice& data, const rocksdb::IOOptions&,
                                        rocksdb::IODebugContext*) {
     try {
-        assert(offset <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) && "Offset must fit in int64_t");
-        assert(data.size() <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) &&
-               "Data size must fit in int64_t");
+        constexpr auto max = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+        if (offset > max || data.size() > max) {
+            return rocksdb::IOStatus::InvalidArgument("Write offset or size is out of range");
+        }
 
         m_file->Write(static_cast<int64_t>(offset), data.data(), static_cast<int64_t>(data.size()));
     } catch (...) {
@@ -35,8 +36,10 @@ rocksdb::IOStatus ReadWriteFile::Write(uint64_t offset, const rocksdb::Slice& da
 rocksdb::IOStatus ReadWriteFile::Read(uint64_t offset, size_t n, const rocksdb::IOOptions&, rocksdb::Slice* result,
                                       char* scratch, rocksdb::IODebugContext*) const {
     try {
-        assert(offset <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) && "Offset must fit in int64_t");
-        assert(n <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) && "Bytes requested must fit in int64_t");
+        constexpr auto max = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+        if (offset > max || n > max) {
+            return rocksdb::IOStatus::InvalidArgument("Read offset or size is out of range");
+        }
 
         const auto bytesRead = m_file->Read(static_cast<int64_t>(offset), static_cast<int64_t>(n), scratch);
 
