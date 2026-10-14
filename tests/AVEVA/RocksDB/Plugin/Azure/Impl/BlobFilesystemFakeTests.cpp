@@ -8,6 +8,10 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
+#include <filesystem>
+#include <span>
+#include <thread>
 #include <memory>
 #include <optional>
 #include <string>
@@ -146,6 +150,53 @@ TEST_F(BlobFilesystemFakeTests, TruncateShrinksTheLogicalSize) {
     EXPECT_EQ(m_fs->GetFileSize(Path("a.log")), 4);
 }
 
+TEST_F(BlobFilesystemFakeTests, TruncateToALargerSizeIsRejectedAndKeepsTheContent) {
+    Write("a.log", "0123456789");
+
+    EXPECT_THROW(m_fs->Truncate(Path("a.log"), 4096), std::invalid_argument);
+
+    EXPECT_EQ(m_fs->GetFileSize(Path("a.log")), 10);
+    EXPECT_EQ(Read("a.log"), "0123456789");
+}
+TEST_F(BlobFilesystemFakeTests, TruncateDropsTheCachedCopyOfTheFile) {
+    const auto cacheDir = std::filesystem::temp_directory_path() / ("aveva_truncate_cache_" + m_prefix.substr(0, 8));
+    std::filesystem::create_directories(cacheDir);
+    struct Cleanup {
+        std::filesystem::path Path;
+        ~Cleanup() {
+            std::error_code ec;
+            std::filesystem::remove_all(Path, ec);
+        }
+    } cleanup{cacheDir};
+    const auto cacheDirString = cacheDir.string();
+    FakeFilesystem cached(
+        m_runtime, Container, AccountUrl, AccountKey, 4096, 1024,
+        std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>(),
+        std::string_view(cacheDirString));
+    {
+        auto writer = cached.CreateWriteableFile(Path("t.sst"));
+        const std::string content(1024, 'C');
+        writer.Append(std::span<const char>(content.data(), content.size()));
+        writer.Close();
+    }
+    auto file = cached.CreateReadableFile(Path("t.sst"));
+    std::vector<char> buffer(1024);
+
+    // The cache downloads a file in the background on its second access.
+    std::optional<size_t> hit;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (!hit && std::chrono::steady_clock::now() < deadline) {
+        hit = file.TryReadFromCache(0, static_cast<int64_t>(buffer.size()), buffer.data());
+        if (!hit) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+    ASSERT_TRUE(hit.has_value()) << "File was not cached within the timeout";
+
+    cached.Truncate(Path("t.sst"), 512);
+
+    EXPECT_FALSE(file.TryReadFromCache(0, 512, buffer.data()).has_value());
+}
 TEST_F(BlobFilesystemFakeTests, FailedTruncateResizeKeepsTheOriginalLogicalSize) {
     Write("a.log", "0123456789");
     m_server->Fault = [](const auto operation) -> std::optional<AzureClient::BlobStorageError> {
@@ -298,6 +349,25 @@ TEST_F(BlobFilesystemFakeTests, FailureToDeleteTheSourceKeepsTheNewDestinationAn
     EXPECT_EQ(children, (std::vector<std::string>{"new", "old"}));
 }
 
+TEST_F(BlobFilesystemFakeTests, FailureOfTheFinalSizeCommitLeavesTheOverwrittenDestinationEmptyNotMixed) {
+    Write("d/old", "source content");
+    Write("d/new", "original destination");
+    int sizeWrites = 0;
+    m_server->Fault = [&sizeWrites](const auto operation) -> std::optional<AzureClient::BlobStorageError> {
+        // The first size write belongs to the temporary blob; the second is the destination's final commit.
+        if (operation == FakeBlobServer::Operation::SetMetadata && ++sizeWrites == 2) {
+            return FakeBlobServer::Error(400U, "InvalidInput");
+        }
+        return std::nullopt;
+    };
+
+    EXPECT_ANY_THROW(m_fs->RenameFile(Path("d/old"), Path("d/new")));
+
+    m_server->Fault = nullptr;
+    const auto size = m_fs->GetFileSize(Path("d/new"));
+    EXPECT_EQ(size, 0);
+    EXPECT_EQ(Read("d/old"), "source content");
+}
 TEST_F(BlobFilesystemFakeTests, RenameOverAnExistingDestinationReplacesItsContent) {
     Write("d/old", "short");
     Write("d/new", "a much longer original destination");

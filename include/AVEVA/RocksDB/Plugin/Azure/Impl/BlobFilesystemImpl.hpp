@@ -180,6 +180,7 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     [[nodiscard]] bool DeleteFile(const std::string& filePath) const;
     // Returns 0 when nothing is left under the directory; otherwise a non-zero value (not an exact count).
     [[nodiscard]] size_t DeleteDir(const std::string& directoryPath) const;
+    // Shrinks the file; throws std::invalid_argument when `size` exceeds the current size (extending is unsupported).
     void Truncate(const std::string& filePath, int64_t size) const;
     [[nodiscard]] int64_t GetFileSize(const std::string& filePath) const;
     [[nodiscard]] uint64_t GetFileModificationTime(const std::string& filePath) const;
@@ -202,7 +203,7 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     struct ResolvedBlob {
         std::string_view Prefix;
         std::string_view RealPath;
-        std::unique_ptr<PageBlobClientOn<THttp>> Blob;
+        PageBlobClientOn<THttp> Blob;
     };
     [[nodiscard]] ResolvedBlob ResolveBlob(const std::string& path) const;
     void EnsureLiveness(std::source_location location = std::source_location::current()) const;

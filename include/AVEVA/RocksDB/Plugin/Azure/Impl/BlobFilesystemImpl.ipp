@@ -210,9 +210,13 @@ BasicBlobFilesystemImpl<THttp>::CreateReadableFile(const std::string& filePath) 
     EnsureLiveness();
 
     auto [prefix, realPath, blob] = ResolveBlob(filePath);
-    return ReadableFileType{
-        realPath, m_runtime,    std::move(blob), BlobFilesystemDetail::FindCache(m_fileCaches, prefix),
-        m_logger, m_asyncReads, m_prefetchBytes};
+    return ReadableFileType{realPath,
+                            m_runtime,
+                            std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)),
+                            BlobFilesystemDetail::FindCache(m_fileCaches, prefix),
+                            m_logger,
+                            m_asyncReads,
+                            m_prefetchBytes};
 }
 
 template <typename THttp>
@@ -229,17 +233,16 @@ BasicBlobFilesystemImpl<THttp>::CreateWriteableFile(const std::string& filePath)
     const auto [initialSize, bufferSize] =
         BlobFilesystemDetail::SizingFor(filePath, m_dataFileInitialSize, m_dataFileBufferSize);
 
-    auto [prefix, realPath, clientPtr] = ResolveBlob(filePath);
+    auto [prefix, realPath, blob] = ResolveBlob(filePath);
 
-    auto& client = *clientPtr;
     // Creating a writeable file always provides a "new" file; the overwriting create gives exactly that, with a
     // known size and capacity, in a single request.
-    BlobOperations::CreateOrReplace(*m_runtime, client, initialSize);
+    BlobOperations::CreateOrReplace(*m_runtime, blob, initialSize);
     const int64_t capacity = initialSize;
 
     return WriteableFileType{realPath,
                              m_runtime,
-                             std::move(clientPtr),
+                             std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)),
                              BlobFilesystemDetail::FindCache(m_fileCaches, prefix),
                              m_logger,
                              bufferSize,
@@ -251,11 +254,11 @@ typename BasicBlobFilesystemImpl<THttp>::ReadWriteFileType
 BasicBlobFilesystemImpl<THttp>::CreateReadWriteFile(const std::string& filePath) {
     EnsureLiveness();
 
-    auto [prefix, realPath, clientPtr] = ResolveBlob(filePath);
+    auto [prefix, realPath, blob] = ResolveBlob(filePath);
 
-    BlobOperations::CreateIfNotExists(*m_runtime, *clientPtr, Configuration::PageBlob::DefaultSize);
+    BlobOperations::CreateIfNotExists(*m_runtime, blob, Configuration::PageBlob::DefaultSize);
 
-    return ReadWriteFileType{realPath, m_runtime, std::move(clientPtr),
+    return ReadWriteFileType{realPath, m_runtime, std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)),
                              BlobFilesystemDetail::FindCache(m_fileCaches, prefix), m_logger};
 }
 
@@ -264,13 +267,16 @@ typename BasicBlobFilesystemImpl<THttp>::WriteableFileType
 BasicBlobFilesystemImpl<THttp>::ReopenWriteableFile(const std::string& filePath) {
     EnsureLiveness();
 
-    auto [prefix, realPath, client] = ResolveBlob(filePath);
+    auto [prefix, realPath, blob] = ResolveBlob(filePath);
     const auto [initialSize, bufferSize] =
         BlobFilesystemDetail::SizingFor(filePath, m_dataFileInitialSize, m_dataFileBufferSize);
 
-    return WriteableFileType{realPath,          m_runtime,
-                             std::move(client), BlobFilesystemDetail::FindCache(m_fileCaches, prefix),
-                             m_logger,          static_cast<int64_t>(bufferSize)};
+    return WriteableFileType{realPath,
+                             m_runtime,
+                             std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)),
+                             BlobFilesystemDetail::FindCache(m_fileCaches, prefix),
+                             m_logger,
+                             static_cast<int64_t>(bufferSize)};
 }
 
 template <typename THttp>
@@ -278,16 +284,15 @@ typename BasicBlobFilesystemImpl<THttp>::WriteableFileType
 BasicBlobFilesystemImpl<THttp>::ReuseWritableFile(const std::string& filePath) {
     EnsureLiveness();
 
-    auto [prefix, realPath, clientPtr] = ResolveBlob(filePath);
+    auto [prefix, realPath, blob] = ResolveBlob(filePath);
     const auto [initialSize, bufferSize] =
         BlobFilesystemDetail::SizingFor(filePath, m_dataFileInitialSize, m_dataFileBufferSize);
 
-    auto& client = *clientPtr;
-    BlobOperations::CreateOrReplace(*m_runtime, client, initialSize);
+    BlobOperations::CreateOrReplace(*m_runtime, blob, initialSize);
 
     return WriteableFileType{realPath,
                              m_runtime,
-                             std::move(clientPtr),
+                             std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)),
                              BlobFilesystemDetail::FindCache(m_fileCaches, prefix),
                              m_logger,
                              static_cast<int64_t>(bufferSize),
@@ -299,12 +304,13 @@ LoggerImpl BasicBlobFilesystemImpl<THttp>::CreateLogger(const std::string& fileP
                                                         const std::chrono::seconds cooldown) {
     EnsureLiveness();
 
-    auto [prefix, realPath, clientPtr] = ResolveBlob(filePath);
+    auto [prefix, realPath, blob] = ResolveBlob(filePath);
 
-    BlobOperations::CreateIfNotExists(*m_runtime, *clientPtr, Configuration::PageBlob::DefaultSize);
+    BlobOperations::CreateIfNotExists(*m_runtime, blob, Configuration::PageBlob::DefaultSize);
 
     auto impl = std::make_unique<FileLogSink<WriteableFileType>>(std::make_unique<WriteableFileType>(
-        realPath, m_runtime, std::move(clientPtr), nullptr, m_logger, Configuration::PageBlob::DefaultSize));
+        realPath, m_runtime, std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)), nullptr, m_logger,
+        Configuration::PageBlob::DefaultSize));
     return LoggerImpl{
         std::move(impl), logLevel,
         std::make_unique<LogRateLimiter>(
@@ -316,11 +322,12 @@ std::shared_ptr<typename BasicBlobFilesystemImpl<THttp>::LockFileType>
 BasicBlobFilesystemImpl<THttp>::LockFile(const std::string& filePath) {
     EnsureLiveness();
 
-    auto [prefix, realPath, client] = ResolveBlob(filePath);
+    auto [prefix, realPath, blob] = ResolveBlob(filePath);
 
-    BlobOperations::CreateIfNotExists(*m_runtime, *client, Configuration::PageBlob::DefaultSize);
-    auto lockFile = std::make_shared<LockFileType>(m_runtime, std::move(client), Configuration::LeaseLength, m_logger,
-                                                   std::string(realPath), m_lockAcquireTimeout);
+    BlobOperations::CreateIfNotExists(*m_runtime, blob, Configuration::PageBlob::DefaultSize);
+    auto lockFile = std::make_shared<LockFileType>(m_runtime, std::make_unique<PageBlobClientOn<THttp>>(std::move(blob)),
+                                                   Configuration::LeaseLength, m_logger, std::string(realPath),
+                                                   m_lockAcquireTimeout);
     // Lock() can retry for the full lease length. The mutex must not be held across it, or the renewal thread
     // would stall and the leases this Env already holds would expire.
     if (lockFile->Lock()) {
@@ -361,9 +368,8 @@ BasicBlobFilesystemImpl<THttp>::CreateDirectory(const std::string& directoryPath
 template <typename THttp> bool BasicBlobFilesystemImpl<THttp>::FileExists(const std::string& name) {
     EnsureLiveness();
 
-    auto [prefix, realPath, clientPtr] = ResolveBlob(name);
+    auto [prefix, realPath, client] = ResolveBlob(name);
 
-    auto& client = *clientPtr;
     auto exists = client.ExistsAsync(AzureClient::block_on);
     if (!exists.has_value()) {
         ThrowRequestFailed(exists.error());
@@ -448,8 +454,7 @@ BasicBlobFilesystemImpl<THttp>::GetChildrenFileAttributes(const std::string& dir
 template <typename THttp> bool BasicBlobFilesystemImpl<THttp>::DeleteFile(const std::string& filePath) const {
     EnsureLiveness();
 
-    auto [prefix, realPath, clientPtr] = ResolveBlob(filePath);
-    auto& client = *clientPtr;
+    auto [prefix, realPath, client] = ResolveBlob(filePath);
     const auto res = CallResponse(client, [&](auto token) { return client.DeleteIfExistsAsync(token); });
 
     auto cache = m_fileCaches.find(prefix);
@@ -510,20 +515,36 @@ template <typename THttp> size_t BasicBlobFilesystemImpl<THttp>::DeleteDir(const
     return remaining;
 }
 
+// Shrinks the file and drops its cached copy, which could otherwise serve bytes past the new end. Like
+// WriteableFile::Truncate this only shrinks: asking for a larger size throws std::invalid_argument (surfaced to
+// RocksDB as IOStatus::InvalidArgument) instead of reporting success for a call that would change nothing.
+// Truncating to the current size is a no-op.
 template <typename THttp>
 void BasicBlobFilesystemImpl<THttp>::Truncate(const std::string& filePath, int64_t size) const {
     EnsureLiveness();
 
-    auto [prefix, realPath, clientPtr] = ResolveBlob(filePath);
+    auto [prefix, realPath, client] = ResolveBlob(filePath);
 
-    auto& client = *clientPtr;
     const auto info = BlobOperations::GetInfo(client);
-    if (info.Size > size) {
-        // Resize before recording the new logical size: if the resize fails the metadata still matches the blob.
-        // The service only accepts page-aligned blob sizes; the logical size lives in the metadata set afterwards.
-        const auto [partialPage, alignedSize] = BlobHelpers::RoundToEndOfNearestPage(size);
-        BlobOperations::SetCapacity(*m_runtime, client, alignedSize);
-        BlobOperations::SetSize(*m_runtime, client, size);
+    if (size > info.Size) {
+        BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
+            << "Refusing to extend '" << realPath << "' from " << info.Size << " to " << size
+            << " bytes: Truncate can only shrink a file";
+        throw std::invalid_argument("Truncate can only shrink the file. Cannot expand from " +
+                                    std::to_string(info.Size) + " to " + std::to_string(size));
+    }
+    if (info.Size == size) {
+        return;
+    }
+
+    // Resize before recording the new logical size: if the resize fails the metadata still matches the blob.
+    // The service only accepts page-aligned blob sizes; the logical size lives in the metadata set afterwards.
+    const auto [partialPage, alignedSize] = BlobHelpers::RoundToEndOfNearestPage(size);
+    BlobOperations::SetCapacity(*m_runtime, client, alignedSize);
+    BlobOperations::SetSize(*m_runtime, client, size);
+
+    if (const auto cache = m_fileCaches.find(prefix); cache != m_fileCaches.end()) {
+        cache->second->RemoveFile(std::string(realPath));
     }
 }
 
@@ -532,15 +553,15 @@ template <typename THttp> int64_t BasicBlobFilesystemImpl<THttp>::GetFileSize(co
 
     auto [prefix, realPath, client] = ResolveBlob(filePath);
 
-    return BlobOperations::GetSize(*client);
+    return BlobOperations::GetSize(client);
 }
 
 template <typename THttp>
 uint64_t BasicBlobFilesystemImpl<THttp>::GetFileModificationTime(const std::string& filePath) const {
     EnsureLiveness();
 
-    const auto blob = ResolveBlob(filePath);
-    return static_cast<uint64_t>(BlobOperations::GetInfo(*blob.Blob).LastModified.time_since_epoch().count());
+    auto blob = ResolveBlob(filePath);
+    return static_cast<uint64_t>(BlobOperations::GetInfo(blob.Blob).LastModified.time_since_epoch().count());
 }
 
 template <typename THttp> size_t BasicBlobFilesystemImpl<THttp>::GetLeaseClientCount() {
@@ -557,8 +578,11 @@ template <typename THttp> size_t BasicBlobFilesystemImpl<THttp>::GetLeaseClientC
 ///
 /// The storage service has no atomic blob replace, so an existing destination is only overwritten after the
 /// content has been fully copied to a temporary blob: a failure while copying leaves the destination and the
-/// source untouched. The final commit (copy from the temporary blob over the destination) is not atomic; if it
-/// fails the source is still intact and the destination may hold partial data, so the rename can be retried.
+/// source untouched. The final commit (copy from the temporary blob over the destination) is not atomic, but it is
+/// ordered so a torn commit is never mistaken for data: the destination is re-created empty with a logical size of
+/// 0 (one request that also drops the old content), its pages are copied, and the real logical size is written
+/// last. A failure in between therefore leaves an empty destination (BlobFilesystem rejects an empty CURRENT
+/// explicitly) while the source is still intact, so the rename can be retried.
 /// A destination that does not exist is written directly and removed again on failure.
 /// </summary>
 template <typename THttp>
@@ -618,10 +642,12 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
             copyInto(tempClient);
 
             // Commit: replace the destination from the fully written temporary blob.
-            const auto tempInfo = BlobOperations::GetInfo(tempClient);
-            BlobOperations::CreateOrReplace(*m_runtime, destClient, tempInfo.Capacity);
-            if (!BlobOperations::CopyPagesServerSide(*m_runtime, tempClient, destClient, size, tempInfo.ETag)) {
-                BlobOperations::CopyPages(*m_runtime, tempClient, destClient, size, tempInfo.ETag);
+            // The temporary blob's capacity is the source's, already known; only its current ETag is needed to
+            // condition the copy. The destination's logical size stays 0 until the last step.
+            const auto tempEtag = BlobOperations::GetEtag(tempClient);
+            BlobOperations::CreateOrReplace(*m_runtime, destClient, cap);
+            if (!BlobOperations::CopyPagesServerSide(*m_runtime, tempClient, destClient, size, tempEtag)) {
+                BlobOperations::CopyPages(*m_runtime, tempClient, destClient, size, tempEtag);
             }
             BlobOperations::SetSize(*m_runtime, destClient, size);
         }
@@ -703,8 +729,7 @@ template <typename THttp>
 typename BasicBlobFilesystemImpl<THttp>::ResolvedBlob
 BasicBlobFilesystemImpl<THttp>::ResolveBlob(const std::string& path) const {
     const auto [prefix, realPath] = StorageAccount::StripPrefix(path);
-    return {prefix, realPath,
-            std::make_unique<PageBlobClientOn<THttp>>(GetContainer(prefix)->GetPageBlobClient(std::string(realPath)))};
+    return {prefix, realPath, GetContainer(prefix)->GetPageBlobClient(std::string(realPath))};
 }
 
 template <typename THttp>

@@ -85,6 +85,9 @@ template <class F> rocksdb::IOStatus BlobFilesystem::Guard(std::string_view oper
     } catch (const RequestFailedException& ex) {
         LogRequestFailed(ex, path);
         return AzureErrorTranslator::IOStatusFromError(ex);
+    } catch (const std::invalid_argument& ex) {
+        BOOST_LOG_SEV(*m_logger, error) << operation << " rejected: " << ex.what();
+        return rocksdb::IOStatus::InvalidArgument(ex.what());
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(*m_logger, error) << operation << " failed: " << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());
@@ -100,7 +103,17 @@ rocksdb::IOStatus BlobFilesystem::NewSequentialFile(const std::string& f, const 
                                                     std::unique_ptr<rocksdb::FSSequentialFile>* r,
                                                     rocksdb::IODebugContext*) {
     return Guard("NewSequentialFile", f, [&]() -> rocksdb::IOStatus {
-        *r = std::unique_ptr<rocksdb::FSSequentialFile>(new SequentialFile(m_filesystem->CreateSequentialFile(f)));
+        auto file = m_filesystem->CreateSequentialFile(f);
+        // RenameFile commits over an existing destination by resetting its logical size to 0 and writing it last, so
+        // an interrupted replace of CURRENT reads as empty. Say so explicitly rather than letting RocksDB report a
+        // generic parse failure.
+        if (std::string_view(f).ends_with("/CURRENT") && file.GetSize() == 0) {
+            BOOST_LOG_SEV(*m_logger, error)
+                << "'" << f << "' is empty; a rename over it was probably interrupted. Restore it from the manifest "
+                << "name before reopening the database";
+            return rocksdb::IOStatus::Corruption("CURRENT is empty: " + f);
+        }
+        *r = std::unique_ptr<rocksdb::FSSequentialFile>(new SequentialFile(std::move(file)));
         return rocksdb::IOStatus::OK();
     });
 }

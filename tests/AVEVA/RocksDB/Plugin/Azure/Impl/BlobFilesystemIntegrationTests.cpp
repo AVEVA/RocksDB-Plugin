@@ -613,7 +613,7 @@ TEST_F(BlobFilesystemIntegrationTests, Truncate_ReducesFileSize) {
     EXPECT_EQ(1024, m_filesystem->GetFileSize(path));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, Truncate_ToLargerSize_DoesNothing) {
+TEST_F(BlobFilesystemIntegrationTests, Truncate_ToLargerSize_IsRejected) {
     // Arrange
     std::vector<char> testData(1024, 'X');
     CreateBlobWithData(testData);
@@ -621,10 +621,8 @@ TEST_F(BlobFilesystemIntegrationTests, Truncate_ToLargerSize_DoesNothing) {
 
     EXPECT_EQ(1024, m_filesystem->GetFileSize(path));
 
-    // Act
-    m_filesystem->Truncate(path, 2048);
-
-    // Assert - size should remain unchanged
+    // Act / Assert - extending is not supported and the size remains unchanged
+    EXPECT_THROW(m_filesystem->Truncate(path, 2048), std::invalid_argument);
     EXPECT_EQ(1024, m_filesystem->GetFileSize(path));
 }
 
