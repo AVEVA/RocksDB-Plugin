@@ -80,6 +80,9 @@ target_link_libraries(aveva-rocksdb-plugin-azure-impl PRIVATE
 )
 # Boost.Asio/Winapi/Atomic must agree on the target Windows version across every TU.
 target_compile_definitions(aveva-rocksdb-plugin-azure-impl PUBLIC $<$<PLATFORM_ID:Windows>:_WIN32_WINNT=0x0A00>)
+if(MSVC)
+    target_compile_options(aveva-rocksdb-plugin-azure-impl PRIVATE /bigobj)
+endif()
 aveva_install_library(aveva-rocksdb-plugin-azure-impl)
 target_compile_features(aveva-rocksdb-plugin-azure-impl PUBLIC cxx_std_23)
 set_target_properties(aveva-rocksdb-plugin-azure-impl PROPERTIES

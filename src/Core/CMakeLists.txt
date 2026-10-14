@@ -56,6 +56,9 @@ target_link_libraries(aveva-rocksdb-plugin-core PUBLIC
     Boost::static_string
     RocksDB::rocksdb
 )
+if(MSVC)
+    target_compile_options(aveva-rocksdb-plugin-core PRIVATE /bigobj)
+endif()
 aveva_install_library(aveva-rocksdb-plugin-core)
 target_compile_features(aveva-rocksdb-plugin-core PUBLIC cxx_std_23)
 set_target_properties(aveva-rocksdb-plugin-core PROPERTIES

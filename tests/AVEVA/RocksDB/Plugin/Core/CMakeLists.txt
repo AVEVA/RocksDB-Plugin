@@ -13,5 +13,8 @@ add_executable(aveva-rocksdb-plugin-core-tests
 )
 
 target_link_libraries(aveva-rocksdb-plugin-core-tests PRIVATE GTest::gtest GTest::gmock aveva-rocksdb-plugin-core aveva-rocksdb-plugin-core-mocks)
+if(MSVC)
+    target_compile_options(aveva-rocksdb-plugin-core-tests PRIVATE /bigobj)
+endif()
 include(GoogleTest)
 gtest_discover_tests(aveva-rocksdb-plugin-core-tests)

@@ -240,7 +240,7 @@ Compare the two output files side by side.
 
 Check these signals, in priority order, for follow-up investigation:
 
-1. **`rocksdb.db.write.micros` P50/P99, against the local baseline.** Manual runs show the plugin's per-write overhead near 40-50 ms median, against sub-millisecond on local disk. Network round-trips to Azure cause most of this cost. If the gap does not shrink as `--value_size` grows, the cost stays fixed per request and does not grow with byte count. Try this fix first: combine more writes into each Azure request, through a larger WAL flush buffer and fewer, larger page-blob writes.
+1. **`rocksdb.db.write.micros` P50/P99, against the local baseline.** In illustrative manual runs (machine, Azure region and commit were not recorded, so treat the numbers as indicative only), the plugin's per-write overhead was near 40-50 ms median, against sub-millisecond on local disk. Record your own machine, region and commit when you compare results. Network round-trips to Azure cause most of this cost. If the gap does not shrink as `--value_size` grows, the cost stays fixed per request and does not grow with byte count. Try this fix first: combine more writes into each Azure request, through a larger WAL flush buffer and fewer, larger page-blob writes.
 
 2. **`rocksdb.manifest.file.sync.micros`.** This event is infrequent, but also network-bound. Optimize this path only when MANIFEST churn is high, for example under many small DB reopens or compactions.
 

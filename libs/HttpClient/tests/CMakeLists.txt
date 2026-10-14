@@ -27,6 +27,9 @@ add_executable(aveva-http-client-tests
 # headers that live alongside the library sources.
 target_include_directories(aveva-http-client-tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 target_compile_features(aveva-http-client-tests PRIVATE cxx_std_23)
+if(MSVC)
+    target_compile_options(aveva-http-client-tests PRIVATE /bigobj)
+endif()
 target_link_libraries(aveva-http-client-tests
 	PRIVATE aveva::http-client Boost::asio Boost::beast Boost::intrusive Boost::unordered Boost::url GTest::gtest_main OpenSSL::SSL OpenSSL::Crypto
 )

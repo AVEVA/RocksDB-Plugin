@@ -5,6 +5,9 @@ find_package(RocksDB CONFIG REQUIRED)
 
 add_executable(aveva_db_bench BenchmarkRunner.cpp)
 target_compile_features(aveva_db_bench PRIVATE cxx_std_23)
+if(MSVC)
+    target_compile_options(aveva_db_bench PRIVATE /bigobj)
+endif()
 target_link_libraries(aveva_db_bench PRIVATE
     aveva::rocksdb-plugin-azure
     RocksDB::rocksdb

@@ -48,6 +48,9 @@ target_link_libraries(aveva-rocksdb-plugin-azure
     PRIVATE
         aveva::rocksdb-plugin-azure-impl
 )
+if(MSVC)
+    target_compile_options(aveva-rocksdb-plugin-azure PRIVATE /bigobj)
+endif()
 aveva_install_library(aveva-rocksdb-plugin-azure)
 target_compile_features(aveva-rocksdb-plugin-azure PUBLIC cxx_std_23)
 set_target_properties(aveva-rocksdb-plugin-azure PROPERTIES
