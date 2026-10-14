@@ -11,13 +11,35 @@
 
 #include <boost/asio/awaitable.hpp>
 
+#include <chrono>
+#include <future>
 #include <optional>
 #include <regex>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
 
 namespace AVEVA::AzureClient::Tests {
+// Assertion that `future` is already satisfied. Completions are driven by Poll(), so there is nothing to wait
+// for; a hung test is caught by the CTest timeout rather than a fixed sleep budget.
+template <class T> [[nodiscard]] ::testing::AssertionResult ExpectReady(const std::future<T>& future) {
+    if (future.wait_for(std::chrono::seconds{0}) == std::future_status::ready) {
+        return ::testing::AssertionSuccess();
+    }
+    return ::testing::AssertionFailure() << "future was not ready after the client was polled";
+}
+
+// Drives the client once and returns the value of a use_future completion. Throws (which gtest reports as a
+// failure) instead of blocking when the completion did not run.
+template <class T> [[nodiscard]] T PollAndGet(FakeHttpClient& client, std::future<T>& future) {
+    client.Poll();
+    if (!ExpectReady(future)) {
+        throw std::runtime_error("future was not ready after the client was polled");
+    }
+    return future.get();
+}
+
 // Awaits the deferred operation produced by `makeOperation()` and stores its result through
 // `out`. This is a free coroutine taking a pointer rather than a capturing coroutine lambda, so
 // the coroutine frame never outlives captured references (cppcoreguidelines-avoid-capturing-

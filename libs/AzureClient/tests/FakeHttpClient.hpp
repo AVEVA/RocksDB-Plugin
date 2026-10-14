@@ -20,7 +20,11 @@
 #include <AVEVA/AzureClient/Detail/DownloadWriterPool.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <boost/asio/any_io_executor.hpp>
+#include <boost/asio/error.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/io_context.hpp>
@@ -62,6 +66,68 @@ class FakeHttpClient final {
     FakeHttpClient& operator=(const FakeHttpClient&) = delete;
     FakeHttpClient(FakeHttpClient&&) = delete;
     FakeHttpClient& operator=(FakeHttpClient&&) = delete;
+
+    // The pipeline's retry timer. It always records the delay it was asked to wait. By default it then really
+    // waits; while an InstantRetryTimers guard is alive it fires on the next poll, so a test can assert the computed
+    // delay without sleeping.
+    class RetryTimer {
+      public:
+        explicit RetryTimer(executor_type executor) : m_executor(executor), m_real(executor) {}
+        ~RetryTimer() { cancel(); }
+        RetryTimer(const RetryTimer&) = delete;
+        RetryTimer& operator=(const RetryTimer&) = delete;
+
+        void expires_after(std::chrono::nanoseconds delay) {
+            {
+                std::scoped_lock lock(DelayMutex());
+                Delays().push_back(std::chrono::duration_cast<std::chrono::milliseconds>(delay));
+            }
+            m_real.expires_after(delay);
+        }
+
+        template <typename Handler> void async_wait(Handler&& handler) {
+            if (!InstantRetryFlag().load()) {
+                m_real.async_wait(std::forward<Handler>(handler));
+                return;
+            }
+            m_pending = std::make_shared<std::atomic<bool>>(false);
+            boost::asio::post(m_executor, [cancelled = m_pending, h = std::forward<Handler>(handler)]() mutable {
+                h(cancelled->load() ? boost::asio::error::operation_aborted : boost::system::error_code{});
+            });
+        }
+
+        std::size_t cancel() {
+            if (m_pending) {
+                m_pending->store(true);
+            }
+            return m_real.cancel();
+        }
+
+      private:
+        executor_type m_executor;
+        boost::asio::steady_timer m_real;
+        std::shared_ptr<std::atomic<bool>> m_pending;
+    };
+    using retry_timer_type = RetryTimer;
+
+    // Makes retry timers fire immediately for as long as it lives.
+    class InstantRetryTimers {
+      public:
+        InstantRetryTimers() { InstantRetryFlag().store(true); }
+        ~InstantRetryTimers() { InstantRetryFlag().store(false); }
+        InstantRetryTimers(const InstantRetryTimers&) = delete;
+        InstantRetryTimers& operator=(const InstantRetryTimers&) = delete;
+    };
+
+    // Every retry delay requested by any pipeline, oldest first.
+    static std::vector<std::chrono::milliseconds> RetryDelays() {
+        std::scoped_lock lock(DelayMutex());
+        return Delays();
+    }
+    static void ClearRetryDelays() {
+        std::scoped_lock lock(DelayMutex());
+        Delays().clear();
+    }
 
     // Return a snapshot of live instances. Tests may call this to Poll all clients.
     static std::vector<FakeHttpClient*> Instances() { return s_instances; }
@@ -558,6 +624,18 @@ class FakeHttpClient final {
 
     // Track live instances so test helpers can Poll() all clients automatically when needed.
     static inline std::vector<FakeHttpClient*> s_instances;
+    static std::mutex& DelayMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
+    static std::vector<std::chrono::milliseconds>& Delays() {
+        static std::vector<std::chrono::milliseconds> delays;
+        return delays;
+    }
+    static std::atomic<bool>& InstantRetryFlag() {
+        static std::atomic<bool> flag{false};
+        return flag;
+    }
 
     // Last member, so the pump thread is joined before anything it touches is destroyed.
     std::jthread m_pump;

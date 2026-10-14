@@ -719,7 +719,8 @@ TEST(CredentialsTests, AzurePipelinesCredentialHonorsRetryAfterOnTheOidcRequest)
     AzurePipelinesCredential credential{httpClient, options};
 
     std::optional<TokenResult> result;
-    const auto start = std::chrono::steady_clock::now();
+    FakeHttpClient::ClearRetryDelays();
+    const FakeHttpClient::InstantRetryTimers instantTimers;
     credential.GetTokenAsync(StorageScope(), [&](std::error_code error, AccessToken token) {
         result = TokenResult{.Error = error, .Token = std::move(token)};
     });
@@ -727,7 +728,7 @@ TEST(CredentialsTests, AzurePipelinesCredentialHonorsRetryAfterOnTheOidcRequest)
 
     EXPECT_FALSE(result->Error);
     EXPECT_EQ(result->Token.Token, "tok");
-    EXPECT_GE(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(900));
+    EXPECT_EQ(FakeHttpClient::RetryDelays(), (std::vector<std::chrono::milliseconds>{std::chrono::seconds{1}}));
 }
 
 TEST(CredentialsTests, AzurePipelinesCredentialDoesNotRetryNonTransientOidcFailures) {

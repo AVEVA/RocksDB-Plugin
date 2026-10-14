@@ -698,9 +698,7 @@ TEST(BlockBlobClientTests, ExistsAsyncAcceptsUseFutureCompletionToken) {
 
     std::future<std::expected<Response<bool>, BlobStorageError>> future = client.ExistsAsync(boost::asio::use_future);
 
-    httpClient.Poll(); // drive the posted (async) completion so the future becomes ready (T26)
-    ASSERT_EQ(future.wait_for(std::chrono::seconds{30}), std::future_status::ready);
-    std::expected<Response<bool>, BlobStorageError> result = future.get();
+    const auto result = PollAndGet(httpClient, future);
     ASSERT_TRUE(result.has_value());
     EXPECT_TRUE(result->Value());
 }
@@ -713,9 +711,7 @@ TEST(BlockBlobClientTests, DownloadAsyncAcceptsUseFutureCompletionToken) {
     std::future<std::expected<Response<DownloadBlobResult>, BlobStorageError>> future =
         client.DownloadAsync(AVEVA::AzureClient::DownloadBlobOptions{}, boost::asio::use_future);
 
-    httpClient.Poll(); // drive the posted (async) completion so the future becomes ready (T26)
-    ASSERT_EQ(future.wait_for(std::chrono::seconds{30}), std::future_status::ready);
-    std::expected<Response<DownloadBlobResult>, BlobStorageError> result = future.get();
+    const auto result = PollAndGet(httpClient, future);
     ASSERT_TRUE(result.has_value());
     const auto& content = result->Value().Content;
     EXPECT_EQ(std::string(content.data(), content.size()), "hello");
@@ -729,9 +725,7 @@ TEST(BlockBlobClientTests, UploadAsyncAcceptsUseFutureCompletionTokenAndReportsF
     std::future<std::expected<Response<UploadBlockBlobResult>, BlobStorageError>> future = client.UploadAsync(
         std::span<const std::byte>{}, AVEVA::AzureClient::UploadBlockBlobOptions{}, boost::asio::use_future);
 
-    httpClient.Poll(); // drive the posted (async) completion so the future becomes ready (T26)
-    ASSERT_EQ(future.wait_for(std::chrono::seconds{30}), std::future_status::ready);
-    std::expected<Response<UploadBlockBlobResult>, BlobStorageError> result = future.get();
+    const auto result = PollAndGet(httpClient, future);
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().Code, BlobStorageErrorCode::BlobAlreadyExists);
     EXPECT_EQ(result.error().RequestId, "upload-request");
@@ -745,9 +739,7 @@ TEST(BlockBlobClientTests, DeleteAsyncAcceptsUseFutureCompletionToken) {
     std::future<std::expected<Response<DeleteBlobResult>, BlobStorageError>> future =
         client.DeleteAsync(AVEVA::AzureClient::DeleteBlobOptions{}, boost::asio::use_future);
 
-    httpClient.Poll(); // drive the posted (async) completion so the future becomes ready (T26)
-    ASSERT_EQ(future.wait_for(std::chrono::seconds{30}), std::future_status::ready);
-    std::expected<Response<DeleteBlobResult>, BlobStorageError> const result = future.get();
+    const auto result = PollAndGet(httpClient, future);
     EXPECT_TRUE(result.has_value());
 }
 
@@ -759,9 +751,7 @@ TEST(BlockBlobClientTests, GetPropertiesAsyncAcceptsUseFutureCompletionToken) {
     std::future<std::expected<Response<BlobProperties>, BlobStorageError>> future =
         client.GetPropertiesAsync(AVEVA::AzureClient::GetBlobPropertiesOptions{}, boost::asio::use_future);
 
-    httpClient.Poll(); // drive the posted (async) completion so the future becomes ready (T26)
-    ASSERT_EQ(future.wait_for(std::chrono::seconds{30}), std::future_status::ready);
-    std::expected<Response<BlobProperties>, BlobStorageError> const result = future.get();
+    const auto result = PollAndGet(httpClient, future);
     EXPECT_TRUE(result.has_value());
 }
 

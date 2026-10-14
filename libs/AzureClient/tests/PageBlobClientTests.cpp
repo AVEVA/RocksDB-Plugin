@@ -780,9 +780,7 @@ TEST(PageBlobClientTests, DownloadAsyncAcceptsUseFutureCompletionToken) {
     std::future<std::expected<Response<DownloadBlobResult>, BlobStorageError>> future =
         client.DownloadAsync(AVEVA::AzureClient::DownloadBlobOptions{}, boost::asio::use_future);
 
-    httpClient.Poll(); // drive the posted (async) completion so the future becomes ready (T26)
-    ASSERT_EQ(future.wait_for(std::chrono::seconds{30}), std::future_status::ready);
-    std::expected<Response<DownloadBlobResult>, BlobStorageError> result = future.get();
+    const auto result = PollAndGet(httpClient, future);
     ASSERT_TRUE(result.has_value());
     const auto& content = result->Value().Content;
     EXPECT_EQ(std::string(content.data(), content.size()), "hello");
@@ -797,9 +795,7 @@ TEST(PageBlobClientTests, UploadPagesAsyncAcceptsUseFutureCompletionTokenAndRepo
     std::future<std::expected<Response<UploadPagesResult>, BlobStorageError>> future = client.UploadPagesAsync(
         0, std::span<const std::byte>{content}, AVEVA::AzureClient::UploadPagesOptions{}, boost::asio::use_future);
 
-    httpClient.Poll(); // drive the posted (async) completion so the future becomes ready (T26)
-    ASSERT_EQ(future.wait_for(std::chrono::seconds{30}), std::future_status::ready);
-    std::expected<Response<UploadPagesResult>, BlobStorageError> result = future.get();
+    const auto result = PollAndGet(httpClient, future);
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().Code, BlobStorageErrorCode::BlobAlreadyExists);
     EXPECT_EQ(result.error().RequestId, "upload-pages-request");
@@ -813,9 +809,7 @@ TEST(PageBlobClientTests, ResizeAsyncAcceptsUseFutureCompletionToken) {
     std::future<std::expected<Response<ResizePageBlobResult>, BlobStorageError>> future =
         client.ResizeAsync(PageBlobPageSize, AVEVA::AzureClient::ResizePageBlobOptions{}, boost::asio::use_future);
 
-    httpClient.Poll(); // drive the posted (async) completion so the future becomes ready (T26)
-    ASSERT_EQ(future.wait_for(std::chrono::seconds{30}), std::future_status::ready);
-    std::expected<Response<ResizePageBlobResult>, BlobStorageError> const result = future.get();
+    const auto result = PollAndGet(httpClient, future);
     EXPECT_TRUE(result.has_value());
 }
 

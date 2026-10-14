@@ -107,6 +107,17 @@ inline void SetBearerAuthorization(HttpRequest& request, std::string_view token)
     });
 }
 
+// The timer that waits out a retry delay. A client type may name its own `retry_timer_type` so tests can observe
+// the requested delay without really waiting; every real client uses a steady_timer.
+template <class THttp> struct RetryTimerFor {
+    using type = boost::asio::steady_timer;
+};
+template <class THttp>
+    requires requires { typename THttp::retry_timer_type; }
+struct RetryTimerFor<THttp> {
+    using type = typename THttp::retry_timer_type;
+};
+
 template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
 class RetryOperation final : public std::enable_shared_from_this<RetryOperation<THttp, TCred, THandler>> {
   public:
@@ -509,7 +520,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     bool m_replaySafe;
     boost::asio::cancellation_slot m_parentSlot;
     boost::asio::cancellation_signal m_attemptSignal;
-    boost::asio::steady_timer m_timer;
+    typename RetryTimerFor<THttp>::type m_timer;
     boost::asio::steady_timer m_deadlineTimer;
     std::optional<std::chrono::milliseconds> m_totalDeadline;
     std::chrono::steady_clock::time_point m_start;

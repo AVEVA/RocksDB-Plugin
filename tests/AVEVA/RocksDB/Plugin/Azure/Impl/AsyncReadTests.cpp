@@ -211,10 +211,9 @@ TEST_F(AsyncReadTests, ReadAsync_RangeCoveredByPendingPrefetch_WaitsForItWithout
     auto req = MakeRequest(1100, scratch);
     CallbackRecord record;
     IoHandle handle;
-    auto done = std::async(std::launch::async, [&] { return Submit(file, req, record, handle); });
-
-    ASSERT_EQ(std::future_status::ready, done.wait_for(std::chrono::seconds(5)));
-    EXPECT_TRUE(done.get().ok());
+    // Submit must return without waiting for the held download; a regression that blocks here is caught by the
+    // CTest timeout rather than a fixed wall-clock budget.
+    EXPECT_TRUE(Submit(file, req, record, handle).ok());
     EXPECT_EQ(1U, m_deferredEnv.Blob->PendingDownloads());
     EXPECT_EQ(0, record.Calls.load());
 

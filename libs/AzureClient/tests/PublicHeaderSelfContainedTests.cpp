@@ -110,10 +110,16 @@ class Loopback {
         return "http://127.0.0.1:" + std::to_string(m_acceptor.local_endpoint().port());
     }
 
-    // The acceptor always has a pending accept, so run() would never return; spin until `done`.
+    // The acceptor always has a pending accept, so run() would never return. Instead each handler is run to
+    // completion and `done` re-checked, so the loop ends as soon as the work finishes; the deadline only bounds a
+    // hang and reports it as a failure rather than letting the following assertion fail without context.
     template <class TDone> void RunUntil(TDone done) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
-        while (!done() && std::chrono::steady_clock::now() < deadline) {
+        while (!done()) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                ADD_FAILURE() << "loopback operation did not complete within 10s (" << m_requests << " request(s) served)";
+                return;
+            }
             m_context.restart();
             m_context.run_one_for(std::chrono::milliseconds{50});
         }

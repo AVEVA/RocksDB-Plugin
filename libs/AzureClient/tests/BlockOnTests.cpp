@@ -3,6 +3,7 @@
 
 #include "FakeHttpClient.hpp"
 #include "TestFixtures.hpp"
+#include "TestHelpers.hpp"
 
 #include <AVEVA/AzureClient/BlockOn.hpp>
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
@@ -64,7 +65,7 @@ TEST(BlockOnTokenTests, ThrowsWithoutSendingWhenCalledOnTheClientsExecutor) {
     });
     httpClient.Poll();
 
-    ASSERT_EQ(future.wait_for(std::chrono::seconds{5}), std::future_status::ready);
+    ASSERT_TRUE(AVEVA::AzureClient::Tests::ExpectReady(future));
     EXPECT_TRUE(future.get());
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
