@@ -82,6 +82,13 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
             if (it == m_origins.end()) {
                 return;
             }
+            // After Close nothing may start: the owner may already be gone.
+            if (m_closed) {
+                if (it->second.active > 0) {
+                    --it->second.active;
+                }
+                return;
+            }
             if (it->second.waiters.empty()) {
                 assert(it->second.active > 0);
                 if (--it->second.active == 0) {
@@ -105,6 +112,9 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
         std::optional<Pending> aborted;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_closed) {
+                return;
+            }
             const auto it = m_origins.find(origin);
             if (it == m_origins.end()) {
                 return;

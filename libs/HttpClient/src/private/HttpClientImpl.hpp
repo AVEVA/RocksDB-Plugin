@@ -70,21 +70,30 @@ struct PendingRequest {
 /// </summary>
 /// <typeparam name="FaultPolicy">Provides <c>static void OnSubmit()</c>, called first thing in
 /// <see cref="Submit"/>; tests use it to make initiation throw. Production uses <see cref="NoFault"/>.</typeparam>
-template <typename FaultPolicy = NoFault> class BasicHttpClientImpl {
+template <typename FaultPolicy = NoFault>
+class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientCore<FaultPolicy>> {
   public:
     /// <summary>
-    /// Starts or aborts requests that passed through the limiter. Refers back to the owning Impl, which
-    /// closes the limiter before it is destroyed, so no request can reach a dead Impl.
+    /// Starts or aborts requests that passed through the limiter. Refers back to the core weakly, so a
+    /// slot released after the client is destroyed fails the request instead of touching freed state.
     /// </summary>
     class LimiterSink {
       public:
-        explicit LimiterSink(BasicHttpClientImpl* impl) noexcept : m_impl(impl) {}
+        explicit LimiterSink(std::weak_ptr<BasicHttpClientCore> core) noexcept : m_core(std::move(core)) {}
 
         /// <summary>
         /// Sends a request that was given a slot, releasing the slot when it completes.
         /// </summary>
         /// <param name="pending">The request to send.</param>
-        void Start(PendingRequest&& pending) const { m_impl->StartLimited(std::move(pending)); }
+        void Start(PendingRequest&& pending) const {
+            if (auto core = m_core.lock()) {
+                core->StartLimited(std::move(pending));
+                return;
+            }
+            // The client is gone; there is nothing left to post to, so fail the request directly.
+            Detail::Complete(std::move(pending.completion), std::make_error_code(std::errc::operation_canceled),
+                             HttpResponse{});
+        }
 
         /// <summary>
         /// Fails a request that never got a slot.
@@ -92,11 +101,15 @@ template <typename FaultPolicy = NoFault> class BasicHttpClientImpl {
         /// <param name="pending">The request to fail.</param>
         /// <param name="error">Why it was dropped.</param>
         void Abort(PendingRequest&& pending, std::error_code error) const {
-            m_impl->AbortLimited(std::move(pending), error);
+            if (auto core = m_core.lock()) {
+                core->AbortLimited(std::move(pending), error);
+                return;
+            }
+            Detail::Complete(std::move(pending.completion), error, HttpResponse{});
         }
 
       private:
-        BasicHttpClientImpl* m_impl;
+        std::weak_ptr<BasicHttpClientCore> m_core;
     };
 
     using Limiter = OriginLimiter<PendingRequest, LimiterSink>;
@@ -108,16 +121,13 @@ template <typename FaultPolicy = NoFault> class BasicHttpClientImpl {
     /// <param name="runtime">The io_context every connection and timer runs on; must outlive the
     /// client.</param>
     /// <param name="options">The TLS, pooling, and concurrency settings to build from.</param>
-    BasicHttpClientImpl(asio::io_context& runtime, const HttpClientOptions& options)
+    BasicHttpClientCore(asio::io_context& runtime, const HttpClientOptions& options)
         : context_(runtime), m_tlsContext(std::make_shared<asio::ssl::context>(asio::ssl::context::tls_client)),
           m_plainPool(std::make_shared<PlainConnectionPool>(options.GetMaxIdleConnectionsPerHost(),
                                                             options.GetIdleConnectionTimeout())),
           m_tlsPool(std::make_shared<TlsConnectionPool>(options.GetMaxIdleConnectionsPerHost(),
                                                         options.GetIdleConnectionTimeout())),
           m_sweeper(std::make_shared<IdleSweeper>(m_plainPool, m_tlsPool, options.GetIdleConnectionTimeout())) {
-        if (options.GetMaxConnectionsPerHost() > 0) {
-            m_limiter = std::make_shared<Limiter>(options.GetMaxConnectionsPerHost(), LimiterSink(this));
-        }
         m_sweeper->BindSelf(m_sweeper);
         m_plainPool->SetNotifier(SweeperNotifier(m_sweeper));
         m_tlsPool->SetNotifier(SweeperNotifier(m_sweeper));
@@ -125,17 +135,30 @@ template <typename FaultPolicy = NoFault> class BasicHttpClientImpl {
                                   asio::ssl::context::no_sslv3 | asio::ssl::context::no_tlsv1 |
                                   asio::ssl::context::no_tlsv1_1);
         ConfigureTlsContext(*m_tlsContext, options);
+        m_maxPerOrigin = options.GetMaxConnectionsPerHost();
+    }
+
+    /// <summary>
+    /// Creates the limiter, which needs a weak reference to this core and so cannot be built in the
+    /// constructor. Call once, right after make_shared.
+    /// </summary>
+    void Initialize() {
+        if (m_maxPerOrigin > 0) {
+            m_limiter = std::make_shared<Limiter>(m_maxPerOrigin, LimiterSink(this->weak_from_this()));
+        }
     }
 
     /// <summary>
     /// Fails every request still waiting for a slot. Requests already running keep the state they need
     /// alive on their own.
     /// </summary>
-    ~BasicHttpClientImpl() {
+    void Close() {
         if (m_limiter) {
             m_limiter->Close();
         }
     }
+
+    ~BasicHttpClientCore() { Close(); }
 
     /// <summary>
     /// Sends a request, routing it through the per-origin limiter when one is configured.
@@ -264,10 +287,9 @@ template <typename FaultPolicy = NoFault> class BasicHttpClientImpl {
             } else {
                 BasicConnectionKey key{route.Host, route.Port};
                 if (auto pooled = m_plainPool->Acquire(key)) {
-                    return ResumeWithPooledConnection<PlainStream>(route, std::move(*pooled), std::move(key),
-                                                                   std::move(request), std::move(completion),
-                                                                   std::move(options), m_plainPool,
-                                                                   std::move(cancelled));
+                    return ResumeWithPooledConnection<PlainStream>(
+                        route, std::move(*pooled), std::move(key), std::move(request), std::move(completion),
+                        std::move(options), m_plainPool, std::move(cancelled));
                 }
             }
         }
@@ -309,9 +331,8 @@ template <typename FaultPolicy = NoFault> class BasicHttpClientImpl {
     /// <param name="cancelled">See <see cref="SendUnlimited"/>.</param>
     template <typename Stream>
     void ResumeWithPooledConnection(const Route& route, PooledConnection<Stream> pooled, ConnectionKey<Stream> key,
-                                    HttpRequest request,
-                                    Detail::CompletionPointer completion, HttpRequestOptions options,
-                                    std::shared_ptr<ConnectionPool<Stream>> pool,
+                                    HttpRequest request, Detail::CompletionPointer completion,
+                                    HttpRequestOptions options, std::shared_ptr<ConnectionPool<Stream>> pool,
                                     std::shared_ptr<std::atomic<bool>> cancelled) {
         auto executor = pooled.stream->get_executor();
         auto operation = std::make_shared<RequestOperation<Stream>>(
@@ -327,7 +348,41 @@ template <typename FaultPolicy = NoFault> class BasicHttpClientImpl {
     std::shared_ptr<asio::ssl::context> m_tlsContext;
     std::shared_ptr<PlainConnectionPool> m_plainPool;
     std::shared_ptr<TlsConnectionPool> m_tlsPool;
+    std::size_t m_maxPerOrigin = 0;
     std::shared_ptr<Limiter> m_limiter;     // Null when no per-origin cap is configured.
     std::shared_ptr<IdleSweeper> m_sweeper; // Last: stops scheduling sweeps before the pools it sweeps go away.
+};
+/// <summary>
+/// The client's owner-facing handle. The real state lives in a shared Core so that limiter callbacks racing
+/// with destruction find it expired (weak_ptr) rather than dangling.
+/// </summary>
+template <typename FaultPolicy = NoFault> class BasicHttpClientImpl {
+  public:
+    /// <param name="runtime">The io_context every connection and timer runs on; must outlive the
+    /// client.</param>
+    /// <param name="options">The TLS, pooling, and concurrency settings to build from.</param>
+    BasicHttpClientImpl(asio::io_context& runtime, const HttpClientOptions& options)
+        : m_core(std::make_shared<BasicHttpClientCore<FaultPolicy>>(runtime, options)) {
+        m_core->Initialize();
+    }
+
+    BasicHttpClientImpl(const BasicHttpClientImpl&) = delete;
+    BasicHttpClientImpl& operator=(const BasicHttpClientImpl&) = delete;
+
+    /// <summary>
+    /// Fails every request still waiting for a slot; requests already running keep the state they need
+    /// alive on their own.
+    /// </summary>
+    ~BasicHttpClientImpl() { m_core->Close(); }
+
+    /// <summary>
+    /// Sends a request, routing it through the per-origin limiter when one is configured.
+    /// </summary>
+    void Submit(HttpRequest request, HttpRequestOptions options, Detail::CompletionPointer completion) {
+        m_core->Submit(std::move(request), std::move(options), std::move(completion));
+    }
+
+  private:
+    std::shared_ptr<BasicHttpClientCore<FaultPolicy>> m_core;
 };
 } // namespace AVEVA::Private

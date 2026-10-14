@@ -773,12 +773,54 @@ TEST(HttpClientRobustness, DestroyingTheClientWithRunningRequestsCompletesEachEx
     EXPECT_EQ(completions, 3);
 }
 
+TEST(HttpClientRobustness, DestroyingTheClientWhileSlotsReleaseOnAMultiThreadedContextCompletesEachOnce) {
+    constexpr int Requests = 48;
+    // The server runs on its own single-threaded context because ScriptedServer is not thread-safe.
+    asio::io_context serverContext;
+    ScriptedServer server(serverContext,
+                          [](int, const http::request<http::string_body>&) -> ServerAction { return {OkResponse}; });
+    auto serverGuard = asio::make_work_guard(serverContext);
+    std::thread serverThread([&] { serverContext.run(); });
+    for (int iteration = 0; iteration < 20; ++iteration) {
+        asio::io_context context;
+        AVEVA::HttpClientOptions clientOptions;
+        clientOptions.SetMaxConnectionsPerHost(2);
+        auto client = AVEVA::HttpClient::Create(context, clientOptions);
+
+        // Each finished request hands its slot to the next waiter, which is what races with destruction.
+        std::atomic<int> completions = 0;
+        for (int i = 0; i < Requests; ++i) {
+            AVEVA::HttpRequestOptions options;
+            options.SetTimeout(std::chrono::seconds(10));
+            client->SendAsync(MakeRequest(server.Url("/" + std::to_string(i))), options,
+                              [&](std::error_code, AVEVA::HttpResponse) { ++completions; });
+        }
+
+        std::vector<std::thread> workers;
+        for (int i = 0; i < 4; ++i) {
+            workers.emplace_back([&] { context.run(); });
+        }
+        for (int spin = 0; spin < (iteration % 5) * 300; ++spin) {
+            std::this_thread::yield();
+        }
+        client.reset();
+        for (auto& worker : workers) {
+            worker.join();
+        }
+
+        EXPECT_EQ(completions.load(), Requests);
+    }
+    asio::post(serverContext, [&] { server.Stop(); });
+    serverGuard.reset();
+    serverThread.join();
+}
+
 TEST(HttpClientRobustness, CancellingTheSharedDnsLeaderStillCompletesEveryJoinedRequestOnce) {
     for (int iteration = 0; iteration < 10; ++iteration) {
         asio::io_context context;
         auto client = AVEVA::HttpClient::Create(context);
-        ScriptedServer server(context,
-                              [](int, const http::request<http::string_body>&) -> ServerAction { return {OkResponse}; });
+        ScriptedServer server(
+            context, [](int, const http::request<http::string_body>&) -> ServerAction { return {OkResponse}; });
         // The cache key includes the port, which is fresh per server, so every iteration starts a new lookup.
         const auto url = server.Url();
 
