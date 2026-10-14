@@ -73,7 +73,8 @@ class HttpClient {
     /// (falling back to this client's executor, the default allocator, and <paramref name="options"/>'s
     /// existing cancellation slot respectively) so that callers using <c>use_future</c>,
     /// <c>use_awaitable</c>, <c>bind_executor</c>, etc. get the behavior they expect. The handler is never
-    /// invoked from inside this call.
+    /// invoked from inside this call. If initiation itself fails (for example <c>std::bad_alloc</c>), nothing is
+    /// thrown: the handler completes exactly once, later, with <c>HttpClientError::InvalidRequest</c>.
     /// </summary>
     /// <param name="request">The request to send.</param>
     /// <param name="options">The per-request settings to apply.</param>

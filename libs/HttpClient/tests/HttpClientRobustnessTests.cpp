@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/HttpClient/HttpClient.hpp"
+#include "private/HttpClientImpl.hpp"
 
 #include <gtest/gtest.h>
 
@@ -680,5 +681,130 @@ TEST(HttpClientRobustness, RequestTargetIsBuiltFromPathAndQuery) {
     context.run();
 
     EXPECT_EQ(targets, (std::vector<std::string>{"/", "/?a=1", "/p/q%20r?x=%2F&y=", "/p?"}));
+}
+
+struct ThrowBadAlloc {
+    static void OnSubmit() { throw std::bad_alloc(); }
+};
+
+TEST(HttpClientRobustness, ThrowingInitiationCompletesTheHandlerExactlyOnceAndNeverInline) {
+    asio::io_context context;
+    AVEVA::Private::BasicHttpClientImpl<ThrowBadAlloc> impl(context, AVEVA::HttpClientOptions{});
+
+    int completions = 0;
+    std::error_code result;
+    bool inSubmit = true;
+    impl.Submit(MakeRequest("http://127.0.0.1:1/"), AVEVA::HttpRequestOptions{},
+                AVEVA::Detail::MakeCompletion([&](std::error_code error, AVEVA::HttpResponse) {
+                    ++completions;
+                    result = error;
+                    EXPECT_FALSE(inSubmit);
+                }));
+    inSubmit = false;
+    EXPECT_EQ(completions, 0);
+    context.run();
+
+    EXPECT_EQ(completions, 1);
+    EXPECT_EQ(result, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidRequest));
+}
+
+TEST(HttpClientRobustness, DestroyingTheClientFailsQueuedRequestsAndCompletesActiveOnesOnce) {
+    asio::io_context context;
+    AVEVA::HttpClientOptions clientOptions;
+    clientOptions.SetMaxConnectionsPerHost(1);
+    auto client = AVEVA::HttpClient::Create(context, clientOptions);
+    ScriptedServer server(context, [](int, const http::request<http::string_body>&) -> ServerAction {
+        ServerAction action;
+        action.Hold = true;
+        return action;
+    });
+
+    std::vector<int> completions(3, 0);
+    std::vector<std::error_code> results(3);
+    int queuedDone = 0;
+    for (int i = 0; i < 3; ++i) {
+        AVEVA::HttpRequestOptions options;
+        options.SetTimeout(std::chrono::seconds(10));
+        client->SendAsync(MakeRequest(server.Url("/" + std::to_string(i))), options,
+                          [&, i](std::error_code error, AVEVA::HttpResponse) {
+                              ++completions[i];
+                              results[i] = error;
+                              if (i > 0 && ++queuedDone == 2) {
+                                  // Release the held request only after the queued ones were failed.
+                                  server.Stop();
+                              }
+                          });
+    }
+    client.reset();
+    context.run();
+
+    EXPECT_EQ(completions, (std::vector<int>{1, 1, 1}));
+    EXPECT_EQ(results[1], std::make_error_code(std::errc::operation_canceled));
+    EXPECT_EQ(results[2], std::make_error_code(std::errc::operation_canceled));
+    EXPECT_TRUE(results[0]);
+}
+
+TEST(HttpClientRobustness, DestroyingTheClientWithRunningRequestsCompletesEachExactlyOnce) {
+    asio::io_context context;
+    auto client = AVEVA::HttpClient::Create(context);
+    ScriptedServer server(context, [](int, const http::request<http::string_body>&) -> ServerAction {
+        ServerAction action;
+        action.Hold = true;
+        return action;
+    });
+
+    int completions = 0;
+    for (int i = 0; i < 3; ++i) {
+        AVEVA::HttpRequestOptions options;
+        options.SetTimeout(std::chrono::seconds(10));
+        client->SendAsync(MakeRequest(server.Url("/" + std::to_string(i))), options,
+                          [&](std::error_code error, AVEVA::HttpResponse) {
+                              EXPECT_TRUE(error);
+                              if (++completions == 3) {
+                                  server.Stop();
+                              }
+                          });
+    }
+    client.reset();
+    asio::steady_timer stopper(context, std::chrono::milliseconds(100));
+    stopper.async_wait([&](boost::system::error_code) { server.Stop(); });
+    context.run();
+
+    EXPECT_EQ(completions, 3);
+}
+
+TEST(HttpClientRobustness, CancellingTheSharedDnsLeaderStillCompletesEveryJoinedRequestOnce) {
+    for (int iteration = 0; iteration < 10; ++iteration) {
+        asio::io_context context;
+        auto client = AVEVA::HttpClient::Create(context);
+        ScriptedServer server(context,
+                              [](int, const http::request<http::string_body>&) -> ServerAction { return {OkResponse}; });
+        const auto url = "http://localhost:" + server.Url("").substr(std::string("http://127.0.0.1:").size());
+
+        asio::cancellation_signal leaderCancel;
+        AVEVA::HttpRequestOptions leaderOptions;
+        leaderOptions.SetCancellationSlot(leaderCancel.slot());
+        int completions = 0;
+        std::error_code followerResult;
+        const auto finish = [&] {
+            if (++completions == 3) {
+                server.Stop();
+            }
+        };
+        client->SendAsync(MakeRequest(url), leaderOptions, [&](std::error_code, AVEVA::HttpResponse) { finish(); });
+        for (int follower = 0; follower < 2; ++follower) {
+            client->SendAsync(MakeRequest(url), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  followerResult = error;
+                                  finish();
+                              });
+        }
+        // Queued behind the three starts, so it lands while the leader's lookup is in flight.
+        asio::post(context, [&] { leaderCancel.emit(asio::cancellation_type::terminal); });
+        context.run();
+
+        EXPECT_EQ(completions, 3);
+        EXPECT_NE(followerResult, std::make_error_code(std::errc::operation_canceled));
+    }
 }
 } // namespace

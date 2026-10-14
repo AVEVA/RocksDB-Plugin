@@ -7,6 +7,7 @@
 #include "DnsCache.hpp"
 #include "HttpVerb.hpp"
 #include "RequestValidation.hpp"
+#include "Route.hpp"
 #include "StreamTypes.hpp"
 #include "TlsContextConfigurator.hpp"
 
@@ -140,11 +141,11 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// Fresh connection: resolve, connect, (TLS handshake), then send. Must run on the operation's strand.
     /// </summary>
     /// <param name="request">The request to send; its owned body is moved out.</param>
-    void Start(HttpRequest request) {
+    void Start(HttpRequest request, const Route& route) {
         if (IsCancellationRequested()) {
             return Cancel();
         }
-        if (!BuildRequest(request)) {
+        if (!BuildRequest(request, route)) {
             return;
         }
         if (IsCancellationRequested()) {
@@ -165,11 +166,11 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// straight away. Must run on the operation's strand.
     /// </summary>
     /// <param name="request">The request to send; its owned body is moved out.</param>
-    void StartReused(HttpRequest request) {
+    void StartReused(HttpRequest request, const Route& route) {
         if (IsCancellationRequested()) {
             return Cancel();
         }
-        if (!BuildRequest(request)) {
+        if (!BuildRequest(request, route)) {
             return;
         }
         if (IsCancellationRequested()) {
@@ -189,9 +190,9 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// </summary>
     /// <param name="request">The request to translate; its owned body is moved out.</param>
     /// <returns>True if the operation may continue.</returns>
-    bool BuildRequest(HttpRequest& request) {
+    bool BuildRequest(HttpRequest& request, const Route& route) {
         try {
-            return BuildRequestUnchecked(request);
+            return BuildRequestUnchecked(request, route);
         } catch (const std::exception&) {
             Fail(HttpClientError::InvalidRequest);
             return false;
@@ -205,30 +206,22 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// </summary>
     /// <param name="request">The request to translate; its owned body is moved out.</param>
     /// <returns>True if the operation may continue.</returns>
-    bool BuildRequestUnchecked(HttpRequest& request) {
-        auto parsed = urls::parse_uri(request.GetUrl());
-        if (!parsed) {
+    bool BuildRequestUnchecked(HttpRequest& request, const Route& route) {
+        if (!route.Parsed) {
             Fail(HttpClientError::InvalidUrl);
             return false;
         }
-        if (const auto invalid = Private::ValidateRequest(request, m_options, *parsed)) {
+        if (route.Error) {
             // ValidateRequest only ever reports HttpClientError values.
-            Fail(static_cast<HttpClientError>(invalid.value()));
+            Fail(static_cast<HttpClientError>(route.Error.value()));
             return false;
         }
 
-        const auto& url = *parsed;
-        const std::string host = url.host_address();
         const auto verb = Private::ToBeastVerb(request.GetMethod());
 
         m_request.version(11);
         m_request.method(verb);
-        std::string target(url.encoded_target());
-        // With an authority the path is empty or absolute, so an empty path only needs the root slash.
-        if (target.empty() || target.front() != '/') {
-            target.insert(target.begin(), '/');
-        }
-        m_request.target(target);
+        m_request.target(route.Target);
         for (const auto& header : request.GetHeaders()) {
             if (beast::iequals(header.GetName(), "Host") || beast::iequals(header.GetName(), "Content-Length") ||
                 beast::iequals(header.GetName(), "Transfer-Encoding") ||
@@ -237,12 +230,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
             }
             m_request.insert(header.GetName(), header.GetValue());
         }
-        std::string authority(url.encoded_host());
-        if (url.has_port()) {
-            authority += ":";
-            authority += url.port();
-        }
-        m_request.set(http::field::host, authority);
+        m_request.set(http::field::host, route.Authority);
         m_request.keep_alive(true);
         if (request.HasBodyView()) {
             const auto view = request.GetBodyView();
@@ -263,7 +251,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
         // set Content-Length manually instead (the same value it would have computed).
         m_request.set(http::field::content_length, std::to_string(m_request.body().size));
         ResetParser();
-        m_hostIsName = url.host_type() == urls::host_type::name;
+        m_hostIsName = route.HostIsName;
         return true;
     }
 
