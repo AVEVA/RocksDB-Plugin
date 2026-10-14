@@ -4,7 +4,7 @@ This project contains AVEVA's plugins for the [RocksDB](https://rocksdb.org/) da
 
 ## Plugin List
 
-### [Azure Page Blob Filesystem](src/AVEVA/RocksDB/Plugin/Azure)
+### [Azure Page Blob Filesystem](src/Azure)
 
 This plugin uses the AVEVA Azure client library ([libs/AzureClient](libs/AzureClient)) for interacting with page blobs
 in place of a local filesystem. This allows a service using RocksDB to be deployed in a "stateless" manner
@@ -118,7 +118,7 @@ Public headers include Boost.Asio, which must see the same `_WIN32_WINNT` in eve
 - **Bounded stale metadata**: Never-downloaded stale SST entries are capped and oldest metadata-only entries are pruned to prevent unbounded cache index growth.
 - **Async IO**: The filesystem advertises `FSSupportedOps::kAsyncIO` and implements `ReadAsync`/`Poll`/`AbortIO`, so setting `rocksdb::ReadOptions::async_io = true` overlaps blob downloads with RocksDB's work (iterator readahead, `MultiGet`). Async reads are issued directly on the host `io_context` (no extra threads); completion handlers only copy bytes into RocksDB's buffer, and RocksDB's callbacks are delivered from `Poll`/`AbortIO` on the calling thread.
 
-For detailed configuration examples and advanced usage patterns, see the [Azure Plugin Documentation](src/AVEVA/RocksDB/Plugin/Azure/README.md).
+For detailed configuration examples and advanced usage patterns, see the plugin sources in [src/Azure](src/Azure) and the public headers in [include/AVEVA/RocksDB/Plugin](include/AVEVA/RocksDB/Plugin).
 
 Plugins are compiled with RocksDB and can be optionally enabled at runtime. To learn more about RocksDB
 plugins, please check out RocksDB's documentation on [building plugins](https://github.com/facebook/rocksdb/blob/main/plugin/README.md)

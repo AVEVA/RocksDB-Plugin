@@ -5,7 +5,7 @@
   "registries": [
     {
       "kind": "artifact",
-      "location": "https://github.com/microsoft/vcpkg-ce-catalog/archive/refs/heads/main.zip",
+      "location": "https://github.com/microsoft/vcpkg-ce-catalog/archive/ae1a296d0a5f1db298f4b1a9e2b949331cd17c51.zip",
       "name": "microsoft"
     }
   ]

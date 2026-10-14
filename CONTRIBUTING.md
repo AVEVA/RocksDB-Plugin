@@ -17,6 +17,14 @@ This repository is currently maintained by AVEVA teams.
 2. Build: `cmake --build build/<preset> --config Debug`
 3. Test: `ctest --test-dir build/<preset> --output-on-failure --build-config Debug`
 
+## Dependency Pins
+
+- `vcpkg.json` `builtin-baseline` pins the default vcpkg registry; Dependabot proposes bumps.
+- `vcpkg-configuration.json` pins the `microsoft` artifact catalog to a commit archive
+  (`.../vcpkg-ce-catalog/archive/<commit>.zip`) so a build never changes underneath you. To bump it, pick a new
+  commit of `microsoft/vcpkg-ce-catalog`, replace the commit in the URL, and run a full configure and build.
+- `infrastructure/vcpkg-overlays/rocksdb/` overrides the RocksDB port; see its `README.md` before touching it.
+
 ## Code Guidelines
 
 1. Follow modern C++ practices (RAII, strong typing, clear ownership).
