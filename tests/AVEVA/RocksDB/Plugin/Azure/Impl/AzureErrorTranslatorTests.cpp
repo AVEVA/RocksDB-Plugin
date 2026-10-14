@@ -178,9 +178,30 @@ TEST(AzureErrorTranslatorTests, InvalidResponseIsCorruption) {
     EXPECT_TRUE(AzureErrorTranslator::IOStatusFromError(Failure(200, "", code)).IsCorruption());
 }
 
-TEST(AzureErrorTranslatorTests, LeaseLostIsAnIOErrorNamingTheLease) {
+TEST(AzureErrorTranslatorTests, LeaseLostIsIOFencedNamingTheLease) {
     const auto code = ::AVEVA::AzureClient::make_error_code(::AVEVA::AzureClient::BlobStorageErrorCode::LeaseLost);
     const auto status = AzureErrorTranslator::IOStatusFromError(Failure(409, "LeaseLost", code));
-    EXPECT_TRUE(status.IsIOError());
+    EXPECT_TRUE(status.IsIOFenced());
+    EXPECT_FALSE(status.GetRetryable());
     EXPECT_NE(status.ToString().find("Lease lost"), std::string::npos);
+}
+
+TEST(AzureErrorTranslatorTests, LeaseMismatchAndMissingLeaseAreIOFenced) {
+    using ::AVEVA::AzureClient::BlobStorageErrorCode;
+    EXPECT_TRUE(
+        AzureErrorTranslator::IOStatusFromError(
+            Failure(412, "LeaseIdMismatchWithBlobOperation",
+                    ::AVEVA::AzureClient::make_error_code(BlobStorageErrorCode::LeaseIdMismatchWithBlobOperation)))
+            .IsIOFenced());
+    EXPECT_TRUE(
+        AzureErrorTranslator::IOStatusFromError(
+            Failure(409, "LeaseNotPresentWithBlobOperation",
+                    ::AVEVA::AzureClient::make_error_code(BlobStorageErrorCode::LeaseNotPresentWithBlobOperation)))
+            .IsIOFenced());
+}
+
+TEST(AzureErrorTranslatorTests, WritesFencedExceptionIsIOFenced) {
+    const auto status = AzureErrorTranslator::FromException(std::make_exception_ptr(WritesFencedException("fenced")));
+    EXPECT_TRUE(status.IsIOFenced());
+    EXPECT_FALSE(status.GetRetryable());
 }

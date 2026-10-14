@@ -25,6 +25,15 @@ struct HttpStatus {
 };
 
 /// <summary>
+/// Thrown when the filesystem refuses an operation because it can no longer prove it holds its leases. Translated to
+/// rocksdb::IOStatus::IOFenced, which RocksDB treats as non-retryable.
+/// </summary>
+class WritesFencedException : public std::runtime_error {
+  public:
+    using std::runtime_error::runtime_error;
+};
+
+/// <summary>
 /// Thrown when a request to Azure Blob Storage fails (after the client's own retries).
 /// StatusCode is 0 when no HTTP response was received (transport, TLS or authentication errors).
 /// </summary>

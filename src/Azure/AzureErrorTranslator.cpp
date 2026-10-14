@@ -65,8 +65,11 @@ rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const RequestFailedExc
     if (code == AzureClient::BlobStorageErrorCode::InvalidResponse) {
         return IOStatus::Corruption("Invalid service response: " + text);
     }
-    if (code == AzureClient::BlobStorageErrorCode::LeaseLost) {
-        return IOStatus::IOError("Lease lost: " + text);
+    // Another writer may own the blob now, so retrying could corrupt data; IOFenced is non-retryable.
+    if (code == AzureClient::BlobStorageErrorCode::LeaseLost ||
+        code == AzureClient::BlobStorageErrorCode::LeaseIdMismatchWithBlobOperation ||
+        code == AzureClient::BlobStorageErrorCode::LeaseNotPresentWithBlobOperation) {
+        return IOStatus::IOFenced("Lease lost: " + text);
     }
 
     switch (error.StatusCode) {
@@ -109,6 +112,8 @@ rocksdb::IOStatus AzureErrorTranslator::FromException(const std::exception_ptr& 
         std::rethrow_exception(error);
     } catch (const RequestFailedException& ex) {
         return IOStatusFromError(ex);
+    } catch (const WritesFencedException& ex) {
+        return rocksdb::IOStatus::IOFenced(ex.what());
     } catch (const std::exception& ex) {
         return rocksdb::IOStatus::IOError(ex.what());
     } catch (...) {
@@ -129,6 +134,9 @@ rocksdb::IOStatus AzureErrorTranslator::FromCurrentException(
             BOOST_LOG_SEV(logger, debug) << operation << " authentication detail: " << ex.AuthenticationDetail;
         }
         return IOStatusFromError(ex);
+    } catch (const WritesFencedException& ex) {
+        BOOST_LOG_SEV(logger, error) << operation << " failed: " << ex.what();
+        return rocksdb::IOStatus::IOFenced(ex.what());
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(logger, error) << operation << " failed: " << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());

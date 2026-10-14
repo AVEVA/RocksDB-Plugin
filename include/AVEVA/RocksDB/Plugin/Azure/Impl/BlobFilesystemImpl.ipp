@@ -786,7 +786,7 @@ void BasicBlobFilesystemImpl<THttp>::EnsureLiveness(const std::source_location l
     if (m_runtime->WritesFenced()) {
         BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::fatal)
             << "Unable to ensure safe database access when attempting to call " << location.function_name();
-        throw std::runtime_error("Unable to ensure safe database access");
+        throw WritesFencedException("Unable to ensure safe database access");
     }
 }
 template <typename THttp>

@@ -98,12 +98,12 @@ bool ClientRuntimeBase::WritesFenced() const noexcept { return m_writesFenced.lo
 
 void ClientRuntimeBase::ThrowIfWritesFenced() const {
     if (WritesFenced()) {
-        throw std::runtime_error("Writes are disabled because the filesystem can no longer guarantee it holds its "
-                                 "locks");
+        throw WritesFencedException("Writes are disabled because the filesystem can no longer guarantee it holds its "
+                                    "locks");
     }
     if (const auto remaining = WriteTimeRemaining();
         remaining && *remaining <= std::chrono::steady_clock::duration::zero()) {
-        throw std::runtime_error("Writes are disabled because the lease renewal deadline has passed");
+        throw WritesFencedException("Writes are disabled because the lease renewal deadline has passed");
     }
 }
 
