@@ -335,9 +335,30 @@ BasicBlobFilesystemImpl<THttp>::LockFile(const std::string& filePath) {
     // Lock() can retry for the full lease length. The mutex must not be held across it, or the renewal thread
     // would stall and the leases this Env already holds would expire.
     if (lockFile->Lock()) {
+        // The lease is held from here on, so a failure while registering it must not leave it orphaned until it
+        // expires: nobody else holds a reference that could release it.
+        boost::scope::scope_fail releaseLease{[&] {
+            try {
+                {
+                    std::scoped_lock _(m_lockFilesMutex);
+                    lockFile->unlink();
+                    std::erase_if(m_renewableLocks, [&lockFile](const std::weak_ptr<LockFileType>& weak) {
+                        const auto shared = weak.lock();
+                        return !shared || shared == lockFile;
+                    });
+                }
+                lockFile->Unlock();
+            } catch (const std::exception& ex) {
+                BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::error)
+                    << "Could not release the lease on '" << realPath << "' after registering it failed: " << ex.what();
+            } catch (...) {
+                BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::error)
+                    << "Could not release the lease on '" << realPath << "' after registering it failed";
+            }
+        }};
         std::scoped_lock _(m_lockFilesMutex);
-        m_locks.push_back(*lockFile);
         m_renewableLocks.push_back(lockFile);
+        m_locks.push_back(*lockFile);
         assert(lockFile->is_linked());
         return lockFile;
     } else {

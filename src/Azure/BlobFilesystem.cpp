@@ -16,6 +16,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/WriteableFile.hpp"
 
 #include <boost/log/trivial.hpp>
+#include <boost/scope/scope_fail.hpp>
 #include <sstream>
 #include <string_view>
 namespace AVEVA::RocksDB::Plugin::Azure {
@@ -313,10 +314,22 @@ rocksdb::IOStatus BlobFilesystem::LockFile(const std::string& f, const rocksdb::
     return Guard("LockFile", f, [&]() -> rocksdb::IOStatus {
         *l = nullptr;
         auto lock = m_filesystem->LockFile(f);
+        // The lease is already held; releasing it on failure keeps it from lingering until it expires.
+        boost::scope::scope_fail releaseLease{[&] {
+            try {
+                m_filesystem->UnlockFile(*lock);
+            } catch (const std::exception& ex) {
+                BOOST_LOG_SEV(*m_logger, error)
+                    << "Could not release the lease on '" << f << "' after wrapping it failed: " << ex.what();
+            } catch (...) {
+                BOOST_LOG_SEV(*m_logger, error)
+                    << "Could not release the lease on '" << f << "' after wrapping it failed";
+            }
+        }};
         auto lockFileWrapper = std::make_unique<Plugin::Azure::LockFile>(lock);
-        *l = lockFileWrapper.get();
         std::scoped_lock _(m_lockFilesMutex);
         m_lockFiles.push_back(std::move(lockFileWrapper));
+        *l = m_lockFiles.back().get();
         return rocksdb::IOStatus::OK();
     });
 }
