@@ -3,6 +3,10 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/Mocks/ContainerClientMock.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/Mocks/FileMock.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/Mocks/FilesystemMock.hpp"
 
 #include "FakeBlobEnvironment.hpp"
 
@@ -595,4 +599,58 @@ TEST_F(WriteableFileTests, MoveAssignment_TransfersState_Correctly) {
     file2 = std::move(file1);
 
     EXPECT_EQ(testData.size(), static_cast<size_t>(file2.GetFileSize()));
+}
+
+TEST_F(WriteableFileTests, Truncate_ResizesTheBlobBeforeRecordingTheNewSize) {
+    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
+    m_env.Blob->SetCapacity(4 * pageSize);
+
+    auto file = MakeFile();
+    file.Append(std::vector<char>(2 * pageSize, 'a'));
+    file.Sync();
+
+    std::vector<FakeBlobServer::Operation> order;
+    m_env.Blob->Fault = [&order](const FakeBlobServer::Operation operation) {
+        if (operation == FakeBlobServer::Operation::Resize || operation == FakeBlobServer::Operation::SetMetadata) {
+            order.push_back(operation);
+        }
+        return std::optional<AVEVA::AzureClient::BlobStorageError>{};
+    };
+    file.Truncate(pageSize);
+
+    EXPECT_EQ((std::vector{FakeBlobServer::Operation::Resize, FakeBlobServer::Operation::SetMetadata}), order);
+}
+
+TEST_F(WriteableFileTests, Truncate_MarksTheCachedCopyStale) {
+    using namespace AVEVA::RocksDB::Plugin::Core;
+    auto filesystem = std::make_shared<Mocks::FilesystemMock>();
+    auto container = std::make_shared<Mocks::ContainerClientMock>();
+    EXPECT_CALL(*container, GetBlobSize(::testing::_)).WillRepeatedly(::testing::Return(1000));
+    EXPECT_CALL(*filesystem, Open(::testing::_)).WillRepeatedly([](const std::filesystem::path&) {
+        auto cached = std::make_unique<Mocks::FileMock>();
+        EXPECT_CALL(*cached, Read(::testing::_, ::testing::_, ::testing::_))
+            .WillRepeatedly([](char*, uint64_t, uint64_t length) { return length; });
+        return cached;
+    });
+    auto cache = std::make_shared<FileCache>("tmp", 1 << 30, container, filesystem, m_logger);
+
+    char byte = 0;
+    bool cached = false;
+    // The first access only records interest and the second queues the download.
+    for (int attempt = 0; attempt < 4 && !cached; ++attempt) {
+        cached = cache->ReadFile("test.sst", 0, 1, &byte).has_value();
+        cache->WaitUntilIdle();
+    }
+    ASSERT_TRUE(cached);
+
+    m_env.Blob->SetCapacity(2 * Configuration::PageBlob::PageSize);
+    FakeWriteableFileImpl file{"test.sst", m_env.Runtime, m_env.Client, nullptr, m_logger};
+    file.Append(std::vector<char>(100, 'a'));
+    file.Sync();
+    // Nothing is left unsynced, so only Truncate itself can mark the cached copy stale.
+    FakeWriteableFileImpl reopened{"test.sst", m_env.Runtime, m_env.Client, cache, m_logger};
+    ASSERT_TRUE(cache->ReadFile("test.sst", 0, 1, &byte).has_value());
+    reopened.Truncate(10);
+
+    EXPECT_FALSE(cache->ReadFile("test.sst", 0, 1, &byte).has_value());
 }

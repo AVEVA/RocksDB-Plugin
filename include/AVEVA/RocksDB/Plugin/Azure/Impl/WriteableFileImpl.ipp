@@ -309,6 +309,11 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Truncate(int64_t s
     // Ensure all data is written to blob before modifications are made
     Sync();
 
+    // The cached copy would otherwise keep serving bytes past the new end, whatever happens next.
+    if (m_h.FileCache) {
+        m_h.FileCache->MarkFileAsStaleIfExists(m_h.Name);
+    }
+
     const auto [partialPageSize, totalPageOffset] = BlobHelpers::RoundToBeginningOfNearestPage(size);
     m_bufferOffset = 0;
     m_lastPageOffset = totalPageOffset;
@@ -323,13 +328,15 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Truncate(int64_t s
         m_flushed = false; // We have data in buffer now
     }
 
+    // Resize before recording the new logical size, like BlobFilesystemImpl::Truncate: if the resize fails the
+    // metadata still matches the blob. The capacity never drops below the buffered tail.
+    const auto [_, newCapacity] =
+        BlobHelpers::RoundToEndOfNearestPage(std::max(size, m_lastPageOffset + m_bufferOffset));
+    BlobOperations::SetCapacity(*m_h.Runtime, *m_h.Blob, newCapacity);
+    m_capacity = newCapacity;
+
     m_size = size;
     BlobOperations::SetSize(*m_h.Runtime, *m_h.Blob, m_size);
-
-    // Calculate new capacity rounded up to page size
-    const auto [_, newCapacity] = BlobHelpers::RoundToEndOfNearestPage(size);
-    m_capacity = newCapacity;
-    BlobOperations::SetCapacity(*m_h.Runtime, *m_h.Blob, newCapacity);
 }
 
 template <typename TBlob> int64_t BasicWriteableFileImpl<TBlob>::GetFileSize() const noexcept { return m_size; }
