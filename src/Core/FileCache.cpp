@@ -123,10 +123,15 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
 
         auto cachedFilePath = m_cachePath / fileEntry.GetFilePath();
         const auto handle = fileEntry.GetOrCreateReadHandle();
+        // Taken under the lock: the entry may be replaced or evicted once it is released.
+        const int64_t entrySize = fileEntry.GetSize();
+        const int64_t expectedBytes = std::max<int64_t>(0, std::min(bytesToRead, entrySize - offset));
 
         // The read is disk I/O, so it must not hold the cache-wide mutex. If an eviction closes the handle after the
         // lock is released, the read fails and the caller falls back to the blob.
         lock.unlock();
+        bool shortRead = false;
+        std::optional<int64_t> result;
         try {
             std::scoped_lock handleLock(handle->Mutex);
             if (handle->Closed) {
@@ -135,17 +140,34 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
             if (!handle->Opened) {
                 handle->Opened = m_filesystem->Open(cachedFilePath);
             }
+            int64_t bytesRead = 0;
             try {
-                return handle->Opened->Read(buffer, offset, bytesToRead);
+                bytesRead = handle->Opened->Read(buffer, offset, bytesToRead);
             } catch (...) {
                 // Do not keep a handle that just failed; the next read reopens the file.
                 handle->Opened.reset();
                 throw;
             }
+            if (bytesRead < expectedBytes) {
+                // A truncated or corrupt cached file must not be returned as if it were the blob's data.
+                handle->Opened.reset();
+                BOOST_LOG_SEV(*m_logger, error)
+                    << "Cached read of '" << filePath << "' returned " << bytesRead << " bytes but " << expectedBytes
+                    << " were expected. Dropping the cached file.";
+                shortRead = true;
+            } else {
+                result = bytesRead;
+            }
         } catch (const std::exception& e) {
             BOOST_LOG_SEV(*m_logger, debug) << "Cached read of '" << filePath << "' failed, falling back: " << e.what();
             return std::nullopt;
         }
+
+        // Done after the handle lock is released so the two locks are never nested.
+        if (shortRead) {
+            RemoveFile(filePath);
+        }
+        return result;
     }
 }
 

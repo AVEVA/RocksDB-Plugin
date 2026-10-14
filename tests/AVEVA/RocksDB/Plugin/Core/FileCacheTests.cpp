@@ -333,6 +333,29 @@ TEST_F(FileCacheTests, ReadFile_SecondAccess_QueuesAndDownloads) {
     EXPECT_TRUE(m_cache.HasFile("1.sst"));
 }
 
+TEST_F(FileCacheTests, ReadFile_ShortReadFromTheCachedFile_FallsBackAndDropsTheEntry) {
+    // Arrange - the cached file is shorter than the blob size recorded for it.
+    EXPECT_CALL(*m_containerClient, GetBlobSize("1.sst")).WillRepeatedly(Return(8));
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo("1.sst", _, _, _)).WillRepeatedly(Return());
+    EXPECT_CALL(*m_filesystem, Open(std::filesystem::path(m_folderName) / "1.sst"))
+        .WillRepeatedly([](const std::filesystem::path&) {
+            auto file = std::make_unique<FileMock>();
+            ON_CALL(*file, Read(_, _, _)).WillByDefault(Return(3));
+            return file;
+        });
+    EnsureReadFromCache("1.sst");
+    char buffer[8];
+
+    // Act
+    const auto bytesRead = m_cache.ReadFile("1.sst", 0, 8, buffer);
+    m_cache.WaitUntilIdle();
+
+    // Assert
+    EXPECT_FALSE(bytesRead.has_value());
+    EXPECT_FALSE(m_cache.HasFile("1.sst"));
+    EXPECT_EQ(0U, m_cache.CacheSize());
+}
+
 TEST_F(FileCacheTests, FileReplacedWhileItsSizeIsBeingLookedUp_IsNotActivated) {
     // Arrange - the size lookup blocks until released.
     std::promise<void> started;

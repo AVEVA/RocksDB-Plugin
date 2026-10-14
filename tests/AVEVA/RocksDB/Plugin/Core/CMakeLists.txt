@@ -2,6 +2,7 @@ add_subdirectory(Mocks)
 add_executable(aveva-rocksdb-plugin-core-tests
     CoreTests.cpp
     FileCacheTests.cpp
+    LocalFileTests.cpp
     FileBasedCompressedSecondaryCacheRoundTripTests.cpp
     FileBasedCompressedSecondaryCacheCapacityTests.cpp
     FileBasedCompressedSecondaryCacheCompressionTests.cpp
