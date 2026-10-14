@@ -40,49 +40,49 @@ namespace AVEVA
         /// The TLS version policy applied to HTTPS connections.
         /// </summary>
         /// <returns>The configured policy.</returns>
-        TlsVersion GetTlsVersion() const noexcept;
+        [[nodiscard]] TlsVersion GetTlsVersion() const noexcept;
 
         /// <summary>
         /// Whether the server certificate chain and host name are verified.
         /// </summary>
         /// <returns>True when verification is on.</returns>
-        bool GetVerifyPeer() const noexcept;
+        [[nodiscard]] bool GetVerifyPeer() const noexcept;
 
         /// <summary>
         /// Path to a PEM file of trusted CA certificates.
         /// </summary>
         /// <returns>The path, empty when none was set.</returns>
-        const std::string& GetCaFile() const noexcept;
+        [[nodiscard]] const std::string& GetCaFile() const noexcept;
 
         /// <summary>
         /// Path to an OpenSSL-style hashed directory of trusted CA certificates.
         /// </summary>
         /// <returns>The path, empty when none was set.</returns>
-        const std::string& GetCaDirectory() const noexcept;
+        [[nodiscard]] const std::string& GetCaDirectory() const noexcept;
 
         /// <summary>
         /// Trusted CA certificates held in memory as PEM text.
         /// </summary>
         /// <returns>The PEM text, empty when none was set.</returns>
-        const std::string& GetCaPem() const noexcept;
+        [[nodiscard]] const std::string& GetCaPem() const noexcept;
 
         /// <summary>
         /// How many idle keep-alive connections may be kept per origin.
         /// </summary>
         /// <returns>The per-origin idle cap; 6 unless set otherwise.</returns>
-        std::size_t GetMaxIdleConnectionsPerHost() const noexcept;
+        [[nodiscard]] std::size_t GetMaxIdleConnectionsPerHost() const noexcept;
 
         /// <summary>
         /// How long a pooled connection may sit idle before it is closed.
         /// </summary>
         /// <returns>The idle timeout; 30 seconds unless set otherwise.</returns>
-        std::chrono::seconds GetIdleConnectionTimeout() const noexcept;
+        [[nodiscard]] std::chrono::seconds GetIdleConnectionTimeout() const noexcept;
 
         /// <summary>
         /// The cap on concurrent in-flight requests per origin.
         /// </summary>
         /// <returns>The cap; 0 means unlimited.</returns>
-        std::size_t GetMaxConnectionsPerHost() const noexcept;
+        [[nodiscard]] std::size_t GetMaxConnectionsPerHost() const noexcept;
 
         /// <summary>
         /// Sets the TLS version policy.

@@ -31,32 +31,32 @@ class HttpRequest {
     /// The request method.
     /// </summary>
     /// <returns>The method; <c>HttpMethod::Get</c> unless set otherwise.</returns>
-    HttpMethod GetMethod() const noexcept;
+    [[nodiscard]] HttpMethod GetMethod() const noexcept;
 
     /// <summary>
     /// The request URL, exactly as supplied; it is not parsed or validated here.
     /// </summary>
     /// <returns>The URL, empty unless set.</returns>
-    const std::string& GetUrl() const noexcept;
+    [[nodiscard]] const std::string& GetUrl() const noexcept;
 
     /// <summary>
     /// The request headers.
     /// </summary>
     /// <returns>The headers, in the order they were added.</returns>
-    const std::vector<HttpHeader>& GetHeaders() const noexcept;
+    [[nodiscard]] const std::vector<HttpHeader>& GetHeaders() const noexcept;
 
     /// <summary>
     /// The request headers, for in-place modification before the request is sent.
     /// </summary>
     /// <returns>A mutable reference to the headers.</returns>
-    std::vector<HttpHeader>& GetHeaders() noexcept;
+    [[nodiscard]] std::vector<HttpHeader>& GetHeaders() noexcept;
 
     /// <summary>
     /// Returns the owned body set via <see cref="SetBody"/>.
     /// </summary>
     /// <returns>The owned body. Empty if a non-owning body was set via <see cref="SetBodyView"/> -- use
     /// <see cref="GetBodyView"/> (and <see cref="HasBodyView"/>) in that case.</returns>
-    const std::string& GetBody() const noexcept;
+    [[nodiscard]] const std::string& GetBody() const noexcept;
 
     /// <summary>
     /// Sets the request method.

@@ -444,6 +444,7 @@ BasicBlobFilesystemImpl<THttp>::GetChildrenFileAttributes(const std::string& dir
     return attributes;
 }
 
+// Deletes the blob and drops its cached copy so a later blob with the same name is never served stale bytes.
 template <typename THttp> bool BasicBlobFilesystemImpl<THttp>::DeleteFile(const std::string& filePath) const {
     EnsureLiveness();
 
@@ -460,6 +461,8 @@ template <typename THttp> bool BasicBlobFilesystemImpl<THttp>::DeleteFile(const 
     return !res.Error().has_value();
 }
 
+// Removes every blob under the directory prefix. Object storage has no real directories, so the blobs are listed
+// and deleted in batches to keep the request count low.
 template <typename THttp> size_t BasicBlobFilesystemImpl<THttp>::DeleteDir(const std::string& directoryPath) const {
     EnsureLiveness();
 
@@ -666,6 +669,8 @@ template <typename THttp> void BasicBlobFilesystemImpl<THttp>::FenceWritesOnFata
     Owner->m_runtime->FenceWrites();
 }
 
+// Stops lease renewal and waits for in-flight async reads first: their completions use the clients and logger that
+// are destroyed right after this body.
 template <typename THttp> BasicBlobFilesystemImpl<THttp>::~BasicBlobFilesystemImpl() {
     m_leaseRenewal->Stop();
     if (const auto inFlight = m_asyncReads->InFlight(); inFlight > 0) {

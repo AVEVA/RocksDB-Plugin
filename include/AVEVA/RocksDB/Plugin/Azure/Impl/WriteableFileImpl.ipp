@@ -120,6 +120,8 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Close() {
     }
 }
 
+// Appends to the page-aligned buffer and starts an asynchronous upload whenever less than a page of space remains,
+// so RocksDB's small appends are batched into few, large page-blob writes instead of one request per Append.
 template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Append(const std::span<const char> data) {
     const char* dataPos = data.data();
     auto dataSize = static_cast<int64_t>(data.size());
@@ -224,6 +226,8 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::StartFlush(const b
     m_flushed = tail == 0 || includePartialPage;
 }
 
+// Makes everything written so far durable and publishes the logical size. The size is a separate metadata write
+// because a page blob's physical length is page-rounded.
 template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Sync() {
     // Every metadata write changes the blob's ETag and invalidates open readers, so a Sync with nothing new to
     // publish (e.g. Sync followed by Close) must not write the size again.
@@ -299,6 +303,8 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::WaitForUploads(con
     m_runtime->ThrowIfWritesFenced();
 }
 
+// Shrinks the file. The trailing partial page is reloaded into the buffer because appends continue inside it and
+// pages are only ever uploaded whole.
 template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Truncate(int64_t size) {
     // Truncate only allows shrinking, not expanding
     if (size > m_size) {

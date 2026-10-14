@@ -273,6 +273,11 @@ class ConnectionPool {
             return;
         }
         LruList retired;
+        // Closes retired sockets after the lock is released on every path, including a throwing allocation.
+        struct DisposeOnExit {
+            LruList& list;
+            ~DisposeOnExit() { list.clear_and_dispose(NodeDisposer{}); }
+        } disposeRetired{retired};
         std::optional<Notifier> notify;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
@@ -282,20 +287,12 @@ class ConnectionPool {
 
             // Everything that can throw happens before any pool state changes, so a bad_alloc
             // leaves the pool consistent and the socket owned by the caller's (RAII) parameter.
-            Node* nodePtr = nullptr;
-            try {
-                nodePtr = Obtain();
-            } catch (...) {
-                retired.clear_and_dispose(NodeDisposer{});
-                throw;
-            }
-            Node& node = *nodePtr;
+            Node& node = *Obtain();
             std::pair<decltype(m_origins.begin()), bool> emplaced;
             try {
                 emplaced = m_origins.try_emplace(key);
             } catch (...) {
                 Recycle(node);
-                retired.clear_and_dispose(NodeDisposer{});
                 throw;
             }
             auto [it, inserted] = emplaced;
@@ -362,8 +359,11 @@ class ConnectionPool {
                 }
                 char probe = 0;
                 socket.receive(boost::asio::buffer(&probe, 1), boost::asio::socket_base::message_peek, ec);
-                boost::system::error_code ignored;
-                socket.non_blocking(false, ignored);
+                boost::system::error_code restoreEc;
+                socket.non_blocking(false, restoreEc);
+                if (restoreEc) {
+                    return false; // A socket stuck in non-blocking mode would break later blocking users.
+                }
                 return ec == boost::asio::error::would_block || ec == boost::asio::error::try_again;
 #else
                 // MSG_DONTWAIT makes just this call non-blocking, so the socket's mode is never toggled.

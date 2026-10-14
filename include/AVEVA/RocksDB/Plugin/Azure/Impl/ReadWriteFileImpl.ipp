@@ -76,6 +76,8 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Sync() {
         << "Synced read/writeable file '" << m_name << "' to " << m_size << " bytes";
 }
 
+// Writes buffered chunks to the blob. Padding pages are read first (in parallel when no two chunks share a page) so
+// partially covered pages keep their existing bytes.
 template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
     // The capacity is tracked locally (set on open and by Expand), so no round trip is needed here.
     // Pre-calculate the maximum size we'll need and expand if necessary
@@ -208,6 +210,8 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
 #endif // _DEBUG
 }
 
+// Buffers a write at its page-aligned slot with room around it, so Flush can merge the existing bytes of partially
+// covered pages and upload whole pages. Flushes early when the buffer is nearly full.
 template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Write(int64_t offset, const char* data, int64_t size) {
     // This one is TRICKY. Incomplete pages must track the location within a page
     // along with length information and then fetch the relevant page before committing
@@ -280,6 +284,7 @@ int64_t BasicReadWriteFileImpl<TBlob>::Read(int64_t offset, int64_t bytesRequest
     return BlobOperations::DownloadToBuffer(*m_blob, readBuffer, offset, bytesRequested);
 }
 
+// Grows the blob geometrically so repeated random writes past the end do not each pay for a resize request.
 template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Expand() {
     const auto capacity = std::max(static_cast<int64_t>(1), m_capacity);
     const auto [_, rounded] = BlobHelpers::RoundToEndOfNearestPage((m_size + capacity) * 2);

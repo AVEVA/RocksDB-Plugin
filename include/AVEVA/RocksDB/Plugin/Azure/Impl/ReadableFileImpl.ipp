@@ -101,6 +101,7 @@ template <typename TBlob> std::pair<int64_t, std::string> BasicReadableFileImpl<
     return {m_size, m_etag};
 }
 
+// Updates the cached size/ETag together and discards prefetched bytes, which belong to the previous blob version.
 template <typename TBlob> void BasicReadableFileImpl<TBlob>::SetMetadata(const int64_t size, std::string etag) const {
     BOOST_LOG_SEV(*m_logger, boost::log::trivial::debug)
         << "Blob metadata refreshed for file '" << m_name << "' :size = " << size << " bytes, etag = " << etag;

@@ -61,6 +61,8 @@ BasicLockFileImpl<TBlob>::BasicLockFileImpl(
     }
 }
 
+// Acquires the lease, retrying while another owner holds it, until the acquire timeout. Returns false only when the
+// lease is held elsewhere; every other failure throws so it is mapped to a proper IOStatus instead of looking locked.
 template <typename TBlob> bool BasicLockFileImpl<TBlob>::Lock() {
     {
         const std::scoped_lock lock(m_stateMutex);
@@ -195,6 +197,8 @@ template <typename TBlob> std::chrono::steady_clock::duration BasicLockFileImpl<
     return budget;
 }
 
+// Starts a renewal without blocking. The callback receives (error, renewed); renewed is false when the lease was
+// released while the request was in flight, which is expected rather than a failure.
 template <typename TBlob> void BasicLockFileImpl<TBlob>::RenewAsync(RenewCallback callback) const {
     const auto leaseId = CurrentLeaseId();
     if (!leaseId.has_value()) {
@@ -237,6 +241,7 @@ template <typename TBlob> void BasicLockFileImpl<TBlob>::RenewAsync(RenewCallbac
         std::move(requestOptions));
 }
 
+// Blocking renewal for RocksDB threads; it waits on RenewAsync and so must never run on the io_context thread.
 template <typename TBlob> void BasicLockFileImpl<TBlob>::RenewLease() const {
     AzureClient::ThrowIfRunningOn(m_file->get_executor());
     // One cancellation path: the synchronous renewal waits on the asynchronous one.
