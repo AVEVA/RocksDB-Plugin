@@ -19,8 +19,10 @@ cmake --preset WindowsRelease -DAVEVA_ROCKSDB_BUILD_DB_BENCH=ON
 cmake --build build/WindowsRelease --config RelWithDebInfo --target aveva_db_bench
 ```
 
-The `db-bench` vcpkg feature is enabled in all presets, so the db_bench_tool is
-available whenever you set the option. See the root
+Setting `-DAVEVA_ROCKSDB_BUILD_DB_BENCH=ON` also turns on the `db-bench` vcpkg
+manifest feature, which builds RocksDB's `db_bench_tool` through the overlay port.
+Use a fresh build directory, or `--fresh`, when you toggle the option so that vcpkg
+reinstalls RocksDB. See the root
 [README.md](../../README.md#build) for preset details and how to configure manually.
 
 This build uses an [overlay port](../../infrastructure/vcpkg-overlays/rocksdb).
