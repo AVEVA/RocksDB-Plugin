@@ -7,7 +7,6 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ServicePrincipalStorageInfo.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/log/trivial.hpp>
