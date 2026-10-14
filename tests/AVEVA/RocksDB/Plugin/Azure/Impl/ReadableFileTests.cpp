@@ -131,6 +131,20 @@ TEST_F(ReadableFileTests, Constructor_FetchesSizeAndEtagWithOneMetadataCall) {
     EXPECT_TRUE(file.HasETag(m_env.Blob->ETag));
 }
 
+TEST_F(ReadableFileTests, RandomRead_AtStaleEndOfBlob_RefreshesWithExactlyOnePropertiesCall) {
+    m_env.Fill(1024, 'O');
+    const auto file = MakeFile();
+    m_env.Fill(2048, 'N');
+    m_env.Blob->ETag = "grown";
+    const int before = m_env.Blob->PropertiesRequests;
+    std::vector<char> buffer(100);
+
+    const auto bytesRead = file.RandomRead(1024, 100, buffer.data());
+
+    EXPECT_EQ(100, bytesRead);
+    EXPECT_EQ(std::vector<char>(100, 'N'), buffer);
+    EXPECT_EQ(before + 1, m_env.Blob->PropertiesRequests);
+}
 TEST_F(ReadableFileTests, GetSize_RefreshesWithOneMetadataCall) {
     m_env.Fill(1024);
     const auto file = MakeFile();

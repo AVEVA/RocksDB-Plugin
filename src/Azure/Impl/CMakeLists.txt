@@ -30,6 +30,7 @@ target_sources(aveva-rocksdb-plugin-azure-impl
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobFileHandles.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ClientFactory.hpp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/DownloadBufferPool.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.ipp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ClientFactory.ipp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.ipp"

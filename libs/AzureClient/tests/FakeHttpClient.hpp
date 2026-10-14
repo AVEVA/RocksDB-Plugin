@@ -109,9 +109,19 @@ class FakeHttpClient final {
     auto SendAsync(HttpRequest request, HttpRequestOptions options, CompletionToken&& token) {
         return boost::asio::async_initiate<CompletionToken, void(std::error_code, HttpResponse)>(
             [this](auto handler, HttpRequest req, HttpRequestOptions opts) {
+                if (auto failure = TakeInitiationFailure()) {
+                    std::rethrow_exception(failure);
+                }
                 SendAsyncErased(std::move(req), CompletionHandler{std::move(handler)}, opts);
             },
             token, std::move(request), options);
+    }
+
+    // Makes the next SendAsync throw from its initiation, before any request is recorded (as an allocation failure
+    // would). Only that one call is affected.
+    void FailNextInitiation(std::exception_ptr failure) {
+        std::scoped_lock lock(m_mutex);
+        m_initiationFailure = std::move(failure);
     }
 
     // Runs ready handlers on this client's executor without blocking; returns the number run.
@@ -536,6 +546,12 @@ class FakeHttpClient final {
     mutable std::mutex m_mutex;
     std::recursive_mutex m_pollMutex;
     Responder m_responder;
+    std::exception_ptr m_initiationFailure;
+
+    std::exception_ptr TakeInitiationFailure() {
+        std::scoped_lock lock(m_mutex);
+        return std::exchange(m_initiationFailure, nullptr);
+    }
     std::deque<ScriptedResult> m_scriptedResults;
     std::deque<PendingCompletion> m_pending;
     std::deque<RequestRecord> m_requests;

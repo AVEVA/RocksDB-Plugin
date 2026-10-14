@@ -26,7 +26,7 @@
 #include <vector>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// <summary>Completion of an async read: an exception (null on success) and the bytes read.</summary>
-using ReadCallback = std::function<void(std::exception_ptr error, std::string data)>;
+using ReadCallback = std::function<void(std::exception_ptr error, std::string_view data)>;
 
 template <typename TBlob> class BasicReadableFileImpl {
     BlobFileHandles<TBlob> m_h;

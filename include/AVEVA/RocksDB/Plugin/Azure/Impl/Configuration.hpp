@@ -36,6 +36,8 @@ struct Configuration {
     static const constexpr std::chrono::milliseconds LeaseSafetyMargin = std::chrono::milliseconds(2000);
     // How long the destructor waits for in-flight async reads before warning (it keeps waiting afterwards).
     static const constexpr std::chrono::seconds AsyncReadDrainWarning = std::chrono::seconds(30);
+    // How long a synchronous read waits for an in-flight prefetch of its range before downloading it itself.
+    static const constexpr std::chrono::seconds PrefetchWaitTimeout = std::chrono::seconds(30);
     static const constexpr std::chrono::seconds LogRateLimiterCooldown = std::chrono::seconds(30);
     static const constexpr size_t MaxCacheSize = static_cast<size_t>(1024) * 1024 * 1024; // 1GB
     static const constexpr int MaxClientRetries = 8;

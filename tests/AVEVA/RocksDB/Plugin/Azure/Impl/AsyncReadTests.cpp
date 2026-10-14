@@ -173,6 +173,35 @@ TEST_F(AsyncReadTests, ReadAsync_ConcurrentReadsAtCachedEnd_ShareOnePropertiesCa
     EXPECT_EQ(before + 1, m_deferredEnv.Blob->PropertiesRequests);
 }
 
+TEST_F(AsyncReadTests, ReadAsync_MetadataInitiationThrows_CompletesTheReadWithTheErrorAndLaterCallsStartFresh) {
+    auto file = CreateFile(m_deferredEnv);
+    m_deferredEnv.Http.FailNextInitiation(std::make_exception_ptr(std::runtime_error("cannot start")));
+    std::vector<char> scratchA(64);
+    auto reqA = MakeRequest(BlobSize, scratchA);
+    CallbackRecord recordA;
+    IoHandle handleA;
+
+    ASSERT_TRUE(Submit(file, reqA, recordA, handleA).ok());
+    std::vector<void*> handlesA{handleA.Handle};
+    ASSERT_TRUE(PollAsyncReads(handlesA).ok());
+
+    EXPECT_EQ(1, recordA.Calls.load());
+    EXPECT_FALSE(recordA.Status.ok());
+
+    m_deferredEnv.Blob->DeferProperties = true;
+    std::vector<char> scratchB(64);
+    auto reqB = MakeRequest(BlobSize, scratchB);
+    CallbackRecord recordB;
+    IoHandle handleB;
+    ASSERT_TRUE(Submit(file, reqB, recordB, handleB).ok());
+    EXPECT_EQ(1U, m_deferredEnv.Blob->PendingProperties());
+
+    m_deferredEnv.Blob->CompleteProperties();
+    std::vector<void*> handlesB{handleB.Handle};
+    ASSERT_TRUE(PollAsyncReads(handlesB).ok());
+    EXPECT_EQ(1, recordB.Calls.load());
+    EXPECT_TRUE(recordB.Status.ok()) << recordB.Status.ToString();
+}
 TEST_F(AsyncReadTests, ReadAsync_RangeCoveredByPendingPrefetch_WaitsForItWithoutBlockingOrDownloadingTwice) {
     auto file = CreateFile(m_deferredEnv);
     ASSERT_TRUE(file.Prefetch(1024, 2048, rocksdb::IOOptions{}, nullptr).ok());

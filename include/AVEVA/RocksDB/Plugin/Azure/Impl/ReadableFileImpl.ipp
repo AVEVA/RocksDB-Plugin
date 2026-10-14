@@ -3,6 +3,7 @@
 
 // Definitions of BasicReadableFileImpl; included at the end of ReadableFileImpl.hpp.
 #pragma once
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include <algorithm>
 #include <boost/log/trivial.hpp>
@@ -11,22 +12,23 @@
 #include <utility>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-namespace {
-RequestFailedException StaleReadException() {
+// In a named namespace (not an anonymous one) so every TU that includes this header shares one definition of these.
+namespace ReadableFileDetail {
+inline RequestFailedException StaleReadException() {
     return RequestFailedException(static_cast<unsigned int>(HttpStatus::PreconditionFailed), "StaleRead",
                                   "The blob kept changing while it was being read; retries exhausted", "", {});
 }
 
-std::exception_ptr StaleReadError() { return std::make_exception_ptr(StaleReadException()); }
+inline std::exception_ptr StaleReadError() { return std::make_exception_ptr(StaleReadException()); }
 
 // The one policy for reads against a blob that may change underneath us, shared by the synchronous
 // (DownloadWithRetry) and asynchronous (ReadAsyncAttempt) paths so they cannot drift apart: a 412 from the
 // ETag-conditioned download means "stale", and each refresh-and-retry spends one unit of a fixed budget.
 namespace StaleReadPolicy {
-bool IsStale(const RequestFailedException& e) { return e.StatusCode == HttpStatus::PreconditionFailed; }
+inline bool IsStale(const RequestFailedException& e) { return e.StatusCode == HttpStatus::PreconditionFailed; }
 
 // Spends one refresh from `left`; false means the budget is exhausted and the read must fail with StaleRead.
-bool TrySpendRefresh(int& left) { return left-- > 0; }
+inline bool TrySpendRefresh(int& left) { return left-- > 0; }
 } // namespace StaleReadPolicy
 
 // Ends an async read. The file is released before the callback runs and the callback (which may hold the read's
@@ -34,12 +36,13 @@ bool TrySpendRefresh(int& left) { return left-- > 0; }
 // holds references into it.
 template <typename TBlob>
 void FinishRead(std::shared_ptr<const BasicReadableFileImpl<TBlob>>& self, ReadCallback& callback,
-                std::exception_ptr error, std::string data) {
+                std::exception_ptr error, std::string_view data) {
     auto done = std::exchange(callback, nullptr);
     self.reset();
-    done(std::move(error), std::move(data));
+    done(std::move(error), data);
 }
-} // namespace
+} // namespace ReadableFileDetail
+
 template <typename TBlob>
 BasicReadableFileImpl<TBlob>::BasicReadableFileImpl(
     std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
@@ -186,7 +189,7 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
     try {
         ReadAsync(std::move(self), offset, n,
                   [state, id, logger = std::move(logger), name = std::move(name)](std::exception_ptr error,
-                                                                                  std::string data) {
+                                                                                  std::string_view data) {
                       std::vector<std::move_only_function<void()>> waiters;
                       {
                           std::scoped_lock lock(state->Mutex);
@@ -196,7 +199,7 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
                                   state->Drop(slot);
                               } else {
                                   slot->Pending = false;
-                                  slot->Data = std::move(data);
+                                  slot->Data.assign(data);
                               }
                           }
                           for (auto it = state->Waiters.begin(); it != state->Waiters.end();) {
@@ -267,11 +270,13 @@ std::optional<size_t> BasicReadableFileImpl<TBlob>::TryReadFromPrefetch(const in
             return std::nullopt;
         }
         const auto id = slot->Id;
-        const auto settled = state.Done.wait_for(lock, std::chrono::seconds(30), [&] {
+        const auto settled = state.Done.wait_for(lock, Configuration::PrefetchWaitTimeout, [&] {
             const auto current = std::ranges::find(state.Slots, id, &PrefetchSlot::Id);
             return current == state.Slots.end() || !current->Pending;
         });
         if (!settled) {
+            BOOST_LOG_SEV(*m_h.Logger, boost::log::trivial::debug)
+                << "Timed out waiting for a prefetch of '" << m_h.Name << "'; falling back to a download";
             return std::nullopt;
         }
         slot = find();
@@ -339,7 +344,7 @@ void BasicReadableFileImpl<TBlob>::ReadAsync(std::shared_ptr<const BasicReadable
                                              const int attemptsLeft, const std::chrono::milliseconds timeout) {
     if (self->m_asyncReads) {
         callback = [callback = std::move(callback), token = self->m_asyncReads->Begin()](
-                       std::exception_ptr error, std::string data) { callback(std::move(error), std::move(data)); };
+                       std::exception_ptr error, std::string_view data) { callback(std::move(error), data); };
     }
     ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(callback), attemptsLeft, timeout);
 }
@@ -352,7 +357,7 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
                                                     ReadCallback callback, const int attemptsLeft,
                                                     const std::chrono::milliseconds timeout) {
     if (offset < 0 || bytesToRead <= 0) {
-        FinishRead(self, callback, nullptr, {});
+        ReadableFileDetail::FinishRead(self, callback, nullptr, {});
         return;
     }
 
@@ -365,17 +370,17 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
             file, [self = std::move(self), offset, bytesToRead, callback = std::move(callback), etag, attemptsLeft,
                    timeout](std::exception_ptr error, int64_t latestSize, std::string latestEtag) mutable {
                 if (error) {
-                    FinishRead(self, callback, error, {});
+                    ReadableFileDetail::FinishRead(self, callback, error, {});
                     return;
                 }
                 if (latestEtag == etag) {
-                    FinishRead(self, callback, nullptr, {});
+                    ReadableFileDetail::FinishRead(self, callback, nullptr, {});
                     return;
                 }
 
                 auto left = attemptsLeft;
-                if (!StaleReadPolicy::TrySpendRefresh(left)) {
-                    FinishRead(self, callback, StaleReadError(), {});
+                if (!ReadableFileDetail::StaleReadPolicy::TrySpendRefresh(left)) {
+                    ReadableFileDetail::FinishRead(self, callback, ReadableFileDetail::StaleReadError(), {});
                     return;
                 }
                 self->SetMetadata(latestSize, std::move(latestEtag));
@@ -386,35 +391,30 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
 
     const auto toRead = std::min(bytesToRead, remaining);
     auto& blob = *self->m_h.Blob;
-    BlobOperations::DownloadAsync(blob, offset, toRead, etag, timeout,
-                                  [self = std::move(self), offset, bytesToRead, remaining,
-                                   callback = std::move(callback), attemptsLeft,
-                                   timeout](std::exception_ptr error, std::string data) mutable {
-                                      if (error) {
-                                          try {
-                                              std::rethrow_exception(error);
-                                          } catch (const RequestFailedException& ex) {
-                                              if (StaleReadPolicy::IsStale(ex)) {
-                                                  auto left = attemptsLeft;
-                                                  if (!StaleReadPolicy::TrySpendRefresh(left)) {
-                                                      FinishRead(self, callback, StaleReadError(), {});
-                                                      return;
-                                                  }
-                                                  RefreshMetadataAndReadAsync(std::move(self), offset, bytesToRead,
-                                                                              std::move(callback), left, timeout);
-                                                  return;
-                                              }
-                                          } catch (...) {
-                                          }
-                                          FinishRead(self, callback, error, {});
-                                          return;
-                                      }
+    BlobOperations::DownloadAsync(
+        blob, offset, toRead, etag, timeout,
+        [self = std::move(self), offset, bytesToRead, remaining, callback = std::move(callback), attemptsLeft,
+         timeout](std::exception_ptr error, unsigned int status, std::string_view data) mutable {
+            if (error) {
+                if (status == HttpStatus::PreconditionFailed) {
+                    auto left = attemptsLeft;
+                    if (!ReadableFileDetail::StaleReadPolicy::TrySpendRefresh(left)) {
+                        ReadableFileDetail::FinishRead(self, callback, ReadableFileDetail::StaleReadError(), {});
+                        return;
+                    }
+                    RefreshMetadataAndReadAsync(std::move(self), offset, bytesToRead, std::move(callback), left,
+                                                timeout);
+                    return;
+                }
+                ReadableFileDetail::FinishRead(self, callback, error, {});
+                return;
+            }
 
-                                      if (static_cast<int64_t>(data.size()) > remaining) {
-                                          data.resize(static_cast<size_t>(remaining));
-                                      }
-                                      FinishRead(self, callback, nullptr, std::move(data));
-                                  });
+            if (static_cast<int64_t>(data.size()) > remaining) {
+                data = data.substr(0, static_cast<size_t>(remaining));
+            }
+            ReadableFileDetail::FinishRead(self, callback, nullptr, data);
+        });
 }
 
 template <typename TBlob>
@@ -427,7 +427,7 @@ void BasicReadableFileImpl<TBlob>::RefreshMetadataAndReadAsync(std::shared_ptr<c
                                   attemptsLeft,
                                   timeout](std::exception_ptr error, int64_t size, std::string etag) mutable {
         if (error) {
-            FinishRead(self, callback, error, {});
+            ReadableFileDetail::FinishRead(self, callback, error, {});
             return;
         }
 
@@ -451,7 +451,23 @@ void BasicReadableFileImpl<TBlob>::CoalescedMetadataAsync(
         }
         state->InFlight = true;
     }
-    BlobOperations::GetMetadataAsync(*file.m_h.Blob, [state](std::exception_ptr error, int64_t size, std::string etag) {
+    // Initiation can throw (allocation, client construction, fenced runtime). Without this, InFlight would stay set
+    // forever and every later caller would queue behind a request that never completes.
+    try {
+        BlobOperations::GetMetadataAsync(
+            *file.m_h.Blob, [state](std::exception_ptr error, int64_t size, std::string etag) {
+                std::vector<typename BasicReadableFileImpl<TBlob>::MetadataCallback> waiters;
+                {
+                    std::scoped_lock lock(state->Mutex);
+                    waiters.swap(state->Waiters);
+                    state->InFlight = false;
+                }
+                for (auto& waiter : waiters) {
+                    waiter(error, size, etag);
+                }
+            });
+    } catch (...) {
+        const auto error = std::current_exception();
         std::vector<typename BasicReadableFileImpl<TBlob>::MetadataCallback> waiters;
         {
             std::scoped_lock lock(state->Mutex);
@@ -459,9 +475,9 @@ void BasicReadableFileImpl<TBlob>::CoalescedMetadataAsync(
             state->InFlight = false;
         }
         for (auto& waiter : waiters) {
-            waiter(error, size, etag);
+            waiter(error, 0, std::string());
         }
-    });
+    }
 }
 
 // Downloads from the blob conditioned on the cached ETag. When the blob changed underneath us (precondition
@@ -478,12 +494,14 @@ int64_t BasicReadableFileImpl<TBlob>::DownloadWithRetry(const int64_t offset, co
         const auto [size, etag] = GetMetadata();
         auto remaining = std::max<int64_t>(0, size - offset);
         if (remaining == 0) {
-            auto latestEtag = BlobOperations::GetEtag(*m_h.Blob);
-            if (latestEtag != etag) {
-                if (!StaleReadPolicy::TrySpendRefresh(refreshesLeft)) {
-                    throw StaleReadException();
+            // One properties call serves both the ETag check and the refresh, so a stale end-of-blob read costs a
+            // single round trip.
+            auto latest = BlobOperations::GetMetadata(*m_h.Blob);
+            if (latest.ETag != etag) {
+                if (!ReadableFileDetail::StaleReadPolicy::TrySpendRefresh(refreshesLeft)) {
+                    throw ReadableFileDetail::StaleReadException();
                 }
-                RefreshBlobMetadata();
+                SetMetadata(latest.Size, std::move(latest.ETag));
                 continue;
             }
 
@@ -497,9 +515,9 @@ int64_t BasicReadableFileImpl<TBlob>::DownloadWithRetry(const int64_t offset, co
             bytesRead = std::min(bytesRead, remaining);
             success = true;
         } catch (const RequestFailedException& ex) {
-            if (StaleReadPolicy::IsStale(ex)) {
-                if (!StaleReadPolicy::TrySpendRefresh(refreshesLeft)) {
-                    throw StaleReadException();
+            if (ReadableFileDetail::StaleReadPolicy::IsStale(ex)) {
+                if (!ReadableFileDetail::StaleReadPolicy::TrySpendRefresh(refreshesLeft)) {
+                    throw ReadableFileDetail::StaleReadException();
                 }
                 RefreshBlobMetadata();
             } else {

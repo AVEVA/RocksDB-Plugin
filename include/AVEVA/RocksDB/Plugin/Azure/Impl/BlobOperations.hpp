@@ -5,6 +5,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/DownloadBufferPool.hpp"
 
 #include <AVEVA/AzureClient/BlockOn.hpp>
 
@@ -25,6 +26,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -382,7 +384,10 @@ void UploadPagesAsync(const ClientRuntimeBase& runtime, TBlob& client, std::shar
 }
 
 /// <summary>
-/// `callback(std::exception_ptr error, std::string data)`: an exception (null on success) and the downloaded bytes.
+/// `callback(std::exception_ptr error, unsigned int httpStatus, std::string_view data)`: an exception (null on
+/// success), the HTTP status carried by a RequestFailedException (0 on success or when no response was received) so
+/// callers can classify failures without rethrowing, and the downloaded bytes.
+/// The bytes live in a pooled buffer and are only valid until the callback returns; copy anything that must outlive it.
 /// A non-zero `timeout` caps how long the request may take; it only ever shortens the transfer-scaled default.
 /// </summary>
 template <typename TBlob, typename TCallback>
@@ -396,17 +401,24 @@ void DownloadAsync(TBlob& client, int64_t blobOffset, int64_t readLength, const 
     if (timeout.count() > 0 && timeout < requestOptions.GetTimeout()) {
         requestOptions.SetTimeout(timeout);
     }
-    client.DownloadAsync(
-        std::move(options),
-        [callback = std::move(callback)](auto result) mutable {
+    // The lease is owned by the completion, so the transfer can never write into freed memory.
+    auto buffer = DownloadBufferPool::Shared()->Acquire(static_cast<size_t>(readLength));
+    const std::span<char> destination(buffer->Data(), buffer->Size());
+    client.DownloadToAsync(
+        destination, std::move(options),
+        [buffer = std::move(buffer), callback = std::move(callback)](auto result) mutable {
             std::exception_ptr error;
-            std::string content;
+            unsigned int status = 0;
+            size_t written = 0;
             try {
-                content = std::move(Unwrap(std::move(result)).Content);
+                written = static_cast<size_t>(Unwrap(std::move(result)).BytesWritten);
+            } catch (const RequestFailedException& e) {
+                status = e.StatusCode;
+                error = std::current_exception();
             } catch (...) {
                 error = std::current_exception();
             }
-            callback(error, std::move(content));
+            callback(error, status, std::string_view(buffer->Data(), std::min(written, buffer->Size())));
         },
         std::move(requestOptions));
 }

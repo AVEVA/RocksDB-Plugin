@@ -80,7 +80,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::ReadAsync(rocksdb::FSReadRequest& re
             auto download = [file = m_file, offset, length, timeout, request] {
                 TImpl::ReadAsync(
                     file, offset, length,
-                    [request](std::exception_ptr error, std::string data) {
+                    [request](std::exception_ptr error, std::string_view data) {
                         request->Complete(error ? StatusFromException(error) : rocksdb::IOStatus::OK(), data);
                     },
                     TImpl::kMaxStaleReadRetries, timeout);

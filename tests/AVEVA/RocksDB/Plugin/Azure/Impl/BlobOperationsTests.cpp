@@ -359,3 +359,30 @@ TEST_F(BlobOperationsFakeBlobTests, CopyPagesFailsWhenTheSourceChangesMidCopy) {
     EXPECT_THROW(BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, 1024, m_env.Blob->ETag),
                  RequestFailedException);
 }
+
+TEST(DownloadBufferPoolTests, ReleasedBufferIsReusedWithoutAllocating) {
+    const auto pool = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::DownloadBufferPool>();
+    const char* first = nullptr;
+    {
+        const auto lease = pool->Acquire(4096);
+        first = lease->Data();
+        EXPECT_EQ(4096U, lease->Size());
+    }
+    EXPECT_EQ(1U, pool->PooledCount());
+
+    const auto again = pool->Acquire(2048);
+
+    EXPECT_EQ(first, again->Data());
+    EXPECT_EQ(2048U, again->Size());
+    EXPECT_EQ(0U, pool->PooledCount());
+}
+
+TEST(DownloadBufferPoolTests, OversizedBuffersAreNotRetained) {
+    const auto pool = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::DownloadBufferPool>();
+    {
+        const auto lease =
+            pool->Acquire(AVEVA::RocksDB::Plugin::Azure::Impl::DownloadBufferPool::MaxPooledBufferBytes + 1);
+    }
+
+    EXPECT_EQ(0U, pool->PooledCount());
+}
