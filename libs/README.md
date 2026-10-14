@@ -1,9 +1,9 @@
 # Vendored libraries
 
-| Library | Path | Upstream repository | Vendored version |
-|---------|------|---------------------|------------------|
-| aveva-http-client | `libs/HttpClient` | TODO: record upstream URL | 0.0.1, imported in `af31859`; locally modified (see below) |
-| aveva-azure-client | `libs/AzureClient` | TODO: record upstream URL | 0.0.1, imported in `af31859`; locally modified (see below) |
+| Library | Path | Origin | Vendored version |
+|---------|------|--------|------------------|
+| aveva-http-client | `libs/HttpClient` | Maintained in-tree; no upstream repository is tracked | 0.0.1, imported in `af31859`; locally modified (see below) |
+| aveva-azure-client | `libs/AzureClient` | Maintained in-tree; no upstream repository is tracked | 0.0.1, imported in `af31859`; locally modified (see below) |
 
 Both libraries are licensed under Apache-2.0 (see the root `LICENSE` file); source files carry SPDX
 identifiers inline.
@@ -20,8 +20,20 @@ Both libraries have diverged from the imported 0.0.1 tree. The changes are in th
   `94d4814`), for example stricter URL and identity-endpoint validation and response parsing.
 - Trimming of `libs/AzureClient` to what the plugin needs (`2cf0763`..`da22526`): AppendBlobClient, uncommon
   BlobClient/BlockBlobClient operations, container/service extras and snapshot/version scoping were removed.
-  SAS builders (`Sas.hpp`), `BlobServiceClient::GetUserDelegationKeyAsync`, `PageBlobClient::GetPageRangesAsync`
-  and the internal `Redaction.hpp` helper were later removed as well, since the plugin never used them.
+  SAS builders (`Sas.hpp`), `BlobServiceClient::GetUserDelegationKeyAsync` and the internal `Redaction.hpp`
+  helper were later removed as well, since the plugin never used them. `PageBlobClient::GetPageRangesAsync` is kept:
+  the plugin uses it (`BlobOperations.hpp`).
+
+## Kept but currently unused
+
+These APIs are not called by the plugin but remain in `libs/AzureClient` (and are covered by its tests) until the
+trim is finished:
+
+- `BlockBlobClient` (whole header and sources) and its plugin typedef and instantiation.
+- `PageBlobClient::ClearPagesAsync` with its options and model.
+- `BlobContainerClient::CreateAsync`, `GetBlobClient` and `GetBlockBlobClient`.
+- The stream overloads of `DownloadToAsync`.
+- `StaticTokenCredential` and the static `BearerToken` path (`RequestAuth::Kind::Bearer`).
 
 ## Updating
 
