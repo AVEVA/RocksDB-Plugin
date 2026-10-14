@@ -260,6 +260,56 @@ TEST_F(ReadWriteFileImplTests, Sync_AfterWriteThatChangesSize_PublishesNewSize) 
     EXPECT_EQ((std::vector<int64_t>{500, 1000}), m_env.Blob->SizeWrites);
 }
 
+TEST_F(ReadWriteFileImplTests, Read_AfterWriteWithoutSync_ReturnsTheUnsyncedBytes) {
+    // Arrange
+    auto file = CreateFile();
+    std::vector<char> data(1000, 'U');
+    file->Write(0, data.data(), static_cast<int64_t>(data.size()));
+
+    // Act
+    std::vector<char> readBuffer(1000);
+    const auto bytesRead = file->Read(0, 1000, readBuffer.data());
+
+    // Assert
+    EXPECT_EQ(1000, bytesRead);
+    EXPECT_EQ(data, readBuffer);
+}
+
+TEST_F(ReadWriteFileImplTests, Read_OverwriteWithoutSync_ReturnsTheNewBytes) {
+    // Arrange
+    auto file = CreateFile();
+    std::vector<char> original(1000, 'A');
+    file->Write(0, original.data(), static_cast<int64_t>(original.size()));
+    file->Sync();
+    std::vector<char> patch(100, 'B');
+    file->Write(450, patch.data(), static_cast<int64_t>(patch.size()));
+
+    // Act
+    std::vector<char> readBuffer(1000);
+    const auto bytesRead = file->Read(0, 1000, readBuffer.data());
+
+    // Assert
+    auto expected = original;
+    std::ranges::copy(patch, expected.begin() + 450);
+    EXPECT_EQ(1000, bytesRead);
+    EXPECT_EQ(expected, readBuffer);
+}
+
+TEST_F(ReadWriteFileImplTests, Read_AfterUnsyncedReadThenSync_PublishesTheSize) {
+    // Arrange
+    auto file = CreateFile();
+    std::vector<char> data(300, 'S');
+    file->Write(0, data.data(), static_cast<int64_t>(data.size()));
+    std::vector<char> readBuffer(300);
+    ASSERT_EQ(300, file->Read(0, 300, readBuffer.data()));
+
+    // Act
+    file->Sync();
+
+    // Assert
+    EXPECT_EQ(300, m_env.Blob->Size);
+}
+
 // Test Read returns correct data
 TEST_F(ReadWriteFileImplTests, Read_ReturnsDataFromBlob) {
     // Arrange

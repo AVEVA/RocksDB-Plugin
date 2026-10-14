@@ -27,7 +27,8 @@ template <typename TBlob> class BasicReadWriteFileImpl {
     int64_t m_syncSize;
     int64_t m_capacity;
     bool m_closed;
-
+    // True from the first Write after a Sync until the next Sync; cached pages must not be served in between.
+    bool m_dirty = false;
     std::vector<char> m_buffer;
     std::vector<BufferChunkInfo> m_bufferStats; // to track where page info is to be inserted
   public:

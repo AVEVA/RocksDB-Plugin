@@ -34,7 +34,7 @@ template <typename TBlob> BasicReadWriteFileImpl<TBlob>::~BasicReadWriteFileImpl
 template <typename TBlob>
 BasicReadWriteFileImpl<TBlob>::BasicReadWriteFileImpl(BasicReadWriteFileImpl<TBlob>&& other) noexcept
     : m_h(std::move(other.m_h)), m_size(other.m_size), m_syncSize(other.m_syncSize), m_capacity(other.m_capacity),
-      m_closed(std::exchange(other.m_closed, true)), m_buffer(std::move(other.m_buffer)),
+      m_closed(std::exchange(other.m_closed, true)), m_dirty(other.m_dirty), m_buffer(std::move(other.m_buffer)),
       m_bufferStats(std::move(other.m_bufferStats)) {}
 
 template <typename TBlob>
@@ -45,6 +45,7 @@ BasicReadWriteFileImpl<TBlob>::operator=(BasicReadWriteFileImpl<TBlob>&& other) 
     m_syncSize = other.m_syncSize;
     m_capacity = other.m_capacity;
     m_closed = std::exchange(other.m_closed, true);
+    m_dirty = other.m_dirty;
     m_buffer = std::move(other.m_buffer);
     m_bufferStats = std::move(other.m_bufferStats);
     return *this;
@@ -60,7 +61,7 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Close() {
 template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Sync() {
     // A metadata write changes the blob's ETag and invalidates readers and the cache, so skip it when there is
     // nothing buffered and the published size is already current (e.g. Sync followed by Close).
-    if (m_bufferStats.empty() && m_size == m_syncSize) {
+    if (m_bufferStats.empty() && m_size == m_syncSize && !m_dirty) {
         return;
     }
 
@@ -72,6 +73,7 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Sync() {
 
     BlobOperations::SetSize(*m_h.Runtime, *m_h.Blob, m_size);
     m_syncSize = m_size;
+    m_dirty = false;
     BOOST_LOG_SEV(*m_h.Logger, boost::log::trivial::debug)
         << "Synced read/writeable file '" << m_h.Name << "' to " << m_size << " bytes";
 }
@@ -217,6 +219,13 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Write(int64_t offs
     // along with length information and then fetch the relevant page before committing
     // likely to be lots of room for optimization maybe around allocation
     auto* dataPos = data;
+    if (!m_dirty) {
+        // The cache is invalidated at the first write, not at Sync, because Read serves unsynced bytes from the blob.
+        if (m_h.FileCache) {
+            m_h.FileCache->MarkFileAsStaleIfExists(m_h.Name);
+        }
+        m_dirty = true;
+    }
     auto targetOffset = offset;
     auto bufferOffset =
         m_bufferStats.empty() ? 0LL : m_bufferStats.back().bufferOffset + m_bufferStats.back().ChunkSize();
@@ -263,20 +272,28 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Write(int64_t offs
     }
 }
 
+// Includes the file's own unsynced writes: buffered chunks are flushed first so the blob holds them, and the limit is
+// m_size rather than the published m_syncSize.
 template <typename TBlob>
 int64_t BasicReadWriteFileImpl<TBlob>::Read(int64_t offset, int64_t bytesRequested, char* buffer) const {
-    if (offset >= m_syncSize) {
+    if (!m_bufferStats.empty()) {
+        // Read is logically const; flushing only moves buffered bytes to the blob.
+        const_cast<BasicReadWriteFileImpl*>(this)->Flush();
+    }
+
+    if (offset >= m_size) {
         return 0;
     }
 
-    if (m_h.FileCache) {
+    // Cached pages may predate this file's unsynced writes.
+    if (m_h.FileCache && !m_dirty) {
         const auto bytesRead = m_h.FileCache->ReadFile(m_h.Name, offset, bytesRequested, buffer);
         if (bytesRead) {
             return static_cast<int64_t>(*bytesRead);
         }
     }
 
-    const auto bytesCanRead = m_syncSize - offset;
+    const auto bytesCanRead = m_size - offset;
     if (bytesCanRead < bytesRequested)
         bytesRequested = bytesCanRead;
 
