@@ -31,9 +31,10 @@ struct Plugin {
     /// Registering the same storage accounts again replaces the previous settings, including the io_context,
     /// for filesystems created afterwards.
     ///
-    /// WARNING: the registered factory holds a reference to `ioContext`. Destroying the context while it can
-    /// still create a filesystem (i.e. before the next Register call or process exit) leaves that reference
-    /// dangling; this cannot be detected. Token refreshes still in flight when a filesystem is destroyed keep
+    /// WARNING: when `ioContext` is passed by reference the registered factory holds a reference to it. Destroying
+    /// the context while it can still create a filesystem leaves that reference dangling; this cannot be detected.
+    /// Call Unregister before destroying the context, or use the std::shared_ptr<io_context> overloads. Token
+    /// refreshes still in flight when a filesystem is destroyed keep
     /// that filesystem's HTTP client alive until they complete, so keep the context running until they drain.
     ///
     /// Preconditions for destroying a filesystem: `ioContext` must still be running (the destructor blocks until
@@ -62,6 +63,44 @@ struct Plugin {
              int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
              int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
              std::optional<std::string_view> cachePath = std::nullopt, size_t maxCacheSize = 0);
+
+    /// <summary>
+    /// Like the io_context& overloads, but the registration and every filesystem created from it share ownership of
+    /// `ioContext`, so it can never be destroyed while the factory can still create a filesystem. The caller still has
+    /// to keep it running. Prefer this overload; it removes the dangling-reference hazard of the reference overloads.
+    /// </summary>
+    static rocksdb::Status
+    Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::shared_ptr<rocksdb::Env>* guard,
+             std::shared_ptr<boost::asio::io_context> ioContext, Models::ServicePrincipalStorageInfo primary,
+             std::optional<Models::ServicePrincipalStorageInfo> backup,
+             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
+             int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
+             std::optional<std::string_view> cachePath = std::nullopt, size_t maxCacheSize = 0);
+
+    /// <summary>See the shared_ptr&lt;io_context&gt; overload taking ServicePrincipalStorageInfo.</summary>
+    static rocksdb::Status
+    Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::shared_ptr<rocksdb::Env>* guard,
+             std::shared_ptr<boost::asio::io_context> ioContext, Models::ChainedCredentialInfo primary,
+             std::optional<Models::ChainedCredentialInfo> backup,
+             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
+             int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
+             std::optional<std::string_view> cachePath = std::nullopt, size_t maxCacheSize = 0);
+
+    /// <summary>
+    /// Removes the registration for this primary/backup pair (under both its current and legacy name), releasing
+    /// the io_context reference or ownership it holds. Call it before destroying an io_context that was passed by
+    /// reference. Filesystems that already exist are unaffected; creating one afterwards fails with a
+    /// "has not been registered" error until Register is called again.
+    /// </summary>
+    static void Unregister(const Models::ServicePrincipalStorageInfo& primary,
+                           const std::optional<Models::ServicePrincipalStorageInfo>& backup = std::nullopt);
+    static void Unregister(const Models::ChainedCredentialInfo& primary,
+                           const std::optional<Models::ChainedCredentialInfo>& backup = std::nullopt);
+
+    /// <summary>Removes the registration published under `name` (see NameFor). Unknown names are ignored.</summary>
+    static void Unregister(const std::string& name);
 
     /// <summary>
     /// Returns the name under which Register publishes the filesystem for this primary/backup pair, e.g. for

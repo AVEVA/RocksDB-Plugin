@@ -34,14 +34,46 @@ struct Registration {
 };
 
 /// <summary>
+/// The registration state per plugin name, shared by registration and unregistration.
+/// </summary>
+struct RegistrationTable {
+    std::mutex Mutex;
+    std::unordered_map<std::string, std::shared_ptr<Registration>> Registrations;
+};
+
+RegistrationTable& Table() {
+    static RegistrationTable table;
+    return table;
+}
+
+/// <summary>
+/// Drops the factory settings (and with them the io_context reference or ownership) for `pluginName`. The RocksDB
+/// factory itself stays in the ObjectLibrary, which cannot remove entries, and reports "not registered" until a
+/// later Register call fills the state again.
+/// </summary>
+void ClearRegistration(const std::string& pluginName) {
+    std::shared_ptr<Registration> registration;
+    {
+        std::scoped_lock lock(Table().Mutex);
+        if (const auto it = Table().Registrations.find(pluginName); it != Table().Registrations.end()) {
+            registration = it->second;
+        }
+    }
+    if (registration) {
+        // Destroy the old factory outside the lock: releasing an owned io_context may join its thread.
+        FileSystemFactory released;
+        std::scoped_lock lock(registration->Mutex);
+        released = std::move(registration->Create);
+        registration->Create = nullptr;
+    }
+}
+
+/// <summary>
 /// Returns the registration state for `pluginName`, adding the RocksDB factory that uses it on first call.
 /// </summary>
 std::shared_ptr<Registration> GetOrAddRegistration(const std::string& pluginName) {
-    static std::mutex mutex;
-    static std::unordered_map<std::string, std::shared_ptr<Registration>> registrations;
-
-    std::scoped_lock lock(mutex);
-    auto& registration = registrations[pluginName];
+    std::scoped_lock lock(Table().Mutex);
+    auto& registration = Table().Registrations[pluginName];
     if (!registration) {
         registration = std::make_shared<Registration>();
         rocksdb::ObjectLibrary::Default()->AddFactory<rocksdb::FileSystem>(
@@ -231,6 +263,50 @@ Plugin::Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std:
                  size_t maxCacheSize) {
     return RegisterImpl(configOptions, env, guard, ioContext, nullptr, std::move(primary), std::move(backup),
                         std::move(logger), dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize);
+}
+
+rocksdb::Status
+Plugin::Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::shared_ptr<rocksdb::Env>* guard,
+                 std::shared_ptr<boost::asio::io_context> ioContext, Models::ServicePrincipalStorageInfo primary,
+                 std::optional<Models::ServicePrincipalStorageInfo> backup,
+                 std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+                 int64_t dataFileBufferSize, int64_t dataFileInitialSize, std::optional<std::string_view> cachePath,
+                 size_t maxCacheSize) {
+    if (!ioContext) {
+        return rocksdb::Status::InvalidArgument("ioContext cannot be null");
+    }
+    auto& context = *ioContext;
+    return RegisterImpl(configOptions, env, guard, context, std::move(ioContext), std::move(primary), std::move(backup),
+                        std::move(logger), dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize);
+}
+
+rocksdb::Status
+Plugin::Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::shared_ptr<rocksdb::Env>* guard,
+                 std::shared_ptr<boost::asio::io_context> ioContext, Models::ChainedCredentialInfo primary,
+                 std::optional<Models::ChainedCredentialInfo> backup,
+                 std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+                 int64_t dataFileBufferSize, int64_t dataFileInitialSize, std::optional<std::string_view> cachePath,
+                 size_t maxCacheSize) {
+    if (!ioContext) {
+        return rocksdb::Status::InvalidArgument("ioContext cannot be null");
+    }
+    auto& context = *ioContext;
+    return RegisterImpl(configOptions, env, guard, context, std::move(ioContext), std::move(primary), std::move(backup),
+                        std::move(logger), dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize);
+}
+
+void Plugin::Unregister(const std::string& name) { ClearRegistration(name); }
+
+void Plugin::Unregister(const Models::ServicePrincipalStorageInfo& primary,
+                        const std::optional<Models::ServicePrincipalStorageInfo>& backup) {
+    ClearRegistration(PluginNameFor(primary, backup));
+    ClearRegistration(LegacyPluginNameFor(primary, backup));
+}
+
+void Plugin::Unregister(const Models::ChainedCredentialInfo& primary,
+                        const std::optional<Models::ChainedCredentialInfo>& backup) {
+    ClearRegistration(PluginNameFor(primary, backup));
+    ClearRegistration(LegacyPluginNameFor(primary, backup));
 }
 
 rocksdb::Status

@@ -8,11 +8,14 @@
 #include <rocksdb/file_system.h>
 #include <rocksdb/utilities/object_registry.h>
 
+#include <boost/asio/executor_work_guard.hpp>
+#include <boost/asio/io_context.hpp>
 #include <boost/log/sources/severity_logger.hpp>
 
 #include <cctype>
 #include <memory>
 #include <string>
+#include <thread>
 
 #if defined(_MSC_VER)
 #define DEPRECATED_CALL_BEGIN __pragma(warning(push)) __pragma(warning(disable : 4996))
@@ -30,6 +33,11 @@ namespace {
 ServicePrincipalStorageInfo MakeInfo(const std::string& dbName, const std::string& account = "myaccount") {
     return ServicePrincipalStorageInfo{dbName, "https://" + account + ".blob.core.windows.net", "client", "secret",
                                        "tenant"};
+}
+
+// An unusable account URL makes filesystem creation fail fast instead of talking to the network.
+ServicePrincipalStorageInfo BadInfo() {
+    return ServicePrincipalStorageInfo{"shared-ctx-db", "", "client", "secret", "tenant"};
 }
 } // namespace
 
@@ -72,4 +80,39 @@ TEST(PluginTests, DeprecatedRegister_WithoutIoContext_PublishesBothNamesAndShuts
     EXPECT_NE(nullptr, library->FindFactory<rocksdb::FileSystem>(std::string(Plugin::Name) + "legacy-dblegacy-backup"));
     // Destroying the Env must not hang or touch a stopped io_context.
     guard.reset();
+}
+
+TEST(PluginTests, Register_WithSharedIoContext_KeepsItAliveUntilUnregistered) {
+    const auto logger =
+        std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
+    rocksdb::ConfigOptions configOptions;
+    rocksdb::Env* env = nullptr;
+    std::shared_ptr<rocksdb::Env> guard;
+    auto context = std::make_shared<boost::asio::io_context>();
+    const std::weak_ptr<boost::asio::io_context> weak = context;
+
+    [[maybe_unused]] const auto status =
+        Plugin::Register(configOptions, &env, &guard, context, BadInfo(), std::nullopt, logger);
+    guard.reset();
+    EXPECT_GT(context.use_count(), 1);
+
+    Plugin::Unregister(BadInfo());
+    EXPECT_EQ(1, context.use_count());
+
+    rocksdb::Env* again = nullptr;
+    std::shared_ptr<rocksdb::Env> againGuard;
+    const auto created =
+        rocksdb::Env::CreateFromUri(configOptions, "", Plugin::NameFor(BadInfo()), &again, &againGuard);
+    EXPECT_FALSE(created.ok());
+}
+
+TEST(PluginTests, Register_WithNullSharedIoContext_IsRejected) {
+    const auto logger =
+        std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
+    rocksdb::ConfigOptions configOptions;
+    rocksdb::Env* env = nullptr;
+    std::shared_ptr<rocksdb::Env> guard;
+    EXPECT_TRUE(Plugin::Register(configOptions, &env, &guard, std::shared_ptr<boost::asio::io_context>{},
+                                 MakeInfo("db"), std::nullopt, logger)
+                    .IsInvalidArgument());
 }
