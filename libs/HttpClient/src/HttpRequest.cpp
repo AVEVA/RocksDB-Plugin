@@ -69,10 +69,11 @@ namespace AVEVA
 
     void HttpRequest::SetBodyView(std::span<const std::byte> content) noexcept
     {
-        m_bodyView = content;
-        m_hasBodyView = true;
-        m_bodyKeepAlive.reset();
         m_body.clear();
+        m_bodyKeepAlive.reset();
+        // An empty view is the same as an empty owned body, so HasBodyView never reports a view of nothing.
+        m_hasBodyView = !content.empty();
+        m_bodyView = m_hasBodyView ? content : std::span<const std::byte>{};
     }
 
     void HttpRequest::SetBodyView(std::span<const std::byte> content, std::shared_ptr<const void> keepAlive) noexcept

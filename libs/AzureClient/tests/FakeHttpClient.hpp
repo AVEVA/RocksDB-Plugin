@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "FakeHttpUrl.hpp"
+
 #include <AVEVA/AzureClient/BlobClient.hpp>
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>
 #include <AVEVA/AzureClient/BlobServiceClient.hpp>
@@ -386,17 +388,8 @@ class FakeHttpClient final {
             if (pos == std::string::npos) {
                 continue;
             }
-            std::string raw = url.substr(pos + 8U);
-            raw = raw.substr(0, raw.find('&'));
-            std::string decoded;
-            for (std::size_t i = 0; i < raw.size(); ++i) {
-                if (raw.at(i) == '%' && i + 2U < raw.size()) {
-                    decoded += static_cast<char>(std::stoi(raw.substr(i + 1U, 2U), nullptr, 16));
-                    i += 2U;
-                } else {
-                    decoded += raw.at(i);
-                }
-            }
+            const std::string raw = url.substr(pos + 8U);
+            std::string decoded = PercentDecode(raw.substr(0, raw.find('&')));
             ids.push_back(std::move(decoded));
         }
         return ids;

@@ -5,6 +5,7 @@
 // completions for one operation genuinely arrive on several threads at once. Built as its own
 // executable with the `concurrency` label; run it under ThreadSanitizer (LinuxDebugTSan) to check
 // the engines' locking (T30).
+#include "FakeHttpUrl.hpp"
 #include "AVEVA/AzureClient/BlobClient.hpp"
 #include "AVEVA/AzureClient/BlobContainerClient.hpp"
 #include "AVEVA/AzureClient/BlobOperationOptions.hpp"
@@ -52,19 +53,6 @@ using AVEVA::HttpRequest;
 using AVEVA::HttpResponse;
 
 constexpr std::size_t ThreadCount = 4;
-
-[[nodiscard]] std::string PercentDecode(std::string_view value) {
-    std::string decoded;
-    for (std::size_t i = 0; i < value.size(); ++i) {
-        if (value.at(i) == '%' && i + 2 < value.size()) {
-            decoded.push_back(static_cast<char>(std::stoi(std::string(value.substr(i + 1, 2)), nullptr, 16)));
-            i += 2;
-        } else {
-            decoded.push_back(value.at(i));
-        }
-    }
-    return decoded;
-}
 
 [[nodiscard]] std::string_view HeaderValue(const HttpRequest& request, std::string_view name) {
     for (const HttpHeader& header : request.GetHeaders()) {
@@ -149,7 +137,7 @@ class ThreadPoolBlobService final {
             const std::string_view pair = rest.substr(0, amp);
             const std::size_t eq = pair.find('=');
             query[std::string(pair.substr(0, eq))] =
-                eq == std::string_view::npos ? std::string{} : PercentDecode(pair.substr(eq + 1));
+                eq == std::string_view::npos ? std::string{} : Tests::PercentDecode(pair.substr(eq + 1));
             rest = amp == std::string_view::npos ? std::string_view{} : rest.substr(amp + 1);
         }
 

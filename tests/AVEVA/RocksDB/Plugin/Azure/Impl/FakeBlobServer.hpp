@@ -4,6 +4,7 @@
 #pragma once
 
 #include "FakeHttpClient.hpp"
+#include "FakeHttpUrl.hpp"
 #include "TestFixtures.hpp"
 
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
@@ -97,9 +98,9 @@ class FakeBlobServer {
     std::map<std::string, StoredBlob> m_blobs;
     std::string m_primaryPath;
     std::set<std::string> m_containers;
-    std::deque<std::size_t> m_heldUploads;
-    std::deque<std::size_t> m_heldProperties;
-    std::deque<std::pair<std::size_t, DownloadRequest>> m_heldDownloads;
+    AzureClient::Tests::HeldRequests<> m_heldUploads;
+    AzureClient::Tests::HeldRequests<> m_heldProperties;
+    AzureClient::Tests::HeldRequests<DownloadRequest> m_heldDownloads;
 
   public:
     explicit FakeBlobServer(FakeHttpClient& http, const std::string& container = "files",
@@ -173,20 +174,10 @@ class FakeBlobServer {
     // Holds Get Blob Properties until CompleteProperties; the response carries the values it had when sent.
     bool DeferProperties = false;
     size_t PendingProperties() {
-        return CountLive(m_heldProperties, [](std::size_t index) { return index; });
+        return Count(m_heldProperties);
     }
     void CompleteProperties() {
-        std::size_t index = 0;
-        {
-            std::scoped_lock lock(m_mutex);
-            PruneLocked(m_heldProperties, [](std::size_t entry) { return entry; });
-            if (m_heldProperties.empty()) {
-                throw std::logic_error("FakeBlobServer has no deferred properties request");
-            }
-            index = m_heldProperties.front();
-            m_heldProperties.pop_front();
-        }
-        if (!m_http->CompleteRequest(index)) {
+        if (!m_http->CompleteRequest(Take(m_heldProperties, 0, "FakeBlobServer has no deferred properties request").RequestIndex)) {
             throw std::logic_error("FakeBlobServer properties request was already completed");
         }
     }
@@ -202,20 +193,20 @@ class FakeBlobServer {
     void SetCapacity(const int64_t capacity) { Data.resize(static_cast<size_t>(capacity), '\0'); }
 
     size_t PendingUploads() {
-        return CountLive(m_heldUploads, [](std::size_t index) { return index; });
+        return Count(m_heldUploads);
     }
     size_t PendingDownloads() {
-        return CountLive(m_heldDownloads, [](const auto& entry) { return entry.first; });
+        return Count(m_heldDownloads);
     }
 
     // Completes a deferred upload; the bytes land in the blob only now.
     void CompleteUpload(const size_t index = 0) {
-        if (!m_http->CompleteRequest(TakeHeldUpload(index))) {
+        if (!m_http->CompleteRequest(Take(m_heldUploads, index, "FakeBlobServer upload index out of range").RequestIndex)) {
             throw std::logic_error("FakeBlobServer upload was already completed");
         }
     }
     void FailUpload(const AzureClient::BlobStorageError& error, const size_t index = 0) {
-        FailHeld(TakeHeldUpload(index), error);
+        FailHeld(Take(m_heldUploads, index, "FakeBlobServer upload index out of range").RequestIndex, error);
     }
 
     // Takes the oldest deferred download; the caller completes it with Succeed / Fail.
@@ -225,17 +216,9 @@ class FakeBlobServer {
         std::move_only_function<void(AzureClient::BlobStorageError error)> Fail;
     };
     HeldDownload TakeDownload() {
-        std::pair<std::size_t, DownloadRequest> held;
-        {
-            std::scoped_lock lock(m_mutex);
-            PruneLocked(m_heldDownloads, [](const auto& entry) { return entry.first; });
-            if (m_heldDownloads.empty()) {
-                throw std::logic_error("FakeBlobServer has no deferred download");
-            }
-            held = std::move(m_heldDownloads.front());
-            m_heldDownloads.pop_front();
-        }
-        const auto [requestIndex, request] = held;
+        const auto held = Take(m_heldDownloads, 0, "FakeBlobServer has no deferred download");
+        const std::size_t requestIndex = held.RequestIndex;
+        const DownloadRequest request = held.Meta;
         return HeldDownload{
             request,
             [this, requestIndex, request](std::string content) {
@@ -259,27 +242,18 @@ class FakeBlobServer {
   private:
     using Result = FakeHttpClient::ScriptedResult;
 
-    template <class TDeque, class TIndexOf> std::size_t CountLive(TDeque& held, TIndexOf indexOf) {
+    template <class THeld> std::size_t Count(THeld& held) {
         std::scoped_lock lock(m_mutex);
-        PruneLocked(held, indexOf);
-        return held.size();
+        return held.Count(*m_http);
     }
 
-    // Cancelled or otherwise finished requests (e.g. a timed-out read) are no longer held.
-    template <class TDeque, class TIndexOf> void PruneLocked(TDeque& held, TIndexOf indexOf) {
-        std::erase_if(held, [&](const auto& entry) { return !m_http->IsPending(indexOf(entry)); });
-    }
-
-    std::size_t TakeHeldUpload(const size_t index) {
+    template <class THeld> auto Take(THeld& held, const std::size_t position, const char* missing) {
         std::scoped_lock lock(m_mutex);
-        PruneLocked(m_heldUploads, [](std::size_t entry) { return entry; });
-        if (index >= m_heldUploads.size()) {
-            throw std::logic_error("FakeBlobServer upload index out of range");
+        auto entry = held.Take(*m_http, position);
+        if (!entry) {
+            throw std::logic_error(missing);
         }
-        const auto it = m_heldUploads.begin() + static_cast<std::ptrdiff_t>(index);
-        const auto requestIndex = *it;
-        m_heldUploads.erase(it);
-        return requestIndex;
+        return std::move(*entry);
     }
 
     void FailHeld(const std::size_t requestIndex, const AzureClient::BlobStorageError& error) {
@@ -288,50 +262,6 @@ class FakeBlobServer {
     }
 
     // ---- HTTP helpers ----
-
-    [[nodiscard]] static std::string PercentDecode(std::string_view text) {
-        std::string decoded;
-        for (std::size_t i = 0; i < text.size(); ++i) {
-            unsigned int value = 0;
-            if (text[i] == '%' && i + 2 < text.size() &&
-                std::from_chars(text.data() + i + 1, text.data() + i + 3, value, 16).ec == std::errc{}) {
-                decoded += static_cast<char>(value);
-                i += 2;
-            } else {
-                decoded += text[i];
-            }
-        }
-        return decoded;
-    }
-
-    // "container/blob" of a request URL, decoded.
-    [[nodiscard]] static std::string PathOf(const std::string& url) {
-        const auto scheme = url.find("://");
-        const auto start = url.find('/', scheme == std::string::npos ? 0 : scheme + 3);
-        if (start == std::string::npos) {
-            return {};
-        }
-        const auto end = url.find('?', start);
-        return PercentDecode(std::string_view(url).substr(start + 1, end == std::string::npos ? end : end - start - 1));
-    }
-
-    [[nodiscard]] static std::string QueryValue(const std::string& url, std::string_view name) {
-        const auto query = url.find('?');
-        if (query == std::string::npos) {
-            return {};
-        }
-        std::string_view rest = std::string_view(url).substr(query + 1);
-        while (!rest.empty()) {
-            const auto end = rest.find('&');
-            const auto pair = rest.substr(0, end);
-            const auto equals = pair.find('=');
-            if (pair.substr(0, equals) == name) {
-                return equals == std::string_view::npos ? std::string() : PercentDecode(pair.substr(equals + 1));
-            }
-            rest = end == std::string_view::npos ? std::string_view() : rest.substr(end + 1);
-        }
-        return {};
-    }
 
     [[nodiscard]] static std::string Header(const HttpRequest& request, std::string_view name) {
         return FakeHttpClient::FindHeaderValue(request, name);
@@ -428,11 +358,11 @@ class FakeBlobServer {
     [[nodiscard]] std::optional<Result> Respond(const FakeHttpClient::RequestRecord& record) {
         const HttpRequest& request = record.Request;
         const std::string& url = request.GetUrl();
-        const std::string path = PathOf(url);
-        const std::string comp = QueryValue(url, "comp");
+        const std::string path = AzureClient::Tests::UrlPath(url);
+        const std::string comp = AzureClient::Tests::QueryValue(url, "comp");
         const HttpMethod method = request.GetMethod();
 
-        if (QueryValue(url, "restype") == "container") {
+        if (AzureClient::Tests::QueryValue(url, "restype") == "container") {
             return ContainerRequest(method, comp, url, path, record.Body);
         }
         if (method == HttpMethod::Put && comp.empty()) {
@@ -652,7 +582,7 @@ class FakeBlobServer {
                 break;
             }
             position = urlEnd;
-            const auto path = PathOf(body.substr(urlStart, urlEnd - urlStart));
+            const auto path = AzureClient::Tests::UrlPath(body.substr(urlStart, urlEnd - urlStart));
             const auto it = m_blobs.find(path);
 
             std::optional<AzureClient::BlobStorageError> error;
@@ -688,14 +618,14 @@ class FakeBlobServer {
             return FailureResult(*fault);
         }
         const std::string root = container + "/";
-        const std::string prefix = QueryValue(url, "prefix");
-        const std::string marker = QueryValue(url, "marker");
-        const std::string maxText = QueryValue(url, "maxresults");
+        const std::string prefix = AzureClient::Tests::QueryValue(url, "prefix");
+        const std::string marker = AzureClient::Tests::QueryValue(url, "marker");
+        const std::string maxText = AzureClient::Tests::QueryValue(url, "maxresults");
         size_t maxResults = 5000;
         if (!maxText.empty()) {
             std::from_chars(maxText.data(), maxText.data() + maxText.size(), maxResults);
         }
-        const bool includeMetadata = QueryValue(url, "include").find("metadata") != std::string::npos;
+        const bool includeMetadata = AzureClient::Tests::QueryValue(url, "include").find("metadata") != std::string::npos;
 
         std::string blobs;
         std::string nextMarker;
@@ -742,7 +672,7 @@ class FakeBlobServer {
         Result result = Success(MakeResponse(200U, std::move(headers)));
         if (DeferProperties) {
             result.Deferred = true;
-            m_heldProperties.push_back(requestIndex);
+            m_heldProperties.Add(requestIndex);
         }
         return result;
     }
@@ -840,7 +770,7 @@ class FakeBlobServer {
         if (RequireCopySourceAuthorization && copy.SourceAuthorization.empty()) {
             return Failure(401U, "CannotVerifyCopySource");
         }
-        const auto source = m_blobs.find(PathOf(copy.SourceUrl));
+        const auto source = m_blobs.find(AzureClient::Tests::UrlPath(copy.SourceUrl));
         if (source == m_blobs.end() || !source->second.Exists) {
             return Failure(404U, "CannotVerifyCopySource");
         }
@@ -901,7 +831,7 @@ class FakeBlobServer {
                 std::scoped_lock completionLock(m_mutex);
                 response = MakeResponse(201U, {HttpHeader("ETag", Apply(m_blobs.at(path), offset, payload))});
             };
-            m_heldUploads.push_back(record.Index);
+            m_heldUploads.Add(record.Index);
             return deferred;
         }
         return Success(MakeResponse(201U, {HttpHeader("ETag", Apply(blob, offset, payload))}));
@@ -942,7 +872,7 @@ class FakeBlobServer {
         if (DeferDownloads) {
             Result deferred = Success(MakeResponse(206U));
             deferred.Deferred = true;
-            m_heldDownloads.emplace_back(record.Index, download);
+            m_heldDownloads.Add(record.Index, download);
             return deferred;
         }
 

@@ -5,6 +5,7 @@
 
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 
+#include <cassert>
 #include <cstddef>
 #include <memory>
 #include <new>
@@ -22,30 +23,12 @@ namespace AVEVA::Detail
     ///
     /// Not intended for direct use; <c>HttpClient::SendAsync</c> creates these.
     /// </summary>
+    struct CompletionDeleter;
     class CompletionOperation
     {
       public:
         CompletionOperation(const CompletionOperation&) = delete;
         CompletionOperation& operator=(const CompletionOperation&) = delete;
-
-        /// <summary>
-        /// Frees the operation and then invokes the handler with the outcome. The operation must not be used
-        /// afterwards.
-        /// </summary>
-        /// <param name="error">The outcome of the request.</param>
-        /// <param name="response">The response; empty on failure.</param>
-        void Complete(std::error_code error, HttpResponse response)
-        {
-            m_complete(this, error, std::move(response));
-        }
-
-        /// <summary>
-        /// Frees the operation without invoking the handler. The operation must not be used afterwards.
-        /// </summary>
-        void Destroy() noexcept
-        {
-            m_destroy(this);
-        }
 
       protected:
         using CompleteFunction = void (*)(CompletionOperation*, std::error_code, HttpResponse);
@@ -60,6 +43,30 @@ namespace AVEVA::Detail
         ~CompletionOperation() = default;
 
       private:
+        friend struct CompletionDeleter;
+        friend void Complete(std::unique_ptr<CompletionOperation, CompletionDeleter>, std::error_code, HttpResponse);
+
+        /// <summary>
+        /// Frees the operation and then invokes the handler with the outcome. The operation must not be used
+        /// afterwards.
+        /// </summary>
+        /// <param name="error">The outcome of the request.</param>
+        /// <param name="response">The response; empty on failure.</param>
+        void Complete(std::error_code error, HttpResponse response)
+        {
+            assert(m_complete != nullptr);
+            m_complete(this, error, std::move(response));
+        }
+
+        /// <summary>
+        /// Frees the operation without invoking the handler. The operation must not be used afterwards.
+        /// </summary>
+        void Destroy() noexcept
+        {
+            assert(m_destroy != nullptr);
+            m_destroy(this);
+        }
+
         CompleteFunction m_complete;
         DestroyFunction m_destroy;
     };
