@@ -50,6 +50,10 @@ void FileCache::MarkFileAsStaleIfExists(const std::string& filePath) {
     std::scoped_lock lock(m_mutex);
     auto it = m_cache.find(filePath);
     if (it != m_cache.end()) {
+        // A downloader that already popped this entry is still QueuedForDownload; the generation is how it learns
+        // the blob changed under it.
+        it->second.BumpGeneration();
+
         // Mark as stale if exists. This should prevent reads from
         // accessing the file while it's being downloaded.
         if (it->second.GetState() != FileCacheEntry::State::QueuedForDownload) {
@@ -101,9 +105,8 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
                 m_fileDownloadQueue.emplace(filePath);
 
                 // Mark as downloading now so we don't queue it again.
-                UpdateEntryUnsafe(fileEntry, [](FileCacheEntry& entry) {
-                    entry.SetState(FileCacheEntry::State::QueuedForDownload);
-                });
+                UpdateEntryUnsafe(
+                    fileEntry, [](FileCacheEntry& entry) { entry.SetState(FileCacheEntry::State::QueuedForDownload); });
 
                 lock.unlock();
                 m_cv.notify_one();
@@ -175,9 +178,8 @@ void FileCache::SetCacheSize(int64_t size) {
 
 void FileCache::WaitUntilIdle() {
     std::unique_lock lock(m_mutex);
-    m_idleCv.wait(lock, [this] {
-        return m_fileDownloadQueue.empty() && m_pendingReleases.empty() && !m_downloadInFlight;
-    });
+    m_idleCv.wait(lock,
+                  [this] { return m_fileDownloadQueue.empty() && m_pendingReleases.empty() && !m_downloadInFlight; });
 }
 
 bool FileCache::WaitUntilIdleForTesting(const std::chrono::milliseconds timeout) {
@@ -204,6 +206,7 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
             } inFlight{*this};
 
             std::string filePath;
+            uint64_t generation = 0;
             std::vector<PendingRelease> releases;
             std::vector<std::string> retryDeletes;
             bool stopping = false;
@@ -212,8 +215,7 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                 if (m_fileDownloadQueue.empty() && m_pendingReleases.empty() && !stopToken.stop_requested()) {
                     BOOST_LOG_SEV(*m_logger, debug) << "File cache has no work. Waiting for condition variable.";
                     m_cv.wait(lock, [this, &stopToken]() {
-                        return !m_fileDownloadQueue.empty() || !m_pendingReleases.empty() ||
-                               stopToken.stop_requested();
+                        return !m_fileDownloadQueue.empty() || !m_pendingReleases.empty() || stopToken.stop_requested();
                     });
                 }
 
@@ -248,6 +250,8 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                                 << "File '" << filePath
                                 << "' is no longer marked as queued for download. Skipping download.";
                             filePath.clear();
+                        } else {
+                            generation = it->second.GetGeneration();
                         }
                     } else {
                         // The file was likely deleted while we were waiting for the condition variable.
@@ -296,6 +300,18 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                 std::unique_lock lock(m_mutex);
                 auto it = m_cache.find(filePath);
                 if (it != m_cache.end()) {
+                    if (it->second.GetGeneration() != generation) {
+                        // The blob was replaced while we asked for its size, so that size and any download are stale.
+                        // A later read queues the entry again.
+                        BOOST_LOG_SEV(*m_logger, debug)
+                            << "File '" << filePath << "' was replaced before download began. Not activating.";
+                        if (it->second.GetState() == FileCacheEntry::State::QueuedForDownload) {
+                            UpdateEntryUnsafe(it->second, [](FileCacheEntry& entry) {
+                                entry.SetState(FileCacheEntry::State::Stale);
+                            });
+                        }
+                        continue;
+                    }
                     UpdateEntryUnsafe(it->second, [fileSize](FileCacheEntry& entry) { entry.SetSize(fileSize); });
                 } else {
                     // The file was likely deleted while we were waiting for the condition variable.
@@ -329,9 +345,8 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                 }
 
                 // Mark the file as downloading now so we don't queue it again.
-                UpdateEntryUnsafe(it->second, [](FileCacheEntry& entry) {
-                    entry.SetState(FileCacheEntry::State::Downloading);
-                });
+                UpdateEntryUnsafe(it->second,
+                                  [](FileCacheEntry& entry) { entry.SetState(FileCacheEntry::State::Downloading); });
             }
 
             try {
@@ -445,8 +460,8 @@ bool FileCache::EvictAtLeast(const int64_t bytes) {
             const std::string filePath = current->GetFilePath();
             const auto fileSize = current->GetSize();
 
-            BOOST_LOG_SEV(*m_logger, debug) << "Evicting '" << filePath << "' of size " << fileSize
-                                            << "'bytes' from file cache";
+            BOOST_LOG_SEV(*m_logger, debug)
+                << "Evicting '" << filePath << "' of size " << fileSize << "'bytes' from file cache";
             bytesEvicted += fileSize;
             RemoveFileUnsafe(filePath);
         }
@@ -518,8 +533,8 @@ bool FileCache::TryDeleteCachedFile(const std::string& filePath) {
         if (m_filesystem->DeleteFile(cachedFilePath)) {
             return true;
         }
-        BOOST_LOG_SEV(*m_logger, warning) << "Could not delete cached file '" << cachedFilePath.string()
-                                          << "'. It will be retried.";
+        BOOST_LOG_SEV(*m_logger, warning)
+            << "Could not delete cached file '" << cachedFilePath.string() << "'. It will be retried.";
     } catch (const std::exception& e) {
         BOOST_LOG_SEV(*m_logger, warning) << "Deleting cached file '" << cachedFilePath.string()
                                           << "' failed: " << e.what() << ". It will be retried.";

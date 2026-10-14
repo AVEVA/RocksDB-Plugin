@@ -333,6 +333,37 @@ TEST_F(FileCacheTests, ReadFile_SecondAccess_QueuesAndDownloads) {
     EXPECT_TRUE(m_cache.HasFile("1.sst"));
 }
 
+TEST_F(FileCacheTests, FileReplacedWhileItsSizeIsBeingLookedUp_IsNotActivated) {
+    // Arrange - the size lookup blocks until released.
+    std::promise<void> started;
+    std::promise<void> release;
+    std::atomic<int> sizeCalls{0};
+    EXPECT_CALL(*m_containerClient, GetBlobSize("1.sst")).WillRepeatedly([&](const std::string&) -> int64_t {
+        if (++sizeCalls == 1) {
+            started.set_value();
+            release.get_future().wait();
+        }
+        return 1;
+    });
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).Times(0);
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", 0, 0, nullptr)); // records the entry
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", 0, 0, nullptr)); // queues the download
+    started.get_future().wait();
+
+    // Act - the downloader has popped the entry, which is still QueuedForDownload, when the blob is replaced.
+    m_cache.MarkFileAsStaleIfExists("1.sst");
+    release.set_value();
+    m_cache.WaitUntilIdle();
+
+    // Assert - nothing was downloaded or activated with the pre-replacement size.
+    ASSERT_TRUE(::testing::Mock::VerifyAndClearExpectations(m_containerClient.get()));
+    EXPECT_EQ(0U, m_cache.CacheSize());
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", 0, 0, nullptr).has_value());
+    EXPECT_GE(sizeCalls, 1);
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
+    m_cache.WaitUntilIdle();
+}
+
 TEST_F(FileCacheTests, FileReplacedAndRequeuedDuringADownload_IsDownloadedAgainNotActivatedWithTheOldBytes) {
     // Arrange - the first download blocks until released; later ones return at once.
     std::promise<void> started;

@@ -20,6 +20,10 @@ void FileCacheEntry::SetSize(int64_t size) noexcept { m_size = size; }
 
 void FileCacheEntry::SetState(State state) noexcept { m_state = state; }
 
+uint64_t FileCacheEntry::GetGeneration() const noexcept { return m_generation; }
+
+void FileCacheEntry::BumpGeneration() noexcept { ++m_generation; }
+
 std::shared_ptr<CachedReadHandle> FileCacheEntry::GetOrCreateReadHandle() {
     if (!m_readHandle) {
         m_readHandle = std::make_shared<CachedReadHandle>();
