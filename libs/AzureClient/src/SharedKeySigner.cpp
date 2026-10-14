@@ -217,12 +217,13 @@ std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpR
     std::array<std::string_view, 11> fields{};
     std::array<bool, 11> fieldFound{};
     const std::vector<HttpHeader>& headers = request.GetHeaders();
-    std::vector<std::size_t> canonicalizedHeaderIndices;
-    canonicalizedHeaderIndices.reserve(headers.size());
+    // Names are lowercased before comparing because the culture-aware tables only rank lowercase letters.
+    std::vector<std::pair<std::string, std::size_t>> canonicalizedHeaders;
+    canonicalizedHeaders.reserve(headers.size());
     for (std::size_t index = 0; index < headers.size(); ++index) {
         const HttpHeader& header = headers.at(index);
         if (IStartsWith(header.GetName(), "x-ms-")) {
-            canonicalizedHeaderIndices.push_back(index);
+            canonicalizedHeaders.emplace_back(ToLowerAscii(header.GetName()), index);
             continue;
         }
         for (std::size_t slot = 0; slot < fieldHeaderNames.size(); ++slot) {
@@ -234,30 +235,24 @@ std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpR
             }
         }
     }
-    // Names are lowercased before comparing because the culture-aware tables only rank lowercase letters.
-    std::vector<std::string> lowercaseNames(headers.size());
-    for (const std::size_t index : canonicalizedHeaderIndices) {
-        lowercaseNames.at(index) = ToLowerAscii(headers.at(index).GetName());
-    }
-    std::ranges::stable_sort(canonicalizedHeaderIndices, [&lowercaseNames](std::size_t lhs, std::size_t rhs) {
-        return CultureAwareLess(lowercaseNames.at(lhs), lowercaseNames.at(rhs));
+    std::ranges::stable_sort(canonicalizedHeaders, [](const auto& lhs, const auto& rhs) {
+        return CultureAwareLess(lhs.first, rhs.first);
     });
 
     std::string canonicalizedHeadersText;
-    canonicalizedHeadersText.reserve(canonicalizedHeaderIndices.size() * EstimatedCanonicalizedHeaderLength);
+    canonicalizedHeadersText.reserve(canonicalizedHeaders.size() * EstimatedCanonicalizedHeaderLength);
     // Repeated header names are combined into one `name:v1,v2` line, in their original order.
-    for (std::size_t position = 0; position < canonicalizedHeaderIndices.size(); ++position) {
-        const HttpHeader& header = headers.at(canonicalizedHeaderIndices.at(position));
-        if (position == 0 ||
-            !IEquals(headers.at(canonicalizedHeaderIndices.at(position - 1)).GetName(), header.GetName())) {
+    for (std::size_t position = 0; position < canonicalizedHeaders.size(); ++position) {
+        const auto& [lowercaseName, headerIndex] = canonicalizedHeaders.at(position);
+        if (position == 0 || canonicalizedHeaders.at(position - 1).first != lowercaseName) {
             if (position != 0) {
                 canonicalizedHeadersText.push_back('\n');
             }
-            canonicalizedHeadersText.append(lowercaseNames.at(canonicalizedHeaderIndices.at(position))).push_back(':');
+            canonicalizedHeadersText.append(lowercaseName).push_back(':');
         } else {
             canonicalizedHeadersText.push_back(',');
         }
-        AppendCollapsedWhitespace(canonicalizedHeadersText, header.GetValue());
+        AppendCollapsedWhitespace(canonicalizedHeadersText, headers.at(headerIndex).GetValue());
     }
     if (!canonicalizedHeadersText.empty()) {
         canonicalizedHeadersText.push_back('\n');
