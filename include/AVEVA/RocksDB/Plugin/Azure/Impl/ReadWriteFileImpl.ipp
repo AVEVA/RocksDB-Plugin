@@ -58,6 +58,12 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Close() {
 }
 
 template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Sync() {
+    // A metadata write changes the blob's ETag and invalidates readers and the cache, so skip it when there is
+    // nothing buffered and the published size is already current (e.g. Sync followed by Close).
+    if (m_bufferStats.empty() && m_size == m_syncSize) {
+        return;
+    }
+
     if (m_h.FileCache) {
         m_h.FileCache->MarkFileAsStaleIfExists(m_h.Name);
     }

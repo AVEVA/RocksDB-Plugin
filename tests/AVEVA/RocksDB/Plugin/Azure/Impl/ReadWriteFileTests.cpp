@@ -227,6 +227,39 @@ TEST_F(ReadWriteFileImplTests, Sync_UpdatesFileSizeMetadata) {
     EXPECT_EQ((std::vector<int64_t>{dataSize}), m_env.Blob->SizeWrites);
 }
 
+TEST_F(ReadWriteFileImplTests, Sync_WithNothingNewToPublish_SendsNoMetadataWriteAndKeepsEtag) {
+    // Arrange
+    auto file = CreateFile();
+    std::vector<char> data(500, 'F');
+    file->Write(0, data.data(), static_cast<int64_t>(data.size()));
+    file->Sync();
+    const auto etag = m_env.Blob->ETag;
+    ASSERT_EQ(1U, m_env.Blob->SizeWrites.size());
+
+    // Act
+    file->Sync();
+    file->Close();
+
+    // Assert
+    EXPECT_EQ(1U, m_env.Blob->SizeWrites.size());
+    EXPECT_EQ(etag, m_env.Blob->ETag);
+}
+
+TEST_F(ReadWriteFileImplTests, Sync_AfterWriteThatChangesSize_PublishesNewSize) {
+    // Arrange
+    auto file = CreateFile();
+    std::vector<char> data(500, 'G');
+    file->Write(0, data.data(), static_cast<int64_t>(data.size()));
+    file->Sync();
+
+    // Act
+    file->Write(500, data.data(), static_cast<int64_t>(data.size()));
+    file->Sync();
+
+    // Assert
+    EXPECT_EQ((std::vector<int64_t>{500, 1000}), m_env.Blob->SizeWrites);
+}
+
 // Test Read returns correct data
 TEST_F(ReadWriteFileImplTests, Read_ReturnsDataFromBlob) {
     // Arrange
@@ -344,6 +377,8 @@ TEST_F(ReadWriteFileImplTests, Destructor_RetriesCloseOnFailure) {
     // Act - destructor should retry
     {
         FakeReadWriteFileImpl file(m_testFileName, m_env.Runtime, m_env.Client, nullptr, m_logger);
+        const std::vector<char> data(100, 'R');
+        file.Write(0, data.data(), static_cast<int64_t>(data.size()));
     } // Destructor called here
 
     // Assert
