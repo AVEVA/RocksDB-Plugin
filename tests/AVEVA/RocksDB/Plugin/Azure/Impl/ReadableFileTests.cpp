@@ -10,6 +10,9 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <thread>
+
 using AVEVA::RocksDB::Plugin::Azure::RequestFailedException;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Configuration;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobEnvironment;
@@ -145,13 +148,24 @@ TEST_F(ReadableFileTests, RandomRead_AtStaleEndOfBlob_RefreshesWithExactlyOnePro
     EXPECT_EQ(std::vector<char>(100, 'N'), buffer);
     EXPECT_EQ(before + 1, m_env.Blob->PropertiesRequests);
 }
-TEST_F(ReadableFileTests, GetSize_RefreshesWithOneMetadataCall) {
+TEST_F(ReadableFileTests, GetSize_RefreshesWithOneMetadataCallOnceTheCachedMetadataIsOlderThanTheTtl) {
+    m_env.Fill(1024);
+    const auto file = MakeFile();
+    m_env.Blob->Size = 2048;
+    std::this_thread::sleep_for(Configuration::MetadataCacheTtl + std::chrono::milliseconds(50));
+
+    EXPECT_EQ(2048, file.GetSize());
+    EXPECT_EQ(2, m_env.Blob->PropertiesRequests);
+}
+
+TEST_F(ReadableFileTests, GetSize_WithinTheTtl_IsServedFromCachedMetadata) {
     m_env.Fill(1024);
     const auto file = MakeFile();
     m_env.Blob->Size = 2048;
 
-    EXPECT_EQ(2048, file.GetSize());
-    EXPECT_EQ(2, m_env.Blob->PropertiesRequests);
+    EXPECT_EQ(1024, file.GetSize());
+    EXPECT_EQ(1024, file.GetSize());
+    EXPECT_EQ(1, m_env.Blob->PropertiesRequests);
 }
 
 TEST_F(ReadableFileTests, RandomRead_GivesUpWhenBlobKeepsChanging) {

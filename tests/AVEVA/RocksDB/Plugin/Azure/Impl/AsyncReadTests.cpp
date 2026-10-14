@@ -29,6 +29,7 @@ using AVEVA::RocksDB::Plugin::Azure::RequestFailedException;
 using AVEVA::RocksDB::Plugin::Azure::Impl::AbortAsyncReads;
 using AVEVA::RocksDB::Plugin::Azure::Impl::AsyncReadTracker;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Configuration;
 using AVEVA::RocksDB::Plugin::Azure::Impl::PollAsyncReads;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobEnvironment;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobServer;
@@ -227,6 +228,35 @@ TEST_F(AsyncReadTests, ReadAsync_RangeCoveredByPendingPrefetch_WaitsForItWithout
     EXPECT_EQ(0U, m_deferredEnv.Blob->PendingDownloads());
 }
 
+TEST_F(AsyncReadTests, GetSize_RefreshThatFindsTheSameEtag_KeepsThePrefetchedBytes) {
+    auto file = std::make_shared<FakeReadableFileImpl>("test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
+                                                       m_logger);
+    ASSERT_TRUE(FakeReadableFileImpl::Prefetch(file, 0, 512));
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'P'));
+    std::this_thread::sleep_for(Configuration::MetadataCacheTtl + std::chrono::milliseconds(50));
+    const auto propertiesBefore = m_deferredEnv.Blob->PropertiesRequests;
+
+    EXPECT_EQ(BlobSize, file->GetSize());
+
+    EXPECT_EQ(propertiesBefore + 1, m_deferredEnv.Blob->PropertiesRequests);
+    std::vector<char> buffer(256);
+    EXPECT_EQ(256U, file->TryReadFromCache(0, 256, buffer.data()).value_or(0));
+    EXPECT_EQ(std::vector<char>(256, 'P'), buffer);
+}
+
+TEST_F(AsyncReadTests, GetSize_RefreshThatFindsANewEtag_DropsThePrefetchedBytes) {
+    auto file = std::make_shared<FakeReadableFileImpl>("test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
+                                                       m_logger);
+    ASSERT_TRUE(FakeReadableFileImpl::Prefetch(file, 0, 512));
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'P'));
+    m_deferredEnv.Blob->ETag = "etag2";
+    std::this_thread::sleep_for(Configuration::MetadataCacheTtl + std::chrono::milliseconds(50));
+
+    EXPECT_EQ(BlobSize, file->GetSize());
+
+    std::vector<char> buffer(256);
+    EXPECT_FALSE(file->TryReadFromCache(0, 256, buffer.data()).has_value());
+}
 TEST_F(AsyncReadTests, ReadAsync_ChainedOntoFailedPrefetch_FallsBackToOwnDownload) {
     auto file = CreateFile(m_deferredEnv);
     ASSERT_TRUE(file.Prefetch(1024, 2048, rocksdb::IOOptions{}, nullptr).ok());

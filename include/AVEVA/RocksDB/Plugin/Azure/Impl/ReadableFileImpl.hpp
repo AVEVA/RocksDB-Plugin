@@ -35,6 +35,8 @@ template <typename TBlob> class BasicReadableFileImpl {
     std::unique_ptr<std::mutex> m_metadataMutex;
     mutable int64_t m_size;
     mutable std::string m_etag;
+    // When m_size/m_etag were last read from the service; GetSize serves them for MetadataCacheTtl.
+    mutable std::chrono::steady_clock::time_point m_metadataFetchedAt;
     // Optional; when set, every ReadAsync is registered with it until its callback has been released.
     std::shared_ptr<AsyncReadTracker> m_asyncReads;
 

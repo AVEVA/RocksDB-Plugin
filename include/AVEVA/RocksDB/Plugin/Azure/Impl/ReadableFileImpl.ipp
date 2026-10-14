@@ -55,6 +55,7 @@ BasicReadableFileImpl<TBlob>::BasicReadableFileImpl(
     auto metadata = BlobOperations::GetMetadata(*m_h.Blob);
     m_size = metadata.Size;
     m_etag = std::move(metadata.ETag);
+    m_metadataFetchedAt = std::chrono::steady_clock::now();
 }
 
 template <typename TBlob>
@@ -93,6 +94,12 @@ template <typename TBlob> bool BasicReadableFileImpl<TBlob>::HasETag(const std::
 }
 
 template <typename TBlob> int64_t BasicReadableFileImpl<TBlob>::GetSize() const {
+    {
+        std::scoped_lock lock(*m_metadataMutex);
+        if (std::chrono::steady_clock::now() - m_metadataFetchedAt < Configuration::MetadataCacheTtl) {
+            return m_size;
+        }
+    }
     RefreshBlobMetadata();
 
     return GetMetadata().first;
@@ -103,17 +110,22 @@ template <typename TBlob> std::pair<int64_t, std::string> BasicReadableFileImpl<
     return {m_size, m_etag};
 }
 
-// Updates the cached size/ETag together and discards prefetched bytes, which belong to the previous blob version.
+// Updates the cached size/ETag together. Prefetched bytes belong to one blob version, so they are only discarded
+// when the ETag shows the blob changed; a refresh that finds the same version keeps them.
 template <typename TBlob> void BasicReadableFileImpl<TBlob>::SetMetadata(const int64_t size, std::string etag) const {
     BOOST_LOG_SEV(*m_h.Logger, boost::log::trivial::debug)
         << "Blob metadata refreshed for file '" << m_h.Name << "' :size = " << size << " bytes, etag = " << etag;
+    bool changed = false;
     {
         std::scoped_lock lock(*m_metadataMutex);
+        changed = m_etag != etag;
         m_size = size;
         m_etag = std::move(etag);
+        m_metadataFetchedAt = std::chrono::steady_clock::now();
     }
-    // The blob changed, so previously prefetched bytes may be stale.
-    ClearPrefetch();
+    if (changed) {
+        ClearPrefetch();
+    }
 }
 
 template <typename TBlob> BasicReadableFileImpl<TBlob>::PrefetchState::~PrefetchState() { DropAll(); }

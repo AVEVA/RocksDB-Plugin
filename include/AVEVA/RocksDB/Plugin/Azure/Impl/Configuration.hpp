@@ -41,6 +41,8 @@ struct Configuration {
     static const constexpr std::chrono::seconds AsyncReadDrainWarning = std::chrono::seconds(30);
     // How long a synchronous read waits for an in-flight prefetch of its range before downloading it itself.
     static const constexpr std::chrono::seconds PrefetchWaitTimeout = std::chrono::seconds(30);
+    // How long a reader's GetSize reuses the blob metadata it already fetched before asking the service again.
+    static const constexpr std::chrono::milliseconds MetadataCacheTtl = std::chrono::milliseconds(100);
     static const constexpr std::chrono::seconds LogRateLimiterCooldown = std::chrono::seconds(30);
     static const constexpr size_t MaxCacheSize = static_cast<size_t>(1024) * 1024 * 1024; // 1GB
     static const constexpr int MaxClientRetries = 8;
