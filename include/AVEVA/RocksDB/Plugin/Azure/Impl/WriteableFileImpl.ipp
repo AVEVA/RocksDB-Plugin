@@ -29,9 +29,9 @@ BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(
     std::shared_ptr<Core::FileCache> fileCache,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     const int64_t bufferSize, const BlobState knownState)
-    : m_name(name), m_bufferSize(bufferSize), m_runtime(std::move(runtime)), m_blob(std::move(blob)),
-      m_fileCache(std::move(fileCache)), m_logger(std::move(logger)), m_lastPageOffset(0), m_size(knownState.Size),
-      m_capacity(knownState.Capacity), m_bufferOffset(0), m_closed(false), m_flushed(true) {
+    : m_h(name, std::move(runtime), std::move(blob), std::move(fileCache), std::move(logger)), m_bufferSize(bufferSize),
+      m_lastPageOffset(0), m_size(knownState.Size), m_capacity(knownState.Capacity), m_bufferOffset(0), m_closed(false),
+      m_flushed(true) {
     if (m_bufferSize < Configuration::PageBlob::PageSize) {
         throw std::invalid_argument("Buffer size cannot be smaller than a page");
     }
@@ -51,7 +51,7 @@ BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(
         if (lastPageBytes > 0) // There is a partially filled page
         {
             [[maybe_unused]] const auto bytesDownloaded =
-                BlobOperations::DownloadToBuffer(*m_blob, m_buffer, m_lastPageOffset, lastPageBytes);
+                BlobOperations::DownloadToBuffer(*m_h.Blob, m_buffer, m_lastPageOffset, lastPageBytes);
             assert(bytesDownloaded == lastPageBytes);
             m_bufferOffset = lastPageBytes;
             m_flushed = false; // We have existing partial page data in buffer
@@ -61,7 +61,7 @@ BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(
 
 template <typename TBlob> BasicWriteableFileImpl<TBlob>::~BasicWriteableFileImpl() {
     // A failed upload is sticky, so retrying can only fail the same way.
-    CloseWithRetries(*m_logger, m_name, [this] { Close(); }, [this] { return HasUploadError(); });
+    CloseWithRetries(*m_h.Logger, m_h.Name, [this] { Close(); }, [this] { return HasUploadError(); });
 
     // Outstanding upload completions use the blob client and logger, which are released below.
     DrainUploads();
@@ -85,22 +85,16 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::DrainUploads() noe
 
 template <typename TBlob>
 BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(BasicWriteableFileImpl<TBlob>&& other) noexcept
-    : m_name(std::move(other.m_name)), m_bufferSize(other.m_bufferSize), m_runtime(std::move(other.m_runtime)),
-      m_blob(std::move(other.m_blob)), m_fileCache(std::move(other.m_fileCache)), m_logger(std::move(other.m_logger)),
-      m_lastPageOffset(other.m_lastPageOffset), m_size(other.m_size), m_capacity(other.m_capacity),
-      m_bufferOffset(other.m_bufferOffset), m_closed(std::exchange(other.m_closed, true)), m_flushed(other.m_flushed),
-      m_unsyncedSize(other.m_unsyncedSize), m_buffer(std::move(other.m_buffer)), m_uploads(std::move(other.m_uploads)) {
-}
+    : m_h(std::move(other.m_h)), m_bufferSize(other.m_bufferSize), m_lastPageOffset(other.m_lastPageOffset),
+      m_size(other.m_size), m_capacity(other.m_capacity), m_bufferOffset(other.m_bufferOffset),
+      m_closed(std::exchange(other.m_closed, true)), m_flushed(other.m_flushed), m_unsyncedSize(other.m_unsyncedSize),
+      m_buffer(std::move(other.m_buffer)), m_uploads(std::move(other.m_uploads)) {}
 
 template <typename TBlob>
 BasicWriteableFileImpl<TBlob>&
 BasicWriteableFileImpl<TBlob>::operator=(BasicWriteableFileImpl<TBlob>&& other) noexcept {
-    m_name = std::move(other.m_name);
+    m_h = std::move(other.m_h);
     m_bufferSize = other.m_bufferSize;
-    m_blob = std::move(other.m_blob);
-    m_runtime = std::move(other.m_runtime);
-    m_fileCache = std::move(other.m_fileCache);
-    m_logger = std::move(other.m_logger);
     m_lastPageOffset = other.m_lastPageOffset;
     m_size = other.m_size;
     m_capacity = other.m_capacity;
@@ -218,8 +212,8 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::StartFlush(const b
         owner->Pool.reset();
         throw;
     }
-    BOOST_LOG_SEV(*m_logger, boost::log::trivial::debug)
-        << "Flushed " << bytesToWrite << " bytes to writeable file '" << m_name << "'.";
+    BOOST_LOG_SEV(*m_h.Logger, boost::log::trivial::debug)
+        << "Flushed " << bytesToWrite << " bytes to writeable file '" << m_h.Name << "'.";
     m_lastPageOffset += fullBytes;
     m_bufferOffset = tail;
     // The tail only counts as flushed once it has been uploaded.
@@ -231,18 +225,18 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::StartFlush(const b
 template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Sync() {
     // Every metadata write changes the blob's ETag and invalidates open readers, so a Sync with nothing new to
     // publish (e.g. Sync followed by Close) must not write the size again.
-    if (m_unsyncedSize && m_fileCache) {
-        m_fileCache->MarkFileAsStaleIfExists(m_name);
+    if (m_unsyncedSize && m_h.FileCache) {
+        m_h.FileCache->MarkFileAsStaleIfExists(m_h.Name);
     }
 
     StartFlush(true);
     WaitForUploads(0);
     if (m_unsyncedSize) {
-        BlobOperations::SetSize(*m_runtime, *m_blob, m_size);
+        BlobOperations::SetSize(*m_h.Runtime, *m_h.Blob, m_size);
         m_unsyncedSize = false;
     }
-    BOOST_LOG_SEV(*m_logger, boost::log::trivial::debug)
-        << "Synced writeable file '" << m_name << "' to " << m_size << " bytes";
+    BOOST_LOG_SEV(*m_h.Logger, boost::log::trivial::debug)
+        << "Synced writeable file '" << m_h.Name << "' to " << m_size << " bytes";
 }
 
 // Uploads of distinct page ranges are independent, so up to MaxInFlightUploads overlap. The payload is a buffer the
@@ -256,7 +250,7 @@ void BasicWriteableFileImpl<TBlob>::StartUpload(std::shared_ptr<const std::vecto
 
     auto tracker = m_uploads;
     try {
-        BlobOperations::UploadPagesAsync(*m_runtime, *m_blob, std::move(data), offset,
+        BlobOperations::UploadPagesAsync(*m_h.Runtime, *m_h.Blob, std::move(data), offset,
                                          [tracker](std::exception_ptr error) {
                                              {
                                                  std::scoped_lock lock(tracker->Mutex);
@@ -300,7 +294,7 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::WaitForUploads(con
             std::rethrow_exception(m_uploads->Error);
         }
     }
-    m_runtime->ThrowIfWritesFenced();
+    m_h.Runtime->ThrowIfWritesFenced();
 }
 
 // Shrinks the file. The trailing partial page is reloaded into the buffer because appends continue inside it and
@@ -323,27 +317,27 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Truncate(int64_t s
     if (partialPageSize != 0) {
         // Read the partial page into memory for further appends
         [[maybe_unused]] const auto bytesDownloaded =
-            BlobOperations::DownloadToBuffer(*m_blob, m_buffer, totalPageOffset, partialPageSize);
+            BlobOperations::DownloadToBuffer(*m_h.Blob, m_buffer, totalPageOffset, partialPageSize);
         assert(bytesDownloaded == partialPageSize);
         m_bufferOffset = partialPageSize;
         m_flushed = false; // We have data in buffer now
     }
 
     m_size = size;
-    BlobOperations::SetSize(*m_runtime, *m_blob, m_size);
+    BlobOperations::SetSize(*m_h.Runtime, *m_h.Blob, m_size);
 
     // Calculate new capacity rounded up to page size
     const auto [_, newCapacity] = BlobHelpers::RoundToEndOfNearestPage(size);
     m_capacity = newCapacity;
-    BlobOperations::SetCapacity(*m_runtime, *m_blob, newCapacity);
+    BlobOperations::SetCapacity(*m_h.Runtime, *m_h.Blob, newCapacity);
 }
 
 template <typename TBlob> int64_t BasicWriteableFileImpl<TBlob>::GetFileSize() const noexcept { return m_size; }
 
 template <typename TBlob>
 int64_t BasicWriteableFileImpl<TBlob>::GetUniqueId(char* id, const int64_t maxIdSize) const noexcept {
-    const auto length = std::min(static_cast<int64_t>(m_name.size()), maxIdSize);
-    std::copy_n(m_name.begin(), length, id);
+    const auto length = std::min(static_cast<int64_t>(m_h.Name.size()), maxIdSize);
+    std::copy_n(m_h.Name.begin(), length, id);
     return length;
 }
 
@@ -354,10 +348,10 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Expand(const int64
     const auto wanted = std::max({requiredCapacity, m_capacity * 2, Configuration::PageBlob::DefaultSize});
     const auto [_, desiredSize] = BlobHelpers::RoundToEndOfNearestPage(wanted);
 
-    BOOST_LOG_SEV(*m_logger, boost::log::trivial::debug)
-        << "Expanding writeable file '" << m_name << "' to " << desiredSize << " bytes";
+    BOOST_LOG_SEV(*m_h.Logger, boost::log::trivial::debug)
+        << "Expanding writeable file '" << m_h.Name << "' to " << desiredSize << " bytes";
 
-    BlobOperations::SetCapacity(*m_runtime, *m_blob, desiredSize);
+    BlobOperations::SetCapacity(*m_h.Runtime, *m_h.Blob, desiredSize);
     m_capacity = desiredSize;
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

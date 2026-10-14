@@ -10,6 +10,7 @@
 #include "TestHelpers.hpp"
 #include "ValueOrFail.hpp"
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
+#include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
 
 #include <AVEVA/AzureClient/BlockBlobClient.hpp>
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
@@ -636,3 +637,26 @@ TEST(RetryTests, RetryReSignsSharedKeyAndRefreshesDateHeader) {
               FakeHttpClient::FindHeaderValue(second.Request, "Authorization"));
 }
 } // namespace AVEVA::AzureClient::Tests
+
+namespace {
+// A generator whose draws are fixed, so the jitter factor is known.
+struct FixedGenerator {
+    using result_type = std::uint64_t;
+    static constexpr result_type min() { return 0; }
+    static constexpr result_type max() { return std::numeric_limits<std::uint64_t>::max(); }
+    result_type operator()() const { return 0; }
+};
+} // namespace
+
+TEST(BackoffTests, InjectedGeneratorMakesTheJitterDeterministic) {
+    AVEVA::AzureClient::RetryOptions retry;
+    retry.InitialDelay = std::chrono::milliseconds{100};
+    retry.MaxDelay = std::chrono::milliseconds{10000};
+    FixedGenerator generator;
+
+    const auto first = AVEVA::AzureClient::Private::RetryDetail::ComputeBackoff(retry, 1, generator);
+    const auto second = AVEVA::AzureClient::Private::RetryDetail::ComputeBackoff(retry, 2, generator);
+
+    EXPECT_EQ(first, std::chrono::milliseconds{80});   // 100 ms * lowest jitter (0.8)
+    EXPECT_EQ(second, std::chrono::milliseconds{160}); // doubled per retry
+}

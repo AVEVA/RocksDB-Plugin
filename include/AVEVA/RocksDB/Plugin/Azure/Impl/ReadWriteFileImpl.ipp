@@ -18,35 +18,29 @@ BasicReadWriteFileImpl<TBlob>::BasicReadWriteFileImpl(
     std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
     std::shared_ptr<Core::FileCache> fileCache,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
-    : m_name(name), m_runtime(std::move(runtime)), m_blob(std::move(blob)), m_fileCache(std::move(fileCache)),
-      m_logger(std::move(logger)), m_size(0), m_syncSize(0), m_capacity(0), m_closed(false),
-      m_buffer(Configuration::PageBlob::DefaultBufferSize) {
+    : m_h(name, std::move(runtime), std::move(blob), std::move(fileCache), std::move(logger)), m_size(0), m_syncSize(0),
+      m_capacity(0), m_closed(false), m_buffer(Configuration::PageBlob::DefaultBufferSize) {
     // One GetProperties call yields both the size and the capacity.
-    const auto info = BlobOperations::GetInfo(*m_blob);
+    const auto info = BlobOperations::GetInfo(*m_h.Blob);
     m_size = info.Size;
     m_syncSize = info.Size;
     m_capacity = info.Capacity;
 }
 
 template <typename TBlob> BasicReadWriteFileImpl<TBlob>::~BasicReadWriteFileImpl() {
-    CloseWithRetries(*m_logger, m_name, [this] { Close(); }, [] { return false; });
+    CloseWithRetries(*m_h.Logger, m_h.Name, [this] { Close(); }, [] { return false; });
 }
 
 template <typename TBlob>
 BasicReadWriteFileImpl<TBlob>::BasicReadWriteFileImpl(BasicReadWriteFileImpl<TBlob>&& other) noexcept
-    : m_name(std::move(other.m_name)), m_runtime(std::move(other.m_runtime)), m_blob(std::move(other.m_blob)),
-      m_fileCache(std::move(other.m_fileCache)), m_logger(std::move(other.m_logger)), m_size(other.m_size),
-      m_syncSize(other.m_syncSize), m_capacity(other.m_capacity), m_closed(std::exchange(other.m_closed, true)),
-      m_buffer(std::move(other.m_buffer)), m_bufferStats(std::move(other.m_bufferStats)) {}
+    : m_h(std::move(other.m_h)), m_size(other.m_size), m_syncSize(other.m_syncSize), m_capacity(other.m_capacity),
+      m_closed(std::exchange(other.m_closed, true)), m_buffer(std::move(other.m_buffer)),
+      m_bufferStats(std::move(other.m_bufferStats)) {}
 
 template <typename TBlob>
 BasicReadWriteFileImpl<TBlob>&
 BasicReadWriteFileImpl<TBlob>::operator=(BasicReadWriteFileImpl<TBlob>&& other) noexcept {
-    m_name = std::move(other.m_name);
-    m_blob = std::move(other.m_blob);
-    m_runtime = std::move(other.m_runtime);
-    m_fileCache = std::move(other.m_fileCache);
-    m_logger = std::move(other.m_logger);
+    m_h = std::move(other.m_h);
     m_size = other.m_size;
     m_syncSize = other.m_syncSize;
     m_capacity = other.m_capacity;
@@ -64,16 +58,16 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Close() {
 }
 
 template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Sync() {
-    if (m_fileCache) {
-        m_fileCache->MarkFileAsStaleIfExists(m_name);
+    if (m_h.FileCache) {
+        m_h.FileCache->MarkFileAsStaleIfExists(m_h.Name);
     }
 
     Flush();
 
-    BlobOperations::SetSize(*m_runtime, *m_blob, m_size);
+    BlobOperations::SetSize(*m_h.Runtime, *m_h.Blob, m_size);
     m_syncSize = m_size;
-    BOOST_LOG_SEV(*m_logger, boost::log::trivial::debug)
-        << "Synced read/writeable file '" << m_name << "' to " << m_size << " bytes";
+    BOOST_LOG_SEV(*m_h.Logger, boost::log::trivial::debug)
+        << "Synced read/writeable file '" << m_h.Name << "' to " << m_size << " bytes";
 }
 
 // Writes buffered chunks to the blob. Padding pages are read first (in parallel when no two chunks share a page) so
@@ -107,7 +101,7 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
             assert(chunk.prePadding < Configuration::PageBlob::PageSize && "Pre-padding should not exceed page size");
             std::span<char> prePaddingBuffer(m_buffer.data() + chunk.bufferOffset,
                                              static_cast<size_t>(chunk.prePadding));
-            reads.push_back(BlobOperations::StartDownload(*m_blob, prePaddingBuffer, targetStart, chunk.prePadding));
+            reads.push_back(BlobOperations::StartDownload(*m_h.Blob, prePaddingBuffer, targetStart, chunk.prePadding));
         }
         if (chunk.postPadding > 0) {
             const auto targetEnd = chunk.targetOffset + chunk.dataLength;
@@ -125,7 +119,7 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
                     &m_buffer[static_cast<size_t>(chunk.bufferOffset + chunk.prePadding + chunk.dataLength)],
                     static_cast<size_t>(chunk.postPadding));
                 reads.push_back(
-                    BlobOperations::StartDownload(*m_blob, postPaddingBuffer, targetEnd, chunk.postPadding));
+                    BlobOperations::StartDownload(*m_h.Blob, postPaddingBuffer, targetEnd, chunk.postPadding));
             }
         }
     };
@@ -157,10 +151,10 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
 
         std::span<char> uploadBuffer(&m_buffer[static_cast<size_t>(chunk.bufferOffset)],
                                      static_cast<size_t>(chunk.ChunkSize()));
-        BlobOperations::UploadPages(*m_runtime, *m_blob, uploadBuffer, targetStart);
+        BlobOperations::UploadPages(*m_h.Runtime, *m_h.Blob, uploadBuffer, targetStart);
 
-        BOOST_LOG_SEV(*m_logger, boost::log::trivial::debug)
-            << "Flushed " << chunk.ChunkSize() << " bytes to read/writeable file '" << m_name << "'";
+        BOOST_LOG_SEV(*m_h.Logger, boost::log::trivial::debug)
+            << "Flushed " << chunk.ChunkSize() << " bytes to read/writeable file '" << m_h.Name << "'";
     };
 
     // A chunk's padding must see the bytes earlier chunks wrote to the same page, so the reads can only all be issued
@@ -269,8 +263,8 @@ int64_t BasicReadWriteFileImpl<TBlob>::Read(int64_t offset, int64_t bytesRequest
         return 0;
     }
 
-    if (m_fileCache) {
-        const auto bytesRead = m_fileCache->ReadFile(m_name, offset, bytesRequested, buffer);
+    if (m_h.FileCache) {
+        const auto bytesRead = m_h.FileCache->ReadFile(m_h.Name, offset, bytesRequested, buffer);
         if (bytesRead) {
             return static_cast<int64_t>(*bytesRead);
         }
@@ -281,7 +275,7 @@ int64_t BasicReadWriteFileImpl<TBlob>::Read(int64_t offset, int64_t bytesRequest
         bytesRequested = bytesCanRead;
 
     std::span<char> readBuffer(buffer, static_cast<size_t>(bytesRequested));
-    return BlobOperations::DownloadToBuffer(*m_blob, readBuffer, offset, bytesRequested);
+    return BlobOperations::DownloadToBuffer(*m_h.Blob, readBuffer, offset, bytesRequested);
 }
 
 // Grows the blob geometrically so repeated random writes past the end do not each pay for a resize request.
@@ -289,10 +283,10 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Expand() {
     const auto capacity = std::max(static_cast<int64_t>(1), m_capacity);
     const auto [_, rounded] = BlobHelpers::RoundToEndOfNearestPage((m_size + capacity) * 2);
     const auto desiredSize = rounded;
-    BlobOperations::SetCapacity(*m_runtime, *m_blob, desiredSize);
+    BlobOperations::SetCapacity(*m_h.Runtime, *m_h.Blob, desiredSize);
     m_capacity = desiredSize;
 
-    BOOST_LOG_SEV(*m_logger, boost::log::trivial::debug)
-        << "Expanding read/writeable file '" << m_name << "' to " << desiredSize << " bytes";
+    BOOST_LOG_SEV(*m_h.Logger, boost::log::trivial::debug)
+        << "Expanding read/writeable file '" << m_h.Name << "' to " << desiredSize << " bytes";
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

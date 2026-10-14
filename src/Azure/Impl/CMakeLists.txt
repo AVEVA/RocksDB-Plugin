@@ -27,6 +27,7 @@ target_sources(aveva-rocksdb-plugin-azure-impl
   FILES
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadRequest.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadTracker.hpp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobFileHandles.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ClientFactory.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.ipp"

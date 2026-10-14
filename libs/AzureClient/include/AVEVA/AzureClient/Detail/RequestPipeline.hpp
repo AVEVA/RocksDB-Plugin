@@ -48,9 +48,10 @@ inline constexpr double MinBackoffJitter = RetryPolicyConstants::MinBackoffJitte
 inline constexpr double MaxBackoffJitter = RetryPolicyConstants::MaxBackoffJitter;
 inline constexpr int MaxBackoffExponent = RetryPolicyConstants::MaxBackoffExponent;
 
-// Exponential backoff (InitialDelay * 2^(retry-1)) with +/- jitter in [0.8, 1.3), capped at MaxDelay.
-[[nodiscard]] inline std::chrono::milliseconds ComputeBackoff(const RetryOptions& retry, int retryNumber) {
-    thread_local std::mt19937_64 generator{std::random_device{}()};
+// Exponential backoff (InitialDelay * 2^(retry-1)) with +/- jitter in [0.8, 1.3), capped at MaxDelay. The generator is
+// a parameter so tests can make the jitter deterministic.
+template <typename Generator>
+[[nodiscard]] std::chrono::milliseconds ComputeBackoff(const RetryOptions& retry, int retryNumber, Generator& generator) {
     std::uniform_real_distribution<double> jitter(MinBackoffJitter, MaxBackoffJitter);
 
     const double maxDelay = static_cast<double>(std::max<std::int64_t>(0, retry.MaxDelay.count()));
@@ -58,6 +59,11 @@ inline constexpr int MaxBackoffExponent = RetryPolicyConstants::MaxBackoffExpone
     const double exponential = initial * std::ldexp(1.0, std::clamp(retryNumber - 1, 0, MaxBackoffExponent));
     const double delay = std::min(exponential * jitter(generator), maxDelay);
     return std::chrono::milliseconds{static_cast<std::int64_t>(std::llround(delay))};
+}
+
+[[nodiscard]] inline std::chrono::milliseconds ComputeBackoff(const RetryOptions& retry, int retryNumber) {
+    thread_local std::mt19937_64 generator{std::random_device{}()};
+    return ComputeBackoff(retry, retryNumber, generator);
 }
 
 // Resolves the x-ms-copy-source-authorization placeholder (see CopySourceClientCredentialMarker): an empty

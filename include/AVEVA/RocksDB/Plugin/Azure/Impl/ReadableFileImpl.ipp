@@ -46,11 +46,10 @@ BasicReadableFileImpl<TBlob>::BasicReadableFileImpl(
     std::shared_ptr<Core::FileCache> fileCache,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     std::shared_ptr<AsyncReadTracker> asyncReads, std::shared_ptr<std::atomic<int64_t>> prefetchBudget)
-    : m_name(name), m_runtime(std::move(runtime)), m_blob(std::move(blob)), m_fileCache(std::move(fileCache)),
-      m_metadataMutex(std::make_unique<std::mutex>()), m_size(0), m_logger(std::move(logger)),
-      m_asyncReads(std::move(asyncReads)) {
+    : m_h(name, std::move(runtime), std::move(blob), std::move(fileCache), std::move(logger)),
+      m_metadataMutex(std::make_unique<std::mutex>()), m_size(0), m_asyncReads(std::move(asyncReads)) {
     m_prefetch->Budget = std::move(prefetchBudget);
-    auto metadata = BlobOperations::GetMetadata(*m_blob);
+    auto metadata = BlobOperations::GetMetadata(*m_h.Blob);
     m_size = metadata.Size;
     m_etag = std::move(metadata.ETag);
 }
@@ -61,8 +60,8 @@ int64_t BasicReadableFileImpl<TBlob>::RandomRead(const int64_t offset, const int
         return 0;
     }
 
-    if (m_fileCache) {
-        const auto bytesRead = m_fileCache->ReadFile(m_name, offset, bytesToRead, buffer);
+    if (m_h.FileCache) {
+        const auto bytesRead = m_h.FileCache->ReadFile(m_h.Name, offset, bytesToRead, buffer);
         if (bytesRead) {
             return static_cast<int64_t>(*bytesRead);
         }
@@ -103,8 +102,8 @@ template <typename TBlob> std::pair<int64_t, std::string> BasicReadableFileImpl<
 
 // Updates the cached size/ETag together and discards prefetched bytes, which belong to the previous blob version.
 template <typename TBlob> void BasicReadableFileImpl<TBlob>::SetMetadata(const int64_t size, std::string etag) const {
-    BOOST_LOG_SEV(*m_logger, boost::log::trivial::debug)
-        << "Blob metadata refreshed for file '" << m_name << "' :size = " << size << " bytes, etag = " << etag;
+    BOOST_LOG_SEV(*m_h.Logger, boost::log::trivial::debug)
+        << "Blob metadata refreshed for file '" << m_h.Name << "' :size = " << size << " bytes, etag = " << etag;
     {
         std::scoped_lock lock(*m_metadataMutex);
         m_size = size;
@@ -182,8 +181,8 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
     }
 
     // A superseded or cleared prefetch (its slot is gone) must not publish its bytes.
-    auto logger = self->m_logger;
-    auto name = self->m_name;
+    auto logger = self->m_h.Logger;
+    auto name = self->m_h.Name;
     try {
         ReadAsync(std::move(self), offset, n,
                   [state, id, logger = std::move(logger), name = std::move(name)](std::exception_ptr error,
@@ -324,11 +323,11 @@ bool BasicReadableFileImpl<TBlob>::ChainOntoPendingPrefetch(const int64_t offset
 template <typename TBlob>
 std::optional<size_t> BasicReadableFileImpl<TBlob>::TryReadFromCache(const int64_t offset, const int64_t bytesToRead,
                                                                      char* buffer) const {
-    if (!m_fileCache || offset < 0 || bytesToRead <= 0) {
+    if (!m_h.FileCache || offset < 0 || bytesToRead <= 0) {
         return TryReadFromPrefetch(offset, bytesToRead, buffer, false);
     }
 
-    if (const auto cached = m_fileCache->ReadFile(m_name, offset, bytesToRead, buffer)) {
+    if (const auto cached = m_h.FileCache->ReadFile(m_h.Name, offset, bytesToRead, buffer)) {
         return cached;
     }
     return TryReadFromPrefetch(offset, bytesToRead, buffer, false);
@@ -386,36 +385,36 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
     }
 
     const auto toRead = std::min(bytesToRead, remaining);
-    auto& blob = *self->m_blob;
-    BlobOperations::DownloadAsync(
-        blob, offset, toRead, etag, timeout,
-        [self = std::move(self), offset, bytesToRead, remaining, callback = std::move(callback), attemptsLeft,
-         timeout](std::exception_ptr error, std::string data) mutable {
-            if (error) {
-                try {
-                    std::rethrow_exception(error);
-                } catch (const RequestFailedException& ex) {
-                    if (StaleReadPolicy::IsStale(ex)) {
-                        auto left = attemptsLeft;
-                        if (!StaleReadPolicy::TrySpendRefresh(left)) {
-                            FinishRead(self, callback, StaleReadError(), {});
-                            return;
-                        }
-                        RefreshMetadataAndReadAsync(std::move(self), offset, bytesToRead, std::move(callback), left,
-                                                    timeout);
-                        return;
-                    }
-                } catch (...) {
-                }
-                FinishRead(self, callback, error, {});
-                return;
-            }
+    auto& blob = *self->m_h.Blob;
+    BlobOperations::DownloadAsync(blob, offset, toRead, etag, timeout,
+                                  [self = std::move(self), offset, bytesToRead, remaining,
+                                   callback = std::move(callback), attemptsLeft,
+                                   timeout](std::exception_ptr error, std::string data) mutable {
+                                      if (error) {
+                                          try {
+                                              std::rethrow_exception(error);
+                                          } catch (const RequestFailedException& ex) {
+                                              if (StaleReadPolicy::IsStale(ex)) {
+                                                  auto left = attemptsLeft;
+                                                  if (!StaleReadPolicy::TrySpendRefresh(left)) {
+                                                      FinishRead(self, callback, StaleReadError(), {});
+                                                      return;
+                                                  }
+                                                  RefreshMetadataAndReadAsync(std::move(self), offset, bytesToRead,
+                                                                              std::move(callback), left, timeout);
+                                                  return;
+                                              }
+                                          } catch (...) {
+                                          }
+                                          FinishRead(self, callback, error, {});
+                                          return;
+                                      }
 
-            if (static_cast<int64_t>(data.size()) > remaining) {
-                data.resize(static_cast<size_t>(remaining));
-            }
-            FinishRead(self, callback, nullptr, std::move(data));
-        });
+                                      if (static_cast<int64_t>(data.size()) > remaining) {
+                                          data.resize(static_cast<size_t>(remaining));
+                                      }
+                                      FinishRead(self, callback, nullptr, std::move(data));
+                                  });
 }
 
 template <typename TBlob>
@@ -425,8 +424,8 @@ void BasicReadableFileImpl<TBlob>::RefreshMetadataAndReadAsync(std::shared_ptr<c
                                                                const std::chrono::milliseconds timeout) {
     const auto& file = *self;
     CoalescedMetadataAsync(file, [self = std::move(self), offset, bytesToRead, callback = std::move(callback),
-                                            attemptsLeft,
-                                            timeout](std::exception_ptr error, int64_t size, std::string etag) mutable {
+                                  attemptsLeft,
+                                  timeout](std::exception_ptr error, int64_t size, std::string etag) mutable {
         if (error) {
             FinishRead(self, callback, error, {});
             return;
@@ -441,8 +440,8 @@ void BasicReadableFileImpl<TBlob>::RefreshMetadataAndReadAsync(std::shared_ptr<c
 // may thus receive metadata fetched slightly before it asked; if that is already stale its read fails the ETag
 // condition again and is retried against its own refresh budget.
 template <typename TBlob>
-void BasicReadableFileImpl<TBlob>::CoalescedMetadataAsync(const BasicReadableFileImpl& file,
-                                                          typename BasicReadableFileImpl<TBlob>::MetadataCallback callback) {
+void BasicReadableFileImpl<TBlob>::CoalescedMetadataAsync(
+    const BasicReadableFileImpl& file, typename BasicReadableFileImpl<TBlob>::MetadataCallback callback) {
     auto state = file.m_metadataRefresh;
     {
         std::scoped_lock lock(state->Mutex);
@@ -452,7 +451,7 @@ void BasicReadableFileImpl<TBlob>::CoalescedMetadataAsync(const BasicReadableFil
         }
         state->InFlight = true;
     }
-    BlobOperations::GetMetadataAsync(*file.m_blob, [state](std::exception_ptr error, int64_t size, std::string etag) {
+    BlobOperations::GetMetadataAsync(*file.m_h.Blob, [state](std::exception_ptr error, int64_t size, std::string etag) {
         std::vector<typename BasicReadableFileImpl<TBlob>::MetadataCallback> waiters;
         {
             std::scoped_lock lock(state->Mutex);
@@ -479,7 +478,7 @@ int64_t BasicReadableFileImpl<TBlob>::DownloadWithRetry(const int64_t offset, co
         const auto [size, etag] = GetMetadata();
         auto remaining = std::max<int64_t>(0, size - offset);
         if (remaining == 0) {
-            auto latestEtag = BlobOperations::GetEtag(*m_blob);
+            auto latestEtag = BlobOperations::GetEtag(*m_h.Blob);
             if (latestEtag != etag) {
                 if (!StaleReadPolicy::TrySpendRefresh(refreshesLeft)) {
                     throw StaleReadException();
@@ -493,8 +492,8 @@ int64_t BasicReadableFileImpl<TBlob>::DownloadWithRetry(const int64_t offset, co
 
         auto toRead = std::min(bytesToRead, remaining);
         try {
-            bytesRead = BlobOperations::Download(*m_blob, std::span<char>(buffer, static_cast<size_t>(toRead)), offset,
-                                                 toRead, etag);
+            bytesRead = BlobOperations::Download(*m_h.Blob, std::span<char>(buffer, static_cast<size_t>(toRead)),
+                                                 offset, toRead, etag);
             bytesRead = std::min(bytesRead, remaining);
             success = true;
         } catch (const RequestFailedException& ex) {
@@ -514,7 +513,7 @@ int64_t BasicReadableFileImpl<TBlob>::DownloadWithRetry(const int64_t offset, co
 
 template <typename TBlob> void BasicReadableFileImpl<TBlob>::RefreshBlobMetadata() const {
     // Query outside the lock so concurrent readers are not serialized behind network round trips.
-    auto metadata = BlobOperations::GetMetadata(*m_blob);
+    auto metadata = BlobOperations::GetMetadata(*m_h.Blob);
     SetMetadata(metadata.Size, std::move(metadata.ETag));
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

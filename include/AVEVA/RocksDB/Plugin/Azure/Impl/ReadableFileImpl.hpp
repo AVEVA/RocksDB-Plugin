@@ -3,6 +3,7 @@
 
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadTracker.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFileHandles.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
@@ -28,17 +29,12 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 using ReadCallback = std::function<void(std::exception_ptr error, std::string data)>;
 
 template <typename TBlob> class BasicReadableFileImpl {
-    std::string m_name;
-    // Declared before the client so that it is destroyed after it: the client references the runtime's HTTP client.
-    std::shared_ptr<ClientRuntimeBase> m_runtime;
-    std::shared_ptr<TBlob> m_blob;
-    std::shared_ptr<Core::FileCache> m_fileCache;
+    BlobFileHandles<TBlob> m_h;
     // Random (and async) reads may run concurrently on one file, so the cached blob metadata is guarded.
     // Held by pointer to keep the type movable.
     std::unique_ptr<std::mutex> m_metadataMutex;
     mutable int64_t m_size;
     mutable std::string m_etag;
-    std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
     // Optional; when set, every ReadAsync is registered with it until its callback has been released.
     std::shared_ptr<AsyncReadTracker> m_asyncReads;
 

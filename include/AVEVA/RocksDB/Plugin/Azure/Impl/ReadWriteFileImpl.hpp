@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFileHandles.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BufferChunkInfo.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
@@ -20,12 +21,7 @@
 #include <vector>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 template <typename TBlob> class BasicReadWriteFileImpl {
-    std::string m_name;
-    // Declared before the client so that it is destroyed after it: the client references the runtime's HTTP client.
-    std::shared_ptr<ClientRuntimeBase> m_runtime;
-    std::shared_ptr<TBlob> m_blob;
-    std::shared_ptr<Core::FileCache> m_fileCache;
-    std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
+    BlobFileHandles<TBlob> m_h;
 
     int64_t m_size;
     int64_t m_syncSize;
