@@ -631,6 +631,9 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
             }
         }
         if (!pooled && m_stream) {
+            // Only clean completions reach here (error paths close immediately in Finish), so the peer is in a known
+            // state and a close_notify lets it distinguish this from a truncation. The bounded grace period keeps a
+            // silent peer from holding the operation alive.
             if constexpr (std::is_same_v<Stream, TlsStream>) {
                 beast::get_lowest_layer(*m_stream).expires_after(TlsShutdownGrace);
                 m_stream->async_shutdown(
