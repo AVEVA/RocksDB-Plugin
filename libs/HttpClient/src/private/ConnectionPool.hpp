@@ -329,7 +329,6 @@ class ConnectionPool {
                 notify = m_notifier;
             }
         }
-        retired.clear_and_dispose(NodeDisposer{});
         if (notify) {
             (*notify)();
         }
