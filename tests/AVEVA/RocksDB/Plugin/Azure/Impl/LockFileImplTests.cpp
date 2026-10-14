@@ -21,9 +21,12 @@
 #include <algorithm>
 #include <chrono>
 #include <exception>
+#include <functional>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -404,4 +407,80 @@ TEST_F(LeaseRenewalLoopTests, TransientFailureIsRetriedWithoutBeingFatal) {
     EXPECT_TRUE(WaitForRequests(4));
     EXPECT_EQ(m_fatalCount, 0);
     EXPECT_FALSE(m_loop->IsStopped());
+}
+namespace {
+// A lock whose RenewAsync starts normally except on the Nth call across all instances, where it throws. Started
+// renewals complete only when the test releases them, which models a renewal still on the wire after the loop gave up.
+struct ScriptedLock {
+    struct Shared {
+        std::mutex Mutex;
+        std::size_t Calls = 0;
+        std::size_t ThrowOnCall = 0;
+        std::vector<std::function<void()>> Completions;
+    };
+    std::shared_ptr<Shared> State;
+
+    void RenewAsync(std::function<void(std::exception_ptr, bool)> callback) const {
+        std::scoped_lock lock(State->Mutex);
+        if (++State->Calls == State->ThrowOnCall) {
+            throw std::runtime_error("cannot start renewal");
+        }
+        State->Completions.emplace_back([callback = std::move(callback)] { callback(nullptr, true); });
+    }
+    [[nodiscard]] bool IsRenewalOverdue() const { return false; }
+};
+
+struct ScriptedSnapshot {
+    std::vector<std::shared_ptr<ScriptedLock>> Locks;
+    std::vector<std::shared_ptr<ScriptedLock>> operator()() const { return Locks; }
+};
+
+struct ScriptedFatal {
+    std::atomic<int>* Count;
+    void operator()() const { ++*Count; }
+};
+} // namespace
+
+TEST(LeaseRenewalLoopThrowTests, ThrowOnTheNthRenewAsyncIsFatalOnceAndLateCompletionsAreHarmless) {
+    boost::asio::io_context context;
+    auto guard = boost::asio::make_work_guard(context);
+    std::jthread thread([&context] { context.run(); });
+    auto logger = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::BasicLeaseRenewalLoop<
+        ScriptedSnapshot, ScriptedFatal, ScriptedLock>::Logger>();
+
+    auto state = std::make_shared<ScriptedLock::Shared>();
+    state->ThrowOnCall = 3; // the first two renewals are started, the third throws
+    ScriptedSnapshot snapshot;
+    for (int i = 0; i < 4; ++i) {
+        snapshot.Locks.push_back(std::make_shared<ScriptedLock>(ScriptedLock{state}));
+    }
+    std::atomic<int> fatal{0};
+
+    auto loop = BasicLeaseRenewalLoop<ScriptedSnapshot, ScriptedFatal, ScriptedLock>::Start(
+        context.get_executor(), logger, snapshot, ScriptedFatal{&fatal}, std::chrono::milliseconds(5));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (fatal == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    // The abandoned round must not keep Stop() waiting, even though two renewals never completed.
+    loop->Stop();
+    EXPECT_EQ(fatal, 1);
+    EXPECT_TRUE(loop->IsStopped());
+
+    // Completing the renewals that were already started must neither fire onFatal again nor restart the loop.
+    std::vector<std::function<void()>> completions;
+    {
+        std::scoped_lock lock(state->Mutex);
+        completions.swap(state->Completions);
+    }
+    ASSERT_EQ(completions.size(), 2u);
+    for (auto& complete : completions) {
+        complete();
+    }
+    guard.reset();
+    thread.join();
+    EXPECT_EQ(fatal, 1);
+    EXPECT_TRUE(loop->IsStopped());
+    EXPECT_EQ(state->Calls, 3u);
 }
