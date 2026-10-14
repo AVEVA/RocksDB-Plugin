@@ -309,9 +309,14 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
 
   private:
     template <HttpClientLike, TokenCredentialLike> friend class BasicBlobContainerClient;
+    friend struct Private::ClientSnapshotAccess;
     BasicPageBlobClient(THttp& httpClient, std::shared_ptr<const Private::BasicBlobTarget<TCred>> target,
                         std::shared_ptr<THttp> owner = nullptr)
         : Base(httpClient, std::move(target), std::move(owner)) {}
+
+    [[nodiscard]] BasicPageBlobClient MakeSnapshot() const {
+        return BasicPageBlobClient{this->Http(), this->SharedTarget(), this->HttpOwner()};
+    }
 
     template <class THandler>
     void GetPageRangesAsyncImpl(const GetPageRangesOptions& options, THandler completion,
@@ -644,7 +649,8 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     }
 };
 
-// Defined once in src/PageBlobClient.cpp, so translation units that use the production client do not instantiate it again.
+// Defined once in src/PageBlobClient.cpp, so translation units that use the production client do not instantiate it
+// again.
 extern template class BasicPageBlobClient<HttpClient>;
 using PageBlobClient = BasicPageBlobClient<HttpClient>;
 } // namespace AVEVA::AzureClient

@@ -63,6 +63,8 @@ struct ConnectionState;
 //
 // Lifetime: stores a non-owning reference to the HTTP client, which must outlive this client and every
 // in-flight ...Async operation; destroying either before a completion handler runs is undefined behavior.
+// A deferred operation (omitted token) snapshots this client's state when created, so it stays valid if the
+// client is moved from or destroyed before the operation is started.
 //
 // Cancellation: HttpRequestOptions carries a boost::asio::cancellation_slot that aborts in-flight work
 // (completing with an operation_aborted-flavored BlobStorageError); a slot associated with the
@@ -214,6 +216,16 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContai
 
   private:
     template <HttpClientLike, TokenCredentialLike> friend class BasicBlobServiceClient;
+    friend struct Private::ClientSnapshotAccess;
+    BasicBlobContainerClient(THttp& httpClient, std::shared_ptr<const Private::BasicContainerTarget<TCred>> target,
+                             std::shared_ptr<THttp> owner)
+        : m_httpClient(&httpClient), m_httpOwner(std::move(owner)), m_target(std::move(target)) {}
+
+    // A client sharing this one's state, owned by a deferred operation so it survives the original being moved from.
+    [[nodiscard]] BasicBlobContainerClient MakeSnapshot() const {
+        return BasicBlobContainerClient{*m_httpClient, m_target, m_httpOwner};
+    }
+
     // Shares the service client's validated connection state (no re-normalisation).
     BasicBlobContainerClient(THttp& httpClient, std::shared_ptr<const Private::ConnectionState> connection,
                              std::shared_ptr<CachedTokenCredential<TCred>> credential, std::string containerName,
@@ -316,7 +328,8 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContai
     std::shared_ptr<const Private::BasicContainerTarget<TCred>> m_target;
 };
 
-// Defined once in src/BlobContainerClient.cpp, so translation units that use the production client do not instantiate it again.
+// Defined once in src/BlobContainerClient.cpp, so translation units that use the production client do not instantiate
+// it again.
 extern template class BasicBlobContainerClient<HttpClient>;
 using BlobContainerClient = BasicBlobContainerClient<HttpClient>;
 } // namespace AVEVA::AzureClient

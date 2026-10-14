@@ -51,6 +51,8 @@ namespace AVEVA::AzureClient {
 //
 // Lifetime: stores a non-owning reference to the HTTP client, which must outlive this client and every
 // in-flight ...Async operation; destroying either before a completion handler runs is undefined behavior.
+// A deferred operation (omitted token) snapshots this client's state when created, so it stays valid if the
+// client is moved from or destroyed before the operation is started.
 //
 // Cancellation: HttpRequestOptions carries a boost::asio::cancellation_slot that aborts in-flight work
 // (completing with an operation_aborted-flavored BlobStorageError); a slot associated with the
@@ -318,6 +320,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
 
   protected:
     template <HttpClientLike, TokenCredentialLike> friend class BasicBlobContainerClient;
+    friend struct Private::ClientSnapshotAccess;
     // Shares the container client's validated connection state (no re-normalisation).
     BasicBlobClient(THttp& httpClient, std::shared_ptr<const Private::BasicBlobTarget<TCred>> target,
                     std::shared_ptr<THttp> owner = nullptr)
@@ -328,6 +331,9 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
     [[nodiscard]] const std::shared_ptr<THttp>& HttpOwner() const noexcept { return m_httpOwner; }
 
     [[nodiscard]] const Private::BasicBlobTarget<TCred>& Target() const noexcept { return *m_target; }
+
+    // A client sharing this one's state, owned by a deferred operation so it survives the original being moved from.
+    [[nodiscard]] BasicBlobClient MakeSnapshot() const { return BasicBlobClient{*m_httpClient, m_target, m_httpOwner}; }
 
     // For operations that outlive the call and must keep the target alive.
     [[nodiscard]] const std::shared_ptr<const Private::BasicBlobTarget<TCred>>& SharedTarget() const noexcept {

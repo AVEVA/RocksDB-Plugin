@@ -591,6 +591,37 @@ TEST(AsyncBehaviorTests, BlobContainerClientMoveOnlyCompletionTokenSurvivesDefer
     EXPECT_EQ(observed, "container-move-only-state");
 }
 
+TEST(AsyncBehaviorTests, DeferredOperationRunsAfterItsClientWasMovedFromAndDestroyed) {
+    FakeHttpClient httpClient;
+    httpClient.DeferByDefault() = true;
+
+    auto client = std::make_unique<BlockBlobClient>(httpClient, MakeBlobClientOptions());
+    auto operation = client->DeleteAsync(boost::asio::deferred);
+    BlockBlobClient moved{std::move(*client)};
+    client.reset();
+
+    std::optional<DeleteResult> observed;
+    InvokeDeferredDeleteOperation(std::move(operation), observed);
+    ASSERT_EQ(httpClient.PendingCount(), 1U);
+    ASSERT_TRUE(httpClient.CompleteNext());
+    EXPECT_TRUE(observed.has_value());
+}
+
+TEST(AsyncBehaviorTests, DeferredContainerOperationRunsAfterItsClientWasDestroyed) {
+    FakeHttpClient httpClient;
+    httpClient.DeferByDefault() = true;
+
+    auto client = std::make_unique<BlobContainerClient>(httpClient, MakeBlobContainerClientOptions());
+    auto operation = client->CreateAsync(boost::asio::deferred);
+    client.reset();
+
+    int completions = 0;
+    std::move(operation)([&](auto) { ++completions; });
+    ASSERT_EQ(httpClient.PendingCount(), 1U);
+    ASSERT_TRUE(httpClient.CompleteNext());
+    EXPECT_EQ(completions, 1);
+}
+
 TEST(AsyncBehaviorTests, BlockBlobClientCanBeDestroyedAfterRequestIsInFlight) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;

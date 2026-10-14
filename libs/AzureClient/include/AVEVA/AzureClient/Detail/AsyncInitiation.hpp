@@ -31,6 +31,11 @@
 #include <utility>
 
 namespace AVEVA::AzureClient::Private {
+// Grants InitiateClientOperation access to a client's private MakeSnapshot().
+struct ClientSnapshotAccess {
+    template <class TClient> [[nodiscard]] static TClient Make(const TClient& client) { return client.MakeSnapshot(); }
+};
+
 // Preserves the associated executor/allocator and adopts the handler's cancellation slot
 // unless requestOptions already carries an explicit one.
 //
@@ -125,11 +130,14 @@ auto InitiateClientOperation(Client* client, Impl impl, CompletionToken&& token,
     }
 
     return boost::asio::async_initiate<Signature>(
-        [client, impl](auto handler, HttpRequestOptions initiationRequestOptions, auto... initiationArgs) {
+        // The initiation owns a snapshot of the client rather than pointing at it: a deferred operation runs
+        // after this call returns, by which time the caller's client may have been moved from or destroyed.
+        [snapshot = ClientSnapshotAccess::Make(*client),
+         impl](auto handler, HttpRequestOptions initiationRequestOptions, auto... initiationArgs) mutable {
             auto boundHandler =
                 BindAssociationsAndAdoptCancellationOn<std::expected<Response<Result>, BlobStorageError>>(
-                    handler, client->get_executor(), initiationRequestOptions);
-            std::invoke(impl, *client, std::move(initiationArgs)..., std::move(boundHandler),
+                    handler, snapshot.get_executor(), initiationRequestOptions);
+            std::invoke(impl, snapshot, std::move(initiationArgs)..., std::move(boundHandler),
                         std::move(initiationRequestOptions));
         },
         std::forward<decltype(innerToken)>(innerToken), std::move(effectiveOptions), std::forward<Args>(args)...);

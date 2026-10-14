@@ -352,9 +352,14 @@ class BasicBlockBlobClient : public BasicBlobClient<THttp, TCred> {
 
   private:
     template <HttpClientLike, TokenCredentialLike> friend class BasicBlobContainerClient;
+    friend struct Private::ClientSnapshotAccess;
     BasicBlockBlobClient(THttp& httpClient, std::shared_ptr<const Private::BasicBlobTarget<TCred>> target,
                          std::shared_ptr<THttp> owner = nullptr)
         : Base(httpClient, std::move(target), std::move(owner)) {}
+
+    [[nodiscard]] BasicBlockBlobClient MakeSnapshot() const {
+        return BasicBlockBlobClient{this->Http(), this->SharedTarget(), this->HttpOwner()};
+    }
 
     template <class THandler>
     void UploadBytesAsyncImpl(std::span<const std::byte> content, const UploadBlockBlobOptions& options,
@@ -504,7 +509,8 @@ class BasicBlockBlobClient : public BasicBlobClient<THttp, TCred> {
     }
 };
 
-// Defined once in src/BlockBlobClient.cpp, so translation units that use the production client do not instantiate it again.
+// Defined once in src/BlockBlobClient.cpp, so translation units that use the production client do not instantiate it
+// again.
 extern template class BasicBlockBlobClient<HttpClient>;
 using BlockBlobClient = BasicBlockBlobClient<HttpClient>;
 } // namespace AVEVA::AzureClient
