@@ -393,17 +393,16 @@ template <HttpClientLike THttp> class BasicClientSecretCredential final {
 
   private:
     template <class Handler> void Begin(std::vector<std::string> scopes, Handler completion) {
-        using namespace Private;
-        if (!IsValidTenantId(m_options.TenantId) || m_options.ClientId.empty() || m_options.ClientSecret.empty() ||
+        if (!Private::IsValidTenantId(m_options.TenantId) || m_options.ClientId.empty() || m_options.ClientSecret.empty() ||
             scopes.empty()) {
             Private::Fail(*m_httpClient, std::move(completion), std::make_error_code(std::errc::invalid_argument));
             return;
         }
-        std::string body = "grant_type=client_credentials&client_id=" + FormEncode(m_options.ClientId) +
-                           "&client_secret=" + FormEncode(m_options.ClientSecret) +
-                           "&scope=" + FormEncode(JoinScopes(scopes));
+        std::string body = "grant_type=client_credentials&client_id=" + Private::FormEncode(m_options.ClientId) +
+                           "&client_secret=" + Private::FormEncode(m_options.ClientSecret) +
+                           "&scope=" + Private::FormEncode(Private::JoinScopes(scopes));
         Private::SendTokenRequest(*m_httpClient,
-                                  BuildEntraTokenRequest(m_options.AuthorityHost, m_options.TenantId, std::move(body)),
+                                  Private::BuildEntraTokenRequest(m_options.AuthorityHost, m_options.TenantId, std::move(body)),
                                   m_options.RequestOptions, m_options.Retry, false, std::move(completion));
     }
 
@@ -438,21 +437,20 @@ template <HttpClientLike THttp> class BasicWorkloadIdentityCredential final {
 
   private:
     template <class Handler> void Begin(std::vector<std::string> scopes, Handler completion) {
-        using namespace Private;
-        if (!IsValidTenantId(m_options.TenantId) || m_options.ClientId.empty() || m_options.TokenFilePath.empty() ||
+        if (!Private::IsValidTenantId(m_options.TenantId) || m_options.ClientId.empty() || m_options.TokenFilePath.empty() ||
             scopes.empty()) {
             Private::Fail(*m_httpClient, std::move(completion), std::make_error_code(std::errc::invalid_argument));
             return;
         }
-        const std::optional<std::string> assertion = ReadTokenFile(m_options.TokenFilePath);
+        const std::optional<std::string> assertion = Private::ReadTokenFile(m_options.TokenFilePath);
         if (!assertion.has_value()) {
             Private::Fail(*m_httpClient, std::move(completion),
                           std::make_error_code(std::errc::no_such_file_or_directory));
             return;
         }
-        std::string body = BuildClientAssertionBody(m_options.ClientId, *assertion, scopes);
+        std::string body = Private::BuildClientAssertionBody(m_options.ClientId, *assertion, scopes);
         Private::SendTokenRequest(*m_httpClient,
-                                  BuildEntraTokenRequest(m_options.AuthorityHost, m_options.TenantId, std::move(body)),
+                                  Private::BuildEntraTokenRequest(m_options.AuthorityHost, m_options.TenantId, std::move(body)),
                                   m_options.RequestOptions, m_options.Retry, false, std::move(completion));
     }
 
@@ -488,8 +486,7 @@ template <HttpClientLike THttp> class BasicClientAssertionCredential final {
 
   private:
     template <class Handler> void Begin(std::vector<std::string> scopes, Handler completion) {
-        using namespace Private;
-        if (!IsValidTenantId(m_options.TenantId) || m_options.ClientId.empty() || !m_options.AssertionProvider ||
+        if (!Private::IsValidTenantId(m_options.TenantId) || m_options.ClientId.empty() || !m_options.AssertionProvider ||
             scopes.empty()) {
             Private::Fail(*m_httpClient, std::move(completion), std::make_error_code(std::errc::invalid_argument));
             return;
@@ -507,9 +504,9 @@ template <HttpClientLike THttp> class BasicClientAssertionCredential final {
                 Private::Fail(*httpClient, std::move(completion), std::make_error_code(std::errc::invalid_argument));
                 return;
             }
-            std::string body = BuildClientAssertionBody(options.ClientId, assertion, scopes);
+            std::string body = Private::BuildClientAssertionBody(options.ClientId, assertion, scopes);
             Private::SendTokenRequest(*httpClient,
-                                      BuildEntraTokenRequest(options.AuthorityHost, options.TenantId, std::move(body)),
+                                      Private::BuildEntraTokenRequest(options.AuthorityHost, options.TenantId, std::move(body)),
                                       options.RequestOptions, options.Retry, false, std::move(completion));
         });
     }
@@ -544,12 +541,11 @@ template <HttpClientLike THttp> class BasicManagedIdentityCredential final {
 
   private:
     template <class Handler> void Begin(std::vector<std::string> scopes, Handler completion) {
-        using namespace Private;
         const bool appService = !m_options.IdentityEndpoint.empty();
         if (scopes.size() != 1U || scopes.front().empty() ||
             (!m_options.ClientId.empty() && !m_options.ResourceId.empty()) ||
             (appService && m_options.IdentityHeader.empty()) || (!appService && m_options.ImdsEndpoint.empty()) ||
-            !IsAcceptableIdentityEndpoint(appService ? m_options.IdentityEndpoint : m_options.ImdsEndpoint)) {
+            !Private::IsAcceptableIdentityEndpoint(appService ? m_options.IdentityEndpoint : m_options.ImdsEndpoint)) {
             Private::Fail(*m_httpClient, std::move(completion), std::make_error_code(std::errc::invalid_argument));
             return;
         }

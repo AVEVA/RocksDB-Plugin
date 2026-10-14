@@ -617,11 +617,10 @@ void StartDownload(THttp& httpClient, const BasicBlobTarget<TCred>& options, Dow
 template <HttpClientLike THttp, class TCred, class TCompletion>
 void DownloadBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, DownloadBlobOptions operationOptions,
                        TCompletion completion, HttpRequestOptions requestOptions) {
-    using namespace DownloadDetail;
     auto sink = std::make_shared<StringSink>();
-    StartDownload(
+    DownloadDetail::StartDownload(
         httpClient, options, ToDownloadToOptions(std::move(operationOptions)), sink,
-        [sink, completion = std::move(completion)](SummaryResult result) mutable {
+        [sink, completion = std::move(completion)](DownloadDetail::SummaryResult result) mutable {
             if (!result.has_value()) {
                 completion(std::unexpected(std::move(result).error()));
                 return;
@@ -639,15 +638,14 @@ void DownloadBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
 template <HttpClientLike THttp, class TCred, class TCompletion>
 void DownloadBlobToAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, DownloadToOptions operationOptions,
                          std::ostream& stream, TCompletion completion, HttpRequestOptions requestOptions) {
-    using namespace DownloadDetail;
-    StartDownload(
+    DownloadDetail::StartDownload(
         httpClient, options, std::move(operationOptions), std::make_shared<StreamSink>(stream),
-        [completion = std::move(completion)](SummaryResult result) mutable {
+        [completion = std::move(completion)](DownloadDetail::SummaryResult result) mutable {
             if (!result.has_value()) {
                 completion(std::unexpected(std::move(result).error()));
                 return;
             }
-            completion(ToDownloadToResponse(std::move(*result)));
+            completion(DownloadDetail::ToDownloadToResponse(std::move(*result)));
         },
         requestOptions);
 }
@@ -656,15 +654,14 @@ template <HttpClientLike THttp, class TCred, class TCompletion>
 void DownloadBlobToSpanAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
                              DownloadToOptions operationOptions, std::span<char> destination, TCompletion completion,
                              HttpRequestOptions requestOptions) {
-    using namespace DownloadDetail;
-    StartDownload(
+    DownloadDetail::StartDownload(
         httpClient, options, std::move(operationOptions), std::make_shared<SpanSink>(destination),
-        [completion = std::move(completion)](SummaryResult result) mutable {
+        [completion = std::move(completion)](DownloadDetail::SummaryResult result) mutable {
             if (!result.has_value()) {
                 completion(std::unexpected(std::move(result).error()));
                 return;
             }
-            completion(ToDownloadToResponse(std::move(*result)));
+            completion(DownloadDetail::ToDownloadToResponse(std::move(*result)));
         },
         requestOptions);
 }
@@ -673,12 +670,11 @@ template <HttpClientLike THttp, class TCred, class TCompletion>
 void DownloadBlobToFileAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
                              DownloadToOptions operationOptions, const std::filesystem::path& path,
                              TCompletion completion, HttpRequestOptions requestOptions) {
-    using namespace DownloadDetail;
     std::error_code statusError;
     if (std::filesystem::is_directory(path, statusError)) {
         PostCompletion(httpClient, std::move(completion),
                        std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>{
-                           std::unexpect, MakeFailure(std::make_error_code(std::errc::is_a_directory),
+                           std::unexpect, DownloadDetail::MakeFailure(std::make_error_code(std::errc::is_a_directory),
                                                       "The destination path is a directory.")});
         return;
     }
@@ -692,13 +688,13 @@ void DownloadBlobToFileAsync(THttp& httpClient, const BasicBlobTarget<TCred>& op
     if (!*file) {
         PostCompletion(httpClient, std::move(completion),
                        std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>{
-                           std::unexpect, MakeFailure(LastOpenError(), "Failed to open destination file.")});
+                           std::unexpect, DownloadDetail::MakeFailure(DownloadDetail::LastOpenError(), "Failed to open destination file.")});
         return;
     }
 
-    StartDownload(
+    DownloadDetail::StartDownload(
         httpClient, options, std::move(operationOptions), std::make_shared<FileSink>(file),
-        [file, tempPath, target = path, completion = std::move(completion)](SummaryResult result) mutable {
+        [file, tempPath, target = path, completion = std::move(completion)](DownloadDetail::SummaryResult result) mutable {
             file->close();
             std::error_code ignored;
             if (!result.has_value()) {
@@ -708,13 +704,13 @@ void DownloadBlobToFileAsync(THttp& httpClient, const BasicBlobTarget<TCred>& op
             }
             if (file->fail()) {
                 std::filesystem::remove(tempPath, ignored);
-                completion(std::unexpected(MakeFailure(std::errc::io_error, "I/O error writing destination file.")));
+                completion(std::unexpected(DownloadDetail::MakeFailure(std::errc::io_error, "I/O error writing destination file.")));
                 return;
             }
             std::error_code renameError;
             if (std::filesystem::is_directory(target, renameError)) {
                 std::filesystem::remove(tempPath, ignored);
-                completion(std::unexpected(MakeFailure(std::make_error_code(std::errc::is_a_directory),
+                completion(std::unexpected(DownloadDetail::MakeFailure(std::make_error_code(std::errc::is_a_directory),
                                                        "The destination path is a directory.")));
                 return;
             }
@@ -723,10 +719,10 @@ void DownloadBlobToFileAsync(THttp& httpClient, const BasicBlobTarget<TCred>& op
             if (renameError) {
                 std::filesystem::remove(tempPath, ignored);
                 completion(std::unexpected(
-                    MakeFailure(renameError, "Failed to rename temporary download file to destination.")));
+                    DownloadDetail::MakeFailure(renameError, "Failed to rename temporary download file to destination.")));
                 return;
             }
-            completion(ToDownloadToResponse(std::move(*result)));
+            completion(DownloadDetail::ToDownloadToResponse(std::move(*result)));
         },
         requestOptions);
 }
