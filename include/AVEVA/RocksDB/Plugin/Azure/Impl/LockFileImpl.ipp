@@ -286,8 +286,7 @@ template <typename TBlob> void BasicLockFileImpl<TBlob>::Unlock() {
 }
 
 template <typename TBlob> std::chrono::seconds BasicLockFileImpl<TBlob>::TimeSinceLastRenewal() const {
-    return std::chrono::duration_cast<std::chrono::seconds>(Now() -
-                                                            m_lastRenewalTime.load());
+    return std::chrono::duration_cast<std::chrono::seconds>(Now() - m_lastRenewalTime.load());
 }
 
 template <typename TBlob> bool BasicLockFileImpl<TBlob>::HasExceededLeaseLength() const {
@@ -299,6 +298,14 @@ template <typename TBlob> std::chrono::steady_clock::time_point BasicLockFileImp
     const auto margin = std::min<std::chrono::milliseconds>(Configuration::LeaseSafetyMargin,
                                                             std::chrono::milliseconds(m_leaseLength) / 10);
     return m_lastRenewalTime.load() + m_leaseLength - margin;
+}
+
+template <typename TBlob>
+std::optional<std::chrono::steady_clock::duration> BasicLockFileImpl<TBlob>::RenewalTimeRemaining() const {
+    if (!m_held.load()) {
+        return std::nullopt;
+    }
+    return RenewalDeadline() - Now();
 }
 
 template <typename TBlob> bool BasicLockFileImpl<TBlob>::IsRenewalOverdue() const {

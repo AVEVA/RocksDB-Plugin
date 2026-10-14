@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadTracker.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 
@@ -111,4 +112,65 @@ TEST_F(LeaseDeadlineTests, NotOverdueBeforeLockedOrRightAfterAcquiring) {
     // The deadline leaves a safety margin before the end of the lease.
     EXPECT_LT(lock.RenewalDeadline(), std::chrono::steady_clock::now() + 20s);
     EXPECT_GT(lock.RenewalDeadline(), std::chrono::steady_clock::now() + 10s);
+}
+
+TEST(WriteDeadlineTests, WithoutASourceNothingIsBounded) {
+    ClientRuntimeBase runtime;
+
+    EXPECT_FALSE(runtime.WriteTimeRemaining().has_value());
+    EXPECT_NO_THROW(runtime.ThrowIfWritesFenced());
+    AVEVA::HttpRequestOptions options;
+    options.SetTimeout(30s);
+    EXPECT_EQ(30s, AVEVA::RocksDB::Plugin::Azure::Impl::BoundByWriteDeadline(runtime, options).GetTimeout());
+}
+
+TEST(WriteDeadlineTests, MutationsAreRejectedOncetheDeadlineHasPassed) {
+    ClientRuntimeBase runtime;
+    std::chrono::steady_clock::duration remaining = 5s;
+    runtime.SetWriteDeadlineSource([&remaining] { return std::optional{remaining}; });
+
+    EXPECT_NO_THROW(runtime.ThrowIfWritesFenced());
+    remaining = 0s;
+    EXPECT_THROW(runtime.ThrowIfWritesFenced(), std::runtime_error);
+
+    runtime.SetWriteDeadlineSource({});
+    EXPECT_NO_THROW(runtime.ThrowIfWritesFenced());
+}
+
+TEST(WriteDeadlineTests, RequestTimeoutIsCappedAtTheTimeLeft) {
+    ClientRuntimeBase runtime;
+    runtime.SetWriteDeadlineSource([] { return std::optional<std::chrono::steady_clock::duration>{2s}; });
+    AVEVA::HttpRequestOptions options;
+    options.SetTimeout(60s);
+    options.SetTotalDeadline(120s);
+
+    const auto bounded = AVEVA::RocksDB::Plugin::Azure::Impl::BoundByWriteDeadline(runtime, options);
+
+    EXPECT_EQ(2s, bounded.GetTimeout());
+    EXPECT_EQ(2s, bounded.GetTotalDeadline());
+    // A transfer that is already shorter than the time left is untouched.
+    options.SetTimeout(1s);
+    EXPECT_EQ(1s, AVEVA::RocksDB::Plugin::Azure::Impl::BoundByWriteDeadline(runtime, options).GetTimeout());
+}
+
+TEST_F(LeaseDeadlineTests, AppendIssuedAfterTheRenewalDeadlineIsRejectedWithoutSendingARequest) {
+    auto client = std::make_unique<AVEVA::AzureClient::Tests::PageBlobClient>(m_httpClient,
+                                                                              MakeBlobClientOptions("locks", "LOCK"));
+    LockFileImpl lock(m_runtime, std::move(client), 20s, m_logger, "LOCK");
+    auto now = std::chrono::steady_clock::now();
+    lock.SetClockForTesting([&now] { return now; });
+    m_httpClient.EnqueueResponse(HttpResponse{201, MakeCanonicalSuccessHeaders({{"x-ms-lease-id", "lease"}}), ""});
+    ASSERT_TRUE(lock.Lock());
+    m_runtime->SetWriteDeadlineSource([&lock] { return lock.RenewalTimeRemaining(); });
+
+    AVEVA::AzureClient::Tests::PageBlobClient blob(m_httpClient, MakeBlobClientOptions("data", "000001.sst"));
+    const std::vector<char> page(512, 'x');
+    const auto requestsBefore = m_httpClient.RequestCount();
+
+    // Renewal is stalled: the clock passes the deadline while the lease is still nominally held.
+    now += 19s;
+    EXPECT_THROW(AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations::UploadPages(*m_runtime, blob, page, 0),
+                 std::runtime_error);
+    EXPECT_EQ(requestsBefore, m_httpClient.RequestCount());
+    m_runtime->SetWriteDeadlineSource({});
 }

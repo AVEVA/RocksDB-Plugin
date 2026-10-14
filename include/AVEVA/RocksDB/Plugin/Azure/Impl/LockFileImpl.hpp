@@ -72,6 +72,8 @@ class BasicLockFileImpl
     // The last moment a renewal may still complete (and writes may still proceed): the end of the lease measured
     // from when the last successful request was sent, less a safety margin.
     [[nodiscard]] std::chrono::steady_clock::time_point RenewalDeadline() const;
+    // Time left until RenewalDeadline(); empty when the lock is not held.
+    [[nodiscard]] std::optional<std::chrono::steady_clock::duration> RenewalTimeRemaining() const;
     // True while the lease is held but can no longer be assumed valid. Safe to call while a renewal is blocked.
     [[nodiscard]] bool IsRenewalOverdue() const;
 

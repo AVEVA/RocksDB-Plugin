@@ -101,6 +101,34 @@ void ClientRuntimeBase::ThrowIfWritesFenced() const {
         throw std::runtime_error("Writes are disabled because the filesystem can no longer guarantee it holds its "
                                  "locks");
     }
+    if (const auto remaining = WriteTimeRemaining();
+        remaining && *remaining <= std::chrono::steady_clock::duration::zero()) {
+        throw std::runtime_error("Writes are disabled because the lease renewal deadline has passed");
+    }
+}
+
+void ClientRuntimeBase::SetWriteDeadlineSource(WriteDeadlineSource source) {
+    const std::scoped_lock lock(m_deadlineMutex);
+    m_deadlineSource = std::move(source);
+}
+
+std::optional<std::chrono::steady_clock::duration> ClientRuntimeBase::WriteTimeRemaining() const {
+    const std::scoped_lock lock(m_deadlineMutex);
+    return m_deadlineSource ? m_deadlineSource() : std::nullopt;
+}
+
+HttpRequestOptions BoundByWriteDeadline(const ClientRuntimeBase& runtime, HttpRequestOptions options) {
+    const auto remaining = runtime.WriteTimeRemaining();
+    if (!remaining) {
+        return options;
+    }
+    // At least 1 ms: a zero timeout may mean "none" to the transport. ThrowIfWritesFenced rejects an expired deadline
+    // before a request is built, so this only guards the race where it expires in between.
+    const auto budget =
+        std::max(std::chrono::milliseconds(1), std::chrono::duration_cast<std::chrono::milliseconds>(*remaining));
+    options.SetTimeout(std::min(options.GetTimeout(), budget));
+    options.SetTotalDeadline(std::min(options.GetTotalDeadline().value_or(budget), budget));
+    return options;
 }
 
 void ThrowRequestFailed(const AzureClient::BlobStorageError& error) {

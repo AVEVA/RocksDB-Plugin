@@ -15,9 +15,13 @@
 #include <boost/asio/use_future.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <utility>
 
 #ifdef _WIN32
@@ -32,6 +36,9 @@
 #undef LoadLibrary
 #endif
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
+/// <summary>Returns the time left until the earliest lease renewal deadline, or empty when no lease is held.</summary>
+using WriteDeadlineSource = std::function<std::optional<std::chrono::steady_clock::duration>()>;
+
 /// <summary>
 /// What every file, lock and blob operation needs from the runtime, independent of the HTTP transport: the write
 /// fence shared by every file, lock and directory of a filesystem. Kept non-template so those classes need not know
@@ -39,6 +46,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// </summary>
 class ClientRuntimeBase {
     std::atomic<bool> m_writesFenced{false};
+    mutable std::mutex m_deadlineMutex;
+    WriteDeadlineSource m_deadlineSource;
 
   public:
     ClientRuntimeBase() = default;
@@ -54,9 +63,28 @@ class ClientRuntimeBase {
     /// </summary>
     void FenceWrites() noexcept;
     [[nodiscard]] bool WritesFenced() const noexcept;
-    /// <summary>Throws std::runtime_error when writes are fenced.</summary>
+    /// <summary>
+    /// Throws std::runtime_error when writes are fenced or the earliest lease renewal deadline has passed. The
+    /// deadline check closes the window before the renewal loop gives up, in which another writer may already own
+    /// the lease.
+    /// </summary>
     void ThrowIfWritesFenced() const;
+
+    /// <summary>
+    /// Installs the source of the time left until the earliest lease renewal deadline (empty result: no lease is
+    /// held). Pass an empty function to remove it. The source is called under an internal lock, so removing it
+    /// guarantees it is no longer running.
+    /// </summary>
+    void SetWriteDeadlineSource(WriteDeadlineSource source);
+    /// <summary>Time left before mutations must stop; empty when no lease deadline applies.</summary>
+    [[nodiscard]] std::optional<std::chrono::steady_clock::duration> WriteTimeRemaining() const;
 };
+
+/// <summary>
+/// Caps a mutating request's timeout and total deadline (retries included) at the time left before the lease
+/// renewal deadline, so the request cannot land after another writer may have taken over.
+/// </summary>
+[[nodiscard]] HttpRequestOptions BoundByWriteDeadline(const ClientRuntimeBase& runtime, HttpRequestOptions options);
 
 /// <summary>
 /// How a transport is created on the host's io_context. Any transport constructible from an io_context works as is;

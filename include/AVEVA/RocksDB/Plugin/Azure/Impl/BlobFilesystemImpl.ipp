@@ -326,9 +326,9 @@ BasicBlobFilesystemImpl<THttp>::LockFile(const std::string& filePath) {
     auto [prefix, realPath, blob] = ResolveBlob(filePath);
 
     BlobOperations::CreateIfNotExists(*m_runtime, blob, Configuration::PageBlob::DefaultSize);
-    auto lockFile = std::make_shared<LockFileType>(m_runtime, std::make_unique<PageBlobClientOn<THttp>>(std::move(blob)),
-                                                   Configuration::LeaseLength, m_logger, std::string(realPath),
-                                                   m_lockAcquireTimeout);
+    auto lockFile = std::make_shared<LockFileType>(
+        m_runtime, std::make_unique<PageBlobClientOn<THttp>>(std::move(blob)), Configuration::LeaseLength, m_logger,
+        std::string(realPath), m_lockAcquireTimeout);
     // Lock() can retry for the full lease length. The mutex must not be held across it, or the renewal thread
     // would stall and the leases this Env already holds would expire.
     if (lockFile->Lock()) {
@@ -551,8 +551,9 @@ void BasicBlobFilesystemImpl<THttp>::Truncate(const std::string& filePath, int64
     {
         boost::scope::scope_fail warn{[&] {
             BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
-                << "'" << realPath << "' was resized to " << alignedSize << " bytes but its logical size could not be set to "
-                << size << "; its recorded size may exceed its capacity until the truncate is retried";
+                << "'" << realPath << "' was resized to " << alignedSize
+                << " bytes but its logical size could not be set to " << size
+                << "; its recorded size may exceed its capacity until the truncate is retried";
         }};
         BlobOperations::SetSize(*m_runtime, client, size);
     }
@@ -585,8 +586,8 @@ template <typename THttp>
 bool BasicBlobFilesystemImpl<THttp>::WaitForFileCachesIdleForTesting(const std::chrono::milliseconds timeout) const {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     for (const auto& [prefix, cache] : m_fileCaches) {
-        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline -
-                                                                                     std::chrono::steady_clock::now());
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
         if (!cache->WaitUntilIdleForTesting((std::max)(remaining, std::chrono::milliseconds::zero()))) {
             return false;
         }
@@ -665,7 +666,8 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
         boost::scope::scope_fail rollback{[&] { deleteQuietly(destClient, realPathTo); }};
         copyInto(destClient);
     } else {
-        const auto tempName = std::string(realPathTo) + ".rename-" + boost::uuids::to_string(boost::uuids::random_generator()());
+        const auto tempName =
+            std::string(realPathTo) + ".rename-" + boost::uuids::to_string(boost::uuids::random_generator()());
         auto tempClient = container->GetPageBlobClient(tempName);
         BlobOperations::CreateOrReplace(*m_runtime, tempClient, cap);
         {
@@ -698,7 +700,28 @@ BasicBlobFilesystemImpl<THttp>::BasicBlobFilesystemImpl(
       m_asyncReads(std::make_shared<AsyncReadTracker>(m_runtime->HttpClient().get_executor())),
       m_leaseRenewal{LeaseRenewal::Start(
           m_runtime->HttpClient().get_executor(), m_logger, RenewableLocksSnapshot{this}, FenceWritesOnFatal{this},
-          std::chrono::duration_cast<std::chrono::milliseconds>(Configuration::RenewalDelay))} {}
+          std::chrono::duration_cast<std::chrono::milliseconds>(Configuration::RenewalDelay))} {
+    // Reads the live lock list on every write; cleared in the destructor because files keep the runtime alive.
+    m_runtime->SetWriteDeadlineSource([this] { return EarliestRenewalTimeRemaining(); });
+}
+
+// The tightest renewal deadline among held locks. Mutations are rejected once it passes and their requests are
+// capped to it, so nothing lands after another writer may have taken over an expiring lease.
+template <typename THttp>
+std::optional<std::chrono::steady_clock::duration>
+BasicBlobFilesystemImpl<THttp>::EarliestRenewalTimeRemaining() const {
+    std::optional<std::chrono::steady_clock::duration> earliest;
+    std::scoped_lock lock(m_lockFilesMutex);
+    for (const auto& weak : m_renewableLocks) {
+        if (const auto shared = weak.lock()) {
+            if (const auto remaining = shared->RenewalTimeRemaining();
+                remaining && (!earliest || *remaining < *earliest)) {
+                earliest = remaining;
+            }
+        }
+    }
+    return earliest;
+}
 
 // Snapshot under the mutex but renew outside it, so LockFile/UnlockFile are not blocked behind network round trips
 // and their retries. The shared_ptrs keep the locks alive meanwhile.
@@ -723,6 +746,7 @@ template <typename THttp> void BasicBlobFilesystemImpl<THttp>::FenceWritesOnFata
 // Stops lease renewal and waits for in-flight async reads first: their completions use the clients and logger that
 // are destroyed right after this body.
 template <typename THttp> BasicBlobFilesystemImpl<THttp>::~BasicBlobFilesystemImpl() {
+    m_runtime->SetWriteDeadlineSource({});
     m_leaseRenewal->Stop();
     if (const auto inFlight = m_asyncReads->InFlight(); inFlight > 0) {
         BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::info)

@@ -91,7 +91,7 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     std::shared_ptr<AsyncReadTracker> m_asyncReads;
     // Bytes held by per-file prefetch buffers across all open files; caps Prefetch memory.
     std::shared_ptr<std::atomic<int64_t>> m_prefetchBytes = std::make_shared<std::atomic<int64_t>>(0);
-    std::mutex m_lockFilesMutex;
+    mutable std::mutex m_lockFilesMutex;
     boost::intrusive::list<LockFileType, boost::intrusive::constant_time_size<false>> m_locks;
     // Parallel to m_locks; lets the renewal loop keep locks alive while it renews outside m_lockFilesMutex.
     std::vector<std::weak_ptr<LockFileType>> m_renewableLocks;
@@ -108,6 +108,7 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     using LeaseRenewal = BasicLeaseRenewalLoop<RenewableLocksSnapshot, FenceWritesOnFatal, LockFileType>;
 
     std::shared_ptr<LeaseRenewal> m_leaseRenewal;
+    [[nodiscard]] std::optional<std::chrono::steady_clock::duration> EarliestRenewalTimeRemaining() const;
 
   public:
     // Every io_context constructor takes the host-owned io_context that all Azure I/O runs on. The filesystem never
