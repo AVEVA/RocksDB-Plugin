@@ -675,6 +675,27 @@ TEST(CredentialsTests, AzurePipelinesCredentialRejectsMissingConfigurationWithou
     EXPECT_TRUE(httpClient.Requests().empty());
 }
 
+TEST(CredentialsTests, AzurePipelinesCredentialRejectsAnUnsafeOidcRequestUri) {
+    FakeHttpClient httpClient;
+    for (const char* uri : {"http://pipelines.example/oidc", "ftp://pipelines.example/oidc", "https:///oidc",
+                            "https://pipelines.example/oidc#fragment", "https://user:pw@pipelines.example/oidc",
+                            "pipelines.example/oidc", "https://pipelines.example\\oidc"}) {
+        auto options = PipelinesOptions();
+        options.OidcRequestUri = uri;
+        EXPECT_THROW((AzurePipelinesCredential{httpClient, options}), std::invalid_argument) << uri;
+    }
+    EXPECT_TRUE(httpClient.Requests().empty());
+}
+
+TEST(CredentialsTests, AzurePipelinesCredentialRejectsAnUnsafeOidcRequestUriFromTheEnvironment) {
+    SetEnvironmentValue("SYSTEM_OIDCREQUESTURI", "http://env.example/oidc");
+    FakeHttpClient httpClient;
+    auto options = PipelinesOptions();
+    options.OidcRequestUri.clear();
+    EXPECT_THROW((AzurePipelinesCredential{httpClient, options}), std::invalid_argument);
+    SetEnvironmentValue("SYSTEM_OIDCREQUESTURI", "");
+}
+
 TEST(CredentialsTests, AzurePipelinesCredentialDefaultsTheOidcUriFromTheEnvironment) {
     SetEnvironmentValue("SYSTEM_OIDCREQUESTURI", "https://env.example/oidc");
     FakeHttpClient httpClient;

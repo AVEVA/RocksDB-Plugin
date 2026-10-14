@@ -393,17 +393,18 @@ template <HttpClientLike THttp> class BasicClientSecretCredential final {
 
   private:
     template <class Handler> void Begin(std::vector<std::string> scopes, Handler completion) {
-        if (!Private::IsValidTenantId(m_options.TenantId) || m_options.ClientId.empty() || m_options.ClientSecret.empty() ||
-            scopes.empty()) {
+        if (!Private::IsValidTenantId(m_options.TenantId) || m_options.ClientId.empty() ||
+            m_options.ClientSecret.empty() || scopes.empty()) {
             Private::Fail(*m_httpClient, std::move(completion), std::make_error_code(std::errc::invalid_argument));
             return;
         }
         std::string body = "grant_type=client_credentials&client_id=" + Private::FormEncode(m_options.ClientId) +
                            "&client_secret=" + Private::FormEncode(m_options.ClientSecret) +
                            "&scope=" + Private::FormEncode(Private::JoinScopes(scopes));
-        Private::SendTokenRequest(*m_httpClient,
-                                  Private::BuildEntraTokenRequest(m_options.AuthorityHost, m_options.TenantId, std::move(body)),
-                                  m_options.RequestOptions, m_options.Retry, false, std::move(completion));
+        Private::SendTokenRequest(
+            *m_httpClient,
+            Private::BuildEntraTokenRequest(m_options.AuthorityHost, m_options.TenantId, std::move(body)),
+            m_options.RequestOptions, m_options.Retry, false, std::move(completion));
     }
 
     THttp* m_httpClient;
@@ -437,8 +438,8 @@ template <HttpClientLike THttp> class BasicWorkloadIdentityCredential final {
 
   private:
     template <class Handler> void Begin(std::vector<std::string> scopes, Handler completion) {
-        if (!Private::IsValidTenantId(m_options.TenantId) || m_options.ClientId.empty() || m_options.TokenFilePath.empty() ||
-            scopes.empty()) {
+        if (!Private::IsValidTenantId(m_options.TenantId) || m_options.ClientId.empty() ||
+            m_options.TokenFilePath.empty() || scopes.empty()) {
             Private::Fail(*m_httpClient, std::move(completion), std::make_error_code(std::errc::invalid_argument));
             return;
         }
@@ -449,9 +450,10 @@ template <HttpClientLike THttp> class BasicWorkloadIdentityCredential final {
             return;
         }
         std::string body = Private::BuildClientAssertionBody(m_options.ClientId, *assertion, scopes);
-        Private::SendTokenRequest(*m_httpClient,
-                                  Private::BuildEntraTokenRequest(m_options.AuthorityHost, m_options.TenantId, std::move(body)),
-                                  m_options.RequestOptions, m_options.Retry, false, std::move(completion));
+        Private::SendTokenRequest(
+            *m_httpClient,
+            Private::BuildEntraTokenRequest(m_options.AuthorityHost, m_options.TenantId, std::move(body)),
+            m_options.RequestOptions, m_options.Retry, false, std::move(completion));
     }
 
     THttp* m_httpClient;
@@ -486,8 +488,8 @@ template <HttpClientLike THttp> class BasicClientAssertionCredential final {
 
   private:
     template <class Handler> void Begin(std::vector<std::string> scopes, Handler completion) {
-        if (!Private::IsValidTenantId(m_options.TenantId) || m_options.ClientId.empty() || !m_options.AssertionProvider ||
-            scopes.empty()) {
+        if (!Private::IsValidTenantId(m_options.TenantId) || m_options.ClientId.empty() ||
+            !m_options.AssertionProvider || scopes.empty()) {
             Private::Fail(*m_httpClient, std::move(completion), std::make_error_code(std::errc::invalid_argument));
             return;
         }
@@ -505,9 +507,9 @@ template <HttpClientLike THttp> class BasicClientAssertionCredential final {
                 return;
             }
             std::string body = Private::BuildClientAssertionBody(options.ClientId, assertion, scopes);
-            Private::SendTokenRequest(*httpClient,
-                                      Private::BuildEntraTokenRequest(options.AuthorityHost, options.TenantId, std::move(body)),
-                                      options.RequestOptions, options.Retry, false, std::move(completion));
+            Private::SendTokenRequest(
+                *httpClient, Private::BuildEntraTokenRequest(options.AuthorityHost, options.TenantId, std::move(body)),
+                options.RequestOptions, options.Retry, false, std::move(completion));
         });
     }
 
@@ -589,6 +591,7 @@ struct AzurePipelinesCredentialOptions {
     std::string ServiceConnectionId;
     std::string SystemAccessToken;
     // The Azure Pipelines OIDC token endpoint; defaults to the SYSTEM_OIDCREQUESTURI environment variable.
+    // Must be an https URL (the construction throws std::invalid_argument otherwise): the system access token is sent to it.
     std::string OidcRequestUri;
     std::string AuthorityHost = std::string{DefaultAuthorityHost};
     HttpRequestOptions RequestOptions;
@@ -620,6 +623,16 @@ template <HttpClientLike THttp> class BasicAzurePipelinesCredential final {
     static constexpr unsigned int FirstSuccess = 200;
     static constexpr unsigned int LastSuccess = 299;
 
+    // Rejects URIs that would send the system access token to an unintended endpoint (plain http, no host,
+    // userinfo, or a fragment; parse_absolute_uri already refuses fragments).
+    static void ValidateOidcRequestUri(std::string_view uri) {
+        const auto parsed = boost::urls::parse_absolute_uri(uri);
+        if (!parsed || parsed->scheme_id() != boost::urls::scheme::https || !parsed->has_authority() ||
+            parsed->host().empty() || parsed->has_userinfo() || uri.find('\\') != std::string_view::npos) {
+            throw std::invalid_argument("OidcRequestUri must be an https URL with a non-empty host and no fragment.");
+        }
+    }
+
     static HttpRequest BuildOidcRequest(const AzurePipelinesCredentialOptions& options) {
         const auto separator = options.OidcRequestUri.find('?') == std::string::npos ? '?' : '&';
         HttpRequest request;
@@ -646,6 +659,11 @@ template <HttpClientLike THttp> class BasicAzurePipelinesCredential final {
                                                                 AzurePipelinesCredentialOptions options) {
         if (options.OidcRequestUri.empty()) {
             options.OidcRequestUri = Private::GetEnvironmentValue("SYSTEM_OIDCREQUESTURI");
+        }
+        // The system access token is sent as a bearer token to this URI, so refuse anything but https.
+        // An empty value is reported when a token is requested, as before.
+        if (!options.OidcRequestUri.empty()) {
+            ValidateOidcRequestUri(options.OidcRequestUri);
         }
 
         ClientAssertionCredentialOptions exchange;
