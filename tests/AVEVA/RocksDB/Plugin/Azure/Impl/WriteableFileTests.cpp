@@ -583,22 +583,9 @@ TEST_F(WriteableFileTests, MoveConstructor_TransfersState_Correctly) {
     EXPECT_EQ(testData.size(), static_cast<size_t>(file2.GetFileSize()));
 }
 
-TEST_F(WriteableFileTests, MoveAssignment_TransfersState_Correctly) {
-    FakeBlobEnvironment env1;
-    FakeBlobEnvironment env2;
-    env1.Blob->SetCapacity(Configuration::PageBlob::PageSize);
-    env2.Blob->SetCapacity(Configuration::PageBlob::PageSize);
-    auto logger1 = std::make_shared<severity_logger_mt<severity_level>>();
-    auto logger2 = std::make_shared<severity_logger_mt<severity_level>>();
-
-    std::vector<char> testData(200, 'n');
-    FakeWriteableFileImpl file1{"test1.dat", env1.Runtime, env1.Client, nullptr, logger1};
-    FakeWriteableFileImpl file2{"test2.dat", env2.Runtime, env2.Client, nullptr, logger2};
-    file1.Append(testData);
-
-    file2 = std::move(file1);
-
-    EXPECT_EQ(testData.size(), static_cast<size_t>(file2.GetFileSize()));
+TEST_F(WriteableFileTests, MoveAssignment_IsDeleted) {
+    static_assert(!std::is_move_assignable_v<FakeWriteableFileImpl>);
+    static_assert(!std::is_copy_assignable_v<FakeWriteableFileImpl>);
 }
 
 TEST_F(WriteableFileTests, Truncate_ResizesTheBlobBeforeRecordingTheNewSize) {

@@ -455,25 +455,10 @@ TEST_F(ReadWriteFileImplTests, MoveConstructor_TransfersOwnership) {
     EXPECT_EQ(data, readBuffer);
 }
 
-// Test move assignment
-TEST_F(ReadWriteFileImplTests, MoveAssignment_TransfersOwnership) {
-    // Arrange
-    auto file1 = CreateFile();
-    auto file2 = CreateFile();
-
-    const int64_t dataSize = 100;
-    std::vector<char> data(dataSize, 'M');
-    file1->Write(0, data.data(), dataSize);
-
-    // Act
-    *file2 = std::move(*file1);
-    file2->Sync();
-
-    // Assert - data should be accessible from moved object
-    std::vector<char> readBuffer(dataSize);
-    auto bytesRead = file2->Read(0, dataSize, readBuffer.data());
-    EXPECT_EQ(dataSize, bytesRead);
-    EXPECT_EQ(data, readBuffer);
+// Assignment would drop buffered data and in-flight uploads, so it is deleted.
+TEST_F(ReadWriteFileImplTests, MoveAssignment_IsDeleted) {
+    static_assert(!std::is_move_assignable_v<FakeReadWriteFileImpl>);
+    static_assert(!std::is_copy_assignable_v<FakeReadWriteFileImpl>);
 }
 
 // Test sequential writes

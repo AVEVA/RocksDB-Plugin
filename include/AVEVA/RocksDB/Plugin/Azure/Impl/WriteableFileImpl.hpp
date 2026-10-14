@@ -70,7 +70,7 @@ template <typename TBlob> class BasicWriteableFileImpl {
     BasicWriteableFileImpl(const BasicWriteableFileImpl&) = delete;
     BasicWriteableFileImpl& operator=(const BasicWriteableFileImpl&) = delete;
     BasicWriteableFileImpl(BasicWriteableFileImpl&&) noexcept;
-    BasicWriteableFileImpl& operator=(BasicWriteableFileImpl&&) noexcept;
+    BasicWriteableFileImpl& operator=(BasicWriteableFileImpl&&) = delete;
 
     void Close();
     void Append(const std::span<const char> data);

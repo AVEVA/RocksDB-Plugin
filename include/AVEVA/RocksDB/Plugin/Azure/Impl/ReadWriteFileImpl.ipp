@@ -37,20 +37,6 @@ BasicReadWriteFileImpl<TBlob>::BasicReadWriteFileImpl(BasicReadWriteFileImpl<TBl
       m_closed(std::exchange(other.m_closed, true)), m_dirty(other.m_dirty), m_buffer(std::move(other.m_buffer)),
       m_bufferStats(std::move(other.m_bufferStats)) {}
 
-template <typename TBlob>
-BasicReadWriteFileImpl<TBlob>&
-BasicReadWriteFileImpl<TBlob>::operator=(BasicReadWriteFileImpl<TBlob>&& other) noexcept {
-    m_h = std::move(other.m_h);
-    m_size = other.m_size;
-    m_syncSize = other.m_syncSize;
-    m_capacity = other.m_capacity;
-    m_closed = std::exchange(other.m_closed, true);
-    m_dirty = other.m_dirty;
-    m_buffer = std::move(other.m_buffer);
-    m_bufferStats = std::move(other.m_bufferStats);
-    return *this;
-}
-
 template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Close() {
     if (!m_closed) {
         Sync();

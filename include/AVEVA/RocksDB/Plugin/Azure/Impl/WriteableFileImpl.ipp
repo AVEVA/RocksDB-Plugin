@@ -90,23 +90,6 @@ BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(BasicWriteableFileImpl<TBl
       m_closed(std::exchange(other.m_closed, true)), m_flushed(other.m_flushed), m_unsyncedSize(other.m_unsyncedSize),
       m_buffer(std::move(other.m_buffer)), m_uploads(std::move(other.m_uploads)) {}
 
-template <typename TBlob>
-BasicWriteableFileImpl<TBlob>&
-BasicWriteableFileImpl<TBlob>::operator=(BasicWriteableFileImpl<TBlob>&& other) noexcept {
-    m_h = std::move(other.m_h);
-    m_bufferSize = other.m_bufferSize;
-    m_lastPageOffset = other.m_lastPageOffset;
-    m_size = other.m_size;
-    m_capacity = other.m_capacity;
-    m_bufferOffset = other.m_bufferOffset;
-    m_closed = std::exchange(other.m_closed, true);
-    m_flushed = other.m_flushed;
-    m_unsyncedSize = other.m_unsyncedSize;
-    m_buffer = std::move(other.m_buffer);
-    m_uploads = std::move(other.m_uploads);
-    return *this;
-}
-
 template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Close() {
     if (!m_closed) {
         Sync();

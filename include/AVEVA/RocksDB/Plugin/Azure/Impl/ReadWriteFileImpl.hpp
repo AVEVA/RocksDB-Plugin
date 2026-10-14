@@ -40,7 +40,7 @@ template <typename TBlob> class BasicReadWriteFileImpl {
     BasicReadWriteFileImpl(const BasicReadWriteFileImpl&) = delete;
     BasicReadWriteFileImpl& operator=(const BasicReadWriteFileImpl&) = delete;
     BasicReadWriteFileImpl(BasicReadWriteFileImpl&&) noexcept;
-    BasicReadWriteFileImpl& operator=(BasicReadWriteFileImpl&&) noexcept;
+    BasicReadWriteFileImpl& operator=(BasicReadWriteFileImpl&&) = delete;
 
     void Close();
     void Sync();
