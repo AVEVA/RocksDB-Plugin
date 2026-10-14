@@ -13,6 +13,7 @@
 #include "AVEVA/RocksDB/Plugin/Core/RocksDBHelpers.hpp"
 
 #include <boost/asio/use_future.hpp>
+#include <boost/scope/scope_exit.hpp>
 #include <boost/scope/scope_fail.hpp>
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid_io.hpp>
@@ -539,12 +540,21 @@ void BasicBlobFilesystemImpl<THttp>::Truncate(const std::string& filePath, int64
 
     // Resize before recording the new logical size: if the resize fails the metadata still matches the blob.
     // The service only accepts page-aligned blob sizes; the logical size lives in the metadata set afterwards.
+    // The cached copy is dropped whether or not this succeeds: a failure after the resize leaves the blob changed.
+    boost::scope::scope_exit dropCached{[&] {
+        if (const auto cache = m_fileCaches.find(prefix); cache != m_fileCaches.end()) {
+            cache->second->RemoveFile(std::string(realPath));
+        }
+    }};
     const auto [partialPage, alignedSize] = BlobHelpers::RoundToEndOfNearestPage(size);
     BlobOperations::SetCapacity(*m_runtime, client, alignedSize);
-    BlobOperations::SetSize(*m_runtime, client, size);
-
-    if (const auto cache = m_fileCaches.find(prefix); cache != m_fileCaches.end()) {
-        cache->second->RemoveFile(std::string(realPath));
+    {
+        boost::scope::scope_fail warn{[&] {
+            BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
+                << "'" << realPath << "' was resized to " << alignedSize << " bytes but its logical size could not be set to "
+                << size << "; its recorded size may exceed its capacity until the truncate is retried";
+        }};
+        BlobOperations::SetSize(*m_runtime, client, size);
     }
 }
 
@@ -615,6 +625,14 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
 
     const auto& container = GetContainer(prefixAccountTo);
 
+    // Whatever happens below, a cached copy of either name may no longer match its blob: a failed commit can leave
+    // the destination emptied or partly written, and a failed source delete leaves both names holding data.
+    boost::scope::scope_exit dropCached{[&] {
+        if (const auto cache = m_fileCaches.find(prefixAccountTo); cache != m_fileCaches.end()) {
+            cache->second->RemoveFile(std::string(realPathFrom));
+            cache->second->RemoveFile(std::string(realPathTo));
+        }
+    }};
     auto srcClient = container->GetPageBlobClient(std::string(realPathFrom));
     auto destClient = container->GetPageBlobClient(std::string(realPathTo));
 
@@ -668,12 +686,6 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
     }
 
     CallResponse(srcClient, [&](auto token) { return srcClient.DeleteIfExistsAsync(token); });
-
-    // Both names now hold different content than any cached copy.
-    if (const auto cache = m_fileCaches.find(prefixAccountTo); cache != m_fileCaches.end()) {
-        cache->second->RemoveFile(std::string(realPathFrom));
-        cache->second->RemoveFile(std::string(realPathTo));
-    }
 }
 
 template <typename THttp>

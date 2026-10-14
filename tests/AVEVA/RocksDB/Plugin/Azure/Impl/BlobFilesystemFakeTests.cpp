@@ -213,6 +213,84 @@ TEST_F(BlobFilesystemFakeTests, FailedTruncateResizeKeepsTheOriginalLogicalSize)
     EXPECT_EQ(Read("a.log"), "0123456789");
 }
 
+// A filesystem with a disk cache, to check that failed mutations still drop cached copies.
+class CachedFailureTests : public BlobFilesystemFakeTests {
+  protected:
+    CachedFailureTests()
+        : m_cacheDir(std::filesystem::temp_directory_path() / ("aveva_failure_cache_" + m_prefix.substr(0, 8))) {
+        std::filesystem::create_directories(m_cacheDir);
+        const auto dir = m_cacheDir.string();
+        m_cached = std::make_unique<FakeFilesystem>(
+            m_runtime, Container, AccountUrl, AccountKey, 4096, 1024,
+            std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>(),
+            std::string_view(dir));
+    }
+
+    ~CachedFailureTests() override {
+        m_cached.reset();
+        std::error_code ec;
+        std::filesystem::remove_all(m_cacheDir, ec);
+    }
+
+    void WriteCached(const std::string& name, const std::string& content) {
+        auto file = m_cached->CreateWriteableFile(Path(name));
+        file.Append(std::span<const char>(content.data(), content.size()));
+        file.Close();
+    }
+
+    // Reads until the background download has cached the file; returns whether it did.
+    template <typename TFile> bool WarmCache(TFile& file, const size_t size) {
+        std::vector<char> buffer(size);
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            if (file.TryReadFromCache(0, static_cast<int64_t>(size), buffer.data())) {
+                return true;
+            }
+            if (!m_cached->WaitForFileCachesIdleForTesting(std::chrono::seconds(30))) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    std::filesystem::path m_cacheDir;
+    std::unique_ptr<FakeFilesystem> m_cached;
+};
+
+TEST_F(CachedFailureTests, TruncateThatFailsAfterShrinkingStillDropsTheCachedCopy) {
+    WriteCached("t.sst", std::string(1024, 'C'));
+    auto file = m_cached->CreateReadableFile(Path("t.sst"));
+    ASSERT_TRUE(WarmCache(file, 1024));
+    m_server->Fault = [](const auto operation) -> std::optional<AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::SetMetadata) {
+            return FakeBlobServer::Error(400U, "InvalidInput");
+        }
+        return std::nullopt;
+    };
+
+    EXPECT_ANY_THROW(m_cached->Truncate(Path("t.sst"), 512));
+
+    std::vector<char> buffer(512);
+    EXPECT_FALSE(file.TryReadFromCache(0, 512, buffer.data()).has_value());
+}
+
+TEST_F(CachedFailureTests, RenameThatFailsMidCommitStillDropsTheDestinationsCachedCopy) {
+    WriteCached("old.sst", "source content");
+    WriteCached("new.sst", std::string(1024, 'N'));
+    auto file = m_cached->CreateReadableFile(Path("new.sst"));
+    ASSERT_TRUE(WarmCache(file, 1024));
+    int sizeWrites = 0;
+    m_server->Fault = [&sizeWrites](const auto operation) -> std::optional<AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::SetMetadata && ++sizeWrites == 2) {
+            return FakeBlobServer::Error(400U, "InvalidInput");
+        }
+        return std::nullopt;
+    };
+
+    EXPECT_ANY_THROW(m_cached->RenameFile(Path("old.sst"), Path("new.sst")));
+
+    std::vector<char> buffer(1024);
+    EXPECT_FALSE(file.TryReadFromCache(0, 1024, buffer.data()).has_value());
+}
 // Page blobs are 512-byte aligned, so sizes straddling a page boundary exercise the padding/partial-page paths.
 class PageBoundaryTests : public BlobFilesystemFakeTests, public ::testing::WithParamInterface<size_t> {
   protected:
