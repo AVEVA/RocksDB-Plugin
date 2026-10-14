@@ -24,6 +24,9 @@ struct Configuration {
         // Largest range copied per request when copying a blob in RenameFile (the service caps Put Page From URL at
         // 4 MiB, and a range must be a multiple of the page size).
         static const constexpr int64_t MaxCopyChunkSize = static_cast<int64_t>(4) * 1024 * 1024;
+        // Blobs up to this size are renamed by downloading them once and uploading the bytes to the new name, which
+        // takes fewer round trips than the server-side copy (and no temporary blob).
+        static const constexpr int64_t MaxInlineRenameSize = static_cast<int64_t>(1) * 1024 * 1024;
         // Chunking used when downloading a blob range into a local file: big enough to amortise request
         // latency, with a few chunks overlapping to keep the link busy.
         static const constexpr std::size_t DownloadChunkSize = static_cast<std::size_t>(4) * 1024 * 1024;

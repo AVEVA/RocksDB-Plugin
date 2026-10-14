@@ -70,6 +70,16 @@ inline uint32_t ToListPageSize(int32_t sizeHint) {
     return static_cast<uint32_t>(std::clamp(sizeHint, 1, Configuration::Transfer::MaxListPageSize));
 }
 
+// RenameFile stages an overwrite in "<destination>.rename-<uuid>"; the uuid is 36 characters.
+inline constexpr std::string_view RenameTempMarker = ".rename-";
+inline constexpr size_t RenameTempUuidLength = 36;
+
+inline bool IsRenameTempName(std::string_view blobName) {
+    constexpr auto suffixLength = RenameTempMarker.size() + RenameTempUuidLength;
+    return blobName.size() > suffixLength &&
+           blobName.substr(blobName.size() - suffixLength, RenameTempMarker.size()) == RenameTempMarker;
+}
+
 } // namespace BlobFilesystemDetail
 
 template <typename THttp>
@@ -143,7 +153,7 @@ void BasicBlobFilesystemImpl<THttp>::AddContainers(const TInfo& primary, const s
                  primary.GetDbName(), cachePath, maxCacheSize);
     if (backup) {
         AddContainer(ClientFactory::CreateServiceClient(m_runtime, *backup), backup->GetStorageAccountUrl(),
-                     backup->GetDbName(), std::nullopt, maxCacheSize);
+                     backup->GetDbName(), std::nullopt, maxCacheSize, false);
     }
 }
 
@@ -154,7 +164,8 @@ void BasicBlobFilesystemImpl<THttp>::AddContainers(const TInfo& primary, const s
 template <typename THttp>
 void BasicBlobFilesystemImpl<THttp>::AddContainer(const BlobServiceClientOn<THttp>& serviceClient,
                                                   const std::string& storageAccountUrl, const std::string& name,
-                                                  std::optional<std::string_view> cachePath, size_t maxCacheSize) {
+                                                  std::optional<std::string_view> cachePath, size_t maxCacheSize,
+                                                  bool purgeRenameTemps) {
     auto containerClient = BlobHelpers::GetContainerClient(serviceClient, name);
     const auto uniquePrefix = StorageAccount::UniquePrefix(storageAccountUrl, name);
     if (cachePath) {
@@ -165,6 +176,37 @@ void BasicBlobFilesystemImpl<THttp>::AddContainer(const BlobServiceClientOn<THtt
     }
 
     m_clients.emplace(uniquePrefix, std::move(containerClient));
+    if (purgeRenameTemps) {
+        PurgeOrphanedRenameTemps(uniquePrefix);
+    }
+}
+
+// A rename that crashed (or could not delete its temporary blob) leaves a ".rename-<uuid>" blob behind. Nothing else
+// refers to those, and the writer is the only process that renames, so they are removed when it starts. Failures
+// only cost some storage, so they are logged rather than allowed to stop the filesystem from opening.
+template <typename THttp>
+void BasicBlobFilesystemImpl<THttp>::PurgeOrphanedRenameTemps(const std::string& prefix) const {
+    try {
+        const auto& container = GetContainer(prefix);
+        std::vector<std::string> orphans;
+        AzureClient::ListBlobsOptions options;
+        options.MaxResults = static_cast<uint32_t>(Configuration::Transfer::MaxListPageSize);
+        BlobFilesystemDetail::ForEachBlob(*container, std::move(options),
+                                          [&](const AzureClient::Models::BlobItem& blob) {
+                                              if (BlobFilesystemDetail::IsRenameTempName(blob.Name)) {
+                                                  orphans.push_back(blob.Name);
+                                              }
+                                          });
+        for (const auto& name : orphans) {
+            auto blob = container->GetPageBlobClient(name);
+            CallResponse(blob, [&](auto token) { return blob.DeleteIfExistsAsync(token); });
+            BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::info)
+                << "Deleted the orphaned rename temporary blob '" << name << "'";
+        }
+    } catch (const std::exception& e) {
+        BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
+            << "Could not clean up orphaned rename temporary blobs: " << e.what();
+    }
 }
 
 namespace BlobFilesystemDetail {
@@ -437,6 +479,9 @@ std::vector<std::string> BasicBlobFilesystemImpl<THttp>::GetChildren(const std::
 
     // Process all pages of results
     BlobFilesystemDetail::ForEachBlob(*container, std::move(opts), [&](const AzureClient::Models::BlobItem& blob) {
+        if (BlobFilesystemDetail::IsRenameTempName(blob.Name)) {
+            return;
+        }
         if (const auto childName = BlobFilesystemDetail::ChildName(blob.Name, dirPrefix); !childName.empty()) {
             children.emplace_back(childName);
         }
@@ -464,7 +509,7 @@ BasicBlobFilesystemImpl<THttp>::GetChildrenFileAttributes(const std::string& dir
     // Process all pages of results
     BlobFilesystemDetail::ForEachBlob(*container, std::move(opts), [&](const AzureClient::Models::BlobItem& blob) {
         const auto childName = BlobFilesystemDetail::ChildName(blob.Name, dirPrefix);
-        if (childName.empty()) {
+        if (childName.empty() || BlobFilesystemDetail::IsRenameTempName(blob.Name)) {
             return;
         }
 
@@ -620,11 +665,17 @@ bool BasicBlobFilesystemImpl<THttp>::WaitForFileCachesIdleForTesting(const std::
 }
 
 /// <summary>
-/// Copies the blob's populated pages to its new name inside the storage service (or, when the service cannot
-/// authorize the source, in page-aligned chunks through this process), carries over the logical file size and
-/// then deletes the source. Both paths must live in the same storage account and container.
+/// Copies the blob to its new name and carries over the logical file size, then deletes the source. Both paths must
+/// live in the same storage account and container. A file of at most Transfer::MaxInlineRenameSize is downloaded
+/// once and uploaded to the destination (see below); a larger one is copied inside the storage service (or, when the
+/// service cannot authorize the source, in page-aligned chunks through this process).
 ///
-/// The storage service has no atomic blob replace, so an existing destination is only overwritten after the
+/// Overwriting a small destination empties it and then writes it, so a crash in that short window leaves an empty
+/// destination while the source is intact (BlobFilesystem rejects an empty CURRENT explicitly) and the rename can be
+/// retried. Temporary blobs left by a crashed large rename are removed when the filesystem is created.
+///
+/// For a large file the storage service has no atomic blob replace, so an existing destination is only overwritten
+/// after the
 /// content has been fully copied to a temporary blob: a failure while copying leaves the destination and the
 /// source untouched. The final commit (copy from the temporary blob over the destination) is not atomic, but it is
 /// ordered so a torn commit is never mistaken for data: the destination is re-created empty with a logical size of
@@ -685,13 +736,36 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
         }
     };
 
-    if (BlobOperations::CreateIfNotExists(*m_runtime, destClient, cap)) {
+    if (size <= Configuration::Transfer::MaxInlineRenameSize) {
+        // Small file: one download, then write the destination directly. Overwriting an existing destination still
+        // goes through an emptied blob (there is no atomic replace), but that window is one upload wide instead of a
+        // multi-request copy, and a failure leaves the source intact for a retry.
+        constexpr auto PageSize = Configuration::PageBlob::PageSize;
+        std::vector<char> data(static_cast<size_t>((size + PageSize - 1) / PageSize * PageSize));
+        if (size > 0 && BlobOperations::Download(srcClient, std::span<char>(data).first(static_cast<size_t>(size)), 0,
+                                                 size, etag) != size) {
+            throw std::runtime_error("Unexpected end of blob while renaming '" + std::string(realPathFrom) + "'");
+        }
+        const auto writeInto = [&](auto& target) {
+            if (!data.empty()) {
+                BlobOperations::UploadPages(*m_runtime, target, data, 0);
+            }
+            BlobOperations::SetSize(*m_runtime, target, size);
+        };
+        if (BlobOperations::CreateIfNotExists(*m_runtime, destClient, cap)) {
+            boost::scope::scope_fail rollback{[&] { deleteQuietly(destClient, realPathTo); }};
+            writeInto(destClient);
+        } else {
+            BlobOperations::CreateOrReplace(*m_runtime, destClient, cap);
+            writeInto(destClient);
+        }
+    } else if (BlobOperations::CreateIfNotExists(*m_runtime, destClient, cap)) {
         // Nothing to lose at the destination, so write it in place and remove the partial blob on failure.
         boost::scope::scope_fail rollback{[&] { deleteQuietly(destClient, realPathTo); }};
         copyInto(destClient);
     } else {
-        const auto tempName =
-            std::string(realPathTo) + ".rename-" + boost::uuids::to_string(boost::uuids::random_generator()());
+        const auto tempName = std::string(realPathTo) + std::string(BlobFilesystemDetail::RenameTempMarker) +
+                              boost::uuids::to_string(boost::uuids::random_generator()());
         auto tempClient = container->GetPageBlobClient(tempName);
         BlobOperations::CreateOrReplace(*m_runtime, tempClient, cap);
         {

@@ -47,6 +47,12 @@ class BlobFilesystemFakeTests : public ::testing::Test {
 
     [[nodiscard]] std::string Path(const std::string& name) const { return m_prefix + "/" + name; }
 
+    // Larger than Transfer::MaxInlineRenameSize, so a rename takes the server-side copy path.
+    [[nodiscard]] static const std::string& LargeContent() {
+        static const std::string content(static_cast<size_t>(Configuration::Transfer::MaxInlineRenameSize) + 1024, 'L');
+        return content;
+    }
+
     void Write(const std::string& name, const std::string& content) {
         auto file = m_fs->CreateWriteableFile(Path(name));
         file.Append(std::span<const char>(content.data(), content.size()));
@@ -121,25 +127,102 @@ TEST_F(BlobFilesystemFakeTests, RenameMovesTheContentAndRemovesTheSource) {
     EXPECT_EQ(m_fs->GetFileSize(Path("new.sst")), 7);
 }
 
-TEST_F(BlobFilesystemFakeTests, RenameCopiesInsideTheServiceWithoutDownloadingTheData) {
+TEST_F(BlobFilesystemFakeTests, RenameOfASmallFileDownloadsOnceAndCopiesNothingInsideTheService) {
     Write("old.sst", "payload");
+    Write("new.sst", "to be replaced");
+    const auto downloadsBefore = m_server->Downloads.size();
+
+    m_fs->RenameFile(Path("old.sst"), Path("new.sst"));
+
+    EXPECT_TRUE(m_server->PageCopies.empty());
+    EXPECT_EQ(m_server->Downloads.size(), downloadsBefore + 1);
+    EXPECT_EQ(Read("new.sst"), "payload");
+    for (const auto& name : m_server->BlobNames()) {
+        EXPECT_FALSE(BlobFilesystemDetail::IsRenameTempName(name)) << name;
+    }
+}
+
+TEST_F(BlobFilesystemFakeTests, RenameOfAnEmptyFileCreatesAnEmptyDestination) {
+    Write("old.sst", "");
+
+    m_fs->RenameFile(Path("old.sst"), Path("new.sst"));
+
+    EXPECT_FALSE(m_fs->FileExists(Path("old.sst")));
+    EXPECT_EQ(m_fs->GetFileSize(Path("new.sst")), 0);
+}
+
+TEST_F(BlobFilesystemFakeTests, FailureWhileUploadingASmallRenameLeavesTheSourceAndNoPartialDestination) {
+    Write("old.sst", "payload");
+    m_server->Fault = [](const auto operation) -> std::optional<AzureClient::BlobStorageError> {
+        return operation == FakeBlobServer::Operation::UploadPages
+                   ? std::optional{FakeBlobServer::Error(400U, "InvalidInput")}
+                   : std::nullopt;
+    };
+
+    EXPECT_ANY_THROW(m_fs->RenameFile(Path("old.sst"), Path("new.sst")));
+
+    m_server->Fault = nullptr;
+    EXPECT_EQ(Read("old.sst"), "payload");
+    EXPECT_FALSE(m_fs->FileExists(Path("new.sst")));
+}
+
+TEST_F(BlobFilesystemFakeTests, CrashDuringALargeRenameLeavesATemporaryBlobThatIsHiddenAndPurgedOnStart) {
+    Write("d/old", LargeContent());
+    Write("d/new", "original destination");
+    // The process "dies" at the destination's final size write: nothing after it reaches the service, so the
+    // temporary blob and the emptied destination stay behind.
+    int sizeWrites = 0;
+    bool crashed = false;
+    m_server->Fault = [&](const auto operation) -> std::optional<AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::SetMetadata && ++sizeWrites == 2) {
+            crashed = true;
+        }
+        return crashed ? std::optional{FakeBlobServer::Error(400U, "ProcessCrashed")} : std::nullopt;
+    };
+    EXPECT_ANY_THROW(m_fs->RenameFile(Path("d/old"), Path("d/new")));
+    m_server->Fault = nullptr;
+
+    const auto orphans = [&] {
+        return std::ranges::count_if(m_server->BlobNames(),
+                                     [](const auto& name) { return BlobFilesystemDetail::IsRenameTempName(name); });
+    };
+    EXPECT_EQ(orphans(), 1);
+    auto children = m_fs->GetChildren(Path("d"));
+    std::ranges::sort(children);
+    EXPECT_EQ(children, (std::vector<std::string>{"new", "old"}));
+    for (const auto& attribute : m_fs->GetChildrenFileAttributes(Path("d"))) {
+        EXPECT_FALSE(BlobFilesystemDetail::IsRenameTempName(attribute.GetName()));
+    }
+
+    // The restarted process still has the source, so the rename can simply be repeated.
+    FakeFilesystem restarted(
+        m_runtime, Container, AccountUrl, AccountKey, 4096, 1024,
+        std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>());
+    EXPECT_EQ(orphans(), 0);
+    EXPECT_EQ(Read("d/old"), LargeContent());
+    restarted.RenameFile(Path("d/old"), Path("d/new"));
+    EXPECT_EQ(Read("d/new"), LargeContent());
+}
+
+TEST_F(BlobFilesystemFakeTests, RenameCopiesInsideTheServiceWithoutDownloadingTheData) {
+    Write("old.sst", LargeContent());
 
     m_fs->RenameFile(Path("old.sst"), Path("new.sst"));
 
     EXPECT_FALSE(m_server->PageCopies.empty());
     EXPECT_TRUE(m_server->Downloads.empty());
-    EXPECT_EQ(Read("new.sst"), "payload");
+    EXPECT_EQ(Read("new.sst"), LargeContent());
 }
 
 TEST_F(BlobFilesystemFakeTests, RenameFallsBackToCopyingThroughTheClientWhenTheSourceCannotBeAuthorized) {
-    Write("old.sst", "payload");
+    Write("old.sst", LargeContent());
     m_server->RequireCopySourceAuthorization = true;
 
     m_fs->RenameFile(Path("old.sst"), Path("new.sst"));
 
     EXPECT_FALSE(m_fs->FileExists(Path("old.sst")));
-    EXPECT_EQ(Read("new.sst"), "payload");
-    EXPECT_EQ(m_fs->GetFileSize(Path("new.sst")), 7);
+    EXPECT_EQ(Read("new.sst"), LargeContent());
+    EXPECT_EQ(m_fs->GetFileSize(Path("new.sst")), static_cast<int64_t>(LargeContent().size()));
 }
 
 TEST_F(BlobFilesystemFakeTests, TruncateShrinksTheLogicalSize) {
@@ -274,7 +357,7 @@ TEST_F(CachedFailureTests, TruncateThatFailsAfterShrinkingStillDropsTheCachedCop
 }
 
 TEST_F(CachedFailureTests, RenameThatFailsMidCommitStillDropsTheDestinationsCachedCopy) {
-    WriteCached("old.sst", "source content");
+    WriteCached("old.sst", LargeContent());
     WriteCached("new.sst", std::string(1024, 'N'));
     auto file = m_cached->CreateReadableFile(Path("new.sst"));
     ASSERT_TRUE(WarmCache(file, 1024));
@@ -394,26 +477,26 @@ class RenameFailureTests : public BlobFilesystemFakeTests,
 };
 
 TEST_P(RenameFailureTests, FailureWhileCopyingOverAnExistingDestinationLeavesBothFilesIntactAndNoTemporaryBlob) {
-    Write("d/old", "source content");
+    Write("d/old", LargeContent());
     Write("d/new", "original destination");
     FailNth(GetParam(), 1);
 
     EXPECT_ANY_THROW(m_fs->RenameFile(Path("d/old"), Path("d/new")));
 
     m_server->Fault = nullptr;
-    EXPECT_EQ(Read("d/old"), "source content");
+    EXPECT_EQ(Read("d/old"), LargeContent());
     EXPECT_EQ(Read("d/new"), "original destination");
     EXPECT_EQ(Children(), (std::vector<std::string>{"new", "old"}));
 }
 
 TEST_P(RenameFailureTests, FailureWhileCopyingToANewDestinationLeavesNoPartialDestination) {
-    Write("d/old", "source content");
+    Write("d/old", LargeContent());
     FailNth(GetParam(), 1);
 
     EXPECT_ANY_THROW(m_fs->RenameFile(Path("d/old"), Path("d/new")));
 
     m_server->Fault = nullptr;
-    EXPECT_EQ(Read("d/old"), "source content");
+    EXPECT_EQ(Read("d/old"), LargeContent());
     EXPECT_EQ(Children(), (std::vector<std::string>{"old"}));
 }
 
@@ -422,7 +505,7 @@ INSTANTIATE_TEST_SUITE_P(CopyAndSizeSteps, RenameFailureTests,
                                            FakeBlobServer::Operation::SetMetadata));
 
 TEST_F(BlobFilesystemFakeTests, FailureToDeleteTheSourceKeepsTheNewDestinationAndLeavesNoTemporaryBlob) {
-    Write("d/old", "source content");
+    Write("d/old", LargeContent());
     Write("d/new", "original destination");
     // The first delete removes the temporary blob; the second is the source.
     int deletes = 0;
@@ -436,14 +519,14 @@ TEST_F(BlobFilesystemFakeTests, FailureToDeleteTheSourceKeepsTheNewDestinationAn
     EXPECT_ANY_THROW(m_fs->RenameFile(Path("d/old"), Path("d/new")));
 
     m_server->Fault = nullptr;
-    EXPECT_EQ(Read("d/new"), "source content");
+    EXPECT_EQ(Read("d/new"), LargeContent());
     auto children = m_fs->GetChildren(Path("d"));
     std::ranges::sort(children);
     EXPECT_EQ(children, (std::vector<std::string>{"new", "old"}));
 }
 
 TEST_F(BlobFilesystemFakeTests, FailureOfTheFinalSizeCommitLeavesTheOverwrittenDestinationEmptyNotMixed) {
-    Write("d/old", "source content");
+    Write("d/old", LargeContent());
     Write("d/new", "original destination");
     int sizeWrites = 0;
     m_server->Fault = [&sizeWrites](const auto operation) -> std::optional<AzureClient::BlobStorageError> {
@@ -459,7 +542,7 @@ TEST_F(BlobFilesystemFakeTests, FailureOfTheFinalSizeCommitLeavesTheOverwrittenD
     m_server->Fault = nullptr;
     const auto size = m_fs->GetFileSize(Path("d/new"));
     EXPECT_EQ(size, 0);
-    EXPECT_EQ(Read("d/old"), "source content");
+    EXPECT_EQ(Read("d/old"), LargeContent());
 }
 TEST_F(BlobFilesystemFakeTests, RenameOverAnExistingDestinationReplacesItsContent) {
     Write("d/old", "short");

@@ -197,7 +197,10 @@ template <typename THttp> class BasicBlobFilesystemImpl {
         std::shared_ptr<BasicClientRuntime<THttp>> runtime, int64_t dataFileInitialSize, int64_t dataFileBufferSize,
         std::optional<std::chrono::milliseconds> lockAcquireTimeout = {});
     void AddContainer(const BlobServiceClientOn<THttp>& serviceClient, const std::string& storageAccountUrl,
-                      const std::string& name, std::optional<std::string_view> cachePath, size_t maxCacheSize);
+                      const std::string& name, std::optional<std::string_view> cachePath, size_t maxCacheSize,
+                      bool purgeRenameTemps = true);
+    // Deletes the temporary blobs a rename left behind when it crashed or could not clean up after itself.
+    void PurgeOrphanedRenameTemps(const std::string& prefix) const;
     template <class TInfo>
     void AddContainers(const TInfo& primary, const std::optional<TInfo>& backup,
                        std::optional<std::string_view> cachePath, size_t maxCacheSize);

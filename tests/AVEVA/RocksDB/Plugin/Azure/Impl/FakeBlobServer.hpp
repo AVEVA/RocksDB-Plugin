@@ -136,6 +136,19 @@ class FakeBlobServer {
         return m_blobs.at(ContainerOfPrimary() + "/" + blob).Data;
     }
 
+    // The names of the blobs that exist in the primary blob's container.
+    [[nodiscard]] std::vector<std::string> BlobNames() {
+        std::scoped_lock lock(m_mutex);
+        const auto root = ContainerOfPrimary() + "/";
+        std::vector<std::string> names;
+        for (const auto& [path, blob] : m_blobs) {
+            if (blob.Exists && path.starts_with(root)) {
+                names.push_back(path.substr(root.size()));
+            }
+        }
+        return names;
+    }
+
     FakeBlobServer(const FakeBlobServer&) = delete;
     FakeBlobServer& operator=(const FakeBlobServer&) = delete;
 
