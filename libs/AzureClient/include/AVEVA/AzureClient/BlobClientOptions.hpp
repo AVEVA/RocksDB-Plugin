@@ -44,6 +44,7 @@ struct BlobClientOptions {
     std::string ServiceEndpoint;
     std::string ContainerName;
     std::string BlobName;
+    // Already URL-encoded `key=value` pairs joined by '&'; one leading '?' is tolerated and stripped.
     std::string SasToken;
 
     // Authorization precedence is SAS > SharedKey > TokenCredential > BearerToken.

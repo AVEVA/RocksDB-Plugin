@@ -236,6 +236,16 @@ TEST(SasTokenValidationTests, ControlCharactersFragmentsAndEmbeddedQuestionMarks
     }
 }
 
+TEST(SasTokenValidationTests, MalformedPairsAreRejected) {
+    FakeHttpClient httpClient;
+    for (const std::string token : {std::string{"sv"}, std::string{"sv=1&&sig=x"}, std::string{"=1&sig=x"},
+                                    std::string{"sv=1&sig"}, std::string{"sv=1&"}}) {
+        auto options = MakeBlobClientOptions();
+        options.SasToken = token;
+        EXPECT_THROW((BlockBlobClient{httpClient, options}), std::invalid_argument) << token;
+    }
+}
+
 TEST(SasTokenValidationTests, OrdinaryTokenWithOneLeadingQuestionMarkIsAccepted) {
     FakeHttpClient httpClient;
     auto options = MakeBlobClientOptions();
