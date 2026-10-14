@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <future>
 #include <stdexcept>
 #include <unordered_set>
 using AVEVA::RocksDB::Plugin::Core::FileCache;
@@ -330,6 +331,33 @@ TEST_F(FileCacheTests, ReadFile_SecondAccess_QueuesAndDownloads) {
     EXPECT_FALSE(bytesReadOnFirstAccess);
     EXPECT_FALSE(bytesReadOnSecondAccess);
     EXPECT_TRUE(m_cache.HasFile("1.sst"));
+}
+
+TEST_F(FileCacheTests, FileReplacedAndRequeuedDuringADownload_IsDownloadedAgainNotActivatedWithTheOldBytes) {
+    // Arrange - the first download blocks until released; later ones return at once.
+    std::promise<void> started;
+    std::promise<void> release;
+    std::atomic<int> downloads{0};
+    EXPECT_CALL(*m_containerClient, GetBlobSize("1.sst")).WillRepeatedly(Return(1));
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo("1.sst", _, _, _)).WillRepeatedly([&](auto&&...) {
+        if (++downloads == 1) {
+            started.set_value();
+            release.get_future().wait();
+        }
+    });
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", 0, 0, nullptr)); // records the entry
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", 0, 0, nullptr)); // queues the download
+    started.get_future().wait();
+
+    // Act - the blob is replaced mid-download and a reader asks for it again before the first download ends.
+    m_cache.MarkFileAsStaleIfExists("1.sst");
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", 0, 0, nullptr));
+    release.set_value();
+    m_cache.WaitUntilIdle();
+
+    // Assert - the bytes fetched before the replacement were discarded and the file was fetched again.
+    EXPECT_EQ(downloads, 2);
+    EXPECT_TRUE(m_cache.ReadFile("1.sst", 0, 0, nullptr).has_value());
 }
 
 TEST_F(FileCacheTests, ReadFile_TooManyUndownloadedStaleEntries_PrunesOldest) {

@@ -358,9 +358,10 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
             std::unique_lock lock(m_mutex);
             auto it = m_cache.find(filePath);
             if (it != m_cache.end()) {
-                if (it->second.GetState() == FileCacheEntry::State::Stale) {
-                    // Someone has marked this file as stale while we were downloading it.
-                    // We should not mark it as active.
+                // Only the state this thread set may become Active. Anything else means the entry was marked stale
+                // while we were downloading, and possibly queued again by a read since: the bytes just written may
+                // predate the replacement, and a queued entry will be downloaded afresh when it is popped.
+                if (it->second.GetState() != FileCacheEntry::State::Downloading) {
                     BOOST_LOG_SEV(*m_logger, debug)
                         << "File '" << filePath
                         << "' was marked as stale while we were downloading it. Will not mark as active.";
