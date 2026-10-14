@@ -182,16 +182,16 @@ TEST_F(BlobFilesystemFakeTests, TruncateDropsTheCachedCopyOfTheFile) {
     auto file = cached.CreateReadableFile(Path("t.sst"));
     std::vector<char> buffer(1024);
 
-    // The cache downloads a file in the background on its second access.
+    // The cache downloads a file in the background once it is accessed; wait for that download instead of polling.
     std::optional<size_t> hit;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-    while (!hit && std::chrono::steady_clock::now() < deadline) {
+    for (int attempt = 0; attempt < 3 && !hit; ++attempt) {
         hit = file.TryReadFromCache(0, static_cast<int64_t>(buffer.size()), buffer.data());
         if (!hit) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            ASSERT_TRUE(cached.WaitForFileCachesIdleForTesting(std::chrono::seconds(30)))
+                << "Background download did not finish";
         }
     }
-    ASSERT_TRUE(hit.has_value()) << "File was not cached within the timeout";
+    ASSERT_TRUE(hit.has_value()) << "File was not cached after the background download finished";
 
     cached.Truncate(Path("t.sst"), 512);
 

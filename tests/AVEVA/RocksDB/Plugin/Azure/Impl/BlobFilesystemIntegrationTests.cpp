@@ -1439,19 +1439,19 @@ TEST_F(BlobFilesystemIntegrationTests, ReadableFile_CachedSst_IsServedFromCacheA
     }
     auto file = filesystem.CreateReadableFile(path);
 
-    // Act - Poll until the background download has made the file available.
+    // Act - Wait for the background download to finish rather than polling on wall-clock time.
     std::vector<char> buffer(data.size());
     std::optional<size_t> hit;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
-    while (!hit && std::chrono::steady_clock::now() < deadline) {
+    for (int attempt = 0; attempt < 3 && !hit; ++attempt) {
         hit = file.TryReadFromCache(0, static_cast<int64_t>(buffer.size()), buffer.data());
         if (!hit) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            ASSERT_TRUE(filesystem.WaitForFileCachesIdleForTesting(std::chrono::seconds(60)))
+                << "Background download did not finish";
         }
     }
 
     // Assert
-    ASSERT_TRUE(hit.has_value()) << "File was not cached within the timeout";
+    ASSERT_TRUE(hit.has_value()) << "File was not cached after the background download finished";
     EXPECT_EQ(data.size(), *hit);
     EXPECT_EQ(data, buffer);
 

@@ -571,6 +571,19 @@ template <typename THttp> size_t BasicBlobFilesystemImpl<THttp>::GetLeaseClientC
     return m_locks.size();
 }
 
+template <typename THttp>
+bool BasicBlobFilesystemImpl<THttp>::WaitForFileCachesIdleForTesting(const std::chrono::milliseconds timeout) const {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    for (const auto& [prefix, cache] : m_fileCaches) {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline -
+                                                                                     std::chrono::steady_clock::now());
+        if (!cache->WaitUntilIdleForTesting((std::max)(remaining, std::chrono::milliseconds::zero()))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /// <summary>
 /// Copies the blob's populated pages to its new name inside the storage service (or, when the service cannot
 /// authorize the source, in page-aligned chunks through this process), carries over the logical file size and

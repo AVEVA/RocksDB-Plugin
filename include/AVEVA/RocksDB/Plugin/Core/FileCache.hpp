@@ -11,6 +11,7 @@
 #include <boost/log/trivial.hpp>
 
 #include <cstdint>
+#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -78,6 +79,9 @@ namespace AVEVA::RocksDB::Plugin::Core
         // Blocks until the background downloader has no queued or in-flight work. Lets tests assert that
         // something did NOT happen without guessing how long to wait.
         void WaitUntilIdle();
+        // Same as WaitUntilIdle, but gives up after `timeout` (a guard against hangs) and reports whether the
+        // downloader went idle.
+        [[nodiscard]] bool WaitUntilIdleForTesting(std::chrono::milliseconds timeout);
     private:
         void BackgroundDownload(std::stop_token stopToken);
         void EntryAccessedUnsafe(FileCacheEntry& file);

@@ -180,6 +180,13 @@ void FileCache::WaitUntilIdle() {
     });
 }
 
+bool FileCache::WaitUntilIdleForTesting(const std::chrono::milliseconds timeout) {
+    std::unique_lock lock(m_mutex);
+    return m_idleCv.wait_for(lock, timeout, [this] {
+        return m_fileDownloadQueue.empty() && m_pendingReleases.empty() && !m_downloadInFlight;
+    });
+}
+
 void FileCache::BackgroundDownload(std::stop_token stopToken) {
     while (true) {
         try {

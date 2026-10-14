@@ -185,6 +185,9 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     [[nodiscard]] int64_t GetFileSize(const std::string& filePath) const;
     [[nodiscard]] uint64_t GetFileModificationTime(const std::string& filePath) const;
     size_t GetLeaseClientCount();
+    // Test-only: blocks until every file cache's background downloader is idle, or `timeout` (a guard against hangs)
+    // elapses; returns false on timeout.
+    [[nodiscard]] bool WaitForFileCachesIdleForTesting(std::chrono::milliseconds timeout) const;
     void RenameFile(const std::string& fromFilePath, const std::string& toFilePath) const;
 
   private:
