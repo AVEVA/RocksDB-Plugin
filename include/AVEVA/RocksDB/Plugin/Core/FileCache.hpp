@@ -18,6 +18,7 @@
 #include <thread>
 #include <unordered_map>
 #include <queue>
+#include <vector>
 #include <condition_variable>
 #include <stop_token>
 namespace AVEVA::RocksDB::Plugin::Core
@@ -38,6 +39,23 @@ namespace AVEVA::RocksDB::Plugin::Core
         std::unordered_map<std::string, FileCacheEntry, StringHash, StringEqual> m_cache;
         std::queue<std::string> m_fileDownloadQueue;
         boost::intrusive::list<FileCacheEntry, boost::intrusive::constant_time_size<false>> m_entryList;
+
+        // Files whose entries were removed, and handles that must be closed. They are released on the background
+        // thread, outside m_mutex (disk I/O must not stall readers) and serialized with downloads so a delete can
+        // never land on a file that has since been downloaded again.
+        struct PendingRelease
+        {
+            std::string FilePath; // The cache key; the file is m_cachePath / FilePath.
+            std::shared_ptr<CachedReadHandle> Handle;
+            bool RemoveFromDisk;
+        };
+        std::vector<PendingRelease> m_pendingReleases;
+        // Cache keys whose delete failed; retried whenever the background thread wakes, unless re-cached meanwhile.
+        std::vector<std::string> m_failedDeletes;
+
+        // Running totals kept in step with the entries (see UpdateEntryUnsafe) so neither is a list scan.
+        int64_t m_activeBytes = 0;
+        size_t m_undownloadedStaleCount = 0;
         std::jthread m_backgroundDownloader;
     public:
         FileCache(std::filesystem::path cachePath,
@@ -66,7 +84,11 @@ namespace AVEVA::RocksDB::Plugin::Core
         void PruneUndownloadedStaleEntriesUnsafe();
         bool EvictAtLeast(int64_t bytes);
         void RemoveFileUnsafe(std::string_view filePath);
-        size_t CountUndownloadedStaleEntriesUnsafe() const noexcept;
+        // Applies `mutate` to the entry and keeps the running totals consistent with its new state and size.
+        template <typename F> void UpdateEntryUnsafe(FileCacheEntry& entry, F&& mutate, bool removing = false);
+        void ReleaseOnBackgroundThread(std::vector<PendingRelease>& releases);
+        bool TryDeleteCachedFile(const std::string& filePath);
+        void ValidateCountersUnsafe() const;
         int64_t GetCurrentSizeUnsafe() const noexcept;
     };
 }

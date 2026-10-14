@@ -20,6 +20,15 @@ void FileCacheEntry::SetSize(int64_t size) noexcept { m_size = size; }
 
 void FileCacheEntry::SetState(State state) noexcept { m_state = state; }
 
+std::shared_ptr<CachedReadHandle> FileCacheEntry::GetOrCreateReadHandle() {
+    if (!m_readHandle) {
+        m_readHandle = std::make_shared<CachedReadHandle>();
+    }
+    return m_readHandle;
+}
+
+std::shared_ptr<CachedReadHandle> FileCacheEntry::TakeReadHandle() noexcept { return std::move(m_readHandle); }
+
 void FileCacheEntry::unlink() {
     boost::intrusive::list_base_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>>::unlink();
 }

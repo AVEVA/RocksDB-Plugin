@@ -4,6 +4,8 @@
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/RocksDBHelpers.hpp"
 #include <boost/log/trivial.hpp>
+#include <cassert>
+#include <utility>
 #include <vector>
 using namespace boost::log::trivial;
 namespace AVEVA::RocksDB::Plugin::Core {
@@ -56,7 +58,13 @@ void FileCache::MarkFileAsStaleIfExists(const std::string& filePath) {
             // If the file still in the download queue we don't have to worry about marking as stale.
             // This is because when the file is downloaded, it will get the most current state from
             // azure.
-            it->second.SetState(FileCacheEntry::State::Stale);
+            UpdateEntryUnsafe(it->second, [](FileCacheEntry& entry) { entry.SetState(FileCacheEntry::State::Stale); });
+
+            // The file is about to be replaced, so its open handle must not serve any more reads.
+            if (auto handle = it->second.TakeReadHandle()) {
+                m_pendingReleases.push_back({filePath, std::move(handle), false});
+                m_cv.notify_one();
+            }
         }
     }
 }
@@ -79,6 +87,8 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
         auto [inserted, _] = m_cache.emplace(std::piecewise_construct, std::forward_as_tuple(std::string(filePath)),
                                              std::forward_as_tuple(filePath, 0));
         m_entryList.push_front(inserted->second);
+        // A new entry is stale with no size yet.
+        ++m_undownloadedStaleCount;
         PruneUndownloadedStaleEntriesUnsafe();
         return std::nullopt;
     } else {
@@ -91,7 +101,9 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
                 m_fileDownloadQueue.emplace(filePath);
 
                 // Mark as downloading now so we don't queue it again.
-                fileEntry.SetState(FileCacheEntry::State::QueuedForDownload);
+                UpdateEntryUnsafe(fileEntry, [](FileCacheEntry& entry) {
+                    entry.SetState(FileCacheEntry::State::QueuedForDownload);
+                });
 
                 lock.unlock();
                 m_cv.notify_one();
@@ -102,17 +114,31 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
 
         EntryAccessedUnsafe(fileEntry);
 
-        auto cachedFilePath = m_cachePath / fileEntry.GetFilePath();
-
-        // The read is disk I/O, so it must not hold the cache-wide mutex. If an eviction removes the file after the
-        // lock is released, the read fails and the caller falls back to the blob.
-        lock.unlock();
         if (buffer == nullptr) {
             return 0;
         }
+
+        auto cachedFilePath = m_cachePath / fileEntry.GetFilePath();
+        const auto handle = fileEntry.GetOrCreateReadHandle();
+
+        // The read is disk I/O, so it must not hold the cache-wide mutex. If an eviction closes the handle after the
+        // lock is released, the read fails and the caller falls back to the blob.
+        lock.unlock();
         try {
-            auto file = m_filesystem->Open(cachedFilePath);
-            return file->Read(buffer, offset, bytesToRead);
+            std::scoped_lock handleLock(handle->Mutex);
+            if (handle->Closed) {
+                return std::nullopt;
+            }
+            if (!handle->Opened) {
+                handle->Opened = m_filesystem->Open(cachedFilePath);
+            }
+            try {
+                return handle->Opened->Read(buffer, offset, bytesToRead);
+            } catch (...) {
+                // Do not keep a handle that just failed; the next read reopens the file.
+                handle->Opened.reset();
+                throw;
+            }
         } catch (const std::exception& e) {
             BOOST_LOG_SEV(*m_logger, debug) << "Cached read of '" << filePath << "' failed, falling back: " << e.what();
             return std::nullopt;
@@ -127,17 +153,8 @@ void FileCache::RemoveFile(const std::string_view filePath) {
 
 int64_t FileCache::CacheSize() {
     std::scoped_lock lock(m_mutex);
-    const auto size = GetCurrentSizeUnsafe();
-#if _DEBUG
-    // Validate that size matches what is in our map
-    int64_t validatedSize = 0;
-    for (const auto& [_, value] : m_cache) {
-        validatedSize += value.GetSize();
-    }
-
-    assert(validatedSize == size && "Sizes should match between data structures");
-#endif
-    return size;
+    ValidateCountersUnsafe();
+    return GetCurrentSizeUnsafe();
 }
 
 void FileCache::SetCacheSize(int64_t size) {
@@ -158,7 +175,9 @@ void FileCache::SetCacheSize(int64_t size) {
 
 void FileCache::WaitUntilIdle() {
     std::unique_lock lock(m_mutex);
-    m_idleCv.wait(lock, [this] { return m_fileDownloadQueue.empty() && !m_downloadInFlight; });
+    m_idleCv.wait(lock, [this] {
+        return m_fileDownloadQueue.empty() && m_pendingReleases.empty() && !m_downloadInFlight;
+    });
 }
 
 void FileCache::BackgroundDownload(std::stop_token stopToken) {
@@ -178,50 +197,74 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
             } inFlight{*this};
 
             std::string filePath;
+            std::vector<PendingRelease> releases;
+            std::vector<std::string> retryDeletes;
+            bool stopping = false;
             {
                 std::unique_lock lock(m_mutex);
-                if (stopToken.stop_requested()) {
-                    BOOST_LOG_SEV(*m_logger, debug) << "File cache should close. Exiting thread.";
-                    lock.unlock();
-                    return; // Exit the thread if we are closing
+                if (m_fileDownloadQueue.empty() && m_pendingReleases.empty() && !stopToken.stop_requested()) {
+                    BOOST_LOG_SEV(*m_logger, debug) << "File cache has no work. Waiting for condition variable.";
+                    m_cv.wait(lock, [this, &stopToken]() {
+                        return !m_fileDownloadQueue.empty() || !m_pendingReleases.empty() ||
+                               stopToken.stop_requested();
+                    });
                 }
 
-                if (m_fileDownloadQueue.empty()) {
-                    BOOST_LOG_SEV(*m_logger, debug) << "File cache queue is empty. Waiting for condition variable.";
-                    m_cv.wait(lock, [this, &stopToken]() {
-                        return !m_fileDownloadQueue.empty() || stopToken.stop_requested();
-                    });
+                // Take the pending releases first: a download of a path must never start before an earlier delete of
+                // the same path has run.
+                releases.swap(m_pendingReleases);
+                // A failed delete is dropped if the path was cached again, since the new download overwrites it.
+                std::erase_if(m_failedDeletes, [this](const std::string& key) { return m_cache.contains(key); });
+                retryDeletes.swap(m_failedDeletes);
+                if (!releases.empty() || !retryDeletes.empty()) {
+                    m_downloadInFlight = true;
+                    inFlight.armed = true;
                 }
 
                 // We could have been woken up because it's time to close.
                 if (stopToken.stop_requested()) {
                     BOOST_LOG_SEV(*m_logger, debug) << "File cache should close. Exiting thread.";
-                    lock.unlock();
-                    return; // Exit the thread if we are closing
-                }
+                    stopping = true;
+                } else if (!m_fileDownloadQueue.empty()) {
+                    filePath = m_fileDownloadQueue.front();
+                    m_fileDownloadQueue.pop();
+                    m_downloadInFlight = true;
+                    inFlight.armed = true;
 
-                filePath = m_fileDownloadQueue.front();
-                m_fileDownloadQueue.pop();
-                m_downloadInFlight = true;
-                inFlight.armed = true;
-
-                auto it = m_cache.find(filePath);
-                if (it != m_cache.end()) {
-                    BOOST_LOG_SEV(*m_logger, debug) << "Downloading '" << filePath << "' into cache";
-                    if (it->second.GetState() != FileCacheEntry::State::QueuedForDownload) {
-                        // The file was marked as stale while we were waiting for the condition variable.
-                        // We should not download it.
+                    auto it = m_cache.find(filePath);
+                    if (it != m_cache.end()) {
+                        BOOST_LOG_SEV(*m_logger, debug) << "Downloading '" << filePath << "' into cache";
+                        if (it->second.GetState() != FileCacheEntry::State::QueuedForDownload) {
+                            // The file was marked as stale while we were waiting for the condition variable.
+                            // We should not download it.
+                            BOOST_LOG_SEV(*m_logger, debug)
+                                << "File '" << filePath
+                                << "' is no longer marked as queued for download. Skipping download.";
+                            filePath.clear();
+                        }
+                    } else {
+                        // The file was likely deleted while we were waiting for the condition variable.
                         BOOST_LOG_SEV(*m_logger, debug)
-                            << "File '" << filePath
-                            << "' is no longer marked as queued for download. Skipping download.";
-                        continue;
+                            << "File pending download '" << filePath << "' was deleted. Skipping download.";
+                        filePath.clear();
                     }
-                } else {
-                    // The file was likely deleted while we were waiting for the condition variable.
-                    BOOST_LOG_SEV(*m_logger, debug)
-                        << "File pending download '" << filePath << "' was deleted. Skipping download.";
-                    continue;
                 }
+            }
+
+            // Disk I/O for removed entries runs here, outside the mutex.
+            ReleaseOnBackgroundThread(releases);
+            for (const auto& key : retryDeletes) {
+                if (!TryDeleteCachedFile(key)) {
+                    std::scoped_lock lock(m_mutex);
+                    m_failedDeletes.push_back(key);
+                }
+            }
+
+            if (stopping) {
+                return;
+            }
+            if (filePath.empty()) {
+                continue;
             }
 
             int64_t fileSize = 0;
@@ -235,7 +278,8 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                 std::scoped_lock lock(m_mutex);
                 if (const auto failed = m_cache.find(filePath);
                     failed != m_cache.end() && failed->second.GetState() == FileCacheEntry::State::QueuedForDownload) {
-                    failed->second.SetState(FileCacheEntry::State::Stale);
+                    UpdateEntryUnsafe(failed->second,
+                                      [](FileCacheEntry& entry) { entry.SetState(FileCacheEntry::State::Stale); });
                 }
                 continue;
             }
@@ -245,7 +289,7 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                 std::unique_lock lock(m_mutex);
                 auto it = m_cache.find(filePath);
                 if (it != m_cache.end()) {
-                    it->second.SetSize(fileSize);
+                    UpdateEntryUnsafe(it->second, [fileSize](FileCacheEntry& entry) { entry.SetSize(fileSize); });
                 } else {
                     // The file was likely deleted while we were waiting for the condition variable.
                     BOOST_LOG_SEV(*m_logger, error) << "Could not find file entry '" << filePath
@@ -278,7 +322,9 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                 }
 
                 // Mark the file as downloading now so we don't queue it again.
-                it->second.SetState(FileCacheEntry::State::Downloading);
+                UpdateEntryUnsafe(it->second, [](FileCacheEntry& entry) {
+                    entry.SetState(FileCacheEntry::State::Downloading);
+                });
             }
 
             try {
@@ -315,13 +361,13 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                 }
 
                 BOOST_LOG_SEV(*m_logger, debug) << "Marking file '" << filePath << "' as active";
-                it->second.SetState(FileCacheEntry::State::Active);
+                UpdateEntryUnsafe(it->second,
+                                  [](FileCacheEntry& entry) { entry.SetState(FileCacheEntry::State::Active); });
             } else {
-                // The file was likely deleted. We should clean up after ourselves.
+                // The file was likely deleted. We should clean up after ourselves; the delete runs on the next pass
+                // of this loop, outside the mutex.
                 BOOST_LOG_SEV(*m_logger, debug) << "File '" << filePath << "' was deleted. Removing file from cache";
-                std::error_code ec;
-                auto cachedFilePath = m_cachePath / filePath;
-                m_filesystem->DeleteFile(cachedFilePath);
+                m_pendingReleases.push_back({filePath, nullptr, true});
             }
         } catch (const std::exception& e) {
             BOOST_LOG_SEV(*m_logger, error) << "Error in file cache background downloader thread: '" << e.what() << "'";
@@ -336,7 +382,8 @@ void FileCache::EntryAccessedUnsafe(FileCacheEntry& file) {
 }
 
 void FileCache::PruneUndownloadedStaleEntriesUnsafe() {
-    auto staleEntries = CountUndownloadedStaleEntriesUnsafe();
+    ValidateCountersUnsafe();
+    auto staleEntries = m_undownloadedStaleCount;
     if (staleEntries <= MaxUndownloadedStaleEntries) {
         return;
     }
@@ -411,34 +458,85 @@ void FileCache::RemoveFileUnsafe(const std::string_view filePath) {
         auto& fileEntry = it->second;
         fileEntry.unlink();
 
-        // Capture data needed before we erase the entry.
-        const auto cachedFilePath = m_cachePath / filePath;
-
+        // The entry leaves the totals now; the file itself is deleted (and its handle closed) later on the background
+        // thread, outside this mutex.
+        UpdateEntryUnsafe(fileEntry, [](FileCacheEntry&) {}, true);
+        m_pendingReleases.push_back({std::string(filePath), fileEntry.TakeReadHandle(), true});
         m_cache.erase(it);
-        m_filesystem->DeleteFile(cachedFilePath);
+        m_cv.notify_one();
     }
 }
 
-int64_t FileCache::GetCurrentSizeUnsafe() const noexcept {
-    int64_t size = 0;
+template <typename F> void FileCache::UpdateEntryUnsafe(FileCacheEntry& entry, F&& mutate, const bool removing) {
+    const auto contribution = [](const FileCacheEntry& e) {
+        const auto state = e.GetState();
+        const bool counted =
+            state != FileCacheEntry::State::Downloading && state != FileCacheEntry::State::QueuedForDownload;
+        return std::pair<int64_t, size_t>{counted ? e.GetSize() : 0,
+                                          state == FileCacheEntry::State::Stale && e.GetSize() == 0 ? 1U : 0U};
+    };
+
+    const auto [bytesBefore, staleBefore] = contribution(entry);
+    m_activeBytes -= bytesBefore;
+    m_undownloadedStaleCount -= staleBefore;
+    mutate(entry);
+    if (!removing) {
+        const auto [bytesAfter, staleAfter] = contribution(entry);
+        m_activeBytes += bytesAfter;
+        m_undownloadedStaleCount += staleAfter;
+    }
+}
+
+// Runs on the background thread with no lock held. Closing a handle waits for any reader still using it, and only
+// then is the file deleted, which matters on Windows where an open file cannot be removed.
+void FileCache::ReleaseOnBackgroundThread(std::vector<PendingRelease>& releases) {
+    for (auto& release : releases) {
+        if (release.Handle) {
+            release.Handle->Close();
+        }
+        if (release.RemoveFromDisk && !TryDeleteCachedFile(release.FilePath)) {
+            std::scoped_lock lock(m_mutex);
+            m_failedDeletes.push_back(release.FilePath);
+        }
+    }
+    releases.clear();
+}
+
+// A file that cannot be deleted is logged and remembered for a later retry; its bytes have already left the
+// cache's accounting, so the only cost of a failure is disk space until the retry succeeds.
+bool FileCache::TryDeleteCachedFile(const std::string& filePath) {
+    const auto cachedFilePath = m_cachePath / filePath;
+    try {
+        if (m_filesystem->DeleteFile(cachedFilePath)) {
+            return true;
+        }
+        BOOST_LOG_SEV(*m_logger, warning) << "Could not delete cached file '" << cachedFilePath.string()
+                                          << "'. It will be retried.";
+    } catch (const std::exception& e) {
+        BOOST_LOG_SEV(*m_logger, warning) << "Deleting cached file '" << cachedFilePath.string()
+                                          << "' failed: " << e.what() << ". It will be retried.";
+    }
+    return false;
+}
+
+int64_t FileCache::GetCurrentSizeUnsafe() const noexcept { return m_activeBytes; }
+
+// Debug-only cross-check of the running totals against a full scan of the entries.
+void FileCache::ValidateCountersUnsafe() const {
+#if _DEBUG
+    int64_t bytes = 0;
+    size_t stale = 0;
     for (const auto& entry : m_entryList) {
         const auto state = entry.GetState();
         if (state != FileCacheEntry::State::Downloading && state != FileCacheEntry::State::QueuedForDownload) {
-            size += entry.GetSize();
+            bytes += entry.GetSize();
+        }
+        if (state == FileCacheEntry::State::Stale && entry.GetSize() == 0) {
+            ++stale;
         }
     }
-
-    return size;
-}
-
-size_t FileCache::CountUndownloadedStaleEntriesUnsafe() const noexcept {
-    size_t count = 0;
-    for (const auto& entry : m_entryList) {
-        if (entry.GetState() == FileCacheEntry::State::Stale && entry.GetSize() == 0) {
-            count++;
-        }
-    }
-
-    return count;
+    assert(bytes == m_activeBytes && "Active byte total should match the entries");
+    assert(stale == m_undownloadedStaleCount && "Stale entry count should match the entries");
+#endif
 }
 } // namespace AVEVA::RocksDB::Plugin::Core

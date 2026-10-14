@@ -40,29 +40,31 @@ class FileCacheTests : public ::testing::Test {
     }
 
     void EnsureReadFromCache(const std::string_view filePath) {
-        constexpr int maxAttempts = 2000; // ~10s at 5ms per attempt before failing fast
+        // The first access only records interest and the second queues the download, so a few reads suffice.
+        constexpr int maxAttempts = 4;
         for (int attempt = 0; attempt < maxAttempts; ++attempt) {
             const auto bytesRead = m_cache.ReadFile(filePath, 0, 0, nullptr);
             if (bytesRead) {
                 return;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            m_cache.WaitUntilIdle();
         }
-        FAIL() << "Timed out waiting for '" << filePath << "' to become readable from cache";
+        FAIL() << "'" << filePath << "' did not become readable from cache";
     }
 
     void EnsureReadFromCache(const std::string_view filePath, const size_t expectedCacheSize) {
         char buffer[1];
-        constexpr int maxAttempts = 2000; // ~10s at 5ms per attempt before failing fast
+        // The first access only records interest and the second queues the download, so a few reads suffice.
+        constexpr int maxAttempts = 4;
         for (int attempt = 0; attempt < maxAttempts; ++attempt) {
             const auto bytesRead = m_cache.ReadFile(filePath, 0, 1, buffer);
             if (bytesRead) {
                 ASSERT_EQ(expectedCacheSize, m_cache.CacheSize());
                 return;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            m_cache.WaitUntilIdle();
         }
-        FAIL() << "Timed out waiting for '" << filePath << "' to become readable from cache";
+        FAIL() << "'" << filePath << "' did not become readable from cache";
     }
 };
 
@@ -89,6 +91,7 @@ TEST_F(FileCacheTests, ReadEvenSpaced256MbFiles) {
     EnsureReadFromCache("5.sst", fileSize * 4);
 
     // Assert
+    m_cache.WaitUntilIdle();
     std::unordered_set<std::string> expectedFiles = {"1.sst", "2.sst", "3.sst", "4.sst", "5.sst"};
 
     EXPECT_EQ(1, m_removedFiles.size());
@@ -136,6 +139,7 @@ TEST_F(FileCacheTests, ReadRandomLargeFiles_EvictionWorks) {
     EnsureReadFromCache("6.sst", fileSize3 + fileSize4 + fileSize5 + fileSize6);
 
     // Assert
+    m_cache.WaitUntilIdle();
     std::unordered_set<std::string> expectedFiles = {"1.sst", "2.sst", "3.sst", "4.sst", "5.sst", "6.sst"};
 
     for (const auto& removed : m_removedFiles) {
@@ -223,6 +227,7 @@ TEST_F(FileCacheTests, CacheSizeExceeded) {
     m_cache.SetCacheSize(fileSize);
 
     // Assert
+    m_cache.WaitUntilIdle();
     ASSERT_EQ(fileSize, m_cache.CacheSize());
     ASSERT_EQ(3, m_removedFiles.size());
 }
@@ -318,8 +323,10 @@ TEST_F(FileCacheTests, ReadFile_SecondAccess_QueuesAndDownloads) {
     // Act
     const auto bytesReadOnSecondAccess = m_cache.ReadFile("1.sst", 0, 1, buffer);
     EnsureReadFromCache("1.sst");
+    const auto bytesReadOnceCached = m_cache.ReadFile("1.sst", 0, 1, buffer);
 
     // Assert
+    EXPECT_EQ(1U, bytesReadOnceCached);
     EXPECT_FALSE(bytesReadOnFirstAccess);
     EXPECT_FALSE(bytesReadOnSecondAccess);
     EXPECT_TRUE(m_cache.HasFile("1.sst"));
@@ -342,4 +349,81 @@ TEST_F(FileCacheTests, ReadFile_TooManyUndownloadedStaleEntries_PrunesOldest) {
     // Assert
     EXPECT_FALSE(m_cache.HasFile("0.sst"));
     EXPECT_TRUE(m_cache.HasFile(std::to_string(staleEntriesToInsert - 1) + ".sst"));
+}
+
+TEST_F(FileCacheTests, ReadFile_ManyReadsOfACachedFile_OpenItOnce) {
+    // Arrange
+    std::atomic<int> opens = 0;
+    EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(8));
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([&opens](const std::filesystem::path&) {
+        ++opens;
+        auto file = std::make_unique<FileMock>();
+        EXPECT_CALL(*file, Read(_, _, _)).WillRepeatedly([](char*, uint64_t, uint64_t length) { return length; });
+        return file;
+    });
+    EnsureReadFromCache("1.sst", 8);
+
+    // Act
+    char buffer[1];
+    for (int i = 0; i < 50; ++i) {
+        ASSERT_EQ(1U, m_cache.ReadFile("1.sst", 0, 1, buffer));
+    }
+
+    // Assert
+    EXPECT_EQ(1, opens.load());
+}
+
+TEST_F(FileCacheTests, EvictedFile_WhoseDeleteFails_IsLoggedRetriedAndNotCounted) {
+    // Arrange
+    const auto fileSize = static_cast<size_t>(100);
+    m_cache.SetCacheSize(fileSize);
+    std::atomic<int> deleteCalls = 0;
+    EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(fileSize));
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
+        auto file = std::make_unique<FileMock>();
+        EXPECT_CALL(*file, Read(_, _, _)).WillRepeatedly([](char*, uint64_t, uint64_t length) { return length; });
+        return file;
+    });
+    ON_CALL(*m_filesystem, DeleteFile(_)).WillByDefault([&deleteCalls](const std::filesystem::path&) -> bool {
+        if (deleteCalls++ == 0) {
+            throw std::runtime_error("locked");
+        }
+        return true;
+    });
+    EnsureReadFromCache("1.sst", fileSize);
+
+    // Act: each download wakes the worker, which retries the delete that failed earlier.
+    EnsureReadFromCache("2.sst", fileSize);
+    EnsureReadFromCache("3.sst", fileSize);
+    m_cache.WaitUntilIdle();
+
+    // Assert
+    EXPECT_EQ(fileSize, m_cache.CacheSize());
+    EXPECT_FALSE(m_cache.HasFile("1.sst"));
+    EXPECT_EQ(3, deleteCalls.load());
+}
+
+TEST_F(FileCacheTests, RunningTotals_StayConsistentThroughEvictionAndRefresh) {
+    // Arrange
+    EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(10));
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
+        auto file = std::make_unique<FileMock>();
+        EXPECT_CALL(*file, Read(_, _, _)).WillRepeatedly([](char*, uint64_t, uint64_t length) { return length; });
+        return file;
+    });
+
+    // Act (CacheSize cross-checks the totals against a full scan in debug builds)
+    for (int i = 0; i < 5; ++i) {
+        EnsureReadFromCache(std::to_string(i) + ".sst", static_cast<size_t>(10 * (i + 1)));
+    }
+    m_cache.MarkFileAsStaleIfExists("2.sst");
+    EXPECT_EQ(50U, m_cache.CacheSize());
+    m_cache.SetCacheSize(20);
+    m_cache.WaitUntilIdle();
+
+    // Assert
+    EXPECT_LE(m_cache.CacheSize(), 20U);
 }
