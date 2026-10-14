@@ -169,8 +169,19 @@ jobs:
           cmake --build build/LinuxRelease --config Release
 
   install-consume:
-    # Installs the libraries and configures a minimal external consumer to validate the package configs.
-    runs-on: ubuntu-latest
+    # Installs the libraries, then configures and builds a minimal external consumer that includes the public headers
+    # and links the plugin, to validate the package configs and that the installed headers are self-sufficient.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            preset: LinuxRelease
+            triplet: x64-linux
+          - os: windows-latest
+            preset: WindowsRelease
+            triplet: x64-windows
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -193,18 +204,43 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
-          key: vcpkg-install-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'infrastructure/vcpkg-overlays/**') }}
+          key: vcpkg-install-${{ matrix.preset }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'infrastructure/vcpkg-overlays/**') }}
           restore-keys: vcpkg-
 
       - name: Configure, build and install
+        shell: bash
         run: |
-          cmake --preset LinuxRelease -DAVEVA_ROCKSDB_TESTS=OFF -DVCPKG_MANIFEST_FEATURES=
-          cmake --build build/LinuxRelease --config Release
-          cmake --install build/LinuxRelease --config Release --prefix "$RUNNER_TEMP/stage"
+          cmake --preset ${{ matrix.preset }} -DAVEVA_ROCKSDB_TESTS=OFF -DVCPKG_MANIFEST_FEATURES=
+          cmake --build build/${{ matrix.preset }} --config Release
+          cmake --install build/${{ matrix.preset }} --config Release --prefix "$RUNNER_TEMP/stage"
 
+      # Reuses the packages the install build already restored, so the consumer needs no second vcpkg install.
       - name: Configure external consumer
+        shell: bash
         run: |
           mkdir consumer && cd consumer
-          printf 'cmake_minimum_required(VERSION 3.25)\nproject(consumer CXX)\nfind_package(aveva-http-client CONFIG REQUIRED)\nfind_package(aveva-azure-client CONFIG REQUIRED)\nfind_package(aveva-rocksdb-plugin-azure CONFIG REQUIRED)\n' > CMakeLists.txt
+          cat > CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.25)
+          project(consumer CXX)
+          find_package(aveva-http-client CONFIG REQUIRED)
+          find_package(aveva-azure-client CONFIG REQUIRED)
+          find_package(aveva-rocksdb-plugin-azure CONFIG REQUIRED)
+          add_executable(consumer main.cpp)
+          target_link_libraries(consumer PRIVATE aveva::rocksdb-plugin-azure)
+          target_compile_features(consumer PRIVATE cxx_std_23)
+          EOF
+          cat > main.cpp <<'EOF'
+          #include <AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp>
+          #include <AVEVA/RocksDB/Plugin/Azure/Plugin.hpp>
+          #include <AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp>
+
+          int main() { return 0; }
+          EOF
           cmake -S . -B out -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/stage" \
-            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} \
+            -DVCPKG_INSTALLED_DIR="$GITHUB_WORKSPACE/build/${{ matrix.preset }}/vcpkg_installed"
+
+      - name: Build external consumer
+        shell: bash
+        run: cmake --build consumer/out --config Release
