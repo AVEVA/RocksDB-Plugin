@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdarg>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <vector>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
@@ -33,6 +34,8 @@ class LoggerImpl {
     int m_logLevel;
     std::vector<char> m_buffer;
     std::unique_ptr<LogRateLimiter> m_rateLimiter;
+    // Heap-allocated so that the logger stays movable. RocksDB calls Logv from many threads.
+    std::unique_ptr<std::mutex> m_mutex = std::make_unique<std::mutex>();
 
   public:
     // Constructs a logger with no rate limiting.

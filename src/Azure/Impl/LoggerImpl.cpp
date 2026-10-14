@@ -29,6 +29,7 @@ void LoggerImpl::Logv(const int logLevel, const char* format, va_list ap) {
         return;
     }
 
+    std::scoped_lock lock(*m_mutex);
     if (m_rateLimiter) {
         const auto result = m_rateLimiter->CheckAndRecord(format);
         if (result.decision == RateDecision::Suppress) {
@@ -80,5 +81,8 @@ void LoggerImpl::Logv(const int logLevel, const char* format, va_list ap) {
     m_file->Append(std::span(m_buffer.data(), m_buffer.data() + totalBufferOffset));
 }
 
-void LoggerImpl::Flush() { m_file->Sync(); }
+void LoggerImpl::Flush() {
+    std::scoped_lock lock(*m_mutex);
+    m_file->Sync();
+}
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
