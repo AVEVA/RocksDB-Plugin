@@ -235,9 +235,8 @@ std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpR
             }
         }
     }
-    std::ranges::stable_sort(canonicalizedHeaders, [](const auto& lhs, const auto& rhs) {
-        return CultureAwareLess(lhs.first, rhs.first);
-    });
+    std::ranges::stable_sort(canonicalizedHeaders,
+                             [](const auto& lhs, const auto& rhs) { return CultureAwareLess(lhs.first, rhs.first); });
 
     std::string canonicalizedHeadersText;
     canonicalizedHeadersText.reserve(canonicalizedHeaders.size() * EstimatedCanonicalizedHeaderLength);
@@ -308,6 +307,9 @@ struct SharedKeySigner::Impl {
 SharedKeySigner::SharedKeySigner(std::string accountName, std::string_view accountKeyBase64)
     : m_accountName(std::move(accountName)), m_impl(std::make_unique<Impl>()) {
     std::vector<unsigned char> key = Base64Decode(accountKeyBase64);
+    // Wipes the decoded key on every exit path, including the throws below.
+    const std::unique_ptr<std::vector<unsigned char>, void (*)(std::vector<unsigned char>*)> keyWipe(
+        &key, [](std::vector<unsigned char>* secret) { OPENSSL_cleanse(secret->data(), secret->size()); });
 
     std::unique_ptr<EVP_MAC, decltype(&EVP_MAC_free)> const mac(EVP_MAC_fetch(nullptr, "HMAC", nullptr), &EVP_MAC_free);
     if (!mac) {
@@ -322,7 +324,6 @@ SharedKeySigner::SharedKeySigner(std::string accountName, std::string_view accou
     std::array<OSSL_PARAM, 2> parameters{OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST, digestName.data(), 0),
                                          OSSL_PARAM_construct_end()};
     const int initialized = EVP_MAC_init(m_impl->KeyedContext.get(), key.data(), key.size(), parameters.data());
-    OPENSSL_cleanse(key.data(), key.size());
     if (initialized != 1) {
         throw std::runtime_error("Failed to initialize Shared Key authorization signature context.");
     }
