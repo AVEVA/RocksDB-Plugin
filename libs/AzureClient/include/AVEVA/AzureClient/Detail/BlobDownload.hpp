@@ -365,6 +365,9 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
 
         m_ranged = true;
         m_summary.FirstResponse = std::move(response);
+        if (ExceedsMaxSize(*m_end - m_begin)) {
+            return;
+        }
         try {
             m_sink->Reserve(*m_end - m_begin);
         } catch (const std::exception&) {
@@ -391,7 +394,19 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         std::string body = TakeBody(response);
         m_end = m_begin + body.size();
         m_summary.FirstResponse = std::move(response);
+        if (ExceedsMaxSize(body.size())) {
+            return;
+        }
         Deliver(m_begin, std::move(body));
+    }
+
+    // Fails the download when `size` is over the caller's limit; true means it failed.
+    [[nodiscard]] bool ExceedsMaxSize(std::uint64_t size) {
+        if (!m_options.MaxSize.has_value() || size <= *m_options.MaxSize) {
+            return false;
+        }
+        Fail(MakeFailure(std::errc::file_too_large, "The download is larger than the configured maximum size."));
+        return true;
     }
 
     void OnChunk(std::error_code error, HttpResponse response, std::uint64_t offset, ChunkLength length) {
@@ -407,8 +422,8 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         // A server that answers a different range would otherwise be written at the wrong offset.
         if (const std::string_view header = FindHeaderValue(response, "Content-Range"); !header.empty()) {
             const auto parsed = ParseContentRange(header);
-            if (!parsed.has_value() || parsed->Unsatisfied || parsed->Start != offset ||
-                parsed->End < parsed->Start || body.empty() || parsed->End - parsed->Start != body.size() - 1U ||
+            if (!parsed.has_value() || parsed->Unsatisfied || parsed->Start != offset || parsed->End < parsed->Start ||
+                body.empty() || parsed->End - parsed->Start != body.size() - 1U ||
                 (m_total.has_value() && parsed->Total.has_value() && *parsed->Total != *m_total)) {
                 Fail(MakeInvalidResponse("The download response has an unexpected Content-Range."));
                 return;
@@ -675,7 +690,7 @@ void DownloadBlobToFileAsync(THttp& httpClient, const BasicBlobTarget<TCred>& op
         PostCompletion(httpClient, std::move(completion),
                        std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>{
                            std::unexpect, DownloadDetail::MakeFailure(std::make_error_code(std::errc::is_a_directory),
-                                                      "The destination path is a directory.")});
+                                                                      "The destination path is a directory.")});
         return;
     }
 
@@ -688,13 +703,15 @@ void DownloadBlobToFileAsync(THttp& httpClient, const BasicBlobTarget<TCred>& op
     if (!*file) {
         PostCompletion(httpClient, std::move(completion),
                        std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>{
-                           std::unexpect, DownloadDetail::MakeFailure(DownloadDetail::LastOpenError(), "Failed to open destination file.")});
+                           std::unexpect, DownloadDetail::MakeFailure(DownloadDetail::LastOpenError(),
+                                                                      "Failed to open destination file.")});
         return;
     }
 
     DownloadDetail::StartDownload(
         httpClient, options, std::move(operationOptions), std::make_shared<FileSink>(file),
-        [file, tempPath, target = path, completion = std::move(completion)](DownloadDetail::SummaryResult result) mutable {
+        [file, tempPath, target = path,
+         completion = std::move(completion)](DownloadDetail::SummaryResult result) mutable {
             file->close();
             std::error_code ignored;
             if (!result.has_value()) {
@@ -704,22 +721,23 @@ void DownloadBlobToFileAsync(THttp& httpClient, const BasicBlobTarget<TCred>& op
             }
             if (file->fail()) {
                 std::filesystem::remove(tempPath, ignored);
-                completion(std::unexpected(DownloadDetail::MakeFailure(std::errc::io_error, "I/O error writing destination file.")));
+                completion(std::unexpected(
+                    DownloadDetail::MakeFailure(std::errc::io_error, "I/O error writing destination file.")));
                 return;
             }
             std::error_code renameError;
             if (std::filesystem::is_directory(target, renameError)) {
                 std::filesystem::remove(tempPath, ignored);
                 completion(std::unexpected(DownloadDetail::MakeFailure(std::make_error_code(std::errc::is_a_directory),
-                                                       "The destination path is a directory.")));
+                                                                       "The destination path is a directory.")));
                 return;
             }
             renameError.clear();
             std::filesystem::rename(tempPath, target, renameError);
             if (renameError) {
                 std::filesystem::remove(tempPath, ignored);
-                completion(std::unexpected(
-                    DownloadDetail::MakeFailure(renameError, "Failed to rename temporary download file to destination.")));
+                completion(std::unexpected(DownloadDetail::MakeFailure(
+                    renameError, "Failed to rename temporary download file to destination.")));
                 return;
             }
             completion(DownloadDetail::ToDownloadToResponse(std::move(*result)));

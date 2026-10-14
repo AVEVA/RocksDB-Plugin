@@ -548,3 +548,44 @@ TEST(A3_DownloadIntoSpanTests, ResponseLargerThanTheDestinationFailsWithoutWriti
     EXPECT_FALSE(result->has_value());
     EXPECT_EQ(storage.substr(10), std::string(8, '#'));
 }
+
+TEST(T11_ParallelDownloadAcceptanceTests, DownloadLargerThanMaxSizeFailsBeforeFetchingAnyChunk) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(18);
+    EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
+    BlockBlobClient client{httpClient, BuildOptions()};
+
+    std::ostringstream out;
+    DownloadToOptions options = Parallel(3U, 3U);
+    options.MaxSize = 17U;
+    int callbackCount = 0;
+    client.DownloadToAsync(out, options, [&callbackCount](DownloadToResult result) {
+        ++callbackCount;
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::file_too_large));
+    });
+    ASSERT_TRUE(httpClient.CompleteRequest(0U));
+    httpClient.Poll();
+
+    EXPECT_EQ(callbackCount, 1);
+    EXPECT_EQ(httpClient.RequestCount(), 1U);
+    EXPECT_TRUE(out.str().empty());
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, DownloadExactlyAtMaxSizeSucceeds) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(18);
+    EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
+    BlockBlobClient client{httpClient, BuildOptions()};
+
+    std::ostringstream out;
+    DownloadToOptions options = Parallel(3U, 3U);
+    options.MaxSize = 18U;
+    int callbackCount = 0;
+    StartDownloadToAsyncAndExpectSuccess(client, out, options, callbackCount, content.size());
+    ASSERT_TRUE(httpClient.CompleteRequest(0U));
+    static_cast<void>(CompleteNewestUntilCallback(httpClient, 3U, callbackCount));
+
+    ASSERT_EQ(callbackCount, 1);
+    EXPECT_EQ(out.str(), content);
+}

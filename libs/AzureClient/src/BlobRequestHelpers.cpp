@@ -61,6 +61,7 @@ DownloadToOptions ToDownloadToOptions(DownloadBlobOptions options) {
     DownloadToOptions result;
     result.Range = options.Range;
     result.Conditions = std::move(options.Conditions);
+    result.MaxSize = options.MaxSize;
     return result;
 }
 

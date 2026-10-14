@@ -122,6 +122,9 @@ struct GetBlobPropertiesOptions {
 struct DownloadBlobOptions {
     std::optional<Models::BlobByteRange> Range;
     Models::BlobRequestConditions Conditions;
+    // Largest download accepted; a bigger blob (or range) fails with std::errc::file_too_large before any
+    // body is buffered. Unset applies no limit beyond available memory.
+    std::optional<std::uint64_t> MaxSize;
 };
 
 // Chunked download options. The first request is a ranged GET of ChunkSize bytes that also learns
@@ -140,6 +143,9 @@ struct DownloadToOptions {
     std::size_t ChunkSize = DefaultChunkSize; // bytes; 0 selects the default (4 MiB); no upper bound
     // Count of concurrent chunk requests; 0 is treated as 1; no upper bound.
     std::size_t Concurrency = 1;
+    // Largest download accepted; a bigger blob (or range) fails with std::errc::file_too_large before the
+    // destination is written. Unset applies no limit.
+    std::optional<std::uint64_t> MaxSize;
 };
 
 struct SetBlobMetadataOptions {

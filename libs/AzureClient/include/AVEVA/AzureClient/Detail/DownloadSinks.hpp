@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -90,11 +91,15 @@ class SpanSink final : public DownloadSink {
 
 class StringSink final : public DownloadSink {
   public:
+    // Upper bound for the up-front reservation. The size comes from the service's response, so it is not trusted to
+    // size an allocation; the string grows geometrically past this as data actually arrives.
+    static constexpr std::uint64_t MaxReserve = std::uint64_t{64} * 1024U * 1024U;
+
     void Reserve(std::uint64_t size) override {
         if (size > m_data.max_size()) {
             throw std::length_error("Blob is too large to download into memory.");
         }
-        m_data.reserve(static_cast<std::size_t>(size));
+        m_data.reserve(static_cast<std::size_t>(std::min(size, MaxReserve)));
     }
 
     [[nodiscard]] bool WritesInline() const noexcept override { return true; }
