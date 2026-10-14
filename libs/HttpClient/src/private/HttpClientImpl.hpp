@@ -5,6 +5,7 @@
 
 #include "AVEVA/HttpClient/HttpClient.hpp"
 
+#include "CancelState.hpp"
 #include "ConnectionPool.hpp"
 #include "IdleSweeper.hpp"
 #include "OriginLimiter.hpp"
@@ -61,7 +62,7 @@ struct PendingRequest {
     HttpRequest request;
     HttpRequestOptions options;
     Detail::CompletionPointer completion;
-    std::shared_ptr<std::atomic<bool>> cancelled;
+    std::shared_ptr<CancelState> cancellation;
 };
 
 /// <summary>
@@ -178,14 +179,15 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
                     Detail::Complete(std::move(pending), error, std::move(response));
                 }
             });
+            auto cancellation = BindCallerSlot(options);
             auto route = Route::Of(request, options);
             // Unparseable URLs bypass the cap; they fail fast and never open a connection.
             if (m_limiter && route.Parsed) {
                 auto origin = route.Origin();
                 return SendLimited(std::move(origin), std::move(route), std::move(request), std::move(guarded),
-                                   std::move(options));
+                                   std::move(options), std::move(cancellation));
             }
-            SendUnlimited(route, std::move(request), std::move(guarded), std::move(options));
+            SendUnlimited(route, std::move(request), std::move(guarded), std::move(options), std::move(cancellation));
         } catch (...) {
             if (auto pending = cell->Take()) {
                 asio::post(context_, [pending = std::move(pending)]() mutable {
@@ -198,14 +200,33 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
 
   private:
     /// <summary>
+    /// Connects the caller's cancellation slot, once and on the submitting thread, to a shared state that
+    /// later stages retarget. Asio slots are single-owner and not thread-safe to reassign, so no later stage
+    /// may call <c>assign</c> on it.
+    /// </summary>
+    /// <param name="options">The request options carrying the caller's slot.</param>
+    /// <returns>The state, or null if the caller has no connected slot.</returns>
+    static std::shared_ptr<CancelState> BindCallerSlot(const HttpRequestOptions& options) {
+        auto slot = options.GetCancellationSlot();
+        if (!slot.is_connected()) {
+            return nullptr;
+        }
+        auto state = std::make_shared<CancelState>();
+        slot.assign([state](asio::cancellation_type type) {
+            if (type != asio::cancellation_type::none) {
+                state->Cancel();
+            }
+        });
+        return state;
+    }
+
+    /// <summary>
     /// Queues the request behind the origin's cap and sends it once a slot is free, releasing that slot
     /// when it completes.
     ///
-    /// Cancellation-slot ownership: a caller's slot holds exactly one handler at a time, so ownership is
-    /// handed over rather than shared. While a request waits in the limiter, the handler installed here
-    /// removes it from the queue. When the request starts, RequestOperation::BindCancellationSlot replaces
-    /// that handler with one that cancels the running operation. After that the limiter can no longer be
-    /// reached through the slot, which is correct: a started request holds its slot until it completes.
+    /// Cancellation: the caller's slot was wired once in Submit to a CancelState. While the request waits in
+    /// the limiter, the state's target removes it from the queue; when it starts, the operation retargets the
+    /// state to cancel itself. Nothing here ever reassigns the slot.
     /// </summary>
     /// <param name="origin">The origin whose cap the request counts against.</param>
     /// <param name="route">The request's parsed destination.</param>
@@ -213,28 +234,24 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// <param name="completion">Invoked exactly once with the outcome.</param>
     /// <param name="options">The timeout, response limits, and cancellation slot for this request.</param>
     void SendLimited(std::string origin, Route route, HttpRequest request, Detail::CompletionPointer completion,
-                     HttpRequestOptions options) {
+                     HttpRequestOptions options, std::shared_ptr<CancelState> cancellation) {
         const auto ticket = m_limiter->NextTicket();
-        auto cancelled = std::make_shared<std::atomic<bool>>(false);
-        // Set before queueing so a cancellation cannot slip in between; a started request replaces it with
-        // its own handler.
-        if (auto slot = options.GetCancellationSlot(); slot.is_connected()) {
-            slot.assign([weak = std::weak_ptr{m_limiter}, origin, ticket, cancelled](asio::cancellation_type type) {
-                if (type != asio::cancellation_type::none) {
-                    // Recorded first: a request dequeued but not yet bound to its own handler is invisible to
-                    // Cancel(), so StartLimited replays this flag once the operation owns the slot.
-                    cancelled->store(true);
-                    if (auto limiter = weak.lock()) {
-                        limiter->Cancel(origin, ticket);
-                    }
+        // Set before queueing so a cancellation cannot slip in between; a started request retargets it.
+        if (cancellation) {
+            cancellation->SetTarget([weak = std::weak_ptr{m_limiter}, origin, ticket] {
+                if (auto limiter = weak.lock()) {
+                    limiter->Cancel(origin, ticket);
                 }
             });
         }
         m_limiter->Run(origin, ticket,
                        PendingRequest{origin, std::move(route), std::move(request), std::move(options),
-                                      std::move(completion), std::move(cancelled)});
+                                      std::move(completion), cancellation});
+        // A cancel that fired before the request was queued found nothing to remove; repeat it now.
+        if (cancellation && cancellation->IsCancelled()) {
+            m_limiter->Cancel(origin, ticket);
+        }
     }
-
     /// <summary>
     /// Sends a request the limiter has given a slot, and hands the slot back when it completes.
     /// </summary>
@@ -247,7 +264,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
                 Detail::Complete(std::move(inner), error, std::move(response));
             });
         SendUnlimited(pending.route, std::move(pending.request), std::move(wrapped), std::move(pending.options),
-                      std::move(pending.cancelled));
+                      std::move(pending.cancellation));
     }
 
     /// <summary>
@@ -270,26 +287,26 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// <param name="request">The request to send.</param>
     /// <param name="completion">Invoked exactly once with the outcome.</param>
     /// <param name="options">The timeout, response limits, and cancellation slot for this request.</param>
-    /// <param name="cancelled">Set by the limiter's handler if the caller cancelled while the request was
-    /// queued or being dequeued; the operation checks it once it owns the slot.</param>
+    /// <param name="cancellation">The state the caller's cancellation slot is wired to; the operation makes itself
+    /// its target. Null when the caller has no slot.</param>
     void SendUnlimited(const Route& route, HttpRequest request, Detail::CompletionPointer completion,
-                       HttpRequestOptions options, std::shared_ptr<std::atomic<bool>> cancelled = nullptr) {
+                       HttpRequestOptions options, std::shared_ptr<CancelState> cancellation = nullptr) {
         // Only requests that pass the same validation the operation applies may take a pooled connection, so that
         // failing an invalid one cannot cost a healthy connection; invalid ones take the fresh-connection path.
         if (route.Sendable()) {
             if (route.Tls) {
                 TlsConnectionKey key{route.Host, route.Port};
                 if (auto pooled = m_tlsPool->Acquire(key)) {
-                    return ResumeWithPooledConnection<TlsStream>(route, std::move(*pooled), std::move(key),
-                                                                 std::move(request), std::move(completion),
-                                                                 std::move(options), m_tlsPool, std::move(cancelled));
+                    return ResumeWithPooledConnection<TlsStream>(
+                        route, std::move(*pooled), std::move(key), std::move(request), std::move(completion),
+                        std::move(options), m_tlsPool, std::move(cancellation));
                 }
             } else {
                 BasicConnectionKey key{route.Host, route.Port};
                 if (auto pooled = m_plainPool->Acquire(key)) {
                     return ResumeWithPooledConnection<PlainStream>(
                         route, std::move(*pooled), std::move(key), std::move(request), std::move(completion),
-                        std::move(options), m_plainPool, std::move(cancelled));
+                        std::move(options), m_plainPool, std::move(cancellation));
                 }
             }
         }
@@ -300,7 +317,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
             auto stream = std::make_unique<TlsStream>(executor, *m_tlsContext);
             auto operation = std::make_shared<RequestOperation<TlsStream>>(
                 m_tlsContext, std::move(stream), std::move(completion), std::move(options), m_tlsPool, std::move(key));
-            operation->BindCancellationSlot(cancelled.get());
+            operation->BindCancellation(cancellation);
             asio::post(executor, [operation, request = std::move(request), route]() mutable {
                 operation->Start(std::move(request), route);
             });
@@ -312,7 +329,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         auto stream = std::make_unique<PlainStream>(executor);
         auto operation = std::make_shared<RequestOperation<PlainStream>>(
             m_tlsContext, std::move(stream), std::move(completion), std::move(options), m_plainPool, std::move(key));
-        operation->BindCancellationSlot(cancelled.get());
+        operation->BindCancellation(cancellation);
         asio::post(executor, [operation, request = std::move(request), route]() mutable {
             operation->Start(std::move(request), route);
         });
@@ -328,17 +345,17 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// <param name="completion">Invoked exactly once with the outcome.</param>
     /// <param name="options">The timeout, response limits, and cancellation slot for this request.</param>
     /// <param name="pool">The pool the connection is returned to if the response allows reuse.</param>
-    /// <param name="cancelled">See <see cref="SendUnlimited"/>.</param>
+    /// <param name="cancellation">See <see cref="SendUnlimited"/>.</param>
     template <typename Stream>
     void ResumeWithPooledConnection(const Route& route, PooledConnection<Stream> pooled, ConnectionKey<Stream> key,
                                     HttpRequest request, Detail::CompletionPointer completion,
                                     HttpRequestOptions options, std::shared_ptr<ConnectionPool<Stream>> pool,
-                                    std::shared_ptr<std::atomic<bool>> cancelled) {
+                                    std::shared_ptr<CancelState> cancellation) {
         auto executor = pooled.stream->get_executor();
         auto operation = std::make_shared<RequestOperation<Stream>>(
             m_tlsContext, std::move(pooled.stream), std::move(completion), std::move(options), std::move(pool),
             std::move(key), std::move(pooled.buffer));
-        operation->BindCancellationSlot(cancelled.get());
+        operation->BindCancellation(cancellation);
         asio::post(executor, [operation, request = std::move(request), route]() mutable {
             operation->StartReused(std::move(request), route);
         });

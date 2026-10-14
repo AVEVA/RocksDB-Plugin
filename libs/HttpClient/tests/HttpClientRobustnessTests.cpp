@@ -549,7 +549,7 @@ TEST(HttpClientRobustness, CompletionRunsWhenTheHandlerExecutorHasNoOtherWork) {
     EXPECT_FALSE(result);
 }
 
-TEST(HttpClientRobustness, CancellationFromAnotherThreadCompletesExactlyOnce) {
+TEST(HttpClientRobustness, CancellationAtVaryingStagesCompletesExactlyOnce) {
     for (int iteration = 0; iteration < 25; ++iteration) {
         asio::io_context context;
         auto client = AVEVA::HttpClient::Create(context);
@@ -572,15 +572,17 @@ TEST(HttpClientRobustness, CancellationFromAnotherThreadCompletesExactlyOnce) {
             server.Stop();
         });
 
-        std::thread canceller([&] {
-            // Spin a varying number of yields so the cancel lands at different points, without wall-clock jitter.
-            for (int spin = 0; spin < (iteration % 5) * 200; ++spin) {
-                std::this_thread::yield();
+        // Emit from the context rather than another thread: a slot's handler may only be reached by whoever
+        // owns the slot, and re-posting a varying number of times lands the cancel at different stages.
+        std::function<void(int)> emitAfter = [&](int hops) {
+            if (hops == 0) {
+                cancellation.emit(asio::cancellation_type::terminal);
+                return;
             }
-            cancellation.emit(asio::cancellation_type::terminal);
-        });
+            asio::post(context, [&, hops] { emitAfter(hops - 1); });
+        };
+        asio::post(context, [&] { emitAfter(iteration % 5 * 3); });
         context.run();
-        canceller.join();
 
         EXPECT_EQ(completions, 1);
         EXPECT_EQ(result, std::make_error_code(std::errc::operation_canceled));

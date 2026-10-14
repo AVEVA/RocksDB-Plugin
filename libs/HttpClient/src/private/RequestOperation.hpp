@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "CancelState.hpp"
 #include "ConnectionPool.hpp"
 #include "DnsCache.hpp"
 #include "HttpVerb.hpp"
@@ -112,29 +113,23 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
           m_pool(std::move(pool)), m_key(std::move(key)), m_buffer(std::move(buffer)) {}
 
     /// <summary>
-    /// Subscribes to the cancellation slot in the options, if one is connected. Must be called before the
-    /// operation is started.
+    /// Makes this operation the target of the request's cancellation state, so a cancel (including one that
+    /// already happened while the request was queued) reaches it. Never touches the caller's slot, which only
+    /// the submitting thread may assign. Must be called before the operation is started.
     /// </summary>
-    /// <param name="cancelledEarlier">Optional flag set by an earlier owner of the slot (the limiter); if set,
-    /// the operation is cancelled right after binding so a cancel that fell between owners is not lost.</param>
-    void BindCancellationSlot(const std::atomic<bool>* cancelledEarlier = nullptr) {
-        auto slot = m_options.GetCancellationSlot();
-        if (!slot.is_connected()) {
+    /// <param name="cancellation">The state shared with the caller's slot; null when the request has no
+    /// cancellation slot.</param>
+    void BindCancellation(const std::shared_ptr<CancelState>& cancellation) {
+        if (!cancellation) {
             return;
         }
-        // The handler runs on whichever thread emits the signal, so it must only touch immutable or
-        // atomic state: it posts to the operation's strand, where Cancel() may safely use the stream.
-        slot.assign([weak = this->weak_from_this()](asio::cancellation_type cancellationType) {
-            if (cancellationType == asio::cancellation_type::none) {
-                return;
-            }
+        // The target runs on whichever thread emits the signal, so it only posts to the operation's strand,
+        // where Cancel() may safely use the stream.
+        cancellation->SetTarget([weak = this->weak_from_this()] {
             if (auto self = weak.lock()) {
                 self->RequestCancellation();
             }
         });
-        if (cancelledEarlier != nullptr && cancelledEarlier->load()) {
-            RequestCancellation();
-        }
     }
 
     /// <summary>
@@ -572,7 +567,8 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// Maps a failed read to the error reported to the caller.
     /// </summary>
     /// <param name="error">The failed read's (non-empty) error.</param>
-    /// <returns>ResponseTooLarge for limit errors, ProtocolError for a malformed response, otherwise ReadFailed.</returns>
+    /// <returns>ResponseTooLarge for limit errors, ProtocolError for a malformed response, otherwise
+    /// ReadFailed.</returns>
     static HttpClientError ClassifyReadError(const boost::system::error_code& error) {
         if (error == http::error::body_limit || error == http::error::header_limit) {
             return HttpClientError::ResponseTooLarge;
