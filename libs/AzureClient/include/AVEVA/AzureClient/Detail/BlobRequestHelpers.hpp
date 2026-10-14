@@ -39,6 +39,7 @@
 #include <cstddef>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <initializer_list>
 #include <memory>
 #include <optional>
@@ -522,6 +523,11 @@ struct RequestAuth {
 // Server-provided retry delay (x-ms-retry-after-ms, then Retry-After in seconds), if any.
 [[nodiscard]] std::optional<std::chrono::milliseconds> ParseRetryAfter(const HttpResponse& response) noexcept;
 
+// Rebuilds the body (and anything derived from it, such as a nested signature) of each attempt just before it is
+// authorized and sent, so a retry never replays a stale date, signature or token. `bearerToken` is the token the
+// attempt will carry (empty when it is not bearer-authorized). Throwing fails the request.
+using AttemptRebuilder = std::function<void(HttpRequest& attempt, std::string_view bearerToken)>;
+
 // Sends `request` with per-attempt authorization and retry/backoff according to `retry`.
 // All state is owned by the operation (no references to the caller's options are retained);
 // only `httpClient` must outlive the operation. A cancellation slot on `requestOptions` cancels
@@ -532,18 +538,19 @@ struct RequestAuth {
 template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
 void SendWithRetryAsync(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
                         HttpRequest request, THandler completion, HttpRequestOptions requestOptions,
-                        bool retryNotFoundAndGone = false);
+                        bool retryNotFoundAndGone = false, AttemptRebuilder rebuild = {});
 
 // Defined in RequestPipeline.hpp.
 template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
 void SendAuthorizedRequestAsync(THttp& httpClient, const ConnectionState& connection, std::shared_ptr<TCred> credential,
-                                HttpRequest request, THandler completion, HttpRequestOptions requestOptions);
+                                HttpRequest request, THandler completion, HttpRequestOptions requestOptions,
+                                AttemptRebuilder rebuild = {});
 
 template <HttpClientLike THttp, class TCred, class THandler>
 void SendAuthorizedRequestAsync(THttp& httpClient, const BasicContainerTarget<TCred>& target, HttpRequest request,
-                                THandler completion, HttpRequestOptions requestOptions) {
+                                THandler completion, HttpRequestOptions requestOptions, AttemptRebuilder rebuild = {}) {
     SendAuthorizedRequestAsync(httpClient, *target.Connection, target.Credential, std::move(request),
-                               std::move(completion), requestOptions);
+                               std::move(completion), requestOptions, std::move(rebuild));
 }
 
 template <HttpClientLike THttp, class TCred, class THandler>

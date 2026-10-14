@@ -3,6 +3,7 @@
 
 #include "FakeHttpClient.hpp"
 #include "TestFixtures.hpp"
+#include "TestHelpers.hpp"
 
 #include <AVEVA/AzureClient/BlobClientOptions.hpp>
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>
@@ -37,6 +38,8 @@ using AVEVA::AzureClient::Models::DeleteBlobsResult;
 using AVEVA::AzureClient::Tests::BlobContainerClient;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeBlobContainerClientOptions;
+using AVEVA::AzureClient::Tests::MakeToken;
+using AVEVA::AzureClient::Tests::ScriptedTokenCredential;
 
 using BatchOutcome = std::expected<Response<DeleteBlobsResult>, BlobStorageError>;
 
@@ -371,4 +374,40 @@ TEST(BatchDeleteTests, ResponseMissingASubrequestIsAnInvalidResponse) {
 
     ASSERT_FALSE(outcome.has_value());
     EXPECT_EQ(outcome.error().Code, BlobStorageErrorCode::InvalidResponse);
+}
+
+// A retried batch must not replay the sub-requests of the failed attempt: their bearer tokens are re-acquired and the
+// body is rebuilt for every attempt.
+TEST(BatchDeleteTests, RetriedBatchRebuildsSubrequestsWithAFreshToken) {
+    FakeHttpClient http;
+    http.SetResponder([](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
+        if (record.Body.find("token-one") != std::string::npos) {
+            return FakeHttpClient::ScriptedResult{.Response =
+                                                      HttpResponse{503, {{"x-ms-error-code", "ServerBusy"}}, ""}};
+        }
+        return BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
+    });
+    auto credential = std::make_shared<ScriptedTokenCredential>();
+    credential->EnqueueImmediate({}, MakeToken("token-one", -std::chrono::seconds(1)));
+    credential->EnqueueImmediate({}, MakeToken("token-two", std::chrono::hours(1)));
+    auto options = MakeBlobContainerClientOptions();
+    options.SasToken.clear();
+    options.Retry.MaxRetries = 1;
+    options.Retry.InitialDelay = std::chrono::milliseconds{0};
+    AVEVA::AzureClient::BasicBlobContainerClient<FakeHttpClient, ScriptedTokenCredential> client{http, options,
+                                                                                                 credential};
+
+    std::optional<BatchOutcome> outcome;
+    client.DeleteBlobsAsync({"a", "b"}, {}, [&outcome](BatchOutcome result) { outcome = std::move(result); });
+    ASSERT_TRUE(http.RunUntil([&] { return outcome.has_value(); }));
+
+    ASSERT_TRUE(outcome->has_value()) << outcome->error().Message << " status " << outcome->error().StatusCode
+                                      << " requests " << http.RequestCount();
+    const auto& first = http.RequestAt(0);
+    const auto& second = http.RequestAt(1);
+    EXPECT_EQ(CountOccurrences(first.Body, "Authorization: Bearer token-one"), 2U);
+    EXPECT_EQ(CountOccurrences(first.Body, "token-two"), 0U);
+    EXPECT_EQ(CountOccurrences(second.Body, "Authorization: Bearer token-two"), 2U);
+    EXPECT_EQ(CountOccurrences(second.Body, "token-one"), 0U);
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(second.Request, "Authorization"), "Bearer token-two");
 }

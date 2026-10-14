@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <deque>
 #include <exception>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -51,7 +52,8 @@ inline constexpr int MaxBackoffExponent = RetryPolicyConstants::MaxBackoffExpone
 // Exponential backoff (InitialDelay * 2^(retry-1)) with +/- jitter in [0.8, 1.3), capped at MaxDelay. The generator is
 // a parameter so tests can make the jitter deterministic.
 template <typename Generator>
-[[nodiscard]] std::chrono::milliseconds ComputeBackoff(const RetryOptions& retry, int retryNumber, Generator& generator) {
+[[nodiscard]] std::chrono::milliseconds ComputeBackoff(const RetryOptions& retry, int retryNumber,
+                                                       Generator& generator) {
     std::uniform_real_distribution<double> jitter(MinBackoffJitter, MaxBackoffJitter);
 
     const double maxDelay = static_cast<double>(std::max<std::int64_t>(0, retry.MaxDelay.count()));
@@ -123,11 +125,11 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
   public:
     RetryOperation(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
                    HttpRequest request, THandler completion, HttpRequestOptions requestOptions,
-                   bool retryNotFoundAndGone)
+                   bool retryNotFoundAndGone, AttemptRebuilder rebuild)
         : m_httpClient(httpClient), m_auth(std::move(auth)), m_credential(std::move(credential)), m_retry(retry),
           m_request(std::move(request)), m_completion(std::move(completion)), m_requestOptions(requestOptions),
-          m_retryNotFoundAndGone(retryNotFoundAndGone), m_replaySafe(IsReplaySafe(m_request)),
-          m_parentSlot(m_requestOptions.GetCancellationSlot()),
+          m_retryNotFoundAndGone(retryNotFoundAndGone), m_rebuild(std::move(rebuild)),
+          m_replaySafe(IsReplaySafe(m_request)), m_parentSlot(m_requestOptions.GetCancellationSlot()),
           m_timer(httpClient.get_executor()), m_deadlineTimer(httpClient.get_executor()),
           m_totalDeadline(m_requestOptions.GetTotalDeadline()), m_start(std::chrono::steady_clock::now()),
           m_maxAttempts(ComputeMaxAttempts(m_requestOptions.GetMaxRetries().value_or(retry.MaxRetries))) {}
@@ -323,6 +325,9 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         switch (m_auth.Type) {
         case RequestAuth::Kind::SharedKey:
             ResolveCopySourceAuthorization(attempt, {});
+            if (!RebuildAttempt(attempt, {})) {
+                return;
+            }
             try {
                 AuthorizeRequest(*m_auth.Signer, attempt);
             } catch (const std::bad_alloc&) {
@@ -343,6 +348,9 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
             return;
 
         case RequestAuth::Kind::Bearer:
+            if (!RebuildAttempt(attempt, m_auth.BearerToken)) {
+                return;
+            }
             ResolveCopySourceAuthorization(attempt, m_auth.BearerToken);
             SetBearerAuthorization(attempt, m_auth.BearerToken);
             Send(std::move(attempt));
@@ -350,6 +358,9 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
 
         case RequestAuth::Kind::None:
             ResolveCopySourceAuthorization(attempt, {});
+            if (!RebuildAttempt(attempt, {})) {
+                return;
+            }
             break;
         }
 
@@ -394,9 +405,33 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
             return;
         }
 
+        if (!RebuildAttempt(attempt, token.Token)) {
+            return;
+        }
         ResolveCopySourceAuthorization(attempt, token.Token);
         SetBearerAuthorization(attempt, token.Token);
         Send(std::move(attempt));
+    }
+
+    // Runs the caller's per-attempt rebuild, if any. A failure ends the request rather than escaping onto a
+    // transport thread.
+    [[nodiscard]] bool RebuildAttempt(HttpRequest& attempt, std::string_view bearerToken) {
+        if (!m_rebuild) {
+            return true;
+        }
+        try {
+            m_rebuild(attempt, bearerToken);
+        } catch (const std::bad_alloc&) {
+            PostFinish(std::make_error_code(std::errc::not_enough_memory));
+            return false;
+        } catch (const std::system_error& e) {
+            PostFinish(e.code());
+            return false;
+        } catch (const std::exception&) {
+            PostFinish(std::make_error_code(std::errc::invalid_argument));
+            return false;
+        }
+        return true;
     }
 
     void Send(HttpRequest attempt) {
@@ -517,6 +552,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     THandler m_completion;
     HttpRequestOptions m_requestOptions;
     bool m_retryNotFoundAndGone;
+    AttemptRebuilder m_rebuild;
     bool m_replaySafe;
     boost::asio::cancellation_slot m_parentSlot;
     boost::asio::cancellation_signal m_attemptSignal;
@@ -540,16 +576,17 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
 template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
 void SendWithRetryAsync(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
                         HttpRequest request, THandler completion, HttpRequestOptions requestOptions,
-                        bool retryNotFoundAndGone) {
+                        bool retryNotFoundAndGone, AttemptRebuilder rebuild) {
     auto operation = std::make_shared<RetryDetail::RetryOperation<THttp, TCred, THandler>>(
         httpClient, std::move(auth), std::move(credential), retry, std::move(request), std::move(completion),
-        requestOptions, retryNotFoundAndGone);
+        requestOptions, retryNotFoundAndGone, std::move(rebuild));
     operation->Start();
 }
 
 template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
 void SendAuthorizedRequestAsync(THttp& httpClient, const ConnectionState& connection, std::shared_ptr<TCred> credential,
-                                HttpRequest request, THandler completion, HttpRequestOptions requestOptions) {
+                                HttpRequest request, THandler completion, HttpRequestOptions requestOptions,
+                                AttemptRebuilder rebuild) {
     // Checked here rather than per operation so every request carrying metadata, including the
     // internal commits issued by multi-part uploads, is rejected before reaching the service.
     for (const HttpHeader& header : request.GetHeaders()) {
@@ -567,6 +604,6 @@ void SendAuthorizedRequestAsync(THttp& httpClient, const ConnectionState& connec
     }
     const bool hasCredential = credential != nullptr;
     SendWithRetryAsync(httpClient, MakeRequestAuth(connection, hasCredential), std::move(credential), connection.Retry,
-                       std::move(request), std::move(completion), requestOptions, false);
+                       std::move(request), std::move(completion), requestOptions, false, std::move(rebuild));
 }
 } // namespace AVEVA::AzureClient::Private

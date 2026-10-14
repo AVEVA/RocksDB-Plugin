@@ -104,21 +104,9 @@ class BatchDeleteOperation final
         }
     }
 
-    void StartChunk(std::size_t chunk) {
-        if (m_auth.Type == RequestAuth::Kind::Token) {
-            // Each sub-request carries its own bearer token, so one is needed before the body can be built.
-            GetTokenForScopes(*m_target->Credential, m_auth.TokenScopes,
-                              [self = this->shared_from_this(), chunk](std::error_code error, AccessToken token) {
-                                  if (error) {
-                                      self->FailChunk(MakeClientError(error));
-                                      return;
-                                  }
-                                  self->SendChunk(chunk, token.Token);
-                              });
-            return;
-        }
-        SendChunk(chunk, {});
-    }
+    // The bearer token for each attempt comes from the request pipeline's rebuild hook, so a retry never replays
+    // stale sub-request dates, signatures or tokens.
+    void StartChunk(std::size_t chunk) { SendChunk(chunk); }
 
     void AuthorizeSubrequest(HttpRequest& subrequest, std::string_view token) const {
         switch (m_auth.Type) {
@@ -137,30 +125,35 @@ class BatchDeleteOperation final
         }
     }
 
-    void SendChunk(std::size_t chunk, std::string_view token) {
+    // Builds the multipart body of one chunk. Called once per HTTP attempt: every sub-request carries its own date and
+    // authorization, and those expire or are single-use, so they must be regenerated on a retry.
+    [[nodiscard]] std::string BuildChunkBody(std::size_t begin, std::size_t end, const std::string& boundary,
+                                             std::string_view token) const {
+        std::string body;
+        for (std::size_t index = begin; index < end; ++index) {
+            const BlobTarget blob = MakeBlobTarget(m_target->Connection, m_target->ContainerName, m_names.at(index));
+            HttpRequest subrequest;
+            subrequest.SetMethod(HttpMethod::Delete);
+            subrequest.SetUrl(BuildBlobUrl(blob));
+            AddHeader(subrequest, XMsDateHeaderName, BuildDateHeaderValue(std::chrono::system_clock::now()));
+            AuthorizeSubrequest(subrequest, token);
+            AddHeader(subrequest, ContentLengthHeaderName, "0");
+            AppendBatchDeletePart(body, boundary, index - begin, subrequest);
+        }
+        AppendBatchClosingBoundary(body, boundary);
+        return body;
+    }
+
+    void SendChunk(std::size_t chunk) {
         const std::size_t begin = chunk * MaxBatchSubrequests;
         const std::size_t end = std::min(begin + MaxBatchSubrequests, m_names.size());
 
         HttpRequest request;
+        std::string boundary;
         try {
-            const std::string boundary = "batch_" + CreateClientRequestId();
-            std::string body;
-            for (std::size_t index = begin; index < end; ++index) {
-                const BlobTarget blob =
-                    MakeBlobTarget(m_target->Connection, m_target->ContainerName, m_names.at(index));
-                HttpRequest subrequest;
-                subrequest.SetMethod(HttpMethod::Delete);
-                subrequest.SetUrl(BuildBlobUrl(blob));
-                AddHeader(subrequest, XMsDateHeaderName, BuildDateHeaderValue(std::chrono::system_clock::now()));
-                AuthorizeSubrequest(subrequest, token);
-                AddHeader(subrequest, ContentLengthHeaderName, "0");
-                AppendBatchDeletePart(body, boundary, index - begin, subrequest);
-            }
-            AppendBatchClosingBoundary(body, boundary);
-
+            boundary = "batch_" + CreateClientRequestId();
             request = BuildContainerRequest(*m_target, HttpMethod::Post, "comp=batch");
             AddHeader(request, ContentTypeHeaderName, "multipart/mixed; boundary=" + boundary);
-            request.SetBody(std::move(body));
         } catch (...) {
             FailChunk(MakeFailureFromCurrentException());
             return;
@@ -172,9 +165,12 @@ class BatchDeleteOperation final
                 self->OnChunkResponse(chunk, std::span{self->m_names}.subspan(begin, end - begin), error,
                                       std::move(response));
             },
-            m_requestOptions);
+            m_requestOptions,
+            [self = this->shared_from_this(), begin, end, boundary = std::move(boundary)](HttpRequest& attempt,
+                                                                                          std::string_view token) {
+                attempt.SetBody(self->BuildChunkBody(begin, end, boundary, token));
+            });
     }
-
     void OnChunkResponse(std::size_t chunk, std::span<const std::string> names, std::error_code error,
                          HttpResponse response) {
         RequestFailure failure = DetermineBlobStorageFailure(error, response);
