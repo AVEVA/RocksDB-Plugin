@@ -68,6 +68,17 @@ template <typename TBlob> class BasicReadableFileImpl {
     };
     std::shared_ptr<PrefetchState> m_prefetch = std::make_shared<PrefetchState>();
 
+    // Concurrent async reads that need fresh blob metadata (at the cached end, or after a precondition failure) share
+    // one in-flight properties call instead of each issuing their own.
+    using MetadataCallback = std::move_only_function<void(std::exception_ptr, int64_t, std::string)>;
+    struct MetadataRefreshState {
+        std::mutex Mutex;
+        bool InFlight = false;
+        std::vector<MetadataCallback> Waiters;
+    };
+    std::shared_ptr<MetadataRefreshState> m_metadataRefresh = std::make_shared<MetadataRefreshState>();
+    static void CoalescedMetadataAsync(const BasicReadableFileImpl& file, MetadataCallback callback);
+
     // Serves from a completed prefetch only. With `wait`, first waits (bounded) for a covering pending prefetch.
     // With `allowPartial`, a range that only starts inside a slot is served up to the slot's end and the caller
     // fetches the remainder; the result is then the number of bytes copied, which may be less than requested.

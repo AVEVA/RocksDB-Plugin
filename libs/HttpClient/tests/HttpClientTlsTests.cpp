@@ -192,9 +192,10 @@ class TlsTestServer {
         EofDelimitedAbort // No Content-Length; the TCP connection closes without a TLS close_notify.
     };
 
-    TlsTestServer(asio::io_context& context, const std::string& subjectAltName, AfterResponse after)
+    TlsTestServer(asio::io_context& context, const std::string& subjectAltName, AfterResponse after,
+                  const char* bindAddress = "127.0.0.1")
         : m_context(context), m_sslContext(asio::ssl::context::tls_server),
-          m_acceptor(context, {asio::ip::make_address("127.0.0.1"), 0}), m_after(after) {
+          m_acceptor(context, {asio::ip::make_address(bindAddress), 0}), m_after(after) {
         std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> key(EVP_PKEY_Q_keygen(nullptr, nullptr, "EC", "prime256v1"),
                                                                 EVP_PKEY_free);
         std::unique_ptr<X509, decltype(&X509_free)> certificate(X509_new(), X509_free);
@@ -451,6 +452,23 @@ TEST(HttpClientTls, ServerNameIsSentForDnsHosts) {
     ASSERT_EQ(outcomes.size(), 1U);
     EXPECT_FALSE(outcomes[0].Error) << outcomes[0].Error.message();
     EXPECT_EQ(server.ServerName(), "localhost");
+}
+
+TEST(HttpClientTls, Ipv6LiteralHostIsVerifiedAgainstItsAddressAndSendsNoServerName) {
+    asio::io_context context;
+    std::unique_ptr<TlsTestServer> server;
+    try {
+        server = std::make_unique<TlsTestServer>(context, "IP:0:0:0:0:0:0:0:1", TlsTestServer::AfterResponse::KeepOpen,
+                                                 "::1");
+    } catch (const boost::system::system_error&) {
+        GTEST_SKIP() << "IPv6 loopback is not available";
+    }
+    const auto outcomes = SendSequentialRequests(context, *server, {}, "[::1]", 1);
+
+    ASSERT_EQ(outcomes.size(), 1U);
+    EXPECT_FALSE(outcomes[0].Error) << outcomes[0].Error.message();
+    EXPECT_EQ(outcomes[0].Status, 200U);
+    EXPECT_TRUE(server->ServerName().empty()) << "SNI must not be sent for IPv6 literals";
 }
 
 TEST(HttpClientTls, Tls13CanBeRequired) {

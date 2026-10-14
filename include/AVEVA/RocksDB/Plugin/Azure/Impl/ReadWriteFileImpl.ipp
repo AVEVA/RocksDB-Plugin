@@ -29,20 +29,7 @@ BasicReadWriteFileImpl<TBlob>::BasicReadWriteFileImpl(
 }
 
 template <typename TBlob> BasicReadWriteFileImpl<TBlob>::~BasicReadWriteFileImpl() {
-    for (int i = 0; i < 5; i++) {
-        if (i > 0) {
-            BOOST_LOG_SEV(*m_logger, boost::log::trivial::debug)
-                << "Retrying to close file '" << m_name << "'. Attempt " << i << " of 5";
-        }
-        try {
-            Close();
-            break;
-        } catch (const std::exception& e) {
-            BOOST_LOG_SEV(*m_logger, boost::log::trivial::warning)
-                << "Failed to close file '" << m_name << "' on attempt " << i;
-            BOOST_LOG_SEV(*m_logger, boost::log::trivial::warning) << "Exception details: " << e.what();
-        }
-    }
+    CloseWithRetries(*m_logger, m_name, [this] { Close(); }, [] { return false; });
 }
 
 template <typename TBlob>

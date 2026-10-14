@@ -14,6 +14,11 @@ LogRateLimiter::LogRateLimiter(std::vector<std::string> patterns, std::chrono::s
 
 RateCheckResult LogRateLimiter::CheckAndRecord(const char* format)
 {
+    return CheckAndRecord(format, std::chrono::steady_clock::now());
+}
+
+RateCheckResult LogRateLimiter::CheckAndRecord(const char* format, std::chrono::steady_clock::time_point now)
+{
     if (format == nullptr)
     {
         return {RateDecision::Allow, 0};
@@ -37,8 +42,6 @@ RateCheckResult LogRateLimiter::CheckAndRecord(const char* format)
         // Not a noisy pattern — pass straight through, no state update.
         return {RateDecision::Allow, 0};
     }
-
-    const auto now = std::chrono::steady_clock::now();
 
     std::lock_guard<std::mutex> lock(m_mutex);
     auto& state = m_state[*matched]; // default-inserts PatternState{} on first access

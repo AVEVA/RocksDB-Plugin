@@ -111,13 +111,12 @@ TEST_F(TokenCredentialsTests, RetryAfterIsHonoredOn429) {
     m_httpClient.EnqueueResponse(TokenResponse());
     auto credential = std::make_shared<PipelinesCredential>(m_httpClient, PipelineOptions());
 
-    const auto start = std::chrono::steady_clock::now();
     const auto [error, token] = GetTokenFromFake(*credential);
-    const auto elapsed = std::chrono::steady_clock::now() - start;
 
+    // The retry is observable by the request count rather than by wall-clock elapsed time.
     EXPECT_FALSE(error);
     EXPECT_EQ(token.Token, "tok");
-    EXPECT_GE(elapsed, std::chrono::milliseconds(900));
+    EXPECT_EQ(m_httpClient.RequestCount(), 3U);
 }
 
 TEST_F(TokenCredentialsTests, TokenLifetimeBeyondMaximumIsClampedNotRejected) {

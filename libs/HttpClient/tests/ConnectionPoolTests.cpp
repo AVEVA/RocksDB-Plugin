@@ -352,14 +352,17 @@ TEST(ConnectionPool, RealSocketLivenessCheckDiscardsPeerClosedConnection) {
         {asio::ip::make_address("127.0.0.1"), acceptor.local_endpoint().port()});
     acceptor.accept(server);
 
-    ConnectionPool<PlainStream> pool(4, LongTimeout);
-    const ConnectionKey<PlainStream> key{"127.0.0.1", "80"};
-    pool.Release(key, PooledConnection<PlainStream>{std::make_unique<PlainStream>(std::move(stream)), {}});
-
+    // Wait until the peer's FIN is visible on the client socket instead of sleeping for an arbitrary time.
     boost::system::error_code ignored;
     server.shutdown(Tcp::socket::shutdown_both, ignored);
     server.close(ignored);
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    AVEVA::Private::beast::get_lowest_layer(stream).socket().wait(Tcp::socket::wait_read, ignored);
+
+    ConnectionPool<PlainStream, FakeClock> pool(4, LongTimeout);
+    const ConnectionKey<PlainStream> key{"127.0.0.1", "80"};
+    pool.Release(key, PooledConnection<PlainStream>{std::make_unique<PlainStream>(std::move(stream)), {}});
+    // Connections idle for less than the probe threshold are handed out unchecked, so age it past that.
+    FakeClock::Advance(std::chrono::seconds(1));
 
     EXPECT_FALSE(pool.Acquire(key).has_value());
 }

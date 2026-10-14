@@ -233,12 +233,20 @@ void CopyPages(const ClientRuntimeBase& runtime, TBlob& source, TBlob& destinati
     }
 
     constexpr auto PageSize = static_cast<int64_t>(Configuration::PageBlob::PageSize);
-    const auto allocate = [](int64_t length) {
-        return std::vector<char>(static_cast<size_t>((length + PageSize - 1) / PageSize * PageSize));
+    const auto paddedLength = [](int64_t length) {
+        return static_cast<size_t>((length + PageSize - 1) / PageSize * PageSize);
     };
-
-    std::vector<char> current = allocate(chunks.front().Length);
-    std::vector<char> next;
+    // Two buffers sized for the largest chunk are reused for the whole copy rather than allocated per chunk.
+    size_t largest = 0;
+    for (const auto& chunk : chunks) {
+        largest = std::max(largest, paddedLength(chunk.Length));
+    }
+    std::vector<char> current(largest);
+    std::vector<char> next(chunks.size() > 1 ? largest : 0);
+    // Zeroes the padding after a chunk's data, which would otherwise hold the previous chunk's bytes.
+    const auto zeroPadding = [&](std::vector<char>& buffer, int64_t length) {
+        std::fill(buffer.begin() + length, buffer.begin() + static_cast<std::ptrdiff_t>(paddedLength(length)), '\0');
+    };
     std::optional<PendingDownload<TBlob>> pending;
     // A download still in flight writes into `current`/`next`, so on failure wait for it before they are destroyed.
     // Declared after the buffers so that it runs first.
@@ -250,7 +258,6 @@ void CopyPages(const ClientRuntimeBase& runtime, TBlob& source, TBlob& destinati
             }
         }
     } waitForPending{pending};
-
     pending.emplace(StartDownload(source, std::span<char>(current).first(static_cast<size_t>(chunks.front().Length)),
                                   chunks.front().Offset, chunks.front().Length, etag));
     for (size_t index = 0; index < chunks.size(); ++index) {
@@ -261,13 +268,13 @@ void CopyPages(const ClientRuntimeBase& runtime, TBlob& source, TBlob& destinati
         }
         if (index + 1 < chunks.size()) {
             const auto& following = chunks[index + 1];
-            next = allocate(following.Length);
             pending.emplace(StartDownload(source, std::span<char>(next).first(static_cast<size_t>(following.Length)),
                                           following.Offset, following.Length, etag));
         }
-        UploadPages(runtime, destination, std::span<const char>(current), chunk.Offset);
-        current = std::move(next);
-        next.clear();
+        zeroPadding(current, chunk.Length);
+        UploadPages(runtime, destination, std::span<const char>(current).first(paddedLength(chunk.Length)),
+                    chunk.Offset);
+        current.swap(next);
     }
 }
 // True when the service refused to read the copy source for lack of authorization, which says nothing about the

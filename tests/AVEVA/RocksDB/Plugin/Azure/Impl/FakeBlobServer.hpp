@@ -98,6 +98,7 @@ class FakeBlobServer {
     std::string m_primaryPath;
     std::set<std::string> m_containers;
     std::deque<std::size_t> m_heldUploads;
+    std::deque<std::size_t> m_heldProperties;
     std::deque<std::pair<std::size_t, DownloadRequest>> m_heldDownloads;
 
   public:
@@ -169,6 +170,26 @@ class FakeBlobServer {
     // Holds page uploads / ranged downloads until the test releases them.
     bool DeferUploads = false;
     bool DeferDownloads = false;
+    // Holds Get Blob Properties until CompleteProperties; the response carries the values it had when sent.
+    bool DeferProperties = false;
+    size_t PendingProperties() {
+        return CountLive(m_heldProperties, [](std::size_t index) { return index; });
+    }
+    void CompleteProperties() {
+        std::size_t index = 0;
+        {
+            std::scoped_lock lock(m_mutex);
+            PruneLocked(m_heldProperties, [](std::size_t entry) { return entry; });
+            if (m_heldProperties.empty()) {
+                throw std::logic_error("FakeBlobServer has no deferred properties request");
+            }
+            index = m_heldProperties.front();
+            m_heldProperties.pop_front();
+        }
+        if (!m_http->CompleteRequest(index)) {
+            throw std::logic_error("FakeBlobServer properties request was already completed");
+        }
+    }
 
     [[nodiscard]] static AzureClient::BlobStorageError Error(unsigned int statusCode, std::string errorCode) {
         AzureClient::BlobStorageError error;
@@ -426,7 +447,7 @@ class FakeBlobServer {
         StoredBlob& blob = it->second;
 
         if (method == HttpMethod::Head) {
-            return GetProperties(blob);
+            return GetProperties(blob, record.Index);
         }
         if (method == HttpMethod::Get && comp.empty()) {
             return Download(record, blob);
@@ -711,14 +732,19 @@ class FakeBlobServer {
         return Success(MakeResponse(200U, {HttpHeader("Content-Type", "application/xml")}, std::move(body)));
     }
 
-    Result GetProperties(const StoredBlob& blob) {
+    Result GetProperties(const StoredBlob& blob, const std::size_t requestIndex) {
         if (const auto fault = FaultFor(Operation::GetProperties)) {
             return FailureResult(*fault);
         }
         ++PropertiesRequests;
         auto headers = BlobHeaders(blob);
         headers.emplace_back("Content-Length", std::to_string(blob.Data.size()));
-        return Success(MakeResponse(200U, std::move(headers)));
+        Result result = Success(MakeResponse(200U, std::move(headers)));
+        if (DeferProperties) {
+            result.Deferred = true;
+            m_heldProperties.push_back(requestIndex);
+        }
+        return result;
     }
 
     Result SetMetadata(const HttpRequest& request, StoredBlob& blob) {

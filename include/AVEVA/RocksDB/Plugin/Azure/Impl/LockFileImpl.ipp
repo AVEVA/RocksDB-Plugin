@@ -81,7 +81,7 @@ template <typename TBlob> bool BasicLockFileImpl<TBlob>::Lock() {
     BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::debug)
         << "Attempting to acquire blob lease for '" << m_fileName
         << "' (timeout: " << std::chrono::duration_cast<std::chrono::seconds>(m_acquireTimeout).count() << "s)";
-    auto start = std::chrono::steady_clock::now();
+    auto start = Now();
     auto end = start;
     // The service starts the lease clock when it receives the request, so the renewal time is taken before sending.
     auto attemptStart = start;
@@ -90,7 +90,7 @@ template <typename TBlob> bool BasicLockFileImpl<TBlob>::Lock() {
     // with the same ID is accepted by the service instead of failing with a conflict until the lease expires.
     const auto leaseId = LockFileDetail::NewLeaseId();
     while ((end - start) < m_acquireTimeout) {
-        attemptStart = std::chrono::steady_clock::now();
+        attemptStart = Now();
         AzureClient::AcquireLeaseOptions options;
         options.ProposedLeaseId = leaseId;
         options.Duration = m_leaseLength;
@@ -111,14 +111,14 @@ template <typename TBlob> bool BasicLockFileImpl<TBlob>::Lock() {
 
         lastError = result.error();
         if (!LockFileDetail::ShouldRetryAcquire(*lastError)) {
-            end = std::chrono::steady_clock::now();
+            end = Now();
             break;
         }
 
         // Avoid hammering the service while another owner holds the lease.
         static const constexpr auto retryDelay = std::chrono::milliseconds(250);
         std::this_thread::sleep_for(retryDelay);
-        end = std::chrono::steady_clock::now();
+        end = Now();
     }
 
     if (lastError.has_value()) {
@@ -186,7 +186,7 @@ template <typename TBlob> std::chrono::steady_clock::duration BasicLockFileImpl<
 
     // Retries inside one renewal could otherwise outlast the lease while the caller keeps writing as if it held it.
     // The whole request, retries included, is cancelled at the renewal deadline.
-    const auto budget = RenewalDeadline() - std::chrono::steady_clock::now();
+    const auto budget = RenewalDeadline() - Now();
     if (budget <= std::chrono::steady_clock::duration::zero()) {
         throw std::runtime_error(
             "Cannot renew lease for '" + m_fileName +
@@ -215,7 +215,7 @@ template <typename TBlob> void BasicLockFileImpl<TBlob>::RenewAsync(RenewCallbac
     // The client bounds the whole request, retries included, by the renewal deadline.
     auto requestOptions = m_file->GetDefaultRequestOptions();
     requestOptions.SetTotalDeadline(LockFileDetail::TotalDeadlineFor(budget));
-    const auto requestStart = std::chrono::steady_clock::now();
+    const auto requestStart = Now();
     m_file->RenewLeaseAsync(
         std::move(options),
         [this, leaseId = *leaseId, requestStart, callback = std::move(callback)](auto result) mutable {
@@ -281,7 +281,7 @@ template <typename TBlob> void BasicLockFileImpl<TBlob>::Unlock() {
 }
 
 template <typename TBlob> std::chrono::seconds BasicLockFileImpl<TBlob>::TimeSinceLastRenewal() const {
-    return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() -
+    return std::chrono::duration_cast<std::chrono::seconds>(Now() -
                                                             m_lastRenewalTime.load());
 }
 
@@ -297,7 +297,12 @@ template <typename TBlob> std::chrono::steady_clock::time_point BasicLockFileImp
 }
 
 template <typename TBlob> bool BasicLockFileImpl<TBlob>::IsRenewalOverdue() const {
-    return m_held.load() && std::chrono::steady_clock::now() >= RenewalDeadline();
+    return m_held.load() && Now() >= RenewalDeadline();
+}
+
+template <typename TBlob> void BasicLockFileImpl<TBlob>::SetClockForTesting(Clock clock) {
+    m_clock = std::move(clock);
+    m_lastRenewalTime = Now();
 }
 
 template <typename TBlob> void BasicLockFileImpl<TBlob>::unlink() {

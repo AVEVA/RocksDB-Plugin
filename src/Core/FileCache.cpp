@@ -156,9 +156,27 @@ void FileCache::SetCacheSize(int64_t size) {
     m_maxSize = size;
 }
 
+void FileCache::WaitUntilIdle() {
+    std::unique_lock lock(m_mutex);
+    m_idleCv.wait(lock, [this] { return m_fileDownloadQueue.empty() && !m_downloadInFlight; });
+}
+
 void FileCache::BackgroundDownload(std::stop_token stopToken) {
     while (true) {
         try {
+            // Declared before any lock in this iteration so it runs last and can safely take the mutex.
+            struct InFlightGuard {
+                FileCache& cache;
+                bool armed = false;
+                ~InFlightGuard() {
+                    if (armed) {
+                        std::scoped_lock lock(cache.m_mutex);
+                        cache.m_downloadInFlight = false;
+                        cache.m_idleCv.notify_all();
+                    }
+                }
+            } inFlight{*this};
+
             std::string filePath;
             {
                 std::unique_lock lock(m_mutex);
@@ -184,6 +202,8 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
 
                 filePath = m_fileDownloadQueue.front();
                 m_fileDownloadQueue.pop();
+                m_downloadInFlight = true;
+                inFlight.armed = true;
 
                 auto it = m_cache.find(filePath);
                 if (it != m_cache.end()) {

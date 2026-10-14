@@ -819,6 +819,45 @@ TEST(SharedKeyCanonicalizationTests, ResourcePathIsUsedAsSentOnTheWire) {
     EXPECT_NE(toSign.find("/account/c/a%2Bb%20c.txt\nx:1 2"), std::string::npos) << toSign;
 }
 
+TEST(SharedKeyCanonicalizationTests, QueryKeysAreLowercasedMergedAndValuesAreDecodedAndSorted) {
+    AVEVA::HttpRequest request;
+    request.SetMethod(HttpMethod::Get);
+    request.SetUrl("https://account.blob.core.windows.net/c/b?Comp=list&COMP=Meta&a=%26b%3Dc");
+
+    const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
+    EXPECT_TRUE(toSign.ends_with("/account/c/b\na:&b=c\ncomp:Meta,list")) << toSign;
+}
+
+TEST(SharedKeyCanonicalizationTests, QueryParametersWithoutValuesOrWithEmptyValuesAreSignedWithEmptyValues) {
+    AVEVA::HttpRequest request;
+    request.SetMethod(HttpMethod::Get);
+    request.SetUrl("https://account.blob.core.windows.net/c/b?flag&a=");
+
+    const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
+    EXPECT_TRUE(toSign.ends_with("/account/c/b\na:\nflag:")) << toSign;
+}
+
+TEST(SharedKeyCanonicalizationTests, EmptyPathIsSignedAsTheRootResource) {
+    AVEVA::HttpRequest request;
+    request.SetMethod(HttpMethod::Get);
+    request.SetUrl("https://account.blob.core.windows.net?comp=list");
+
+    const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
+    EXPECT_TRUE(toSign.ends_with("/account/\ncomp:list")) << toSign;
+}
+
+TEST(SharedKeyCanonicalizationTests, MalformedUrlsAreRejected) {
+    for (const char* url : {"", "/container/blob", "http://[::1/c", "https://account.blob.core.windows.net/c%zz"}) {
+        AVEVA::HttpRequest request;
+        request.SetMethod(HttpMethod::Get);
+        request.SetUrl(url);
+
+        EXPECT_THROW((void)AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request),
+                     std::invalid_argument)
+            << url;
+    }
+}
+
 TEST(SharedKeyCanonicalizationTests, AuthorizationSupportsRootContainerUnicodeAndAzuritePathStyleEndpoints) {
     HttpRequest pathStyleRequest;
     pathStyleRequest.SetMethod(HttpMethod::Get);

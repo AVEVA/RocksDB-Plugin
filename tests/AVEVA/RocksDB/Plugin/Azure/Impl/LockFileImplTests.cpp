@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LeaseRenewalLoop.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
@@ -17,6 +18,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <exception>
 #include <future>
@@ -47,10 +49,12 @@ class LockFileImplTests : public ::testing::Test {
         m_logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
     }
 
-    std::unique_ptr<LockFileImpl> CreateLock(std::chrono::seconds leaseLength) {
+    std::unique_ptr<LockFileImpl> CreateLock(std::chrono::seconds leaseLength,
+                                             std::optional<std::chrono::milliseconds> acquireTimeout = std::nullopt) {
         auto client = std::make_unique<AVEVA::AzureClient::Tests::PageBlobClient>(
             m_httpClient, MakeBlobClientOptions("locks", "LOCK"));
-        return std::make_unique<LockFileImpl>(m_runtime, std::move(client), leaseLength, m_logger, "LOCK");
+        return std::make_unique<LockFileImpl>(m_runtime, std::move(client), leaseLength, m_logger, "LOCK",
+                                              acquireTimeout);
     }
 
     static HttpResponse Acquired() {
@@ -109,12 +113,12 @@ TEST_F(LockFileImplTests, ForbiddenThrowsWithoutRetrying) {
 }
 
 TEST_F(LockFileImplTests, LeaseStillHeldWhenRetriesRunOutReturnsFalse) {
-    // 15s is the shortest lease the service accepts; retries run every 250ms for that long.
+    // A short acquire timeout (the lease is still the service minimum of 15s) keeps the retry loop brief.
     for (int i = 0; i < 100; ++i) {
         m_httpClient.EnqueueResponse(MakeAzureErrorResponse(409, "LeaseAlreadyPresent", "held", "r1"));
     }
 
-    auto lock = CreateLock(std::chrono::seconds(15));
+    auto lock = CreateLock(std::chrono::seconds(15), std::chrono::milliseconds(600));
     EXPECT_FALSE(lock->Lock());
     EXPECT_GE(m_httpClient.RequestCount(), 2U);
 }
@@ -176,19 +180,28 @@ TEST_F(LockFileImplTests, RenewThatOutlastsTheLeaseIsCancelledAtTheDeadlineAndTh
     // Never completed: the renewal hangs until the lease has run out.
     m_httpClient.EnqueueDeferredResponse(HttpResponse{200, MakeCanonicalSuccessHeaders({}), ""});
 
-    // 15s is the shortest lease the service accepts, so this test runs for about that long.
+    // 15s is the shortest lease the service accepts. The lease clock is simulated so that only ~200ms of real time
+    // remain before the renewal deadline, which the client enforces with a real timer.
     const auto leaseLength = std::chrono::seconds(15);
+    const auto margin = std::min<std::chrono::milliseconds>(AVEVA::RocksDB::Plugin::Azure::Impl::Configuration::LeaseSafetyMargin,
+                                                            std::chrono::milliseconds(leaseLength) / 10);
     auto lock = CreateLock(leaseLength);
+    auto offset = std::make_shared<std::atomic<std::chrono::steady_clock::duration>>(
+        std::chrono::steady_clock::duration::zero());
+    lock->SetClockForTesting([offset] { return std::chrono::steady_clock::now() + offset->load(); });
     ASSERT_TRUE(lock->Lock());
+
+    *offset = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::milliseconds(leaseLength) - margin - std::chrono::milliseconds(200));
+    ASSERT_FALSE(lock->HasExceededLeaseLength());
 
     const auto start = std::chrono::steady_clock::now();
     EXPECT_ANY_THROW(lock->Renew());
     const auto elapsed = std::chrono::steady_clock::now() - start;
 
-    // The caller must find out before it would keep writing under a lease the service has already released.
-    EXPECT_LT(elapsed, leaseLength);
-
-    std::this_thread::sleep_for(std::chrono::seconds(2));
+    // The caller must find out at the renewal deadline, not hang until the lease has run out.
+    EXPECT_LT(elapsed, std::chrono::seconds(5));
+    *offset = leaseLength;
     EXPECT_TRUE(lock->HasExceededLeaseLength());
     EXPECT_THROW(lock->Renew(), std::runtime_error);
     EXPECT_EQ(m_httpClient.RequestCount(), 2U);
@@ -337,8 +350,9 @@ TEST_F(LeaseRenewalLoopTests, StopHaltsFurtherRenewals) {
     ASSERT_TRUE(WaitForRequests(2));
 
     m_loop->Stop();
+    // Stop() is synchronous (timer cancelled, in-flight rounds drained), so nothing can be sent after it returns.
     const auto afterStop = m_httpClient.RequestCount();
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    std::this_thread::yield();
 
     EXPECT_EQ(m_httpClient.RequestCount(), afterStop);
     EXPECT_TRUE(m_loop->IsStopped());

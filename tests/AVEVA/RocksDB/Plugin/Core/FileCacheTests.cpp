@@ -40,27 +40,27 @@ class FileCacheTests : public ::testing::Test {
     }
 
     void EnsureReadFromCache(const std::string_view filePath) {
-        constexpr int maxAttempts = 100; // ~10s at 100ms per attempt before failing fast
+        constexpr int maxAttempts = 2000; // ~10s at 5ms per attempt before failing fast
         for (int attempt = 0; attempt < maxAttempts; ++attempt) {
             const auto bytesRead = m_cache.ReadFile(filePath, 0, 0, nullptr);
             if (bytesRead) {
                 return;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         FAIL() << "Timed out waiting for '" << filePath << "' to become readable from cache";
     }
 
     void EnsureReadFromCache(const std::string_view filePath, const size_t expectedCacheSize) {
         char buffer[1];
-        constexpr int maxAttempts = 100; // ~10s at 100ms per attempt before failing fast
+        constexpr int maxAttempts = 2000; // ~10s at 5ms per attempt before failing fast
         for (int attempt = 0; attempt < maxAttempts; ++attempt) {
             const auto bytesRead = m_cache.ReadFile(filePath, 0, 1, buffer);
             if (bytesRead) {
                 ASSERT_EQ(expectedCacheSize, m_cache.CacheSize());
                 return;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         FAIL() << "Timed out waiting for '" << filePath << "' to become readable from cache";
     }
@@ -280,7 +280,7 @@ TEST_F(FileCacheTests, ReadFile_FirstAccess_DoesNotStartDownload) {
     // Act
     char buffer[1];
     const auto bytesRead = m_cache.ReadFile("1.sst", 0, 1, buffer);
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    m_cache.WaitUntilIdle();
 
     // Assert
     EXPECT_FALSE(bytesRead);
@@ -295,7 +295,7 @@ TEST_F(FileCacheTests, ReadFile_SecondAccess_QueuesAndDownloads) {
     // First access should only record stale metadata.
     char buffer[1];
     const auto bytesReadOnFirstAccess = m_cache.ReadFile("1.sst", 0, 1, buffer);
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    m_cache.WaitUntilIdle();
     ASSERT_TRUE(::testing::Mock::VerifyAndClearExpectations(m_containerClient.get()));
 
     EXPECT_CALL(*m_containerClient, GetBlobSize("1.sst"))
@@ -337,7 +337,7 @@ TEST_F(FileCacheTests, ReadFile_TooManyUndownloadedStaleEntries_PrunesOldest) {
         const auto bytesRead = m_cache.ReadFile(filePath, 0, 1, buffer);
         ASSERT_FALSE(bytesRead);
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    m_cache.WaitUntilIdle();
 
     // Assert
     EXPECT_FALSE(m_cache.HasFile("0.sst"));

@@ -52,6 +52,9 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         // <param name="format">  The printf-style format string passed to Logv (may be null). </param>
         RateCheckResult CheckAndRecord(const char* format);
 
+        // Same as above with an explicit timestamp, so cooldown expiry can be tested without sleeping.
+        RateCheckResult CheckAndRecord(const char* format, std::chrono::steady_clock::time_point now);
+
     private:
         struct PatternState
         {

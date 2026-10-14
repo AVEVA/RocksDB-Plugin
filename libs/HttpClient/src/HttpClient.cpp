@@ -244,10 +244,10 @@ class HttpClient::Impl {
     /// queued or being dequeued; the operation checks it once it owns the slot.</param>
     void SendUnlimited(HttpRequest request, Detail::CompletionPointer completion, HttpRequestOptions options,
                        std::shared_ptr<std::atomic<bool>> cancelled = nullptr) {
-        // Invalid requests take the fresh-connection path, which fails them without closing a healthy
-        // pooled connection.
+        // Only requests that pass the same validation the operation applies may take a pooled connection, so that
+        // failing an invalid one cannot cost a healthy connection; invalid ones take the fresh-connection path.
         auto parsed = urls::parse_uri(request.GetUrl());
-        if (parsed && IsPoolableRequest(request, options) && Private::IsValidRequestUrl(*parsed)) {
+        if (parsed && !Private::ValidateRequest(request, options, *parsed)) {
             const bool isTls = parsed->scheme_id() == urls::scheme::https;
             if (isTls) {
                 TlsConnectionKey key{parsed->host_address(), parsed->has_port() ? std::string(parsed->port()) : "443"};
@@ -292,24 +292,6 @@ class HttpClient::Impl {
     }
 
   private:
-    /// <summary>
-    /// Whether the request is one that may be sent on a pooled connection. An invalid request is not,
-    /// so that failing it cannot cost a healthy pooled connection.
-    /// </summary>
-    /// <param name="request">The request to classify.</param>
-    /// <param name="options">The options the request would be sent with.</param>
-    /// <returns>True if the request may use a pooled connection.</returns>
-    static bool IsPoolableRequest(const HttpRequest& request, const HttpRequestOptions& options) {
-        const HttpMethod method = request.GetMethod();
-        if (Private::ToBeastVerb(method) == boost::beast::http::verb::unknown || method == HttpMethod::Connect ||
-            (method == HttpMethod::Trace && request.GetBodySize() != 0) || options.GetTimeout().count() <= 0) {
-            return false;
-        }
-        return std::all_of(request.GetHeaders().begin(), request.GetHeaders().end(), [](const HttpHeader& header) {
-            return Private::IsValidHeader(header.GetName(), header.GetValue());
-        });
-    }
-
     /// <summary>
     /// Starts the request on an already-connected pooled stream, on the executor that stream was
     /// created with.

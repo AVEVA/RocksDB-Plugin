@@ -572,7 +572,10 @@ TEST(HttpClientRobustness, CancellationFromAnotherThreadCompletesExactlyOnce) {
         });
 
         std::thread canceller([&] {
-            std::this_thread::sleep_for(std::chrono::milliseconds(iteration % 5));
+            // Spin a varying number of yields so the cancel lands at different points, without wall-clock jitter.
+            for (int spin = 0; spin < (iteration % 5) * 200; ++spin) {
+                std::this_thread::yield();
+            }
             cancellation.emit(asio::cancellation_type::terminal);
         });
         context.run();

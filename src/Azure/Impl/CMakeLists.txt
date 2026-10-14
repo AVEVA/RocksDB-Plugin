@@ -43,6 +43,7 @@ target_sources(aveva-rocksdb-plugin-azure-impl
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BufferChunkInfo.hpp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/CloseWithRetries.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/LoggerImpl.hpp"

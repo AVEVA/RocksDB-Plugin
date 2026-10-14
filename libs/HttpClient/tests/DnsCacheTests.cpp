@@ -29,7 +29,19 @@ struct RecordingWaiter {
     }
 };
 
-using TestDnsCache = BasicDnsCache<std::chrono::steady_clock, RecordingWaiter>;
+// A manually advanced clock, so TTL expiry is tested without sleeping.
+struct FakeClock {
+    using rep = std::chrono::steady_clock::rep;
+    using period = std::chrono::steady_clock::period;
+    using duration = std::chrono::steady_clock::duration;
+    using time_point = std::chrono::time_point<FakeClock>;
+    static constexpr bool is_steady = true;
+
+    static inline time_point Current{};
+    static time_point now() { return Current; }
+};
+
+using TestDnsCache = BasicDnsCache<FakeClock, RecordingWaiter>;
 
 Tcp::resolver::results_type Loopback(boost::asio::io_context& io) {
     Tcp::resolver resolver(io);
@@ -41,6 +53,7 @@ TEST(DnsCacheTests, ReturnsAStoredResultUntilTheTtlElapses) {
     boost::asio::io_context io;
     const auto results = Loopback(io);
     TestDnsCache cache(std::chrono::seconds{1});
+    FakeClock::Current = {};
 
     EXPECT_FALSE(cache.Find("host", "80").has_value());
     cache.Store("host", "80", results);
@@ -51,7 +64,9 @@ TEST(DnsCacheTests, ReturnsAStoredResultUntilTheTtlElapses) {
     EXPECT_FALSE(cache.Find("host", "81").has_value());
     EXPECT_FALSE(cache.Find("other", "80").has_value());
 
-    std::this_thread::sleep_for(std::chrono::milliseconds{1100});
+    FakeClock::Current += std::chrono::milliseconds{999};
+    EXPECT_TRUE(cache.Find("host", "80").has_value());
+    FakeClock::Current += std::chrono::milliseconds{1};
     EXPECT_FALSE(cache.Find("host", "80").has_value());
 }
 
@@ -78,6 +93,28 @@ TEST(DnsCacheTests, ConcurrentLookupsForOneOriginShareASingleLeader) {
     EXPECT_TRUE(cache.Find("host", "80").has_value());
 
     // The key is free again once the leader has finished.
+    RecordingWaiter next;
+    EXPECT_TRUE(cache.JoinOrLead("host", "80", next));
+    cache.Finish("host", "80", boost::asio::error::host_not_found, {});
+}
+
+TEST(DnsCacheTests, AbortedLeaderDeliversTheErrorToFollowersCachesNothingAndFreesTheKey) {
+    TestDnsCache cache;
+    RecordingWaiter leader;
+    ASSERT_TRUE(cache.JoinOrLead("host", "80", leader));
+
+    int delivered = 0;
+    boost::system::error_code seenError;
+    RecordingWaiter follower{&delivered, &seenError};
+    EXPECT_FALSE(cache.JoinOrLead("host", "80", follower));
+
+    cache.Finish("host", "80", boost::asio::error::operation_aborted, {});
+
+    EXPECT_EQ(delivered, 1);
+    EXPECT_EQ(seenError, boost::asio::error::operation_aborted);
+    EXPECT_FALSE(cache.Find("host", "80").has_value());
+
+    // A late follower becomes the new leader instead of inheriting the abort.
     RecordingWaiter next;
     EXPECT_TRUE(cache.JoinOrLead("host", "80", next));
     cache.Finish("host", "80", boost::asio::error::host_not_found, {});

@@ -33,6 +33,8 @@ namespace AVEVA::RocksDB::Plugin::Core
         std::mutex m_mutex;
         std::stop_source m_stopSource;
         std::condition_variable m_cv;
+        std::condition_variable m_idleCv;
+        bool m_downloadInFlight = false;
         std::unordered_map<std::string, FileCacheEntry, StringHash, StringEqual> m_cache;
         std::queue<std::string> m_fileDownloadQueue;
         boost::intrusive::list<FileCacheEntry, boost::intrusive::constant_time_size<false>> m_entryList;
@@ -55,6 +57,9 @@ namespace AVEVA::RocksDB::Plugin::Core
         void RemoveFile(std::string_view filePath);
         [[nodiscard]] int64_t CacheSize();
         void SetCacheSize(int64_t size);
+        // Blocks until the background downloader has no queued or in-flight work. Lets tests assert that
+        // something did NOT happen without guessing how long to wait.
+        void WaitUntilIdle();
     private:
         void BackgroundDownload(std::stop_token stopToken);
         void EntryAccessedUnsafe(FileCacheEntry& file);

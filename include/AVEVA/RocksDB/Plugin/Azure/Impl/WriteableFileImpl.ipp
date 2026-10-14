@@ -60,27 +60,8 @@ BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(
 }
 
 template <typename TBlob> BasicWriteableFileImpl<TBlob>::~BasicWriteableFileImpl() {
-    for (int i = 0; i < 5; i++) {
-        if (i > 0) {
-            BOOST_LOG_SEV(*m_logger, boost::log::trivial::debug)
-                << "Retrying to close file '" << m_name << "'. Attempt " << i << " of 5";
-        }
-        try {
-            Close();
-            break;
-        } catch (const std::exception& e) {
-            BOOST_LOG_SEV(*m_logger, boost::log::trivial::warning)
-                << "Failed to close file '" << m_name << "' on attempt " << i;
-            BOOST_LOG_SEV(*m_logger, boost::log::trivial::warning) << "Exception details: " << e.what();
-        } catch (...) {
-            BOOST_LOG_SEV(*m_logger, boost::log::trivial::warning)
-                << "Failed to close file '" << m_name << "' on attempt " << i;
-        }
-        // A failed upload is sticky, so retrying can only fail the same way.
-        if (HasUploadError()) {
-            break;
-        }
-    }
+    // A failed upload is sticky, so retrying can only fail the same way.
+    CloseWithRetries(*m_logger, m_name, [this] { Close(); }, [this] { return HasUploadError(); });
 
     // Outstanding upload completions use the blob client and logger, which are released below.
     DrainUploads();

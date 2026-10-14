@@ -145,6 +145,34 @@ TEST_F(AsyncReadTests, ReadAsync_DoesNotBlockAndPollDeliversOnCallerThread) {
     EXPECT_EQ(std::string(128, 'A'), record.Data);
 }
 
+TEST_F(AsyncReadTests, ReadAsync_ConcurrentReadsAtCachedEnd_ShareOnePropertiesCall) {
+    auto file = CreateFile(m_deferredEnv);
+    const int before = m_deferredEnv.Blob->PropertiesRequests;
+    m_deferredEnv.Blob->DeferProperties = true;
+
+    std::vector<char> scratchA(64);
+    std::vector<char> scratchB(64);
+    auto reqA = MakeRequest(BlobSize, scratchA);
+    auto reqB = MakeRequest(BlobSize, scratchB);
+    CallbackRecord recordA;
+    CallbackRecord recordB;
+    IoHandle handleA;
+    IoHandle handleB;
+    ASSERT_TRUE(Submit(file, reqA, recordA, handleA).ok());
+    ASSERT_TRUE(Submit(file, reqB, recordB, handleB).ok());
+    EXPECT_EQ(1U, m_deferredEnv.Blob->PendingProperties());
+
+    m_deferredEnv.Blob->CompleteProperties();
+    std::vector<void*> handles{handleA.Handle, handleB.Handle};
+    ASSERT_TRUE(PollAsyncReads(handles).ok());
+
+    EXPECT_EQ(1, recordA.Calls.load());
+    EXPECT_EQ(1, recordB.Calls.load());
+    EXPECT_TRUE(recordA.Status.ok()) << recordA.Status.ToString();
+    EXPECT_TRUE(recordB.Status.ok()) << recordB.Status.ToString();
+    EXPECT_EQ(before + 1, m_deferredEnv.Blob->PropertiesRequests);
+}
+
 TEST_F(AsyncReadTests, ReadAsync_RangeCoveredByPendingPrefetch_WaitsForItWithoutBlockingOrDownloadingTwice) {
     auto file = CreateFile(m_deferredEnv);
     ASSERT_TRUE(file.Prefetch(1024, 2048, rocksdb::IOOptions{}, nullptr).ok());

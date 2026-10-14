@@ -19,6 +19,16 @@ RequestFailedException StaleReadException() {
 
 std::exception_ptr StaleReadError() { return std::make_exception_ptr(StaleReadException()); }
 
+// The one policy for reads against a blob that may change underneath us, shared by the synchronous
+// (DownloadWithRetry) and asynchronous (ReadAsyncAttempt) paths so they cannot drift apart: a 412 from the
+// ETag-conditioned download means "stale", and each refresh-and-retry spends one unit of a fixed budget.
+namespace StaleReadPolicy {
+bool IsStale(const RequestFailedException& e) { return e.StatusCode == HttpStatus::PreconditionFailed; }
+
+// Spends one refresh from `left`; false means the budget is exhausted and the read must fail with StaleRead.
+bool TrySpendRefresh(int& left) { return left-- > 0; }
+} // namespace StaleReadPolicy
+
 // Ends an async read. The file is released before the callback runs and the callback (which may hold the read's
 // AsyncReadTracker token) is released last, so the filesystem cannot finish draining while this completion still
 // holds references into it.
@@ -350,9 +360,9 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
     const auto remaining = std::max<int64_t>(0, size - offset);
     if (remaining == 0) {
         // At the cached end of the blob: only re-read if another writer moved the blob on.
-        auto& blob = *self->m_blob;
-        BlobOperations::GetMetadataAsync(
-            blob, [self = std::move(self), offset, bytesToRead, callback = std::move(callback), etag, attemptsLeft,
+        const auto& file = *self;
+        CoalescedMetadataAsync(
+            file, [self = std::move(self), offset, bytesToRead, callback = std::move(callback), etag, attemptsLeft,
                    timeout](std::exception_ptr error, int64_t latestSize, std::string latestEtag) mutable {
                 if (error) {
                     FinishRead(self, callback, error, {});
@@ -363,12 +373,13 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
                     return;
                 }
 
-                if (attemptsLeft <= 0) {
+                auto left = attemptsLeft;
+                if (!StaleReadPolicy::TrySpendRefresh(left)) {
                     FinishRead(self, callback, StaleReadError(), {});
                     return;
                 }
                 self->SetMetadata(latestSize, std::move(latestEtag));
-                ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(callback), attemptsLeft - 1, timeout);
+                ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(callback), left, timeout);
             });
         return;
     }
@@ -383,13 +394,14 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
                 try {
                     std::rethrow_exception(error);
                 } catch (const RequestFailedException& ex) {
-                    if (ex.StatusCode == HttpStatus::PreconditionFailed) {
-                        if (attemptsLeft <= 0) {
+                    if (StaleReadPolicy::IsStale(ex)) {
+                        auto left = attemptsLeft;
+                        if (!StaleReadPolicy::TrySpendRefresh(left)) {
                             FinishRead(self, callback, StaleReadError(), {});
                             return;
                         }
-                        RefreshMetadataAndReadAsync(std::move(self), offset, bytesToRead, std::move(callback),
-                                                    attemptsLeft - 1, timeout);
+                        RefreshMetadataAndReadAsync(std::move(self), offset, bytesToRead, std::move(callback), left,
+                                                    timeout);
                         return;
                     }
                 } catch (...) {
@@ -410,8 +422,8 @@ void BasicReadableFileImpl<TBlob>::RefreshMetadataAndReadAsync(std::shared_ptr<c
                                                                const int64_t offset, const int64_t bytesToRead,
                                                                ReadCallback callback, const int attemptsLeft,
                                                                const std::chrono::milliseconds timeout) {
-    auto& blob = *self->m_blob;
-    BlobOperations::GetMetadataAsync(blob, [self = std::move(self), offset, bytesToRead, callback = std::move(callback),
+    const auto& file = *self;
+    CoalescedMetadataAsync(file, [self = std::move(self), offset, bytesToRead, callback = std::move(callback),
                                             attemptsLeft,
                                             timeout](std::exception_ptr error, int64_t size, std::string etag) mutable {
         if (error) {
@@ -421,6 +433,34 @@ void BasicReadableFileImpl<TBlob>::RefreshMetadataAndReadAsync(std::shared_ptr<c
 
         self->SetMetadata(size, std::move(etag));
         ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(callback), attemptsLeft, timeout);
+    });
+}
+
+// The first caller starts the properties call; callers arriving while it is in flight just queue behind it. A joiner
+// may thus receive metadata fetched slightly before it asked; if that is already stale its read fails the ETag
+// condition again and is retried against its own refresh budget.
+template <typename TBlob>
+void BasicReadableFileImpl<TBlob>::CoalescedMetadataAsync(const BasicReadableFileImpl& file,
+                                                          typename BasicReadableFileImpl<TBlob>::MetadataCallback callback) {
+    auto state = file.m_metadataRefresh;
+    {
+        std::scoped_lock lock(state->Mutex);
+        state->Waiters.push_back(std::move(callback));
+        if (state->InFlight) {
+            return;
+        }
+        state->InFlight = true;
+    }
+    BlobOperations::GetMetadataAsync(*file.m_blob, [state](std::exception_ptr error, int64_t size, std::string etag) {
+        std::vector<typename BasicReadableFileImpl<TBlob>::MetadataCallback> waiters;
+        {
+            std::scoped_lock lock(state->Mutex);
+            waiters.swap(state->Waiters);
+            state->InFlight = false;
+        }
+        for (auto& waiter : waiters) {
+            waiter(error, size, etag);
+        }
     });
 }
 
@@ -440,7 +480,7 @@ int64_t BasicReadableFileImpl<TBlob>::DownloadWithRetry(const int64_t offset, co
         if (remaining == 0) {
             auto latestEtag = BlobOperations::GetEtag(*m_blob);
             if (latestEtag != etag) {
-                if (refreshesLeft-- <= 0) {
+                if (!StaleReadPolicy::TrySpendRefresh(refreshesLeft)) {
                     throw StaleReadException();
                 }
                 RefreshBlobMetadata();
@@ -457,8 +497,8 @@ int64_t BasicReadableFileImpl<TBlob>::DownloadWithRetry(const int64_t offset, co
             bytesRead = std::min(bytesRead, remaining);
             success = true;
         } catch (const RequestFailedException& ex) {
-            if (ex.StatusCode == HttpStatus::PreconditionFailed) {
-                if (refreshesLeft-- <= 0) {
+            if (StaleReadPolicy::IsStale(ex)) {
+                if (!StaleReadPolicy::TrySpendRefresh(refreshesLeft)) {
                     throw StaleReadException();
                 }
                 RefreshBlobMetadata();

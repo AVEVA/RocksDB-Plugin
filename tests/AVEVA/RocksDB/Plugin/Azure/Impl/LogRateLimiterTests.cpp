@@ -5,15 +5,12 @@
 
 #include <gtest/gtest.h>
 #include <chrono>
-#include <thread>
 
 using AVEVA::RocksDB::Plugin::Azure::Impl::LogRateLimiter;
 using AVEVA::RocksDB::Plugin::Azure::Impl::RateCheckResult;
 using AVEVA::RocksDB::Plugin::Azure::Impl::RateDecision;
 
-// All tests use a 1-second cooldown so they can exercise window expiry without
-// requiring real clock manipulation (steady_clock is not mockable here, so
-// expiry tests sleep for just over 1 s via the helper below).
+// Window-expiry tests pass an explicit later timestamp instead of sleeping.
 namespace {
 constexpr auto kCooldown = std::chrono::seconds{1};
 constexpr const char* kStallingWritesFormat = "Stalling writes because we have 5 level-0 files";
@@ -107,10 +104,10 @@ TEST(LogRateLimiterTests, MatchingFormat_AfterCooldown_WithSuppressed_AllowWithS
     limiter.CheckAndRecord(kStallingWritesFormat);        // Suppress (count = 1)
     limiter.CheckAndRecord(kStallingWritesFormat);        // Suppress (count = 2)
 
-    std::this_thread::sleep_for(kCooldown + std::chrono::milliseconds{50});
+    const auto afterCooldown = std::chrono::steady_clock::now() + kCooldown + std::chrono::milliseconds{50};
 
     // Act
-    const auto result = limiter.CheckAndRecord(kStallingWritesFormat);
+    const auto result = limiter.CheckAndRecord(kStallingWritesFormat, afterCooldown);
 
     // Assert
     EXPECT_EQ(RateDecision::AllowWithSummary, result.decision);
@@ -123,10 +120,10 @@ TEST(LogRateLimiterTests, MatchingFormat_AfterCooldown_NoSuppressed_Allow)
     LogRateLimiter limiter{{"Stalling writes because we have"}, kCooldown};
     limiter.CheckAndRecord(kStallingWritesFormat);
 
-    std::this_thread::sleep_for(kCooldown + std::chrono::milliseconds{50});
+    const auto afterCooldown = std::chrono::steady_clock::now() + kCooldown + std::chrono::milliseconds{50};
 
     // Act
-    const auto result = limiter.CheckAndRecord(kStallingWritesFormat);
+    const auto result = limiter.CheckAndRecord(kStallingWritesFormat, afterCooldown);
 
     // Assert — no suppressions occurred, so no summary is needed
     EXPECT_EQ(RateDecision::Allow, result.decision);
@@ -233,10 +230,10 @@ TEST(LogRateLimiterTests, BlobNotFound_AfterCooldown_WithSuppressed_AllowWithSum
     limiter.CheckAndRecord(kBlobNotFoundErrorCode); // Suppress (count = 1)
     limiter.CheckAndRecord(kBlobNotFoundErrorCode); // Suppress (count = 2)
 
-    std::this_thread::sleep_for(kCooldown + std::chrono::milliseconds{50});
+    const auto afterCooldown = std::chrono::steady_clock::now() + kCooldown + std::chrono::milliseconds{50};
 
     // Act
-    const auto result = limiter.CheckAndRecord(kBlobNotFoundErrorCode);
+    const auto result = limiter.CheckAndRecord(kBlobNotFoundErrorCode, afterCooldown);
 
     // Assert — first call after the window expires must report suppressed count
     EXPECT_EQ(RateDecision::AllowWithSummary, result.decision);

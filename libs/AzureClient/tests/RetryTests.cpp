@@ -12,6 +12,7 @@
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 
 #include <AVEVA/AzureClient/BlockBlobClient.hpp>
+#include <AVEVA/AzureClient/PageBlobClient.hpp>
 #include <AVEVA/AzureClient/WithRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpClientError.hpp>
 #include <AVEVA/HttpClient/HttpHeader.hpp>
@@ -250,6 +251,57 @@ TEST(RetryTests, DeleteIsNotReplayedAfterAnAmbiguousTransportErrorBecauseItsOutc
         EXPECT_EQ(httpClient.RequestCount(), 1U) << error.message();
         EXPECT_FALSE(ValueOrFail(observed).has_value()) << error.message();
     }
+}
+
+using CreateResult = std::expected<Response<Models::CreatePageBlobResult>, BlobStorageError>;
+
+TEST(RetryTests, ConditionalCreateIsNotReplayedAfterAnAmbiguousTransportErrorBecauseItsOutcomeIsUnknown) {
+    for (const std::error_code error :
+         {std::error_code{AVEVA::HttpClientError::TimedOut}, std::error_code{AVEVA::HttpClientError::ReadFailed},
+          std::make_error_code(std::errc::connection_reset)}) {
+        FakeHttpClient httpClient;
+        httpClient.EnqueueResponse(HttpResponse{}, error);
+        // A replay would find the blob the first attempt created and answer 409.
+        httpClient.EnqueueResponse(HttpResponse{409, {{"x-ms-error-code", "BlobAlreadyExists"}}, ""});
+        PageBlobClient client{httpClient, MakeRetryOptions(3)};
+
+        std::optional<CreateResult> observed;
+        client.CreateIfNotExistsAsync(512, CreatePageBlobOptions{},
+                                      [&](CreateResult result) { observed = std::move(result); });
+
+        ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); })) << error.message();
+        EXPECT_EQ(httpClient.RequestCount(), 1U) << error.message();
+        EXPECT_FALSE(ValueOrFail(observed).has_value()) << error.message();
+    }
+}
+
+TEST(RetryTests, ConditionalCreateIsRetriedAfterFailuresThatHappenedBeforeAnythingWasSent) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ConnectFailed);
+    httpClient.EnqueueResponse(HttpResponse{201, {}, ""});
+    PageBlobClient client{httpClient, MakeRetryOptions(1)};
+
+    std::optional<CreateResult> observed;
+    client.CreateIfNotExistsAsync(512, CreatePageBlobOptions{},
+                                  [&](CreateResult result) { observed = std::move(result); });
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
+    EXPECT_EQ(httpClient.RequestCount(), 2U);
+    EXPECT_TRUE(ValueOrFail(observed).has_value());
+}
+
+TEST(RetryTests, UnconditionalCreateOverwriteIsReplayedAfterAnAmbiguousTransportError) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ReadFailed);
+    httpClient.EnqueueResponse(HttpResponse{201, {}, ""});
+    PageBlobClient client{httpClient, MakeRetryOptions(1)};
+
+    std::optional<CreateResult> observed;
+    client.CreateAsync(512, CreatePageBlobOptions{}, [&](CreateResult result) { observed = std::move(result); });
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
+    EXPECT_EQ(httpClient.RequestCount(), 2U);
+    EXPECT_TRUE(ValueOrFail(observed).has_value());
 }
 
 TEST(RetryTests, GivesUpAfterMaxRetriesAndReportsLastResponse) {

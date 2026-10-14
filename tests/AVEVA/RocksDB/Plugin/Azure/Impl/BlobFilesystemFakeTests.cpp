@@ -162,6 +162,72 @@ TEST_F(BlobFilesystemFakeTests, FailedTruncateResizeKeepsTheOriginalLogicalSize)
     EXPECT_EQ(Read("a.log"), "0123456789");
 }
 
+// Page blobs are 512-byte aligned, so sizes straddling a page boundary exercise the padding/partial-page paths.
+class PageBoundaryTests : public BlobFilesystemFakeTests, public ::testing::WithParamInterface<size_t> {
+  protected:
+    static std::string Pattern(const size_t size) {
+        std::string data(size, '\0');
+        for (size_t i = 0; i < size; ++i) {
+            data[i] = static_cast<char>('a' + (i * 7 + i / 512) % 26);
+        }
+        return data;
+    }
+};
+
+TEST_P(PageBoundaryTests, WriteThenReadReturnsExactBytesAndSize) {
+    const auto content = Pattern(GetParam());
+    Write("p.log", content);
+
+    EXPECT_EQ(m_fs->GetFileSize(Path("p.log")), static_cast<int64_t>(content.size()));
+    EXPECT_EQ(Read("p.log"), content);
+}
+
+TEST_P(PageBoundaryTests, TruncateToTheBoundarySizeKeepsThePrefix) {
+    const auto content = Pattern(1500);
+    Write("p.log", content);
+
+    m_fs->Truncate(Path("p.log"), static_cast<int64_t>(GetParam()));
+
+    EXPECT_EQ(m_fs->GetFileSize(Path("p.log")), static_cast<int64_t>(GetParam()));
+    EXPECT_EQ(Read("p.log"), content.substr(0, GetParam()));
+}
+
+TEST_P(PageBoundaryTests, ReopenAfterSyncAndAppendPreservesTheExistingBytes) {
+    const auto first = Pattern(GetParam());
+    const std::string second = "tail-bytes";
+    {
+        auto file = m_fs->CreateWriteableFile(Path("p.log"));
+        file.Append(std::span<const char>(first.data(), first.size()));
+        file.Sync();
+        file.Close();
+    }
+    {
+        auto file = m_fs->ReopenWriteableFile(Path("p.log"));
+        file.Append(std::span<const char>(second.data(), second.size()));
+        file.Close();
+    }
+
+    EXPECT_EQ(Read("p.log"), first + second);
+}
+
+TEST_P(PageBoundaryTests, ReopenAfterFlushOnlyThenCloseKeepsTheBytes) {
+    const auto first = Pattern(GetParam());
+    {
+        auto file = m_fs->CreateWriteableFile(Path("p.log"));
+        file.Append(std::span<const char>(first.data(), first.size()));
+        file.Flush();
+        file.Close();
+    }
+
+    auto file = m_fs->ReopenWriteableFile(Path("p.log"));
+    EXPECT_EQ(file.GetFileSize(), static_cast<int64_t>(first.size()));
+    file.Close();
+    EXPECT_EQ(Read("p.log"), first);
+}
+
+INSTANTIATE_TEST_SUITE_P(Sizes, PageBoundaryTests, ::testing::Values<size_t>(0, 1, 511, 512, 513, 1023, 1024, 1025),
+                         [](const auto& info) { return "Size" + std::to_string(info.param); });
+
 // Rename failures: whichever step fails, the source survives and an existing destination keeps its content.
 class RenameFailureTests : public BlobFilesystemFakeTests, public ::testing::WithParamInterface<FakeBlobServer::Operation> {
   protected:

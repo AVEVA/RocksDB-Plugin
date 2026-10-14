@@ -118,19 +118,22 @@ TEST_F(WriteableFileTests, Destructor_UploadsStillInFlightAfterFailure_WaitsForT
     m_env.Blob->FailUpload(FakeBlobServer::Error(500, "upload failed"), 0);
     ASSERT_THROW(file->RangeSync(), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
 
-    std::atomic<bool> destroyed = false;
+    // Records whether every upload had been released by the time the destructor returned; no sleep needed.
+    std::atomic<bool> uploadsReleased = false;
+    std::atomic<bool> releasedBeforeDestroyed = false;
     std::thread destroyer([&] {
         file.reset();
-        destroyed = true;
+        releasedBeforeDestroyed = uploadsReleased.load();
     });
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    EXPECT_FALSE(destroyed);
     while (m_env.Blob->PendingUploads() > 0) {
+        if (m_env.Blob->PendingUploads() == 1) {
+            uploadsReleased = true;
+        }
         m_env.Blob->CompleteUpload(0);
     }
     destroyer.join();
-    EXPECT_TRUE(destroyed);
+    EXPECT_TRUE(releasedBeforeDestroyed);
 }
 
 TEST_F(WriteableFileTests, RangeSync_UploadInFlight_ReturnsWithoutWaitingAndSyncCompletesIt) {

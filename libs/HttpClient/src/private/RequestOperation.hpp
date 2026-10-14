@@ -207,20 +207,19 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// <returns>True if the operation may continue.</returns>
     bool BuildRequestUnchecked(HttpRequest& request) {
         auto parsed = urls::parse_uri(request.GetUrl());
-        if (!parsed || !Private::IsValidRequestUrl(*parsed)) {
+        if (!parsed) {
             Fail(HttpClientError::InvalidUrl);
+            return false;
+        }
+        if (const auto invalid = Private::ValidateRequest(request, m_options, *parsed)) {
+            // ValidateRequest only ever reports HttpClientError values.
+            Fail(static_cast<HttpClientError>(invalid.value()));
             return false;
         }
 
         const auto& url = *parsed;
         const std::string host = url.host_address();
         const auto verb = Private::ToBeastVerb(request.GetMethod());
-        if (verb == http::verb::unknown || request.GetMethod() == HttpMethod::Connect ||
-            (request.GetMethod() == HttpMethod::Trace && request.GetBodySize() != 0) ||
-            m_options.GetTimeout().count() <= 0) {
-            Fail(HttpClientError::InvalidRequest);
-            return false;
-        }
 
         m_request.version(11);
         m_request.method(verb);
@@ -231,10 +230,6 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
         }
         m_request.target(target);
         for (const auto& header : request.GetHeaders()) {
-            if (!Private::IsValidHeader(header.GetName(), header.GetValue())) {
-                Fail(HttpClientError::InvalidRequest);
-                return false;
-            }
             if (beast::iequals(header.GetName(), "Host") || beast::iequals(header.GetName(), "Content-Length") ||
                 beast::iequals(header.GetName(), "Transfer-Encoding") ||
                 beast::iequals(header.GetName(), "Connection")) {
@@ -540,33 +535,10 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
             return Cancel();
         }
         if (error) {
-            if constexpr (std::is_same_v<Stream, TlsStream>) {
-                // A server may close TCP without close_notify; that still ends an EOF-delimited body.
-                if (error == asio::ssl::error::stream_truncated && m_parser->got_some()) {
-                    boost::system::error_code eofError;
-                    m_parser->put_eof(eofError);
-                    if (!eofError) {
-                        error = {};
-                    }
-                }
-            }
+            error = AcceptTruncatedTlsBody(error);
         }
         if (error) {
-            if (error == http::error::body_limit) {
-                return Fail(HttpClientError::ResponseTooLarge, error);
-            }
-            if (error == http::error::header_limit) {
-                return Fail(HttpClientError::ResponseTooLarge, error);
-            }
-            // The request was fully written before the read started.
-            if (MaybeRetryAfterReuseFailure(true)) {
-                return;
-            }
-            // A connection that ends mid-message is a transport failure, not a malformed response.
-            const bool truncated = error == http::error::end_of_stream || error == http::error::partial_message;
-            return Fail(!truncated && IsBeastHttpError(error) ? HttpClientError::ProtocolError
-                                                              : HttpClientError::ReadFailed,
-                        error);
+            return FailRead(error);
         }
         const auto status = m_parser->get().result_int();
         if (status == 101) {
@@ -581,7 +553,66 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
         // The parser-level check also rejects EOF-delimited bodies; leftover bytes would be mistaken for the
         // next response on a pooled connection.
         const bool keepAlive = m_parser->keep_alive() && m_buffer.size() == 0;
-        std::optional<HttpResponse> built;
+        auto response = BuildResponse();
+        if (!response) {
+            // Without this the handler would never be called (e.g. bad_alloc while copying headers).
+            return Fail(HttpClientError::ReadFailed);
+        }
+        CompleteSuccess(std::move(*response), keepAlive);
+    }
+
+    /// <summary>
+    /// A TLS server may close TCP without close_notify; that still ends an EOF-delimited body, so such a
+    /// truncation is not an error once the parser accepts the EOF.
+    /// </summary>
+    /// <param name="error">The failed read's error.</param>
+    /// <returns>An empty error code if the message turned out to be complete; otherwise the original error.</returns>
+    boost::system::error_code AcceptTruncatedTlsBody(boost::system::error_code error) {
+        if constexpr (std::is_same_v<Stream, TlsStream>) {
+            if (error == asio::ssl::error::stream_truncated && m_parser->got_some()) {
+                boost::system::error_code eofError;
+                m_parser->put_eof(eofError);
+                if (!eofError) {
+                    return {};
+                }
+            }
+        }
+        return error;
+    }
+
+    /// <summary>
+    /// Maps a failed read to the error reported to the caller.
+    /// </summary>
+    /// <param name="error">The failed read's (non-empty) error.</param>
+    /// <returns>ResponseTooLarge for limit errors, ProtocolError for a malformed response, otherwise ReadFailed.</returns>
+    static HttpClientError ClassifyReadError(const boost::system::error_code& error) {
+        if (error == http::error::body_limit || error == http::error::header_limit) {
+            return HttpClientError::ResponseTooLarge;
+        }
+        // A connection that ends mid-message is a transport failure, not a malformed response.
+        const bool truncated = error == http::error::end_of_stream || error == http::error::partial_message;
+        return !truncated && IsBeastHttpError(error) ? HttpClientError::ProtocolError : HttpClientError::ReadFailed;
+    }
+
+    /// <summary>
+    /// Completes a failed read, first retrying on a fresh connection when a reused one turned out to be dead.
+    /// </summary>
+    /// <param name="error">The failed read's (non-empty) error.</param>
+    void FailRead(const boost::system::error_code& error) {
+        const auto classified = ClassifyReadError(error);
+        // Limit errors are the response's fault, not the connection's, so they are never retried. For the rest,
+        // the request was fully written before the read started.
+        if (classified != HttpClientError::ResponseTooLarge && MaybeRetryAfterReuseFailure(true)) {
+            return;
+        }
+        Fail(classified, error);
+    }
+
+    /// <summary>
+    /// Moves the parsed message into an HttpResponse.
+    /// </summary>
+    /// <returns>The response, or nothing if building it threw (for example bad_alloc).</returns>
+    std::optional<HttpResponse> BuildResponse() {
         try {
             auto message = m_parser->release();
             std::vector<HttpHeader> headers;
@@ -589,17 +620,17 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
             for (const auto& header : message.base()) {
                 headers.push_back({std::string(header.name_string()), std::string(header.value())});
             }
-            built.emplace(message.result_int(), std::move(headers), std::move(message.body()));
+            return HttpResponse(message.result_int(), std::move(headers), std::move(message.body()));
         } catch (const std::exception&) {
-            // Without this the handler would never be called (e.g. bad_alloc while copying headers).
-            return Fail(HttpClientError::ReadFailed);
+            return std::nullopt;
         }
-        HttpResponse response = std::move(*built);
+    }
 
-        m_timer.cancel();
-        m_resolver.cancel();
-        finished_ = true;
-        auto completion = std::move(m_completion);
+    /// <summary>
+    /// Returns the connection to the pool when the response allows reuse, and otherwise shuts it down.
+    /// </summary>
+    /// <param name="keepAlive">Whether the connection may be reused.</param>
+    void ReleaseOrClose(bool keepAlive) {
         bool pooled = false;
         if (keepAlive) {
             try {
@@ -620,6 +651,20 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
                 Close();
             }
         }
+    }
+
+    /// <summary>
+    /// Finishes the operation successfully: stops the timer and resolver, disposes of the connection, and hands
+    /// the response to the completion handler.
+    /// </summary>
+    /// <param name="response">The response to report.</param>
+    /// <param name="keepAlive">Whether the connection may be reused.</param>
+    void CompleteSuccess(HttpResponse response, bool keepAlive) {
+        m_timer.cancel();
+        m_resolver.cancel();
+        finished_ = true;
+        auto completion = std::move(m_completion);
+        ReleaseOrClose(keepAlive);
         Detail::Complete(std::move(completion), {}, std::move(response));
     }
 

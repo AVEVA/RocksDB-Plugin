@@ -2,6 +2,9 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "RequestValidation.hpp"
+#include "HttpVerb.hpp"
+
+#include "AVEVA/HttpClient/HttpClientError.hpp"
 
 #include <algorithm>
 #include <boost/beast/http/fields.hpp>
@@ -49,5 +52,29 @@ namespace AVEVA::Private
         {
             return character <= 32 || character >= 127;
         });
+    }
+
+    std::error_code ValidateRequest(const HttpRequest& request, const HttpRequestOptions& options,
+                                    const boost::urls::url_view& url)
+    {
+        if (!IsValidRequestUrl(url))
+        {
+            return HttpClientError::InvalidUrl;
+        }
+        const HttpMethod method = request.GetMethod();
+        if (ToBeastVerb(method) == boost::beast::http::verb::unknown || method == HttpMethod::Connect ||
+            (method == HttpMethod::Trace && request.GetBodySize() != 0) || options.GetTimeout().count() <= 0)
+        {
+            return HttpClientError::InvalidRequest;
+        }
+        const auto& headers = request.GetHeaders();
+        if (!std::all_of(headers.begin(), headers.end(), [](const HttpHeader& header)
+            {
+                return IsValidHeader(header.GetName(), header.GetValue());
+            }))
+        {
+            return HttpClientError::InvalidRequest;
+        }
+        return {};
     }
 } // namespace AVEVA::Private

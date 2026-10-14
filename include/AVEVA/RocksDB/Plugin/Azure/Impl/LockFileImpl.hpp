@@ -38,8 +38,16 @@ class BasicLockFileImpl
     void RenewLease() const;
     // Throws when the lease has expired or its renewal deadline has passed; otherwise returns the time left to renew.
     [[nodiscard]] std::chrono::steady_clock::duration RenewalBudget() const;
+    // Defaults to steady_clock; replaced only by tests so lease expiry can be simulated without waiting.
+    using Clock = std::function<std::chrono::steady_clock::time_point()>;
+    Clock m_clock;
+    [[nodiscard]] std::chrono::steady_clock::time_point Now() const {
+        return m_clock ? m_clock() : std::chrono::steady_clock::now();
+    }
 
   public:
+    // Not thread-safe: call before the lock is shared. Also restarts the lease age at the new clock's current time.
+    void SetClockForTesting(Clock clock);
     BasicLockFileImpl(
         std::shared_ptr<ClientRuntimeBase> runtime, std::unique_ptr<TBlob> file, std::chrono::seconds leaseLength,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
