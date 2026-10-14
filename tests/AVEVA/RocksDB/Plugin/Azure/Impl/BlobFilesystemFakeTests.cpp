@@ -10,11 +10,11 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
-#include <span>
-#include <thread>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl::Tests {
@@ -357,13 +357,28 @@ TEST_P(PageBoundaryTests, ReopenAfterFlushOnlyThenCloseKeepsTheBytes) {
 INSTANTIATE_TEST_SUITE_P(Sizes, PageBoundaryTests, ::testing::Values<size_t>(0, 1, 511, 512, 513, 1023, 1024, 1025),
                          [](const auto& info) { return "Size" + std::to_string(info.param); });
 
+TEST_F(BlobFilesystemFakeTests, ReopenWriteableFile_OfAMissingFile_CreatesItAndAcceptsAppends) {
+    ASSERT_FALSE(m_fs->FileExists(Path("missing.log")));
+    const std::string data = "appended after reopen";
+    {
+        auto file = m_fs->ReopenWriteableFile(Path("missing.log"));
+        EXPECT_EQ(0, file.GetFileSize());
+        file.Append(std::span<const char>(data.data(), data.size()));
+        file.Close();
+    }
+
+    EXPECT_TRUE(m_fs->FileExists(Path("missing.log")));
+    EXPECT_EQ(Read("missing.log"), data);
+}
+
 // Rename failures: whichever step fails, the source survives and an existing destination keeps its content.
-class RenameFailureTests : public BlobFilesystemFakeTests, public ::testing::WithParamInterface<FakeBlobServer::Operation> {
+class RenameFailureTests : public BlobFilesystemFakeTests,
+                           public ::testing::WithParamInterface<FakeBlobServer::Operation> {
   protected:
     // Fails the `occurrence`-th (1-based) request of the given operation, and only that one.
     void FailNth(const FakeBlobServer::Operation target, const int occurrence) {
-        m_server->Fault = [target, occurrence, seen = 0](const auto operation) mutable
-            -> std::optional<AzureClient::BlobStorageError> {
+        m_server->Fault = [target, occurrence,
+                           seen = 0](const auto operation) mutable -> std::optional<AzureClient::BlobStorageError> {
             if (operation == target && ++seen == occurrence) {
                 return FakeBlobServer::Error(400U, "InvalidInput");
             }

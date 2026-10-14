@@ -272,6 +272,9 @@ BasicBlobFilesystemImpl<THttp>::ReopenWriteableFile(const std::string& filePath)
     const auto [initialSize, bufferSize] =
         BlobFilesystemDetail::SizingFor(filePath, m_dataFileInitialSize, m_dataFileBufferSize);
 
+    // RocksDB expects reopening to create a missing file, as the POSIX Env does.
+    BlobOperations::CreateIfNotExists(*m_runtime, blob, initialSize);
+
     return WriteableFileType{realPath,
                              m_runtime,
                              std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)),
