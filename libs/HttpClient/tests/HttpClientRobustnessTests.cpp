@@ -779,7 +779,8 @@ TEST(HttpClientRobustness, CancellingTheSharedDnsLeaderStillCompletesEveryJoined
         auto client = AVEVA::HttpClient::Create(context);
         ScriptedServer server(context,
                               [](int, const http::request<http::string_body>&) -> ServerAction { return {OkResponse}; });
-        const auto url = "http://localhost:" + server.Url("").substr(std::string("http://127.0.0.1:").size());
+        // The cache key includes the port, which is fresh per server, so every iteration starts a new lookup.
+        const auto url = server.Url();
 
         asio::cancellation_signal leaderCancel;
         AVEVA::HttpRequestOptions leaderOptions;
