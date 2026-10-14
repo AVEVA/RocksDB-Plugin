@@ -130,6 +130,7 @@ The Azure client is now trimmed and in-tree, which changed the public surface:
 
 * `AVEVA/RocksDB/Plugin/Core/BlobClient.hpp` and `Impl/PageBlob.hpp` were removed. Use the `AzureClient` page blob client instead.
 * The constructors of `BlobFilesystem`, `ReadableFile`, `WriteableFile`, `ReadWriteFile`, `LockFile`, `Directory`, `Logger` and the `Plugin` registration now take the injected `io_context`/client types; update call sites accordingly.
+* The old `Plugin::Register` overloads without an `io_context` remain as `[[deprecated]]` shims: they run the plugin on a process-wide, plugin-owned `io_context` thread. Migrate to the `io_context` overloads. The filesystem is registered under both the new `Plugin::NameFor` name and the legacy `Plugin::Name + db + backupDb` name so existing `azblobfs...` URIs keep resolving.
 * `http:` endpoints are rejected unless `AllowInsecureHttp = true` is set on the client options (credentials are still refused over non-loopback `http`).
 * Ranged downloads now require a valid `Content-Range` on every `206` response.
 * `HttpRequestOptions::SetMaxRetries` and `HttpClientOptions::SetIdleConnectionTimeout` throw `std::invalid_argument` for negative values.

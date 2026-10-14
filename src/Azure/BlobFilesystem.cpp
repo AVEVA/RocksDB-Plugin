@@ -42,9 +42,10 @@ std::string FormatRequestFailedLogMessage(const RequestFailedException& ex, cons
 
 BlobFilesystem::BlobFilesystem(
     std::shared_ptr<rocksdb::FileSystem> rocksdbFs, std::unique_ptr<Impl::BlobFilesystemImpl> filesystem,
-    std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
-    : rocksdb::FileSystemWrapper(std::move(rocksdbFs)), m_filesystem(std::move(filesystem)),
-      m_logger(std::move(logger)),
+    std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+    std::shared_ptr<void> keepAlive)
+    : rocksdb::FileSystemWrapper(std::move(rocksdbFs)), m_keepAlive(std::move(keepAlive)),
+      m_filesystem(std::move(filesystem)), m_logger(std::move(logger)),
       m_blobNotFoundRateLimiter(std::make_unique<Impl::LogRateLimiter>(std::vector<std::string>{"BlobNotFound"},
                                                                        Impl::Configuration::LogRateLimiterCooldown)) {}
 

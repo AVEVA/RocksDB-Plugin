@@ -21,6 +21,9 @@ class LogRateLimiter;
 
 namespace AVEVA::RocksDB::Plugin::Azure {
 class BlobFilesystem final : public rocksdb::FileSystemWrapper {
+    // Declared first so it is released last: the filesystem below must be destroyed while its owner (e.g. a
+    // plugin-owned io_context) is still running.
+    std::shared_ptr<void> m_keepAlive;
     std::unique_ptr<Impl::BlobFilesystemImpl> m_filesystem;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
     std::vector<std::unique_ptr<Azure::LockFile>> m_lockFiles;
@@ -35,9 +38,10 @@ class BlobFilesystem final : public rocksdb::FileSystemWrapper {
     template <class F> rocksdb::IOStatus Guard(std::string_view operation, std::string_view path, F&& f);
 
   public:
-    BlobFilesystem(
-        std::shared_ptr<rocksdb::FileSystem> rocksdbFs, std::unique_ptr<Impl::BlobFilesystemImpl> filesystem,
-        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
+    // `keepAlive` is released after the filesystem is destroyed; it holds whatever the filesystem's I/O depends on.
+    BlobFilesystem(std::shared_ptr<rocksdb::FileSystem> rocksdbFs, std::unique_ptr<Impl::BlobFilesystemImpl> filesystem,
+                   std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+                   std::shared_ptr<void> keepAlive = nullptr);
     virtual ~BlobFilesystem() override;
     BlobFilesystem(const BlobFilesystem&) = delete;
     BlobFilesystem& operator=(const BlobFilesystem&) = delete;

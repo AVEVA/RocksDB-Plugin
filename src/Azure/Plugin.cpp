@@ -7,11 +7,16 @@
 #include <rocksdb/file_system.h>
 #include <rocksdb/utilities/object_registry.h>
 
+#include <boost/asio/executor_work_guard.hpp>
+#include <boost/asio/io_context.hpp>
+
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 
 namespace AVEVA::RocksDB::Plugin::Azure {
@@ -108,17 +113,67 @@ std::string PluginNameFor(const StorageInfo& primary, const std::optional<Storag
 }
 
 /// <summary>
-/// Records the settings for the given storage accounts' plugin name, then creates the Env from it. Every
-/// filesystem created borrows `ioContext`, which is never owned by the plugin.
+/// The name earlier versions registered: Name + primary database name + backup database name.
+/// </summary>
+template <class StorageInfo>
+std::string LegacyPluginNameFor(const StorageInfo& primary, const std::optional<StorageInfo>& backup) {
+    auto name = std::string(Plugin::Name) + primary.GetDbName();
+    if (backup) {
+        name += backup->GetDbName();
+    }
+    return name;
+}
+
+/// <summary>
+/// An io_context with one worker thread, for callers of the deprecated Register overloads that have no io_context
+/// of their own. Shared by every filesystem created that way and kept alive by them.
+/// </summary>
+class OwnedIoContext {
+    boost::asio::io_context m_context;
+    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> m_workGuard{
+        boost::asio::make_work_guard(m_context)};
+    std::thread m_thread;
+
+  public:
+    OwnedIoContext() : m_thread([this] { m_context.run(); }) {}
+    ~OwnedIoContext() {
+        m_workGuard.reset();
+        m_thread.join();
+    }
+    OwnedIoContext(const OwnedIoContext&) = delete;
+    OwnedIoContext& operator=(const OwnedIoContext&) = delete;
+
+    [[nodiscard]] boost::asio::io_context& Context() { return m_context; }
+
+    /// <summary>The process-wide instance; recreated when every previous user has released it.</summary>
+    static std::shared_ptr<OwnedIoContext> Acquire() {
+        static std::mutex mutex;
+        static std::weak_ptr<OwnedIoContext> current;
+        std::scoped_lock lock(mutex);
+        auto shared = current.lock();
+        if (!shared) {
+            shared = std::make_shared<OwnedIoContext>();
+            current = shared;
+        }
+        return shared;
+    }
+};
+
+/// <summary>
+/// Records the settings for the given storage accounts' plugin name (and the legacy name as an alias), then creates
+/// the Env from it. Every filesystem created borrows `ioContext`; `owner`, when set, keeps whatever owns it alive
+/// for as long as the factory or any filesystem exists.
 /// </summary>
 template <class StorageInfo>
 rocksdb::Status
 RegisterImpl(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::shared_ptr<rocksdb::Env>* guard,
-             boost::asio::io_context& ioContext, StorageInfo primary, std::optional<StorageInfo> backup,
+             boost::asio::io_context& ioContext, std::shared_ptr<void> owner, StorageInfo primary,
+             std::optional<StorageInfo> backup,
              std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
              int64_t dataFileBufferSize, int64_t dataFileInitialSize, std::optional<std::string_view> cachePath,
              size_t maxCacheSize) {
     auto pluginName = PluginNameFor(primary, backup);
+    auto legacyName = LegacyPluginNameFor(primary, backup);
 
     // Own a copy of the cache path: the factory may run long after the caller's string is gone.
     std::optional<std::string> ownedCachePath;
@@ -126,20 +181,20 @@ RegisterImpl(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::sha
         ownedCachePath.emplace(*cachePath);
     }
 
-    FileSystemFactory create = [&ioContext, primary = std::move(primary), backup = std::move(backup),
-                                logger = std::move(logger), dataFileBufferSize, dataFileInitialSize,
-                                cachePath = std::move(ownedCachePath), maxCacheSize]() {
+    FileSystemFactory create = [&ioContext, owner = std::move(owner), primary = std::move(primary),
+                                backup = std::move(backup), logger = std::move(logger), dataFileBufferSize,
+                                dataFileInitialSize, cachePath = std::move(ownedCachePath), maxCacheSize]() {
         auto impl = std::make_unique<Impl::BlobFilesystemImpl>(
             ioContext, primary, backup, dataFileInitialSize, dataFileBufferSize, logger,
             cachePath ? std::optional<std::string_view>(*cachePath) : std::nullopt, maxCacheSize);
         return std::unique_ptr<rocksdb::FileSystem>(
-            new BlobFilesystem(rocksdb::FileSystem::Default(), std::move(impl), logger));
+            new BlobFilesystem(rocksdb::FileSystem::Default(), std::move(impl), logger, owner));
     };
 
-    auto registration = GetOrAddRegistration(pluginName);
-    {
+    for (const auto& name : {pluginName, legacyName}) {
+        auto registration = GetOrAddRegistration(name);
         std::scoped_lock lock(registration->Mutex);
-        registration->Create = std::move(create);
+        registration->Create = create;
     }
 
     return rocksdb::Env::CreateFromUri(configOptions, "", pluginName, env, guard);
@@ -163,8 +218,8 @@ Plugin::Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std:
                  std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
                  int64_t dataFileBufferSize, int64_t dataFileInitialSize, std::optional<std::string_view> cachePath,
                  size_t maxCacheSize) {
-    return RegisterImpl(configOptions, env, guard, ioContext, std::move(primary), std::move(backup), std::move(logger),
-                        dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize);
+    return RegisterImpl(configOptions, env, guard, ioContext, nullptr, std::move(primary), std::move(backup),
+                        std::move(logger), dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize);
 }
 
 rocksdb::Status
@@ -174,7 +229,31 @@ Plugin::Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std:
                  std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
                  int64_t dataFileBufferSize, int64_t dataFileInitialSize, std::optional<std::string_view> cachePath,
                  size_t maxCacheSize) {
-    return RegisterImpl(configOptions, env, guard, ioContext, std::move(primary), std::move(backup), std::move(logger),
-                        dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize);
+    return RegisterImpl(configOptions, env, guard, ioContext, nullptr, std::move(primary), std::move(backup),
+                        std::move(logger), dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize);
+}
+
+rocksdb::Status
+Plugin::Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::shared_ptr<rocksdb::Env>* guard,
+                 Models::ServicePrincipalStorageInfo primary, std::optional<Models::ServicePrincipalStorageInfo> backup,
+                 std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+                 int64_t dataFileBufferSize, int64_t dataFileInitialSize, std::optional<std::string_view> cachePath,
+                 size_t maxCacheSize) {
+    auto owner = OwnedIoContext::Acquire();
+    auto& context = owner->Context();
+    return RegisterImpl(configOptions, env, guard, context, std::move(owner), std::move(primary), std::move(backup),
+                        std::move(logger), dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize);
+}
+
+rocksdb::Status
+Plugin::Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::shared_ptr<rocksdb::Env>* guard,
+                 Models::ChainedCredentialInfo primary, std::optional<Models::ChainedCredentialInfo> backup,
+                 std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+                 int64_t dataFileBufferSize, int64_t dataFileInitialSize, std::optional<std::string_view> cachePath,
+                 size_t maxCacheSize) {
+    auto owner = OwnedIoContext::Acquire();
+    auto& context = owner->Context();
+    return RegisterImpl(configOptions, env, guard, context, std::move(owner), std::move(primary), std::move(backup),
+                        std::move(logger), dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize);
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure

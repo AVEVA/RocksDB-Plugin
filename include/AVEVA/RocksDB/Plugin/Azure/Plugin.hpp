@@ -66,10 +66,37 @@ struct Plugin {
     /// <summary>
     /// Returns the name under which Register publishes the filesystem for this primary/backup pair, e.g. for
     /// `--fs_uri` or Env::CreateFromUri. Only the account URLs and database names take part in the name.
+    /// Register also publishes the filesystem under the name earlier versions used (`Name` followed by the primary
+    /// and backup database names) so existing URIs keep working; when two registrations share those database names
+    /// the latest one wins that legacy alias.
     /// </summary>
     static std::string NameFor(const Models::ServicePrincipalStorageInfo& primary,
                                const std::optional<Models::ServicePrincipalStorageInfo>& backup = std::nullopt);
     static std::string NameFor(const Models::ChainedCredentialInfo& primary,
                                const std::optional<Models::ChainedCredentialInfo>& backup = std::nullopt);
+
+    /// <summary>
+    /// Source-compatible overload from before the io_context was injected. The plugin creates its own io_context and
+    /// one worker thread, shared by every filesystem created through the deprecated overloads and released when the
+    /// last of them is destroyed. Prefer the overload that takes the host's io_context.
+    /// </summary>
+    [[deprecated("Pass the host io_context to Register; this overload runs its own io_context thread.")]]
+    static rocksdb::Status
+    Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::shared_ptr<rocksdb::Env>* guard,
+             Models::ServicePrincipalStorageInfo primary, std::optional<Models::ServicePrincipalStorageInfo> backup,
+             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
+             int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
+             std::optional<std::string_view> cachePath = std::nullopt, size_t maxCacheSize = 0);
+
+    /// <summary>See the deprecated ServicePrincipalStorageInfo overload without an io_context.</summary>
+    [[deprecated("Pass the host io_context to Register; this overload runs its own io_context thread.")]]
+    static rocksdb::Status
+    Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::shared_ptr<rocksdb::Env>* guard,
+             Models::ChainedCredentialInfo primary, std::optional<Models::ChainedCredentialInfo> backup,
+             std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
+             int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
+             std::optional<std::string_view> cachePath = std::nullopt, size_t maxCacheSize = 0);
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure
