@@ -504,5 +504,7 @@ class BasicBlockBlobClient : public BasicBlobClient<THttp, TCred> {
     }
 };
 
+// Defined once in src/BlockBlobClient.cpp, so translation units that use the production client do not instantiate it again.
+extern template class BasicBlockBlobClient<HttpClient>;
 using BlockBlobClient = BasicBlockBlobClient<HttpClient>;
 } // namespace AVEVA::AzureClient
