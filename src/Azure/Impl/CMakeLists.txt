@@ -59,7 +59,6 @@ target_sources(aveva-rocksdb-plugin-azure-impl
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/TokenCredentials.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/Environment.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 )
 install(TARGETS aveva-rocksdb-plugin-azure-impl
     EXPORT
