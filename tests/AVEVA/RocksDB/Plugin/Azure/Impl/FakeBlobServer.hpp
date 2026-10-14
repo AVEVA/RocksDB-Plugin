@@ -90,7 +90,12 @@ class FakeBlobServer {
         std::string LeaseId;
         long long LeaseSeconds = 0;
         std::chrono::steady_clock::time_point LeaseExpiry;
+        // Pages (PageSize bytes each) written by a non-clear write. A page written with zeros is still a valid range
+        // on the service. Pages seeded by changing Data directly are recognised by their non-zero bytes instead.
+        std::vector<bool> WrittenPages;
     };
+
+    static constexpr size_t PageSize = 512;
 
     FakeHttpClient* m_http;
     std::mutex m_mutex;
@@ -173,11 +178,10 @@ class FakeBlobServer {
     bool DeferDownloads = false;
     // Holds Get Blob Properties until CompleteProperties; the response carries the values it had when sent.
     bool DeferProperties = false;
-    size_t PendingProperties() {
-        return Count(m_heldProperties);
-    }
+    size_t PendingProperties() { return Count(m_heldProperties); }
     void CompleteProperties() {
-        if (!m_http->CompleteRequest(Take(m_heldProperties, 0, "FakeBlobServer has no deferred properties request").RequestIndex)) {
+        if (!m_http->CompleteRequest(
+                Take(m_heldProperties, 0, "FakeBlobServer has no deferred properties request").RequestIndex)) {
             throw std::logic_error("FakeBlobServer properties request was already completed");
         }
     }
@@ -190,18 +194,18 @@ class FakeBlobServer {
         return error;
     }
 
-    void SetCapacity(const int64_t capacity) { Data.resize(static_cast<size_t>(capacity), '\0'); }
+    void SetCapacity(const int64_t capacity) {
+        Data.resize(static_cast<size_t>(capacity), '\0');
+        m_blobs.at(m_primaryPath).WrittenPages.resize(PageCount(static_cast<size_t>(capacity)));
+    }
 
-    size_t PendingUploads() {
-        return Count(m_heldUploads);
-    }
-    size_t PendingDownloads() {
-        return Count(m_heldDownloads);
-    }
+    size_t PendingUploads() { return Count(m_heldUploads); }
+    size_t PendingDownloads() { return Count(m_heldDownloads); }
 
     // Completes a deferred upload; the bytes land in the blob only now.
     void CompleteUpload(const size_t index = 0) {
-        if (!m_http->CompleteRequest(Take(m_heldUploads, index, "FakeBlobServer upload index out of range").RequestIndex)) {
+        if (!m_http->CompleteRequest(
+                Take(m_heldUploads, index, "FakeBlobServer upload index out of range").RequestIndex)) {
             throw std::logic_error("FakeBlobServer upload was already completed");
         }
     }
@@ -423,6 +427,7 @@ class FakeBlobServer {
         StoredBlob& blob = m_blobs[path];
         blob.Exists = true;
         blob.Data.assign(static_cast<size_t>(capacity), '\0');
+        blob.WrittenPages.assign(PageCount(static_cast<size_t>(capacity)), false);
         blob.Size = 0;
         blob.Metadata.clear();
         ApplyMetadata(request, blob);
@@ -456,6 +461,7 @@ class FakeBlobServer {
         }
         blob.Exists = false;
         blob.Data.clear();
+        blob.WrittenPages.clear();
         blob.Size = 0;
         blob.Metadata.clear();
         blob.LeaseId.clear();
@@ -504,6 +510,8 @@ class FakeBlobServer {
             }
             ++LeaseReleases;
             blob.LeaseId.clear();
+            blob.LeaseSeconds = 0;
+            blob.LeaseExpiry = {};
             return Success(MakeResponse(200U, {HttpHeader("ETag", blob.ETag)}));
         }
         if (action == "break") {
@@ -511,7 +519,8 @@ class FakeBlobServer {
                 return Failure(409U, "LeaseNotPresentWithLeaseOperation");
             }
             ++LeaseBreaks;
-            blob.LeaseExpiry = now;
+            // The fake only models immediate breaks, so the lease is over as soon as the call completes.
+            blob.LeaseExpiry = {};
             return Success(MakeResponse(202U, {HttpHeader("ETag", blob.ETag), HttpHeader("x-ms-lease-time", "0")}));
         }
         return Failure(400U, "InvalidHeaderValue");
@@ -594,6 +603,7 @@ class FakeBlobServer {
                 StoredBlob& blob = it->second;
                 blob.Exists = false;
                 blob.Data.clear();
+                blob.WrittenPages.clear();
                 blob.Size = 0;
                 blob.Metadata.clear();
                 blob.LeaseId.clear();
@@ -625,7 +635,8 @@ class FakeBlobServer {
         if (!maxText.empty()) {
             std::from_chars(maxText.data(), maxText.data() + maxText.size(), maxResults);
         }
-        const bool includeMetadata = AzureClient::Tests::QueryValue(url, "include").find("metadata") != std::string::npos;
+        const bool includeMetadata =
+            AzureClient::Tests::QueryValue(url, "include").find("metadata") != std::string::npos;
 
         std::string blobs;
         std::string nextMarker;
@@ -702,6 +713,7 @@ class FakeBlobServer {
             return Failure(400U, "InvalidHeaderValue");
         }
         blob.Data.resize(static_cast<size_t>(capacity), '\0');
+        blob.WrittenPages.resize(PageCount(static_cast<size_t>(capacity)));
         CapacityWrites.push_back(capacity);
         return Success(MakeResponse(200U, {HttpHeader("ETag", NextETag(blob))}));
     }
@@ -718,16 +730,18 @@ class FakeBlobServer {
         if (PageRangeOverride) {
             ranges = *PageRangeOverride;
         } else {
-            constexpr size_t Page = 512;
-            for (size_t offset = 0; offset < blob.Data.size(); offset += Page) {
-                const auto end = (std::min)(offset + Page, blob.Data.size());
-                if (std::any_of(blob.Data.begin() + static_cast<std::ptrdiff_t>(offset),
-                                blob.Data.begin() + static_cast<std::ptrdiff_t>(end),
-                                [](char byte) { return byte != '\0'; })) {
+            // A page is populated if it was written (even with zeros) or, for seeded data, holds a non-zero byte.
+            for (size_t offset = 0; offset < blob.Data.size(); offset += PageSize) {
+                const auto end = (std::min)(offset + PageSize, blob.Data.size());
+                const bool written =
+                    offset / PageSize < blob.WrittenPages.size() && blob.WrittenPages[offset / PageSize];
+                if (written || std::any_of(blob.Data.begin() + static_cast<std::ptrdiff_t>(offset),
+                                           blob.Data.begin() + static_cast<std::ptrdiff_t>(end),
+                                           [](char byte) { return byte != '\0'; })) {
                     if (!ranges.empty() && ranges.back().Offset + ranges.back().Length == offset) {
-                        ranges.back().Length += Page;
+                        ranges.back().Length += PageSize;
                     } else {
-                        ranges.push_back({offset, Page});
+                        ranges.push_back({offset, PageSize});
                     }
                 }
             }
@@ -787,7 +801,11 @@ class FakeBlobServer {
         }
         const std::string payload(source->second.Data.begin() + copy.SourceOffset,
                                   source->second.Data.begin() + copy.SourceOffset + copy.Length);
-        return Success(MakeResponse(201U, {HttpHeader("ETag", Apply(blob, copy.Offset, payload))}));
+        const auto etag = Apply(blob, copy.Offset, payload);
+        if (!etag) {
+            return Failure(416U, "InvalidPageRange");
+        }
+        return Success(MakeResponse(201U, {HttpHeader("ETag", *etag)}));
     }
 
     Result PageWrite(const FakeHttpClient::RequestRecord& record, const std::string& path, StoredBlob& blob) {
@@ -829,22 +847,43 @@ class FakeBlobServer {
             deferred.Deferred = true;
             deferred.OnComplete = [this, path, offset, payload](HttpResponse& response) {
                 std::scoped_lock completionLock(m_mutex);
-                response = MakeResponse(201U, {HttpHeader("ETag", Apply(m_blobs.at(path), offset, payload))});
+                const auto etag = Apply(m_blobs.at(path), offset, payload);
+                if (etag) {
+                    response = MakeResponse(201U, {HttpHeader("ETag", *etag)});
+                } else {
+                    response = Failure(416U, "InvalidPageRange").Response;
+                }
             };
             m_heldUploads.Add(record.Index);
             return deferred;
         }
-        return Success(MakeResponse(201U, {HttpHeader("ETag", Apply(blob, offset, payload))}));
+        const auto etag = Apply(blob, offset, payload, clear);
+        if (!etag) {
+            return Failure(416U, "InvalidPageRange");
+        }
+        return Success(MakeResponse(201U, {HttpHeader("ETag", *etag)}));
     }
 
-    [[nodiscard]] static std::string Apply(StoredBlob& blob, const int64_t offset, const std::string& payload) {
+    // Writes (or, for `clear`, zeroes and unmarks) a page range. Unlike a lenient in-memory buffer the service never
+    // grows a page blob by writing past its end, so a range that no longer fits (e.g. the blob was shrunk after the
+    // request was queued) fails with nullopt and leaves the blob untouched.
+    [[nodiscard]] static std::optional<std::string> Apply(StoredBlob& blob, const int64_t offset,
+                                                          const std::string& payload, const bool clear = false) {
         const auto end = static_cast<size_t>(offset) + payload.size();
         if (end > blob.Data.size()) {
-            blob.Data.resize(end, '\0');
+            return std::nullopt;
         }
         std::ranges::copy(payload, blob.Data.begin() + offset);
+        if (blob.WrittenPages.size() < PageCount(blob.Data.size())) {
+            blob.WrittenPages.resize(PageCount(blob.Data.size()));
+        }
+        for (size_t page = static_cast<size_t>(offset) / PageSize; page * PageSize < end; ++page) {
+            blob.WrittenPages[page] = !clear;
+        }
         return NextETag(blob);
     }
+
+    [[nodiscard]] static size_t PageCount(const size_t bytes) { return (bytes + PageSize - 1) / PageSize; }
 
     Result Download(const FakeHttpClient::RequestRecord& record, StoredBlob& blob) {
         const HttpRequest& request = record.Request;
