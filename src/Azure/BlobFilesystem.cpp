@@ -16,6 +16,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/WriteableFile.hpp"
 
 #include <boost/log/trivial.hpp>
+#include <boost/scope/scope_exit.hpp>
 #include <boost/scope/scope_fail.hpp>
 #include <sstream>
 #include <string_view>
@@ -344,9 +345,13 @@ rocksdb::IOStatus BlobFilesystem::UnlockFile(rocksdb::FileLock* l, const rocksdb
             return rocksdb::IOStatus::InvalidArgument();
         }
 
+        // The wrapper is dropped even if the release fails: the lock is unlinked from renewal either way, so keeping
+        // it would only make RocksDB or the destructor retry a release that cannot succeed.
+        const boost::scope::scope_exit forget{[&] {
+            std::scoped_lock _(m_lockFilesMutex);
+            std::erase_if(m_lockFiles, [lockFile](const auto& entry) { return entry.get() == lockFile; });
+        }};
         m_filesystem->UnlockFile(lockFile->GetImpl());
-        std::scoped_lock _(m_lockFilesMutex);
-        std::erase_if(m_lockFiles, [lockFile](const auto& entry) { return entry.get() == lockFile; });
         return rocksdb::IOStatus::OK();
     });
 }

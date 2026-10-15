@@ -261,8 +261,12 @@ template <typename TBlob> void BasicLockFileImpl<TBlob>::RenewLease() const {
 
 template <typename TBlob> void BasicLockFileImpl<TBlob>::Unlock() {
     const auto leaseId = CurrentLeaseId();
+    // Idempotent: a lease that was never acquired, was already released, or was dropped after a failed release has
+    // nothing left to give back, and shutdown paths call this without knowing which of those applies.
     if (!leaseId.has_value()) {
-        throw std::runtime_error("Cannot release lease that has not been acquired");
+        BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::debug)
+            << "No blob lease to release for '" << m_fileName << "'";
+        return;
     }
 
     BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::debug)

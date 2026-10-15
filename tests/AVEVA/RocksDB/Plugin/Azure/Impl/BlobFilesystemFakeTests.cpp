@@ -656,6 +656,17 @@ TEST(BlobFilesystemFakeRuntimeTests, RuntimeBuiltOnAnIoContextRunsTheTransportOn
     EXPECT_EQ(runtime.HttpClient().get_executor(), context.get_executor());
 }
 
+TEST_F(BlobFilesystemFakeTests, UnlockFileStillReleasesTheLeaseWhenWritesAreFencedAndIsIdempotent) {
+    auto lock = m_fs->LockFile(Path("LOCK"));
+    m_runtime->FenceWrites();
+
+    EXPECT_NO_THROW(m_fs->UnlockFile(*lock));
+    EXPECT_EQ(m_server->LeaseReleases, 1);
+
+    EXPECT_NO_THROW(m_fs->UnlockFile(*lock));
+    EXPECT_EQ(m_server->LeaseReleases, 1);
+}
+
 TEST_F(BlobFilesystemFakeTests, FencedRuntimeRejectsFurtherOperations) {
     m_runtime->FenceWrites();
 

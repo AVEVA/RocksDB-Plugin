@@ -671,7 +671,7 @@ TEST_F(BlobFilesystemIntegrationTests, UnlockFile_InvalidLock_ReturnsFalse) {
     m_filesystem->UnlockFile(*lock1);
 
     // Act - try to unlock lock1 again
-    EXPECT_THROW(m_filesystem->UnlockFile(*lock1), std::runtime_error);
+    EXPECT_NO_THROW(m_filesystem->UnlockFile(*lock1));
 
     // Cleanup
     m_filesystem->UnlockFile(*lock2);

@@ -158,10 +158,10 @@ TEST_F(LockFileImplTests, StateQueriesAreNotBlockedWhileLockIsRetrying) {
     EXPECT_TRUE(lockResult);
 }
 
-TEST_F(LockFileImplTests, RenewAndUnlockBeforeLockThrowAndSendNothing) {
+TEST_F(LockFileImplTests, RenewBeforeLockThrowsAndUnlockIsANoOpSendingNothing) {
     auto lock = CreateLock(std::chrono::seconds(20));
     EXPECT_THROW(lock->Renew(), std::runtime_error);
-    EXPECT_THROW(lock->Unlock(), std::runtime_error);
+    EXPECT_NO_THROW(lock->Unlock());
     EXPECT_FALSE(lock->RenewIfLocked());
     EXPECT_EQ(m_httpClient.RequestCount(), 0U);
 }
@@ -220,7 +220,7 @@ TEST_F(LockFileImplTests, UnlockReleasesTheLeaseAndStopsFurtherRenewal) {
     EXPECT_NO_THROW(lock->Unlock());
 
     EXPECT_FALSE(lock->RenewIfLocked());
-    EXPECT_THROW(lock->Unlock(), std::runtime_error);
+    EXPECT_NO_THROW(lock->Unlock());
     EXPECT_EQ(m_httpClient.RequestCount(), 2U);
 }
 

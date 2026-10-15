@@ -409,9 +409,9 @@ BasicBlobFilesystemImpl<THttp>::LockFile(const std::string& filePath) {
     }
 }
 
+// Deliberately skips EnsureLiveness: once writes are fenced the lease may already be lost, and releasing whatever is
+// still held is exactly what shutdown must still be able to do. Releasing is never a write to the data.
 template <typename THttp> void BasicBlobFilesystemImpl<THttp>::UnlockFile(LockFileType& lock) {
-    EnsureLiveness();
-
     {
         std::scoped_lock _(m_lockFilesMutex);
         lock.unlink();
