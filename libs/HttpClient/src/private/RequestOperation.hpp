@@ -637,9 +637,9 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
         try {
             auto message = m_parser->release();
             std::vector<HttpHeader> headers;
-            headers.reserve(static_cast<std::size_t>(std::distance(message.base().begin(), message.base().end())));
+            // Beast keeps fields in a linked list, so sizing the vector first would cost a second walk.
             for (const auto& header : message.base()) {
-                headers.push_back({std::string(header.name_string()), std::string(header.value())});
+                headers.emplace_back(std::string(header.name_string()), std::string(header.value()));
             }
             return HttpResponse(message.result_int(), std::move(headers), std::move(message.body()));
         } catch (const std::exception&) {
