@@ -95,7 +95,8 @@ void AzureIntegrationTestBase::CreateContainerClient() {
         m_runtime = std::make_shared<ClientRuntime>(m_ioContext.Get());
         const auto serviceClient = ClientFactory::CreateServiceClient(m_runtime, *m_credentials);
 
-        m_containerClient = serviceClient.GetBlobContainerClient(m_credentials->GetDbName());
+        m_containerClient = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::BlobContainerClient>(
+            serviceClient.GetBlobContainerClient(m_credentials->GetDbName()));
 
         // Create container if it doesn't exist - this will test authentication
         TryCreateContainer();

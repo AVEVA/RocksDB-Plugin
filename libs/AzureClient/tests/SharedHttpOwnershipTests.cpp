@@ -77,7 +77,7 @@ TEST(SharedHttpOwnershipTests, ServiceClientSharesTheTransportWithItsContainers)
     SharedTransport transport;
     std::optional<BlobServiceClient> service;
     service.emplace(transport.Release(), MakeBlobServiceClientOptions());
-    auto container = service->GetBlobContainerClient("files");
+    std::optional<BlobContainerClient> container{service->GetBlobContainerClient("files")};
 
     service.reset();
     EXPECT_FALSE(transport.Expired());

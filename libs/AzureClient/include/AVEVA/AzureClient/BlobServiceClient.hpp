@@ -91,9 +91,9 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobServic
     // (matching this client's executor_type, per boost::asio::default_completion_token).
     using DefaultCompletionToken = boost::asio::default_completion_token<executor_type>::type;
 
-    [[nodiscard]] std::unique_ptr<ContainerClientType> GetBlobContainerClient(std::string containerName) const {
-        return std::unique_ptr<ContainerClientType>(
-            new ContainerClientType{*m_httpClient, m_connection, m_credential, std::move(containerName), m_httpOwner});
+    // Returned by value; wrap it in a shared_ptr when shared ownership is needed.
+    [[nodiscard]] ContainerClientType GetBlobContainerClient(std::string containerName) const {
+        return ContainerClientType{*m_httpClient, m_connection, m_credential, std::move(containerName), m_httpOwner};
     }
 
   private:

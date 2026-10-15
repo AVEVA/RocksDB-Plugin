@@ -50,8 +50,9 @@ std::pair<int64_t, int64_t> RoundToEndOfNearestPage(int64_t size);
 std::pair<int64_t, int64_t> RoundToBeginningOfNearestPage(int64_t size);
 // Gets the container client for `name`, creating the container when it does not exist yet.
 template <typename TService> auto GetContainerClient(const TService& blobServiceClient, const std::string& name) {
-    std::shared_ptr<typename std::remove_cvref_t<decltype(*blobServiceClient.GetBlobContainerClient(name))>>
-        blobContainerClient = blobServiceClient.GetBlobContainerClient(name);
+    const auto blobContainerClient =
+        std::make_shared<std::remove_cvref_t<decltype(blobServiceClient.GetBlobContainerClient(name))>>(
+            blobServiceClient.GetBlobContainerClient(name));
     CreateContainerIfNotExists(*blobContainerClient);
     return blobContainerClient;
 }
