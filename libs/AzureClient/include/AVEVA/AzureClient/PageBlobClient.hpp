@@ -88,9 +88,8 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
         requires(!std::same_as<std::remove_cvref_t<CompletionToken>, CreatePageBlobOptions>)
     [[nodiscard]] auto CreateAsync(std::uint64_t contentLength, CompletionToken&& token = CompletionToken{},
                                    std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::CreatePageBlobResult>(
-            this, [](auto& client, auto&&... args) { client.CreateAsyncImpl(std::forward<decltype(args)>(args)...); },
-            std::forward<CompletionToken>(token), std::move(requestOptions), contentLength, CreatePageBlobOptions{});
+        return CreateAsync(contentLength, CreatePageBlobOptions{}, std::forward<CompletionToken>(token),
+                           std::move(requestOptions));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -108,12 +107,8 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
         requires(!std::same_as<std::remove_cvref_t<CompletionToken>, CreatePageBlobOptions>)
     [[nodiscard]] auto CreateIfNotExistsAsync(std::uint64_t contentLength, CompletionToken&& token = CompletionToken{},
                                               std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::CreatePageBlobResult>(
-            this,
-            [](auto& client, auto&&... args) {
-                client.CreateIfNotExistsAsyncImpl(std::forward<decltype(args)>(args)...);
-            },
-            std::forward<CompletionToken>(token), std::move(requestOptions), contentLength, CreatePageBlobOptions{});
+        return CreateIfNotExistsAsync(contentLength, CreatePageBlobOptions{}, std::forward<CompletionToken>(token),
+                                      std::move(requestOptions));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -133,13 +128,8 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     [[nodiscard]] auto UploadPagesAsync(std::uint64_t offset, std::string content,
                                         CompletionToken&& token = CompletionToken{},
                                         std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::UploadPagesResult>(
-            this,
-            [](auto& client, auto&&... args) {
-                client.UploadPagesStringAsyncImpl(std::forward<decltype(args)>(args)...);
-            },
-            std::forward<CompletionToken>(token), std::move(requestOptions), offset, std::move(content),
-            UploadPagesOptions{});
+        return UploadPagesAsync(offset, std::move(content), UploadPagesOptions{}, std::forward<CompletionToken>(token),
+                                std::move(requestOptions));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -162,13 +152,8 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     [[nodiscard]] auto UploadPagesAsync(std::uint64_t offset, std::shared_ptr<const std::vector<char>> content,
                                         CompletionToken&& token = CompletionToken{},
                                         std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::UploadPagesResult>(
-            this,
-            [](auto& client, auto&&... args) {
-                client.UploadPagesSharedAsyncImpl(std::forward<decltype(args)>(args)...);
-            },
-            std::forward<CompletionToken>(token), std::move(requestOptions), offset, std::move(content),
-            UploadPagesOptions{});
+        return UploadPagesAsync(offset, std::move(content), UploadPagesOptions{}, std::forward<CompletionToken>(token),
+                                std::move(requestOptions));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -193,12 +178,8 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     [[nodiscard]] auto UploadPagesAsync(std::uint64_t offset, std::span<const std::byte> content,
                                         CompletionToken&& token = CompletionToken{},
                                         std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::UploadPagesResult>(
-            this,
-            [](auto& client, auto&&... args) {
-                client.UploadPagesBytesAsyncImpl(std::forward<decltype(args)>(args)...);
-            },
-            std::forward<CompletionToken>(token), std::move(requestOptions), offset, content, UploadPagesOptions{});
+        return UploadPagesAsync(offset, content, UploadPagesOptions{}, std::forward<CompletionToken>(token),
+                                std::move(requestOptions));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -218,9 +199,8 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
                  !std::same_as<std::remove_cvref_t<CompletionToken>, CreatePageBlobOptions>)
     [[nodiscard]] auto ResizeAsync(std::uint64_t newSize, CompletionToken&& token = CompletionToken{},
                                    std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::ResizePageBlobResult>(
-            this, [](auto& client, auto&&... args) { client.ResizeAsyncImpl(std::forward<decltype(args)>(args)...); },
-            std::forward<CompletionToken>(token), std::move(requestOptions), newSize, ResizePageBlobOptions{});
+        return ResizeAsync(newSize, ResizePageBlobOptions{}, std::forward<CompletionToken>(token),
+                           std::move(requestOptions));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -238,10 +218,8 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
         requires(!std::same_as<std::remove_cvref_t<CompletionToken>, GetPageRangesOptions>)
     [[nodiscard]] auto GetPageRangesAsync(CompletionToken&& token = CompletionToken{},
                                           std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::GetPageRangesResult>(
-            this,
-            [](auto& client, auto&&... args) { client.GetPageRangesAsyncImpl(std::forward<decltype(args)>(args)...); },
-            std::forward<CompletionToken>(token), std::move(requestOptions), GetPageRangesOptions{});
+        return GetPageRangesAsync(GetPageRangesOptions{}, std::forward<CompletionToken>(token),
+                                  std::move(requestOptions));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -263,13 +241,8 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     [[nodiscard]] auto UploadPagesFromUrlAsync(std::uint64_t offset, std::string sourceUrl, std::uint64_t sourceOffset,
                                                std::uint64_t length, CompletionToken&& token = CompletionToken{},
                                                std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::UploadPagesResult>(
-            this,
-            [](auto& client, auto&&... args) {
-                client.UploadPagesFromUrlAsyncImpl(std::forward<decltype(args)>(args)...);
-            },
-            std::forward<CompletionToken>(token), std::move(requestOptions), offset, std::move(sourceUrl), sourceOffset,
-            length, UploadPagesFromUrlOptions{});
+        return UploadPagesFromUrlAsync(offset, std::move(sourceUrl), sourceOffset, length, UploadPagesFromUrlOptions{},
+                                       std::forward<CompletionToken>(token), std::move(requestOptions));
     }
 
     template <class CompletionToken = DefaultCompletionToken>

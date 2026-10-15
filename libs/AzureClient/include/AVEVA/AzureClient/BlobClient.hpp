@@ -98,9 +98,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
         requires(!std::same_as<std::remove_cvref_t<CompletionToken>, DownloadBlobOptions>)
     [[nodiscard]] auto DownloadAsync(CompletionToken&& token = CompletionToken{},
                                      std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::DownloadBlobResult>(
-            this, [](auto& client, auto&&... args) { client.DownloadAsyncImpl(std::forward<decltype(args)>(args)...); },
-            std::forward<CompletionToken>(token), std::move(requestOptions), DownloadBlobOptions{});
+        return DownloadAsync(DownloadBlobOptions{}, std::forward<CompletionToken>(token), std::move(requestOptions));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -151,10 +149,8 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
                  !std::same_as<std::remove_cvref_t<CompletionToken>, DownloadToOptions>)
     [[nodiscard]] auto DownloadToAsync(const std::filesystem::path& path, CompletionToken&& token = CompletionToken{},
                                        std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::DownloadBlobToResult>(
-            this,
-            [](auto& client, auto&&... args) { client.DownloadToFileAsyncImpl(std::forward<decltype(args)>(args)...); },
-            std::forward<CompletionToken>(token), std::move(requestOptions), path, DownloadToOptions{});
+        return DownloadToAsync(path, DownloadToOptions{}, std::forward<CompletionToken>(token),
+                               std::move(requestOptions));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -173,9 +169,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
         requires(!std::same_as<std::remove_cvref_t<CompletionToken>, DeleteBlobOptions>)
     [[nodiscard]] auto DeleteAsync(CompletionToken&& token = CompletionToken{},
                                    std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::DeleteBlobResult>(
-            this, [](auto& client, auto&&... args) { client.DeleteAsyncImpl(std::forward<decltype(args)>(args)...); },
-            std::forward<CompletionToken>(token), std::move(requestOptions), DeleteBlobOptions{});
+        return DeleteAsync(DeleteBlobOptions{}, std::forward<CompletionToken>(token), std::move(requestOptions));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -209,10 +203,8 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
         requires(!std::same_as<std::remove_cvref_t<CompletionToken>, GetBlobPropertiesOptions>)
     [[nodiscard]] auto GetPropertiesAsync(CompletionToken&& token = CompletionToken{},
                                           std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::BlobProperties>(
-            this,
-            [](auto& client, auto&&... args) { client.GetPropertiesAsyncImpl(std::forward<decltype(args)>(args)...); },
-            std::forward<CompletionToken>(token), std::move(requestOptions), GetBlobPropertiesOptions{});
+        return GetPropertiesAsync(GetBlobPropertiesOptions{}, std::forward<CompletionToken>(token),
+                                  std::move(requestOptions));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -247,10 +239,8 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
         requires(!std::same_as<std::remove_cvref_t<CompletionToken>, AcquireLeaseOptions>)
     [[nodiscard]] auto AcquireLeaseAsync(CompletionToken&& token = CompletionToken{},
                                          std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::AcquireBlobLeaseResult>(
-            this,
-            [](auto& client, auto&&... args) { client.AcquireLeaseAsyncImpl(std::forward<decltype(args)>(args)...); },
-            std::forward<CompletionToken>(token), std::move(requestOptions), AcquireLeaseOptions{});
+        return AcquireLeaseAsync(AcquireLeaseOptions{}, std::forward<CompletionToken>(token),
+                                 std::move(requestOptions));
     }
 
     template <class CompletionToken = DefaultCompletionToken>

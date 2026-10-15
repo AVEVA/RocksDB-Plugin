@@ -114,10 +114,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContai
         requires(!std::same_as<std::remove_cvref_t<CompletionToken>, ListBlobsOptions>)
     [[nodiscard]] auto ListBlobsAsync(CompletionToken&& token = CompletionToken{},
                                       std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::ListBlobsResult>(
-            this,
-            [](auto& client, auto&&... args) { client.ListBlobsAsyncImpl(std::forward<decltype(args)>(args)...); },
-            std::forward<CompletionToken>(token), std::move(requestOptions), ListBlobsOptions{});
+        return ListBlobsAsync(ListBlobsOptions{}, std::forward<CompletionToken>(token), std::move(requestOptions));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -137,12 +134,8 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContai
         requires(!std::same_as<std::remove_cvref_t<CompletionToken>, CreateBlobContainerOptions>)
     [[nodiscard]] auto CreateIfNotExistsAsync(CompletionToken&& token = CompletionToken{},
                                               std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::CreateBlobContainerResult>(
-            this,
-            [](auto& client, auto&&... args) {
-                client.CreateIfNotExistsAsyncImpl(std::forward<decltype(args)>(args)...);
-            },
-            std::forward<CompletionToken>(token), std::move(requestOptions), CreateBlobContainerOptions{});
+        return CreateIfNotExistsAsync(CreateBlobContainerOptions{}, std::forward<CompletionToken>(token),
+                                      std::move(requestOptions));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -171,11 +164,8 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContai
         requires(!std::same_as<std::remove_cvref_t<CompletionToken>, DeleteBlobsOptions>)
     [[nodiscard]] auto DeleteBlobsAsync(std::vector<std::string> blobNames, CompletionToken&& token = CompletionToken{},
                                         std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::DeleteBlobsResult>(
-            this,
-            [](auto& client, auto&&... args) { client.DeleteBlobsAsyncImpl(std::forward<decltype(args)>(args)...); },
-            std::forward<CompletionToken>(token), std::move(requestOptions), std::move(blobNames),
-            DeleteBlobsOptions{});
+        return DeleteBlobsAsync(std::move(blobNames), DeleteBlobsOptions{}, std::forward<CompletionToken>(token),
+                                std::move(requestOptions));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
