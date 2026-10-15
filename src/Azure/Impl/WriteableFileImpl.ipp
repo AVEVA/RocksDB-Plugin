@@ -60,8 +60,9 @@ BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(
 }
 
 template <typename TBlob> BasicWriteableFileImpl<TBlob>::~BasicWriteableFileImpl() {
-    // A failed upload is sticky, so retrying can only fail the same way.
-    CloseWithRetries(*m_h.Logger, m_h.Name, [this] { Close(); }, [this] { return HasUploadError(); });
+    // A failed upload is sticky, and a fenced runtime refuses every write, so retrying can only fail the same way.
+    CloseWithRetries(
+        *m_h.Logger, m_h.Name, [this] { Close(); }, [this] { return HasUploadError() || m_h.Runtime->WritesFenced(); });
 
     // Outstanding upload completions use the blob client and logger, which are released below.
     DrainUploads();

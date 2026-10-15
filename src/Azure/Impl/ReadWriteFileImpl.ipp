@@ -30,7 +30,7 @@ BasicReadWriteFileImpl<TBlob>::BasicReadWriteFileImpl(
 }
 
 template <typename TBlob> BasicReadWriteFileImpl<TBlob>::~BasicReadWriteFileImpl() {
-    CloseWithRetries(*m_h.Logger, m_h.Name, [this] { Close(); }, [] { return false; });
+    CloseWithRetries(*m_h.Logger, m_h.Name, [this] { Close(); }, [this] { return m_h.Runtime->WritesFenced(); });
 }
 
 template <typename TBlob>
@@ -89,7 +89,7 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
     struct Extent {
         int64_t Start = 0;
         int64_t End = 0;
-        std::vector<size_t> Chunks; // indices into m_bufferStats, in write order
+        std::vector<size_t> Chunks;              // indices into m_bufferStats, in write order
         std::shared_ptr<std::vector<char>> Data; // shared so each upload's request views it without a copy
     };
 
@@ -190,9 +190,8 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
         }
         finishAll(reads, finishRead);
 
-        using PendingUploadT =
-            decltype(BlobOperations::StartUploadPages(*m_h.Runtime, *m_h.Blob, std::shared_ptr<const std::vector<char>>{},
-                                                      int64_t{0}));
+        using PendingUploadT = decltype(BlobOperations::StartUploadPages(
+            *m_h.Runtime, *m_h.Blob, std::shared_ptr<const std::vector<char>>{}, int64_t{0}));
         std::vector<PendingUploadT> uploads;
         try {
             for (auto i = begin; i < end; ++i) {

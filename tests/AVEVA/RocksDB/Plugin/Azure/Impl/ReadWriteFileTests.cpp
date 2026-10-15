@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/CloseWithRetries.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
@@ -652,4 +653,64 @@ TEST_F(ReadWriteFileImplTests, Write_Overlapping_OverwritesData) {
     // Last 50 bytes should be 'Q'
     EXPECT_EQ('Q', readBuffer[150]);
     EXPECT_EQ('Q', readBuffer[199]);
+}
+TEST(CloseWithRetriesTests, RetriesWithBackoffUntilTheCloseSucceeds) {
+    boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level> logger;
+    int attempts = 0;
+    const auto start = std::chrono::steady_clock::now();
+
+    CloseWithRetries(
+        logger, "f",
+        [&] {
+            if (++attempts < 3) {
+                throw std::runtime_error("transient");
+            }
+        },
+        [] { return false; }, std::chrono::milliseconds(40));
+
+    EXPECT_EQ(attempts, 3);
+    // 40 ms after the first failure plus 80 ms after the second.
+    EXPECT_GE(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(110));
+}
+
+TEST(CloseWithRetriesTests, StopsAtOnceWhenTheFailureIsPermanent) {
+    boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level> logger;
+    int attempts = 0;
+
+    CloseWithRetries(
+        logger, "f",
+        [&] {
+            ++attempts;
+            throw std::runtime_error("fenced");
+        },
+        [] { return true; });
+
+    EXPECT_EQ(attempts, 1);
+}
+
+TEST(CloseWithRetriesTests, GivesUpAfterTheMaximumNumberOfAttempts) {
+    boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level> logger;
+    int attempts = 0;
+
+    CloseWithRetries(
+        logger, "f",
+        [&] {
+            ++attempts;
+            throw std::runtime_error("down");
+        },
+        [] { return false; }, std::chrono::milliseconds(1));
+
+    EXPECT_EQ(attempts, 5);
+}
+
+TEST_F(ReadWriteFileImplTests, DestructorDoesNotRetryTheCloseOnceWritesAreFenced) {
+    {
+        auto file = CreateFile();
+        file->Write(0, "data", 4);
+        m_env.Runtime->FenceWrites();
+        const auto start = std::chrono::steady_clock::now();
+        file.reset();
+        // Five attempts with backoff would take at least 750 ms.
+        EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(700));
+    }
 }
