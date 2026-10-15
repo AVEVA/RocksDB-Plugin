@@ -113,9 +113,9 @@ git config --system core.longpaths true
 ```
 
 ### Azure client (OpenSSL) build failures on Linux
-Ensure OpenSSL development headers are installed:
+OpenSSL is built from source by vcpkg, so a system `libssl-dev` is not used. Make sure the vcpkg port prerequisites are installed:
 ```bash
-sudo apt-get install libssl-dev
+sudo apt-get install perl make linux-libc-dev
 ```
 
 ---
