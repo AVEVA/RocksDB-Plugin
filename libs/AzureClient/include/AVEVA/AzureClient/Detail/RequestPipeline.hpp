@@ -287,6 +287,25 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     }
 
     [[nodiscard]] HttpRequest BuildAttemptRequest() {
+        HttpRequest attempt = CopyOrMoveRequest();
+        // Stamped here, right before signing, so a request that waited for a token or a backoff never carries a
+        // stale date that the service would reject as clock skew.
+        StampDate(attempt, BuildDateHeaderValue(std::chrono::system_clock::now()));
+        return attempt;
+    }
+
+    static void StampDate(HttpRequest& request, const std::string& now) {
+        for (HttpHeader& header : request.GetHeaders()) {
+            if (IEquals(header.GetName(), XMsDateHeaderName)) {
+                header.SetValue(now);
+                return;
+            }
+        }
+        request.AddHeader(HttpHeader{std::string{XMsDateHeaderName}, now});
+    }
+
+    // The last possible attempt takes the request itself; earlier ones copy only the headers and share the body.
+    [[nodiscard]] HttpRequest CopyOrMoveRequest() {
         if (m_attempt >= m_maxAttempts && !CanRefreshToken() && !m_sharedBody) {
             return std::move(m_request);
         }
@@ -305,15 +324,6 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
             }
             if (m_sharedBody) {
                 attempt.SetBodyView(std::as_bytes(std::span{m_sharedBody->data(), m_sharedBody->size()}), m_sharedBody);
-            }
-        }
-
-        if (m_attempt > 1) {
-            const std::string now = BuildDateHeaderValue(std::chrono::system_clock::now());
-            for (HttpHeader& header : attempt.GetHeaders()) {
-                if (IEquals(header.GetName(), XMsDateHeaderName)) {
-                    header.SetValue(now);
-                }
             }
         }
         return attempt;

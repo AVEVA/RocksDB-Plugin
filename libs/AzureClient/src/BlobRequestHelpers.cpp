@@ -397,7 +397,6 @@ template <class TOptions>
     request.SetUrl(std::move(url));
     request.GetHeaders().reserve(TypicalRequestHeaderCount);
     AddHeader(request, XMsVersionHeaderName, options.ApiVersion);
-    AddHeader(request, XMsDateHeaderName, BuildDateHeaderValue(std::chrono::system_clock::now()));
     AddHeader(request, XMsClientRequestIdHeaderName, CreateClientRequestId());
     return request;
 }
