@@ -130,9 +130,10 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
             std::forward<CompletionToken>(token), std::move(requestOptions), path, std::move(options));
     }
 
-    // Downloads the range straight into `destination`, avoiding an intermediate copy of the body. The span must
-    // stay valid until the operation completes. A range larger than the span fails; BytesWritten reports the
-    // bytes stored when the blob ends before the requested range does.
+    // Downloads the range into `destination`. The HTTP client delivers the body as a string, so the bytes are
+    // copied once from that string into the span (not zero-copy). The span must stay valid until the operation
+    // completes. A range larger than the span fails; BytesWritten reports the bytes stored when the blob ends
+    // before the requested range does.
     template <class CompletionToken = DefaultCompletionToken>
     [[nodiscard]] auto DownloadToAsync(std::span<char> destination, DownloadBlobOptions options,
                                        CompletionToken&& token = CompletionToken{},

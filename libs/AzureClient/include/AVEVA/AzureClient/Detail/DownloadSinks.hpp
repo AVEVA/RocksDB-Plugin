@@ -47,8 +47,9 @@ class FileSink final : public DownloadSink {
     std::shared_ptr<std::ofstream> m_file;
 };
 
-// Copies into caller-owned memory, so a download into a fixed buffer needs no intermediate string. A blob
-// range larger than the buffer fails the download instead of writing past the end.
+// Copies each received body string into caller-owned memory (one copy; the HTTP client has no body-sink hook
+// to read straight into the span). A blob range larger than the buffer fails the download instead of writing
+// past the end.
 class SpanSink final : public DownloadSink {
   public:
     explicit SpanSink(std::span<char> destination) : m_destination(destination) {}
