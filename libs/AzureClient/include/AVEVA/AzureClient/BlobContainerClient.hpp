@@ -292,8 +292,6 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContai
     std::shared_ptr<const Private::BasicContainerTarget<TCred>> m_target;
 };
 
-// Defined once in src/BlobContainerClient.cpp, so translation units that use the production client do not instantiate
-// it again.
-extern template class BasicBlobContainerClient<HttpClient>;
+// The production client type.
 using BlobContainerClient = BasicBlobContainerClient<HttpClient>;
 } // namespace AVEVA::AzureClient

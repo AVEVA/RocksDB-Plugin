@@ -589,8 +589,6 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     }
 };
 
-// Defined once in src/PageBlobClient.cpp, so translation units that use the production client do not instantiate it
-// again.
-extern template class BasicPageBlobClient<HttpClient>;
+// The production client type.
 using PageBlobClient = BasicPageBlobClient<HttpClient>;
 } // namespace AVEVA::AzureClient

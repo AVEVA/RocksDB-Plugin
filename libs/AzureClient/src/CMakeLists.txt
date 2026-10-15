@@ -12,19 +12,15 @@ find_package(boost_uuid CONFIG REQUIRED)
 find_package(LibXml2 CONFIG REQUIRED)
 
 add_library(aveva-azure-client
-    BlobClient.cpp
     BlobClientOptions.cpp
-    BlobContainerClient.cpp
     BlobBatch.cpp
     BlobRequestHelpers.cpp
     SharedKeySigner.cpp
     BlobXmlParser.cpp
     BlobUrl.cpp
     BlobResponseParsers.cpp
-    BlobServiceClient.cpp
     Credentials.cpp
     BlobStorageErrorCategory.cpp
-    PageBlobClient.cpp
     RequestPipeline.cpp
 )
 

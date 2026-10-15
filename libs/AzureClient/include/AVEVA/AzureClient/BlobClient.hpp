@@ -381,8 +381,6 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
     }
 };
 
-// The production client type. Other client types (test doubles) instantiate BasicBlobClient<T> explicitly.
-// Defined once in src/BlobClient.cpp, so translation units that use the production client do not instantiate it again.
-extern template class BasicBlobClient<HttpClient>;
+// The production client type.
 using BlobClient = BasicBlobClient<HttpClient>;
 } // namespace AVEVA::AzureClient
