@@ -51,8 +51,9 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
     /// </summary>
     /// <param name="origin">The origin the request counts against.</param>
     /// <param name="ticket">Identifies the request while it waits (see <see cref="Cancel"/>).</param>
-    /// <param name="pending">The request; started once, outside the lock, or aborted through the sink.</param>
-    void Run(const std::string& origin, std::uint64_t ticket, Pending pending) {
+    /// <param name="pending">The request; started once, outside the lock, or aborted through the sink. It is
+    /// consumed last, so <paramref name="origin"/> may safely refer to one of its fields.</param>
+    void Run(const std::string& origin, std::uint64_t ticket, Pending&& pending) {
         std::unique_lock<std::mutex> lock(m_mutex);
         if (m_closed) {
             lock.unlock();

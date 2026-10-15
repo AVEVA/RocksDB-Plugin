@@ -40,19 +40,21 @@ struct NoFault {
 /// <summary>
 /// Holds a completion until it is delivered, so initiation can still fail the request if it throws after
 /// something took ownership of the handler. Whoever takes it first completes it; nobody completes it twice.
+/// A single atomic exchange decides the winner, so no lock is needed.
 /// </summary>
 class CompletionCell {
   public:
-    explicit CompletionCell(Detail::CompletionPointer completion) : m_completion(std::move(completion)) {}
+    explicit CompletionCell(Detail::CompletionPointer completion) noexcept : m_completion(completion.release()) {}
 
-    Detail::CompletionPointer Take() {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        return std::move(m_completion);
-    }
+    CompletionCell(const CompletionCell&) = delete;
+    CompletionCell& operator=(const CompletionCell&) = delete;
+
+    ~CompletionCell() { Take(); }
+
+    Detail::CompletionPointer Take() noexcept { return Detail::CompletionPointer(m_completion.exchange(nullptr)); }
 
   private:
-    std::mutex m_mutex;
-    Detail::CompletionPointer m_completion;
+    std::atomic<Detail::CompletionOperation*> m_completion;
 };
 
 /// <summary>
@@ -192,8 +194,8 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
                 return SendLimited(std::move(origin), std::move(route), std::move(request), std::move(guarded),
                                    std::move(options), std::move(cancellation), deadline);
             }
-            SendUnlimited(route, std::move(request), std::move(guarded), std::move(options), std::move(cancellation),
-                          deadline);
+            SendUnlimited(std::move(route), std::move(request), std::move(guarded), std::move(options),
+                          std::move(cancellation), deadline);
         } catch (...) {
             if (auto pending = cell->Take()) {
                 asio::post(context_, [pending = std::move(pending)]() mutable {
@@ -260,12 +262,15 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
                 }
             });
         }
-        m_limiter->Run(origin, ticket,
-                       PendingRequest{origin, std::move(route), std::move(request), std::move(options),
-                                      std::move(completion), cancellation, deadline});
-        // A cancel that fired before the request was queued found nothing to remove; repeat it now.
+        PendingRequest pending{
+            std::move(origin), std::move(route), std::move(request), std::move(options), std::move(completion),
+            cancellation,      deadline};
+        // Run reads the origin from the request before it consumes it.
+        m_limiter->Run(pending.origin, ticket, std::move(pending));
+        // A cancel that fired before the request was queued found nothing to remove; deliver it again to
+        // whichever target is current (the queue entry, or the operation if it has already started).
         if (cancellation && cancellation->IsCancelled()) {
-            m_limiter->Cancel(origin, ticket);
+            cancellation->Cancel();
         }
     }
     /// <summary>
@@ -279,8 +284,8 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
                 limiter->Release(origin);
                 Detail::Complete(std::move(inner), error, std::move(response));
             });
-        SendUnlimited(pending.route, std::move(pending.request), std::move(wrapped), std::move(pending.options),
-                      std::move(pending.cancellation), pending.deadline);
+        SendUnlimited(std::move(pending.route), std::move(pending.request), std::move(wrapped),
+                      std::move(pending.options), std::move(pending.cancellation), pending.deadline);
     }
 
     /// <summary>
@@ -306,51 +311,52 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// <param name="cancellation">The state the caller's cancellation slot is wired to; the operation makes itself
     /// its target. Null when the caller has no slot.</param>
     /// <param name="deadline">When the request times out, measured from submission.</param>
-    void SendUnlimited(const Route& route, HttpRequest request, Detail::CompletionPointer completion,
+    void SendUnlimited(Route route, HttpRequest request, Detail::CompletionPointer completion,
                        HttpRequestOptions options, std::shared_ptr<CancelState> cancellation,
                        std::chrono::steady_clock::time_point deadline) {
+        if (route.Parsed && route.Tls) {
+            SendOver<TlsStream>(std::move(route), m_tlsPool, std::move(request), std::move(completion),
+                                std::move(options), std::move(cancellation), deadline);
+        } else {
+            SendOver<PlainStream>(std::move(route), m_plainPool, std::move(request), std::move(completion),
+                                  std::move(options), std::move(cancellation), deadline);
+        }
+    }
+
+    /// <summary>
+    /// Sends over one kind of stream: a pooled connection when the request may take one, and otherwise a fresh
+    /// connection on a new strand. The route is consumed; its host and port become the connection key.
+    /// </summary>
+    template <typename Stream>
+    void SendOver(Route route, const std::shared_ptr<ConnectionPool<Stream>>& pool, HttpRequest request,
+                  Detail::CompletionPointer completion, HttpRequestOptions options,
+                  std::shared_ptr<CancelState> cancellation, std::chrono::steady_clock::time_point deadline) {
+        // An unparseable URL has an empty route; the operation then fails it with InvalidUrl.
+        ConnectionKey<Stream> key{std::move(route.Host), route.Parsed ? std::move(route.Port) : std::string("80")};
+
         // Only requests that pass the same validation the operation applies may take a pooled connection, so that
         // failing an invalid one cannot cost a healthy connection; invalid ones take the fresh-connection path.
         if (route.Sendable()) {
-            if (route.Tls) {
-                TlsConnectionKey key{route.Host, route.Port};
-                if (auto pooled = m_tlsPool->Acquire(key)) {
-                    return ResumeWithPooledConnection<TlsStream>(
-                        route, std::move(*pooled), std::move(key), std::move(request), std::move(completion),
-                        std::move(options), m_tlsPool, std::move(cancellation), deadline);
-                }
-            } else {
-                BasicConnectionKey key{route.Host, route.Port};
-                if (auto pooled = m_plainPool->Acquire(key)) {
-                    return ResumeWithPooledConnection<PlainStream>(
-                        route, std::move(*pooled), std::move(key), std::move(request), std::move(completion),
-                        std::move(options), m_plainPool, std::move(cancellation), deadline);
-                }
+            if (auto pooled = pool->Acquire(key)) {
+                return ResumeWithPooledConnection<Stream>(std::move(route), std::move(*pooled), std::move(key),
+                                                          std::move(request), std::move(completion), std::move(options),
+                                                          pool, std::move(cancellation), deadline);
             }
         }
 
         auto executor = asio::make_strand(context_);
-        if (route.Parsed && route.Tls) {
-            TlsConnectionKey key{route.Host, route.Port};
-            auto stream = std::make_unique<TlsStream>(executor, *m_tlsContext);
-            auto operation = std::make_shared<RequestOperation<TlsStream>>(
-                m_tlsContext, std::move(stream), std::move(completion), std::move(options), m_tlsPool, std::move(key));
-            operation->BindCancellation(cancellation);
-            operation->SetDeadline(deadline);
-            asio::post(executor, [operation, request = std::move(request), route]() mutable {
-                operation->Start(std::move(request), route);
-            });
-            return;
-        }
-
-        // An unparseable URL has an empty route; the operation then fails it with InvalidUrl.
-        BasicConnectionKey key{route.Host, route.Parsed ? route.Port : "80"};
-        auto stream = std::make_unique<PlainStream>(executor);
-        auto operation = std::make_shared<RequestOperation<PlainStream>>(
-            m_tlsContext, std::move(stream), std::move(completion), std::move(options), m_plainPool, std::move(key));
+        auto stream = [&] {
+            if constexpr (std::is_same_v<Stream, TlsStream>) {
+                return std::make_unique<TlsStream>(executor, *m_tlsContext);
+            } else {
+                return std::make_unique<PlainStream>(executor);
+            }
+        }();
+        auto operation = std::make_shared<RequestOperation<Stream>>(
+            m_tlsContext, std::move(stream), std::move(completion), std::move(options), pool, std::move(key));
         operation->BindCancellation(cancellation);
         operation->SetDeadline(deadline);
-        asio::post(executor, [operation, request = std::move(request), route]() mutable {
+        asio::post(executor, [operation, request = std::move(request), route = std::move(route)]() mutable {
             operation->Start(std::move(request), route);
         });
     }
@@ -359,6 +365,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// Starts the request on an already-connected pooled stream, on the executor that stream was
     /// created with.
     /// </summary>
+    /// <param name="route">The request's parsed destination; consumed.</param>
     /// <param name="pooled">The connection and read buffer taken from the pool.</param>
     /// <param name="key">The origin the connection belongs to.</param>
     /// <param name="request">The request to send.</param>
@@ -367,7 +374,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// <param name="pool">The pool the connection is returned to if the response allows reuse.</param>
     /// <param name="cancellation">See <see cref="SendUnlimited"/>.</param>
     template <typename Stream>
-    void ResumeWithPooledConnection(const Route& route, PooledConnection<Stream> pooled, ConnectionKey<Stream> key,
+    void ResumeWithPooledConnection(Route route, PooledConnection<Stream> pooled, ConnectionKey<Stream> key,
                                     HttpRequest request, Detail::CompletionPointer completion,
                                     HttpRequestOptions options, std::shared_ptr<ConnectionPool<Stream>> pool,
                                     std::shared_ptr<CancelState> cancellation,
@@ -378,7 +385,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
             std::move(key), std::move(pooled.buffer));
         operation->BindCancellation(cancellation);
         operation->SetDeadline(deadline);
-        asio::post(executor, [operation, request = std::move(request), route]() mutable {
+        asio::post(executor, [operation, request = std::move(request), route = std::move(route)]() mutable {
             operation->StartReused(std::move(request), route);
         });
     }
