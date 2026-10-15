@@ -92,6 +92,8 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     std::shared_ptr<AsyncReadTracker> m_asyncReads;
     // Bytes held by per-file prefetch buffers across all open files; caps Prefetch memory.
     std::shared_ptr<std::atomic<int64_t>> m_prefetchBytes = std::make_shared<std::atomic<int64_t>>(0);
+    // Cap on m_prefetchBytes; set before files are opened.
+    int64_t m_maxPrefetchBytes = Configuration::DefaultPrefetchBudgetBytes;
     mutable std::mutex m_lockFilesMutex;
     boost::intrusive::list<LockFileType, boost::intrusive::constant_time_size<false>> m_locks;
     // Parallel to m_locks; lets the renewal loop keep locks alive while it renews outside m_lockFilesMutex.
@@ -164,6 +166,8 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     BasicBlobFilesystemImpl& operator=(BasicBlobFilesystemImpl&&) = delete;
 
     [[nodiscard]] ReadableFileType CreateReadableFile(const std::string& filePath);
+    // Caps the bytes held by prefetch buffers across all files opened afterwards; 0 declines every prefetch.
+    void SetMaxPrefetchBytes(int64_t maxPrefetchBytes) { m_maxPrefetchBytes = maxPrefetchBytes; }
     [[nodiscard]] SequentialFileType CreateSequentialFile(const std::string& filePath);
     [[nodiscard]] WriteableFileType CreateWriteableFile(const std::string& filePath);
     [[nodiscard]] ReadWriteFileType CreateReadWriteFile(const std::string& filePath);

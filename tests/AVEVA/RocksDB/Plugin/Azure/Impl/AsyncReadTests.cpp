@@ -364,6 +364,29 @@ TEST_F(AsyncReadTests, Prefetch_OverSharedBudget_DeclinedReturnsOkAndFailedPrefe
     EXPECT_EQ(FakeReadableFileImpl::kDefaultPrefetchBudgetBytes, budget->load());
 }
 
+TEST_F(AsyncReadTests, Prefetch_ConfiguredBudget_CapsPrefetchedBytes) {
+    auto budget = std::make_shared<std::atomic<int64_t>>(0);
+    FakeReadableFile file{FakeReadableFileImpl{"test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
+                                               m_logger, nullptr, budget, 1024}};
+
+    ASSERT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
+    EXPECT_EQ(1U, m_deferredEnv.Blob->PendingDownloads());
+    // 512 + 1024 would exceed the 1024-byte budget, so no second download starts.
+    EXPECT_TRUE(file.Prefetch(1024, 1024, rocksdb::IOOptions{}, nullptr).ok());
+    EXPECT_EQ(1U, m_deferredEnv.Blob->PendingDownloads());
+    EXPECT_EQ(512, budget->load());
+}
+
+TEST_F(AsyncReadTests, Prefetch_ZeroBudget_NeverStartsADownload) {
+    auto budget = std::make_shared<std::atomic<int64_t>>(0);
+    FakeReadableFile file{FakeReadableFileImpl{"test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
+                                               m_logger, nullptr, budget, 0}};
+
+    EXPECT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
+    EXPECT_EQ(0U, m_deferredEnv.Blob->PendingDownloads());
+    EXPECT_EQ(0, budget->load());
+}
+
 TEST_F(AsyncReadTests, ReadAsync_PassesIoOptionsTimeoutToTheDownload) {
     auto file = CreateFile(m_deferredEnv);
     std::vector<char> scratch(64);

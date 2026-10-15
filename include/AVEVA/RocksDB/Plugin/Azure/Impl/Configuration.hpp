@@ -44,6 +44,8 @@ struct Configuration {
     // How long a reader's GetSize reuses the blob metadata it already fetched before asking the service again.
     static const constexpr std::chrono::milliseconds MetadataCacheTtl = std::chrono::milliseconds(100);
     static const constexpr std::chrono::seconds LogRateLimiterCooldown = std::chrono::seconds(30);
+    // Default cap on bytes held by prefetch buffers across all files of one filesystem.
+    static const constexpr int64_t DefaultPrefetchBudgetBytes = static_cast<int64_t>(256) * 1024 * 1024;
     static const constexpr size_t MaxCacheSize = static_cast<size_t>(1024) * 1024 * 1024; // 1GB
     static const constexpr int MaxClientRetries = 8;
     // Caps the backoff between retries. With 8 retries from the 800 ms default initial delay the waits total at most

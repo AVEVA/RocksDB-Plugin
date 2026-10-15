@@ -6,6 +6,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFileHandles.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
@@ -35,6 +36,8 @@ template <typename TBlob> class BasicReadableFileImpl {
     std::unique_ptr<std::mutex> m_metadataMutex;
     mutable int64_t m_size;
     mutable std::string m_etag;
+    // Cap on the shared prefetch budget; a Prefetch that would push the budget past it is declined.
+    int64_t m_maxPrefetchBytes;
     // When m_size/m_etag were last read from the service; GetSize serves them for MetadataCacheTtl.
     mutable std::chrono::steady_clock::time_point m_metadataFetchedAt;
     // Optional; when set, every ReadAsync is registered with it until its callback has been released.
@@ -100,7 +103,8 @@ template <typename TBlob> class BasicReadableFileImpl {
         std::shared_ptr<Core::FileCache> fileCache,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::shared_ptr<AsyncReadTracker> asyncReads = nullptr,
-        std::shared_ptr<std::atomic<int64_t>> prefetchBudget = nullptr);
+        std::shared_ptr<std::atomic<int64_t>> prefetchBudget = nullptr,
+        int64_t maxPrefetchBytes = Configuration::DefaultPrefetchBudgetBytes);
 
     // Reads at an explicit offset; carries no read position of its own.
     [[nodiscard]] int64_t RandomRead(int64_t offset, int64_t bytesToRead, char* buffer) const;
@@ -137,7 +141,7 @@ template <typename TBlob> class BasicReadableFileImpl {
 
     static constexpr size_t kMaxPrefetchSlots = 2;
     // Default process-wide cap on prefetched bytes across all files sharing a budget.
-    static constexpr int64_t kDefaultPrefetchBudgetBytes = 256 * 1024 * 1024;
+    static constexpr int64_t kDefaultPrefetchBudgetBytes = Configuration::DefaultPrefetchBudgetBytes;
 
     [[nodiscard]] std::string GetETag() const;
     // Compares against the cached ETag under the metadata lock without copying it.

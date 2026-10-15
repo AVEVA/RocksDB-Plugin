@@ -259,7 +259,8 @@ BasicBlobFilesystemImpl<THttp>::CreateReadableFile(const std::string& filePath) 
                             BlobFilesystemDetail::FindCache(m_fileCaches, prefix),
                             m_logger,
                             m_asyncReads,
-                            m_prefetchBytes};
+                            m_prefetchBytes,
+                            m_maxPrefetchBytes};
 }
 
 template <typename THttp>
@@ -741,7 +742,8 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
         // goes through an emptied blob (there is no atomic replace), but that window is one upload wide instead of a
         // multi-request copy, and a failure leaves the source intact for a retry.
         constexpr auto PageSize = Configuration::PageBlob::PageSize;
-        auto data = std::make_shared<std::vector<char>>(static_cast<size_t>((size + PageSize - 1) / PageSize * PageSize));
+        auto data =
+            std::make_shared<std::vector<char>>(static_cast<size_t>((size + PageSize - 1) / PageSize * PageSize));
         if (size > 0 && BlobOperations::Download(srcClient, std::span<char>(*data).first(static_cast<size_t>(size)), 0,
                                                  size, etag) != size) {
             throw std::runtime_error("Unexpected end of blob while renaming '" + std::string(realPathFrom) + "'");

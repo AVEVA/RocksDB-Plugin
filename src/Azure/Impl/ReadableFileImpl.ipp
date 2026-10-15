@@ -48,9 +48,11 @@ BasicReadableFileImpl<TBlob>::BasicReadableFileImpl(
     std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
     std::shared_ptr<Core::FileCache> fileCache,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-    std::shared_ptr<AsyncReadTracker> asyncReads, std::shared_ptr<std::atomic<int64_t>> prefetchBudget)
+    std::shared_ptr<AsyncReadTracker> asyncReads, std::shared_ptr<std::atomic<int64_t>> prefetchBudget,
+    int64_t maxPrefetchBytes)
     : m_h(name, std::move(runtime), std::move(blob), std::move(fileCache), std::move(logger)),
-      m_metadataMutex(std::make_unique<std::mutex>()), m_size(0), m_asyncReads(std::move(asyncReads)) {
+      m_metadataMutex(std::make_unique<std::mutex>()), m_size(0), m_maxPrefetchBytes(maxPrefetchBytes),
+      m_asyncReads(std::move(asyncReads)) {
     m_prefetch->Budget = std::move(prefetchBudget);
     auto metadata = BlobOperations::GetMetadata(*m_h.Blob);
     m_size = metadata.Size;
@@ -182,7 +184,7 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
 
         if (state->Budget) {
             const int64_t freed = victim != state->Slots.end() ? victim->Length : 0;
-            if (state->Budget->fetch_add(n) + n - freed > kDefaultPrefetchBudgetBytes) {
+            if (state->Budget->fetch_add(n) + n - freed > self->m_maxPrefetchBytes) {
                 state->Budget->fetch_sub(n);
                 return false;
             }

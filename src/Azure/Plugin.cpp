@@ -203,7 +203,10 @@ RegisterImpl(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::sha
              std::optional<StorageInfo> backup,
              std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
              int64_t dataFileBufferSize, int64_t dataFileInitialSize, std::optional<std::string_view> cachePath,
-             size_t maxCacheSize) {
+             size_t maxCacheSize, int64_t maxPrefetchBytes) {
+    if (maxPrefetchBytes < 0) {
+        return rocksdb::Status::InvalidArgument("maxPrefetchBytes cannot be negative");
+    }
     auto pluginName = PluginNameFor(primary, backup);
     auto legacyName = LegacyPluginNameFor(primary, backup);
 
@@ -215,10 +218,12 @@ RegisterImpl(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::sha
 
     FileSystemFactory create = [&ioContext, owner = std::move(owner), primary = std::move(primary),
                                 backup = std::move(backup), logger = std::move(logger), dataFileBufferSize,
-                                dataFileInitialSize, cachePath = std::move(ownedCachePath), maxCacheSize]() {
+                                dataFileInitialSize, cachePath = std::move(ownedCachePath), maxCacheSize,
+                                maxPrefetchBytes]() {
         auto impl = std::make_unique<Impl::BlobFilesystemImpl>(
             ioContext, primary, backup, dataFileInitialSize, dataFileBufferSize, logger,
             cachePath ? std::optional<std::string_view>(*cachePath) : std::nullopt, maxCacheSize);
+        impl->SetMaxPrefetchBytes(maxPrefetchBytes);
         return std::unique_ptr<rocksdb::FileSystem>(
             new BlobFilesystem(rocksdb::FileSystem::Default(), std::move(impl), logger, owner));
     };
@@ -249,9 +254,10 @@ Plugin::Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std:
                  std::optional<Models::ServicePrincipalStorageInfo> backup,
                  std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
                  int64_t dataFileBufferSize, int64_t dataFileInitialSize, std::optional<std::string_view> cachePath,
-                 size_t maxCacheSize) {
+                 size_t maxCacheSize, int64_t maxPrefetchBytes) {
     return RegisterImpl(configOptions, env, guard, ioContext, nullptr, std::move(primary), std::move(backup),
-                        std::move(logger), dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize);
+                        std::move(logger), dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize,
+                        maxPrefetchBytes);
 }
 
 rocksdb::Status
@@ -260,9 +266,10 @@ Plugin::Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std:
                  std::optional<Models::ChainedCredentialInfo> backup,
                  std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
                  int64_t dataFileBufferSize, int64_t dataFileInitialSize, std::optional<std::string_view> cachePath,
-                 size_t maxCacheSize) {
+                 size_t maxCacheSize, int64_t maxPrefetchBytes) {
     return RegisterImpl(configOptions, env, guard, ioContext, nullptr, std::move(primary), std::move(backup),
-                        std::move(logger), dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize);
+                        std::move(logger), dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize,
+                        maxPrefetchBytes);
 }
 
 rocksdb::Status
@@ -271,13 +278,14 @@ Plugin::Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std:
                  std::optional<Models::ServicePrincipalStorageInfo> backup,
                  std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
                  int64_t dataFileBufferSize, int64_t dataFileInitialSize, std::optional<std::string_view> cachePath,
-                 size_t maxCacheSize) {
+                 size_t maxCacheSize, int64_t maxPrefetchBytes) {
     if (!ioContext) {
         return rocksdb::Status::InvalidArgument("ioContext cannot be null");
     }
     auto& context = *ioContext;
     return RegisterImpl(configOptions, env, guard, context, std::move(ioContext), std::move(primary), std::move(backup),
-                        std::move(logger), dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize);
+                        std::move(logger), dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize,
+                        maxPrefetchBytes);
 }
 
 rocksdb::Status
@@ -286,13 +294,14 @@ Plugin::Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std:
                  std::optional<Models::ChainedCredentialInfo> backup,
                  std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
                  int64_t dataFileBufferSize, int64_t dataFileInitialSize, std::optional<std::string_view> cachePath,
-                 size_t maxCacheSize) {
+                 size_t maxCacheSize, int64_t maxPrefetchBytes) {
     if (!ioContext) {
         return rocksdb::Status::InvalidArgument("ioContext cannot be null");
     }
     auto& context = *ioContext;
     return RegisterImpl(configOptions, env, guard, context, std::move(ioContext), std::move(primary), std::move(backup),
-                        std::move(logger), dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize);
+                        std::move(logger), dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize,
+                        maxPrefetchBytes);
 }
 
 void Plugin::Unregister(const std::string& name) { ClearRegistration(name); }
@@ -314,11 +323,12 @@ Plugin::Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std:
                  Models::ServicePrincipalStorageInfo primary, std::optional<Models::ServicePrincipalStorageInfo> backup,
                  std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
                  int64_t dataFileBufferSize, int64_t dataFileInitialSize, std::optional<std::string_view> cachePath,
-                 size_t maxCacheSize) {
+                 size_t maxCacheSize, int64_t maxPrefetchBytes) {
     auto owner = OwnedIoContext::Acquire();
     auto& context = owner->Context();
     return RegisterImpl(configOptions, env, guard, context, std::move(owner), std::move(primary), std::move(backup),
-                        std::move(logger), dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize);
+                        std::move(logger), dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize,
+                        maxPrefetchBytes);
 }
 
 rocksdb::Status
@@ -326,10 +336,11 @@ Plugin::Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std:
                  Models::ChainedCredentialInfo primary, std::optional<Models::ChainedCredentialInfo> backup,
                  std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
                  int64_t dataFileBufferSize, int64_t dataFileInitialSize, std::optional<std::string_view> cachePath,
-                 size_t maxCacheSize) {
+                 size_t maxCacheSize, int64_t maxPrefetchBytes) {
     auto owner = OwnedIoContext::Acquire();
     auto& context = owner->Context();
     return RegisterImpl(configOptions, env, guard, context, std::move(owner), std::move(primary), std::move(backup),
-                        std::move(logger), dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize);
+                        std::move(logger), dataFileBufferSize, dataFileInitialSize, cachePath, maxCacheSize,
+                        maxPrefetchBytes);
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure
