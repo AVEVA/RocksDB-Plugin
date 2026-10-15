@@ -413,7 +413,12 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                 BOOST_LOG_SEV(*m_logger, debug) << "Marking file '" << filePath << "' as active";
                 UpdateEntryUnsafe(it->second,
                                   [](FileCacheEntry& entry) { entry.SetState(FileCacheEntry::State::Active); });
-            } else {
+
+                // SetCacheSize may have lowered the maximum while this file was downloading, and it was not yet
+                // counted then.
+                if (const auto size = GetCurrentSizeUnsafe(); size > m_maxSize) {
+                    EvictAtLeast(size - m_maxSize);
+                }
                 // The file was likely deleted. We should clean up after ourselves; the delete runs on the next pass
                 // of this loop, outside the mutex.
                 BOOST_LOG_SEV(*m_logger, debug) << "File '" << filePath << "' was deleted. Removing file from cache";
@@ -483,6 +488,9 @@ bool FileCache::EvictAtLeast(const int64_t bytes) {
         if (state == FileCacheEntry::State::Downloading || state == FileCacheEntry::State::QueuedForDownload) {
             BOOST_LOG_SEV(*m_logger, debug) << "Skipping eviction of '" << current->GetFilePath()
                                             << "'. It is currently downloading or queued for download";
+        } else if (state == FileCacheEntry::State::Stale && current->GetSize() == 0) {
+            // Frees nothing, and removing it would discard its access history; PruneUndownloadedStaleEntriesUnsafe
+            // bounds these.
         } else {
             const std::string filePath = current->GetFilePath();
             const auto fileSize = current->GetSize();

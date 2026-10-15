@@ -533,3 +533,26 @@ TEST_F(FileCacheTests, EvictedFiles_AreDeletedBeforeTheNextFileIsDownloaded) {
     // Assert
     EXPECT_TRUE(deletedBeforeDownload);
 }
+
+TEST_F(FileCacheTests, Eviction_DoesNotRemoveMetadataOnlyStaleEntries) {
+    // Arrange
+    const auto fileSize = static_cast<size_t>(100);
+    m_cache.SetCacheSize(fileSize);
+    EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(fileSize));
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
+        auto file = std::make_unique<FileMock>();
+        EXPECT_CALL(*file, Read(_, _, _)).WillRepeatedly([](char*, uint64_t, uint64_t length) { return length; });
+        return file;
+    });
+    EXPECT_FALSE(m_cache.ReadFile("seen.sst", 0, 0, nullptr)); // metadata-only entry, size 0
+    EnsureReadFromCache("1.sst", fileSize);
+
+    // Act - forces an eviction
+    EnsureReadFromCache("2.sst", fileSize);
+    m_cache.WaitUntilIdle();
+
+    // Assert
+    EXPECT_TRUE(m_cache.HasFile("seen.sst"));
+    EXPECT_FALSE(m_cache.HasFile("1.sst"));
+}
