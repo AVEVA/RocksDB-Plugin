@@ -10,10 +10,10 @@
 #include <AVEVA/AzureClient/HttpClientLike.hpp>
 #include <AVEVA/AzureClient/TokenCredential.hpp>
 
+#include <AVEVA/AzureClient/AzureRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpClient.hpp>
 #include <AVEVA/HttpClient/HttpMethod.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
-#include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/post.hpp>
@@ -56,7 +56,7 @@ struct ClientSecretCredentialOptions {
     std::string ClientId;
     std::string ClientSecret;
     std::string AuthorityHost = std::string{DefaultAuthorityHost};
-    HttpRequestOptions RequestOptions;
+    AzureRequestOptions RequestOptions;
     // Retries of transient token endpoint failures (408/429/5xx and transport errors).
     RetryOptions Retry;
 
@@ -71,7 +71,7 @@ struct WorkloadIdentityCredentialOptions {
     // File holding the federated (e.g. Kubernetes service account) token; re-read on every request.
     std::string TokenFilePath;
     std::string AuthorityHost = std::string{DefaultAuthorityHost};
-    HttpRequestOptions RequestOptions;
+    AzureRequestOptions RequestOptions;
     // Retries of transient token endpoint failures (408/429/5xx and transport errors).
     RetryOptions Retry;
 
@@ -91,7 +91,7 @@ struct ClientAssertionCredentialOptions {
     // thread. An error from it is passed through as the token error and no token request is sent.
     std::function<void(AssertionCompletion)> AssertionProvider;
     std::string AuthorityHost = std::string{DefaultAuthorityHost};
-    HttpRequestOptions RequestOptions;
+    AzureRequestOptions RequestOptions;
     // Retries of transient token endpoint failures (408/429/5xx and transport errors).
     RetryOptions Retry;
 };
@@ -106,7 +106,7 @@ struct ManagedIdentityCredentialOptions { // A user-assigned identity, by client
     std::string IdentityEndpoint;
     std::string IdentityHeader;
     std::string ImdsEndpoint = std::string{DefaultImdsEndpoint};
-    HttpRequestOptions RequestOptions;
+    AzureRequestOptions RequestOptions;
     // Retries of transient token endpoint failures; HTTP 404 and 410 are also retried (IMDS answers these while the
     // identity is still being provisioned).
     RetryOptions Retry;
@@ -144,7 +144,7 @@ template <HttpClientLike THttp, class Handler> void Fail(THttp& httpClient, Hand
 }
 
 template <HttpClientLike THttp, class Handler>
-void SendTokenRequest(THttp& httpClient, HttpRequest request, HttpRequestOptions requestOptions, RetryOptions retry,
+void SendTokenRequest(THttp& httpClient, HttpRequest request, AzureRequestOptions requestOptions, RetryOptions retry,
                       bool retryNotFoundAndGone, Handler completion) {
     for (const HttpHeader& header : request.GetHeaders()) {
         if (Private::HasHeaderControlCharacters(header.GetName()) ||
@@ -435,7 +435,7 @@ struct AzurePipelinesCredentialOptions {
     // to it.
     std::string OidcRequestUri;
     std::string AuthorityHost = std::string{DefaultAuthorityHost};
-    HttpRequestOptions RequestOptions;
+    AzureRequestOptions RequestOptions;
     // Retries of transient failures of the OIDC token request and of the token exchange.
     RetryOptions Retry;
 };

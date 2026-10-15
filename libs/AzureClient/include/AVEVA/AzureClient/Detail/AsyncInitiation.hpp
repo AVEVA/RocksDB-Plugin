@@ -3,12 +3,12 @@
 
 #pragma once
 
+#include <AVEVA/AzureClient/AzureRequestOptions.hpp>
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
 #include <AVEVA/AzureClient/BlockOn.hpp>
 #include <AVEVA/AzureClient/HttpClientLike.hpp>
 #include <AVEVA/AzureClient/Response.hpp>
 #include <AVEVA/AzureClient/WithRequestOptions.hpp>
-#include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 
 #include <boost/asio/append.hpp>
 #include <boost/asio/associated_allocator.hpp>
@@ -74,7 +74,7 @@ template <class TArg, class THandler, class TExecutor, class TAllocator, class T
 
 template <class TArg, class RawHandler, class TExecutor>
 [[nodiscard]] auto BindAssociationsAndAdoptCancellationOn(RawHandler& handler, const TExecutor& defaultExecutor,
-                                                          HttpRequestOptions& requestOptions) {
+                                                          AzureRequestOptions& requestOptions) {
     auto slot = boost::asio::get_associated_cancellation_slot(handler, boost::asio::cancellation_slot());
     const bool adoptedSlot = slot.is_connected() && !requestOptions.GetCancellationSlot().is_connected();
     if (adoptedSlot) {
@@ -106,10 +106,10 @@ template <class TArg, class RawHandler, class TExecutor>
 // the client's DefaultRequestOptions.
 template <class Result, class Client, class Impl, class CompletionToken, class... Args>
 auto InitiateClientOperation(Client* client, Impl impl, CompletionToken&& token,
-                             std::optional<HttpRequestOptions> requestOptions, Args&&... args) {
+                             std::optional<AzureRequestOptions> requestOptions, Args&&... args) {
     using Signature = void(std::expected<Response<Result>, BlobStorageError>);
 
-    HttpRequestOptions effectiveOptions =
+    AzureRequestOptions effectiveOptions =
         requestOptions ? std::move(*requestOptions) : client->GetDefaultRequestOptions();
     if constexpr (IsRequestOptionsToken<std::remove_cvref_t<CompletionToken>>) {
         effectiveOptions = token.Options;
@@ -133,7 +133,7 @@ auto InitiateClientOperation(Client* client, Impl impl, CompletionToken&& token,
         // The initiation owns a snapshot of the client rather than pointing at it: a deferred operation runs
         // after this call returns, by which time the caller's client may have been moved from or destroyed.
         [snapshot = ClientSnapshotAccess::Make(*client),
-         impl](auto handler, HttpRequestOptions initiationRequestOptions, auto... initiationArgs) mutable {
+         impl](auto handler, AzureRequestOptions initiationRequestOptions, auto... initiationArgs) mutable {
             auto boundHandler =
                 BindAssociationsAndAdoptCancellationOn<std::expected<Response<Result>, BlobStorageError>>(
                     handler, snapshot.get_executor(), initiationRequestOptions);

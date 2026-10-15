@@ -28,8 +28,7 @@ namespace AVEVA::Private {
 /// <typeparam name="Sink">Decides what happens to a request: <c>Start(Pending&amp;&amp;)</c> begins one that
 /// has been given a slot, and <c>Abort(Pending&amp;&amp;, std::error_code)</c> fails one that never got a
 /// slot. Copyable, and called outside the lock.</typeparam>
-template <typename Pending, typename Sink>
-class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending, Sink>> {
+template <typename Pending, typename Sink> class OriginLimiter {
   public:
     /// <summary>
     /// Constructs a limiter with a per-origin concurrency cap.

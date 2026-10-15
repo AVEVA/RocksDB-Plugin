@@ -4,12 +4,12 @@
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
+#include <AVEVA/AzureClient/AzureRequestOptions.hpp>
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
 #include <AVEVA/AzureClient/BlockOn.hpp>
 #include <AVEVA/AzureClient/HttpClientLike.hpp>
 #include <AVEVA/AzureClient/Response.hpp>
 #include <AVEVA/HttpClient/HttpClient.hpp>
-#include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/use_future.hpp>
@@ -110,7 +110,8 @@ class ClientRuntimeBase {
 /// Caps a mutating request's timeout and total deadline (retries included) at the time left before the lease
 /// renewal deadline, so the request cannot land after another writer may have taken over.
 /// </summary>
-[[nodiscard]] HttpRequestOptions BoundByWriteDeadline(const ClientRuntimeBase& runtime, HttpRequestOptions options);
+[[nodiscard]] AVEVA::AzureClient::AzureRequestOptions
+BoundByWriteDeadline(const ClientRuntimeBase& runtime, AVEVA::AzureClient::AzureRequestOptions options);
 
 /// <summary>
 /// How a transport is created on the host's io_context. Any transport constructible from an io_context works as is;
@@ -155,11 +156,13 @@ using ClientRuntime = BasicClientRuntime<::AVEVA::HttpClient>;
 /// Request options for a request transferring `bytes` of payload: raises the response body limit so the
 /// payload fits, and extends the timeout so that large transfers on slow links are not cut short.
 /// </summary>
-[[nodiscard]] HttpRequestOptions RequestOptionsForTransfer(const HttpRequestOptions& defaults, uint64_t bytes);
+[[nodiscard]] AVEVA::AzureClient::AzureRequestOptions
+RequestOptionsForTransfer(const AVEVA::AzureClient::AzureRequestOptions& defaults, uint64_t bytes);
 
 /// Request options for moving `bytes` through `client`: the client's defaults with the timeout and response limit
 /// scaled to the transfer size.
-template <typename Client> [[nodiscard]] HttpRequestOptions TransferOptions(const Client& client, uint64_t bytes) {
+template <typename Client>
+[[nodiscard]] AVEVA::AzureClient::AzureRequestOptions TransferOptions(const Client& client, uint64_t bytes) {
     return RequestOptionsForTransfer(client.GetDefaultRequestOptions(), bytes);
 }
 

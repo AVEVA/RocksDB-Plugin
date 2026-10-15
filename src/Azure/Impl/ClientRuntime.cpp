@@ -164,7 +164,8 @@ std::optional<std::chrono::steady_clock::duration> ClientRuntimeBase::WriteTimeR
     return m_deadlineSource ? m_deadlineSource() : std::nullopt;
 }
 
-HttpRequestOptions BoundByWriteDeadline(const ClientRuntimeBase& runtime, HttpRequestOptions options) {
+AVEVA::AzureClient::AzureRequestOptions BoundByWriteDeadline(const ClientRuntimeBase& runtime,
+                                                             AVEVA::AzureClient::AzureRequestOptions options) {
     const auto remaining = runtime.WriteTimeRemaining();
     if (!remaining) {
         return options;
@@ -184,12 +185,13 @@ void ThrowRequestFailed(const AzureClient::BlobStorageError& error) {
                                  error.Code, error.AuthenticationDetail, error.RetryAfter);
 }
 
-HttpRequestOptions RequestOptionsForTransfer(const HttpRequestOptions& defaults, uint64_t bytes) {
+AVEVA::AzureClient::AzureRequestOptions
+RequestOptionsForTransfer(const AVEVA::AzureClient::AzureRequestOptions& defaults, uint64_t bytes) {
     // Assume at least 1 MiB/s of throughput on top of the default timeout.
     static const constexpr uint64_t bytesPerSecond = 1024ULL * 1024ULL;
     static const constexpr uint64_t responseOverhead = 64ULL * 1024ULL;
 
-    HttpRequestOptions options = defaults;
+    AVEVA::AzureClient::AzureRequestOptions options = defaults;
     options.SetResponseBodyLimit(std::max(defaults.GetResponseBodyLimit(), bytes + responseOverhead));
     options.SetTimeout(defaults.GetTimeout() +
                        std::chrono::duration_cast<std::chrono::milliseconds>(

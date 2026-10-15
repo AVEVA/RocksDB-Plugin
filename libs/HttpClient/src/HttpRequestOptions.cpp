@@ -3,8 +3,6 @@
 
 #include "AVEVA/HttpClient/HttpRequestOptions.hpp"
 
-#include <stdexcept>
-
 namespace AVEVA {
 std::chrono::milliseconds HttpRequestOptions::GetTimeout() const noexcept { return m_timeout; }
 
@@ -26,23 +24,6 @@ void HttpRequestOptions::SetResponseHeaderLimit(std::uint32_t responseHeaderLimi
 
 void HttpRequestOptions::SetCancellationSlot(boost::asio::cancellation_slot cancellationSlot) noexcept {
     m_cancellationSlot = cancellationSlot;
-}
-
-std::optional<std::chrono::milliseconds> HttpRequestOptions::GetTotalDeadline() const noexcept {
-    return m_totalDeadline;
-}
-
-std::optional<int> HttpRequestOptions::GetMaxRetries() const noexcept { return m_maxRetries; }
-
-void HttpRequestOptions::SetTotalDeadline(std::chrono::milliseconds totalDeadline) noexcept {
-    m_totalDeadline = totalDeadline;
-}
-
-void HttpRequestOptions::SetMaxRetries(int maxRetries) {
-    if (maxRetries < 0) {
-        throw std::invalid_argument("The retry count must not be negative.");
-    }
-    m_maxRetries = maxRetries;
 }
 
 bool HttpRequestOptions::GetAcceptTruncatedTlsBody() const noexcept { return m_acceptTruncatedTlsBody; }

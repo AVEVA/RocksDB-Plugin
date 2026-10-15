@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #pragma once
+#include <AVEVA/AzureClient/AzureRequestOptions.hpp>
 #include <AVEVA/AzureClient/BlobClientOptions.hpp>
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
@@ -13,7 +14,6 @@
 #include <AVEVA/AzureClient/Response.hpp>
 #include <AVEVA/AzureClient/TokenCredential.hpp>
 #include <AVEVA/HttpClient/HttpClient.hpp>
-#include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 
 #include <boost/asio/async_result.hpp>
 
@@ -44,9 +44,9 @@ struct ConnectionState;
 // Lifetime: stores a non-owning reference to the HTTP client, which must outlive this client and every
 // in-flight ...Async operation; destroying either before a completion handler runs is undefined behavior.
 //
-// Cancellation: HttpRequestOptions carries a boost::asio::cancellation_slot that aborts in-flight work
+// Cancellation: AzureRequestOptions carries a boost::asio::cancellation_slot that aborts in-flight work
 // (completing with an operation_aborted-flavored BlobStorageError); a slot associated with the
-// completion token is adopted when HttpRequestOptions has none.
+// completion token is adopted when AzureRequestOptions has none.
 //
 // Completion tokens: every ...Async operation accepts any Boost.Asio CompletionToken (callback,
 // use_future, use_awaitable, ...) and completes with std::expected<Response<T>, BlobStorageError>.
@@ -83,7 +83,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobServic
 
     // Request options (timeout, response body limit, cancellation slot) applied to every operation
     // that is not given its own via WithRequestOptions(...) or the trailing requestOptions argument.
-    [[nodiscard]] const HttpRequestOptions& GetDefaultRequestOptions() const noexcept {
+    [[nodiscard]] const AzureRequestOptions& GetDefaultRequestOptions() const noexcept {
         return m_connection->DefaultRequestOptions;
     }
 

@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #pragma once
+#include <AVEVA/AzureClient/AzureRequestOptions.hpp>
 #include <AVEVA/AzureClient/TokenCredential.hpp>
-#include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 
 #include <chrono>
 #include <memory>
@@ -54,7 +54,7 @@ struct BlobClientOptions {
     SharedKeyCredentialOptions SharedKey;
 
     RetryOptions Retry;
-    HttpRequestOptions DefaultRequestOptions;
+    AzureRequestOptions DefaultRequestOptions;
 
     std::string ApiVersion = std::string(DefaultApiVersion);
 
@@ -74,7 +74,7 @@ struct BlobContainerClientOptions {
     std::string ApiVersion = std::string(DefaultApiVersion);
 
     RetryOptions Retry;
-    HttpRequestOptions DefaultRequestOptions;
+    AzureRequestOptions DefaultRequestOptions;
 
     // See BlobClientOptions::AllowInsecureHttp.
     bool AllowInsecureHttp = false;
@@ -90,7 +90,7 @@ struct BlobServiceClientOptions {
     std::string ApiVersion = std::string(DefaultApiVersion);
 
     RetryOptions Retry;
-    HttpRequestOptions DefaultRequestOptions;
+    AzureRequestOptions DefaultRequestOptions;
 
     // See BlobClientOptions::AllowInsecureHttp.
     bool AllowInsecureHttp = false;

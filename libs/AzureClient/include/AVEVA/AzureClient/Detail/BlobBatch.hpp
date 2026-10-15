@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <AVEVA/AzureClient/AzureRequestOptions.hpp>
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
@@ -15,7 +16,6 @@
 #include <AVEVA/AzureClient/TokenCredential.hpp>
 #include <AVEVA/HttpClient/HttpMethod.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
-#include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 
 #include <boost/asio/post.hpp>
@@ -61,7 +61,7 @@ class BatchDeleteOperation final
   public:
     BatchDeleteOperation(THttp& httpClient, std::shared_ptr<const BasicContainerTarget<TCred>> target,
                          std::vector<std::string> names, std::size_t maxConcurrentRequests, TCompletion completion,
-                         HttpRequestOptions requestOptions)
+                         AzureRequestOptions requestOptions)
         : m_httpClient(httpClient), m_target(std::move(target)), m_names(std::move(names)),
           m_maxConcurrent(std::max<std::size_t>(1U, maxConcurrentRequests)), m_completion(std::move(completion)),
           m_requestOptions(requestOptions),
@@ -235,7 +235,7 @@ class BatchDeleteOperation final
     std::vector<std::string> m_names;
     std::size_t m_maxConcurrent;
     TCompletion m_completion;
-    HttpRequestOptions m_requestOptions;
+    AzureRequestOptions m_requestOptions;
     RequestAuth m_auth;
 
     std::mutex m_mutex;
@@ -252,7 +252,7 @@ class BatchDeleteOperation final
 template <HttpClientLike THttp, TokenCredentialLike TCred, class TCompletion>
 void DeleteBlobsAsync(THttp& httpClient, std::shared_ptr<const BasicContainerTarget<TCred>> target,
                       std::vector<std::string> names, const DeleteBlobsOptions& options, TCompletion completion,
-                      HttpRequestOptions requestOptions) {
+                      AzureRequestOptions requestOptions) {
     if (names.empty()) {
         PostCompletion(httpClient, std::move(completion),
                        std::expected<Response<Models::DeleteBlobsResult>, BlobStorageError>{

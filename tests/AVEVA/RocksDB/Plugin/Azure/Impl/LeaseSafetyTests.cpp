@@ -140,7 +140,7 @@ TEST(WriteDeadlineTests, MutationsAreRejectedOncetheDeadlineHasPassed) {
 TEST(WriteDeadlineTests, RequestTimeoutIsCappedAtTheTimeLeft) {
     ClientRuntimeBase runtime;
     runtime.SetWriteDeadlineSource([] { return std::optional<std::chrono::steady_clock::duration>{2s}; });
-    AVEVA::HttpRequestOptions options;
+    AVEVA::AzureClient::AzureRequestOptions options;
     options.SetTimeout(60s);
     options.SetTotalDeadline(120s);
 

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <AVEVA/AzureClient/AzureRequestOptions.hpp>
 #include <AVEVA/AzureClient/BlobClientOptions.hpp>
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
@@ -14,7 +15,6 @@
 #include <AVEVA/AzureClient/Response.hpp>
 #include <AVEVA/HttpClient/HttpHeader.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
-#include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 
 #include <algorithm>
@@ -137,7 +137,7 @@ struct ConnectionState {
     std::string BasePath;   // encoded endpoint path without a trailing '/', empty for the root
 
     RetryOptions Retry;
-    HttpRequestOptions DefaultRequestOptions;
+    AzureRequestOptions DefaultRequestOptions;
 };
 
 struct ContainerTarget {
@@ -524,19 +524,19 @@ using AttemptRebuilder = std::function<void(HttpRequest& attempt, std::string_vi
 // `completion` is invoked as completion(std::error_code, HttpResponse).
 template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
 void SendWithRetryAsync(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
-                        HttpRequest request, THandler completion, HttpRequestOptions requestOptions,
+                        HttpRequest request, THandler completion, AzureRequestOptions requestOptions,
                         bool retryNotFoundAndGone = false, AttemptRebuilder rebuild = {}, bool replaySafe = false);
 
 // Defined in RequestPipeline.hpp. `replaySafe` marks a request whose caller absorbs the outcome of a replay (the
 // *IfExists/*IfNotExists operations), so it may be retried even after an ambiguous transport error.
 template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
 void SendAuthorizedRequestAsync(THttp& httpClient, const ConnectionState& connection, std::shared_ptr<TCred> credential,
-                                HttpRequest request, THandler completion, HttpRequestOptions requestOptions,
+                                HttpRequest request, THandler completion, AzureRequestOptions requestOptions,
                                 AttemptRebuilder rebuild = {}, bool replaySafe = false);
 
 template <HttpClientLike THttp, class TCred, class THandler>
 void SendAuthorizedRequestAsync(THttp& httpClient, const BasicContainerTarget<TCred>& target, HttpRequest request,
-                                THandler completion, HttpRequestOptions requestOptions, AttemptRebuilder rebuild = {},
+                                THandler completion, AzureRequestOptions requestOptions, AttemptRebuilder rebuild = {},
                                 bool replaySafe = false) {
     SendAuthorizedRequestAsync(httpClient, *target.Connection, target.Credential, std::move(request),
                                std::move(completion), requestOptions, std::move(rebuild), replaySafe);
@@ -544,7 +544,7 @@ void SendAuthorizedRequestAsync(THttp& httpClient, const BasicContainerTarget<TC
 
 template <HttpClientLike THttp, class TCred, class THandler>
 void SendAuthorizedRequestAsync(THttp& httpClient, const BasicBlobTarget<TCred>& target, HttpRequest request,
-                                THandler completion, HttpRequestOptions requestOptions, bool replaySafe = false) {
+                                THandler completion, AzureRequestOptions requestOptions, bool replaySafe = false) {
     SendAuthorizedRequestAsync(httpClient, *target.Connection, target.Credential, std::move(request),
                                std::move(completion), requestOptions, {}, replaySafe);
 }
@@ -561,26 +561,26 @@ void SendAuthorizedRequestAsync(THttp& httpClient, const BasicBlobTarget<TCred>&
 // cancellation the in-flight requests are cancelled and drained before the single completion.
 template <HttpClientLike THttp, class TCred, class TCompletion>
 void DownloadBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, DownloadBlobOptions operationOptions,
-                       TCompletion completion, HttpRequestOptions requestOptions);
+                       TCompletion completion, AzureRequestOptions requestOptions);
 template <HttpClientLike THttp, class TCred, class TCompletion>
 void DownloadBlobToAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, DownloadToOptions operationOptions,
-                         std::ostream& stream, TCompletion completion, HttpRequestOptions requestOptions);
+                         std::ostream& stream, TCompletion completion, AzureRequestOptions requestOptions);
 // Writes straight into `destination`, which must stay valid until the completion runs. A range larger than
 // the buffer fails the download; a shorter blob leaves the tail untouched (see BytesWritten).
 template <HttpClientLike THttp, class TCred, class TCompletion>
 void DownloadBlobToSpanAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
                              DownloadToOptions operationOptions, std::span<char> destination, TCompletion completion,
-                             HttpRequestOptions requestOptions);
+                             AzureRequestOptions requestOptions);
 // Downloads into `<path>.partial-<id>` and renames it over `path` only on success.
 template <HttpClientLike THttp, class TCred, class TCompletion>
 void DownloadBlobToFileAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
                              DownloadToOptions operationOptions, const std::filesystem::path& path,
-                             TCompletion completion, HttpRequestOptions requestOptions);
+                             TCompletion completion, AzureRequestOptions requestOptions);
 
 template <HttpClientLike THttp, class TCred, class TCompletion>
 void DeleteBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
                      const DeleteBlobOptions& operationOptions, TCompletion&& completion,
-                     HttpRequestOptions requestOptions, bool replaySafe = false) {
+                     AzureRequestOptions requestOptions, bool replaySafe = false) {
     HttpRequest request = BuildBlobRequest(options, HttpMethod::Delete);
     ApplyBlobRequestConditions(request, operationOptions.Conditions);
 
@@ -596,7 +596,7 @@ void DeleteBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
 template <HttpClientLike THttp, class TCred, class TCompletion>
 void GetBlobPropertiesAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
                             const GetBlobPropertiesOptions& operationOptions, TCompletion&& completion,
-                            HttpRequestOptions requestOptions) {
+                            AzureRequestOptions requestOptions) {
     HttpRequest request = BuildBlobRequest(options, HttpMethod::Head);
     ApplyBlobRequestConditions(request, operationOptions.Conditions);
 
@@ -612,7 +612,7 @@ void GetBlobPropertiesAsync(THttp& httpClient, const BasicBlobTarget<TCred>& opt
 template <HttpClientLike THttp, class TCred, class TCompletion>
 void SetBlobMetadataAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
                           const SetBlobMetadataOptions& operationOptions, TCompletion&& completion,
-                          HttpRequestOptions requestOptions) {
+                          AzureRequestOptions requestOptions) {
     HttpRequest request = BuildBlobRequest(options, HttpMethod::Put, "comp=metadata");
     ApplyMetadata(request, operationOptions.Metadata);
     ApplyBlobRequestConditions(request, operationOptions.Conditions);
@@ -630,7 +630,7 @@ void SetBlobMetadataAsync(THttp& httpClient, const BasicBlobTarget<TCred>& optio
 // Sends `request` to `target` and completes with the TModel produced by `parser`.
 template <class TModel, HttpClientLike THttp, class TTarget, class TParser, class TCompletion>
 void SendAndParse(THttp& httpClient, const TTarget& target, HttpRequest request, TParser parser,
-                  TCompletion&& completion, HttpRequestOptions requestOptions) {
+                  TCompletion&& completion, AzureRequestOptions requestOptions) {
     SendAuthorizedRequestAsync(
         httpClient, target, std::move(request),
         [parser = std::move(parser),
@@ -648,7 +648,7 @@ void ApplyLeaseRequestConditions(HttpRequest& request, Models::BlobRequestCondit
 
 template <HttpClientLike THttp, class TTarget, class TCompletion>
 void AcquireLeaseAsync(THttp& httpClient, const TTarget& target, AcquireLeaseOptions operationOptions,
-                       TCompletion&& completion, HttpRequestOptions requestOptions) {
+                       TCompletion&& completion, AzureRequestOptions requestOptions) {
     if (operationOptions.Duration.has_value() &&
         (*operationOptions.Duration < MinFixedLeaseDuration || *operationOptions.Duration > MaxFixedLeaseDuration)) {
         PostCompletion(httpClient, std::forward<TCompletion>(completion),
@@ -674,7 +674,7 @@ void AcquireLeaseAsync(THttp& httpClient, const TTarget& target, AcquireLeaseOpt
 
 template <HttpClientLike THttp, class TTarget, class TCompletion>
 void RenewLeaseAsync(THttp& httpClient, const TTarget& target, RenewLeaseOptions operationOptions,
-                     TCompletion&& completion, HttpRequestOptions requestOptions) {
+                     TCompletion&& completion, AzureRequestOptions requestOptions) {
     if (operationOptions.LeaseId.empty()) {
         PostCompletion(httpClient, std::forward<TCompletion>(completion),
                        MakeError<Models::RenewBlobLeaseResult>(std::make_error_code(std::errc::invalid_argument),
@@ -691,7 +691,7 @@ void RenewLeaseAsync(THttp& httpClient, const TTarget& target, RenewLeaseOptions
 
 template <HttpClientLike THttp, class TTarget, class TCompletion>
 void ReleaseLeaseAsync(THttp& httpClient, const TTarget& target, ReleaseLeaseOptions operationOptions,
-                       TCompletion&& completion, HttpRequestOptions requestOptions) {
+                       TCompletion&& completion, AzureRequestOptions requestOptions) {
     if (operationOptions.LeaseId.empty()) {
         PostCompletion(httpClient, std::forward<TCompletion>(completion),
                        MakeError<Models::ReleaseBlobLeaseResult>(std::make_error_code(std::errc::invalid_argument),
@@ -708,7 +708,7 @@ void ReleaseLeaseAsync(THttp& httpClient, const TTarget& target, ReleaseLeaseOpt
 
 template <HttpClientLike THttp, class TCred, class TCompletion>
 void ExistsBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, TCompletion&& completion,
-                     HttpRequestOptions requestOptions) {
+                     AzureRequestOptions requestOptions) {
     HttpRequest request = BuildBlobRequest(options, HttpMethod::Head);
 
     SendAuthorizedRequestAsync(

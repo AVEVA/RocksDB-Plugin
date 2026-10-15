@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/HttpClient/HttpClientOptions.hpp"
-#include "AVEVA/HttpClient/HttpRequestOptions.hpp"
 
 #include <gtest/gtest.h>
 
@@ -11,18 +10,6 @@
 
 namespace {
 using namespace AVEVA;
-
-TEST(HttpOptionValidation, NegativeRetryCountIsRejected) {
-    HttpRequestOptions options;
-    EXPECT_THROW(options.SetMaxRetries(-1), std::invalid_argument);
-    EXPECT_FALSE(options.GetMaxRetries().has_value());
-}
-
-TEST(HttpOptionValidation, ZeroRetryCountIsAccepted) {
-    HttpRequestOptions options;
-    options.SetMaxRetries(0);
-    EXPECT_EQ(options.GetMaxRetries(), 0);
-}
 
 TEST(HttpOptionValidation, NegativeIdleTimeoutIsRejected) {
     HttpClientOptions options;

@@ -7,7 +7,6 @@
 
 #include <chrono>
 #include <cstdint>
-#include <optional>
 
 namespace AVEVA {
 /// <summary>
@@ -71,35 +70,6 @@ class HttpRequestOptions {
     void SetCancellationSlot(boost::asio::cancellation_slot cancellationSlot) noexcept;
 
     /// <summary>
-    /// The retry budget for this request, retries and backoff included. Only retrying layers (the AzureClient
-    /// request pipeline) honour it; the HTTP client itself sends a single attempt and ignores it.
-    /// </summary>
-    /// <returns>The deadline measured from the start of the operation; empty when none was set.</returns>
-    std::optional<std::chrono::milliseconds> GetTotalDeadline() const noexcept;
-
-    /// <summary>
-    /// The number of retries after the first attempt that replaces the client's retry policy for this request.
-    /// Only retrying layers honour it.
-    /// </summary>
-    /// <returns>The override; empty when the client's policy applies.</returns>
-    std::optional<int> GetMaxRetries() const noexcept;
-
-    /// <summary>
-    /// Bounds the whole operation, retries and backoff included. When it elapses the in-flight attempt is
-    /// cancelled and the operation completes with <c>std::errc::timed_out</c>. Each attempt's own timeout is
-    /// additionally clamped to the time that remains.
-    /// </summary>
-    /// <param name="totalDeadline">The deadline; a non-positive value expires immediately.</param>
-    void SetTotalDeadline(std::chrono::milliseconds totalDeadline) noexcept;
-
-    /// <summary>
-    /// Replaces the client's retry count for this request (0 disables retries).
-    /// </summary>
-    /// <param name="maxRetries">Retries after the first attempt.</param>
-    /// <exception cref="std::invalid_argument">Thrown when <paramref name="maxRetries"/> is negative.</exception>
-    void SetMaxRetries(int maxRetries);
-
-    /// <summary>
     /// Whether a TLS connection closed without close_notify may end an EOF-delimited response body. Off by
     /// default because an attacker can truncate such a body undetected.
     /// </summary>
@@ -118,7 +88,5 @@ class HttpRequestOptions {
     std::uint64_t m_responseBodyLimit = 8 * 1024 * 1024;
     std::uint32_t m_responseHeaderLimit = 64 * 1024;
     boost::asio::cancellation_slot m_cancellationSlot;
-    std::optional<std::chrono::milliseconds> m_totalDeadline;
-    std::optional<int> m_maxRetries;
 };
 } // namespace AVEVA

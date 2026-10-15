@@ -182,7 +182,7 @@ class ConnectionPool {
     /// The number of idle connections currently held across every origin.
     /// </summary>
     /// <returns>The idle connection count.</returns>
-    std::size_t IdleCount() {
+    std::size_t IdleCount() const {
         std::lock_guard<std::mutex> lock(m_mutex);
         return m_lru.size();
     }
@@ -214,16 +214,6 @@ class ConnectionPool {
             }
         }
         return std::nullopt;
-    }
-
-    /// <summary>
-    /// Like <see cref="Acquire"/>, but without probing whether the peer has closed the connection.
-    /// </summary>
-    /// <param name="key">The origin to take a connection for.</param>
-    /// <returns>The newest idle connection, or nullopt when the origin has none.</returns>
-    std::optional<PooledConnection<Stream>> AcquireUnchecked(const ConnectionKey<Stream>& key) {
-        typename Clock::duration idleFor{};
-        return AcquireAged(key, idleFor);
     }
 
     /// <summary>
@@ -475,7 +465,7 @@ class ConnectionPool {
     std::size_t m_maxTotalIdle;
     Notifier m_notifier;
     bool m_hasNotifier = false;
-    std::mutex m_mutex;
+    mutable std::mutex m_mutex;
     boost::unordered_node_map<ConnectionKey<Stream>, Origin, ConnectionKeyHash<Stream>, ConnectionKeyEqual<Stream>>
         m_origins;
     LruList m_lru;

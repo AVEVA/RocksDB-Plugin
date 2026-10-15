@@ -57,6 +57,7 @@ target_sources(aveva-azure-client
         "${base-include-dir}/AVEVA/AzureClient/Detail/RequestPipeline.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Detail/DownloadSinks.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Detail/ProtocolConstants.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/AzureRequestOptions.hpp"
         "${base-include-dir}/AVEVA/AzureClient/HttpClientLike.hpp"
         "${base-include-dir}/AVEVA/AzureClient/TokenCredential.hpp"
         "${base-include-dir}/AVEVA/AzureClient/ClientForwardDeclarations.hpp"

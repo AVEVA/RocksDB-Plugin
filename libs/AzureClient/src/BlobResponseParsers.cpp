@@ -17,10 +17,10 @@
 
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 
+#include <AVEVA/AzureClient/AzureRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpClient.hpp>
 #include <AVEVA/HttpClient/HttpMethod.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
-#include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 #include <boost/url/encode.hpp> // IWYU pragma: keep (symbol is defined in a Boost impl/ header)
 #include <boost/url/parse.hpp>
@@ -781,7 +781,8 @@ Models::GetPageRangesResult ParseGetPageRangesResult(const HttpResponse& respons
 }
 
 namespace {
-// The Name element's Encoded="true" attribute marks a percent-encoded name (used for names with characters invalid in XML).
+// The Name element's Encoded="true" attribute marks a percent-encoded name (used for names with characters invalid in
+// XML).
 [[nodiscard]] std::string GetBlobItemName(const XmlNode& item) {
     const XmlNode* name = FindChildByLocalName(item, "Name");
     if (name == nullptr) {

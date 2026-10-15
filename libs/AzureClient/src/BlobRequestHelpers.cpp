@@ -17,10 +17,10 @@
 
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 
+#include <AVEVA/AzureClient/AzureRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpClient.hpp>
 #include <AVEVA/HttpClient/HttpMethod.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
-#include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 #include <boost/url/encode.hpp> // IWYU pragma: keep (symbol is defined in a Boost impl/ header)
 #include <boost/url/parse.hpp>

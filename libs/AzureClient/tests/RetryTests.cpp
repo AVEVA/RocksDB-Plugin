@@ -12,12 +12,12 @@
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 #include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
 
+#include <AVEVA/AzureClient/AzureRequestOptions.hpp>
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
 #include <AVEVA/AzureClient/WithRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpClientError.hpp>
 #include <AVEVA/HttpClient/HttpHeader.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
-#include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 #include <algorithm>
 #include <boost/asio/bind_cancellation_slot.hpp>
@@ -551,7 +551,7 @@ TEST(RetryTests, MaxRetriesOverrideReplacesClientPolicy) {
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
     BlobClient client{httpClient, MakeRetryOptions(3)};
 
-    AVEVA::HttpRequestOptions requestOptions;
+    AVEVA::AzureClient::AzureRequestOptions requestOptions;
     requestOptions.SetMaxRetries(0);
     std::optional<DeleteResult> observed;
     client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) { observed = std::move(result); }));
@@ -568,7 +568,7 @@ TEST(RetryTests, MaxRetriesOverrideCanEnableRetriesDisabledOnTheClient) {
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
     BlobClient client{httpClient, MakeRetryOptions(0)};
 
-    AVEVA::HttpRequestOptions requestOptions;
+    AVEVA::AzureClient::AzureRequestOptions requestOptions;
     requestOptions.SetMaxRetries(1);
     std::optional<DeleteResult> observed;
     client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) { observed = std::move(result); }));
@@ -584,7 +584,7 @@ TEST(RetryTests, TotalDeadlineEndsRetryBackoffWithTimedOut) {
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
     BlobClient client{httpClient, MakeRetryOptions(3, std::chrono::minutes{1})};
 
-    AVEVA::HttpRequestOptions requestOptions;
+    AVEVA::AzureClient::AzureRequestOptions requestOptions;
     requestOptions.SetTotalDeadline(std::chrono::milliseconds{50});
     std::optional<DeleteResult> observed;
     client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) { observed = std::move(result); }));
@@ -601,7 +601,7 @@ TEST(RetryTests, TotalDeadlineFailsImmediatelyWhenTheBackoffWouldOutlastIt) {
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
     BlobClient client{httpClient, MakeRetryOptions(3, std::chrono::minutes{1})};
 
-    AVEVA::HttpRequestOptions requestOptions;
+    AVEVA::AzureClient::AzureRequestOptions requestOptions;
     requestOptions.SetTotalDeadline(std::chrono::seconds{10});
     std::optional<DeleteResult> observed;
     const auto start = std::chrono::steady_clock::now();
@@ -620,7 +620,7 @@ TEST(RetryTests, TotalDeadlineCancelsInFlightAttemptAndIsNotRetried) {
     httpClient.DeferByDefault() = true;
     BlobClient client{httpClient, MakeRetryOptions(3)};
 
-    AVEVA::HttpRequestOptions requestOptions;
+    AVEVA::AzureClient::AzureRequestOptions requestOptions;
     requestOptions.SetTotalDeadline(std::chrono::milliseconds{50});
     std::optional<DeleteResult> observed;
     client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) { observed = std::move(result); }));
@@ -637,7 +637,7 @@ TEST(RetryTests, TotalDeadlineClampsAttemptTimeoutAndDoesNotFireAfterSuccess) {
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
     BlobClient client{httpClient, MakeRetryOptions(3)};
 
-    AVEVA::HttpRequestOptions requestOptions;
+    AVEVA::AzureClient::AzureRequestOptions requestOptions;
     requestOptions.SetTimeout(std::chrono::seconds{30});
     requestOptions.SetTotalDeadline(std::chrono::milliseconds{200});
     std::optional<DeleteResult> observed;
@@ -657,9 +657,17 @@ TEST(RetryTests, TotalDeadlineClampsAttemptTimeoutAndDoesNotFireAfterSuccess) {
 }
 
 TEST(RetryTests, RequestOptionsWithoutOverridesKeepClientPolicy) {
-    const AVEVA::HttpRequestOptions defaults;
+    const AVEVA::AzureClient::AzureRequestOptions defaults;
     EXPECT_FALSE(defaults.GetTotalDeadline().has_value());
     EXPECT_FALSE(defaults.GetMaxRetries().has_value());
+}
+
+TEST(RetryTests, NegativeRetryCountOverrideIsRejected) {
+    AVEVA::AzureClient::AzureRequestOptions options;
+    EXPECT_THROW(options.SetMaxRetries(-1), std::invalid_argument);
+    EXPECT_FALSE(options.GetMaxRetries().has_value());
+    options.SetMaxRetries(0);
+    EXPECT_EQ(options.GetMaxRetries(), 0);
 }
 
 TEST(RetryTests, RetryReSignsSharedKeyAndRefreshesDateHeader) {

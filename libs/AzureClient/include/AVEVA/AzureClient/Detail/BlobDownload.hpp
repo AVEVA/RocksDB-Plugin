@@ -13,10 +13,10 @@
 #include <AVEVA/AzureClient/Detail/DownloadSinks.hpp>
 #include <AVEVA/AzureClient/Detail/ProtocolConstants.hpp>
 
+#include <AVEVA/AzureClient/AzureRequestOptions.hpp>
 #include <AVEVA/AzureClient/HttpClientLike.hpp>
 #include <AVEVA/HttpClient/HttpMethod.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
-#include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/cancellation_type.hpp>
@@ -110,7 +110,7 @@ template <HttpClientLike THttp, class TCred, class TDone>
 class DownloadOperation final : public std::enable_shared_from_this<DownloadOperation<THttp, TCred, TDone>> {
   public:
     DownloadOperation(THttp& httpClient, BasicBlobTarget<TCred> clientOptions, DownloadToOptions options,
-                      HttpRequestOptions requestOptions, std::shared_ptr<DownloadSink> sink, TDone completion)
+                      AzureRequestOptions requestOptions, std::shared_ptr<DownloadSink> sink, TDone completion)
         : m_httpClient(httpClient), m_clientOptions(std::move(clientOptions)), m_options(std::move(options)),
           m_requestOptions(requestOptions), m_sink(std::move(sink)), m_completion(std::move(completion)),
           m_parentSlot(m_requestOptions.GetCancellationSlot()),
@@ -205,7 +205,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
     void Send(RequestKind kind, std::uint64_t offset, std::uint64_t length,
               const Models::BlobRequestConditions& conditions) {
         HttpRequest request;
-        HttpRequestOptions requestOptions = m_requestOptions;
+        AzureRequestOptions requestOptions = m_requestOptions;
         try {
             request = BuildBlobRequest(m_clientOptions, HttpMethod::Get);
             if (kind != RequestKind::Full) {
@@ -570,7 +570,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
     THttp& m_httpClient;
     BasicBlobTarget<TCred> m_clientOptions;
     DownloadToOptions m_options;
-    HttpRequestOptions m_requestOptions;
+    AzureRequestOptions m_requestOptions;
     std::shared_ptr<DownloadSink> m_sink;
     TDone m_completion;
     boost::asio::cancellation_slot m_parentSlot;
@@ -606,7 +606,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
 
 template <HttpClientLike THttp, class TCred, class TDone>
 void StartDownload(THttp& httpClient, const BasicBlobTarget<TCred>& options, DownloadToOptions operationOptions,
-                   std::shared_ptr<DownloadSink> sink, TDone completion, HttpRequestOptions requestOptions) {
+                   std::shared_ptr<DownloadSink> sink, TDone completion, AzureRequestOptions requestOptions) {
     std::make_shared<DownloadOperation<THttp, TCred, TDone>>(httpClient, options, std::move(operationOptions),
                                                              requestOptions, std::move(sink), std::move(completion))
         ->Start();
@@ -619,7 +619,7 @@ FinalizeFileDownload(std::ofstream& file, const std::filesystem::path& tempPath,
 
 template <HttpClientLike THttp, class TCred, class TCompletion>
 void DownloadBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, DownloadBlobOptions operationOptions,
-                       TCompletion completion, HttpRequestOptions requestOptions) {
+                       TCompletion completion, AzureRequestOptions requestOptions) {
     auto sink = std::make_shared<StringSink>();
     DownloadDetail::StartDownload(
         httpClient, options, ToDownloadToOptions(std::move(operationOptions)), sink,
@@ -641,7 +641,7 @@ void DownloadBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
 template <HttpClientLike THttp, class TCred, class TCompletion>
 void DownloadBlobToSpanAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
                              DownloadToOptions operationOptions, std::span<char> destination, TCompletion completion,
-                             HttpRequestOptions requestOptions) {
+                             AzureRequestOptions requestOptions) {
     DownloadDetail::StartDownload(
         httpClient, options, std::move(operationOptions), std::make_shared<SpanSink>(destination),
         [completion = std::move(completion)](DownloadDetail::SummaryResult result) mutable {
@@ -660,7 +660,7 @@ void DownloadBlobToSpanAsync(THttp& httpClient, const BasicBlobTarget<TCred>& op
 template <HttpClientLike THttp, class TCred, class TCompletion>
 void DownloadBlobToFileAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
                              DownloadToOptions operationOptions, const std::filesystem::path& path,
-                             TCompletion completion, HttpRequestOptions requestOptions) {
+                             TCompletion completion, AzureRequestOptions requestOptions) {
     using FileResult = std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>;
     auto scheduler = operationOptions.WriteScheduler;
     DownloadDetail::RunOnWriter(

@@ -13,9 +13,9 @@
 
 #include <AVEVA/HttpClient/HttpClientError.hpp>
 
+#include <AVEVA/AzureClient/AzureRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpHeader.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
-#include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/cancellation_type.hpp>
 #include <boost/asio/post.hpp>
@@ -94,7 +94,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
 class RetryOperation final : public std::enable_shared_from_this<RetryOperation<THttp, TCred, THandler>> {
   public:
     RetryOperation(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
-                   HttpRequest request, THandler completion, HttpRequestOptions requestOptions,
+                   HttpRequest request, THandler completion, AzureRequestOptions requestOptions,
                    bool retryNotFoundAndGone, AttemptRebuilder rebuild, bool callerAbsorbsReplay = false)
         : m_httpClient(httpClient), m_auth(std::move(auth)), m_credential(std::move(credential)), m_retry(retry),
           m_request(std::move(request)), m_completion(std::move(completion)), m_requestOptions(requestOptions),
@@ -407,7 +407,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     }
 
     void Send(HttpRequest attempt) {
-        HttpRequestOptions options = m_requestOptions;
+        AzureRequestOptions options = m_requestOptions;
         m_attemptSignal.slot().clear();
         if (m_totalDeadline) {
             const auto remaining = *m_totalDeadline - std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -543,7 +543,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     HttpRequest m_request;
     std::shared_ptr<const std::string> m_sharedBody;
     THandler m_completion;
-    HttpRequestOptions m_requestOptions;
+    AzureRequestOptions m_requestOptions;
     bool m_retryNotFoundAndGone;
     AttemptRebuilder m_rebuild;
     bool m_replaySafe;
@@ -569,7 +569,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
 
 template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
 void SendWithRetryAsync(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
-                        HttpRequest request, THandler completion, HttpRequestOptions requestOptions,
+                        HttpRequest request, THandler completion, AzureRequestOptions requestOptions,
                         bool retryNotFoundAndGone, AttemptRebuilder rebuild, bool replaySafe) {
     auto operation = std::make_shared<RetryDetail::RetryOperation<THttp, TCred, THandler>>(
         httpClient, std::move(auth), std::move(credential), retry, std::move(request), std::move(completion),
@@ -579,7 +579,7 @@ void SendWithRetryAsync(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCr
 
 template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
 void SendAuthorizedRequestAsync(THttp& httpClient, const ConnectionState& connection, std::shared_ptr<TCred> credential,
-                                HttpRequest request, THandler completion, HttpRequestOptions requestOptions,
+                                HttpRequest request, THandler completion, AzureRequestOptions requestOptions,
                                 AttemptRebuilder rebuild, bool replaySafe) {
     // Checked here rather than per operation so every request carrying metadata, including the
     // internal commits issued by multi-part uploads, is rejected before reaching the service.
