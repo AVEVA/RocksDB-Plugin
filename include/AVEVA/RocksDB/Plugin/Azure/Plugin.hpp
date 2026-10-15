@@ -39,8 +39,11 @@ struct Plugin {
     ///
     /// Preconditions for destroying a filesystem: `ioContext` must still be running (the destructor blocks until
     /// every async read has completed on it, logging a warning every 30 s while it waits), and the destructor
-    /// must not run on a thread running `ioContext`. Write operations are refused once a lease renewal has
-    /// failed or run past the lease.
+    /// must not run on a thread running `ioContext`. The same holds for the lease renewal loop: `ioContext` must
+    /// keep running until every filesystem and database using it has been destroyed. As a last resort the
+    /// destructor stops waiting after two minutes, logs an error and carries on, which can leave late completions
+    /// touching freed state: that is a host bug, not a supported mode. Write operations are refused once a lease
+    /// renewal has failed or run past the lease.
     ///
     /// `maxPrefetchBytes` caps the memory held by RocksDB prefetch buffers across all files of a filesystem; a
     /// prefetch that would exceed it is declined (reads then simply go to the blob). Zero disables prefetching.

@@ -78,14 +78,23 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
     /// <summary>
     /// Cancels the timer and waits for a renewal round that is already on the wire; idempotent. Rounds finish on
     /// the io_context, so it must still be running unless no round is in flight. Must not be called from a thread
-    /// running the executor.
+    /// running the executor. If a round is still in flight after giveUpAfter (the io_context is not running),
+    /// an error is logged and Stop returns anyway: the round's completion only touches state it owns by shared_ptr.
     /// </summary>
-    void Stop() {
+    void Stop(const std::chrono::milliseconds giveUpAfter = std::chrono::minutes(2)) {
         std::unique_lock lock(m_mutex);
         const bool wasStopped = std::exchange(m_stopped, true);
         m_timer.cancel();
         // Acquiring the mutex above also waited out any wake-up that was already running, so no new round can start.
-        while (!m_roundsIdle.wait_for(lock, StopWarningInterval, [this] { return m_activeRounds == 0; })) {
+        const auto giveUpAt = std::chrono::steady_clock::now() + giveUpAfter;
+        while (!m_roundsIdle.wait_for(lock, std::min<std::chrono::milliseconds>(StopWarningInterval, giveUpAfter),
+                                      [this] { return m_activeRounds == 0; })) {
+            if (std::chrono::steady_clock::now() >= giveUpAt) {
+                BOOST_LOG_SEV(*m_logger, boost::log::trivial::error)
+                    << "Giving up on " << m_activeRounds << " lease renewal(s) that never completed; the io_context "
+                    << "was not running them";
+                break;
+            }
             BOOST_LOG_SEV(*m_logger, boost::log::trivial::warning)
                 << "Still waiting for " << m_activeRounds
                 << " lease renewal(s); the io_context must keep running until the filesystem is destroyed";

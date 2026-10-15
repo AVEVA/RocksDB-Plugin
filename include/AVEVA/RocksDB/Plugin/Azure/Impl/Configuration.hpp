@@ -37,8 +37,10 @@ struct Configuration {
     static const constexpr std::chrono::seconds RenewalDelay = std::chrono::seconds(5);
     // Writes stop this long before the lease can expire, so one already in flight cannot land after it lapsed.
     static const constexpr std::chrono::milliseconds LeaseSafetyMargin = std::chrono::milliseconds(2000);
-    // How long the destructor waits for in-flight async reads before warning (it keeps waiting afterwards).
+    // How long the destructor waits for in-flight async reads before warning, and the total it waits before giving up
+    // (logging an error and carrying on) so a stopped io_context cannot hang shutdown forever.
     static const constexpr std::chrono::seconds AsyncReadDrainWarning = std::chrono::seconds(30);
+    static const constexpr std::chrono::seconds ShutdownWaitTimeout = std::chrono::seconds(120);
     // How long a synchronous read waits for an in-flight prefetch of its range before downloading it itself.
     static const constexpr std::chrono::seconds PrefetchWaitTimeout = std::chrono::seconds(30);
     // How long a reader's GetSize reuses the blob metadata it already fetched before asking the service again.

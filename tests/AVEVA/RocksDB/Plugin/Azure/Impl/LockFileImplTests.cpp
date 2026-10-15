@@ -596,3 +596,37 @@ TEST(LeaseRenewalLoopBackoffTests, RetryDelayNeverOutlastsTheRenewalDeadline) {
         EXPECT_LT(gap.count(), 200);
     }
 }
+TEST(LeaseRenewalLoopThrowTests, StopGivesUpOnARoundThatNeverCompletes) {
+    boost::asio::io_context context;
+    auto guard = boost::asio::make_work_guard(context);
+    std::jthread thread([&context] { context.run(); });
+    using Loop = BasicLeaseRenewalLoop<ScriptedSnapshot, ScriptedFatal, ScriptedLock>;
+    auto logger = std::make_shared<Loop::Logger>();
+
+    auto state = std::make_shared<ScriptedLock::Shared>();
+    ScriptedSnapshot snapshot;
+    snapshot.Locks.push_back(std::make_shared<ScriptedLock>(ScriptedLock{state}));
+    std::atomic<int> fatal{0};
+
+    auto loop =
+        Loop::Start(context.get_executor(), logger, snapshot, ScriptedFatal{&fatal}, std::chrono::milliseconds(5));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    for (;;) {
+        {
+            std::scoped_lock lock(state->Mutex);
+            if (!state->Completions.empty() || std::chrono::steady_clock::now() > deadline) {
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    // The renewal is started but never completed: Stop must return after its timeout instead of hanging.
+    const auto start = std::chrono::steady_clock::now();
+    loop->Stop(std::chrono::milliseconds(150));
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(5));
+    EXPECT_TRUE(loop->IsStopped());
+
+    guard.reset();
+    thread.join();
+}

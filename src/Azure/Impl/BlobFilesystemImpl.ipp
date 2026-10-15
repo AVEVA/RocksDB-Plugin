@@ -850,14 +850,22 @@ template <typename THttp> void BasicBlobFilesystemImpl<THttp>::FenceWritesOnFata
 // are destroyed right after this body.
 template <typename THttp> BasicBlobFilesystemImpl<THttp>::~BasicBlobFilesystemImpl() {
     m_runtime->SetWriteDeadlineSource({});
-    m_leaseRenewal->Stop();
+    m_leaseRenewal->Stop(Configuration::ShutdownWaitTimeout);
     if (const auto inFlight = m_asyncReads->InFlight(); inFlight > 0) {
         BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::info)
             << "Waiting for " << inFlight << " in-flight async read(s) before closing the filesystem";
     }
     // The host must keep the io_context running here: reads only end once their completions run on it. Warn
     // periodically so a stopped io_context shows up as a diagnosable hang rather than a silent one.
+    const auto giveUpAt = std::chrono::steady_clock::now() + Configuration::ShutdownWaitTimeout;
     while (!m_asyncReads->DrainFor(Configuration::AsyncReadDrainWarning)) {
+        if (std::chrono::steady_clock::now() >= giveUpAt) {
+            BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::error)
+                << "Giving up on " << m_asyncReads->InFlight() << " in-flight async read(s) after "
+                << Configuration::ShutdownWaitTimeout.count()
+                << " s; the io_context was not running them to completion. Late completions may touch freed state";
+            break;
+        }
         BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
             << "Still waiting for " << m_asyncReads->InFlight()
             << " in-flight async read(s); the io_context must keep running until the filesystem is destroyed";
