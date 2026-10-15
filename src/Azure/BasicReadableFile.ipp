@@ -175,7 +175,8 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::Prefetch(const uint64_t offset, cons
 
     try {
         if (!TImpl::Prefetch(m_file, static_cast<int64_t>(offset), static_cast<int64_t>(n))) {
-            return rocksdb::IOStatus::NotSupported("Prefetch declined; another prefetch is pending or over budget");
+            // NotSupported would make RocksDB stop prefetching this file for good; a declined hint is not an error.
+            return rocksdb::IOStatus::OK();
         }
         return rocksdb::IOStatus::OK();
     } catch (...) {

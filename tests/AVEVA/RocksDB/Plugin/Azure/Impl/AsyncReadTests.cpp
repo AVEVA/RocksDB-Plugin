@@ -330,7 +330,7 @@ TEST_F(AsyncReadTests, Prefetch_DeclinedForBudget_DoesNotEvictFinishedRange) {
     m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'B'));
 
     budget->store(FakeReadableFileImpl::kDefaultPrefetchBudgetBytes);
-    EXPECT_TRUE(file.Prefetch(2048, 1024, rocksdb::IOOptions{}, nullptr).IsNotSupported());
+    EXPECT_TRUE(file.Prefetch(2048, 1024, rocksdb::IOOptions{}, nullptr).ok());
 
     std::vector<char> scratch(256);
     auto req = MakeRequest(0, scratch);
@@ -340,16 +340,16 @@ TEST_F(AsyncReadTests, Prefetch_DeclinedForBudget_DoesNotEvictFinishedRange) {
     EXPECT_EQ(0U, m_deferredEnv.Blob->PendingDownloads());
 }
 
-TEST_F(AsyncReadTests, Prefetch_AllSlotsStillDownloading_ReturnsNotSupported) {
+TEST_F(AsyncReadTests, Prefetch_AllSlotsStillDownloading_DeclinedReturnsOk) {
     auto file = CreateFile(m_deferredEnv);
     ASSERT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
     ASSERT_TRUE(file.Prefetch(1024, 512, rocksdb::IOOptions{}, nullptr).ok());
 
-    EXPECT_TRUE(file.Prefetch(2048, 512, rocksdb::IOOptions{}, nullptr).IsNotSupported());
+    EXPECT_TRUE(file.Prefetch(2048, 512, rocksdb::IOOptions{}, nullptr).ok());
     EXPECT_EQ(2U, m_deferredEnv.Blob->PendingDownloads());
 }
 
-TEST_F(AsyncReadTests, Prefetch_OverSharedBudget_ReturnsNotSupportedAndFailedPrefetchReleasesBytes) {
+TEST_F(AsyncReadTests, Prefetch_OverSharedBudget_DeclinedReturnsOkAndFailedPrefetchReleasesBytes) {
     auto budget = std::make_shared<std::atomic<int64_t>>(0);
     FakeReadableFile file{FakeReadableFileImpl{"test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
                                                m_logger, nullptr, budget}};
@@ -360,7 +360,7 @@ TEST_F(AsyncReadTests, Prefetch_OverSharedBudget_ReturnsNotSupportedAndFailedPre
     EXPECT_EQ(0, budget->load());
 
     budget->store(FakeReadableFileImpl::kDefaultPrefetchBudgetBytes);
-    EXPECT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).IsNotSupported());
+    EXPECT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
     EXPECT_EQ(FakeReadableFileImpl::kDefaultPrefetchBudgetBytes, budget->load());
 }
 
