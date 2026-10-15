@@ -182,8 +182,16 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
             // The deadline covers time spent queued behind the per-origin cap, not just the network exchange.
             const auto deadline = DeadlineFor(options);
             auto route = Route::Of(request, options);
-            // Unparseable URLs bypass the cap; they fail fast and never open a connection.
-            if (m_limiter && route.Parsed) {
+            // A request that can never be sent fails without building a strand, stream or operation.
+            if (!route.Sendable()) {
+                const auto error = route.Parsed ? make_error_code(static_cast<HttpClientError>(route.Error.value()))
+                                                : make_error_code(HttpClientError::InvalidUrl);
+                asio::post(context_, [pending = std::move(guarded), error]() mutable {
+                    Detail::Complete(std::move(pending), error, HttpResponse{});
+                });
+                return;
+            }
+            if (m_limiter) {
                 auto origin = route.Origin();
                 return SendLimited(std::move(origin), std::move(route), std::move(request), std::move(guarded),
                                    std::move(options), std::move(cancellation), deadline);
