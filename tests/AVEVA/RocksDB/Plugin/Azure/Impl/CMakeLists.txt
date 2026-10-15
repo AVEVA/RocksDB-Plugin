@@ -34,7 +34,8 @@ target_include_directories(aveva-rocksdb-plugin-azure-impl-tests PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../src/Azure"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../src/Azure/Impl")
 include(GoogleTest)
-gtest_discover_tests(aveva-rocksdb-plugin-azure-impl-tests DISCOVERY_TIMEOUT 15)
+gtest_discover_tests(aveva-rocksdb-plugin-azure-impl-tests DISCOVERY_TIMEOUT 60
+    PROPERTIES TIMEOUT 300 LABELS unit)
 
 # Live-Azure tests skip themselves unless AVEVA_RUN_AZURE_INTEGRATION_TESTS=1, so they live in their own executable.
 add_executable(aveva-rocksdb-plugin-azure-impl-integration-tests
