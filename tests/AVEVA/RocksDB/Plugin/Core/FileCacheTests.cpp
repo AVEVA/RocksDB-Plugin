@@ -19,11 +19,34 @@ using AVEVA::RocksDB::Plugin::Core::Mocks::FilesystemMock;
 using boost::log::sources::severity_logger_mt;
 using boost::log::trivial::severity_level;
 using ::testing::_;
+using ::testing::NiceMock;
 using ::testing::Return;
+// A gate a mock blocks on. It opens on destruction so a failed assertion cannot leave a worker blocked forever.
+class Gate {
+  public:
+    Gate() : m_future(m_promise.get_future().share()) {}
+    Gate(const Gate&) = delete;
+    Gate& operator=(const Gate&) = delete;
+    ~Gate() { Open(); }
+
+    void Wait() const { m_future.wait(); }
+
+    void Open() {
+        if (!m_opened.exchange(true)) {
+            m_promise.set_value();
+        }
+    }
+
+  private:
+    std::promise<void> m_promise;
+    std::shared_future<void> m_future;
+    std::atomic<bool> m_opened{false};
+};
+
 class FileCacheTests : public ::testing::Test {
   protected:
     static const constexpr std::string_view m_folderName = "tmp";
-    std::shared_ptr<FilesystemMock> m_filesystem;
+    std::shared_ptr<NiceMock<FilesystemMock>> m_filesystem;
     std::shared_ptr<ContainerClientMock> m_containerClient;
     std::shared_ptr<severity_logger_mt<severity_level>> m_logger;
     std::vector<std::filesystem::path> m_removedFiles;
@@ -31,7 +54,8 @@ class FileCacheTests : public ::testing::Test {
 
   public:
     FileCacheTests()
-        : m_filesystem(std::make_shared<FilesystemMock>()), m_containerClient(std::make_shared<ContainerClientMock>()),
+        : m_filesystem(std::make_shared<NiceMock<FilesystemMock>>()),
+          m_containerClient(std::make_shared<ContainerClientMock>()),
           m_logger(std::make_shared<severity_logger_mt<severity_level>>()),
           m_cache(m_folderName, static_cast<size_t>(1073741824), m_containerClient, m_filesystem, m_logger) {
         ON_CALL(*m_filesystem, DeleteFile(_)).WillByDefault([this](const std::filesystem::path& path) {
@@ -53,7 +77,7 @@ class FileCacheTests : public ::testing::Test {
         FAIL() << "'" << filePath << "' did not become readable from cache";
     }
 
-    void EnsureReadFromCache(const std::string_view filePath, const size_t expectedCacheSize) {
+    void EnsureReadFromCache(const std::string_view filePath, const int64_t expectedCacheSize) {
         char buffer[1];
         // The first access only records interest and the second queues the download, so a few reads suffice.
         constexpr int maxAttempts = 4;
@@ -71,7 +95,7 @@ class FileCacheTests : public ::testing::Test {
 
 TEST_F(FileCacheTests, ReadEvenSpaced256MbFiles) {
     // Arrange
-    const auto fileSize = static_cast<size_t>(268435456);
+    const auto fileSize = static_cast<int64_t>(268435456);
     EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(fileSize));
     EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
 
@@ -107,12 +131,12 @@ TEST_F(FileCacheTests, ReadEvenSpaced256MbFiles) {
 
 TEST_F(FileCacheTests, ReadRandomLargeFiles_EvictionWorks) {
     // Arrange
-    const auto fileSize1 = static_cast<size_t>(268435456);
-    const auto fileSize2 = static_cast<size_t>(76612355);
-    const auto fileSize3 = static_cast<size_t>(16612355);
-    const auto fileSize4 = static_cast<size_t>(176612355);
-    const auto fileSize5 = static_cast<size_t>(330812579);
-    const auto fileSize6 = static_cast<size_t>(509715200);
+    const auto fileSize1 = static_cast<int64_t>(268435456);
+    const auto fileSize2 = static_cast<int64_t>(76612355);
+    const auto fileSize3 = static_cast<int64_t>(16612355);
+    const auto fileSize4 = static_cast<int64_t>(176612355);
+    const auto fileSize5 = static_cast<int64_t>(330812579);
+    const auto fileSize6 = static_cast<int64_t>(509715200);
 
     EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
     EXPECT_CALL(*m_containerClient, GetBlobSize("1.sst")).WillRepeatedly(Return(fileSize1));
@@ -206,7 +230,7 @@ TEST_F(FileCacheTests, EmptyBlobIsDownloadedWithZeroLength) {
 
 TEST_F(FileCacheTests, CacheSizeExceeded) {
     // Arrange
-    const auto fileSize = static_cast<size_t>(20000);
+    const auto fileSize = static_cast<int64_t>(20000);
 
     EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(fileSize));
     EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
@@ -236,7 +260,7 @@ TEST_F(FileCacheTests, CacheSizeExceeded) {
 
 TEST_F(FileCacheTests, SetCacheSize_EvictsTheOnlyEntry) {
     // Arrange
-    const auto fileSize = static_cast<size_t>(20000);
+    const auto fileSize = static_cast<int64_t>(20000);
     EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(fileSize));
     EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
     EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
@@ -360,12 +384,12 @@ TEST_F(FileCacheTests, ReadFile_ShortReadFromTheCachedFile_FallsBackAndDropsTheE
 TEST_F(FileCacheTests, FileReplacedWhileItsSizeIsBeingLookedUp_IsNotActivated) {
     // Arrange - the size lookup blocks until released.
     std::promise<void> started;
-    std::promise<void> release;
+    Gate release;
     std::atomic<int> sizeCalls{0};
     EXPECT_CALL(*m_containerClient, GetBlobSize("1.sst")).WillRepeatedly([&](const std::string&) -> int64_t {
         if (++sizeCalls == 1) {
             started.set_value();
-            release.get_future().wait();
+            release.Wait();
         }
         return 1;
     });
@@ -376,7 +400,7 @@ TEST_F(FileCacheTests, FileReplacedWhileItsSizeIsBeingLookedUp_IsNotActivated) {
 
     // Act - the downloader has popped the entry, which is still QueuedForDownload, when the blob is replaced.
     m_cache.MarkFileAsStaleIfExists("1.sst");
-    release.set_value();
+    release.Open();
     m_cache.WaitUntilIdle();
 
     // Assert - nothing was downloaded or activated with the pre-replacement size.
@@ -391,13 +415,13 @@ TEST_F(FileCacheTests, FileReplacedWhileItsSizeIsBeingLookedUp_IsNotActivated) {
 TEST_F(FileCacheTests, FileReplacedAndRequeuedDuringADownload_IsDownloadedAgainNotActivatedWithTheOldBytes) {
     // Arrange - the first download blocks until released; later ones return at once.
     std::promise<void> started;
-    std::promise<void> release;
+    Gate release;
     std::atomic<int> downloads{0};
     EXPECT_CALL(*m_containerClient, GetBlobSize("1.sst")).WillRepeatedly(Return(1));
     EXPECT_CALL(*m_containerClient, DownloadBlobTo("1.sst", _, _, _)).WillRepeatedly([&](auto&&...) {
         if (++downloads == 1) {
             started.set_value();
-            release.get_future().wait();
+            release.Wait();
         }
     });
     EXPECT_FALSE(m_cache.ReadFile("1.sst", 0, 0, nullptr)); // records the entry
@@ -407,7 +431,7 @@ TEST_F(FileCacheTests, FileReplacedAndRequeuedDuringADownload_IsDownloadedAgainN
     // Act - the blob is replaced mid-download and a reader asks for it again before the first download ends.
     m_cache.MarkFileAsStaleIfExists("1.sst");
     EXPECT_FALSE(m_cache.ReadFile("1.sst", 0, 0, nullptr));
-    release.set_value();
+    release.Open();
     m_cache.WaitUntilIdle();
 
     // Assert - the bytes fetched before the replacement were discarded and the file was fetched again.
@@ -459,7 +483,7 @@ TEST_F(FileCacheTests, ReadFile_ManyReadsOfACachedFile_OpenItOnce) {
 
 TEST_F(FileCacheTests, EvictedFile_WhoseDeleteFails_IsLoggedRetriedAndNotCounted) {
     // Arrange
-    const auto fileSize = static_cast<size_t>(100);
+    const auto fileSize = static_cast<int64_t>(100);
     m_cache.SetCacheSize(fileSize);
     std::atomic<int> deleteCalls = 0;
     EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(fileSize));
@@ -500,7 +524,7 @@ TEST_F(FileCacheTests, RunningTotals_StayConsistentThroughEvictionAndRefresh) {
 
     // Act (CacheSize cross-checks the totals against a full scan in debug builds)
     for (int i = 0; i < 5; ++i) {
-        EnsureReadFromCache(std::to_string(i) + ".sst", static_cast<size_t>(10 * (i + 1)));
+        EnsureReadFromCache(std::to_string(i) + ".sst", static_cast<int64_t>(10 * (i + 1)));
     }
     m_cache.MarkFileAsStaleIfExists("2.sst");
     EXPECT_EQ(50U, m_cache.CacheSize());
@@ -512,7 +536,7 @@ TEST_F(FileCacheTests, RunningTotals_StayConsistentThroughEvictionAndRefresh) {
 }
 TEST_F(FileCacheTests, EvictedFiles_AreDeletedBeforeTheNextFileIsDownloaded) {
     // Arrange
-    const auto fileSize = static_cast<size_t>(100);
+    const auto fileSize = static_cast<int64_t>(100);
     m_cache.SetCacheSize(fileSize);
     std::atomic<bool> deletedBeforeDownload = false;
     EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(fileSize));
@@ -537,7 +561,7 @@ TEST_F(FileCacheTests, EvictedFiles_AreDeletedBeforeTheNextFileIsDownloaded) {
 
 TEST_F(FileCacheTests, Eviction_DoesNotRemoveMetadataOnlyStaleEntries) {
     // Arrange
-    const auto fileSize = static_cast<size_t>(100);
+    const auto fileSize = static_cast<int64_t>(100);
     m_cache.SetCacheSize(fileSize);
     EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(fileSize));
     EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
@@ -560,14 +584,14 @@ TEST_F(FileCacheTests, Eviction_DoesNotRemoveMetadataOnlyStaleEntries) {
 
 TEST_F(FileCacheTests, SetCacheSize_WhileADownloadIsInFlight_EvictsAfterItActivates) {
     // Arrange - the second file's download blocks until released.
-    const auto fileSize = static_cast<size_t>(100);
+    const auto fileSize = static_cast<int64_t>(100);
     std::promise<void> started;
-    std::promise<void> release;
+    Gate release;
     EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(fileSize));
     EXPECT_CALL(*m_containerClient, DownloadBlobTo("1.sst", _, _, _)).WillRepeatedly(Return());
     EXPECT_CALL(*m_containerClient, DownloadBlobTo("2.sst", _, _, _)).WillRepeatedly([&](auto&&...) {
         started.set_value();
-        release.get_future().wait();
+        release.Wait();
     });
     EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
         auto file = std::make_unique<FileMock>();
@@ -581,7 +605,7 @@ TEST_F(FileCacheTests, SetCacheSize_WhileADownloadIsInFlight_EvictsAfterItActiva
 
     // Act - the in-flight file is not counted yet, so nothing is evicted by the resize itself.
     m_cache.SetCacheSize(fileSize);
-    release.set_value();
+    release.Open();
     m_cache.WaitUntilIdle();
 
     // Assert
@@ -611,7 +635,7 @@ TEST_F(FileCacheTests, Download_PassesTheCachePathThroughWithoutNarrowing) {
 
 TEST(FileCacheShutdownTests, FailedDelete_IsRetriedOnceAtShutdown) {
     // Arrange
-    auto filesystem = std::make_shared<FilesystemMock>();
+    auto filesystem = std::make_shared<NiceMock<FilesystemMock>>();
     auto containerClient = std::make_shared<ContainerClientMock>();
     auto logger = std::make_shared<severity_logger_mt<severity_level>>();
     std::atomic<int> deleteCalls = 0;
