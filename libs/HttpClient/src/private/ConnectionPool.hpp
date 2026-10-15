@@ -282,9 +282,9 @@ class ConnectionPool {
             auto [it, inserted] = emplaced;
             Origin& origin = it->second;
             if (inserted) {
-                // unordered_node_map keeps keys and mapped values at stable addresses, so a
-                // node can point back at its origin for O(1) unlinking during expiry.
-                origin.key = &it->first;
+                // unordered_node_map keeps elements at stable addresses, so the origin can remember its
+                // own entry and be erased in O(1) during expiry.
+                origin.entry = it;
             } else if (origin.idle.size() >= m_maxIdlePerKey) {
                 Node& oldest = origin.idle.front();
                 origin.idle.pop_front();
@@ -305,7 +305,7 @@ class ConnectionPool {
                 Origin& oldestOrigin = *oldest.origin;
                 oldestOrigin.idle.erase(oldestOrigin.idle.iterator_to(oldest));
                 if (oldestOrigin.idle.empty()) {
-                    m_origins.erase(*oldestOrigin.key);
+                    m_origins.erase(oldestOrigin.entry);
                 }
                 retired.push_back(oldest);
             }
@@ -358,6 +358,9 @@ class ConnectionPool {
 
     struct Origin;
 
+    using OriginMap =
+        boost::unordered_node_map<ConnectionKey<Stream>, Origin, ConnectionKeyHash<Stream>, ConnectionKeyEqual<Stream>>;
+
     /// <summary>
     /// A cached connection, linked into both its origin's idle list and the pool-wide LRU list.
     /// </summary>
@@ -373,12 +376,12 @@ class ConnectionPool {
                                            boost::intrusive::constant_time_size<true>>;
 
     /// <summary>
-    /// One origin's idle connections, oldest first, plus a pointer back to the key that owns them so a node
-    /// can erase its origin in O(1).
+    /// One origin's idle connections, oldest first, plus its own map entry so a node can erase its origin
+    /// in O(1) without looking the key up (the key lives inside the element being erased).
     /// </summary>
     struct Origin {
         IdleList idle;
-        const ConnectionKey<Stream>* key = nullptr;
+        typename OriginMap::iterator entry;
     };
 
     /// <summary>
@@ -405,7 +408,7 @@ class ConnectionPool {
             Origin& origin = *node.origin;
             origin.idle.erase(origin.idle.iterator_to(node));
             if (origin.idle.empty()) {
-                m_origins.erase(*origin.key);
+                m_origins.erase(origin.entry);
             }
             retired.push_back(node);
         }
@@ -454,8 +457,7 @@ class ConnectionPool {
     std::size_t m_maxTotalIdle;
     const Notifier m_notifier;
     mutable std::mutex m_mutex;
-    boost::unordered_node_map<ConnectionKey<Stream>, Origin, ConnectionKeyHash<Stream>, ConnectionKeyEqual<Stream>>
-        m_origins;
+    OriginMap m_origins;
     LruList m_lru;
     IdleList m_recycled;
 };
