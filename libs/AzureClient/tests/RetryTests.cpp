@@ -412,6 +412,21 @@ TEST(RetryTests, RetryAfterHttpDateInThePastRetriesImmediately) {
     EXPECT_EQ(httpClient.RequestCount(), 2U);
 }
 
+TEST(RetryTests, RetryAfterHttpDateIsRelativeToTheResponseDateHeader) {
+    FakeHttpClient httpClient;
+    // The server clock is an hour ahead of ours: against the local clock this would be a one hour wait.
+    const auto serverNow = std::chrono::system_clock::now() + std::chrono::hours{1};
+    const auto serverDate = AVEVA::AzureClient::Private::BuildDateHeaderValue(serverNow);
+    httpClient.EnqueueResponse(HttpResponse{503, {{"Date", serverDate}, {"Retry-After", serverDate}}, ""});
+    httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
+    BlobClient client{httpClient, MakeRetryOptions(1, std::chrono::milliseconds{0})};
+
+    std::optional<DeleteResult> observed;
+    client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}));
+    EXPECT_EQ(httpClient.RequestCount(), 2U);
+}
 TEST(RetryTests, RetryAfterFutureHttpDateDelaysTheRetry) {
     FakeHttpClient httpClient;
     const auto retryAt = std::chrono::system_clock::now() + std::chrono::seconds{2};

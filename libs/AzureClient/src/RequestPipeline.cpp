@@ -81,10 +81,12 @@ std::optional<std::chrono::milliseconds> ParseRetryAfter(const HttpResponse& res
         return std::chrono::milliseconds{static_cast<std::chrono::milliseconds::rep>(
             std::min<std::uint64_t>(*seconds, MaxMilliseconds / MillisecondsPerSecond) * MillisecondsPerSecond)};
     }
-    // The HTTP-date form; a date in the past means "retry now".
+    // The HTTP-date form; a date in the past means "retry now". The server's Date header is the reference when
+    // present so that client clock skew does not distort the delay.
     if (const auto date = ParseHttpDateHeader(FindHeaderValue(response, "Retry-After")); date.has_value()) {
-        const auto wait =
-            std::chrono::duration_cast<std::chrono::milliseconds>(*date - std::chrono::system_clock::now());
+        const auto serverNow = ParseHttpDateHeader(FindHeaderValue(response, "Date"));
+        const auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(
+            *date - serverNow.value_or(std::chrono::system_clock::now()));
         return std::clamp(wait, std::chrono::milliseconds{0},
                           std::chrono::milliseconds{static_cast<std::chrono::milliseconds::rep>(MaxMilliseconds)});
     }
