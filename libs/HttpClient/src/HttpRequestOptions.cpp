@@ -44,4 +44,8 @@ void HttpRequestOptions::SetMaxRetries(int maxRetries) {
     }
     m_maxRetries = maxRetries;
 }
+
+bool HttpRequestOptions::GetAcceptTruncatedTlsBody() const noexcept { return m_acceptTruncatedTlsBody; }
+
+void HttpRequestOptions::SetAcceptTruncatedTlsBody(bool accept) noexcept { m_acceptTruncatedTlsBody = accept; }
 } // namespace AVEVA

@@ -99,7 +99,21 @@ class HttpRequestOptions {
     /// <exception cref="std::invalid_argument">Thrown when <paramref name="maxRetries"/> is negative.</exception>
     void SetMaxRetries(int maxRetries);
 
+    /// <summary>
+    /// Whether a TLS connection closed without close_notify may end an EOF-delimited response body. Off by
+    /// default because an attacker can truncate such a body undetected.
+    /// </summary>
+    /// <returns>True if truncated TLS bodies are accepted.</returns>
+    bool GetAcceptTruncatedTlsBody() const noexcept;
+
+    /// <summary>
+    /// Opts in to accepting EOF-delimited bodies whose TLS stream ended without close_notify.
+    /// </summary>
+    /// <param name="accept">True to accept such bodies.</param>
+    void SetAcceptTruncatedTlsBody(bool accept) noexcept;
+
   private:
+    bool m_acceptTruncatedTlsBody = false;
     std::chrono::milliseconds m_timeout{30000};
     std::uint64_t m_responseBodyLimit = 8 * 1024 * 1024;
     std::uint32_t m_responseHeaderLimit = 64 * 1024;

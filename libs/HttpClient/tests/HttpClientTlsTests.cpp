@@ -359,7 +359,8 @@ struct TlsOutcome {
 // When `stopWhenDone` is false the caller must arrange for the server to be stopped (e.g. via SetOnClose).
 std::vector<TlsOutcome> SendSequentialRequests(asio::io_context& context, TlsTestServer& server,
                                                AVEVA::HttpClientOptions options, const std::string& host, int count,
-                                               bool stopWhenDone = true) {
+                                               bool stopWhenDone = true,
+                                               AVEVA::HttpRequestOptions requestOptions = {}) {
     options.SetCaPem(server.CertificatePem());
     std::shared_ptr<AVEVA::HttpClient> client = AVEVA::HttpClient::Create(context, options);
     const std::string url = "https://" + host + ":" + std::to_string(server.Port()) + "/";
@@ -375,18 +376,17 @@ std::vector<TlsOutcome> SendSequentialRequests(asio::io_context& context, TlsTes
     sendNext = [&]() {
         AVEVA::HttpRequest request;
         request.SetUrl(url);
-        client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{},
-                          [&](std::error_code error, AVEVA::HttpResponse response) {
-                              outcomes.push_back({error, response.GetStatus(), std::string{response.GetBody()}});
-                              if (error || static_cast<int>(outcomes.size()) >= count) {
-                                  guard.cancel();
-                                  if (stopWhenDone) {
-                                      server.Stop();
-                                  }
-                                  return;
-                              }
-                              sendNext();
-                          });
+        client->SendAsync(std::move(request), requestOptions, [&](std::error_code error, AVEVA::HttpResponse response) {
+            outcomes.push_back({error, response.GetStatus(), std::string{response.GetBody()}});
+            if (error || static_cast<int>(outcomes.size()) >= count) {
+                guard.cancel();
+                if (stopWhenDone) {
+                    server.Stop();
+                }
+                return;
+            }
+            sendNext();
+        });
     };
     sendNext();
     context.run();
@@ -433,10 +433,21 @@ TEST(HttpClientTls, StalePooledTlsConnectionIsReplaced) {
     EXPECT_EQ(server.Handshakes(), 2);
 }
 
-TEST(HttpClientTls, EofDelimitedResponseWithoutCloseNotifyCompletes) {
+TEST(HttpClientTls, EofDelimitedResponseWithoutCloseNotifyFailsByDefault) {
     asio::io_context context;
     TlsTestServer server(context, "IP:127.0.0.1", TlsTestServer::AfterResponse::EofDelimitedAbort);
     const auto outcomes = SendSequentialRequests(context, server, {}, "127.0.0.1", 1);
+
+    ASSERT_EQ(outcomes.size(), 1U);
+    EXPECT_TRUE(outcomes[0].Error);
+}
+
+TEST(HttpClientTls, EofDelimitedResponseWithoutCloseNotifyCompletesWhenOptedIn) {
+    asio::io_context context;
+    TlsTestServer server(context, "IP:127.0.0.1", TlsTestServer::AfterResponse::EofDelimitedAbort);
+    AVEVA::HttpRequestOptions requestOptions;
+    requestOptions.SetAcceptTruncatedTlsBody(true);
+    const auto outcomes = SendSequentialRequests(context, server, {}, "127.0.0.1", 1, true, requestOptions);
 
     ASSERT_EQ(outcomes.size(), 1U);
     EXPECT_FALSE(outcomes[0].Error) << outcomes[0].Error.message();

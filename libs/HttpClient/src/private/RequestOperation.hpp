@@ -582,14 +582,17 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     }
 
     /// <summary>
-    /// A TLS server may close TCP without close_notify; that still ends an EOF-delimited body, so such a
-    /// truncation is not an error once the parser accepts the EOF.
+    /// A TLS server may close TCP without close_notify. An attacker can also truncate an EOF-delimited body
+    /// that way, so it is only accepted for bodyless statuses (204/304) or when the request opted in.
     /// </summary>
     /// <param name="error">The failed read's error.</param>
     /// <returns>An empty error code if the message turned out to be complete; otherwise the original error.</returns>
     boost::system::error_code AcceptTruncatedTlsBody(boost::system::error_code error) {
         if constexpr (std::is_same_v<Stream, TlsStream>) {
-            if (error == asio::ssl::error::stream_truncated && m_parser->got_some()) {
+            const auto status = m_parser->get().result_int();
+            const bool bodyless = status == 204 || status == 304;
+            if (error == asio::ssl::error::stream_truncated && m_parser->got_some() &&
+                (m_options.GetAcceptTruncatedTlsBody() || bodyless)) {
                 boost::system::error_code eofError;
                 m_parser->put_eof(eofError);
                 if (!eofError) {
