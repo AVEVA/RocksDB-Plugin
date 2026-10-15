@@ -63,8 +63,7 @@ class ChainedTokenCredential final : public std::enable_shared_from_this<Chained
     };
 
   public:
-    explicit ChainedTokenCredential(std::vector<std::shared_ptr<TSource>> sources,
-                                    SourceFailureObserver observer = {})
+    explicit ChainedTokenCredential(std::vector<std::shared_ptr<TSource>> sources, SourceFailureObserver observer = {})
         : m_sources(std::move(sources)), m_observer(std::move(observer)) {
         std::erase(m_sources, nullptr);
     }

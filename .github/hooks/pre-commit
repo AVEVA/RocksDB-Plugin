@@ -32,7 +32,7 @@ if [ -z "$clang_format_cmd" ] && [ -z "$powershell_cmd" ]; then
 fi
 
 staged_files="$(git diff --cached --name-only --diff-filter=ACMR)"
-files_to_format="$(printf '%s\n' "$staged_files" | grep -E '^(src|include|tests)/.*\.(c|cc|cpp|cxx|h|hh|hpp|hxx)$' || true)"
+files_to_format="$(printf '%s\n' "$staged_files" | grep -E '^(src|include|tests|libs)/.*\.(c|cc|cpp|cxx|h|hh|hpp|hxx)$' || true)"
 
 if [ -z "$files_to_format" ]; then
   exit 0

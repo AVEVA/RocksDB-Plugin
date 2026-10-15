@@ -8,7 +8,7 @@
 using AVEVA::RocksDB::Plugin::Azure::Impl::BufferChunkInfo;
 TEST(BufferChunkInfoTests, ChunkSize_ReturnsCorrectTotal) {
     // Arrange
-    BufferChunkInfo chunk{ 0, 512, 100, 12, 400 };
+    BufferChunkInfo chunk{0, 512, 100, 12, 400};
 
     // Act
     const auto size = chunk.ChunkSize();
@@ -19,7 +19,7 @@ TEST(BufferChunkInfoTests, ChunkSize_ReturnsCorrectTotal) {
 
 TEST(BufferChunkInfoTests, ChunkSize_WithNoPadding_ReturnsDataLength) {
     // Arrange
-    BufferChunkInfo chunk{ 0, 0, 512, 0, 0 };
+    BufferChunkInfo chunk{0, 0, 512, 0, 0};
 
     // Act
     const auto size = chunk.ChunkSize();
@@ -30,7 +30,7 @@ TEST(BufferChunkInfoTests, ChunkSize_WithNoPadding_ReturnsDataLength) {
 
 TEST(BufferChunkInfoTests, ChunkSize_WithOnlyPrePadding) {
     // Arrange
-    BufferChunkInfo chunk{ 0, 100, 412, 100, 0 };
+    BufferChunkInfo chunk{0, 100, 412, 100, 0};
 
     // Act
     const auto size = chunk.ChunkSize();
@@ -41,7 +41,7 @@ TEST(BufferChunkInfoTests, ChunkSize_WithOnlyPrePadding) {
 
 TEST(BufferChunkInfoTests, ChunkSize_WithOnlyPostPadding) {
     // Arrange
-    BufferChunkInfo chunk{ 0, 0, 256, 0, 256 };
+    BufferChunkInfo chunk{0, 0, 256, 0, 256};
 
     // Act
     const auto size = chunk.ChunkSize();

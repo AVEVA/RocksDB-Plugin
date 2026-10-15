@@ -19,15 +19,15 @@ namespace AVEVA::Private {
 /// key, the pool key, and the request line and Host header are all derived from it.
 /// </summary>
 struct Route {
-    bool Parsed = false;    // The URL parsed at all.
-    std::error_code Error;  // Set when the parsed request failed validation; otherwise empty.
+    bool Parsed = false;   // The URL parsed at all.
+    std::error_code Error; // Set when the parsed request failed validation; otherwise empty.
     bool Tls = false;
     bool HostIsName = false;
     std::string Scheme;
     std::string Host;
     std::string Port;
-    std::string Target;     // Request target, always starting with '/'.
-    std::string Authority;  // The Host header value.
+    std::string Target;    // Request target, always starting with '/'.
+    std::string Authority; // The Host header value.
 
     /// <summary>
     /// Whether a pooled connection may be used: the request passes the same validation the operation applies,

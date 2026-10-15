@@ -80,7 +80,7 @@ support, CMake, clang-format/clang-tidy, gitleaks, vcpkg, and git hook configura
 - Public headers go in `include/AVEVA/RocksDB/Plugin/` — do not leak implementation details
   into headers.
 - Respect [.clang-format](../.clang-format) and [.clang-tidy](../.clang-tidy); the pre-commit
-  hook runs `clang-format` on staged C/C++ files under `src/`, `include/`, and `tests/`.
+  hook runs `clang-format` on staged C/C++ files under `src/`, `include/`, `tests/`, and `libs/`; CI fails on unformatted files.
 
 ## Documentation/Comments
 

@@ -19,15 +19,13 @@
 
 using AVEVA::AzureClient::Tests::ValueOrFail;
 
-namespace
-{
-    using AVEVA::HttpResponse;
-    using AVEVA::AzureClient::BlobStorageError;
-    using AVEVA::AzureClient::Response;
+namespace {
+using AVEVA::HttpResponse;
+using AVEVA::AzureClient::BlobStorageError;
+using AVEVA::AzureClient::Response;
 } // namespace
 
-TEST(ResponseTests, DefaultConstructedResponseHasDefaultState)
-{
+TEST(ResponseTests, DefaultConstructedResponseHasDefaultState) {
     Response<std::string> response;
 
     EXPECT_TRUE(response.Value().empty());
@@ -35,10 +33,9 @@ TEST(ResponseTests, DefaultConstructedResponseHasDefaultState)
     EXPECT_FALSE(response.Error().has_value());
 }
 
-TEST(ResponseTests, MoveConstructionPreservesValueRawResponseAndError)
-{
-    Response<std::vector<int>> original{std::vector<int>{1, 2, 3},
-        HttpResponse{206, {{"x-ms-request-id", "req-1"}}, "body"},
+TEST(ResponseTests, MoveConstructionPreservesValueRawResponseAndError) {
+    Response<std::vector<int>> original{
+        std::vector<int>{1, 2, 3}, HttpResponse{206, {{"x-ms-request-id", "req-1"}}, "body"},
         BlobStorageError{.StatusCode = 409, .ErrorCode = "Conflict", .Message = "message", .RequestId = "req-1"}};
 
     Response<std::vector<int>> moved{std::move(original)};
@@ -50,8 +47,7 @@ TEST(ResponseTests, MoveConstructionPreservesValueRawResponseAndError)
     EXPECT_EQ(ValueOrFail(moved.Error()).ErrorCode, "Conflict");
 }
 
-TEST(ResponseTests, RvalueQualifiedValueMovesOutLargePayloads)
-{
+TEST(ResponseTests, RvalueQualifiedValueMovesOutLargePayloads) {
     Response<std::unique_ptr<int>> response{std::make_unique<int>(42), HttpResponse{200, {}, ""}};
 
     std::unique_ptr<int> const value = std::move(response).Value();
@@ -60,12 +56,10 @@ TEST(ResponseTests, RvalueQualifiedValueMovesOutLargePayloads)
     EXPECT_EQ(*value, 42);
 }
 
-TEST(ResponseTests, RvalueQualifiedRawResponseAndErrorMoveOutWithoutRelyingOnSource)
-{
-    const auto makeResponse = []
-    {
-        return Response<std::string>{"value",
-            HttpResponse{206, {{"x-ms-request-id", "req-1"}}, "large-body-payload"},
+TEST(ResponseTests, RvalueQualifiedRawResponseAndErrorMoveOutWithoutRelyingOnSource) {
+    const auto makeResponse = [] {
+        return Response<std::string>{
+            "value", HttpResponse{206, {{"x-ms-request-id", "req-1"}}, "large-body-payload"},
             BlobStorageError{.StatusCode = 409, .ErrorCode = "Conflict", .Message = "message", .RequestId = "req-1"}};
     };
 
@@ -80,11 +74,9 @@ TEST(ResponseTests, RvalueQualifiedRawResponseAndErrorMoveOutWithoutRelyingOnSou
     EXPECT_EQ(ValueOrFail(error).ErrorCode, "Conflict");
 }
 
-TEST(ResponseTests, MutableLvalueAccessorsAllowInPlaceModificationAndMoveOut)
-{
-    Response<std::string> response{"value",
-        HttpResponse{206, {{"x-ms-request-id", "req-1"}}, "body"},
-        BlobStorageError{.StatusCode = 409, .ErrorCode = "Conflict"}};
+TEST(ResponseTests, MutableLvalueAccessorsAllowInPlaceModificationAndMoveOut) {
+    Response<std::string> response{"value", HttpResponse{206, {{"x-ms-request-id", "req-1"}}, "body"},
+                                   BlobStorageError{.StatusCode = 409, .ErrorCode = "Conflict"}};
 
     response.Value() = "changed";
     response.Error().reset();
@@ -97,12 +89,10 @@ TEST(ResponseTests, MutableLvalueAccessorsAllowInPlaceModificationAndMoveOut)
     EXPECT_EQ(moved.GetBody(), "body");
 }
 
-TEST(ResponseTests, ErrorCodesCompareEqualToDocumentedPortableConditions)
-{
+TEST(ResponseTests, ErrorCodesCompareEqualToDocumentedPortableConditions) {
     using AVEVA::AzureClient::BlobStorageErrorCode;
 
-    struct Row
-    {
+    struct Row {
         BlobStorageErrorCode Code;
         std::errc Condition;
     };
@@ -122,21 +112,17 @@ TEST(ResponseTests, ErrorCodesCompareEqualToDocumentedPortableConditions)
         {BlobStorageErrorCode::InvalidResponse, std::errc::bad_message},
         {BlobStorageErrorCode::InvalidMetadata, std::errc::invalid_argument},
     };
-    for (const Row& row : rows)
-    {
+    for (const Row& row : rows) {
         BlobStorageError error;
         error.Code = make_error_code(row.Code);
         EXPECT_EQ(error.Code, row.Condition) << static_cast<int>(row.Code);
     }
 }
 
-TEST(ResponseTests, MovingMembersOutInDifferentOrdersLeavesEachIntact)
-{
-    const auto makeResponse = []
-    {
-        return Response<std::string>{"value",
-            HttpResponse{206, {{"x-ms-request-id", "req-1"}}, "body"},
-            BlobStorageError{.StatusCode = 409, .ErrorCode = "Conflict"}};
+TEST(ResponseTests, MovingMembersOutInDifferentOrdersLeavesEachIntact) {
+    const auto makeResponse = [] {
+        return Response<std::string>{"value", HttpResponse{206, {{"x-ms-request-id", "req-1"}}, "body"},
+                                     BlobStorageError{.StatusCode = 409, .ErrorCode = "Conflict"}};
     };
 
     Response<std::string> first = makeResponse();

@@ -5,52 +5,25 @@
 
 #include <utility>
 
-namespace AVEVA
-{
-    HttpResponse::HttpResponse() = default;
+namespace AVEVA {
+HttpResponse::HttpResponse() = default;
 
-    HttpResponse::HttpResponse(unsigned int status, std::vector<HttpHeader> headers, std::string body)
-        : m_status(status), m_headers(std::move(headers)), m_body(std::move(body))
-    {
-    }
+HttpResponse::HttpResponse(unsigned int status, std::vector<HttpHeader> headers, std::string body)
+    : m_status(status), m_headers(std::move(headers)), m_body(std::move(body)) {}
 
-    unsigned int HttpResponse::GetStatus() const noexcept
-    {
-        return m_status;
-    }
+unsigned int HttpResponse::GetStatus() const noexcept { return m_status; }
 
-    const std::vector<HttpHeader>& HttpResponse::GetHeaders() const& noexcept
-    {
-        return m_headers;
-    }
+const std::vector<HttpHeader>& HttpResponse::GetHeaders() const& noexcept { return m_headers; }
 
-    std::vector<HttpHeader> HttpResponse::GetHeaders() && noexcept
-    {
-        return std::move(m_headers);
-    }
+std::vector<HttpHeader> HttpResponse::GetHeaders() && noexcept { return std::move(m_headers); }
 
-    const std::string& HttpResponse::GetBody() const& noexcept
-    {
-        return m_body;
-    }
+const std::string& HttpResponse::GetBody() const& noexcept { return m_body; }
 
-    std::string HttpResponse::GetBody() && noexcept
-    {
-        return std::move(m_body);
-    }
+std::string HttpResponse::GetBody() && noexcept { return std::move(m_body); }
 
-    void HttpResponse::AddHeader(HttpHeader header)
-    {
-        m_headers.push_back(std::move(header));
-    }
+void HttpResponse::AddHeader(HttpHeader header) { m_headers.push_back(std::move(header)); }
 
-    std::error_code HttpResponse::GetCause() const noexcept
-    {
-        return m_cause;
-    }
+std::error_code HttpResponse::GetCause() const noexcept { return m_cause; }
 
-    void HttpResponse::SetCause(std::error_code cause) noexcept
-    {
-        m_cause = cause;
-    }
+void HttpResponse::SetCause(std::error_code cause) noexcept { m_cause = cause; }
 } // namespace AVEVA

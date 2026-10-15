@@ -5,14 +5,12 @@
 #include "AVEVA/RocksDB/Plugin/Core/File.hpp"
 #include <gmock/gmock.h>
 
-namespace AVEVA::RocksDB::Plugin::Core::Mocks
-{
-    class FileMock : public File
-    {
-    public:
-        FileMock();
-        virtual ~FileMock();
+namespace AVEVA::RocksDB::Plugin::Core::Mocks {
+class FileMock : public File {
+  public:
+    FileMock();
+    virtual ~FileMock();
 
-        MOCK_METHOD(int64_t, Read, (char* buffer, int64_t offset, int64_t length), (override));
-    };
-}
+    MOCK_METHOD(int64_t, Read, (char* buffer, int64_t offset, int64_t length), (override));
+};
+} // namespace AVEVA::RocksDB::Plugin::Core::Mocks

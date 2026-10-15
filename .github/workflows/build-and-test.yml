@@ -23,6 +23,21 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  format-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      # Same file set as the pre-commit hook, so a commit that passed the hook never fails here.
+      - name: Check clang-format
+        run: |
+          git ls-files -z -- 'src/*' 'include/*' 'tests/*' 'libs/*' \
+            | grep -zE '\.(c|cc|cpp|cxx|h|hh|hpp|hxx)$' \
+            | xargs -0 clang-format --dry-run --Werror --style=file
+
   build:
     strategy:
       fail-fast: false

@@ -35,8 +35,7 @@ void RequestOperation<Stream>::BindCancellation(const std::shared_ptr<CancelStat
     });
 }
 
-template <typename Stream>
-void RequestOperation<Stream>::Start(HttpRequest request, const Route& route) {
+template <typename Stream> void RequestOperation<Stream>::Start(HttpRequest request, const Route& route) {
     if (IsCancellationRequested()) {
         return Cancel();
     }
@@ -59,8 +58,7 @@ void RequestOperation<Stream>::Start(HttpRequest request, const Route& route) {
     Resolve();
 }
 
-template <typename Stream>
-void RequestOperation<Stream>::StartReused(HttpRequest request, const Route& route) {
+template <typename Stream> void RequestOperation<Stream>::StartReused(HttpRequest request, const Route& route) {
     if (IsCancellationRequested()) {
         return Cancel();
     }
@@ -78,8 +76,7 @@ void RequestOperation<Stream>::StartReused(HttpRequest request, const Route& rou
     Write();
 }
 
-template <typename Stream>
-bool RequestOperation<Stream>::BuildRequest(HttpRequest& request, const Route& route) {
+template <typename Stream> bool RequestOperation<Stream>::BuildRequest(HttpRequest& request, const Route& route) {
     try {
         return BuildRequestUnchecked(request, route);
     } catch (const std::exception&) {
@@ -107,8 +104,7 @@ bool RequestOperation<Stream>::BuildRequestUnchecked(HttpRequest& request, const
     m_request.target(route.Target);
     for (const auto& header : request.GetHeaders()) {
         if (beast::iequals(header.GetName(), "Host") || beast::iequals(header.GetName(), "Content-Length") ||
-            beast::iequals(header.GetName(), "Transfer-Encoding") ||
-            beast::iequals(header.GetName(), "Connection")) {
+            beast::iequals(header.GetName(), "Transfer-Encoding") || beast::iequals(header.GetName(), "Connection")) {
             continue;
         }
         m_request.insert(header.GetName(), header.GetValue());
@@ -143,8 +139,7 @@ bool RequestOperation<Stream>::BuildRequestUnchecked(HttpRequest& request, const
     return true;
 }
 
-template <typename Stream>
-void RequestOperation<Stream>::ArmTimer() {
+template <typename Stream> void RequestOperation<Stream>::ArmTimer() {
     if (m_deadline) {
         m_timer.expires_at(*m_deadline);
     } else {
@@ -160,8 +155,7 @@ void RequestOperation<Stream>::ArmTimer() {
     });
 }
 
-template <typename Stream>
-bool RequestOperation<Stream>::ConfigureTlsForHost() {
+template <typename Stream> bool RequestOperation<Stream>::ConfigureTlsForHost() {
     if constexpr (std::is_same_v<Stream, TlsStream>) {
         PrepareTlsSessionResumption(m_stream->native_handle(), m_key.host, m_key.service);
         if (SSL_get_verify_mode(m_stream->native_handle()) != SSL_VERIFY_NONE) {
@@ -175,8 +169,7 @@ bool RequestOperation<Stream>::ConfigureTlsForHost() {
     return true;
 }
 
-template <typename Stream>
-bool RequestOperation<Stream>::MaybeRetryAfterReuseFailure(bool requestMayHaveBeenSent) {
+template <typename Stream> bool RequestOperation<Stream>::MaybeRetryAfterReuseFailure(bool requestMayHaveBeenSent) {
     if (IsCancellationRequested() || !m_reused || m_retried || m_receivedAnyResponse || m_parser->got_some() ||
         (requestMayHaveBeenSent && !IsIdempotentMethod(m_request.method()))) {
         return false;
@@ -201,8 +194,7 @@ bool RequestOperation<Stream>::MaybeRetryAfterReuseFailure(bool requestMayHaveBe
     return true;
 }
 
-template <typename Stream>
-bool RequestOperation<Stream>::IsIdempotentMethod(http::verb method) noexcept {
+template <typename Stream> bool RequestOperation<Stream>::IsIdempotentMethod(http::verb method) noexcept {
     switch (method) {
     case http::verb::get:
     case http::verb::head:
@@ -216,8 +208,7 @@ bool RequestOperation<Stream>::IsIdempotentMethod(http::verb method) noexcept {
     }
 }
 
-template <typename Stream>
-void RequestOperation<Stream>::ResetParser() {
+template <typename Stream> void RequestOperation<Stream>::ResetParser() {
     m_parser.emplace();
     m_parser->body_limit(m_options.GetResponseBodyLimit());
     m_parser->header_limit(m_options.GetResponseHeaderLimit());
@@ -235,8 +226,7 @@ void RequestOperation<Stream>::OnSharedResolve(boost::system::error_code error, 
     });
 }
 
-template <typename Stream>
-void RequestOperation<Stream>::Resolve() {
+template <typename Stream> void RequestOperation<Stream>::Resolve() {
     m_resolvedFromCache = false;
     auto& cache = DnsCache::Shared();
     if (auto cached = cache.Find(m_key.host, m_key.service)) {
@@ -262,18 +252,16 @@ void RequestOperation<Stream>::Resolve() {
         }
     };
     auto guard = std::make_shared<LeaderGuard>(LeaderGuard{m_key.host, m_key.service, scope});
-    m_resolver.async_resolve(m_key.host, m_key.service,
-                             [self = this->shared_from_this(), guard](boost::system::error_code error,
-                                                                      Tcp::resolver::results_type results) {
-                                 guard->finished = true;
-                                 DnsCache::Shared().Finish(self->m_key.host, self->m_key.service, error, results,
-                                                           guard->scope);
-                                 self->OnResolve(error, std::move(results));
-                             });
+    m_resolver.async_resolve(
+        m_key.host, m_key.service,
+        [self = this->shared_from_this(), guard](boost::system::error_code error, Tcp::resolver::results_type results) {
+            guard->finished = true;
+            DnsCache::Shared().Finish(self->m_key.host, self->m_key.service, error, results, guard->scope);
+            self->OnResolve(error, std::move(results));
+        });
 }
 
-template <typename Stream>
-const void* RequestOperation<Stream>::LookupScope() const {
+template <typename Stream> const void* RequestOperation<Stream>::LookupScope() const {
     return static_cast<const void*>(&asio::query(m_executor, asio::execution::context));
 }
 
@@ -294,8 +282,7 @@ void RequestOperation<Stream>::OnResolve(boost::system::error_code error, Tcp::r
         });
 }
 
-template <typename Stream>
-void RequestOperation<Stream>::OnConnect(boost::system::error_code error) {
+template <typename Stream> void RequestOperation<Stream>::OnConnect(boost::system::error_code error) {
     if (m_finished) {
         return;
     }
@@ -328,8 +315,7 @@ void RequestOperation<Stream>::OnConnect(boost::system::error_code error) {
     }
 }
 
-template <typename Stream>
-void RequestOperation<Stream>::Write() {
+template <typename Stream> void RequestOperation<Stream>::Write() {
     if (m_finished) {
         return;
     }
@@ -354,8 +340,7 @@ void RequestOperation<Stream>::Write() {
                       });
 }
 
-template <typename Stream>
-void RequestOperation<Stream>::Read() {
+template <typename Stream> void RequestOperation<Stream>::Read() {
     if (m_finished) {
         return;
     }
@@ -367,8 +352,7 @@ void RequestOperation<Stream>::Read() {
         [self = this->shared_from_this()](boost::system::error_code error, std::size_t) { self->OnRead(error); });
 }
 
-template <typename Stream>
-void RequestOperation<Stream>::OnRead(boost::system::error_code error) {
+template <typename Stream> void RequestOperation<Stream>::OnRead(boost::system::error_code error) {
     if (m_finished) {
         return;
     }
@@ -429,8 +413,7 @@ HttpClientError RequestOperation<Stream>::ClassifyReadError(const boost::system:
     return !truncated && IsBeastHttpError(error) ? HttpClientError::ProtocolError : HttpClientError::ReadFailed;
 }
 
-template <typename Stream>
-void RequestOperation<Stream>::FailRead(const boost::system::error_code& error) {
+template <typename Stream> void RequestOperation<Stream>::FailRead(const boost::system::error_code& error) {
     const auto classified = ClassifyReadError(error);
     // Limit errors are the response's fault, not the connection's, so they are never retried. For the rest,
     // the request was fully written before the read started.
@@ -440,8 +423,7 @@ void RequestOperation<Stream>::FailRead(const boost::system::error_code& error) 
     Fail(classified, error);
 }
 
-template <typename Stream>
-std::optional<HttpResponse> RequestOperation<Stream>::BuildResponse() {
+template <typename Stream> std::optional<HttpResponse> RequestOperation<Stream>::BuildResponse() {
     try {
         auto message = m_parser->release();
         std::vector<HttpHeader> headers;
@@ -455,8 +437,7 @@ std::optional<HttpResponse> RequestOperation<Stream>::BuildResponse() {
     }
 }
 
-template <typename Stream>
-void RequestOperation<Stream>::ReleaseOrClose(bool keepAlive) {
+template <typename Stream> void RequestOperation<Stream>::ReleaseOrClose(bool keepAlive) {
     bool pooled = false;
     if (keepAlive) {
         try {
@@ -474,16 +455,14 @@ void RequestOperation<Stream>::ReleaseOrClose(bool keepAlive) {
         // silent peer from holding the operation alive.
         if constexpr (std::is_same_v<Stream, TlsStream>) {
             beast::get_lowest_layer(*m_stream).expires_after(TlsShutdownGrace);
-            m_stream->async_shutdown(
-                [self = this->shared_from_this()](boost::system::error_code) { self->Close(); });
+            m_stream->async_shutdown([self = this->shared_from_this()](boost::system::error_code) { self->Close(); });
         } else {
             Close();
         }
     }
 }
 
-template <typename Stream>
-void RequestOperation<Stream>::CompleteSuccess(HttpResponse response, bool keepAlive) {
+template <typename Stream> void RequestOperation<Stream>::CompleteSuccess(HttpResponse response, bool keepAlive) {
     m_timer.cancel();
     m_resolver.cancel();
     m_finished = true;
@@ -492,8 +471,7 @@ void RequestOperation<Stream>::CompleteSuccess(HttpResponse response, bool keepA
     Detail::Complete(std::move(completion), {}, std::move(response));
 }
 
-template <typename Stream>
-void RequestOperation<Stream>::Close() {
+template <typename Stream> void RequestOperation<Stream>::Close() {
     if (!m_stream) {
         return;
     }
@@ -503,8 +481,7 @@ void RequestOperation<Stream>::Close() {
     socket.close(ignored);
 }
 
-template <typename Stream>
-void RequestOperation<Stream>::Fail(HttpClientError error, boost::system::error_code cause) {
+template <typename Stream> void RequestOperation<Stream>::Fail(HttpClientError error, boost::system::error_code cause) {
     HttpResponse response;
     if (cause) {
         response.SetCause(static_cast<std::error_code>(cause));
@@ -512,8 +489,7 @@ void RequestOperation<Stream>::Fail(HttpClientError error, boost::system::error_
     Finish(error, std::move(response));
 }
 
-template <typename Stream>
-void RequestOperation<Stream>::Finish(std::error_code error, HttpResponse response) {
+template <typename Stream> void RequestOperation<Stream>::Finish(std::error_code error, HttpResponse response) {
     if (m_finished) {
         return;
     }
@@ -525,8 +501,7 @@ void RequestOperation<Stream>::Finish(std::error_code error, HttpResponse respon
     Detail::Complete(std::move(completion), error, std::move(response));
 }
 
-template <typename Stream>
-void RequestOperation<Stream>::RequestCancellation() {
+template <typename Stream> void RequestOperation<Stream>::RequestCancellation() {
     if (m_cancellationRequested.exchange(true)) {
         return;
     }

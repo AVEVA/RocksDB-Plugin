@@ -3,8 +3,8 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LogRateLimiter.hpp"
 
-#include <gtest/gtest.h>
 #include <chrono>
+#include <gtest/gtest.h>
 
 using AVEVA::RocksDB::Plugin::Azure::Impl::LogRateLimiter;
 using AVEVA::RocksDB::Plugin::Azure::Impl::RateCheckResult;
@@ -21,23 +21,20 @@ constexpr const char* kOtherFormat = "Compaction started for column family [defa
 
 // ─── Non-matching patterns ────────────────────────────────────────────────────
 
-TEST(LogRateLimiterTests, NonMatchingFormat_AlwaysAllowed)
-{
+TEST(LogRateLimiterTests, NonMatchingFormat_AlwaysAllowed) {
     // Arrange
     LogRateLimiter limiter{{"Stalling writes because we have"}, kCooldown};
 
     // Act / Assert — non-matching messages are always Allow, regardless of how
     // many times they are called.
-    for (int i = 0; i < 10; ++i)
-    {
+    for (int i = 0; i < 10; ++i) {
         const auto result = limiter.CheckAndRecord(kOtherFormat);
         EXPECT_EQ(RateDecision::Allow, result.decision);
         EXPECT_EQ(0u, result.suppressedCount);
     }
 }
 
-TEST(LogRateLimiterTests, NullFormat_AlwaysAllowed)
-{
+TEST(LogRateLimiterTests, NullFormat_AlwaysAllowed) {
     // Arrange
     LogRateLimiter limiter{{"Stalling writes because we have"}, kCooldown};
 
@@ -51,8 +48,7 @@ TEST(LogRateLimiterTests, NullFormat_AlwaysAllowed)
 
 // ─── First occurrence ─────────────────────────────────────────────────────────
 
-TEST(LogRateLimiterTests, MatchingFormat_FirstCall_Allowed)
-{
+TEST(LogRateLimiterTests, MatchingFormat_FirstCall_Allowed) {
     // Arrange
     LogRateLimiter limiter{{"Stalling writes because we have"}, kCooldown};
 
@@ -66,8 +62,7 @@ TEST(LogRateLimiterTests, MatchingFormat_FirstCall_Allowed)
 
 // ─── Within-window suppression ───────────────────────────────────────────────
 
-TEST(LogRateLimiterTests, MatchingFormat_SecondCallWithinWindow_Suppressed)
-{
+TEST(LogRateLimiterTests, MatchingFormat_SecondCallWithinWindow_Suppressed) {
     // Arrange
     LogRateLimiter limiter{{"Stalling writes because we have"}, kCooldown};
     limiter.CheckAndRecord(kStallingWritesFormat); // first — opens the window
@@ -80,15 +75,13 @@ TEST(LogRateLimiterTests, MatchingFormat_SecondCallWithinWindow_Suppressed)
     EXPECT_EQ(0u, result.suppressedCount);
 }
 
-TEST(LogRateLimiterTests, MatchingFormat_MultipleCallsWithinWindow_AllSuppressed)
-{
+TEST(LogRateLimiterTests, MatchingFormat_MultipleCallsWithinWindow_AllSuppressed) {
     // Arrange
     LogRateLimiter limiter{{"Stalling writes because we have"}, kCooldown};
     limiter.CheckAndRecord(kStallingWritesFormat); // first — opens the window
 
     // Act / Assert
-    for (int i = 0; i < 5; ++i)
-    {
+    for (int i = 0; i < 5; ++i) {
         const auto result = limiter.CheckAndRecord(kStallingWritesFormat);
         EXPECT_EQ(RateDecision::Suppress, result.decision);
     }
@@ -96,13 +89,12 @@ TEST(LogRateLimiterTests, MatchingFormat_MultipleCallsWithinWindow_AllSuppressed
 
 // ─── Window expiry ───────────────────────────────────────────────────────────
 
-TEST(LogRateLimiterTests, MatchingFormat_AfterCooldown_WithSuppressed_AllowWithSummary)
-{
+TEST(LogRateLimiterTests, MatchingFormat_AfterCooldown_WithSuppressed_AllowWithSummary) {
     // Arrange
     LogRateLimiter limiter{{"Stalling writes because we have"}, kCooldown};
-    limiter.CheckAndRecord(kStallingWritesFormat);        // Allow — opens window
-    limiter.CheckAndRecord(kStallingWritesFormat);        // Suppress (count = 1)
-    limiter.CheckAndRecord(kStallingWritesFormat);        // Suppress (count = 2)
+    limiter.CheckAndRecord(kStallingWritesFormat); // Allow — opens window
+    limiter.CheckAndRecord(kStallingWritesFormat); // Suppress (count = 1)
+    limiter.CheckAndRecord(kStallingWritesFormat); // Suppress (count = 2)
 
     const auto afterCooldown = std::chrono::steady_clock::now() + kCooldown + std::chrono::milliseconds{50};
 
@@ -114,8 +106,7 @@ TEST(LogRateLimiterTests, MatchingFormat_AfterCooldown_WithSuppressed_AllowWithS
     EXPECT_EQ(2u, result.suppressedCount);
 }
 
-TEST(LogRateLimiterTests, MatchingFormat_AfterCooldown_NoSuppressed_Allow)
-{
+TEST(LogRateLimiterTests, MatchingFormat_AfterCooldown_NoSuppressed_Allow) {
     // Arrange — open window then let it expire with no intervening suppressions
     LogRateLimiter limiter{{"Stalling writes because we have"}, kCooldown};
     limiter.CheckAndRecord(kStallingWritesFormat);
@@ -132,8 +123,7 @@ TEST(LogRateLimiterTests, MatchingFormat_AfterCooldown_NoSuppressed_Allow)
 
 // ─── Cooldown accessor ───────────────────────────────────────────────────────
 
-TEST(LogRateLimiterTests, Cooldown_ReturnsConfiguredValue)
-{
+TEST(LogRateLimiterTests, Cooldown_ReturnsConfiguredValue) {
     // Arrange
     const auto expected = std::chrono::seconds{42};
     LogRateLimiter limiter{{}, expected};
@@ -144,8 +134,7 @@ TEST(LogRateLimiterTests, Cooldown_ReturnsConfiguredValue)
 
 // ─── Stopping writes pattern ─────────────────────────────────────────────────
 
-TEST(LogRateLimiterTests, StoppingWritesFormat_FirstCall_Allowed)
-{
+TEST(LogRateLimiterTests, StoppingWritesFormat_FirstCall_Allowed) {
     // Arrange
     LogRateLimiter limiter{{"Stopping writes because we have"}, kCooldown};
 
@@ -157,8 +146,7 @@ TEST(LogRateLimiterTests, StoppingWritesFormat_FirstCall_Allowed)
     EXPECT_EQ(0u, result.suppressedCount);
 }
 
-TEST(LogRateLimiterTests, StoppingWritesFormat_SecondCallWithinWindow_Suppressed)
-{
+TEST(LogRateLimiterTests, StoppingWritesFormat_SecondCallWithinWindow_Suppressed) {
     // Arrange
     LogRateLimiter limiter{{"Stopping writes because we have"}, kCooldown};
     limiter.CheckAndRecord(kStoppingWritesFormat); // first — opens the window
@@ -172,8 +160,7 @@ TEST(LogRateLimiterTests, StoppingWritesFormat_SecondCallWithinWindow_Suppressed
 
 // ─── Independent patterns ────────────────────────────────────────────────────
 
-TEST(LogRateLimiterTests, DifferentPatterns_TrackedIndependently)
-{
+TEST(LogRateLimiterTests, DifferentPatterns_TrackedIndependently) {
     // Arrange — stalling and stopping writes are separate patterns and must each
     // have their own independent cooldown bucket.
     LogRateLimiter limiter{{"Stalling writes because we have", "Stopping writes because we have"}, kCooldown};
@@ -196,8 +183,7 @@ TEST(LogRateLimiterTests, DifferentPatterns_TrackedIndependently)
 
 // ─── BlobNotFound pattern ─────────────────────────────────────────────────────
 
-TEST(LogRateLimiterTests, BlobNotFound_FirstCall_Allowed)
-{
+TEST(LogRateLimiterTests, BlobNotFound_FirstCall_Allowed) {
     // Arrange
     LogRateLimiter limiter{{"BlobNotFound"}, kCooldown};
 
@@ -209,8 +195,7 @@ TEST(LogRateLimiterTests, BlobNotFound_FirstCall_Allowed)
     EXPECT_EQ(0u, result.suppressedCount);
 }
 
-TEST(LogRateLimiterTests, BlobNotFound_SecondCallWithinWindow_Suppressed)
-{
+TEST(LogRateLimiterTests, BlobNotFound_SecondCallWithinWindow_Suppressed) {
     // Arrange
     LogRateLimiter limiter{{"BlobNotFound"}, kCooldown};
     limiter.CheckAndRecord(kBlobNotFoundErrorCode); // first — opens the window
@@ -222,8 +207,7 @@ TEST(LogRateLimiterTests, BlobNotFound_SecondCallWithinWindow_Suppressed)
     EXPECT_EQ(RateDecision::Suppress, result.decision);
 }
 
-TEST(LogRateLimiterTests, BlobNotFound_AfterCooldown_WithSuppressed_AllowWithSummary)
-{
+TEST(LogRateLimiterTests, BlobNotFound_AfterCooldown_WithSuppressed_AllowWithSummary) {
     // Arrange
     LogRateLimiter limiter{{"BlobNotFound"}, kCooldown};
     limiter.CheckAndRecord(kBlobNotFoundErrorCode); // Allow — opens window
