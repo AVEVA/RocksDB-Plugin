@@ -436,7 +436,6 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
 }
 
 void FileCache::EntryAccessedUnsafe(FileCacheEntry& file) {
-    file.Accessed();
     file.unlink();
     m_entryList.push_front(file);
 }

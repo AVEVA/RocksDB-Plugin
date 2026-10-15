@@ -6,9 +6,7 @@ namespace AVEVA::RocksDB::Plugin::Core {
 // New entries start as stale. The first access records the file in cache
 // metadata, and a subsequent access queues it for background download.
 FileCacheEntry::FileCacheEntry(const std::string_view filePath, const int64_t size)
-    : m_state(State::Stale), m_filePath(std::move(filePath)), m_size(size) {}
-
-void FileCacheEntry::Accessed() {}
+    : m_state(State::Stale), m_filePath(filePath), m_size(size) {}
 
 int64_t FileCacheEntry::GetSize() const noexcept { return m_size; }
 

@@ -42,12 +42,10 @@ class FileCacheEntry
     std::string m_filePath;
     int64_t m_size;
     uint64_t m_generation = 0;
-    std::chrono::time_point<std::chrono::system_clock> m_lastAccessTime;
     std::shared_ptr<CachedReadHandle> m_readHandle;
 
   public:
     FileCacheEntry(std::string_view filePath, int64_t size);
-    void Accessed();
 
     int64_t GetSize() const noexcept;
     const std::string& GetFilePath() const noexcept;
