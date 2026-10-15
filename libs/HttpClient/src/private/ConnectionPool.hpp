@@ -8,6 +8,7 @@
 #include <boost/beast/core/flat_buffer.hpp>
 #include <boost/intrusive/list.hpp>
 #include <boost/unordered/unordered_node_map.hpp>
+#include <openssl/ssl.h>
 
 #include "Timeouts.hpp"
 
@@ -23,6 +24,8 @@
 #if !defined(_WIN32)
 #include <cerrno>
 #include <sys/socket.h>
+#else
+#include <boost/asio/detail/socket_types.hpp>
 #endif
 
 namespace AVEVA::Private {
@@ -350,20 +353,19 @@ class ConnectionPool {
                 if (!socket.is_open()) {
                     return false;
                 }
-                boost::system::error_code ec;
+                if constexpr (requires { connection.stream->native_handle(); }) {
+                    // Decrypted bytes already buffered by TLS never show up on the socket.
+                    if (SSL_pending(connection.stream->native_handle()) > 0) {
+                        return false;
+                    }
+                }
 #if defined(_WIN32)
-                socket.non_blocking(true, ec);
-                if (ec) {
-                    return false;
-                }
-                char probe = 0;
-                socket.receive(boost::asio::buffer(&probe, 1), boost::asio::socket_base::message_peek, ec);
-                boost::system::error_code restoreEc;
-                socket.non_blocking(false, restoreEc);
-                if (restoreEc) {
-                    return false; // A socket stuck in non-blocking mode would break later blocking users.
-                }
-                return ec == boost::asio::error::would_block || ec == boost::asio::error::try_again;
+                // A zero-timeout poll avoids toggling the socket's blocking mode.
+                WSAPOLLFD pollFd{};
+                pollFd.fd = socket.native_handle();
+                pollFd.events = POLLRDNORM;
+                const int ready = ::WSAPoll(&pollFd, 1, 0);
+                return ready == 0;
 #else
                 // MSG_DONTWAIT makes just this call non-blocking, so the socket's mode is never toggled.
                 char probe = 0;
