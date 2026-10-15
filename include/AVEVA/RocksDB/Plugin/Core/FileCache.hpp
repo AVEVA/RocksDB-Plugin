@@ -37,6 +37,12 @@ class FileCache {
     std::unordered_map<std::string, FileCacheEntry, StringHash, StringEqual> m_cache;
     std::queue<std::string> m_fileDownloadQueue;
     boost::intrusive::list<FileCacheEntry, boost::intrusive::constant_time_size<false>> m_entryList;
+    // Stale entries with no size, newest at the front, so pruning pops the back in O(1).
+    boost::intrusive::list<
+        FileCacheEntry,
+        boost::intrusive::member_hook<FileCacheEntry, FileCacheEntry::MetadataOnlyHook, &FileCacheEntry::MetadataOnly>,
+        boost::intrusive::constant_time_size<false>>
+        m_metadataOnlyList;
 
     // Files whose entries were removed, and handles that must be closed. They are released on the background
     // thread, outside m_mutex (disk I/O must not stall readers) and serialized with downloads so a delete can

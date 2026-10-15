@@ -93,6 +93,7 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
                                              std::forward_as_tuple(filePath, 0));
         m_entryList.push_front(inserted->second);
         // A new entry is stale with no size yet.
+        m_metadataOnlyList.push_front(inserted->second);
         ++m_undownloadedStaleCount;
         PruneUndownloadedStaleEntriesUnsafe();
         return std::nullopt;
@@ -457,22 +458,13 @@ void FileCache::EntryAccessedUnsafe(FileCacheEntry& file) {
 
 void FileCache::PruneUndownloadedStaleEntriesUnsafe() {
     ValidateCountersUnsafe();
-    auto staleEntries = m_undownloadedStaleCount;
-    if (staleEntries <= MaxUndownloadedStaleEntries) {
+    if (m_undownloadedStaleCount <= MaxUndownloadedStaleEntries) {
         return;
     }
 
-    std::vector<std::string> staleEntriesToRemove;
-    staleEntriesToRemove.reserve(staleEntries - MaxUndownloadedStaleEntries);
-
-    for (auto it = m_entryList.rbegin(); it != m_entryList.rend() && staleEntries > MaxUndownloadedStaleEntries; ++it) {
-        if (it->GetState() == FileCacheEntry::State::Stale && it->GetSize() == 0) {
-            staleEntriesToRemove.push_back(it->GetFilePath());
-            staleEntries--;
-        }
-    }
-
-    for (const auto& staleEntry : staleEntriesToRemove) {
+    // Oldest first. Removing an entry unlinks it from m_metadataOnlyList, so the list shrinks on every iteration.
+    while (m_undownloadedStaleCount > MaxUndownloadedStaleEntries && !m_metadataOnlyList.empty()) {
+        const std::string staleEntry = m_metadataOnlyList.back().GetFilePath();
         BOOST_LOG_SEV(*m_logger, debug) << "Pruning stale metadata-only entry '" << staleEntry << "'";
         RemoveFileUnsafe(staleEntry);
     }
@@ -561,6 +553,13 @@ template <typename F> void FileCache::UpdateEntryUnsafe(FileCacheEntry& entry, F
         const auto [bytesAfter, staleAfter] = contribution(entry);
         m_activeBytes += bytesAfter;
         m_undownloadedStaleCount += staleAfter;
+        if (staleAfter != 0 && !entry.MetadataOnly.is_linked()) {
+            m_metadataOnlyList.push_front(entry);
+        } else if (staleAfter == 0) {
+            entry.MetadataOnly.unlink();
+        }
+    } else {
+        entry.MetadataOnly.unlink();
     }
 }
 
@@ -603,7 +602,9 @@ void FileCache::ValidateCountersUnsafe() const {
 #ifndef NDEBUG
     int64_t bytes = 0;
     size_t stale = 0;
+    size_t linked = 0;
     for (const auto& entry : m_entryList) {
+        linked += entry.MetadataOnly.is_linked() ? 1 : 0;
         const auto state = entry.GetState();
         if (state != FileCacheEntry::State::Downloading && state != FileCacheEntry::State::QueuedForDownload) {
             bytes += entry.GetSize();
@@ -614,6 +615,7 @@ void FileCache::ValidateCountersUnsafe() const {
     }
     assert(bytes == m_activeBytes && "Active byte total should match the entries");
     assert(stale == m_undownloadedStaleCount && "Stale entry count should match the entries");
+    assert(linked == stale && "Every metadata-only stale entry should be in the prune list");
 #endif
 }
 } // namespace AVEVA::RocksDB::Plugin::Core
