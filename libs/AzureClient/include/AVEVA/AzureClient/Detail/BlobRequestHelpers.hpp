@@ -130,7 +130,6 @@ struct ConnectionState {
     std::string ServiceEndpoint;
     std::string SasToken; // without a leading '?'
     std::string ApiVersion;
-    std::string BearerToken;                                     // static token sent as "Authorization: Bearer"
     std::shared_ptr<const std::vector<std::string>> TokenScopes; // shared with every request's RequestAuth
     std::shared_ptr<const SharedKeySigner> Signer;               // set iff Shared Key authorization is used
 
@@ -358,11 +357,6 @@ struct ParsedContentRange {
 // Parses "YYYY-MM-DDThh:mm:ss[.fffffff]Z"; std::nullopt if malformed.
 [[nodiscard]] std::optional<std::chrono::system_clock::time_point> ParseIso8601Utc(std::string_view value) noexcept;
 
-// Tag for StringLabel to give the CRC64 parameter of ApplyTransactionalHashes its own type.
-struct TransactionalCrc64Tag {};
-
-// Content-MD5 / x-ms-content-crc64 request headers for service-side body verification.
-void ApplyTransactionalHashes(HttpRequest& request, std::string_view md5, StringLabel<TransactionalCrc64Tag> crc64);
 [[nodiscard]] Models::ListBlobsResult ParseListBlobsResultXml(std::string_view xml);
 // Parses a Get Page Ranges response: the <PageList> body plus the ETag, Last-Modified and
 // x-ms-blob-content-length headers.
@@ -396,7 +390,6 @@ void ApplyMetadata(HttpRequest& request, const Models::MetadataMap& metadata);
 // One-off Shared Key signing (constructs a temporary signer); clients use ConnectionState::Signer.
 void AuthorizeRequest(const SharedKeyCredentialOptions& options, HttpRequest& request);
 void AuthorizeRequest(const SharedKeySigner& signer, HttpRequest& request);
-void ValidateBlockId(std::string_view blockId);
 
 // Maps the exception being handled to a BlobStorageError; must be called from a catch handler.
 [[nodiscard]] BlobStorageError MakeFailureFromCurrentException();
@@ -501,15 +494,14 @@ template <class T>
 // Authorization material captured (by value) for the lifetime of a single logical request,
 // including all of its retry attempts. Precedence: SAS (in URL) > SharedKey > TokenCredential.
 struct RequestAuth {
-    enum class Kind : std::uint8_t { None, SharedKey, Token, Bearer };
+    enum class Kind : std::uint8_t { None, SharedKey, Token };
 
     Kind Type = Kind::None;
     std::shared_ptr<const SharedKeySigner> Signer;
-    std::string BearerToken;
     std::shared_ptr<const std::vector<std::string>> TokenScopes;
 };
 
-// `hasTokenCredential` selects Kind::Token when no SAS, Shared Key or static bearer token applies.
+// `hasTokenCredential` selects Kind::Token when no SAS or Shared Key applies.
 [[nodiscard]] RequestAuth MakeRequestAuth(const ConnectionState& connection, bool hasTokenCredential);
 
 // True for HTTP statuses and transport errors that Azure Storage documents as transient.

@@ -34,35 +34,6 @@ struct ListBlobsOptions {
     bool IncludeCopy = false;
 };
 
-struct UploadBlockBlobOptions {
-    Models::BlobHttpHeaders HttpHeaders;
-    Models::MetadataMap Metadata;
-    // Empty omits the x-ms-access-tier header (the service default applies).
-    Models::AccessTier AccessTier;
-    Models::BlobRequestConditions Conditions;
-    // Base64-encoded MD5 / CRC64 of the request body, verified by the service (Put Blob, Put Block).
-    std::string TransactionalContentMd5;
-    std::string TransactionalContentCrc64;
-};
-
-// Put Block honours only the lease condition and the transactional checksums; metadata, HTTP headers,
-// access tier and access conditions belong on Put Block List (CommitBlockListOptions).
-struct StageBlockOptions {
-    // Only Conditions.LeaseId is sent.
-    Models::BlobRequestConditions Conditions;
-    // Base64-encoded MD5 / CRC64 of the block, verified by the service.
-    std::string TransactionalContentMd5;
-    std::string TransactionalContentCrc64;
-};
-
-struct CommitBlockListOptions {
-    Models::BlobHttpHeaders HttpHeaders;
-    Models::MetadataMap Metadata;
-    // Empty omits the x-ms-access-tier header (the service default applies).
-    Models::AccessTier AccessTier;
-    Models::BlobRequestConditions Conditions;
-};
-
 struct CreatePageBlobOptions {
     Models::BlobHttpHeaders HttpHeaders;
     Models::MetadataMap Metadata;
@@ -89,10 +60,6 @@ struct UploadPagesFromUrlOptions {
     // address the source with a SAS URL instead.
     bool AuthorizeSourceWithClientCredential = false;
     // Conditions on the destination blob.
-    Models::BlobRequestConditions Conditions;
-};
-
-struct ClearPagesOptions {
     Models::BlobRequestConditions Conditions;
 };
 

@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/AzureClient/BlobClientOptions.hpp"
-#include "AVEVA/AzureClient/BlockBlobClient.hpp"
 #include "FakeHttpClient.hpp"
 #include "TestFixtures.hpp"
 
@@ -41,14 +40,6 @@ void ExpectSignedAuthorization(const FakeHttpClient::RequestRecord& record) {
 }
 } // namespace
 
-TEST(BlobServiceClientTests, Constructor_ThrowsForConflictingCredentials) {
-    FakeHttpClient httpClient;
-    BlobServiceClientOptions options = BuildOptions();
-    options.BearerToken = "token";
-
-    EXPECT_THROW((BlobServiceClient{httpClient, options}), std::invalid_argument);
-}
-
 TEST(BlobServiceClientTests, Constructor_ThrowsForInvalidEndpointSchemeAndPartialSharedKeys) {
     FakeHttpClient httpClient;
 
@@ -78,13 +69,10 @@ TEST(BlobServiceClientTests, DerivedClientsSignWithTheSharedConnectionSigner) {
 
     const auto containerPtr = service.GetBlobContainerClient("images");
     AVEVA::AzureClient::Tests::BlobContainerClient& container = *containerPtr;
-    auto blob = container.GetBlockBlobClient("folder/photo.png");
+    auto blob = container.GetPageBlobClient("folder/photo.png");
 
     int completions = 0;
-    container.CreateAsync([&](auto result) {
-        EXPECT_TRUE(result.has_value());
-        ++completions;
-    });
+    container.ListBlobsAsync([&](auto) { ++completions; });
     blob.DeleteAsync([&](auto result) {
         EXPECT_TRUE(result.has_value());
         ++completions;
@@ -105,7 +93,7 @@ TEST(BlobServiceClientTests, GetBlobContainerClient_ValidatesTheContainerName) {
     BlobServiceClient service{httpClient, BuildOptions()};
     EXPECT_THROW(static_cast<void>(service.GetBlobContainerClient("Invalid_Name")), std::invalid_argument);
     const auto container = service.GetBlobContainerClient("valid-name");
-    EXPECT_THROW(static_cast<void>(container->GetBlockBlobClient("")), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(container->GetPageBlobClient("")), std::invalid_argument);
 }
 
 TEST(BlobServiceClientTests, OptionsDefaultApiVersionMatchesSharedDefault) {

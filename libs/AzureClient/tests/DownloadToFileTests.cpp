@@ -163,33 +163,3 @@ TEST(T06_DownloadToFileTests, HttpFailureRemovesPartialAndLeavesTargetUntouched)
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
 }
-
-TEST(T06_DownloadToFileTests, StreamWriteFailureReportsIoError) {
-    FakeHttpClient httpClient;
-    httpClient.DefaultResponse() = HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "4"}}), "data"};
-
-    PageBlobClient client{httpClient, BuildOptions()};
-
-    // Create a failing streambuf that refuses writes
-    struct FailBuf : std::streambuf {
-      protected:
-        std::streamsize xsputn(const char* /*s*/, std::streamsize /*n*/) override { return 0; }
-
-        int_type overflow(int_type /*ch*/) override { return traits_type::eof(); }
-    } failbuf;
-
-    std::ostream failingStream(&failbuf);
-
-    bool invoked = false;
-    client.DownloadToAsync(failingStream, [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result) {
-        ASSERT_FALSE(result.has_value());
-        // Expect an io_error transported
-        EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::io_error));
-        invoked = true;
-    });
-
-    // Complete the HTTP response so download writes are attempted. FakeHttpClient may complete
-    // inline or defer onto its executor, so Poll() first to run any posted completion.
-    httpClient.Poll();
-    EXPECT_TRUE(invoked);
-}

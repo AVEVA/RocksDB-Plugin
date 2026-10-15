@@ -662,17 +662,15 @@ TEST(BlobRequestHelpersTests, MakeConnectionState_NormalisesOptionsOnce) {
     EXPECT_EQ(sharedKey->Signer->AccountName(), "devstoreaccount1");
     EXPECT_EQ(sharedKey->BasePrefix, "http://127.0.0.1:10000");
     EXPECT_EQ(sharedKey->BasePath, "/devstoreaccount1");
-    EXPECT_TRUE(sharedKey->BearerToken.empty());
 
     const auto blob = MakeBlobTarget(sharedKey, "container", "dir/blob.txt");
     EXPECT_EQ(blob.Connection, sharedKey) << "child targets share, not copy, the connection";
     EXPECT_EQ(BuildBlobUrl(blob), "http://127.0.0.1:10000/devstoreaccount1/container/dir/blob.txt");
 
-    const auto bearer = MakeConnectionState(
-        BlobServiceClientOptions{.ServiceEndpoint = "https://account.blob.core.windows.net", .BearerToken = "token"});
-    EXPECT_EQ(bearer->Signer, nullptr);
-    EXPECT_EQ(bearer->BearerToken, "token");
-    EXPECT_EQ(bearer->BasePath, "");
+    const auto unsigned_ =
+        MakeConnectionState(BlobServiceClientOptions{.ServiceEndpoint = "https://account.blob.core.windows.net"});
+    EXPECT_EQ(unsigned_->Signer, nullptr);
+    EXPECT_EQ(unsigned_->BasePath, "");
 
     const auto sas = MakeConnectionState(BlobServiceClientOptions{
         .ServiceEndpoint = "https://account.blob.core.windows.net", .SasToken = "?sv=1&sig=x"});

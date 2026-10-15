@@ -12,7 +12,6 @@
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 #include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
 
-#include <AVEVA/AzureClient/BlockBlobClient.hpp>
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
 #include <AVEVA/AzureClient/WithRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpClientError.hpp>
@@ -47,7 +46,7 @@ TEST(RetryTests, NoRetries_DoesNotRetryOnTransientFailure) {
     BlobClientOptions options = MakeBlobClientOptions("container", "blob.txt");
     options.Retry.MaxRetries = 0; // no retries
 
-    BlockBlobClient client{httpClient, options};
+    BlobClient client{httpClient, options};
 
     CallbackExpectation cb;
     std::optional<BlobStorageError> observedError;
@@ -74,7 +73,7 @@ TEST(RetryTests, MaxRetriesAtIntMaxDoesNotOverflow) {
     options.Retry.MaxRetries = std::numeric_limits<int>::max();
     options.Retry.InitialDelay = std::chrono::milliseconds{0};
 
-    BlockBlobClient client{httpClient, options};
+    BlobClient client{httpClient, options};
 
     CallbackExpectation cb;
     std::optional<BlobStorageError> observedError;
@@ -102,7 +101,7 @@ TEST(RetryTests, Retries_OnTransientThenSucceeds) {
     options.Retry.MaxRetries = 1; // allow one retry
     options.Retry.InitialDelay = std::chrono::milliseconds{0};
 
-    BlockBlobClient client{httpClient, options};
+    BlobClient client{httpClient, options};
 
     CallbackExpectation cb;
     std::optional<Response<Models::DeleteBlobResult>> success;
@@ -130,7 +129,7 @@ TEST(RetryTests, Retries_OnTransientThenSucceeds) {
 namespace {
 using DeleteResult = std::expected<Response<Models::DeleteBlobResult>, BlobStorageError>;
 
-void StartDeleteAsync(BlockBlobClient& client, boost::asio::cancellation_signal& signal,
+void StartDeleteAsync(BlobClient& client, boost::asio::cancellation_signal& signal,
                       std::optional<DeleteResult>& observed) {
     client.DeleteAsync(
         boost::asio::bind_cancellation_slot(signal.slot(), [&](DeleteResult result) { observed = std::move(result); }));
@@ -158,11 +157,12 @@ struct UploadState {
     bool Succeeded = false;
 };
 
-void StartUploadAsync(BlockBlobClient& client, const std::string& payload, UploadState& state) {
-    client.UploadAsync(payload, [&](std::expected<Response<Models::UploadBlockBlobResult>, BlobStorageError> result) {
-        state.Succeeded = result.has_value();
-        state.Done = true;
-    });
+void StartUploadAsync(PageBlobClient& client, const std::string& payload, UploadState& state) {
+    client.UploadPagesAsync(0, payload,
+                            [&](std::expected<Response<Models::UploadPagesResult>, BlobStorageError> result) {
+                                state.Succeeded = result.has_value();
+                                state.Done = true;
+                            });
 }
 
 [[nodiscard]] std::size_t CountAuthorizationHeaders(const AVEVA::HttpRequest& request) {
@@ -176,7 +176,7 @@ TEST(RetryTests, RetriesEveryTransientStatus) {
         FakeHttpClient httpClient;
         httpClient.EnqueueResponse(HttpResponse{status, {}, ""});
         httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
-        BlockBlobClient client{httpClient, MakeRetryOptions(1)};
+        BlobClient client{httpClient, MakeRetryOptions(1)};
 
         std::optional<DeleteResult> observed;
         client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
@@ -191,7 +191,7 @@ TEST(RetryTests, DoesNotRetryNonTransientStatus) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{404, {{"x-ms-error-code", "BlobNotFound"}}, ""});
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
-    BlockBlobClient client{httpClient, MakeRetryOptions(3)};
+    BlobClient client{httpClient, MakeRetryOptions(3)};
 
     std::optional<DeleteResult> observed;
     client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
@@ -210,10 +210,10 @@ TEST(RetryTests, RetriesTransientTransportErrors) {
         FakeHttpClient httpClient;
         httpClient.EnqueueResponse(HttpResponse{}, error);
         httpClient.EnqueueResponse(HttpResponse{201, {}, ""});
-        BlockBlobClient client{httpClient, MakeRetryOptions(1)};
+        PageBlobClient client{httpClient, MakeRetryOptions(1)};
 
         UploadState state;
-        StartUploadAsync(client, "payload", state);
+        StartUploadAsync(client, std::string(512, 'p'), state);
 
         ASSERT_TRUE(PollUntil(httpClient, [&] { return state.Done; })) << error.message();
         EXPECT_EQ(httpClient.RequestCount(), 2U) << error.message();
@@ -225,7 +225,7 @@ TEST(RetryTests, DeleteIsRetriedAfterFailuresThatHappenedBeforeAnythingWasSent) 
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ConnectFailed);
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
-    BlockBlobClient client{httpClient, MakeRetryOptions(1)};
+    BlobClient client{httpClient, MakeRetryOptions(1)};
 
     std::optional<DeleteResult> observed;
     client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
@@ -243,7 +243,7 @@ TEST(RetryTests, DeleteIsNotReplayedAfterAnAmbiguousTransportErrorBecauseItsOutc
         httpClient.EnqueueResponse(HttpResponse{}, error);
         // A replay would find the blob already gone and answer 404.
         httpClient.EnqueueResponse(HttpResponse{404, {{"x-ms-error-code", "BlobNotFound"}}, ""});
-        BlockBlobClient client{httpClient, MakeRetryOptions(3)};
+        BlobClient client{httpClient, MakeRetryOptions(3)};
 
         std::optional<DeleteResult> observed;
         client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
@@ -280,7 +280,7 @@ TEST(RetryTests, DeleteIfExistsIsReplayedAfterAnAmbiguousTransportErrorBecauseTh
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ReadFailed);
     httpClient.EnqueueResponse(HttpResponse{404, {{"x-ms-error-code", "BlobNotFound"}}, ""});
-    BlockBlobClient client{httpClient, MakeRetryOptions(3)};
+    BlobClient client{httpClient, MakeRetryOptions(3)};
 
     std::optional<DeleteResult> observed;
     client.DeleteIfExistsAsync([&](DeleteResult result) { observed = std::move(result); });
@@ -329,7 +329,7 @@ TEST(RetryTests, UnauthorizedResponseIsRepeatedOnceWithAFreshToken) {
 
     BlobClientOptions options = MakeRetryOptions(0);
     options.SasToken.clear();
-    BasicBlockBlobClient<FakeHttpClient, ScriptedTokenCredential> client{httpClient, std::move(options), credential};
+    BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{httpClient, std::move(options), credential};
 
     std::optional<DeleteResult> observed;
     client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
@@ -353,7 +353,7 @@ TEST(RetryTests, UnauthorizedResponseIsOnlyRefreshedOnce) {
 
     BlobClientOptions options = MakeRetryOptions(0);
     options.SasToken.clear();
-    BasicBlockBlobClient<FakeHttpClient, ScriptedTokenCredential> client{httpClient, std::move(options), credential};
+    BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{httpClient, std::move(options), credential};
 
     std::optional<DeleteResult> observed;
     client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
@@ -370,7 +370,7 @@ TEST(RetryTests, GivesUpAfterMaxRetriesAndReportsLastResponse) {
     httpClient.EnqueueResponse(HttpResponse{503, {{"x-ms-request-id", "second"}}, ""});
     httpClient.EnqueueResponse(HttpResponse{500, {{"x-ms-request-id", "last"}}, ""});
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
-    BlockBlobClient client{httpClient, MakeRetryOptions(2)};
+    BlobClient client{httpClient, MakeRetryOptions(2)};
 
     std::optional<DeleteResult> observed;
     client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
@@ -388,7 +388,7 @@ TEST(RetryTests, HonorsServerRetryAfterHeadersOverLongBackoff) {
         httpClient.EnqueueResponse(HttpResponse{503, {{std::string{header}, "0"}}, ""});
         httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
         // The computed backoff would be ~1 minute; the server hint of 0 must win.
-        BlockBlobClient client{httpClient, MakeRetryOptions(1, std::chrono::minutes{1})};
+        BlobClient client{httpClient, MakeRetryOptions(1, std::chrono::minutes{1})};
 
         std::optional<DeleteResult> observed;
         client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
@@ -403,7 +403,7 @@ TEST(RetryTests, RetryAfterHttpDateInThePastRetriesImmediately) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{503, {{"Retry-After", "Wed, 21 Oct 2015 07:28:00 GMT"}}, ""});
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
-    BlockBlobClient client{httpClient, MakeRetryOptions(1, std::chrono::minutes{1})};
+    BlobClient client{httpClient, MakeRetryOptions(1, std::chrono::minutes{1})};
 
     std::optional<DeleteResult> observed;
     client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
@@ -418,7 +418,7 @@ TEST(RetryTests, RetryAfterFutureHttpDateDelaysTheRetry) {
     httpClient.EnqueueResponse(
         HttpResponse{503, {{"Retry-After", AVEVA::AzureClient::Private::BuildDateHeaderValue(retryAt)}}, ""});
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
-    BlockBlobClient client{httpClient, MakeRetryOptions(1, std::chrono::milliseconds{0})};
+    BlobClient client{httpClient, MakeRetryOptions(1, std::chrono::milliseconds{0})};
 
     std::optional<DeleteResult> observed;
     client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
@@ -437,7 +437,7 @@ TEST(RetryTests, XMsRetryAfterMsTakesPrecedenceOverRetryAfter) {
     httpClient.EnqueueResponse(
         HttpResponse{503, {{"x-ms-retry-after-ms", "0"}, {"Retry-After", "Wed, 21 Oct 2099 07:28:00 GMT"}}, ""});
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
-    BlockBlobClient client{httpClient, MakeRetryOptions(1, std::chrono::minutes{1})};
+    BlobClient client{httpClient, MakeRetryOptions(1, std::chrono::minutes{1})};
 
     std::optional<DeleteResult> observed;
     client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
@@ -453,7 +453,7 @@ TEST(RetryTests, ComputedBackoffIsCappedByMaxDelay) {
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
     BlobClientOptions options = MakeRetryOptions(1, std::chrono::minutes{1});
     options.Retry.MaxDelay = std::chrono::milliseconds{0};
-    BlockBlobClient client{httpClient, options};
+    BlobClient client{httpClient, options};
 
     std::optional<DeleteResult> observed;
     client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
@@ -469,7 +469,7 @@ TEST(RetryTests, ServerRetryAfterHintIsNotClampedToMaxDelay) {
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
     BlobClientOptions options = MakeRetryOptions(1);
     options.Retry.MaxDelay = std::chrono::milliseconds{0};
-    BlockBlobClient client{httpClient, options};
+    BlobClient client{httpClient, options};
 
     std::optional<DeleteResult> observed;
     boost::asio::cancellation_signal signal;
@@ -486,7 +486,7 @@ TEST(RetryTests, CancellationDuringBackoffCompletesWithOperationCanceledAndSends
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
-    BlockBlobClient client{httpClient, MakeRetryOptions(3, std::chrono::minutes{1})};
+    BlobClient client{httpClient, MakeRetryOptions(3, std::chrono::minutes{1})};
 
     boost::asio::cancellation_signal signal;
     std::optional<DeleteResult> observed;
@@ -508,7 +508,7 @@ TEST(RetryTests, CancellationFromAnotherThreadWhileRetryTimerIsPending) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
-    BlockBlobClient client{httpClient, MakeRetryOptions(3, std::chrono::minutes{1})};
+    BlobClient client{httpClient, MakeRetryOptions(3, std::chrono::minutes{1})};
 
     boost::asio::cancellation_signal signal;
     std::optional<DeleteResult> observed;
@@ -528,7 +528,7 @@ TEST(RetryTests, CancellationFromAnotherThreadWhileRetryTimerIsPending) {
 TEST(RetryTests, CancellationOfInFlightAttemptIsNotRetried) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
-    BlockBlobClient client{httpClient, MakeRetryOptions(3)};
+    BlobClient client{httpClient, MakeRetryOptions(3)};
 
     boost::asio::cancellation_signal signal;
     std::optional<DeleteResult> observed;
@@ -549,7 +549,7 @@ TEST(RetryTests, MaxRetriesOverrideReplacesClientPolicy) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
-    BlockBlobClient client{httpClient, MakeRetryOptions(3)};
+    BlobClient client{httpClient, MakeRetryOptions(3)};
 
     AVEVA::HttpRequestOptions requestOptions;
     requestOptions.SetMaxRetries(0);
@@ -566,7 +566,7 @@ TEST(RetryTests, MaxRetriesOverrideCanEnableRetriesDisabledOnTheClient) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
-    BlockBlobClient client{httpClient, MakeRetryOptions(0)};
+    BlobClient client{httpClient, MakeRetryOptions(0)};
 
     AVEVA::HttpRequestOptions requestOptions;
     requestOptions.SetMaxRetries(1);
@@ -582,7 +582,7 @@ TEST(RetryTests, TotalDeadlineEndsRetryBackoffWithTimedOut) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
-    BlockBlobClient client{httpClient, MakeRetryOptions(3, std::chrono::minutes{1})};
+    BlobClient client{httpClient, MakeRetryOptions(3, std::chrono::minutes{1})};
 
     AVEVA::HttpRequestOptions requestOptions;
     requestOptions.SetTotalDeadline(std::chrono::milliseconds{50});
@@ -599,7 +599,7 @@ TEST(RetryTests, TotalDeadlineFailsImmediatelyWhenTheBackoffWouldOutlastIt) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
-    BlockBlobClient client{httpClient, MakeRetryOptions(3, std::chrono::minutes{1})};
+    BlobClient client{httpClient, MakeRetryOptions(3, std::chrono::minutes{1})};
 
     AVEVA::HttpRequestOptions requestOptions;
     requestOptions.SetTotalDeadline(std::chrono::seconds{10});
@@ -618,7 +618,7 @@ TEST(RetryTests, TotalDeadlineFailsImmediatelyWhenTheBackoffWouldOutlastIt) {
 TEST(RetryTests, TotalDeadlineCancelsInFlightAttemptAndIsNotRetried) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
-    BlockBlobClient client{httpClient, MakeRetryOptions(3)};
+    BlobClient client{httpClient, MakeRetryOptions(3)};
 
     AVEVA::HttpRequestOptions requestOptions;
     requestOptions.SetTotalDeadline(std::chrono::milliseconds{50});
@@ -635,7 +635,7 @@ TEST(RetryTests, TotalDeadlineCancelsInFlightAttemptAndIsNotRetried) {
 TEST(RetryTests, TotalDeadlineClampsAttemptTimeoutAndDoesNotFireAfterSuccess) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
-    BlockBlobClient client{httpClient, MakeRetryOptions(3)};
+    BlobClient client{httpClient, MakeRetryOptions(3)};
 
     AVEVA::HttpRequestOptions requestOptions;
     requestOptions.SetTimeout(std::chrono::seconds{30});
@@ -670,10 +670,11 @@ TEST(RetryTests, RetryReSignsSharedKeyAndRefreshesDateHeader) {
     BlobClientOptions options = MakeRetryOptions(1);
     options.SasToken.clear();
     options.SharedKey = {.AccountName = "storageaccount", .AccountKey = "c2VjcmV0LWtleQ=="};
-    BlockBlobClient client{httpClient, options};
+    PageBlobClient client{httpClient, options};
 
+    const std::string payload(512, 'p');
     UploadState uploadState;
-    StartUploadAsync(client, "payload", uploadState);
+    StartUploadAsync(client, payload, uploadState);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return uploadState.Done; }));
     EXPECT_TRUE(uploadState.Succeeded);
@@ -681,8 +682,8 @@ TEST(RetryTests, RetryReSignsSharedKeyAndRefreshesDateHeader) {
 
     const auto& first = httpClient.RequestAt(0);
     const auto& second = httpClient.RequestAt(1);
-    EXPECT_EQ(first.Body, "payload");
-    EXPECT_EQ(second.Body, "payload");
+    EXPECT_EQ(first.Body, payload);
+    EXPECT_EQ(second.Body, payload);
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(first.Request, "x-ms-client-request-id"),
               FakeHttpClient::FindHeaderValue(second.Request, "x-ms-client-request-id"));
 
@@ -701,7 +702,7 @@ TEST(RetryTests, EveryAttemptOfARetriedUploadCarriesTheFullBody) {
     httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{201, MakeCanonicalSuccessHeaders(), ""});
-    BlockBlobClient client{httpClient, MakeRetryOptions(2)};
+    PageBlobClient client{httpClient, MakeRetryOptions(2)};
 
     const std::string payload(64 * 1024, 'x');
     UploadState uploadState;

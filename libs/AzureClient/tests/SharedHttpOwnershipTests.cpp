@@ -67,9 +67,7 @@ TEST(SharedHttpOwnershipTests, DroppingEveryClientReleasesTheTransport) {
     SharedTransport transport;
     {
         BlobContainerClient container{transport.Release(), MakeBlobContainerClientOptions()};
-        const auto blob = container.GetBlobClient("a.sst");
         const auto page = container.GetPageBlobClient("b.sst");
-        const auto block = container.GetBlockBlobClient("c.sst");
         EXPECT_FALSE(transport.Expired());
     }
     EXPECT_TRUE(transport.Expired());

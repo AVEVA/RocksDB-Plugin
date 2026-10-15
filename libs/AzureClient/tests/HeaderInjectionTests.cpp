@@ -9,7 +9,6 @@
 
 #include <AVEVA/AzureClient/BlobClient.hpp>
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
-#include <AVEVA/AzureClient/BlockBlobClient.hpp>
 #include <AVEVA/AzureClient/Credentials.hpp>
 
 #include <gtest/gtest.h>
@@ -21,14 +20,14 @@
 #include <vector>
 
 namespace {
+using AVEVA::AzureClient::CreatePageBlobOptions;
 using AVEVA::AzureClient::ManagedIdentityCredentialOptions;
 using AVEVA::AzureClient::SetBlobMetadataOptions;
-using AVEVA::AzureClient::UploadBlockBlobOptions;
 using AVEVA::AzureClient::Tests::BlobClient;
-using AVEVA::AzureClient::Tests::BlockBlobClient;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 using AVEVA::AzureClient::Tests::ManagedIdentityCredential;
+using AVEVA::AzureClient::Tests::PageBlobClient;
 
 const std::string Injected = "a\r\nx-ms-evil: 1";
 
@@ -56,14 +55,14 @@ TEST(HeaderInjectionTests, MetadataValueWithCrLfIsRejected) {
 
 TEST(HeaderInjectionTests, ContentTypeWithCrLfIsRejected) {
     FakeHttpClient httpClient;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
-    UploadBlockBlobOptions options;
+    PageBlobClient client{httpClient, MakeBlobClientOptions()};
+    CreatePageBlobOptions options;
     options.HttpHeaders.ContentType = Injected;
 
-    using Result = std::expected<AVEVA::AzureClient::Response<AVEVA::AzureClient::Models::UploadBlockBlobResult>,
+    using Result = std::expected<AVEVA::AzureClient::Response<AVEVA::AzureClient::Models::CreatePageBlobResult>,
                                  AVEVA::AzureClient::BlobStorageError>;
     std::optional<Result> result;
-    client.UploadAsync(std::string{"data"}, std::move(options), [&](Result value) { result = std::move(value); });
+    client.CreateAsync(512U, std::move(options), [&](Result value) { result = std::move(value); });
     ExpectRejected(httpClient, result);
 }
 

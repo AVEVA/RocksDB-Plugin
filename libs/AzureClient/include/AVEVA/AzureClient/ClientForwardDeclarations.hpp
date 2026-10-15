@@ -11,7 +11,6 @@ namespace AVEVA::AzureClient {
 // that use SAS, Shared Key or a static bearer token keep the default NoTokenCredential. The defaults live
 // here, in the only first declaration.
 template <HttpClientLike THttp, TokenCredentialLike TCred = NoTokenCredential> class BasicBlobClient;
-template <HttpClientLike THttp, TokenCredentialLike TCred = NoTokenCredential> class BasicBlockBlobClient;
 template <HttpClientLike THttp, TokenCredentialLike TCred = NoTokenCredential> class BasicPageBlobClient;
 template <HttpClientLike THttp, TokenCredentialLike TCred = NoTokenCredential> class BasicBlobContainerClient;
 template <HttpClientLike THttp, TokenCredentialLike TCred = NoTokenCredential> class BasicBlobServiceClient;

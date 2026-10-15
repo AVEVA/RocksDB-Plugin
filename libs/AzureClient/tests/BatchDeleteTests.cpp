@@ -171,22 +171,6 @@ TEST(BatchDeleteTests, SharedKeyAuthorizesTheRequestAndEverySubrequest) {
     EXPECT_EQ(CountOccurrences(record.Body, "Authorization: SharedKey storageaccount:"), 2U);
 }
 
-TEST(BatchDeleteTests, BearerTokenAuthorizesEverySubrequest) {
-    FakeHttpClient http;
-    RespondToBatches(http);
-    auto options = MakeBlobContainerClientOptions();
-    options.SasToken.clear();
-    options.BearerToken = "static-token";
-    BlobContainerClient client{http, options};
-
-    const BatchOutcome outcome = DeleteAll(http, client, {"a", "b"});
-
-    ASSERT_TRUE(outcome.has_value());
-    const auto& record = http.RequestAt(0);
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(record.Request, "Authorization"), "Bearer static-token");
-    EXPECT_EQ(CountOccurrences(record.Body, "Authorization: Bearer static-token\r\n"), 2U);
-}
-
 TEST(BatchDeleteTests, SplitsMoreThan256NamesIntoSeveralRequestsAndKeepsOrder) {
     FakeHttpClient http;
     RespondToBatches(http);

@@ -8,7 +8,6 @@
 #include <AVEVA/AzureClient/BlobClient.hpp>
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>
 #include <AVEVA/AzureClient/BlobServiceClient.hpp>
-#include <AVEVA/AzureClient/BlockBlobClient.hpp>
 #include <AVEVA/AzureClient/Credentials.hpp>
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
 #include <AVEVA/AzureClient/TokenCredential.hpp>
@@ -22,12 +21,12 @@
 #include <algorithm>
 #include <atomic>
 #include <boost/asio/any_io_executor.hpp>
-#include <boost/asio/error.hpp>
-#include <boost/asio/post.hpp>
-#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/cancellation_signal.hpp>
+#include <boost/asio/error.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/asio/steady_timer.hpp>
 
 #include <cassert>
 #include <chrono>
@@ -454,23 +453,6 @@ class FakeHttpClient final {
         return m_requests.at(index);
     }
 
-    // Block IDs (percent-decoded) of every Put Block request seen so far, in send order.
-    [[nodiscard]] std::vector<std::string> StagedBlockIds() const {
-        std::scoped_lock lock(m_mutex);
-        std::vector<std::string> ids;
-        for (const RequestRecord& record : m_requests) {
-            const std::string& url = record.Request.GetUrl();
-            const std::size_t pos = url.find("blockid=");
-            if (pos == std::string::npos) {
-                continue;
-            }
-            const std::string raw = url.substr(pos + 8U);
-            std::string decoded = PercentDecode(raw.substr(0, raw.find('&')));
-            ids.push_back(std::move(decoded));
-        }
-        return ids;
-    }
-
     [[nodiscard]] const HttpRequest& LastRequest() const {
         std::scoped_lock lock(m_mutex);
         assert(!m_requests.empty());
@@ -644,7 +626,6 @@ class FakeHttpClient final {
 // The clients under test run on the fake transport; these shadow the HttpClient-bound aliases of the library.
 // Definitions are explicitly instantiated in FakeInstantiations.cpp.
 using BlobClient = BasicBlobClient<FakeHttpClient>;
-using BlockBlobClient = BasicBlockBlobClient<FakeHttpClient>;
 using PageBlobClient = BasicPageBlobClient<FakeHttpClient>;
 using BlobContainerClient = BasicBlobContainerClient<FakeHttpClient>;
 using BlobServiceClient = BasicBlobServiceClient<FakeHttpClient>;
@@ -654,6 +635,30 @@ using ClientAssertionCredential = BasicClientAssertionCredential<FakeHttpClient>
 using ManagedIdentityCredential = BasicManagedIdentityCredential<FakeHttpClient>;
 using AzurePipelinesCredential = BasicAzurePipelinesCredential<FakeHttpClient>;
 
+// Returns a fixed token. The requested `scopes` are ignored.
+class StaticTokenCredential {
+  public:
+    explicit StaticTokenCredential(
+        std::string token,
+        std::chrono::system_clock::time_point expiresOn = std::chrono::system_clock::time_point::max(),
+        std::optional<boost::asio::io_context::executor_type> executor = std::nullopt)
+        : m_token(std::move(token)), m_expiresOn(expiresOn), m_executor(std::move(executor)) {}
+
+    template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
+    auto GetTokenAsync(std::vector<std::string> /*scopes*/, CompletionToken&& token) {
+        return boost::asio::async_initiate<TokenSignature>(
+            [this](auto handler) {
+                Private::CompleteOnExecutorIfSet(m_executor, std::move(handler), std::error_code{},
+                                                 AccessToken{.Token = m_token, .ExpiresOn = m_expiresOn});
+            },
+            token);
+    }
+
+  private:
+    std::string m_token;
+    std::chrono::system_clock::time_point m_expiresOn;
+    std::optional<boost::asio::io_context::executor_type> m_executor;
+};
 class ScriptedTokenCredential final {
   public:
     struct Script {

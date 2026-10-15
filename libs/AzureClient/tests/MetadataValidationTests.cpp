@@ -11,7 +11,6 @@
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
-#include <AVEVA/AzureClient/BlockBlobClient.hpp>
 
 #include <gtest/gtest.h>
 
@@ -26,15 +25,15 @@ namespace {
 using AVEVA::AzureClient::BlobStorageError;
 using AVEVA::AzureClient::BlobStorageErrorCode;
 using AVEVA::AzureClient::CreateBlobContainerOptions;
+using AVEVA::AzureClient::CreatePageBlobOptions;
 using AVEVA::AzureClient::SetBlobMetadataOptions;
-using AVEVA::AzureClient::UploadBlockBlobOptions;
 using AVEVA::AzureClient::Models::MetadataMap;
 using AVEVA::AzureClient::Tests::BlobClient;
 using AVEVA::AzureClient::Tests::BlobContainerClient;
-using AVEVA::AzureClient::Tests::BlockBlobClient;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 using AVEVA::AzureClient::Tests::MakeBlobContainerClientOptions;
+using AVEVA::AzureClient::Tests::PageBlobClient;
 
 // Calls SetMetadataAsync with a single `name` entry; returns the error, or nullopt on success.
 [[nodiscard]] std::optional<BlobStorageError> SetMetadataWithName(FakeHttpClient& httpClient, const std::string& name) {
@@ -88,22 +87,22 @@ TEST(MetadataValidationTests, CaseInsensitiveDuplicateKeysCollapseToOneEntry) {
     EXPECT_EQ(metadata.begin()->second, "first");
 }
 
-TEST(MetadataValidationTests, ValidationAppliesToUploadAndContainerCreate) {
+TEST(MetadataValidationTests, ValidationAppliesToPageBlobAndContainerCreate) {
     FakeHttpClient httpClient;
-    BlockBlobClient blockBlob{httpClient, MakeBlobClientOptions()};
+    PageBlobClient pageBlob{httpClient, MakeBlobClientOptions()};
     BlobContainerClient container{httpClient, MakeBlobContainerClientOptions()};
 
-    UploadBlockBlobOptions uploadOptions;
+    CreatePageBlobOptions uploadOptions;
     uploadOptions.Metadata.emplace("bad-name", "v");
     std::optional<std::error_code> uploadError;
-    blockBlob.UploadAsync(std::string{"content"}, std::move(uploadOptions), [&](auto result) {
+    pageBlob.CreateAsync(512U, std::move(uploadOptions), [&](auto result) {
         uploadError = result.has_value() ? std::error_code{} : result.error().Code;
     });
 
     CreateBlobContainerOptions createOptions;
     createOptions.Metadata.emplace("9lives", "v");
     std::optional<std::error_code> createError;
-    container.CreateAsync(std::move(createOptions), [&](auto result) {
+    container.CreateIfNotExistsAsync(std::move(createOptions), [&](auto result) {
         createError = result.has_value() ? std::error_code{} : result.error().Code;
     });
 

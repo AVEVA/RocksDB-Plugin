@@ -6,8 +6,6 @@
 #include "FakeHttpClient.hpp"
 #include "TestFixtures.hpp"
 
-#include <AVEVA/AzureClient/BlockBlobClient.hpp>
-
 #include <AVEVA/HttpClient/HttpHeader.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
@@ -29,7 +27,7 @@ using AVEVA::AzureClient::AcquireLeaseOptions;
 using AVEVA::AzureClient::ReleaseLeaseOptions;
 using AVEVA::AzureClient::RenewLeaseOptions;
 using AVEVA::AzureClient::Models::BlobRequestConditions;
-using AVEVA::AzureClient::Tests::BlockBlobClient;
+using AVEVA::AzureClient::Tests::BlobClient;
 using AVEVA::AzureClient::Tests::DefaultETag;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
@@ -52,7 +50,7 @@ using namespace std::chrono_literals;
     return conditions;
 }
 
-const HttpRequest& RenewBlobLease(FakeHttpClient& httpClient, BlockBlobClient& client, std::string leaseId,
+const HttpRequest& RenewBlobLease(FakeHttpClient& httpClient, BlobClient& client, std::string leaseId,
                                   BlobRequestConditions conditions, std::optional<std::string>& renewed) {
     client.RenewLeaseAsync(RenewLeaseOptions{.LeaseId = std::move(leaseId), .Conditions = std::move(conditions)},
                            [&](auto result) {
@@ -64,7 +62,7 @@ const HttpRequest& RenewBlobLease(FakeHttpClient& httpClient, BlockBlobClient& c
     return httpClient.LastRequest();
 }
 
-const HttpRequest& ReleaseBlobLease(FakeHttpClient& httpClient, BlockBlobClient& client, std::string leaseId,
+const HttpRequest& ReleaseBlobLease(FakeHttpClient& httpClient, BlobClient& client, std::string leaseId,
                                     BlobRequestConditions conditions) {
     client.ReleaseLeaseAsync(ReleaseLeaseOptions{.LeaseId = std::move(leaseId), .Conditions = std::move(conditions)},
                              [](auto) {});
@@ -75,7 +73,7 @@ const HttpRequest& ReleaseBlobLease(FakeHttpClient& httpClient, BlockBlobClient&
 
 TEST(LeaseTests, BlobRenewReleaseRejectEmptyLeaseIds) {
     FakeHttpClient httpClient;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
 
     int completed = 0;
     const auto expectInvalid = [&](auto result) {
@@ -94,7 +92,7 @@ TEST(LeaseTests, BlobRenewAndReleaseSendLeaseActionAndConditions) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(LeaseResponse(200, "lease-a"));
     httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders(), ""});
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
 
     std::optional<std::string> renewed;
     const HttpRequest renew = RenewBlobLease(httpClient, client, "lease-a", {}, renewed);
@@ -109,7 +107,7 @@ TEST(LeaseTests, BlobRenewAndReleaseSendLeaseActionAndConditions) {
 
 TEST(LeaseTests, BlobAcquireLeaseValidatesDuration) {
     FakeHttpClient httpClient;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
 
     std::optional<std::error_code> error;
     client.AcquireLeaseAsync(AcquireLeaseOptions{.Conditions = {}, .ProposedLeaseId = {}, .Duration = 5s},
@@ -130,7 +128,7 @@ TEST(LeaseTests, BlobAcquireLeaseRetryReusesGeneratedProposedLeaseId) {
     auto options = MakeBlobClientOptions();
     options.Retry.MaxRetries = 1;
     options.Retry.InitialDelay = 0ms;
-    BlockBlobClient client{httpClient, options};
+    BlobClient client{httpClient, options};
 
     std::optional<std::string> acquired;
     client.AcquireLeaseAsync([&](auto result) {

@@ -41,7 +41,6 @@ inline constexpr std::uint64_t MaxPagesFromUrlBytes = std::uint64_t{4} * 1024U *
 namespace Private {
 constexpr std::string_view PageBlobTypeValue = "PageBlob";
 constexpr std::string_view PageWriteUpdateValue = "update";
-constexpr std::string_view PageWriteClearValue = "clear";
 
 [[nodiscard]] inline std::optional<std::string> ValidatePageAligned(std::uint64_t value, const char* fieldName) {
     if ((value % PageBlobPageSize) != 0U) {
@@ -211,27 +210,6 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
                 client.UploadPagesBytesAsyncImpl(std::forward<decltype(args)>(args)...);
             },
             std::forward<CompletionToken>(token), std::move(requestOptions), offset, content, std::move(options));
-    }
-
-    template <class CompletionToken = DefaultCompletionToken>
-        requires(!std::same_as<std::remove_cvref_t<CompletionToken>, ClearPagesOptions>)
-    [[nodiscard]] auto ClearPagesAsync(std::uint64_t offset, std::uint64_t length,
-                                       CompletionToken&& token = CompletionToken{},
-                                       std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::ClearPagesResult>(
-            this,
-            [](auto& client, auto&&... args) { client.ClearPagesAsyncImpl(std::forward<decltype(args)>(args)...); },
-            std::forward<CompletionToken>(token), std::move(requestOptions), offset, length, ClearPagesOptions{});
-    }
-
-    template <class CompletionToken = DefaultCompletionToken>
-    [[nodiscard]] auto ClearPagesAsync(std::uint64_t offset, std::uint64_t length, ClearPagesOptions options,
-                                       CompletionToken&& token = CompletionToken{},
-                                       std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::ClearPagesResult>(
-            this,
-            [](auto& client, auto&&... args) { client.ClearPagesAsyncImpl(std::forward<decltype(args)>(args)...); },
-            std::forward<CompletionToken>(token), std::move(requestOptions), offset, length, std::move(options));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -580,44 +558,6 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
             [completion = std::move(completion)](std::error_code error, HttpResponse response) mutable {
                 Private::CompleteParsed<Models::UploadPagesResult>(
                     error, std::move(response), Private::ParseETagAndLastModified<Models::UploadPagesResult>,
-                    std::move(completion));
-            },
-            requestOptions);
-    }
-
-    template <class THandler>
-    void ClearPagesAsyncImpl(std::uint64_t offset, std::uint64_t length, const ClearPagesOptions& options,
-                             THandler completion, HttpRequestOptions requestOptions) {
-        if (const auto validationError = Private::ValidatePageAligned(offset, "offset"); validationError.has_value()) {
-            Private::PostCompletion(this->Http(), std::move(completion),
-                                    Private::MakeError<Models::ClearPagesResult>(
-                                        std::make_error_code(std::errc::invalid_argument), *validationError));
-            return;
-        }
-        if (const auto validationError = Private::ValidatePageAligned(length, "length"); validationError.has_value()) {
-            Private::PostCompletion(this->Http(), std::move(completion),
-                                    Private::MakeError<Models::ClearPagesResult>(
-                                        std::make_error_code(std::errc::invalid_argument), *validationError));
-            return;
-        }
-
-        HttpRequest request = Private::BuildBlobRequest(this->Target(), HttpMethod::Put, "comp=page");
-        Private::AddHeader(request, Private::XMsPageWriteHeaderName, Private::PageWriteClearValue);
-        const auto rangeHeader = Private::BuildPageWriteRangeHeaderValue(offset, length);
-        if (!rangeHeader.has_value()) {
-            Private::PostCompletion(this->Http(), std::move(completion),
-                                    Private::MakeError<Models::ClearPagesResult>(
-                                        std::make_error_code(std::errc::invalid_argument), rangeHeader.error()));
-            return;
-        }
-        Private::AddHeader(request, Private::XMsRangeHeaderName, *rangeHeader);
-        Private::ApplyBlobRequestConditions(request, options.Conditions);
-
-        Private::SendAuthorizedRequestAsync(
-            this->Http(), this->Target(), std::move(request),
-            [completion = std::move(completion)](std::error_code error, HttpResponse response) mutable {
-                Private::CompleteParsed<Models::ClearPagesResult>(
-                    error, std::move(response), Private::ParseETagAndLastModified<Models::ClearPagesResult>,
                     std::move(completion));
             },
             requestOptions);

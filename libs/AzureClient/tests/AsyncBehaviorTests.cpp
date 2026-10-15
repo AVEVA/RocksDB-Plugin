@@ -15,7 +15,6 @@
 #include <AVEVA/AzureClient/BlobServiceClient.hpp>
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
-#include <AVEVA/AzureClient/BlockBlobClient.hpp>
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
 
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
@@ -50,7 +49,6 @@
 #include <functional>
 #include <memory>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -67,10 +65,10 @@ using AVEVA::AzureClient::BlobStorageErrorCode;
 using AVEVA::AzureClient::Response;
 using AVEVA::AzureClient::Models::BlobProperties;
 using AVEVA::AzureClient::Models::DeleteBlobResult;
-using AVEVA::AzureClient::Models::UploadBlockBlobResult;
+using AVEVA::AzureClient::Models::UploadPagesResult;
+using AVEVA::AzureClient::Tests::BlobClient;
 using AVEVA::AzureClient::Tests::BlobContainerClient;
 using AVEVA::AzureClient::Tests::BlobServiceClient;
-using AVEVA::AzureClient::Tests::BlockBlobClient;
 using AVEVA::AzureClient::Tests::CallbackExpectation;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
@@ -80,13 +78,12 @@ using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
 using AVEVA::AzureClient::Tests::MakeToken;
 using AVEVA::AzureClient::Tests::PageBlobClient;
 using AVEVA::AzureClient::Tests::ScriptedTokenCredential;
-using ScriptedBlockBlobClient =
-    AVEVA::AzureClient::BasicBlockBlobClient<AVEVA::AzureClient::Tests::FakeHttpClient, ScriptedTokenCredential>;
+using ScriptedBlobClient =
+    AVEVA::AzureClient::BasicBlobClient<AVEVA::AzureClient::Tests::FakeHttpClient, ScriptedTokenCredential>;
 using DeleteResult = std::expected<Response<DeleteBlobResult>, BlobStorageError>;
 using DownloadBlobToResult =
     std::expected<Response<AVEVA::AzureClient::Models::DownloadBlobToResult>, BlobStorageError>;
 using GetBlobPropertiesResult = std::expected<Response<BlobProperties>, BlobStorageError>;
-using UploadBlockBlobAsyncResult = std::expected<Response<UploadBlockBlobResult>, BlobStorageError>;
 
 // Minimal allocator that counts allocations/deallocations, used to prove
 // BindAssociationsAndAdoptCancellation's non-skip branch genuinely uses an explicitly
@@ -142,7 +139,7 @@ void HandleDeferredDeleteCompletion(DeferredDeleteExpectation expectation, Delet
     expectation.Callback->MarkInvoked();
 }
 
-void StartDeleteAndVerifyExplicitDeferredCompletion(BlockBlobClient& client, bool& callReturned,
+void StartDeleteAndVerifyExplicitDeferredCompletion(BlobClient& client, bool& callReturned,
                                                     bool& callbackObservedReturnedCall, CallbackExpectation& callback) {
     client.DeleteAsync(
         std::bind_front(HandleDeferredDeleteCompletion,
@@ -166,8 +163,7 @@ void HandleTimedOutDeleteCompletion(int& callbackCount, DeleteResult result) {
     EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::timed_out));
 }
 
-void StartDeleteAndExpectTimeout(BlockBlobClient& client, int& callbackCount,
-                                 const HttpRequestOptions& requestOptions) {
+void StartDeleteAndExpectTimeout(BlobClient& client, int& callbackCount, const HttpRequestOptions& requestOptions) {
     client.DeleteAsync(std::bind_front(HandleTimedOutDeleteCompletion, std::ref(callbackCount)), requestOptions);
 }
 
@@ -184,9 +180,8 @@ void HandleSuccessfulDeleteCompletionAndRecord(int& completionCount, std::vector
     completionOrder.emplace_back(expectation.CompletionLabel);
 }
 
-void StartSuccessfulDeleteAndRecord(BlockBlobClient& client, int& completionCount,
-                                    std::vector<std::string>& completionOrder, const char* expectedRequestId,
-                                    const char* completionLabel) {
+void StartSuccessfulDeleteAndRecord(BlobClient& client, int& completionCount, std::vector<std::string>& completionOrder,
+                                    const char* expectedRequestId, const char* completionLabel) {
     client.DeleteAsync(std::bind_front(
         HandleSuccessfulDeleteCompletionAndRecord, std::ref(completionCount), std::ref(completionOrder),
         DeleteCompletionRecordExpectation{.ExpectedRequestId = expectedRequestId, .CompletionLabel = completionLabel}));
@@ -201,7 +196,7 @@ void HandleBlobNotFoundDeleteCompletion(int& completionCount, std::vector<std::s
     completionOrder.emplace_back("second");
 }
 
-void StartBlobNotFoundDeleteAndRecord(BlockBlobClient& client, int& completionCount,
+void StartBlobNotFoundDeleteAndRecord(BlobClient& client, int& completionCount,
                                       std::vector<std::string>& completionOrder) {
     client.DeleteAsync(
         std::bind_front(HandleBlobNotFoundDeleteCompletion, std::ref(completionCount), std::ref(completionOrder)));
@@ -214,7 +209,7 @@ void HandleGetPropertiesCompletion(CallbackExpectation& callback, GetBlobPropert
     callback.MarkInvoked();
 }
 
-void StartGetPropertiesAndVerify(BlockBlobClient& client, CallbackExpectation& callback) {
+void StartGetPropertiesAndVerify(BlobClient& client, CallbackExpectation& callback) {
     client.GetPropertiesAsync(std::bind_front(HandleGetPropertiesCompletion, std::ref(callback)));
 }
 
@@ -223,34 +218,35 @@ struct ReentrantPropertiesExpectations {
     CallbackExpectation* PropertiesCallback;
 };
 
-void HandleDeleteCompletionThenStartGetProperties(BlockBlobClient& client, ReentrantPropertiesExpectations expectations,
+void HandleDeleteCompletionThenStartGetProperties(BlobClient& client, ReentrantPropertiesExpectations expectations,
                                                   DeleteResult result) {
     ASSERT_TRUE(result.has_value());
     expectations.DeleteCallback->MarkInvoked();
     StartGetPropertiesAndVerify(client, *expectations.PropertiesCallback);
 }
 
-void StartDeleteAndVerifyReentrantPropertiesRequest(BlockBlobClient& client, CallbackExpectation& deleteCallback,
+void StartDeleteAndVerifyReentrantPropertiesRequest(BlobClient& client, CallbackExpectation& deleteCallback,
                                                     CallbackExpectation& propertiesCallback) {
     client.DeleteAsync(std::bind_front(
         HandleDeleteCompletionThenStartGetProperties, std::ref(client),
         ReentrantPropertiesExpectations{.DeleteCallback = &deleteCallback, .PropertiesCallback = &propertiesCallback}));
 }
 
-void HandleDownloadToCompletionAndReleaseStream(std::shared_ptr<std::ostringstream>& stream,
-                                                CallbackExpectation& callback, DownloadBlobToResult result) {
+void HandleDownloadToCompletionAndReleaseStream(std::shared_ptr<std::string>& stream, CallbackExpectation& callback,
+                                                DownloadBlobToResult result) {
     ASSERT_TRUE(result.has_value());
     const Response<AVEVA::AzureClient::Models::DownloadBlobToResult>& response = *result;
     EXPECT_EQ(response.Value().BytesWritten, 4U);
-    EXPECT_EQ(stream->str(), "data");
+    EXPECT_EQ(*stream, "data");
     stream.reset();
     callback.MarkInvoked();
 }
 
-void StartDownloadToAndReleaseStream(BlockBlobClient& client, std::shared_ptr<std::ostringstream>& stream,
+void StartDownloadToAndReleaseStream(BlobClient& client, std::shared_ptr<std::string>& stream,
                                      CallbackExpectation& callback) {
     client.DownloadToAsync(
-        *stream, std::bind_front(HandleDownloadToCompletionAndReleaseStream, std::ref(stream), std::ref(callback)));
+        std::span<char>(*stream), AVEVA::AzureClient::DownloadBlobOptions{},
+        std::bind_front(HandleDownloadToCompletionAndReleaseStream, std::ref(stream), std::ref(callback)));
 }
 
 void ThrowDeleteCallback(DeleteResult /*unused*/) { throw std::runtime_error("callback boom"); }
@@ -264,22 +260,22 @@ template <class TClient> void StartDeleteAndCaptureInvocation(TClient& client, b
     client.DeleteAsync(std::bind_front(HandleSuccessfulDeleteInvocation, std::ref(callbackInvoked)));
 }
 
-void HandleInvalidStageBlockCompletion(
+void HandleInvalidPageUploadCompletion(
     bool& callbackInvoked,
-    std::expected<Response<AVEVA::AzureClient::Models::StageBlockResult>, BlobStorageError> result) {
+    std::expected<Response<AVEVA::AzureClient::Models::UploadPagesResult>, BlobStorageError> result) {
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
     callbackInvoked = true;
 }
 
-void StartInvalidStageBlockAndCaptureInvocation(BlockBlobClient& client, bool& callbackInvoked) {
-    client.StageBlockAsync("not-base64!", "data",
-                           std::bind_front(HandleInvalidStageBlockCompletion, std::ref(callbackInvoked)));
+void StartInvalidPageUploadAndCaptureInvocation(PageBlobClient& client, bool& callbackInvoked) {
+    client.UploadPagesAsync(0, std::string{},
+                            std::bind_front(HandleInvalidPageUploadCompletion, std::ref(callbackInvoked)));
 }
 
-void HandleRecursiveInvalidStageBlockCompletion(
+void HandleRecursiveInvalidPageUploadCompletion(
     int& completedCount, const std::function<void()>& issue,
-    std::expected<Response<AVEVA::AzureClient::Models::StageBlockResult>, BlobStorageError> result) {
+    std::expected<Response<AVEVA::AzureClient::Models::UploadPagesResult>, BlobStorageError> result) {
     ASSERT_FALSE(result.has_value());
     ++completedCount;
     if (completedCount < 5000) {
@@ -287,13 +283,13 @@ void HandleRecursiveInvalidStageBlockCompletion(
     }
 }
 
-void IssueRecursiveInvalidStageBlock(BlockBlobClient& client, int& completedCount, const std::function<void()>& issue) {
-    client.StageBlockAsync("not-base64!", "data", [&completedCount, capture0 = std::cref(issue)](auto&& result) {
-        HandleRecursiveInvalidStageBlockCompletion(completedCount, capture0, std::forward<decltype(result)>(result));
+void IssueRecursiveInvalidPageUpload(PageBlobClient& client, int& completedCount, const std::function<void()>& issue) {
+    client.UploadPagesAsync(0, std::string{}, [&completedCount, capture0 = std::cref(issue)](auto&& result) {
+        HandleRecursiveInvalidPageUploadCompletion(completedCount, capture0, std::forward<decltype(result)>(result));
     });
 }
 
-void DrainRecursiveInvalidStageBlockCompletions(FakeHttpClient& httpClient, int& completedCount, int iterations) {
+void DrainRecursiveInvalidPageUploadCompletions(FakeHttpClient& httpClient, int& completedCount, int iterations) {
     while (completedCount < iterations) {
         ASSERT_GT(httpClient.Poll(), 0U);
     }
@@ -306,8 +302,7 @@ void HandleDeleteOnStrandCompletion(boost::asio::strand<boost::asio::io_context:
     callback.MarkInvoked();
 }
 
-void StartDeleteBoundToStrand(BlockBlobClient& client,
-                              boost::asio::strand<boost::asio::io_context::executor_type>& strand,
+void StartDeleteBoundToStrand(BlobClient& client, boost::asio::strand<boost::asio::io_context::executor_type>& strand,
                               bool& completedOnStrand, CallbackExpectation& callback) {
     client.DeleteAsync(
         boost::asio::bind_executor(strand, std::bind_front(HandleDeleteOnStrandCompletion, std::ref(strand),
@@ -316,8 +311,7 @@ void StartDeleteBoundToStrand(BlockBlobClient& client,
 
 void MarkCallbackInvoked(CallbackExpectation& callback, DeleteResult /*unused*/) { callback.MarkInvoked(); }
 
-void StartDeleteWithAssociatedCancellationSlot(BlockBlobClient& client,
-                                               boost::asio::cancellation_signal& associatedSignal,
+void StartDeleteWithAssociatedCancellationSlot(BlobClient& client, boost::asio::cancellation_signal& associatedSignal,
                                                CallbackExpectation& callback,
                                                const HttpRequestOptions& requestOptions) {
     client.DeleteAsync(boost::asio::bind_cancellation_slot(associatedSignal.slot(),
@@ -330,7 +324,7 @@ void HandleAllocatorBoundDeleteCompletion(bool& callbackInvoked, DeleteResult re
     callbackInvoked = true;
 }
 
-void StartDeleteWithAssociatedAllocator(BlockBlobClient& client,
+void StartDeleteWithAssociatedAllocator(BlobClient& client,
                                         boost::asio::strand<boost::asio::io_context::executor_type>& strand,
                                         const std::shared_ptr<int>& allocateCount,
                                         const std::shared_ptr<int>& deallocateCount, bool& callbackInvoked) {
@@ -340,13 +334,12 @@ void StartDeleteWithAssociatedAllocator(BlockBlobClient& client,
                                     std::bind_front(HandleAllocatorBoundDeleteCompletion, std::ref(callbackInvoked)))));
 }
 
-void StartDeleteWithCancelAfter(BlockBlobClient& client, boost::asio::steady_timer& timer,
-                                CallbackExpectation& callback) {
+void StartDeleteWithCancelAfter(BlobClient& client, boost::asio::steady_timer& timer, CallbackExpectation& callback) {
     client.DeleteAsync(boost::asio::cancel_after(timer, std::chrono::seconds(30),
                                                  std::bind_front(MarkCallbackInvoked, std::ref(callback))));
 }
 
-boost::asio::awaitable<void> AwaitDeleteAsync(BlockBlobClient* client, std::optional<DeleteResult>* observed) {
+boost::asio::awaitable<void> AwaitDeleteAsync(BlobClient* client, std::optional<DeleteResult>* observed) {
     *observed = co_await client->DeleteAsync(boost::asio::use_awaitable);
 }
 
@@ -355,7 +348,7 @@ void HandleAwaitableDeleteCompletion(bool& coroutineFinished, const std::excepti
     coroutineFinished = true;
 }
 
-void SpawnAwaitableDeleteWithCancellation(FakeHttpClient& httpClient, BlockBlobClient& client,
+void SpawnAwaitableDeleteWithCancellation(FakeHttpClient& httpClient, BlobClient& client,
                                           boost::asio::cancellation_signal& signal,
                                           std::optional<DeleteResult>& observed, bool& coroutineFinished) {
     boost::asio::co_spawn(
@@ -405,7 +398,7 @@ template <class Result> void RecordCancellationResult(CancellationObservation ob
 void StartContainerDeleteWithCancellation(FakeHttpClient& httpClient, boost::asio::cancellation_signal& signal,
                                           int& completions, bool& canceled) {
     auto client = std::make_shared<BlobContainerClient>(httpClient, MakeBlobContainerClientOptions());
-    client->CreateAsync(
+    client->CreateIfNotExistsAsync(
         boost::asio::bind_cancellation_slot(signal.slot(), [client, &completions, &canceled](auto result) {
             RecordCancellationResult(CancellationObservation{.Completions = &completions, .Canceled = &canceled},
                                      std::move(result));
@@ -460,8 +453,8 @@ void ConfigurePendingWork(PendingWork pending, FakeHttpClient& httpClient, BlobC
     }
 }
 
-void StartPendingWork(PendingWork pending, BlockBlobClient& client, FakeHttpClient& httpClient,
-                      std::ostringstream& downloadTarget, InvocationObserver handler) {
+void StartPendingWork(PendingWork pending, BlobClient& client, FakeHttpClient& httpClient, std::string& downloadTarget,
+                      InvocationObserver handler) {
     switch (pending) {
     case PendingWork::TransportRequest:
     case PendingWork::PostedCompletion:
@@ -472,7 +465,8 @@ void StartPendingWork(PendingWork pending, BlockBlobClient& client, FakeHttpClie
         httpClient.Poll(); // deliver the 503; the operation now waits on its backoff timer
         break;
     case PendingWork::DownloadTo:
-        client.DownloadToAsync(downloadTarget, std::move(handler));
+        client.DownloadToAsync(std::span<char>(downloadTarget), AVEVA::AzureClient::DownloadBlobOptions{},
+                               std::move(handler));
         break;
     }
 }
@@ -483,14 +477,14 @@ void VerifyPendingWorkHandlerIsReleased(PendingWork pending) {
     auto sentinel = std::make_shared<int>(0);
     const std::weak_ptr<int> watch = sentinel;
     bool invoked = false;
-    std::ostringstream downloadTarget;
+    std::string downloadTarget(4U, '\0');
 
     auto httpClient = std::make_unique<FakeHttpClient>();
     BlobClientOptions options = MakeBlobClientOptions();
     ConfigurePendingWork(pending, *httpClient, options);
 
     {
-        BlockBlobClient client{*httpClient, options};
+        BlobClient client{*httpClient, options};
         StartPendingWork(pending, client, *httpClient, downloadTarget,
                          InvocationObserver{.Invoked = &invoked, .KeepAlive = std::move(sentinel)});
         ASSERT_EQ(httpClient->RequestCount(), 1U);
@@ -512,7 +506,7 @@ void VerifyPendingWorkHandlersAreReleased() {
 TEST(AsyncBehaviorTests, HandlerRunsOnlyAfterExplicitDeferredCompletion) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
 
     bool callReturned = false;
     bool callbackObservedReturnedCall = false;
@@ -530,7 +524,7 @@ TEST(AsyncBehaviorTests, HandlerRunsOnlyAfterExplicitDeferredCompletion) {
 TEST(AsyncBehaviorTests, MoveOnlyCapturedStateSurvivesDeferredCompletion) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
 
     std::string observed;
     CallbackExpectation callback;
@@ -577,7 +571,7 @@ TEST(AsyncBehaviorTests, BlobContainerClientMoveOnlyCompletionTokenSurvivesDefer
 
     std::string observed;
     CallbackExpectation callback;
-    client.CreateAsync(
+    client.CreateIfNotExistsAsync(
         [state = std::make_unique<std::string>("container-move-only-state"), &observed, &callback](
             std::expected<Response<AVEVA::AzureClient::Models::CreateBlobContainerResult>, BlobStorageError>) mutable {
             ASSERT_TRUE(state);
@@ -595,9 +589,9 @@ TEST(AsyncBehaviorTests, DeferredOperationRunsAfterItsClientWasMovedFromAndDestr
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
 
-    auto client = std::make_unique<BlockBlobClient>(httpClient, MakeBlobClientOptions());
+    auto client = std::make_unique<BlobClient>(httpClient, MakeBlobClientOptions());
     auto operation = client->DeleteAsync(boost::asio::deferred);
-    BlockBlobClient moved{std::move(*client)};
+    BlobClient moved{std::move(*client)};
     client.reset();
 
     std::optional<DeleteResult> observed;
@@ -612,7 +606,7 @@ TEST(AsyncBehaviorTests, DeferredContainerOperationRunsAfterItsClientWasDestroye
     httpClient.DeferByDefault() = true;
 
     auto client = std::make_unique<BlobContainerClient>(httpClient, MakeBlobContainerClientOptions());
-    auto operation = client->CreateAsync(boost::asio::deferred);
+    auto operation = client->CreateIfNotExistsAsync(boost::asio::deferred);
     client.reset();
 
     int completions = 0;
@@ -622,13 +616,13 @@ TEST(AsyncBehaviorTests, DeferredContainerOperationRunsAfterItsClientWasDestroye
     EXPECT_EQ(completions, 1);
 }
 
-TEST(AsyncBehaviorTests, BlockBlobClientCanBeDestroyedAfterRequestIsInFlight) {
+TEST(AsyncBehaviorTests, BlobClientCanBeDestroyedAfterRequestIsInFlight) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
 
     CallbackExpectation callback;
     {
-        auto client = std::make_unique<BlockBlobClient>(httpClient, MakeBlobClientOptions());
+        auto client = std::make_unique<BlobClient>(httpClient, MakeBlobClientOptions());
         client->DeleteAsync([&](std::expected<Response<DeleteBlobResult>, BlobStorageError> result) {
             ASSERT_TRUE(result.has_value());
             callback.MarkInvoked();
@@ -666,7 +660,7 @@ TEST(AsyncBehaviorTests, TokenCredentialRequestCanDestroyClientAfterRequestIsSen
     BlobClientOptions options = MakeBlobClientOptions();
     options.SasToken.clear();
     CallbackExpectation callback;
-    auto client = std::make_unique<ScriptedBlockBlobClient>(httpClient, std::move(options), tokenCredential);
+    auto client = std::make_unique<ScriptedBlobClient>(httpClient, std::move(options), tokenCredential);
     StartDeleteAndExpectSuccess(*client, callback);
 
     EXPECT_EQ(tokenCredential->PendingCount(), 1U);
@@ -684,7 +678,7 @@ TEST(AsyncBehaviorTests, TokenCredentialRequestCanDestroyClientAfterRequestIsSen
 TEST(AsyncBehaviorTests, TimeoutSimulationCompletesExactlyOnceAndPreservesPlumbedTimeout) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
 
     HttpRequestOptions requestOptions;
     requestOptions.SetTimeout(std::chrono::milliseconds{250});
@@ -707,9 +701,9 @@ TEST(AsyncBehaviorTests, ConcurrentDeferredRequestsCanCompleteOutOfOrderExactlyO
     httpClient.EnqueueDeferredResponse(
         HttpResponse{204, MakeCanonicalSuccessHeaders({{"x-ms-request-id", "third"}}), ""});
 
-    BlockBlobClient first{httpClient, MakeBlobClientOptions("images", "one.bin")};
-    BlockBlobClient second{httpClient, MakeBlobClientOptions("images", "two.bin")};
-    BlockBlobClient third{httpClient, MakeBlobClientOptions("images", "three.bin")};
+    BlobClient first{httpClient, MakeBlobClientOptions("images", "one.bin")};
+    BlobClient second{httpClient, MakeBlobClientOptions("images", "two.bin")};
+    BlobClient third{httpClient, MakeBlobClientOptions("images", "three.bin")};
 
     std::vector<std::string> completionOrder;
     int firstCount = 0;
@@ -736,7 +730,7 @@ TEST(AsyncBehaviorTests, CallbackCanStartAnotherRequestReentrantly) {
     httpClient.EnqueueDeferredResponse(HttpResponse{202, MakeCanonicalSuccessHeaders(), ""});
     httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "0"}}), ""});
 
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
 
     CallbackExpectation deleteCallback;
     CallbackExpectation propertiesCallback;
@@ -752,7 +746,7 @@ TEST(AsyncBehaviorTests, CallbackCanDestroyClientAfterCompletionBegins) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
 
-    auto client = std::make_unique<BlockBlobClient>(httpClient, MakeBlobClientOptions());
+    auto client = std::make_unique<BlobClient>(httpClient, MakeBlobClientOptions());
     CallbackExpectation callback;
     client->DeleteAsync([&](std::expected<Response<DeleteBlobResult>, BlobStorageError> result) {
         ASSERT_TRUE(result.has_value());
@@ -769,9 +763,9 @@ TEST(AsyncBehaviorTests, DownloadToAsyncAllowsDestroyingTheTargetStreamInTheComp
     httpClient.DeferByDefault() = true;
     httpClient.DefaultResponse() = HttpResponse{
         200, MakeCanonicalSuccessHeaders({{"Content-Length", "4"}, {"Content-Type", "text/plain"}}), "data"};
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
 
-    auto stream = std::make_shared<std::ostringstream>();
+    auto stream = std::make_shared<std::string>(4U, '\0');
     CallbackExpectation callback;
     StartDownloadToAndReleaseStream(client, stream, callback);
 
@@ -782,7 +776,7 @@ TEST(AsyncBehaviorTests, DownloadToAsyncAllowsDestroyingTheTargetStreamInTheComp
 TEST(AsyncBehaviorTests, ExceptionsFromUserCallbacksPropagateWithoutCorruptingLaterRequests) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
 
     client.DeleteAsync(ThrowDeleteCallback);
 
@@ -808,7 +802,7 @@ TEST(AsyncBehaviorTests, TokenCredentialSynchronousCompletionIsDeferredRatherTha
 
     BlobClientOptions options = MakeBlobClientOptions();
     options.SasToken.clear();
-    ScriptedBlockBlobClient client{httpClient, options, tokenCredential};
+    ScriptedBlobClient client{httpClient, options, tokenCredential};
 
     bool callbackInvoked = false;
     StartDeleteAndCaptureInvocation(client, callbackInvoked);
@@ -837,7 +831,7 @@ TEST(AsyncBehaviorTests, CancellationWinsIfASynchronousTokenCredentialCompletedB
 
     BlobClientOptions options = MakeBlobClientOptions();
     options.SasToken.clear();
-    ScriptedBlockBlobClient client{httpClient, options, tokenCredential};
+    ScriptedBlobClient client{httpClient, options, tokenCredential};
 
     boost::asio::cancellation_signal signal;
     std::optional<DeleteResult> observed;
@@ -860,10 +854,10 @@ TEST(AsyncBehaviorTests, CancellationWinsIfASynchronousTokenCredentialCompletedB
 // the initiating call returns; it must run only once the executor it was posted to is driven.
 TEST(AsyncBehaviorTests, EarlyExitValidationFailurePostsRatherThanInvokingSynchronously) {
     FakeHttpClient httpClient;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    PageBlobClient client{httpClient, MakePageBlobOptions()};
 
     bool callbackInvoked = false;
-    StartInvalidStageBlockAndCaptureInvocation(client, callbackInvoked);
+    StartInvalidPageUploadAndCaptureInvocation(client, callbackInvoked);
 
     EXPECT_FALSE(callbackInvoked);
     EXPECT_EQ(httpClient.Poll(), 1U);
@@ -876,15 +870,15 @@ TEST(AsyncBehaviorTests, EarlyExitValidationFailurePostsRatherThanInvokingSynchr
 // initiating call.
 TEST(AsyncBehaviorTests, RecursivePostedEarlyExitFailuresDoNotGrowTheStack) {
     FakeHttpClient httpClient;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    PageBlobClient client{httpClient, MakePageBlobOptions()};
 
     constexpr int Iterations = 5000;
     int completedCount = 0;
 
-    std::function<void()> issue = [&]() { IssueRecursiveInvalidStageBlock(client, completedCount, issue); };
+    std::function<void()> issue = [&]() { IssueRecursiveInvalidPageUpload(client, completedCount, issue); };
 
     issue();
-    DrainRecursiveInvalidStageBlockCompletions(httpClient, completedCount, Iterations);
+    DrainRecursiveInvalidPageUploadCompletions(httpClient, completedCount, Iterations);
 
     EXPECT_EQ(completedCount, Iterations);
 }
@@ -895,7 +889,7 @@ TEST(AsyncBehaviorTests, RecursivePostedEarlyExitFailuresDoNotGrowTheStack) {
 TEST(AsyncBehaviorTests, ExplicitAssociatedExecutorReceivesTheCompletionInsteadOfTheDefault) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
 
     boost::asio::io_context strandContext;
     auto strand = boost::asio::make_strand(strandContext);
@@ -917,7 +911,7 @@ TEST(AsyncBehaviorTests, ExplicitAssociatedExecutorReceivesTheCompletionInsteadO
 TEST(AsyncBehaviorTests, HandlerExecutorWorkGuardIsTakenAtInitiation) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
 
     boost::asio::io_context strandContext;
     auto strand = boost::asio::make_strand(strandContext);
@@ -940,7 +934,7 @@ TEST(AsyncBehaviorTests, HandlerExecutorWorkGuardIsTakenAtInitiation) {
 TEST(AsyncBehaviorTests, ExplicitRequestOptionsCancellationSlotWinsOverAssociatedSlot) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
 
     boost::asio::cancellation_signal explicitSignal;
     boost::asio::cancellation_signal associatedSignal;
@@ -966,7 +960,7 @@ TEST(AsyncBehaviorTests, ExplicitRequestOptionsCancellationSlotWinsOverAssociate
 TEST(AsyncBehaviorTests, ExplicitAssociatedAllocatorIsActuallyUsedForTheDispatchedCompletion) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
 
     boost::asio::io_context strandContext;
     auto strand = boost::asio::make_strand(strandContext);
@@ -1001,7 +995,7 @@ TEST(AsyncBehaviorTests, ExplicitAssociatedAllocatorIsActuallyUsedForTheDispatch
 TEST(AsyncBehaviorTests, CancelAfterWrappedTokenCompilesAndCompletesNormally) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
 
     boost::asio::steady_timer timer{httpClient.get_executor()};
 
@@ -1037,56 +1031,46 @@ struct DeferredCompletionCase {
 
     std::vector<DeferredCompletionCase> cases;
 
-    // --- BlockBlobClient ---
-    cases.push_back({.Name = "BlockBlobClient.UploadAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
-                         auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
-                         client->UploadAsync("data", [client, &invoked](auto) { invoked = true; });
-                     }});
-    cases.push_back({.Name = "BlockBlobClient.StageBlockAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
-                         auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
-                         client->StageBlockAsync("AAAA", "data", [client, &invoked](auto) { invoked = true; });
-                     }});
-    cases.push_back({.Name = "BlockBlobClient.CommitBlockListAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
-                         auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
-                         client->CommitBlockListAsync({"AAAA"}, [client, &invoked](auto) { invoked = true; });
-                     }});
-    cases.push_back({.Name = "BlockBlobClient.DownloadAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
-                         auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
+    // --- BlobClient ---
+    cases.push_back({.Name = "BlobClient.DownloadAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
+                         auto client = std::make_shared<BlobClient>(http, MakeBlobClientOptions());
                          client->DownloadAsync([client, &invoked](auto) { invoked = true; });
                      }});
-    cases.push_back({.Name = "BlockBlobClient.DownloadToAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
-                         auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
-                         auto stream = std::make_shared<std::ostringstream>();
-                         client->DownloadToAsync(*stream, [client, stream, &invoked](auto) { invoked = true; });
+    cases.push_back({.Name = "BlobClient.DownloadToAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
+                         auto client = std::make_shared<BlobClient>(http, MakeBlobClientOptions());
+                         auto destination = std::make_shared<std::string>(4U, '\0');
+                         client->DownloadToAsync(std::span<char>(*destination),
+                                                 AVEVA::AzureClient::DownloadBlobOptions{},
+                                                 [client, destination, &invoked](auto) { invoked = true; });
                      }});
-    cases.push_back({.Name = "BlockBlobClient.DeleteAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
-                         auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
+    cases.push_back({.Name = "BlobClient.DeleteAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
+                         auto client = std::make_shared<BlobClient>(http, MakeBlobClientOptions());
                          client->DeleteAsync([client, &invoked](auto) { invoked = true; });
                      }});
-    cases.push_back({.Name = "BlockBlobClient.GetPropertiesAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
-                         auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
+    cases.push_back({.Name = "BlobClient.GetPropertiesAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
+                         auto client = std::make_shared<BlobClient>(http, MakeBlobClientOptions());
                          client->GetPropertiesAsync([client, &invoked](auto) { invoked = true; });
                      }});
-    cases.push_back({.Name = "BlockBlobClient.SetMetadataAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
-                         auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
+    cases.push_back({.Name = "BlobClient.SetMetadataAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
+                         auto client = std::make_shared<BlobClient>(http, MakeBlobClientOptions());
                          client->SetMetadataAsync(SetBlobMetadataOptions{},
                                                   [client, &invoked](auto) { invoked = true; });
                      }});
-    cases.push_back({.Name = "BlockBlobClient.AcquireLeaseAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
-                         auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
+    cases.push_back({.Name = "BlobClient.AcquireLeaseAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
+                         auto client = std::make_shared<BlobClient>(http, MakeBlobClientOptions());
                          client->AcquireLeaseAsync([client, &invoked](auto) { invoked = true; });
                      }});
-    cases.push_back({.Name = "BlockBlobClient.ReleaseLeaseAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
-                         auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
+    cases.push_back({.Name = "BlobClient.ReleaseLeaseAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
+                         auto client = std::make_shared<BlobClient>(http, MakeBlobClientOptions());
                          client->ReleaseLeaseAsync(ReleaseLeaseOptions{.LeaseId = "lease-1"},
                                                    [client, &invoked](auto) { invoked = true; });
                      }});
-    cases.push_back({.Name = "BlockBlobClient.ExistsAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
-                         auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
+    cases.push_back({.Name = "BlobClient.ExistsAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
+                         auto client = std::make_shared<BlobClient>(http, MakeBlobClientOptions());
                          client->ExistsAsync([client, &invoked](auto) { invoked = true; });
                      }});
-    cases.push_back({.Name = "BlockBlobClient.DeleteIfExistsAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
-                         auto client = std::make_shared<BlockBlobClient>(http, MakeBlobClientOptions());
+    cases.push_back({.Name = "BlobClient.DeleteIfExistsAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
+                         auto client = std::make_shared<BlobClient>(http, MakeBlobClientOptions());
                          client->DeleteIfExistsAsync([client, &invoked](auto) { invoked = true; });
                      }});
 
@@ -1100,10 +1084,6 @@ struct DeferredCompletionCase {
                          client->UploadPagesAsync(0, std::string(512U, 'x'),
                                                   [client, &invoked](auto) { invoked = true; });
                      }});
-    cases.push_back({.Name = "PageBlobClient.ClearPagesAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
-                         auto client = std::make_shared<PageBlobClient>(http, MakePageBlobOptions());
-                         client->ClearPagesAsync(0, 512U, [client, &invoked](auto) { invoked = true; });
-                     }});
     cases.push_back({.Name = "PageBlobClient.ResizeAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
                          auto client = std::make_shared<PageBlobClient>(http, MakePageBlobOptions());
                          client->ResizeAsync(512U, [client, &invoked](auto) { invoked = true; });
@@ -1114,8 +1094,10 @@ struct DeferredCompletionCase {
                      }});
     cases.push_back({.Name = "PageBlobClient.DownloadToAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
                          auto client = std::make_shared<PageBlobClient>(http, MakePageBlobOptions());
-                         auto stream = std::make_shared<std::ostringstream>();
-                         client->DownloadToAsync(*stream, [client, stream, &invoked](auto) { invoked = true; });
+                         auto destination = std::make_shared<std::string>(4U, '\0');
+                         client->DownloadToAsync(std::span<char>(*destination),
+                                                 AVEVA::AzureClient::DownloadBlobOptions{},
+                                                 [client, destination, &invoked](auto) { invoked = true; });
                      }});
     cases.push_back({.Name = "PageBlobClient.DeleteAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
                          auto client = std::make_shared<PageBlobClient>(http, MakePageBlobOptions());
@@ -1149,10 +1131,6 @@ struct DeferredCompletionCase {
                      }});
 
     // --- BlobContainerClient ---
-    cases.push_back({.Name = "BlobContainerClient.CreateAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
-                         auto client = std::make_shared<BlobContainerClient>(http, MakeBlobContainerClientOptions());
-                         client->CreateAsync([client, &invoked](auto) { invoked = true; });
-                     }});
     cases.push_back({.Name = "BlobContainerClient.ListBlobsAsync", .Invoke = [](FakeHttpClient& http, bool& invoked) {
                          auto client = std::make_shared<BlobContainerClient>(http, MakeBlobContainerClientOptions());
                          client->ListBlobsAsync([client, &invoked](auto) { invoked = true; });
@@ -1192,7 +1170,7 @@ TEST(AsyncBehaviorTests, NoPublicOperationCompletesBeforeTheInitiatingCallReturn
 // ---------------------------------------------------------------------------------------------
 TEST(AsyncBehaviorTests, ExplicitDeferredTokenSendsNothingUntilTheOperationIsInvoked) {
     FakeHttpClient httpClient;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
 
     auto operation = client.DeleteAsync(boost::asio::deferred);
     httpClient.Poll();
@@ -1211,7 +1189,7 @@ TEST(AsyncBehaviorTests, ExplicitDeferredTokenSendsNothingUntilTheOperationIsInv
 TEST(AsyncBehaviorTests, CancellingACoSpawnedUseAwaitableOperationCancelsTheInFlightRequest) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
 
     boost::asio::cancellation_signal signal;
     std::optional<DeleteResult> observed;
@@ -1235,7 +1213,7 @@ TEST(AsyncBehaviorTests, CancellingACoSpawnedUseAwaitableOperationCancelsTheInFl
 // to it, so a signal emitted before initiation has no effect on a later operation.
 TEST(AsyncBehaviorTests, SignalEmittedBeforeInitiationDoesNotCancelALaterOperation) {
     FakeHttpClient httpClient;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
 
     boost::asio::cancellation_signal signal;
     signal.emit(boost::asio::cancellation_type::terminal);
@@ -1259,7 +1237,7 @@ TEST(AsyncBehaviorTests, CancellationDuringTokenAcquisitionCompletesPromptlyAndN
 
     BlobClientOptions options = MakeBlobClientOptions();
     options.SasToken.clear();
-    ScriptedBlockBlobClient client{httpClient, options, credential};
+    ScriptedBlobClient client{httpClient, options, credential};
 
     boost::asio::cancellation_signal signal;
     int completions = 0;
@@ -1300,7 +1278,7 @@ TEST(AsyncBehaviorTests, DestroyingTheIoContextWithPendingWorkReleasesTheHandler
 TEST(AsyncBehaviorTests, CancellationEmittedFromTheHandlerExecutorCancelsTheOperation) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
     boost::asio::cancellation_signal signal;
     std::optional<DeleteResult> observed;
     client.DeleteAsync(

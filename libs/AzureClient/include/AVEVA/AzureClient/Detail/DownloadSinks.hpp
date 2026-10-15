@@ -10,7 +10,6 @@
 #include <fstream>
 #include <ios>
 #include <memory>
-#include <ostream>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -33,19 +32,6 @@ class DownloadSink {
     [[nodiscard]] virtual bool WritesInline() const noexcept { return false; }
 
     [[nodiscard]] virtual bool Write(std::string data) = 0;
-};
-
-class StreamSink final : public DownloadSink {
-  public:
-    explicit StreamSink(std::ostream& stream) : m_stream(stream) {}
-
-    [[nodiscard]] bool Write(std::string data) override {
-        m_stream.write(data.data(), static_cast<std::streamsize>(data.size()));
-        return m_stream.good();
-    }
-
-  private:
-    std::ostream& m_stream;
 };
 
 class FileSink final : public DownloadSink {

@@ -8,7 +8,6 @@
 
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>
 #include <AVEVA/AzureClient/BlobServiceClient.hpp>
-#include <AVEVA/AzureClient/BlockBlobClient.hpp>
 #include <AVEVA/AzureClient/WithRequestOptions.hpp>
 
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
@@ -32,9 +31,9 @@ using AVEVA::HttpRequestOptions;
 using AVEVA::HttpResponse;
 using AVEVA::AzureClient::DeleteBlobOptions;
 using AVEVA::AzureClient::WithRequestOptions;
+using AVEVA::AzureClient::Tests::BlobClient;
 using AVEVA::AzureClient::Tests::BlobContainerClient;
 using AVEVA::AzureClient::Tests::BlobServiceClient;
-using AVEVA::AzureClient::Tests::BlockBlobClient;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 using AVEVA::AzureClient::Tests::MakeBlobContainerClientOptions;
@@ -56,7 +55,7 @@ TEST(RequestOptionsTests, ClientDefaultRequestOptionsApplyWhenNoneAreGiven) {
     FakeHttpClient httpClient;
     auto options = MakeBlobClientOptions();
     options.DefaultRequestOptions = MakeRequestOptions(1234ms, 77);
-    BlockBlobClient client{httpClient, options};
+    BlobClient client{httpClient, options};
 
     client.DeleteAsync(IgnoreResult);
     httpClient.Poll();
@@ -69,7 +68,7 @@ TEST(RequestOptionsTests, ClientDefaultRequestOptionsApplyWhenNoneAreGiven) {
 
 TEST(RequestOptionsTests, WithoutClientDefaultsTheHttpRequestOptionsDefaultsApply) {
     FakeHttpClient httpClient;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
 
     client.DeleteAsync(IgnoreResult);
     httpClient.Poll();
@@ -82,7 +81,7 @@ TEST(RequestOptionsTests, ExplicitTrailingRequestOptionsReplaceTheClientDefault)
     FakeHttpClient httpClient;
     auto options = MakeBlobClientOptions();
     options.DefaultRequestOptions = MakeRequestOptions(1234ms, 77);
-    BlockBlobClient client{httpClient, options};
+    BlobClient client{httpClient, options};
 
     client.DeleteAsync(IgnoreResult, MakeRequestOptions(55ms, 66));
     httpClient.Poll();
@@ -96,7 +95,7 @@ TEST(RequestOptionsTests, WithRequestOptionsAndDefaultedTokenIsCoAwaitable) {
     httpClient.DefaultResponse() = HttpResponse{202, MakeCanonicalSuccessHeaders(), ""};
     auto options = MakeBlobClientOptions();
     options.DefaultRequestOptions = MakeRequestOptions(1234ms, 77);
-    BlockBlobClient client{httpClient, options};
+    BlobClient client{httpClient, options};
 
     bool succeeded = false;
     boost::asio::co_spawn(
@@ -114,7 +113,7 @@ TEST(RequestOptionsTests, WithRequestOptionsAndDefaultedTokenIsCoAwaitable) {
 TEST(RequestOptionsTests, WithRequestOptionsWrapsAnyTokenAndTakesPrecedenceOverTrailingArgument) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{202, MakeCanonicalSuccessHeaders(), ""};
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
 
     int callbacks = 0;
     client.DeleteAsync(DeleteBlobOptions{},
@@ -136,11 +135,11 @@ TEST(RequestOptionsTests, ContainerDefaultsApplyToContainerAndChildBlobOperation
     options.DefaultRequestOptions = MakeRequestOptions(777ms, 5);
     BlobContainerClient container{httpClient, options};
 
-    container.CreateAsync(IgnoreResult);
+    container.CreateIfNotExistsAsync(IgnoreResult);
     httpClient.Poll();
     EXPECT_EQ(httpClient.LastRequestOptions().GetTimeout(), 777ms);
 
-    auto blob = container.GetBlockBlobClient("child");
+    auto blob = container.GetPageBlobClient("child");
     blob.DeleteAsync(IgnoreResult);
     httpClient.Poll();
     EXPECT_EQ(httpClient.LastRequestOptions().GetTimeout(), 777ms);
@@ -156,7 +155,7 @@ TEST(RequestOptionsTests, AllThreeLevelsPickWithRequestOptionsForEveryTokenForm)
     httpClient.DefaultResponse() = HttpResponse{202, MakeCanonicalSuccessHeaders(), ""};
     auto options = MakeBlobClientOptions();
     options.DefaultRequestOptions = MakeRequestOptions(1ms, 1);
-    BlockBlobClient client{httpClient, options};
+    BlobClient client{httpClient, options};
 
     client.DeleteAsync(DeleteBlobOptions{}, WithRequestOptions(MakeRequestOptions(11ms, 11), IgnoreResult),
                        MakeRequestOptions(22ms, 22));
@@ -193,7 +192,7 @@ TEST(RequestOptionsTests, TokenCancellationSlotIsUsedOnlyWhenEffectiveOptionsHav
     {
         FakeHttpClient httpClient;
         httpClient.DeferByDefault() = true;
-        BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+        BlobClient client{httpClient, MakeBlobClientOptions()};
         boost::asio::cancellation_signal tokenSignal;
         bool cancelled = false;
         client.DeleteAsync(boost::asio::bind_cancellation_slot(tokenSignal.slot(),
@@ -206,7 +205,7 @@ TEST(RequestOptionsTests, TokenCancellationSlotIsUsedOnlyWhenEffectiveOptionsHav
     {
         FakeHttpClient httpClient;
         httpClient.DeferByDefault() = true;
-        BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+        BlobClient client{httpClient, MakeBlobClientOptions()};
         boost::asio::cancellation_signal tokenSignal;
         boost::asio::cancellation_signal optionsSignal;
         HttpRequestOptions requestOptions;

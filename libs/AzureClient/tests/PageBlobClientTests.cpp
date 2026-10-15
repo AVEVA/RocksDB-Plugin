@@ -52,7 +52,6 @@ using AVEVA::AzureClient::Response;
 using AVEVA::AzureClient::Models::AcquireBlobLeaseResult;
 using AVEVA::AzureClient::Models::BlobProperties;
 using AVEVA::AzureClient::Models::BlobType;
-using AVEVA::AzureClient::Models::ClearPagesResult;
 using AVEVA::AzureClient::Models::CreatePageBlobResult;
 using AVEVA::AzureClient::Models::DeleteBlobResult;
 using AVEVA::AzureClient::Models::DownloadBlobResult;
@@ -119,15 +118,6 @@ void StartUploadPagesAsyncExpectingZeroLengthContent(PageBlobClient& client, boo
     });
 }
 
-void StartClearPagesAsyncExpectingZeroLengthRange(PageBlobClient& client, bool& callbackInvoked) {
-    client.ClearPagesAsync(0, 0, [&](std::expected<Response<ClearPagesResult>, BlobStorageError> result) {
-        ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
-        EXPECT_EQ(result.error().Message, "length must be greater than zero.");
-        callbackInvoked = true;
-    });
-}
-
 void StartDeleteAsyncExpectingTransportError(PageBlobClient& client, CallbackExpectation& callback) {
     client.DeleteAsync([&](std::expected<Response<DeleteBlobResult>, BlobStorageError> result) {
         ASSERT_FALSE(result.has_value());
@@ -171,13 +161,14 @@ void StartDownloadAsyncAndVerify(PageBlobClient& client, CallbackExpectation& do
     });
 }
 
-void StartDownloadToStreamAsyncAndVerify(PageBlobClient& client, std::ostringstream& stream,
-                                         CallbackExpectation& streamCallback) {
-    client.DownloadToAsync(stream, [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result) {
-        ASSERT_TRUE(result.has_value());
-        EXPECT_EQ(result->Value().BytesWritten, 4U);
-        streamCallback.MarkInvoked();
-    });
+void StartDownloadToSpanAsyncAndVerify(PageBlobClient& client, std::span<char> destination,
+                                       CallbackExpectation& streamCallback) {
+    client.DownloadToAsync(destination, AVEVA::AzureClient::DownloadBlobOptions{},
+                           [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result) {
+                               ASSERT_TRUE(result.has_value());
+                               EXPECT_EQ(result->Value().BytesWritten, 4U);
+                               streamCallback.MarkInvoked();
+                           });
 }
 
 void StartDownloadToPathAsyncAndVerify(PageBlobClient& client, const std::filesystem::path& path,
@@ -403,8 +394,9 @@ TEST(PageBlobClientTests, UploadPagesFromUrlAsync_ClientCredentialIsForwardedAsB
     FakeHttpClient httpClient;
     auto options = BuildOptions();
     options.SasToken.clear();
-    options.BearerToken = "client-token";
-    PageBlobClient client{httpClient, options};
+    auto credential = std::make_shared<AVEVA::AzureClient::Tests::StaticTokenCredential>("client-token");
+    AVEVA::AzureClient::BasicPageBlobClient<FakeHttpClient, AVEVA::AzureClient::Tests::StaticTokenCredential> client{
+        httpClient, options, credential};
 
     client.UploadPagesFromUrlAsync(
         0, "https://a/b/c", 0, 512,
@@ -447,30 +439,6 @@ TEST(PageBlobClientTests, UploadPagesFromUrlAsync_RejectsBadRangesBeforeSending)
     httpClient.Poll();
 
     EXPECT_EQ(failures, 5);
-    EXPECT_EQ(httpClient.RequestCount(), 0U);
-}
-
-TEST(PageBlobClientTests, ClearPagesAsync_SetsRangeAndPageWriteHeaders) {
-    FakeHttpClient httpClient;
-    PageBlobClient client{httpClient, BuildOptions()};
-
-    client.ClearPagesAsync(0, PageBlobPageSize, [](std::expected<Response<ClearPagesResult>, BlobStorageError>) {});
-
-    const auto& request = httpClient.LastRequest();
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-page-write"), "clear");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-range"), "bytes=0-511");
-}
-
-TEST(PageBlobClientTests, ClearPagesAsync_ReportsZeroLengthRangeViaCompletion) {
-    FakeHttpClient httpClient;
-    PageBlobClient client{httpClient, BuildOptions()};
-
-    bool callbackInvoked = false;
-    StartClearPagesAsyncExpectingZeroLengthRange(client, callbackInvoked);
-
-    EXPECT_FALSE(callbackInvoked);
-    httpClient.Poll();
-    EXPECT_TRUE(callbackInvoked);
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
@@ -634,14 +602,6 @@ TEST(PageBlobClientTests, Constructor_ThrowsForMissingBlobName) {
     EXPECT_THROW((PageBlobClient{httpClient, options}), std::invalid_argument);
 }
 
-TEST(PageBlobClientTests, Constructor_ThrowsForConflictingCredentials) {
-    FakeHttpClient httpClient;
-    BlobClientOptions options = BuildOptions();
-    options.BearerToken = "bearer-token";
-
-    EXPECT_THROW((PageBlobClient{httpClient, options}), std::invalid_argument);
-}
-
 TEST(PageBlobClientTests, Constructor_ThrowsForInvalidSharedKeyBase64) {
     FakeHttpClient httpClient;
     BlobClientOptions options = BuildOptions();
@@ -752,11 +712,11 @@ TEST(PageBlobClientTests, DownloadAsyncAndDownloadToAsyncParseContentAndProperti
     StartDownloadAsyncAndVerify(client, downloadCallback);
     EXPECT_TRUE(httpClient.CompleteNext());
 
-    std::ostringstream stream;
+    std::string destination(4, '\0');
     CallbackExpectation streamCallback;
-    StartDownloadToStreamAsyncAndVerify(client, stream, streamCallback);
+    StartDownloadToSpanAsyncAndVerify(client, destination, streamCallback);
     EXPECT_TRUE(httpClient.CompleteNext());
-    EXPECT_EQ(stream.str(), "data");
+    EXPECT_EQ(destination, "data");
 
     const std::filesystem::path fsPath = std::filesystem::current_path() / "azure-client-page-download.bin";
     AVEVA::AzureClient::DownloadBlobOptions options;
@@ -838,7 +798,6 @@ TEST(PageBlobClientTests, UploadPagesAsyncSupportsCoAwaitWithNoExplicitCompletio
 namespace {
 [[maybe_unused]] void PageBlobClientNoTokenOverloadsCompile(PageBlobClient& client) {
     using AVEVA::AzureClient::AcquireLeaseOptions;
-    using AVEVA::AzureClient::ClearPagesOptions;
     using AVEVA::AzureClient::CreatePageBlobOptions;
     using AVEVA::AzureClient::DeleteBlobOptions;
     using AVEVA::AzureClient::DownloadBlobOptions;
@@ -848,7 +807,8 @@ namespace {
     const std::vector<std::byte> bytes;
     const std::span<const std::byte> span{bytes};
     std::string const str;
-    std::ostringstream stream;
+    std::string spanStorage(4, '\0');
+    const std::span<char> destination{spanStorage};
     std::filesystem::path const path;
 
     static_cast<void>(client.CreateAsync(PageBlobPageSize));
@@ -859,17 +819,13 @@ namespace {
     static_cast<void>(client.UploadPagesAsync(0, span));
     static_cast<void>(client.UploadPagesAsync(0, span, UploadPagesOptions{}));
 
-    static_cast<void>(client.ClearPagesAsync(0, PageBlobPageSize));
-    static_cast<void>(client.ClearPagesAsync(0, PageBlobPageSize, ClearPagesOptions{}));
-
     static_cast<void>(client.ResizeAsync(PageBlobPageSize));
     static_cast<void>(client.ResizeAsync(PageBlobPageSize, AVEVA::AzureClient::ResizePageBlobOptions{}));
 
     static_cast<void>(client.DownloadAsync());
     static_cast<void>(client.DownloadAsync(DownloadBlobOptions{}));
 
-    static_cast<void>(client.DownloadToAsync(stream));
-    static_cast<void>(client.DownloadToAsync(stream, DownloadBlobOptions{}));
+    static_cast<void>(client.DownloadToAsync(destination, DownloadBlobOptions{}));
     static_cast<void>(client.DownloadToAsync(path));
     static_cast<void>(client.DownloadToAsync(path, DownloadBlobOptions{}));
 

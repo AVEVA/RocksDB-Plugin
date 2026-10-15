@@ -6,7 +6,6 @@
 #include "AVEVA/AzureClient/BlobClientOptions.hpp"
 #include "AVEVA/AzureClient/BlobContainerClient.hpp"
 #include "AVEVA/AzureClient/BlobServiceClient.hpp"
-#include "AVEVA/AzureClient/BlockBlobClient.hpp"
 #include "AVEVA/AzureClient/PageBlobClient.hpp"
 
 #include <AVEVA/HttpClient/HttpClient.hpp>
@@ -117,7 +116,8 @@ class Loopback {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
         while (!done()) {
             if (std::chrono::steady_clock::now() >= deadline) {
-                ADD_FAILURE() << "loopback operation did not complete within 10s (" << m_requests << " request(s) served)";
+                ADD_FAILURE() << "loopback operation did not complete within 10s (" << m_requests
+                              << " request(s) served)";
                 return;
             }
             m_context.restart();
@@ -180,15 +180,14 @@ void ExerciseAllTokenKinds(Loopback& http, TClient& client, TOperation operation
 }
 } // namespace
 
-TEST(PublicHeaderSelfContainedTests, BlockBlobClient) {
+TEST(PublicHeaderSelfContainedTests, BlobClient) {
     Loopback http;
-    BlockBlobClient client{http.Http(), BlobOptions(http)};
-    ExerciseAllTokenKinds(http, client, [](BlockBlobClient& c, auto&& token) {
+    BlobClient client{http.Http(), BlobOptions(http)};
+    ExerciseAllTokenKinds(http, client, [](BlobClient& c, auto&& token) {
         return c.GetPropertiesAsync(std::forward<decltype(token)>(token));
     });
-    ExerciseAllTokenKinds(http, client, [](BlockBlobClient& c, auto&& token) {
-        return c.UploadAsync(std::string{"data"}, std::forward<decltype(token)>(token));
-    });
+    ExerciseAllTokenKinds(
+        http, client, [](BlobClient& c, auto&& token) { return c.DeleteAsync(std::forward<decltype(token)>(token)); });
     EXPECT_EQ(http.Requests(), 6);
 }
 
@@ -210,9 +209,8 @@ TEST(PublicHeaderSelfContainedTests, BlobContainerClient) {
         return c.ListBlobsAsync(std::forward<decltype(token)>(token));
     });
 
-    auto childClient = client.GetBlockBlobClient("child");
-    BlockBlobClient& child = childClient;
-    ExerciseAllTokenKinds(http, child, [](BlockBlobClient& c, auto&& token) {
-        return c.ExistsAsync(std::forward<decltype(token)>(token));
-    });
+    auto childClient = client.GetPageBlobClient("child");
+    BlobClient& child = childClient;
+    ExerciseAllTokenKinds(
+        http, child, [](BlobClient& c, auto&& token) { return c.ExistsAsync(std::forward<decltype(token)>(token)); });
 }

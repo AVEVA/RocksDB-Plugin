@@ -8,7 +8,6 @@
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
 #include <AVEVA/AzureClient/BlobServiceClient.hpp>
-#include <AVEVA/AzureClient/BlockBlobClient.hpp>
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
 #include <AVEVA/AzureClient/TokenCredential.hpp>
 
@@ -28,7 +27,6 @@
 
 namespace {
 using AVEVA::AzureClient::Tests::BlobClient;
-using AVEVA::AzureClient::Tests::BlockBlobClient;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 using AVEVA::AzureClient::Tests::PageBlobClient;
@@ -67,39 +65,6 @@ std::vector<ValidationCase> MakeCases() {
                          });
                      },
                      std::errc::invalid_argument});
-    cases.push_back({"PageClearUnalignedOffset",
-                     [](FakeHttpClient& http, auto report) {
-                         PageBlobClient client{http, MakeBlobClientOptions()};
-                         client.ClearPagesAsync(3, 512, [report](auto result) {
-                             report(result.has_value() ? std::error_code{} : result.error().Code);
-                         });
-                     },
-                     std::errc::invalid_argument});
-    cases.push_back({"PageClearZeroLength",
-                     [](FakeHttpClient& http, auto report) {
-                         PageBlobClient client{http, MakeBlobClientOptions()};
-                         client.ClearPagesAsync(0, 0, [report](auto result) {
-                             report(result.has_value() ? std::error_code{} : result.error().Code);
-                         });
-                     },
-                     std::errc::invalid_argument});
-    cases.push_back({"StageBlockInvalidBase64Id",
-                     [](FakeHttpClient& http, auto report) {
-                         BlockBlobClient client{http, MakeBlobClientOptions()};
-                         client.StageBlockAsync("not-base64!", "data", [report](auto result) {
-                             report(result.has_value() ? std::error_code{} : result.error().Code);
-                         });
-                     },
-                     std::errc::invalid_argument});
-    cases.push_back({"CommitBlockListInconsistentIdLengths",
-                     [](FakeHttpClient& http, auto report) {
-                         BlockBlobClient client{http, MakeBlobClientOptions()};
-                         const std::vector<std::string> ids{"YmxvY2swMQ==", "YmI="};
-                         client.CommitBlockListAsync(ids, [report](auto result) {
-                             report(result.has_value() ? std::error_code{} : result.error().Code);
-                         });
-                     },
-                     std::errc::invalid_argument});
 
     return cases;
 }
@@ -128,7 +93,6 @@ struct TokenTransportCase {
     std::string Name;
     std::string Endpoint;
     bool UseTokenCredential;
-    bool UseBearerToken;
     bool UseSharedKey;
     bool UseSas;
     bool ExpectThrow;
@@ -136,34 +100,32 @@ struct TokenTransportCase {
 
 std::vector<TokenTransportCase> MakeTokenTransportCases() {
     return {
-        {"HttpTokenCredentialThrows", "http://account.blob.core.windows.net", true, false, false, false, true},
-        {"HttpBearerTokenThrows", "http://account.blob.core.windows.net", false, true, false, false, true},
-        {"UpperCaseHttpBearerThrows", "HTTP://account.blob.core.windows.net", false, true, false, false, true},
-        {"HttpLookalikeHostThrows", "http://localhost.evil.example/path", false, true, false, false, true},
-        {"HttpUserinfoHostThrows", "http://127.0.0.1@evil.example/", false, true, false, false, true},
-        {"LoopbackIpv4TokenOk", "http://127.0.0.1:10000/devstoreaccount1", true, false, false, false, false},
-        {"LocalhostBearerOk", "http://localhost:10000/devstoreaccount1", false, true, false, false, false},
-        {"LoopbackIpv6BearerOk", "http://[::1]:10000/devstoreaccount1", false, true, false, false, false},
-        {"HttpsTokenCredentialOk", "https://account.blob.core.windows.net", true, false, false, false, false},
-        {"HttpsBearerOk", "https://account.blob.core.windows.net", false, true, false, false, false},
-        {"HttpSharedKeyThrows", "http://account.blob.core.windows.net", false, false, true, false, true},
-        {"HttpSasThrows", "http://account.blob.core.windows.net", false, false, false, true, true},
+        {"HttpTokenCredentialThrows", "http://account.blob.core.windows.net", true, false, false, true},
+        {"HttpTokenCredentialEndpointThrows", "http://account.blob.core.windows.net", true, false, false, true},
+        {"UpperCaseHttpTokenThrows", "HTTP://account.blob.core.windows.net", true, false, false, true},
+        {"HttpLookalikeHostThrows", "http://localhost.evil.example/path", true, false, false, true},
+        {"HttpUserinfoHostThrows", "http://127.0.0.1@evil.example/", true, false, false, true},
+        {"LoopbackIpv4TokenOk", "http://127.0.0.1:10000/devstoreaccount1", true, false, false, false},
+        {"LocalhostTokenOk", "http://localhost:10000/devstoreaccount1", true, false, false, false},
+        {"LoopbackIpv6TokenOk", "http://[::1]:10000/devstoreaccount1", true, false, false, false},
+        {"HttpsTokenCredentialOk", "https://account.blob.core.windows.net", true, false, false, false},
+        {"HttpsTokenOk", "https://account.blob.core.windows.net", true, false, false, false},
+        {"HttpSharedKeyThrows", "http://account.blob.core.windows.net", false, true, false, true},
+        {"HttpSasThrows", "http://account.blob.core.windows.net", false, false, true, true},
     };
 }
 
-using StaticBlobClient = AVEVA::AzureClient::BasicBlobClient<FakeHttpClient, AVEVA::AzureClient::StaticTokenCredential>;
+using StaticBlobClient =
+    AVEVA::AzureClient::BasicBlobClient<FakeHttpClient, AVEVA::AzureClient::Tests::StaticTokenCredential>;
 using StaticContainerClient =
-    AVEVA::AzureClient::BasicBlobContainerClient<FakeHttpClient, AVEVA::AzureClient::StaticTokenCredential>;
+    AVEVA::AzureClient::BasicBlobContainerClient<FakeHttpClient, AVEVA::AzureClient::Tests::StaticTokenCredential>;
 using StaticServiceClient =
-    AVEVA::AzureClient::BasicBlobServiceClient<FakeHttpClient, AVEVA::AzureClient::StaticTokenCredential>;
+    AVEVA::AzureClient::BasicBlobServiceClient<FakeHttpClient, AVEVA::AzureClient::Tests::StaticTokenCredential>;
 
 template <class TOptions> void ApplyCase(TOptions& options, const TokenTransportCase& testCase) {
     options.ServiceEndpoint = testCase.Endpoint;
     options.AllowInsecureHttp = true;
     options.SasToken.clear();
-    if (testCase.UseBearerToken) {
-        options.BearerToken = "token";
-    }
     if (testCase.UseSharedKey) {
         options.SharedKey.AccountName = "account";
         options.SharedKey.AccountKey = "a2V5";
@@ -179,8 +141,9 @@ class TokenTransportTests : public ::testing::TestWithParam<TokenTransportCase> 
 TEST_P(TokenTransportTests, TokenCredentialsRequireHttpsUnlessLoopback) {
     FakeHttpClient httpClient;
     const TokenTransportCase& testCase = GetParam();
-    const auto credential =
-        testCase.UseTokenCredential ? std::make_shared<AVEVA::AzureClient::StaticTokenCredential>("token") : nullptr;
+    const auto credential = testCase.UseTokenCredential
+                                ? std::make_shared<AVEVA::AzureClient::Tests::StaticTokenCredential>("token")
+                                : nullptr;
 
     auto blobOptions = MakeBlobClientOptions();
     ApplyCase(blobOptions, testCase);
@@ -212,9 +175,9 @@ TEST(InsecureHttpTests, HttpEndpointIsRejectedUnlessExplicitlyAllowed) {
     for (const char* endpoint : {"http://127.0.0.1:10000/devstoreaccount1", "HTTP://account.blob.core.windows.net"}) {
         options.ServiceEndpoint = endpoint;
         options.AllowInsecureHttp = false;
-        EXPECT_THROW((BlockBlobClient{httpClient, options}), std::invalid_argument) << endpoint;
+        EXPECT_THROW((BlobClient{httpClient, options}), std::invalid_argument) << endpoint;
         options.AllowInsecureHttp = true;
-        EXPECT_NO_THROW((BlockBlobClient{httpClient, options})) << endpoint;
+        EXPECT_NO_THROW((BlobClient{httpClient, options})) << endpoint;
     }
 }
 
@@ -223,7 +186,7 @@ TEST(InsecureHttpTests, HttpsEndpointNeedsNoOptIn) {
     auto options = MakeBlobClientOptions();
     options.ServiceEndpoint = "https://account.blob.core.windows.net";
     ASSERT_FALSE(options.AllowInsecureHttp);
-    EXPECT_NO_THROW((BlockBlobClient{httpClient, options}));
+    EXPECT_NO_THROW((BlobClient{httpClient, options}));
 }
 
 TEST(SasTokenValidationTests, ControlCharactersFragmentsAndEmbeddedQuestionMarksAreRejected) {
@@ -232,7 +195,7 @@ TEST(SasTokenValidationTests, ControlCharactersFragmentsAndEmbeddedQuestionMarks
                                     std::string{"sv=1?sig=x"}, std::string{"sv=1 &sig=x"}, std::string{"sv=1\0x", 6}}) {
         auto options = MakeBlobClientOptions();
         options.SasToken = token;
-        EXPECT_THROW((BlockBlobClient{httpClient, options}), std::invalid_argument) << token;
+        EXPECT_THROW((BlobClient{httpClient, options}), std::invalid_argument) << token;
     }
 }
 
@@ -242,7 +205,7 @@ TEST(SasTokenValidationTests, MalformedPairsAreRejected) {
                                     std::string{"sv=1&sig"}, std::string{"sv=1&"}}) {
         auto options = MakeBlobClientOptions();
         options.SasToken = token;
-        EXPECT_THROW((BlockBlobClient{httpClient, options}), std::invalid_argument) << token;
+        EXPECT_THROW((BlobClient{httpClient, options}), std::invalid_argument) << token;
     }
 }
 
@@ -250,5 +213,5 @@ TEST(SasTokenValidationTests, OrdinaryTokenWithOneLeadingQuestionMarkIsAccepted)
     FakeHttpClient httpClient;
     auto options = MakeBlobClientOptions();
     options.SasToken = "?sv=2023-11-03&sig=abc%2Bdef%3D";
-    EXPECT_NO_THROW((BlockBlobClient{httpClient, options}));
+    EXPECT_NO_THROW((BlobClient{httpClient, options}));
 }

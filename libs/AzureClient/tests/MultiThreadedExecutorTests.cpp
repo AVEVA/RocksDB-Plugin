@@ -5,15 +5,14 @@
 // completions for one operation genuinely arrive on several threads at once. Built as its own
 // executable with the `concurrency` label; run it under ThreadSanitizer (LinuxDebugTSan) to check
 // the engines' locking (T30).
-#include "FakeHttpUrl.hpp"
 #include "AVEVA/AzureClient/BlobClient.hpp"
 #include "AVEVA/AzureClient/BlobContainerClient.hpp"
 #include "AVEVA/AzureClient/BlobOperationOptions.hpp"
 #include "AVEVA/AzureClient/BlobStorageError.hpp"
-#include "AVEVA/AzureClient/BlockBlobClient.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
 #include "AVEVA/AzureClient/PageBlobClient.hpp"
 #include "AVEVA/AzureClient/Response.hpp"
+#include "FakeHttpUrl.hpp"
 
 #include <AVEVA/HttpClient/HttpClient.hpp>
 #include <AVEVA/HttpClient/HttpHeader.hpp>
@@ -34,13 +33,16 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <future>
+#include <iterator>
 #include <map>
 #include <mutex>
-#include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -100,6 +102,11 @@ class ThreadPoolBlobService final {
             token, std::move(request), options);
     }
 
+    void Seed(const std::string& blobName, std::string content) {
+        const std::scoped_lock lock(m_mutex);
+        m_blobs["https://account.blob.core.windows.net/container/" + blobName] = std::move(content);
+    }
+
     [[nodiscard]] std::size_t Requests() const noexcept { return m_requests.load(); }
 
     [[nodiscard]] std::size_t Throttled() const noexcept { return m_throttled.load(); }
@@ -143,22 +150,6 @@ class ThreadPoolBlobService final {
 
         const std::scoped_lock lock(m_mutex);
         if (request.GetMethod() == HttpMethod::Put) {
-            if (query["comp"] == "block") {
-                m_blocks[path + "#" + query["blockid"]] = BodyOf(request);
-                return Ok(201);
-            }
-            if (query["comp"] == "blocklist") {
-                std::string content;
-                const std::string xml = BodyOf(request);
-                for (std::size_t pos = xml.find("<Latest>"); pos != std::string::npos;
-                     pos = xml.find("<Latest>", pos)) {
-                    pos += 8;
-                    const std::size_t end = xml.find("</Latest>", pos);
-                    content += m_blocks.at(path + "#" + xml.substr(pos, end - pos));
-                }
-                m_blobs[path] = std::move(content);
-                return Ok(201);
-            }
             m_blobs[path] = BodyOf(request);
             return Ok(201);
         }
@@ -190,12 +181,11 @@ class ThreadPoolBlobService final {
     mutable boost::asio::thread_pool m_pool{ThreadCount};
     std::mutex m_mutex;
     std::map<std::string, std::string> m_blobs;
-    std::map<std::string, std::string> m_blocks;
     std::atomic<std::size_t> m_requests{0};
     std::atomic<std::size_t> m_throttled{0};
 };
 
-using PoolBlockBlobClient = BasicBlockBlobClient<ThreadPoolBlobService>;
+using PoolPageBlobClient = BasicPageBlobClient<ThreadPoolBlobService>;
 using PoolBlobContainerClient = BasicBlobContainerClient<ThreadPoolBlobService>;
 
 [[nodiscard]] BlobContainerClientOptions SharedKeyContainerOptions() {
@@ -237,7 +227,7 @@ struct BlobSizeValue {
 }
 
 struct ConcurrentBlobData {
-    std::vector<PoolBlockBlobClient> Clients;
+    std::vector<PoolPageBlobClient> Clients;
     std::vector<std::string> Contents;
 };
 
@@ -247,42 +237,35 @@ struct ConcurrentBlobData {
     data.Clients.reserve(blobCount.Value);
     data.Contents.reserve(blobCount.Value);
     for (std::size_t i = 0; i < blobCount.Value; ++i) {
-        data.Clients.push_back(container.GetBlockBlobClient("blob-" + std::to_string(i)));
+        data.Clients.push_back(container.GetPageBlobClient("blob-" + std::to_string(i)));
         data.Contents.push_back(MakeContent(i, blobSize.Value));
     }
     return data;
 }
 
-void UploadAllBlobs(std::vector<PoolBlockBlobClient>& clients, const std::vector<std::string>& contents,
-                    const UploadBlockBlobOptions& uploadOptions) {
-    std::vector<std::future<std::expected<Response<Models::UploadBlockBlobResult>, BlobStorageError>>> uploads;
-    uploads.reserve(clients.size());
-    for (std::size_t i = 0; i < clients.size(); ++i) {
-        uploads.push_back(clients.at(i).UploadAsync(contents.at(i), uploadOptions, boost::asio::use_future));
-    }
-    for (auto& upload : uploads) {
-        const auto result = upload.get();
-        ASSERT_TRUE(result.has_value()) << result.error().Message;
-    }
-}
-
-void DownloadAndVerifyAllBlobs(std::vector<PoolBlockBlobClient>& clients, const std::vector<std::string>& contents,
+void DownloadAndVerifyAllBlobs(std::vector<PoolPageBlobClient>& clients, const std::vector<std::string>& contents,
                                const DownloadToOptions& downloadOptions) {
-    std::vector<std::ostringstream> sinks(clients.size());
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "mt-executor-downloads";
+    std::filesystem::create_directories(dir);
     std::vector<std::future<std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>>> downloads;
     downloads.reserve(clients.size());
     for (std::size_t i = 0; i < clients.size(); ++i) {
-        downloads.push_back(clients.at(i).DownloadToAsync(sinks.at(i), downloadOptions, boost::asio::use_future));
+        downloads.push_back(clients.at(i).DownloadToAsync(dir / ("blob-" + std::to_string(i)), downloadOptions,
+                                                          boost::asio::use_future));
     }
     for (std::size_t i = 0; i < clients.size(); ++i) {
         const auto result = downloads.at(i).get();
         ASSERT_TRUE(result.has_value()) << result.error().Message;
-        EXPECT_EQ(sinks.at(i).str(), contents.at(i)) << "blob " << i;
+        std::ifstream in(dir / ("blob-" + std::to_string(i)), std::ios::binary);
+        const std::string actual{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+        EXPECT_EQ(actual, contents.at(i)) << "blob " << i;
     }
+    std::error_code ignored;
+    std::filesystem::remove_all(dir, ignored);
 }
 } // namespace
 
-TEST(MultiThreadedExecutorTests, ConcurrentChunkedUploadsAndDownloadsOnAThreadPool) {
+TEST(MultiThreadedExecutorTests, ConcurrentChunkedDownloadsOnAThreadPool) {
     constexpr std::size_t BlobCount = 8;
     constexpr std::size_t BlobSize = (64U * 1024U) + 123U;
 
@@ -290,8 +273,9 @@ TEST(MultiThreadedExecutorTests, ConcurrentChunkedUploadsAndDownloadsOnAThreadPo
     const PoolBlobContainerClient container{service, SharedKeyContainerOptions()};
     ConcurrentBlobData data = MakeConcurrentBlobData(container, BlobCountValue{BlobCount}, BlobSizeValue{BlobSize});
 
-    UploadBlockBlobOptions uploadOptions;
-    UploadAllBlobs(data.Clients, data.Contents, uploadOptions);
+    for (std::size_t i = 0; i < BlobCount; ++i) {
+        service.Seed("blob-" + std::to_string(i), data.Contents.at(i));
+    }
 
     DownloadToOptions downloadOptions;
     downloadOptions.ChunkSize = 4096U;
@@ -306,8 +290,8 @@ TEST(MultiThreadedExecutorTests, ClientsAreSafeToInitiateFromManyThreads) {
 
     ThreadPoolBlobService service;
     const PoolBlobContainerClient container{service, SharedKeyContainerOptions()};
-    auto shared = container.GetBlockBlobClient("shared");
-    ASSERT_TRUE(shared.UploadAsync(std::string{"payload"}, boost::asio::use_future).get().has_value());
+    service.Seed("shared", "payload");
+    auto shared = container.GetPageBlobClient("shared");
 
     std::atomic<std::size_t> succeeded{0};
     std::vector<std::thread> threads;
@@ -316,9 +300,9 @@ TEST(MultiThreadedExecutorTests, ClientsAreSafeToInitiateFromManyThreads) {
         threads.emplace_back([&, t] {
             // Mix the shared client with per-thread derived clients so both the shared target and
             // the shared signer are used concurrently.
-            auto own = container.GetBlockBlobClient("shared");
+            auto own = container.GetPageBlobClient("shared");
             for (std::size_t call = 0; call < CallsPerThread; ++call) {
-                PoolBlockBlobClient& client = (call + t) % 2 == 0 ? shared : own;
+                PoolPageBlobClient& client = (call + t) % 2 == 0 ? shared : own;
                 if (client.GetPropertiesAsync(boost::asio::use_future).get().has_value()) {
                     ++succeeded;
                 }

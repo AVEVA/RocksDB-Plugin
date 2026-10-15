@@ -6,7 +6,6 @@
 #include "AVEVA/AzureClient/BlobClient.hpp"
 #include "AVEVA/AzureClient/BlobContainerClient.hpp"
 #include "AVEVA/AzureClient/BlobOperationOptions.hpp"
-#include "AVEVA/AzureClient/BlockBlobClient.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
 #include "AVEVA/AzureClient/PageBlobClient.hpp"
 #include "FakeHttpClient.hpp"
@@ -25,7 +24,6 @@
 #include <optional>
 #include <ostream>
 #include <span>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -38,7 +36,6 @@ using AVEVA::HttpRequest;
 using AVEVA::AzureClient::Tests::BlobClient;
 using AVEVA::AzureClient::Tests::BlobContainerClient;
 using AVEVA::AzureClient::Tests::BlobServiceClient;
-using AVEVA::AzureClient::Tests::BlockBlobClient;
 using AVEVA::AzureClient::Tests::ClientSecretCredential;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
@@ -53,11 +50,10 @@ using Pairs = std::vector<std::pair<std::string, std::string>>;
 struct Clients {
     FakeHttpClient Http;
     BlobClient Blob{Http, MakeBlobClientOptions()};
-    BlockBlobClient Block{Http, MakeBlobClientOptions()};
     PageBlobClient Page{Http, MakeBlobClientOptions()};
     BlobContainerClient Container{Http, MakeBlobContainerClientOptions()};
     std::istringstream Source{"hello"};
-    std::ostringstream Sink;
+    std::string Sink = std::string(1024U, '\0');
 };
 
 constexpr auto Ignore = [](auto&&...) {};
@@ -212,13 +208,12 @@ std::vector<RequestShapeCase> BlobCases() {
                      .Headers = {{"Range", "bytes=10-29"}},
                      .AbsentHeaders = {"If-Match", "x-ms-range"},
                      .Body = std::nullopt});
-    cases.push_back({.Name = "Blob_DownloadTo",
+    cases.push_back({.Name = "Blob_DownloadToSpan",
                      .Start =
                          [](Clients& c) {
-                             DownloadToOptions o;
-                             o.ChunkSize = 1024;
-                             o.Concurrency = 2;
-                             c.Blob.DownloadToAsync(c.Sink, std::move(o), Ignore);
+                             DownloadBlobOptions o;
+                             o.Range = Models::BlobByteRange{.Offset = 0, .Length = 1024};
+                             c.Blob.DownloadToAsync(std::span<char>(c.Sink), std::move(o), Ignore);
                          },
                      .Method = HttpMethod::Get,
                      .Path = blob,
@@ -330,80 +325,6 @@ std::vector<RequestShapeCase> TypedBlobCases() {
     const std::string blob = "/images/photo.png";
     std::vector<RequestShapeCase> cases;
 
-    cases.push_back({.Name = "Block_Upload",
-                     .Start =
-                         [](Clients& c) {
-                             UploadBlockBlobOptions o;
-                             o.HttpHeaders = HttpHeaders();
-                             o.Metadata = Metadata();
-                             o.AccessTier = Models::AccessTier::Cool();
-                             o.Conditions = FullConditions();
-                             o.TransactionalContentMd5 = "bWQ1";
-                             c.Block.UploadAsync(std::string{"hello"}, std::move(o), Ignore);
-                         },
-                     .Method = HttpMethod::Put,
-                     .Path = blob,
-                     .Query = {},
-                     .Headers = Concat({{"x-ms-blob-type", "BlockBlob"},
-                                        {"Content-MD5", "bWQ1"},
-                                        {"x-ms-blob-content-type", "text/plain"},
-                                        {"x-ms-blob-content-encoding", "gzip"},
-                                        {"x-ms-blob-content-language", "en"},
-                                        {"x-ms-blob-cache-control", "no-cache"},
-                                        {"x-ms-blob-content-disposition", "inline"},
-                                        {"x-ms-blob-content-md5", "bWQ1"},
-                                        {"x-ms-meta-Project", "alpha"},
-                                        {"x-ms-access-tier", "Cool"}},
-                                       ConditionHeaders()),
-                     .AbsentHeaders = {},
-                     .Body = std::string{"hello"}});
-    cases.push_back({.Name = "Block_UploadSpan",
-                     .Start =
-                         [](Clients& c) {
-                             static constexpr std::array<std::byte, 2> Bytes{std::byte{'h'}, std::byte{'i'}};
-                             c.Block.UploadAsync(std::span<const std::byte>{Bytes}, Ignore);
-                         },
-                     .Method = HttpMethod::Put,
-                     .Path = blob,
-                     .Query = {},
-                     .Headers = {{"x-ms-blob-type", "BlockBlob"}},
-                     .AbsentHeaders = {"If-Match", "x-ms-meta-Project"},
-                     .Body = std::string{"hi"}});
-    cases.push_back({.Name = "Block_StageBlock",
-                     .Start =
-                         [](Clients& c) {
-                             StageBlockOptions o;
-                             o.Conditions = FullConditions();
-                             o.TransactionalContentCrc64 = "Y3JjNjQ=";
-                             c.Block.StageBlockAsync("YmxvY2s=", std::string{"data"}, std::move(o), Ignore);
-                         },
-                     .Method = HttpMethod::Put,
-                     .Path = blob,
-                     .Query = {{"comp", "block"}, {"blockid", "YmxvY2s%3D"}},
-                     .Headers = {{"x-ms-lease-id", "lease-1"}, {"x-ms-content-crc64", "Y3JjNjQ="}},
-                     .AbsentHeaders = {"If-Match", "If-None-Match", "x-ms-blob-type"},
-                     .Body = std::string{"data"}});
-    cases.push_back(
-        {.Name = "Block_CommitBlockList",
-         .Start =
-             [](Clients& c) {
-                 CommitBlockListOptions o;
-                 o.HttpHeaders = HttpHeaders();
-                 o.Metadata = Metadata();
-                 o.AccessTier = Models::AccessTier::Archive();
-                 o.Conditions = FullConditions();
-                 c.Block.CommitBlockListAsync({"YQ==", "Yg=="}, std::move(o), Ignore);
-             },
-         .Method = HttpMethod::Put,
-         .Path = blob,
-         .Query = {{"comp", "blocklist"}},
-         .Headers = Concat({{"x-ms-blob-content-type", "text/plain"},
-                            {"x-ms-meta-Project", "alpha"},
-                            {"x-ms-access-tier", "Archive"}},
-                           ConditionHeaders()),
-         .AbsentHeaders = {"x-ms-blob-type"},
-         .Body = std::string{
-             R"(<?xml version="1.0" encoding="utf-8"?><BlockList><Latest>YQ==</Latest><Latest>Yg==</Latest></BlockList>)"}});
     cases.push_back({.Name = "Page_Create",
                      .Start =
                          [](Clients& c) {
@@ -441,20 +362,6 @@ std::vector<RequestShapeCase> TypedBlobCases() {
                            ConditionHeaders()),
          .AbsentHeaders = {},
          .Body = std::string(512, 'x')});
-    cases.push_back(
-        {.Name = "Page_ClearPages",
-         .Start =
-             [](Clients& c) {
-                 ClearPagesOptions o;
-                 o.Conditions = FullConditions();
-                 c.Page.ClearPagesAsync(0, 512, std::move(o), Ignore);
-             },
-         .Method = HttpMethod::Put,
-         .Path = blob,
-         .Query = {{"comp", "page"}},
-         .Headers = Concat({{"x-ms-page-write", "clear"}, {"x-ms-range", "bytes=0-511"}}, ConditionHeaders()),
-         .AbsentHeaders = {},
-         .Body = std::string{}});
     cases.push_back({.Name = "Page_Resize",
                      .Start =
                          [](Clients& c) {
@@ -476,19 +383,6 @@ std::vector<RequestShapeCase> ContainerCases() {
     const std::string container = "/images";
     std::vector<RequestShapeCase> cases;
 
-    cases.push_back({.Name = "Container_Create",
-                     .Start =
-                         [](Clients& c) {
-                             CreateBlobContainerOptions o;
-                             o.Metadata = Metadata();
-                             c.Container.CreateAsync(std::move(o), Ignore);
-                         },
-                     .Method = HttpMethod::Put,
-                     .Path = container,
-                     .Query = {{"restype", "container"}},
-                     .Headers = {{"x-ms-meta-Project", "alpha"}},
-                     .AbsentHeaders = {},
-                     .Body = std::nullopt});
     cases.push_back({.Name = "Container_CreateIfNotExists",
                      .Start = [](Clients& c) { c.Container.CreateIfNotExistsAsync(Ignore); },
                      .Method = HttpMethod::Put,

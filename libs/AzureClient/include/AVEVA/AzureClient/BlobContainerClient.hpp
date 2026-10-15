@@ -8,7 +8,6 @@
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
-#include <AVEVA/AzureClient/BlockBlobClient.hpp>
 #include <AVEVA/AzureClient/ClientForwardDeclarations.hpp>
 #include <AVEVA/AzureClient/Detail/BlobBatch.hpp>
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
@@ -76,8 +75,6 @@ struct ConnectionState;
 // Overloads that also take an options struct exclude it from the defaulted token via `requires`.
 template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContainerClient {
   public:
-    using BlobClientType = BasicBlobClient<THttp, TCred>;
-    using BlockBlobClientType = BasicBlockBlobClient<THttp, TCred>;
     using PageBlobClientType = BasicPageBlobClient<THttp, TCred>;
 
     BasicBlobContainerClient(THttp& httpClient, const BlobContainerClientOptions& options,
@@ -112,23 +109,6 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContai
     // The default completion token used when a ...Async call omits an explicit token
     // (matching this client's executor_type, per boost::asio::default_completion_token).
     using DefaultCompletionToken = boost::asio::default_completion_token<executor_type>::type;
-
-    template <class CompletionToken = DefaultCompletionToken>
-        requires(!std::same_as<std::remove_cvref_t<CompletionToken>, CreateBlobContainerOptions>)
-    [[nodiscard]] auto CreateAsync(CompletionToken&& token = CompletionToken{},
-                                   std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::CreateBlobContainerResult>(
-            this, [](auto& client, auto&&... args) { client.CreateAsyncImpl(std::forward<decltype(args)>(args)...); },
-            std::forward<CompletionToken>(token), std::move(requestOptions), CreateBlobContainerOptions{});
-    }
-
-    template <class CompletionToken = DefaultCompletionToken>
-    [[nodiscard]] auto CreateAsync(CreateBlobContainerOptions options, CompletionToken&& token = CompletionToken{},
-                                   std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::CreateBlobContainerResult>(
-            this, [](auto& client, auto&&... args) { client.CreateAsyncImpl(std::forward<decltype(args)>(args)...); },
-            std::forward<CompletionToken>(token), std::move(requestOptions), std::move(options));
-    }
 
     template <class CompletionToken = DefaultCompletionToken>
         requires(!std::same_as<std::remove_cvref_t<CompletionToken>, ListBlobsOptions>)
@@ -178,12 +158,6 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContai
     }
 
     // Clients are cheap, movable values (one shared target allocation each); no heap-allocated wrapper is needed.
-    [[nodiscard]] BlobClientType GetBlobClient(std::string blobName) const {
-        return BlobClientType{*m_httpClient, MakeBlobTarget(std::move(blobName)), m_httpOwner};
-    }
-    [[nodiscard]] BlockBlobClientType GetBlockBlobClient(std::string blobName) const {
-        return BlockBlobClientType{*m_httpClient, MakeBlobTarget(std::move(blobName)), m_httpOwner};
-    }
     [[nodiscard]] PageBlobClientType GetPageBlobClient(std::string blobName) const {
         return PageBlobClientType{*m_httpClient, MakeBlobTarget(std::move(blobName)), m_httpOwner};
     }
@@ -237,16 +211,6 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContai
     [[nodiscard]] std::shared_ptr<const Private::BasicBlobTarget<TCred>> MakeBlobTarget(std::string blobName) const {
         return std::make_shared<const Private::BasicBlobTarget<TCred>>(Private::MakeBlobTarget<TCred>(
             m_target->Connection, m_target->Credential, m_target->ContainerName, std::move(blobName)));
-    }
-
-    // Operation entry points (see BasicBlobClient).
-    template <class THandler>
-    void CreateAsyncImpl(const CreateBlobContainerOptions& options, THandler completion,
-                         HttpRequestOptions requestOptions = {}) {
-        Private::SendAndParse<Models::CreateBlobContainerResult>(
-            *m_httpClient, *m_target, Private::BuildCreateContainerRequest(*m_target, options),
-            Private::ParseETagAndLastModified<Models::CreateBlobContainerResult>, std::move(completion),
-            requestOptions);
     }
 
     template <class THandler>

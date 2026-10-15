@@ -68,7 +68,6 @@ DownloadToOptions ToDownloadToOptions(DownloadBlobOptions options) {
 namespace {
 constexpr std::size_t MinContainerNameLength = 3U;
 constexpr std::size_t MaxContainerNameLength = 63U;
-constexpr std::size_t MaxBlockIdDecodedBytes = 64U;
 
 [[nodiscard]] constexpr bool IsAsciiWhitespace(char value) noexcept {
     switch (value) {
@@ -340,10 +339,8 @@ template <class TOptions> void ValidateConnectionOptions(const TOptions& options
     credentialCount += options.SasToken.empty() ? 0U : 1U;
     credentialCount += options.SharedKey.AccountName.empty() ? 0U : 1U;
     credentialCount += hasTokenCredential ? 1U : 0U;
-    credentialCount += options.BearerToken.empty() ? 0U : 1U;
     if (credentialCount > 1U) {
-        throw std::invalid_argument(
-            "Specify at most one credential type: SasToken, SharedKey, TokenCredential, or BearerToken.");
+        throw std::invalid_argument("Specify at most one credential type: SasToken, SharedKey, or TokenCredential.");
     }
     if (credentialCount > 0U) {
         ValidateTokenTransport(options.ServiceEndpoint);
@@ -361,7 +358,6 @@ template <class TOptions>
     state->SasToken = std::move(options.SasToken);
     state->ApiVersion = std::move(options.ApiVersion);
     NormalizeTokenScopes(options.TokenScopes);
-    state->BearerToken = std::move(options.BearerToken);
     state->TokenScopes = std::make_shared<const std::vector<std::string>>(std::move(options.TokenScopes));
     if (!options.SharedKey.AccountName.empty()) {
         state->Signer = std::make_shared<const SharedKeySigner>(std::move(options.SharedKey.AccountName),
@@ -399,15 +395,6 @@ template <class TOptions>
     AddHeader(request, XMsVersionHeaderName, options.ApiVersion);
     AddHeader(request, XMsClientRequestIdHeaderName, CreateClientRequestId());
     return request;
-}
-
-[[nodiscard]] std::size_t GetDecodedBlockIdLength(std::string_view blockId) {
-    try {
-        return ValidateBase64AndGetDecodedLength(blockId, false);
-    } catch (const std::invalid_argument&) {
-        throw std::invalid_argument(blockId.empty() ? "Block IDs must be non-empty base64 strings."
-                                                    : "Block IDs must be valid base64 strings.");
-    }
 }
 } // namespace
 
@@ -529,11 +516,6 @@ RequestFailure MakeInvalidResponseFailure(const HttpResponse& response, std::str
     return {.Error = make_error_code(BlobStorageErrorCode::InvalidResponse), .Details = std::move(details)};
 }
 
-void ApplyTransactionalHashes(HttpRequest& request, std::string_view md5, StringLabel<TransactionalCrc64Tag> crc64) {
-    AddHeaderIfNotEmpty(request, ContentMd5HeaderName, md5);
-    AddHeaderIfNotEmpty(request, XMsContentCrc64HeaderName, crc64.Value);
-}
-
 std::shared_ptr<const ConnectionState> MakeConnectionState(BlobServiceClientOptions options, bool hasTokenCredential) {
     return BuildConnection(options, hasTokenCredential);
 }
@@ -582,11 +564,6 @@ RequestAuth MakeRequestAuth(const ConnectionState& connection, bool hasTokenCred
     if (connection.Signer) {
         auth.Type = RequestAuth::Kind::SharedKey;
         auth.Signer = connection.Signer;
-        return auth;
-    }
-    if (!connection.BearerToken.empty()) {
-        auth.Type = RequestAuth::Kind::Bearer;
-        auth.BearerToken = connection.BearerToken;
         return auth;
     }
     if (hasTokenCredential) {
@@ -726,12 +703,5 @@ void AuthorizeRequest(const SharedKeyCredentialOptions& options, HttpRequest& re
 
 void AuthorizeRequest(const SharedKeySigner& signer, HttpRequest& request) {
     AddHeader(request, AuthorizationHeaderName, signer.Authorize(request));
-}
-
-void ValidateBlockId(std::string_view blockId) {
-    const std::size_t decodedLength = GetDecodedBlockIdLength(blockId);
-    if (decodedLength > MaxBlockIdDecodedBytes) {
-        throw std::invalid_argument("Block IDs must decode to at most 64 bytes.");
-    }
 }
 } // namespace AVEVA::AzureClient::Private

@@ -42,7 +42,6 @@
 #include <mutex>
 #include <new>
 #include <optional>
-#include <ostream>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -646,21 +645,6 @@ void DownloadBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
             value.ContentRange = result->ContentRange;
             completion(
                 Response<Models::DownloadBlobResult>{std::move(value), std::move(result->FirstResponse), std::nullopt});
-        },
-        requestOptions);
-}
-
-template <HttpClientLike THttp, class TCred, class TCompletion>
-void DownloadBlobToAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, DownloadToOptions operationOptions,
-                         std::ostream& stream, TCompletion completion, HttpRequestOptions requestOptions) {
-    DownloadDetail::StartDownload(
-        httpClient, options, std::move(operationOptions), std::make_shared<StreamSink>(stream),
-        [completion = std::move(completion)](DownloadDetail::SummaryResult result) mutable {
-            if (!result.has_value()) {
-                completion(std::unexpected(std::move(result).error()));
-                return;
-            }
-            completion(DownloadDetail::ToDownloadToResponse(std::move(*result)));
         },
         requestOptions);
 }

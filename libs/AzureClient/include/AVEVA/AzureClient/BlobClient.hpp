@@ -39,12 +39,11 @@
 
 namespace AVEVA::AzureClient {
 
-// Operations common to every blob type; BlockBlobClient and PageBlobClient derive
-// from it. Usable on its own (e.g. via BlobContainerClient::GetBlobClient) when the blob type is
-// irrelevant.
+// Operations common to every blob type; PageBlobClient derives from it. Usable on its own when the blob
+// type is irrelevant.
 //
 // Thread safety: distinct instances are independent; concurrent ...Async calls on one instance are
-// supported (connection state is immutable once constructed). Stream and span arguments are not
+// supported (connection state is immutable once constructed). Span arguments are not
 // synchronized by the library and must not be touched by the caller until the operation completes.
 // Completion handlers are not serialized with each other and may run inline, before the initiating
 // call returns, or on any thread that drives the HTTP client.
@@ -112,26 +111,13 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
             std::forward<CompletionToken>(token), std::move(requestOptions), std::move(options));
     }
 
-    // DownloadToAsync overload set (the first argument picks the sink, the options type picks the mode):
-    //   (stream|path, DownloadToOptions)   - whole blob (or DownloadToOptions::Range), chunked and optionally parallel.
-    //   (stream|path, token)               - whole blob with default DownloadToOptions, chunked.
-    //   (stream|path, DownloadBlobOptions) - honours DownloadBlobOptions::Range; goes through the same chunked engine.
-    // Stream/file writes run on the client's executor (the threads completing HTTP requests): use a dedicated
-    // io_context or a fast stream. To cancel, emit the signal from the handler's executor/strand.
-
-    // Chunked download with an explicit ChunkSize and Concurrency (see DownloadToOptions). `stream` is
-    // captured by reference and must outlive the operation.
-    template <class CompletionToken = DefaultCompletionToken>
-    [[nodiscard]] auto DownloadToAsync(std::ostream& stream, DownloadToOptions options,
-                                       CompletionToken&& token = CompletionToken{},
-                                       std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::DownloadBlobToResult>(
-            this,
-            [](auto& client, auto&&... args) {
-                client.DownloadToStreamAsyncImpl(std::forward<decltype(args)>(args)...);
-            },
-            std::forward<CompletionToken>(token), std::move(requestOptions), std::ref(stream), std::move(options));
-    }
+    // DownloadToAsync overload set (the first argument picks the destination, the options type picks the mode):
+    //   (path, DownloadToOptions)   - whole blob (or DownloadToOptions::Range), chunked and optionally parallel.
+    //   (path, token)               - whole blob with default DownloadToOptions, chunked.
+    //   (path, DownloadBlobOptions) - honours DownloadBlobOptions::Range; goes through the same chunked engine.
+    //   (span, DownloadBlobOptions) - the range straight into caller memory.
+    // File writes run on the client's executor (the threads completing HTTP requests): use a dedicated
+    // io_context or a fast disk. To cancel, emit the signal from the handler's executor/strand.
 
     // Chunked download into `path`, via a temporary sibling file that replaces `path` only on success.
     template <class CompletionToken = DefaultCompletionToken>
@@ -142,19 +128,6 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
             this,
             [](auto& client, auto&&... args) { client.DownloadToFileAsyncImpl(std::forward<decltype(args)>(args)...); },
             std::forward<CompletionToken>(token), std::move(requestOptions), path, std::move(options));
-    }
-
-    template <class CompletionToken = DefaultCompletionToken>
-        requires(!std::same_as<std::remove_cvref_t<CompletionToken>, DownloadBlobOptions> &&
-                 !std::same_as<std::remove_cvref_t<CompletionToken>, DownloadToOptions>)
-    [[nodiscard]] auto DownloadToAsync(std::ostream& stream, CompletionToken&& token = CompletionToken{},
-                                       std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::DownloadBlobToResult>(
-            this,
-            [](auto& client, auto&&... args) {
-                client.DownloadToStreamAsyncImpl(std::forward<decltype(args)>(args)...);
-            },
-            std::forward<CompletionToken>(token), std::move(requestOptions), std::ref(stream), DownloadToOptions{});
     }
 
     // Downloads the range straight into `destination`, avoiding an intermediate copy of the body. The span must
@@ -170,18 +143,6 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
                 client.DownloadRangeToSpanAsyncImpl(std::forward<decltype(args)>(args)...);
             },
             std::forward<CompletionToken>(token), std::move(requestOptions), destination, std::move(options));
-    }
-
-    template <class CompletionToken = DefaultCompletionToken>
-    [[nodiscard]] auto DownloadToAsync(std::ostream& stream, DownloadBlobOptions options,
-                                       CompletionToken&& token = CompletionToken{},
-                                       std::optional<HttpRequestOptions> requestOptions = std::nullopt) {
-        return Private::InitiateClientOperation<Models::DownloadBlobToResult>(
-            this,
-            [](auto& client, auto&&... args) {
-                client.DownloadRangeToStreamAsyncImpl(std::forward<decltype(args)>(args)...);
-            },
-            std::forward<CompletionToken>(token), std::move(requestOptions), std::ref(stream), std::move(options));
     }
 
     template <class CompletionToken = DefaultCompletionToken>
@@ -353,24 +314,10 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
     }
 
     template <class THandler>
-    void DownloadToStreamAsyncImpl(std::ostream& stream, DownloadToOptions options, THandler completion,
-                                   HttpRequestOptions requestOptions) {
-        Private::DownloadBlobToAsync(*m_httpClient, *m_target, std::move(options), stream, std::move(completion),
-                                     requestOptions);
-    }
-
-    template <class THandler>
     void DownloadToFileAsyncImpl(const std::filesystem::path& path, DownloadToOptions options, THandler completion,
                                  HttpRequestOptions requestOptions) {
         Private::DownloadBlobToFileAsync(*m_httpClient, *m_target, std::move(options), path, std::move(completion),
                                          requestOptions);
-    }
-
-    template <class THandler>
-    void DownloadRangeToStreamAsyncImpl(std::ostream& stream, DownloadBlobOptions options, THandler completion,
-                                        HttpRequestOptions requestOptions) {
-        DownloadToStreamAsyncImpl(stream, Private::ToDownloadToOptions(std::move(options)), std::move(completion),
-                                  requestOptions);
     }
 
     template <class THandler>

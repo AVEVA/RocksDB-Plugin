@@ -358,15 +358,6 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
             RequestToken(std::move(attempt));
             return;
 
-        case RequestAuth::Kind::Bearer:
-            if (!RebuildAttempt(attempt, m_auth.BearerToken)) {
-                return;
-            }
-            ResolveCopySourceAuthorization(attempt, m_auth.BearerToken);
-            SetBearerAuthorization(attempt, m_auth.BearerToken);
-            Send(std::move(attempt));
-            return;
-
         case RequestAuth::Kind::None:
             ResolveCopySourceAuthorization(attempt, {});
             if (!RebuildAttempt(attempt, {})) {

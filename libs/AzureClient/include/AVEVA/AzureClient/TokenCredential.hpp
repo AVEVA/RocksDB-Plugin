@@ -80,7 +80,7 @@ void CompleteOnExecutorIfSet(const std::optional<boost::asio::io_context::execut
 } // namespace Private
 
 // The credential of clients that are not given one: every request fails with std::errc::operation_not_permitted.
-// Clients authorized by SAS, Shared Key or a bearer token use it as their TCred.
+// Clients authorized by SAS or Shared Key use it as their TCred.
 class NoTokenCredential {
   public:
     template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
@@ -91,32 +91,6 @@ class NoTokenCredential {
             },
             token);
     }
-};
-
-// Returns a fixed token. The requested `scopes` are ignored.
-class StaticTokenCredential {
-  public:
-    // `executor`, if supplied, is used to post GetTokenAsync completions.
-    explicit StaticTokenCredential(
-        std::string token,
-        std::chrono::system_clock::time_point expiresOn = std::chrono::system_clock::time_point::max(),
-        std::optional<boost::asio::io_context::executor_type> executor = std::nullopt)
-        : m_token(std::move(token)), m_expiresOn(expiresOn), m_executor(std::move(executor)) {}
-
-    template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
-    auto GetTokenAsync(std::vector<std::string> /*scopes*/, CompletionToken&& token) {
-        return boost::asio::async_initiate<TokenSignature>(
-            [this](auto handler) {
-                Private::CompleteOnExecutorIfSet(m_executor, std::move(handler), std::error_code{},
-                                                 AccessToken{.Token = m_token, .ExpiresOn = m_expiresOn});
-            },
-            token);
-    }
-
-  private:
-    std::string m_token;
-    std::chrono::system_clock::time_point m_expiresOn;
-    std::optional<boost::asio::io_context::executor_type> m_executor;
 };
 
 // "Now" for expiry, refresh-window and backoff decisions of CachingTokenCredential.

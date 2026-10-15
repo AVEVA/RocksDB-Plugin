@@ -24,16 +24,12 @@ Both libraries have diverged from the imported 0.0.1 tree. The changes are in th
   helper were later removed as well, since the plugin never used them. `PageBlobClient::GetPageRangesAsync` is kept:
   the plugin uses it (`BlobOperations.hpp`).
 
-## Kept but currently unused
+## Also removed
 
-These APIs are not called by the plugin but remain in `libs/AzureClient` (and are covered by its tests) until the
-trim is finished:
-
-- `BlockBlobClient` (whole header and sources) and its plugin typedef and instantiation.
-- `PageBlobClient::ClearPagesAsync` with its options and model.
-- `BlobContainerClient::CreateAsync`, `GetBlobClient` and `GetBlockBlobClient`.
-- The stream overloads of `DownloadToAsync`.
-- `StaticTokenCredential` and the static `BearerToken` path (`RequestAuth::Kind::Bearer`).
+`BlockBlobClient` (header, sources, plugin typedef and instantiation), `PageBlobClient::ClearPagesAsync`,
+`BlobContainerClient::CreateAsync`/`GetBlobClient`/`GetBlockBlobClient`, the stream overloads of
+`DownloadToAsync` and the static bearer-token path (`StaticTokenCredential`, `RequestAuth::Kind::Bearer`)
+were removed. A test-only `Tests::StaticTokenCredential` remains in `libs/AzureClient/tests/FakeHttpClient.hpp`.
 
 ## Updating
 

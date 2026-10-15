@@ -113,9 +113,6 @@ class BatchDeleteOperation final
         case RequestAuth::Kind::SharedKey:
             AuthorizeRequest(*m_auth.Signer, subrequest);
             break;
-        case RequestAuth::Kind::Bearer:
-            AddHeader(subrequest, AuthorizationHeaderName, "Bearer " + m_auth.BearerToken);
-            break;
         case RequestAuth::Kind::Token:
             AddHeader(subrequest, AuthorizationHeaderName, "Bearer " + std::string{token});
             break;

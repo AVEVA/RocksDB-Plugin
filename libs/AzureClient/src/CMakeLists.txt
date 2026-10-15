@@ -24,8 +24,6 @@ add_library(aveva-azure-client
     BlobServiceClient.cpp
     Credentials.cpp
     BlobStorageErrorCategory.cpp
-    BlobModels.cpp
-    BlockBlobClient.cpp
     PageBlobClient.cpp
     RequestPipeline.cpp
 )
@@ -55,7 +53,6 @@ target_sources(aveva-azure-client
         "${base-include-dir}/AVEVA/AzureClient/BlobServiceClient.hpp"
         "${base-include-dir}/AVEVA/AzureClient/BlobStorageError.hpp"
         "${base-include-dir}/AVEVA/AzureClient/BlobStorageErrorCode.hpp"
-        "${base-include-dir}/AVEVA/AzureClient/BlockBlobClient.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Detail/AsyncInitiation.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Detail/BlobBatch.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Detail/BlobDownload.hpp"

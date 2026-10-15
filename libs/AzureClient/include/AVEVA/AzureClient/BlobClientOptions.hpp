@@ -47,10 +47,9 @@ struct BlobClientOptions {
     // Already URL-encoded `key=value` pairs joined by '&'; one leading '?' is tolerated and stripped.
     std::string SasToken;
 
-    // Authorization precedence is SAS > SharedKey > TokenCredential > BearerToken.
-    // BearerToken/TokenCredential require an https ServiceEndpoint (an http endpoint is rejected with
+    // Authorization precedence is SAS > SharedKey > TokenCredential.
+    // TokenCredential requires an https ServiceEndpoint (an http endpoint is rejected with
     // std::invalid_argument) unless the host is loopback (localhost, 127.0.0.1, [::1]).
-    std::string BearerToken;
     std::vector<std::string> TokenScopes{"https://storage.azure.com/.default"};
     SharedKeyCredentialOptions SharedKey;
 
@@ -67,10 +66,9 @@ struct BlobClientOptions {
 struct BlobContainerClientOptions {
     std::string ServiceEndpoint;
     std::string ContainerName;
-    // Authorization precedence is SAS > SharedKey > TokenCredential > BearerToken (see BlobClientOptions).
-    // BearerToken/TokenCredential require https unless the host is loopback (see BlobClientOptions).
+    // Authorization precedence is SAS > SharedKey > TokenCredential (see BlobClientOptions).
+    // TokenCredential requires https unless the host is loopback (see BlobClientOptions).
     std::string SasToken;
-    std::string BearerToken;
     std::vector<std::string> TokenScopes{"https://storage.azure.com/.default"};
     SharedKeyCredentialOptions SharedKey;
     std::string ApiVersion = std::string(DefaultApiVersion);
@@ -84,10 +82,9 @@ struct BlobContainerClientOptions {
 
 struct BlobServiceClientOptions {
     std::string ServiceEndpoint;
-    // Authorization precedence is SAS > SharedKey > TokenCredential > BearerToken (see BlobClientOptions).
-    // BearerToken/TokenCredential require https unless the host is loopback (see BlobClientOptions).
+    // Authorization precedence is SAS > SharedKey > TokenCredential (see BlobClientOptions).
+    // TokenCredential requires https unless the host is loopback (see BlobClientOptions).
     std::string SasToken;
-    std::string BearerToken;
     std::vector<std::string> TokenScopes{"https://storage.azure.com/.default"};
     SharedKeyCredentialOptions SharedKey;
     std::string ApiVersion = std::string(DefaultApiVersion);

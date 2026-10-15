@@ -62,7 +62,6 @@ aveva_azure_client_add_unit_tests(aveva-azure-client-blob-tests
     BlobRequestHelpersTests.cpp
     BlobServiceClientTests.cpp
     BlobStorageErrorCategoryTests.cpp
-    BlockBlobClientTests.cpp
     PageBlobClientTests.cpp
     ModelTests.cpp
     LeaseTests.cpp
@@ -70,7 +69,6 @@ aveva_azure_client_add_unit_tests(aveva-azure-client-blob-tests
     BatchDeleteTests.cpp
 )
 aveva_azure_client_add_unit_tests(aveva-azure-client-transfer-tests
-    UploadConcurrencyTests.cpp
     DownloadToFileTests.cpp
     ParallelDownloadTests.cpp
 )

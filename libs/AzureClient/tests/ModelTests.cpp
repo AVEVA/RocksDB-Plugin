@@ -8,7 +8,6 @@
 #include "TestFixtures.hpp"
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 
-#include <AVEVA/AzureClient/BlockBlobClient.hpp>
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
 
 #include <AVEVA/HttpClient/HttpHeader.hpp>
@@ -36,14 +35,14 @@ using AVEVA::HttpMethod;
 using AVEVA::HttpRequest;
 using AVEVA::HttpResponse;
 using AVEVA::AzureClient::AcquireLeaseOptions;
+using AVEVA::AzureClient::CreatePageBlobOptions;
 using AVEVA::AzureClient::DeleteBlobOptions;
 using AVEVA::AzureClient::ResizePageBlobOptions;
-using AVEVA::AzureClient::UploadBlockBlobOptions;
 using AVEVA::AzureClient::Models::AccessTier;
 using AVEVA::AzureClient::Models::LeaseDurationType;
 using AVEVA::AzureClient::Models::LeaseState;
 using AVEVA::AzureClient::Models::LeaseStatus;
-using AVEVA::AzureClient::Tests::BlockBlobClient;
+using AVEVA::AzureClient::Tests::BlobClient;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 using AVEVA::AzureClient::Tests::PageBlobClient;
@@ -79,7 +78,7 @@ void ExpectMalformedExtendedHeadersAreRejected() {
     }
 }
 
-void ExpectAcquireLeaseRejectsInvalidDurations(BlockBlobClient& client, FakeHttpClient& httpClient,
+void ExpectAcquireLeaseRejectsInvalidDurations(BlobClient& client, FakeHttpClient& httpClient,
                                                std::initializer_list<std::chrono::seconds> durations) {
     for (const auto duration : durations) {
         std::optional<std::error_code> error;
@@ -183,16 +182,16 @@ TEST(ModelTests, ListBlobsParsesExtendedPropertiesAndVersionSiblings) {
     EXPECT_EQ(properties.ServerEncrypted, std::optional<bool>{true});
 }
 
-TEST(ModelTests, UploadSendsContentEncodingLanguageAndDisposition) {
+TEST(ModelTests, CreatePageBlobSendsContentEncodingLanguageAndDisposition) {
     FakeHttpClient httpClient;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    PageBlobClient client{httpClient, MakeBlobClientOptions()};
 
-    UploadBlockBlobOptions options;
+    CreatePageBlobOptions options;
     options.HttpHeaders.ContentEncoding = "gzip";
     options.HttpHeaders.ContentLanguage = "fr";
     options.HttpHeaders.ContentDisposition = "attachment";
     options.AccessTier = AccessTier::Cold();
-    client.UploadAsync(std::string{"abc"}, std::move(options), IgnoreResult);
+    client.CreateAsync(512U, std::move(options), IgnoreResult);
     httpClient.Poll();
 
     const auto& request = httpClient.LastRequest();
@@ -201,7 +200,7 @@ TEST(ModelTests, UploadSendsContentEncodingLanguageAndDisposition) {
     EXPECT_EQ(Header(request, "x-ms-blob-content-disposition"), "attachment");
     EXPECT_EQ(Header(request, "x-ms-access-tier"), "Cold");
 
-    client.UploadAsync(std::string{"abc"}, IgnoreResult);
+    client.CreateAsync(512U, IgnoreResult);
     httpClient.Poll();
     EXPECT_FALSE(HasHeader(httpClient.LastRequest(), "x-ms-blob-content-encoding"));
     EXPECT_FALSE(HasHeader(httpClient.LastRequest(), "x-ms-access-tier"));
@@ -224,7 +223,7 @@ TEST(ModelTests, SharedKeyStringToSignIncludesContentEncodingAndLanguage) {
 
 TEST(ModelTests, AcquireLeaseDurationIsInfiniteByDefaultAndValidated) {
     FakeHttpClient httpClient;
-    BlockBlobClient client{httpClient, MakeBlobClientOptions()};
+    BlobClient client{httpClient, MakeBlobClientOptions()};
 
     client.AcquireLeaseAsync(IgnoreResult);
     httpClient.Poll();

@@ -66,17 +66,11 @@ TEST_F(FakeBlobServerTests, DeferredUploadAfterTheBlobWasShrunk_FailsWith416AndD
     EXPECT_EQ(static_cast<size_t>(2 * Page), m_env.Blob->Data.size());
 }
 
-TEST_F(FakeBlobServerTests, WritingZeros_ReportsTheRangeAndClearingItRemovesTheRange) {
+TEST_F(FakeBlobServerTests, WritingZeros_ReportsTheRange) {
     m_env.Blob->SetCapacity(4 * Page);
     ASSERT_EQ(Ok, Upload(Page, '\0').get());
 
     EXPECT_EQ((std::vector<std::pair<uint64_t, uint64_t>>{{Page, Page}}), Ranges());
-
-    auto cleared = Start([&](auto handler) {
-        m_env.Client->ClearPagesAsync(static_cast<uint64_t>(Page), static_cast<uint64_t>(Page), std::move(handler));
-    });
-    ASSERT_EQ(Ok, cleared.get());
-    EXPECT_TRUE(Ranges().empty());
 }
 
 TEST_F(FakeBlobServerTests, ShrinkingTheBlob_DropsRangesBeyondTheNewEnd) {
