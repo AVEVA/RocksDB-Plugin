@@ -90,11 +90,11 @@ int main(int argc, char** argv) {
     std::shared_ptr<rocksdb::Env> guard;
 
     // The plugin blocks on this context from RocksDB threads, so it must be run by dedicated threads
-    // that never call into RocksDB. It intentionally lives until process exit (see std::_Exit below).
-    auto* ioContext = new boost::asio::io_context();
-    auto workGuard =
-        new boost::asio::executor_work_guard<boost::asio::io_context::executor_type>(ioContext->get_executor());
-    (void)workGuard;
+    // that never call into RocksDB. Statics live until process exit (see std::_Exit below), which skips
+    // their destructors, so the detached threads never observe a destroyed context.
+    static boost::asio::io_context ioContextStorage;
+    static auto workGuard = boost::asio::make_work_guard(ioContextStorage);
+    auto* ioContext = &ioContextStorage;
     std::vector<std::thread> ioThreads;
     for (int i = 0; i < 4; ++i) {
         ioThreads.emplace_back([ioContext] { ioContext->run(); });
