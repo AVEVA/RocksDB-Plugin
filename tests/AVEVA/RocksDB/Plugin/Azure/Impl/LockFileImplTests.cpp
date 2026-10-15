@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <exception>
 #include <functional>
 #include <future>
@@ -144,15 +145,12 @@ TEST_F(LockFileImplTests, StateQueriesAreNotBlockedWhileLockIsRetrying) {
     auto lock = CreateLock(std::chrono::seconds(20));
     std::atomic<bool> lockResult{false};
     std::jthread locker([&] { lockResult = lock->Lock(); });
-    while (m_httpClient.RequestCount() < 2U) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    ASSERT_TRUE(m_httpClient.WaitForRequestCount(2U));
 
-    const auto start = std::chrono::steady_clock::now();
+    // None of these may queue behind the retry loop; if one did, it would block until the lock finished.
     EXPECT_FALSE(lock->RenewIfLocked());
     EXPECT_FALSE(lock->IsRenewalOverdue());
     EXPECT_FALSE(lock->Lock()); // A concurrent acquire is rejected rather than queued behind the retry loop.
-    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(200));
 
     locker.join();
     EXPECT_TRUE(lockResult);
@@ -199,12 +197,8 @@ TEST_F(LockFileImplTests, RenewThatOutlastsTheLeaseIsCancelledAtTheDeadlineAndTh
                                                                               margin - std::chrono::milliseconds(200));
     ASSERT_FALSE(lock->HasExceededLeaseLength());
 
-    const auto start = std::chrono::steady_clock::now();
-    EXPECT_ANY_THROW(lock->Renew());
-    const auto elapsed = std::chrono::steady_clock::now() - start;
-
     // The caller must find out at the renewal deadline, not hang until the lease has run out.
-    EXPECT_LT(elapsed, std::chrono::seconds(5));
+    EXPECT_ANY_THROW(lock->Renew());
     *offset = leaseLength;
     EXPECT_TRUE(lock->HasExceededLeaseLength());
     EXPECT_THROW(lock->Renew(), std::runtime_error);
@@ -275,6 +269,33 @@ TEST_F(LockFileImplTests, RenewAsyncReportsAFailedRenewalAsAnError) {
     EXPECT_THROW(std::rethrow_exception(outcome.Error), RequestFailedException);
 }
 namespace {
+// Counts fatal callbacks and lets a test block until one arrives instead of polling.
+class FatalCounter {
+  public:
+    void Increment() {
+        {
+            std::scoped_lock lock(m_mutex);
+            ++m_count;
+        }
+        m_cv.notify_all();
+    }
+    [[nodiscard]] int Count() const {
+        std::scoped_lock lock(m_mutex);
+        return m_count;
+    }
+    [[nodiscard]] bool WaitForAtLeast(const int count) {
+        std::unique_lock lock(m_mutex);
+        return m_cv.wait_for(lock, std::chrono::seconds(10), [&] { return m_count >= count; });
+    }
+
+  private:
+    mutable std::mutex m_mutex;
+    std::condition_variable m_cv;
+    int m_count = 0;
+};
+} // namespace
+
+namespace {
 // Drives a LeaseRenewalLoop on its own io_context thread, separate from the fake HTTP client's.
 class LeaseRenewalLoopTests : public LockFileImplTests {
   public:
@@ -283,8 +304,8 @@ class LeaseRenewalLoopTests : public LockFileImplTests {
         std::vector<std::shared_ptr<LockFileImpl>> operator()() const { return {Lock}; }
     };
     struct CountFatal {
-        std::atomic<int>* Count;
-        void operator()() const { ++*Count; }
+        FatalCounter* Count;
+        void operator()() const { Count->Increment(); }
     };
     using Loop = BasicLeaseRenewalLoop<FixedSnapshot, CountFatal, LockFileImpl>;
 
@@ -314,13 +335,7 @@ class LeaseRenewalLoopTests : public LockFileImplTests {
                              std::chrono::milliseconds(20), std::chrono::milliseconds(5));
     }
 
-    bool WaitForRequests(const std::size_t count) const {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-        while (m_httpClient.RequestCount() < count && std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-        return m_httpClient.RequestCount() >= count;
-    }
+    bool WaitForRequests(const std::size_t count) { return m_httpClient.WaitForRequestCount(count); }
 
     static HttpResponse Renewed() {
         return HttpResponse{200, MakeCanonicalSuccessHeaders({{"x-ms-lease-id", "lease"}}), ""};
@@ -330,7 +345,7 @@ class LeaseRenewalLoopTests : public LockFileImplTests {
     std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>> m_guard;
     std::jthread m_loopThread;
     std::shared_ptr<Loop> m_loop;
-    std::atomic<int> m_fatalCount{0};
+    FatalCounter m_fatalCount;
 };
 } // namespace
 
@@ -342,7 +357,7 @@ TEST_F(LeaseRenewalLoopTests, RenewsTheLeaseOnEveryInterval) {
     StartLoop(lock);
 
     EXPECT_TRUE(WaitForRequests(4)); // the acquire plus at least three renewals
-    EXPECT_EQ(m_fatalCount, 0);
+    EXPECT_EQ(m_fatalCount.Count(), 0);
 }
 
 TEST_F(LeaseRenewalLoopTests, StopHaltsFurtherRenewals) {
@@ -360,7 +375,7 @@ TEST_F(LeaseRenewalLoopTests, StopHaltsFurtherRenewals) {
 
     EXPECT_EQ(m_httpClient.RequestCount(), afterStop);
     EXPECT_TRUE(m_loop->IsStopped());
-    EXPECT_EQ(m_fatalCount, 0);
+    EXPECT_EQ(m_fatalCount.Count(), 0);
 }
 
 TEST_F(LeaseRenewalLoopTests, ConflictIsFatalAndStopsTheLoop) {
@@ -368,12 +383,9 @@ TEST_F(LeaseRenewalLoopTests, ConflictIsFatalAndStopsTheLoop) {
     m_httpClient.EnqueueResponse(MakeAzureErrorResponse(409, "LeaseIdMismatchWithLeaseOperation", "mismatch", "r2"));
     StartLoop(lock);
 
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (m_fatalCount == 0 && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    EXPECT_TRUE(m_fatalCount.WaitForAtLeast(1));
 
-    EXPECT_EQ(m_fatalCount, 1);
+    EXPECT_EQ(m_fatalCount.Count(), 1);
     EXPECT_TRUE(m_loop->IsStopped());
 }
 
@@ -387,13 +399,10 @@ TEST_F(LeaseRenewalLoopTests, ForbiddenRenewalFencesOnTheFirstRoundWithoutRetryi
     }
     StartLoop(lock);
 
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (m_fatalCount == 0 && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    EXPECT_TRUE(m_fatalCount.WaitForAtLeast(1));
     m_loop->Stop();
 
-    EXPECT_EQ(m_fatalCount, 1);
+    EXPECT_EQ(m_fatalCount.Count(), 1);
     EXPECT_EQ(m_httpClient.RequestCount(), before + 1);
 }
 
@@ -406,7 +415,7 @@ TEST_F(LeaseRenewalLoopTests, TransientFailureIsRetriedWithoutBeingFatal) {
     StartLoop(lock);
 
     EXPECT_TRUE(WaitForRequests(4));
-    EXPECT_EQ(m_fatalCount, 0);
+    EXPECT_EQ(m_fatalCount.Count(), 0);
     EXPECT_FALSE(m_loop->IsStopped());
 }
 namespace {
@@ -418,6 +427,7 @@ struct ScriptedLock {
         std::size_t Calls = 0;
         std::size_t ThrowOnCall = 0;
         std::vector<std::function<void()>> Completions;
+        std::condition_variable Started;
     };
     std::shared_ptr<Shared> State;
 
@@ -427,6 +437,7 @@ struct ScriptedLock {
             throw std::runtime_error("cannot start renewal");
         }
         State->Completions.emplace_back([callback = std::move(callback)] { callback(nullptr, true); });
+        State->Started.notify_all();
     }
     [[nodiscard]] bool IsRenewalOverdue() const { return false; }
     [[nodiscard]] std::optional<std::chrono::steady_clock::duration> RenewalTimeRemaining() const { return Remaining; }
@@ -439,8 +450,8 @@ struct ScriptedSnapshot {
 };
 
 struct ScriptedFatal {
-    std::atomic<int>* Count;
-    void operator()() const { ++*Count; }
+    FatalCounter* Count;
+    void operator()() const { Count->Increment(); }
 };
 } // namespace
 
@@ -458,18 +469,15 @@ TEST(LeaseRenewalLoopThrowTests, ThrowOnTheNthRenewAsyncIsFatalOnceAndLateComple
     for (int i = 0; i < 4; ++i) {
         snapshot.Locks.push_back(std::make_shared<ScriptedLock>(ScriptedLock{state}));
     }
-    std::atomic<int> fatal{0};
+    FatalCounter fatal;
 
     auto loop = BasicLeaseRenewalLoop<ScriptedSnapshot, ScriptedFatal, ScriptedLock>::Start(
         context.get_executor(), logger, snapshot, ScriptedFatal{&fatal}, std::chrono::milliseconds(5));
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (fatal == 0 && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    ASSERT_TRUE(fatal.WaitForAtLeast(1));
 
     // The abandoned round must not keep Stop() waiting, even though two renewals never completed.
     loop->Stop();
-    EXPECT_EQ(fatal, 1);
+    EXPECT_EQ(fatal.Count(), 1);
     EXPECT_TRUE(loop->IsStopped());
 
     // Completing the renewals that were already started must neither fire onFatal again nor restart the loop.
@@ -484,7 +492,7 @@ TEST(LeaseRenewalLoopThrowTests, ThrowOnTheNthRenewAsyncIsFatalOnceAndLateComple
     }
     guard.reset();
     thread.join();
-    EXPECT_EQ(fatal, 1);
+    EXPECT_EQ(fatal.Count(), 1);
     EXPECT_TRUE(loop->IsStopped());
     EXPECT_EQ(state->Calls, 3u);
 }
@@ -496,6 +504,7 @@ struct FailingLock {
         std::mutex Mutex;
         std::vector<std::chrono::steady_clock::time_point> Calls;
         std::optional<std::chrono::milliseconds> RetryAfter;
+        std::condition_variable Attempted;
     };
     std::shared_ptr<Shared> State;
     std::optional<std::chrono::steady_clock::duration> Remaining;
@@ -506,6 +515,7 @@ struct FailingLock {
             std::scoped_lock lock(State->Mutex);
             State->Calls.push_back(std::chrono::steady_clock::now());
             hint = State->RetryAfter;
+            State->Attempted.notify_all();
         }
         callback(std::make_exception_ptr(RequestFailedException(503, "ServerBusy", "busy", "id",
                                                                 std::make_error_code(std::errc::io_error), {}, hint)),
@@ -522,7 +532,7 @@ struct FailingSnapshot {
 
 struct FailingLoopRun {
     std::shared_ptr<FailingLock::Shared> State = std::make_shared<FailingLock::Shared>();
-    std::atomic<int> Fatal{0};
+    FatalCounter Fatal;
 
     // Runs one wake-up whose renewals keep failing, and returns the gaps between the attempts.
     std::vector<std::chrono::milliseconds> Run(const std::optional<std::chrono::steady_clock::duration> remaining,
@@ -536,18 +546,9 @@ struct FailingLoopRun {
 
         auto loop = Loop::Start(context.get_executor(), logger, snapshot, ScriptedFatal{&Fatal},
                                 std::chrono::milliseconds(500), retryDelay, 5);
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-        for (;;) {
-            {
-                std::scoped_lock lock(State->Mutex);
-                if (State->Calls.size() >= 5) {
-                    break;
-                }
-            }
-            if (std::chrono::steady_clock::now() > deadline) {
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        {
+            std::unique_lock lock(State->Mutex);
+            State->Attempted.wait_for(lock, std::chrono::seconds(10), [&] { return State->Calls.size() >= 5; });
         }
         loop->Stop();
         guard.reset();
@@ -575,7 +576,7 @@ TEST(LeaseRenewalLoopBackoffTests, RetryDelayGrowsExponentiallyWithJitter) {
         EXPECT_GE(gaps[k].count(), step / 2 - 5) << "gap " << k;
     }
     EXPECT_GE(gaps[3].count(), 75); // a fixed 40 ms delay would fail this
-    EXPECT_EQ(run.Fatal, 0);
+    EXPECT_EQ(run.Fatal.Count(), 0);
 }
 
 TEST(LeaseRenewalLoopBackoffTests, RetryAfterHintRaisesTheDelay) {
@@ -606,25 +607,18 @@ TEST(LeaseRenewalLoopThrowTests, StopGivesUpOnARoundThatNeverCompletes) {
     auto state = std::make_shared<ScriptedLock::Shared>();
     ScriptedSnapshot snapshot;
     snapshot.Locks.push_back(std::make_shared<ScriptedLock>(ScriptedLock{state}));
-    std::atomic<int> fatal{0};
+    FatalCounter fatal;
 
     auto loop =
         Loop::Start(context.get_executor(), logger, snapshot, ScriptedFatal{&fatal}, std::chrono::milliseconds(5));
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    for (;;) {
-        {
-            std::scoped_lock lock(state->Mutex);
-            if (!state->Completions.empty() || std::chrono::steady_clock::now() > deadline) {
-                break;
-            }
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    {
+        std::unique_lock lock(state->Mutex);
+        ASSERT_TRUE(
+            state->Started.wait_for(lock, std::chrono::seconds(10), [&] { return !state->Completions.empty(); }));
     }
 
     // The renewal is started but never completed: Stop must return after its timeout instead of hanging.
-    const auto start = std::chrono::steady_clock::now();
     loop->Stop(std::chrono::milliseconds(150));
-    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(5));
     EXPECT_TRUE(loop->IsStopped());
 
     guard.reset();

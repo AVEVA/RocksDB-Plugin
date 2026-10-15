@@ -29,6 +29,7 @@
 
 #include <cassert>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <deque>
 #include <functional>
@@ -303,6 +304,14 @@ class FakeHttpClient final {
         return RunUntil([&] { return RequestCount() >= count; }, timeout);
     }
 
+    // Blocks on a condition variable (no polling) until `count` requests were sent, for tests where another thread
+    // issues them. `timeout` is only a deadlock guard.
+    [[nodiscard]] bool WaitForRequestCount(std::size_t count,
+                                           std::chrono::milliseconds timeout = std::chrono::seconds{10}) {
+        std::unique_lock lock(m_mutex);
+        return m_requestCv.wait_for(lock, timeout, [&] { return m_requests.size() >= count; });
+    }
+
     void SendAsyncErased(HttpRequest request, CompletionHandler completion, HttpRequestOptions options) {
         // Snapshot the body now, while any SetBodyView() backing buffer is still guaranteed
         // alive (i.e. before completion runs) -- mirrors how a real transport consumes the
@@ -332,6 +341,7 @@ class FakeHttpClient final {
             record = &m_requests.back();
             responder = m_responder;
         }
+        m_requestCv.notify_all();
 
         std::optional<ScriptedResult> custom;
         if (responder) {
@@ -641,6 +651,7 @@ class FakeHttpClient final {
     boost::asio::io_context& m_context;
     // Guards the containers below; never held while a completion or responder runs.
     mutable std::mutex m_mutex;
+    std::condition_variable m_requestCv;
     std::recursive_mutex m_pollMutex;
     mutable std::atomic<std::size_t> m_settledStarted{0U};
     Responder m_responder;

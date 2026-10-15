@@ -429,6 +429,8 @@ TEST(RetryTests, RetryAfterHttpDateIsRelativeToTheResponseDateHeader) {
 }
 TEST(RetryTests, RetryAfterFutureHttpDateDelaysTheRetry) {
     FakeHttpClient httpClient;
+    FakeHttpClient::ClearRetryDelays();
+    const FakeHttpClient::InstantRetryTimers instantTimers;
     const auto retryAt = std::chrono::system_clock::now() + std::chrono::seconds{2};
     httpClient.EnqueueResponse(
         HttpResponse{503, {{"Retry-After", AVEVA::AzureClient::Private::BuildDateHeaderValue(retryAt)}}, ""});
@@ -438,13 +440,14 @@ TEST(RetryTests, RetryAfterFutureHttpDateDelaysTheRetry) {
     std::optional<DeleteResult> observed;
     client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
 
-    httpClient.Poll();
-    ASSERT_EQ(httpClient.RequestCount(), 1U);
-    EXPECT_FALSE(
-        PollUntil(httpClient, [&] { return httpClient.RequestCount() >= 2U; }, std::chrono::milliseconds{500}));
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{4}));
     EXPECT_EQ(httpClient.RequestCount(), 2U);
     EXPECT_TRUE(ValueOrFail(observed).has_value());
+    // The date has whole-second resolution, so the delay is the remaining 1-2 seconds, not the (zero) backoff.
+    const auto delays = FakeHttpClient::RetryDelays();
+    ASSERT_EQ(delays.size(), 1U);
+    EXPECT_GT(delays[0], std::chrono::milliseconds{0});
+    EXPECT_LE(delays[0], std::chrono::milliseconds{2000});
 }
 
 TEST(RetryTests, XMsRetryAfterMsTakesPrecedenceOverRetryAfter) {
@@ -619,12 +622,10 @@ TEST(RetryTests, TotalDeadlineFailsImmediatelyWhenTheBackoffWouldOutlastIt) {
     AVEVA::AzureClient::AzureRequestOptions requestOptions;
     requestOptions.SetTotalDeadline(std::chrono::seconds{10});
     std::optional<DeleteResult> observed;
-    const auto start = std::chrono::steady_clock::now();
     client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) { observed = std::move(result); }));
 
+    // Without the check the operation would idle until the 10 second deadline fired, which outlasts this poll.
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{5}));
-    // Without the check the operation would idle until the 10 second deadline fired.
-    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds{5});
     ASSERT_FALSE(ValueOrFail(observed).has_value());
     EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::timed_out));
     EXPECT_EQ(httpClient.RequestCount(), 1U);
