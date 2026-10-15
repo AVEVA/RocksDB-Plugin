@@ -8,6 +8,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/CloseWithRetries.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlobWriter.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
@@ -21,11 +22,10 @@
 #include <vector>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 template <typename TBlob> class BasicReadWriteFileImpl {
-    BlobFileHandles<TBlob> m_h;
+    PageBlobWriter<TBlob> m_w;
 
     int64_t m_size;
     int64_t m_syncSize;
-    int64_t m_capacity;
     bool m_closed;
     // True from the first Write after a Sync until the next Sync; cached pages must not be served in between.
     bool m_dirty = false;
@@ -50,9 +50,6 @@ template <typename TBlob> class BasicReadWriteFileImpl {
     /// passed to Write, or flushed with Flush, are not visible to Read until Sync is called. RocksDB uses
     /// random-RW files only to write and then sync, so a read-your-writes guarantee is deliberately not provided.
     int64_t Read(int64_t offset, int64_t bytesRequested, char* buffer) const;
-
-  private:
-    void Expand();
 };
 extern template class BasicReadWriteFileImpl<PageBlobClient>;
 

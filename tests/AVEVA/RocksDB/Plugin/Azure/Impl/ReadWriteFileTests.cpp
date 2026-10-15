@@ -3,6 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/CloseWithRetries.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlobWriter.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 
@@ -713,4 +714,21 @@ TEST_F(ReadWriteFileImplTests, DestructorDoesNotRetryTheCloseOnceWritesAreFenced
         // Five attempts with backoff would take at least 750 ms.
         EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(700));
     }
+}
+
+TEST(PageBlobWriterTests, EnsureCapacityHonoursTheRequirementAndDoublesOtherwise) {
+    FakeBlobEnvironment env;
+    auto logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
+    AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobWriter<std::remove_reference_t<decltype(*env.Client)>> writer(
+        "f", env.Runtime, env.Client, nullptr, logger, 0);
+    EXPECT_EQ(writer.Capacity(), 0);
+    const auto huge = Configuration::PageBlob::DefaultSize * 3 + 1;
+    writer.EnsureCapacity(huge);
+    EXPECT_GE(writer.Capacity(), huge);
+    EXPECT_EQ(writer.Capacity() % 512, 0);
+    const auto before = writer.Capacity();
+    writer.EnsureCapacity(before - 1);
+    EXPECT_EQ(writer.Capacity(), before);
+    writer.EnsureCapacity(before + 1);
+    EXPECT_GE(writer.Capacity(), before * 2);
 }

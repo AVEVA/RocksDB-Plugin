@@ -7,6 +7,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/CloseWithRetries.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlobWriter.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
@@ -22,12 +23,11 @@
 #include <vector>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 template <typename TBlob> class BasicWriteableFileImpl {
-    BlobFileHandles<TBlob> m_h;
+    PageBlobWriter<TBlob> m_w;
     int64_t m_bufferSize;
 
     int64_t m_lastPageOffset;
     int64_t m_size;
-    int64_t m_capacity;
     int64_t m_bufferOffset;
     bool m_closed;
     bool m_flushed;
@@ -83,7 +83,6 @@ template <typename TBlob> class BasicWriteableFileImpl {
     [[nodiscard]] int64_t GetUniqueId(char* id, int64_t maxIdSize) const noexcept;
 
   private:
-    void Expand(int64_t requiredCapacity);
     void StartFlush(bool includePartialPage);
     void StartUpload(std::shared_ptr<const std::vector<char>> data, int64_t offset);
     [[nodiscard]] std::vector<char> RentBuffer() const;
