@@ -116,7 +116,11 @@ std::string ToLowerAscii(std::string_view value) {
 }
 
 bool HasHeaderControlCharacters(std::string_view value) noexcept {
-    return value.find_first_of(std::string_view{"\r\n\0", 3U}) != std::string_view::npos;
+    // Every C0 control except HTAB, plus DEL, is illegal in a header field; CR, LF and NUL enable injection.
+    return std::ranges::any_of(value, [](char c) noexcept {
+        const auto byte = static_cast<unsigned char>(c);
+        return (byte < 0x20U && byte != '\t') || byte == 0x7FU;
+    });
 }
 
 [[nodiscard]] constexpr bool IsBase64Character(char value) noexcept {

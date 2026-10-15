@@ -590,7 +590,10 @@ void SendAuthorizedRequestAsync(THttp& httpClient, const ConnectionState& connec
                            HttpResponse{});
             return;
         }
-        if (IStartsWith(name, XMsMetaHeaderPrefix) && !IsValidMetadataName(name.substr(XMsMetaHeaderPrefix.size()))) {
+        const bool isMetadata = IStartsWith(name, XMsMetaHeaderPrefix);
+        const auto isNonAscii = [](char c) noexcept { return static_cast<unsigned char>(c) >= 0x80U; };
+        if (isMetadata && (!IsValidMetadataName(name.substr(XMsMetaHeaderPrefix.size())) ||
+                           std::ranges::any_of(header.GetValue(), isNonAscii))) {
             PostCompletion(httpClient, std::move(completion), std::error_code{BlobStorageErrorCode::InvalidMetadata},
                            HttpResponse{});
             return;

@@ -6,6 +6,7 @@
 #include "AVEVA/AzureClient/TokenCredential.hpp"
 #include "FakeHttpClient.hpp"
 #include "TestFixtures.hpp"
+#include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 
 #include <AVEVA/AzureClient/BlobClient.hpp>
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
@@ -106,5 +107,31 @@ TEST(HeaderInjectionTests, ManagedIdentityHeaderWithCrLfIsRejected) {
 
     ASSERT_TRUE(error.has_value());
     EXPECT_EQ(*error, std::errc::invalid_argument);
+    EXPECT_EQ(httpClient.RequestCount(), 0U);
+}
+
+TEST(HeaderInjectionTests, OtherControlCharactersAreRejectedButTabIsAllowed) {
+    using AVEVA::AzureClient::Private::HasHeaderControlCharacters;
+    for (const char c : {'\0', '\x01', '\x08', '\x0b', '\x0c', '\x1f', '\x7f', '\r', '\n'}) {
+        EXPECT_TRUE(HasHeaderControlCharacters(std::string{"a"} + c + "b")) << static_cast<int>(c);
+    }
+    EXPECT_FALSE(HasHeaderControlCharacters("a\tb c"));
+    EXPECT_FALSE(HasHeaderControlCharacters(""));
+}
+
+TEST(HeaderInjectionTests, NonAsciiMetadataValueIsRejected) {
+    FakeHttpClient httpClient;
+    BlobClient client{httpClient, MakeBlobClientOptions()};
+    SetBlobMetadataOptions options;
+    options.Metadata.emplace("key", "caf\xc3\xa9");
+
+    using Result = std::expected<AVEVA::AzureClient::Response<AVEVA::AzureClient::Models::SetBlobMetadataResult>,
+                                 AVEVA::AzureClient::BlobStorageError>;
+    std::optional<Result> result;
+    client.SetMetadataAsync(std::move(options), [&](Result value) { result = std::move(value); });
+    httpClient.Poll();
+    ASSERT_TRUE(result.has_value());
+    ASSERT_FALSE(result->has_value());
+    EXPECT_EQ(result->error().Code, AVEVA::AzureClient::BlobStorageErrorCode::InvalidMetadata);
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
