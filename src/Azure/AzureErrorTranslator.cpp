@@ -123,16 +123,13 @@ rocksdb::IOStatus AzureErrorTranslator::FromException(const std::exception_ptr& 
 
 rocksdb::IOStatus AzureErrorTranslator::FromCurrentException(
     boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>& logger, std::string_view operation) {
-    using boost::log::trivial::debug;
     using boost::log::trivial::error;
     try {
         throw;
     } catch (const RequestFailedException& ex) {
         // Describe() carries the status, Azure error code, message and request id.
         BOOST_LOG_SEV(logger, error) << operation << " failed: " << ex.Describe();
-        if (!ex.AuthenticationDetail.empty()) {
-            BOOST_LOG_SEV(logger, debug) << operation << " authentication detail: " << ex.AuthenticationDetail;
-        }
+        // AuthenticationDetail may echo the string-to-sign, so it is deliberately never logged.
         return IOStatusFromError(ex);
     } catch (const WritesFencedException& ex) {
         BOOST_LOG_SEV(logger, error) << operation << " failed: " << ex.what();
