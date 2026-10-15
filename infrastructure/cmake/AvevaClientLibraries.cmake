@@ -13,10 +13,15 @@ add_subdirectory("${PROJECT_SOURCE_DIR}/libs/HttpClient" "${PROJECT_BINARY_DIR}/
 # aveva-azure-client resolves aveva-http-client through find_package(); point it at a shim that reuses the
 # target built above instead of looking for an installed package.
 set(_aveva_http_client_shim_dir "${PROJECT_BINARY_DIR}/cmake/aveva-http-client")
-file(WRITE "${_aveva_http_client_shim_dir}/aveva-http-client-config.cmake"
-    "if(NOT TARGET aveva::http-client)\n"
-    "    message(FATAL_ERROR \"aveva::http-client must be built in-tree before aveva-azure-client.\")\n"
-    "endif()\n")
+# file(CONFIGURE) only rewrites the file when its content changes, so it does not retrigger the build.
+file(CONFIGURE
+    OUTPUT "${_aveva_http_client_shim_dir}/aveva-http-client-config.cmake"
+    CONTENT [[
+if(NOT TARGET aveva::http-client)
+    message(FATAL_ERROR "aveva::http-client must be built in-tree before aveva-azure-client.")
+endif()
+]]
+    @ONLY)
 set(aveva-http-client_DIR "${_aveva_http_client_shim_dir}" CACHE INTERNAL "In-tree aveva-http-client package shim")
 
 set(AVEVA_AZURE_CLIENT_TESTS ${AVEVA_ROCKSDB_TESTS})
