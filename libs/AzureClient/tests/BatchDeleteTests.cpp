@@ -10,9 +10,11 @@
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
+#include <AVEVA/AzureClient/Detail/BlobBatch.hpp>
 #include <AVEVA/AzureClient/Models/BlobContainerModels.hpp>
 #include <AVEVA/AzureClient/Response.hpp>
 #include <AVEVA/HttpClient/HttpMethod.hpp>
+#include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 
 #include <gtest/gtest.h>
@@ -22,6 +24,7 @@
 #include <functional>
 #include <optional>
 #include <regex>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -394,4 +397,46 @@ TEST(BatchDeleteTests, RetriedBatchRebuildsSubrequestsWithAFreshToken) {
     EXPECT_EQ(CountOccurrences(second.Body, "Authorization: Bearer token-two"), 2U);
     EXPECT_EQ(CountOccurrences(second.Body, "token-one"), 0U);
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(second.Request, "Authorization"), "Bearer token-two");
+}
+TEST(BatchDeleteTests, AppendBatchDeletePartRejectsUrlsWithoutSchemeOrPath) {
+    for (const char* url : {"no-scheme/container/blob", "https://account.blob.core.windows.net"}) {
+        AVEVA::HttpRequest subrequest;
+        subrequest.SetMethod(HttpMethod::Delete);
+        subrequest.SetUrl(url);
+        std::string body;
+        EXPECT_THROW(AVEVA::AzureClient::Private::AppendBatchDeletePart(body, "b", 0, subrequest),
+                     std::invalid_argument)
+            << url;
+        EXPECT_TRUE(body.empty()) << "nothing is appended for a rejected URL";
+    }
+
+    AVEVA::HttpRequest valid;
+    valid.SetMethod(HttpMethod::Delete);
+    valid.SetUrl("https://account.blob.core.windows.net/container/blob?sig=x");
+    std::string body;
+    AVEVA::AzureClient::Private::AppendBatchDeletePart(body, "b", 0, valid);
+    EXPECT_NE(body.find("DELETE /container/blob?sig=x HTTP/1.1"), std::string::npos);
+}
+
+TEST(BatchDeleteTests, SuccessfulPartsNeedNoHeaderParsingAndFailedPartsKeepTheirErrorDetails) {
+    const std::vector<std::string> names{"ok", "gone", "denied"};
+    const std::string body =
+        "--b\r\nContent-Type: application/http\r\nContent-ID: 0\r\n\r\nHTTP/1.1 202 Accepted\r\nx-ms-request-id: "
+        "r0\r\n\r\n\r\n"
+        "--b\r\nContent-Type: application/http\r\nContent-ID: 1\r\n\r\nHTTP/1.1 404 Not Found\r\nx-ms-error-code: "
+        "BlobNotFound\r\n\r\n\r\n"
+        "--b\r\nContent-Type: application/http\r\nContent-ID: 2\r\n\r\nHTTP/1.1 403 Forbidden\r\nx-ms-error-code: "
+        "AuthorizationFailure\r\nx-ms-request-id: r2\r\n\r\n\r\n--b--\r\n";
+    const HttpResponse response{202, {{"Content-Type", "multipart/mixed; boundary=b"}}, body};
+
+    const auto items = AVEVA::AzureClient::Private::ParseBatchDeleteResponse(response, names);
+
+    ASSERT_EQ(items.size(), 3U);
+    EXPECT_FALSE(items[0].Error.has_value());
+    EXPECT_FALSE(items[0].AlreadyAbsent);
+    EXPECT_TRUE(items[1].AlreadyAbsent);
+    EXPECT_FALSE(items[1].Error.has_value());
+    ASSERT_TRUE(items[2].Error.has_value());
+    EXPECT_EQ(items[2].Error->StatusCode, 403);
+    EXPECT_EQ(items[2].Error->RequestId, "r2");
 }
