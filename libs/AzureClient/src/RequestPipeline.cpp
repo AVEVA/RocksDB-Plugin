@@ -107,7 +107,7 @@ void ResolveCopySourceAuthorization(HttpRequest& request, std::string_view beare
         if (bearerToken.empty()) {
             headers.erase(it);
         } else {
-            it->SetValue("Bearer " + std::string{bearerToken});
+            it->SetValue(MakeBearerValue(bearerToken));
         }
         return;
     }
@@ -118,7 +118,7 @@ void ResolveCopySourceAuthorization(HttpRequest& request, std::string_view beare
 void SetBearerAuthorization(HttpRequest& request, std::string_view token) {
     std::erase_if(request.GetHeaders(),
                   [](const HttpHeader& header) { return IEquals(header.GetName(), AuthorizationHeaderName); });
-    request.AddHeader(HttpHeader{std::string{AuthorizationHeaderName}, "Bearer " + std::string{token}});
+    request.AddHeader(HttpHeader{std::string{AuthorizationHeaderName}, MakeBearerValue(token)});
 }
 
 [[nodiscard]] bool IsReplaySafe(const HttpRequest& request) {

@@ -114,7 +114,7 @@ class BatchDeleteOperation final
             AuthorizeRequest(*m_auth.Signer, subrequest);
             break;
         case RequestAuth::Kind::Token:
-            AddHeader(subrequest, AuthorizationHeaderName, "Bearer " + std::string{token});
+            AddHeader(subrequest, AuthorizationHeaderName, MakeBearerValue(token));
             break;
         case RequestAuth::Kind::None:
             // The SAS token is already part of the sub-request URL.
