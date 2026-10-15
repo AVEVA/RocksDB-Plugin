@@ -392,22 +392,19 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
   private:
     /// <summary>
     /// Serves a recent result from the shared cache and collapses concurrent lookups for one origin into a
-    /// single resolve. Every caller already runs on this operation's strand, so a hit is dispatched (run inline)
-    /// instead of posted; completions are always posted, so the caller's handler is still never re-entered.
+    /// single resolve. Every caller already runs on this operation's strand, so a hit is handled inline.
+    /// Completions are always posted, so the caller's handler is still never re-entered.
     /// </summary>
     void Resolve() {
         m_resolvedFromCache = false;
         auto& cache = DnsCache::Shared();
         if (auto cached = cache.Find(m_key.host, m_key.service)) {
             m_resolvedFromCache = true;
-            asio::dispatch(m_executor, [self = this->shared_from_this(), results = std::move(*cached)]() mutable {
-                self->OnResolve({}, std::move(results));
-            });
-            return;
+            return OnResolve({}, std::move(*cached));
         }
-        ResolveWaiter waiter(this->shared_from_this());
         const void* const scope = LookupScope();
-        if (!cache.JoinOrLead(m_key.host, m_key.service, waiter, scope)) {
+        if (!cache.JoinOrLead(
+                m_key.host, m_key.service, [this] { return ResolveWaiter(this->shared_from_this()); }, scope)) {
             return;
         }
         // If the handler is destroyed unrun (io_context torn down), the guard still releases the waiters.

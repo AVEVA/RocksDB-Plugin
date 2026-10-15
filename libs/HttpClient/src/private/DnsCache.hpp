@@ -12,6 +12,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -122,12 +123,29 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     /// run elsewhere. Cached results are still shared across scopes.</param>
     /// <returns>True when the caller must perform the lookup and then call <see cref="Finish"/>.</returns>
     bool JoinOrLead(std::string_view host, std::string_view service, Waiter& waiter, const void* scope = nullptr) {
+        return JoinOrLead(host, service, [&waiter] { return std::move(waiter); }, scope);
+    }
+
+    /// <summary>
+    /// Like the overload above, but builds the waiter only when the caller actually joins, so a leader pays
+    /// nothing for one.
+    /// </summary>
+    /// <param name="host">The host to resolve.</param>
+    /// <param name="service">The port or service name to resolve.</param>
+    /// <param name="makeWaiter">Called (under the cache lock, so it must be cheap) to produce the waiter when
+    /// the caller is not the leader.</param>
+    /// <param name="scope">See the overload above.</param>
+    /// <returns>True when the caller must perform the lookup and then call <see cref="Finish"/>.</returns>
+    template <typename MakeWaiter>
+        requires std::is_invocable_r_v<Waiter, MakeWaiter>
+    bool JoinOrLead(std::string_view host, std::string_view service, MakeWaiter&& makeWaiter,
+                    const void* scope = nullptr) {
         std::lock_guard<std::mutex> lock(m_mutex);
         const auto [it, inserted] = m_pending.try_emplace(Key{std::string(host), std::string(service), scope});
         if (inserted) {
             return true;
         }
-        it->second.push_back(std::move(waiter));
+        it->second.push_back(makeWaiter());
         return false;
     }
 

@@ -98,6 +98,24 @@ TEST(DnsCacheTests, ConcurrentLookupsForOneOriginShareASingleLeader) {
     cache.Finish("host", "80", boost::asio::error::host_not_found, {});
 }
 
+TEST(DnsCacheTests, WaiterFactoryRunsOnlyWhenJoining) {
+    TestDnsCache cache;
+    int built = 0;
+    int delivered = 0;
+    auto factory = [&] {
+        ++built;
+        return RecordingWaiter{&delivered, nullptr};
+    };
+
+    EXPECT_TRUE(cache.JoinOrLead("host", "80", factory));
+    EXPECT_EQ(built, 0);
+    EXPECT_FALSE(cache.JoinOrLead("host", "80", factory));
+    EXPECT_EQ(built, 1);
+
+    cache.Finish("host", "80", boost::asio::error::host_not_found, {});
+    EXPECT_EQ(delivered, 1);
+}
+
 TEST(DnsCacheTests, AbortedLeaderDeliversTheErrorToFollowersCachesNothingAndFreesTheKey) {
     TestDnsCache cache;
     RecordingWaiter leader;
