@@ -51,6 +51,28 @@ TEST(IdleSweeper, EarlierDeadlineWakesTheSchedulerThread) {
     EXPECT_EQ(slow.plain->IdleCount(), 1U);
 }
 
+// A sweeper scheduled later with a nearer deadline runs first, and the earlier-scheduled one still gets its
+// own sweep afterwards.
+TEST(IdleSweeper, SweepersRunInDeadlineOrderNotSchedulingOrder) {
+    asio::io_context context;
+    SweeperFixture later(context, std::chrono::seconds(3));
+    later.AddIdleConnection();
+    SweeperFixture sooner(context, std::chrono::seconds(1));
+    sooner.AddIdleConnection();
+
+    const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    while (sooner.plain->IdleCount() != 0 && std::chrono::steady_clock::now() < limit) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    EXPECT_EQ(sooner.plain->IdleCount(), 0U);
+    EXPECT_EQ(later.plain->IdleCount(), 1U);
+
+    while (later.plain->IdleCount() != 0 && std::chrono::steady_clock::now() < limit) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    EXPECT_EQ(later.plain->IdleCount(), 0U);
+}
+
 // The shared scheduler thread belongs to the live sweepers: it is stopped and joined when the last one goes,
 // and started afresh for the next.
 TEST(IdleSweeper, SchedulerStopsWhenTheLastSweeperIsDestroyed) {

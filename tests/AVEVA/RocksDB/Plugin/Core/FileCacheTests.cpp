@@ -439,6 +439,83 @@ TEST_F(FileCacheTests, FileReplacedAndRequeuedDuringADownload_IsDownloadedAgainN
     EXPECT_TRUE(m_cache.ReadFile("1.sst", 0, 0, nullptr).has_value());
 }
 
+TEST_F(FileCacheTests, RemoveFile_WhileAReaderIsInsideTheCachedFile_DoesNotWaitForItAndTheReaderFinishes) {
+    // Arrange - a cached file whose read blocks until released.
+    std::promise<void> readStarted;
+    Gate release;
+    std::atomic<bool> signalled{false};
+    EXPECT_CALL(*m_containerClient, GetBlobSize("1.sst")).WillRepeatedly(Return(4));
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo("1.sst", _, _, _)).WillRepeatedly(Return());
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([&](const std::filesystem::path&) {
+        auto file = std::make_unique<FileMock>();
+        ON_CALL(*file, Read(_, _, _)).WillByDefault([&](char*, uint64_t, uint64_t length) -> uint64_t {
+            if (!signalled.exchange(true)) {
+                readStarted.set_value();
+            }
+            release.Wait();
+            return length;
+        });
+        return file;
+    });
+    EnsureReadFromCache("1.sst");
+    auto reader = std::async(std::launch::async, [this] {
+        char buffer[4];
+        return m_cache.ReadFile("1.sst", 0, 4, buffer);
+    });
+    readStarted.get_future().wait();
+
+    // Act - removal must not block on the in-flight read.
+    auto removal = std::async(std::launch::async, [this] { m_cache.RemoveFile("1.sst"); });
+    const auto removed = removal.wait_for(std::chrono::seconds(5));
+    release.Open();
+
+    // Assert
+    ASSERT_EQ(removed, std::future_status::ready);
+    ASSERT_EQ(reader.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    reader.get();
+    EXPECT_TRUE(m_cache.WaitUntilIdle(std::chrono::seconds(5)));
+    EXPECT_FALSE(m_cache.HasFile("1.sst"));
+    EXPECT_EQ(0, m_cache.CacheSize());
+}
+
+TEST_F(FileCacheTests, DownloadThatFailsAfterTheFileWasMarkedStale_LeavesNothingActiveAndCanBeRetried) {
+    // Arrange - the first download blocks, then fails; later ones succeed.
+    std::promise<void> started;
+    Gate release;
+    std::atomic<int> downloads{0};
+    EXPECT_CALL(*m_containerClient, GetBlobSize("1.sst")).WillRepeatedly(Return(1));
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo("1.sst", _, _, _)).WillRepeatedly([&](auto&&...) {
+        if (++downloads == 1) {
+            started.set_value();
+            release.Wait();
+            throw std::runtime_error("download failed");
+        }
+    });
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", 0, 0, nullptr));
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", 0, 0, nullptr));
+    started.get_future().wait();
+
+    // Act
+    m_cache.MarkFileAsStaleIfExists("1.sst");
+    release.Open();
+    ASSERT_TRUE(m_cache.WaitUntilIdle(std::chrono::seconds(5)));
+
+    // Assert - the failed download activated nothing and counted no bytes.
+    EXPECT_EQ(0, m_cache.CacheSize());
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", 0, 0, nullptr).has_value());
+
+    // A later read queues the download again and this time it succeeds.
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
+        auto file = std::make_unique<FileMock>();
+        ON_CALL(*file, Read(_, _, _)).WillByDefault([](char*, uint64_t, uint64_t length) -> uint64_t {
+            return length;
+        });
+        return file;
+    });
+    EnsureReadFromCache("1.sst");
+    EXPECT_GE(downloads.load(), 2);
+}
+
 TEST_F(FileCacheTests, ReadFile_TooManyUndownloadedStaleEntries_PrunesOldest) {
     // Arrange
     EXPECT_CALL(*m_containerClient, GetBlobSize(_)).Times(0);
