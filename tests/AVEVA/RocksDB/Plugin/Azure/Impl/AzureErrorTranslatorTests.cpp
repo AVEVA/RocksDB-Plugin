@@ -5,9 +5,16 @@
 
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 #include <AVEVA/HttpClient/HttpClientError.hpp>
+#include <boost/log/core.hpp>
+#include <boost/log/sinks/sync_frontend.hpp>
+#include <boost/log/sinks/text_ostream_backend.hpp>
+#include <boost/log/sources/severity_logger.hpp>
+#include <boost/log/trivial.hpp>
 #include <gtest/gtest.h>
 
 #include <cerrno>
+#include <memory>
+#include <sstream>
 #include <system_error>
 
 using namespace AVEVA::RocksDB::Plugin::Azure;
@@ -204,4 +211,22 @@ TEST(AzureErrorTranslatorTests, WritesFencedExceptionIsIOFenced) {
     const auto status = AzureErrorTranslator::FromException(std::make_exception_ptr(WritesFencedException("fenced")));
     EXPECT_TRUE(status.IsIOFenced());
     EXPECT_FALSE(status.GetRetryable());
+}
+
+TEST(AzureErrorTranslatorTests, CapturedExceptionIsLoggedWithTheRequestIdAndTranslated) {
+    namespace sinks = boost::log::sinks;
+    auto stream = std::make_shared<std::ostringstream>();
+    auto backend = boost::make_shared<sinks::text_ostream_backend>();
+    backend->add_stream(boost::shared_ptr<std::ostream>(stream.get(), [](std::ostream*) {}));
+    backend->auto_flush(true);
+    auto sink = boost::make_shared<sinks::synchronous_sink<sinks::text_ostream_backend>>(backend);
+    boost::log::core::get()->add_sink(sink);
+
+    boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level> logger;
+    const auto status = AzureErrorTranslator::FromException(logger, std::make_exception_ptr(Failure(404)), "ReadAsync");
+    boost::log::core::get()->remove_sink(sink);
+
+    EXPECT_TRUE(status.IsNotFound());
+    EXPECT_NE(stream->str().find("ReadAsync failed"), std::string::npos) << stream->str();
+    EXPECT_NE(stream->str().find("req-1"), std::string::npos) << stream->str();
 }

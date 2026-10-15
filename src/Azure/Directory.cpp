@@ -7,8 +7,10 @@
 
 #include <utility>
 namespace AVEVA::RocksDB::Plugin::Azure {
-Directory::Directory(Impl::DirectoryImpl&& directory)
-    : m_directory(std::make_unique<Impl::DirectoryImpl>(std::move(directory))) {}
+Directory::Directory(
+    Impl::DirectoryImpl&& directory,
+    std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
+    : m_directory(std::make_unique<Impl::DirectoryImpl>(std::move(directory))), m_logger(std::move(logger)) {}
 
 Directory::~Directory() = default;
 
@@ -17,7 +19,7 @@ rocksdb::IOStatus Directory::Fsync(const rocksdb::IOOptions&, rocksdb::IODebugCo
         m_directory->Fsync();
         return rocksdb::IOStatus::OK();
     } catch (...) {
-        return AzureErrorTranslator::FromException(std::current_exception());
+        return AzureErrorTranslator::FromCurrentException(*m_logger, "Fsync");
     }
 }
 

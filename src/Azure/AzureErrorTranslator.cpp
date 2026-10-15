@@ -146,6 +146,16 @@ rocksdb::IOStatus AzureErrorTranslator::FromCurrentException(
     }
 }
 
+rocksdb::IOStatus AzureErrorTranslator::FromException(
+    boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>& logger,
+    const std::exception_ptr& error, std::string_view operation) {
+    try {
+        std::rethrow_exception(error);
+    } catch (...) {
+        return FromCurrentException(logger, operation);
+    }
+}
+
 bool AzureErrorTranslator::IsTransient(unsigned int statusCode, const std::error_code& code) {
     // The client's own retry policy is the single definition of "transient", so the plugin never disagrees with it.
     AzureClient::BlobStorageError error;

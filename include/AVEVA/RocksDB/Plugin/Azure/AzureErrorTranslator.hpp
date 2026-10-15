@@ -42,6 +42,13 @@ struct AzureErrorTranslator {
     FromCurrentException(boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>& logger,
                          std::string_view operation);
 
+    /// <summary>
+    /// As FromCurrentException, for a captured exception (e.g. one delivered to an async completion handler).
+    /// </summary>
+    static rocksdb::IOStatus
+    FromException(boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>& logger,
+                  const std::exception_ptr& error, std::string_view operation);
+
   private:
     static rocksdb::IOStatus IOStatusFromError(const std::string& context, unsigned int statusCode);
 };

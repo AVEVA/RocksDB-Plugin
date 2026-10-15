@@ -12,14 +12,10 @@
 #include <utility>
 
 namespace AVEVA::RocksDB::Plugin::Azure {
-namespace {
-rocksdb::IOStatus StatusFromException(const std::exception_ptr& error) {
-    return AzureErrorTranslator::FromException(error);
-}
-} // namespace
-
-SequentialFile::SequentialFile(Impl::SequentialFileImpl&& file)
-    : m_file(std::make_unique<Impl::SequentialFileImpl>(std::move(file))) {}
+SequentialFile::SequentialFile(
+    Impl::SequentialFileImpl&& file,
+    std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
+    : m_file(std::make_unique<Impl::SequentialFileImpl>(std::move(file))), m_logger(std::move(logger)) {}
 
 SequentialFile::~SequentialFile() = default;
 
@@ -34,7 +30,7 @@ rocksdb::IOStatus SequentialFile::Read(const size_t n, const rocksdb::IOOptions&
         *result = rocksdb::Slice(scratch, static_cast<size_t>(bytesRead));
         return rocksdb::IOStatus::OK();
     } catch (...) {
-        return StatusFromException(std::current_exception());
+        return AzureErrorTranslator::FromCurrentException(*m_logger, "Read");
     }
 }
 
@@ -46,7 +42,7 @@ rocksdb::IOStatus SequentialFile::Skip(const uint64_t n) {
         m_file->Skip(static_cast<int64_t>(n));
         return rocksdb::IOStatus::OK();
     } catch (...) {
-        return StatusFromException(std::current_exception());
+        return AzureErrorTranslator::FromCurrentException(*m_logger, "Skip");
     }
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure

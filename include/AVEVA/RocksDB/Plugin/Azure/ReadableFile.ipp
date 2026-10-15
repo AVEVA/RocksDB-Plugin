@@ -18,15 +18,15 @@ namespace AVEVA::RocksDB::Plugin::Azure {
 using Impl::AsyncReadHandle;
 using Impl::AsyncReadRequest;
 using Impl::DeleteAsyncReadHandle;
-namespace ReadableFileDetail {
-inline rocksdb::IOStatus StatusFromException(const std::exception_ptr& error) {
-    return AzureErrorTranslator::FromException(error);
-}
-} // namespace ReadableFileDetail
-using ReadableFileDetail::StatusFromException;
 
 template <class TImpl>
-BasicReadableFile<TImpl>::BasicReadableFile(TImpl&& file) : m_file(std::make_shared<TImpl>(std::move(file))) {}
+BasicReadableFile<TImpl>::BasicReadableFile(
+    TImpl&& file, std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
+    : m_file(std::make_shared<TImpl>(std::move(file))),
+      m_logger(logger
+                   ? std::move(logger)
+                   : std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>()) {
+}
 
 template <class TImpl> BasicReadableFile<TImpl>::~BasicReadableFile() = default;
 
@@ -46,7 +46,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::Read(const uint64_t offset, const si
         *result = rocksdb::Slice(scratch, static_cast<size_t>(bytesRead));
         return rocksdb::IOStatus::OK();
     } catch (...) {
-        return StatusFromException(std::current_exception());
+        return AzureErrorTranslator::FromCurrentException(*m_logger, "Read");
     }
 }
 
@@ -77,11 +77,13 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::ReadAsync(rocksdb::FSReadRequest& re
             // The cache wrote straight into scratch; Complete only records the length.
             request->Complete(rocksdb::IOStatus::OK(), std::string_view(req.scratch, *cached));
         } else {
-            auto download = [file = m_file, offset, length, timeout, request] {
+            auto download = [file = m_file, offset, length, timeout, request, logger = m_logger] {
                 TImpl::ReadAsync(
                     file, offset, length,
-                    [request](std::exception_ptr error, std::string_view data) {
-                        request->Complete(error ? StatusFromException(error) : rocksdb::IOStatus::OK(), data);
+                    [request, logger](std::exception_ptr error, std::string_view data) {
+                        request->Complete(error ? AzureErrorTranslator::FromException(*logger, error, "ReadAsync")
+                                                : rocksdb::IOStatus::OK(),
+                                          data);
                     },
                     TImpl::kMaxStaleReadRetries, timeout);
             };
@@ -106,7 +108,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::ReadAsync(rocksdb::FSReadRequest& re
         *del_fn = DeleteAsyncReadHandle;
         return rocksdb::IOStatus::OK();
     } catch (...) {
-        return StatusFromException(std::current_exception());
+        return AzureErrorTranslator::FromCurrentException(*m_logger, "ReadAsync");
     }
 }
 
@@ -176,7 +178,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::Prefetch(const uint64_t offset, cons
         }
         return rocksdb::IOStatus::OK();
     } catch (...) {
-        return StatusFromException(std::current_exception());
+        return AzureErrorTranslator::FromCurrentException(*m_logger, "Prefetch");
     }
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure

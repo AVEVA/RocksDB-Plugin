@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
+#include <boost/log/sources/severity_logger.hpp>
+#include <boost/log/trivial.hpp>
 #include <rocksdb/file_system.h>
 
 #include <functional>
@@ -15,9 +17,12 @@ namespace AVEVA::RocksDB::Plugin::Azure {
 template <class TImpl> class BasicReadableFile final : public rocksdb::FSRandomAccessFile {
     // Shared with in-flight async reads so the file (and its blob client) outlives their completions.
     std::shared_ptr<TImpl> m_file;
+    std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
 
   public:
-    explicit BasicReadableFile(TImpl&& file);
+    explicit BasicReadableFile(
+        TImpl&& file,
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger = nullptr);
     ~BasicReadableFile() override;
 
     virtual rocksdb::IOStatus Read(uint64_t offset, size_t n, const rocksdb::IOOptions& options, rocksdb::Slice* result,

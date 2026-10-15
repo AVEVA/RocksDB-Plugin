@@ -115,7 +115,7 @@ rocksdb::IOStatus BlobFilesystem::NewSequentialFile(const std::string& f, const 
                 << "name before reopening the database";
             return rocksdb::IOStatus::Corruption("CURRENT is empty: " + f);
         }
-        *r = std::unique_ptr<rocksdb::FSSequentialFile>(new SequentialFile(std::move(file)));
+        *r = std::unique_ptr<rocksdb::FSSequentialFile>(new SequentialFile(std::move(file), m_logger));
         return rocksdb::IOStatus::OK();
     });
 }
@@ -124,7 +124,8 @@ rocksdb::IOStatus BlobFilesystem::NewRandomAccessFile(const std::string& f, cons
                                                       std::unique_ptr<rocksdb::FSRandomAccessFile>* r,
                                                       rocksdb::IODebugContext*) {
     return Guard("NewRandomAccessFile", f, [&]() -> rocksdb::IOStatus {
-        *r = std::unique_ptr<rocksdb::FSRandomAccessFile>(new ReadableFile(m_filesystem->CreateReadableFile(f)));
+        *r = std::unique_ptr<rocksdb::FSRandomAccessFile>(
+            new ReadableFile(m_filesystem->CreateReadableFile(f), m_logger));
         return rocksdb::IOStatus::OK();
     });
 }
@@ -179,7 +180,7 @@ rocksdb::IOStatus BlobFilesystem::NewDirectory(const std::string& name, const ro
                                                std::unique_ptr<rocksdb::FSDirectory>* result,
                                                rocksdb::IODebugContext*) {
     return Guard("NewDirectory", name, [&]() -> rocksdb::IOStatus {
-        *result = std::unique_ptr<rocksdb::FSDirectory>(new Directory(m_filesystem->CreateDirectory(name)));
+        *result = std::unique_ptr<rocksdb::FSDirectory>(new Directory(m_filesystem->CreateDirectory(name), m_logger));
         return rocksdb::IOStatus::OK();
     });
 }
