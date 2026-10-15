@@ -21,13 +21,13 @@ FileCache::FileCache(
     : m_cachePath(std::move(cachePath)), m_maxSize(maxCacheSize), m_containerClient(std::move(containerClient)),
       m_filesystem(std::move(filesystem)), m_logger(std::move(logger)) {
     // Start the background thread after all members are initialized
-    m_backgroundDownloader = std::jthread(&FileCache::BackgroundDownload, this, m_stopSource.get_token());
+    m_backgroundDownloader = std::jthread([this](std::stop_token stopToken) { BackgroundDownload(stopToken); });
 }
 
 FileCache::~FileCache() {
     {
         std::scoped_lock lock(m_mutex);
-        m_stopSource.request_stop();
+        m_backgroundDownloader.request_stop();
     }
 
     m_cv.notify_all();
