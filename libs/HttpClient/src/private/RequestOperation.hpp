@@ -391,8 +391,10 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// instead of posted; completions are always posted, so the caller's handler is still never re-entered.
     /// </summary>
     void Resolve() {
+        m_resolvedFromCache = false;
         auto& cache = DnsCache::Shared();
         if (auto cached = cache.Find(m_key.host, m_key.service)) {
+            m_resolvedFromCache = true;
             asio::dispatch(m_executor, [self = this->shared_from_this(), results = std::move(*cached)]() mutable {
                 self->OnResolve({}, std::move(results));
             });
@@ -470,6 +472,10 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
             return Cancel();
         }
         if (error) {
+            if (m_resolvedFromCache) {
+                // The cached address may be stale; make the next request resolve again.
+                DnsCache::Shared().Invalidate(m_key.host, m_key.service);
+            }
             return Fail(HttpClientError::ConnectFailed, error);
         }
         if constexpr (std::is_same_v<Stream, TlsStream>) {
@@ -785,6 +791,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     bool m_retried = false;
     bool m_receivedAnyResponse = false;
     bool m_hostIsName = false;
+    bool m_resolvedFromCache = false;
     std::atomic_bool m_cancellationRequested = false;
     std::optional<std::chrono::steady_clock::time_point> m_deadline;
 };

@@ -120,6 +120,20 @@ TEST(DnsCacheTests, AbortedLeaderDeliversTheErrorToFollowersCachesNothingAndFree
     cache.Finish("host", "80", boost::asio::error::host_not_found, {});
 }
 
+TEST(DnsCacheTests, InvalidateDropsOnlyTheNamedEntry) {
+    boost::asio::io_context io;
+    const auto results = Loopback(io);
+    TestDnsCache cache;
+    cache.Store("host", "80", results);
+    cache.Store("host", "81", results);
+
+    cache.Invalidate("host", "80");
+
+    EXPECT_FALSE(cache.Find("host", "80").has_value());
+    EXPECT_TRUE(cache.Find("host", "81").has_value());
+    cache.Invalidate("missing", "80"); // Dropping an absent entry is a no-op.
+}
+
 TEST(DnsCacheTests, EmptyResultsAreNotCached) {
     TestDnsCache cache;
     cache.Store("host", "80", Tcp::resolver::results_type{});

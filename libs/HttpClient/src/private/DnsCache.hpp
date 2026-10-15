@@ -69,6 +69,17 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     }
 
     /// <summary>
+    /// Forgets a cached resolution, so the next request resolves afresh. Called when connecting to a cached
+    /// address failed, because the address may be stale.
+    /// </summary>
+    /// <param name="host">The host whose entry to drop.</param>
+    /// <param name="service">The port or service name whose entry to drop.</param>
+    void Invalidate(std::string_view host, std::string_view service) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_entries.erase(KeyView{host, service});
+    }
+
+    /// <summary>
     /// Caches a resolution for the cache's TTL. An empty result set is ignored.
     /// </summary>
     /// <param name="host">The host that was resolved.</param>
