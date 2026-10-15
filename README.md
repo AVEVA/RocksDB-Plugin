@@ -50,6 +50,9 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
     #include <boost/log/sources/severity_logger.hpp>
     #include <boost/log/trivial.hpp>
     #include <memory>
+    #include <optional>
+    #include <rocksdb/convenience.h>
+    #include <rocksdb/env.h>
     #include <thread>
 
     using AVEVA::RocksDB::Plugin::Azure::Plugin;
@@ -59,9 +62,12 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
     // (on threads that never call into RocksDB) for as long as the filesystem is in use.
     boost::asio::io_context ioContext;
     auto workGuard = boost::asio::make_work_guard(ioContext);
-    std::jthread ioThread{[&ioContext] { ioContext.run(); }};
-    // On shutdown: close the database, then workGuard.reset() so ioContext.run() can return.
+    std::thread ioThread{[&ioContext] { ioContext.run(); }};
+    // On shutdown, in this order: close the database and release the Env, then `workGuard.reset();`
+    // so that ioContext.run() can return, and only then `ioThread.join();`. Joining first never returns.
 
+    constexpr auto MbToBytes = [](int64_t mb) { return mb * 1024 * 1024; };
+    rocksdb::ConfigOptions primaryDbOptions;
     rocksdb::Env* env = nullptr;
     std::shared_ptr<rocksdb::Env> guard = nullptr;
     ServicePrincipalStorageInfo storageCredentials
