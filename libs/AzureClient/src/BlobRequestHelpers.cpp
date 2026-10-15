@@ -705,4 +705,22 @@ void AuthorizeRequest(const SharedKeyCredentialOptions& options, HttpRequest& re
 void AuthorizeRequest(const SharedKeySigner& signer, HttpRequest& request) {
     AddHeader(request, AuthorizationHeaderName, signer.Authorize(request));
 }
+
+[[nodiscard]] BlobStorageError MakeClientError(std::error_code error, std::string message) {
+    BlobStorageError details;
+    details.Message = message.empty() ? error.message() : std::move(message);
+    details.Code = error;
+    return details;
+}
+
+void ApplyLeaseRequestConditions(HttpRequest& request, Models::BlobRequestConditions conditions) {
+    conditions.LeaseId.clear();
+    ApplyBlobRequestConditions(request, conditions);
+}
+
+[[nodiscard]] HttpRequest BuildLeaseRequest(const BlobTarget& target, std::string_view action) {
+    HttpRequest request = BuildBlobRequest(target, HttpMethod::Put, "comp=lease");
+    AddHeader(request, XMsLeaseActionHeaderName, action);
+    return request;
+}
 } // namespace AVEVA::AzureClient::Private

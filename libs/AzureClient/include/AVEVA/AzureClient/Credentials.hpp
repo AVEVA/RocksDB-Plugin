@@ -17,12 +17,6 @@
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/post.hpp>
-#include <boost/json/parse.hpp>
-#include <boost/json/serialize.hpp>
-#include <boost/json/value.hpp>
-#include <boost/url/parse.hpp>
-#include <boost/url/scheme.hpp>
-#include <boost/url/url_view.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -31,13 +25,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <expected>
-#include <fstream>
 #include <functional>
-#include <ios>
-#include <iterator>
 #include <memory>
 #include <optional>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -133,125 +123,20 @@ using Clock = std::chrono::system_clock;
 constexpr std::int64_t MinTokenLifetimeSeconds = 1;
 constexpr std::int64_t MaxTokenLifetimeSeconds = 24 * 60 * 60;
 
-[[nodiscard]] inline std::string GetEnvironmentValue(const char* name) {
-#ifdef _WIN32
-    char* buffer = nullptr;
-    std::size_t size = 0;
-    if (_dupenv_s(&buffer, &size, name) != 0 || buffer == nullptr) {
-        return {};
-    }
-    const std::unique_ptr<char, decltype(&std::free)> owner{buffer, &std::free};
-    return std::string{buffer};
-#else
-    const char* value = std::getenv(name);
-    return value == nullptr ? std::string{} : std::string{value};
-#endif
-}
+[[nodiscard]] std::string GetEnvironmentValue(const char* name);
 
-[[nodiscard]] inline std::optional<std::int64_t> ParseInteger(std::string_view text) noexcept {
-    std::int64_t value = 0;
-    const auto* const end = std::to_address(text.end());
-    // Bounded by `end`, so null termination is not required.
-    const auto [ptr, ec] = std::from_chars(std::to_address(text.begin()), end, value);
-    if (ec != std::errc{} || ptr != end) {
-        return std::nullopt;
-    }
-    return value;
-}
+[[nodiscard]] std::optional<std::int64_t> ParseInteger(std::string_view text) noexcept;
 
 // Managed identity requests carry a secret header, so the endpoint must be https or a local/link-local
 // address (App Service uses loopback, IMDS uses 169.254.169.254).
-[[nodiscard]] inline bool IsAcceptableIdentityEndpoint(std::string_view endpoint) noexcept {
-    // Parse rather than prefix-match: prefixes accept hosts such as "127.evil.com" and userinfo tricks
-    // such as "127.0.0.1@evil.example".
-    const auto parsed = boost::urls::parse_uri(endpoint);
-    if (!parsed) {
-        return false;
-    }
-    const boost::urls::url_view url = *parsed;
-    if (url.has_userinfo()) {
-        return false;
-    }
-    if (url.scheme_id() == boost::urls::scheme::https) {
-        return true;
-    }
-    if (url.scheme_id() != boost::urls::scheme::http) {
-        return false;
-    }
-    switch (url.host_type()) {
-    case boost::urls::host_type::ipv4: {
-        const auto bytes = url.host_ipv4_address().to_bytes();
-        return bytes[0] == 127 || (bytes[0] == 169 && bytes[1] == 254);
-    }
-    case boost::urls::host_type::ipv6:
-        return url.host_ipv6_address().is_loopback();
-    case boost::urls::host_type::name:
-        return url.encoded_host_name() == "localhost";
-    default:
-        return false;
-    }
-}
+[[nodiscard]] bool IsAcceptableIdentityEndpoint(std::string_view endpoint) noexcept;
 
 // Returns a scalar member as text (numbers are serialized) or an empty string.
-[[nodiscard]] inline std::string JsonText(const boost::json::object& object, std::string_view key) {
-    const auto it = object.find(key);
-    if (it == object.end()) {
-        return {};
-    }
-    if (it->value().is_string()) {
-        return std::string{it->value().as_string()};
-    }
-    if (it->value().is_number()) {
-        return boost::json::serialize(it->value());
-    }
-    return {};
-}
 
 // Entra ID returns {"access_token", "expires_in": seconds}; managed identity endpoints return
 // "expires_on" (Unix seconds) and possibly a string "expires_in".
-[[nodiscard]] inline std::expected<AccessToken, std::error_code> ParseTokenResponse(std::error_code error,
-                                                                                    const HttpResponse& response) {
-    if (error) {
-        return std::unexpected(error);
-    }
-    constexpr unsigned int MinSuccess = 200;
-    constexpr unsigned int MaxSuccess = 299;
-    if (response.GetStatus() < MinSuccess || response.GetStatus() > MaxSuccess) {
-        return std::unexpected(make_error_code(BlobStorageErrorCode::AuthenticationFailed));
-    }
-    const auto invalid = std::unexpected(make_error_code(BlobStorageErrorCode::InvalidResponse));
-    boost::system::error_code parseError;
-    const boost::json::value root = boost::json::parse(std::string_view{response.GetBody()}, parseError);
-    if (parseError || !root.is_object()) {
-        return invalid;
-    }
-    const boost::json::object& tree = root.as_object();
-    AccessToken token;
-    token.Token = JsonText(tree, "access_token");
-    if (token.Token.empty()) {
-        return invalid;
-    }
-    if (const auto expiresIn = ParseInteger(JsonText(tree, "expires_in"));
-        expiresIn.has_value() && *expiresIn >= MinTokenLifetimeSeconds) {
-        // Tokens living longer than the cap are accepted but refreshed at the cap.
-        const auto lifetime = std::min(*expiresIn, MaxTokenLifetimeSeconds);
-        token.ExpiresOn = std::chrono::time_point_cast<Clock::duration>(Clock::now() + std::chrono::seconds{lifetime});
-    } else if (const auto expiresOn = ParseInteger(JsonText(tree, "expires_on"));
-               expiresOn.has_value() && *expiresOn >= 0) {
-        const auto now = Clock::now();
-        const std::int64_t nowSeconds =
-            std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-        const std::int64_t lifetime = *expiresOn - nowSeconds;
-        if (lifetime < MinTokenLifetimeSeconds) {
-            return invalid;
-        }
-        token.ExpiresOn = std::chrono::time_point_cast<Clock::duration>(
-            now + std::chrono::seconds{std::min(lifetime, MaxTokenLifetimeSeconds)});
-    } else {
-        return invalid;
-    }
-    return token;
-}
+[[nodiscard]] std::expected<AccessToken, std::error_code> ParseTokenResponse(std::error_code error,
+                                                                             const HttpResponse& response);
 
 template <HttpClientLike THttp, class Handler> void Fail(THttp& httpClient, Handler completion, std::error_code error) {
     boost::asio::post(httpClient.get_executor(),
@@ -300,33 +185,11 @@ void SendTokenRequest(THttp& httpClient, HttpRequest request, HttpRequestOptions
 }
 
 // Tenant ids are GUIDs or domain names; anything else could alter the token endpoint path.
-[[nodiscard]] inline bool IsValidTenantId(std::string_view tenantId) noexcept {
-    return !tenantId.empty() && std::ranges::all_of(tenantId, [](char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '.';
-    });
-}
+[[nodiscard]] bool IsValidTenantId(std::string_view tenantId) noexcept;
 
 // Rejects authority hosts that would send credentials to an unintended endpoint and returns
 // the host without a trailing slash.
-[[nodiscard]] inline std::string NormalizeAuthorityHost(std::string_view authorityHost) {
-    std::string_view host = authorityHost;
-    while (host.ends_with('/')) {
-        host.remove_suffix(1);
-    }
-    const auto parsed = boost::urls::parse_uri(host);
-    if (!parsed || parsed->scheme_id() != boost::urls::scheme::https || !parsed->has_authority() ||
-        parsed->host().empty()) {
-        throw std::invalid_argument("AuthorityHost must be an https URL with a non-empty host.");
-    }
-    if (parsed->has_userinfo() || !parsed->encoded_path().empty() || parsed->has_query() || parsed->has_fragment() ||
-        host.find('\\') != std::string_view::npos) {
-        throw std::invalid_argument("AuthorityHost must not contain userinfo, a path, query or fragment.");
-    }
-    if (parsed->has_port() && parsed->port_number() == 0) {
-        throw std::invalid_argument("AuthorityHost has an invalid port.");
-    }
-    return std::string{host};
-}
+[[nodiscard]] std::string NormalizeAuthorityHost(std::string_view authorityHost);
 
 // Tags the tenant id with its own type so it's never adjacent-and-same-type with the
 // authority host parameter.
@@ -334,39 +197,16 @@ struct TenantIdTag {};
 
 using TenantIdLabel = Private::StringLabel<TenantIdTag>;
 
-[[nodiscard]] inline HttpRequest BuildEntraTokenRequest(std::string_view authorityHost, TenantIdLabel tenantId,
-                                                        std::string body) {
-    std::string url = NormalizeAuthorityHost(authorityHost);
-    url += '/';
-    url += tenantId.Value;
-    url += "/oauth2/v2.0/token";
+[[nodiscard]] HttpRequest BuildEntraTokenRequest(std::string_view authorityHost, TenantIdLabel tenantId,
+                                                 std::string body);
 
-    HttpRequest request;
-    request.SetMethod(HttpMethod::Post);
-    request.SetUrl(std::move(url));
-    request.AddHeader(HttpHeader{"Content-Type", "application/x-www-form-urlencoded"});
-    request.SetBody(std::move(body));
-    return request;
-}
+[[nodiscard]] std::optional<std::string> ReadTokenFile(const std::string& path);
+// Rejects URIs that would send the system access token to an unintended endpoint (plain http, no host,
+// userinfo, or a fragment). Throws std::invalid_argument.
+void ValidateOidcRequestUri(std::string_view uri);
 
-[[nodiscard]] inline std::optional<std::string> ReadTokenFile(const std::string& path) {
-    std::ifstream file{path, std::ios::binary};
-    if (!file) {
-        return std::nullopt;
-    }
-    std::string content{std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
-    constexpr std::string_view Whitespace = " \t\r\n";
-    const std::size_t first = content.find_first_not_of(Whitespace);
-    if (first == std::string::npos) {
-        return std::nullopt;
-    }
-    const std::size_t last = content.find_last_not_of(Whitespace);
-    content = content.substr(first, last - first + 1);
-    if (content.find_first_of(Whitespace) != std::string::npos) {
-        return std::nullopt;
-    }
-    return content;
-}
+// Extracts the oidcToken member, or an empty string when the body is not the expected JSON object.
+[[nodiscard]] std::string ParseOidcToken(const HttpResponse& response);
 } // namespace Private
 
 // Service principal with a client secret (OAuth 2.0 client credentials grant).
@@ -591,7 +431,8 @@ struct AzurePipelinesCredentialOptions {
     std::string ServiceConnectionId;
     std::string SystemAccessToken;
     // The Azure Pipelines OIDC token endpoint; defaults to the SYSTEM_OIDCREQUESTURI environment variable.
-    // Must be an https URL (the construction throws std::invalid_argument otherwise): the system access token is sent to it.
+    // Must be an https URL (the construction throws std::invalid_argument otherwise): the system access token is sent
+    // to it.
     std::string OidcRequestUri;
     std::string AuthorityHost = std::string{DefaultAuthorityHost};
     HttpRequestOptions RequestOptions;
@@ -623,16 +464,6 @@ template <HttpClientLike THttp> class BasicAzurePipelinesCredential final {
     static constexpr unsigned int FirstSuccess = 200;
     static constexpr unsigned int LastSuccess = 299;
 
-    // Rejects URIs that would send the system access token to an unintended endpoint (plain http, no host,
-    // userinfo, or a fragment; parse_absolute_uri already refuses fragments).
-    static void ValidateOidcRequestUri(std::string_view uri) {
-        const auto parsed = boost::urls::parse_absolute_uri(uri);
-        if (!parsed || parsed->scheme_id() != boost::urls::scheme::https || !parsed->has_authority() ||
-            parsed->host().empty() || parsed->has_userinfo() || uri.find('\\') != std::string_view::npos) {
-            throw std::invalid_argument("OidcRequestUri must be an https URL with a non-empty host and no fragment.");
-        }
-    }
-
     static HttpRequest BuildOidcRequest(const AzurePipelinesCredentialOptions& options) {
         const auto separator = options.OidcRequestUri.find('?') == std::string::npos ? '?' : '&';
         HttpRequest request;
@@ -645,16 +476,6 @@ template <HttpClientLike THttp> class BasicAzurePipelinesCredential final {
         return request;
     }
 
-    // Extracts the oidcToken member, or an empty string when the body is not the expected JSON object.
-    static std::string ParseOidcToken(const HttpResponse& response) {
-        boost::system::error_code ec;
-        const boost::json::value root = boost::json::parse(response.GetBody(), ec);
-        if (ec || !root.is_object()) {
-            return {};
-        }
-        return Private::JsonText(root.as_object(), "oidcToken");
-    }
-
     static ClientAssertionCredentialOptions MakeExchangeOptions(THttp& httpClient, std::shared_ptr<THttp> owner,
                                                                 AzurePipelinesCredentialOptions options) {
         if (options.OidcRequestUri.empty()) {
@@ -663,7 +484,7 @@ template <HttpClientLike THttp> class BasicAzurePipelinesCredential final {
         // The system access token is sent as a bearer token to this URI, so refuse anything but https.
         // An empty value is reported when a token is requested, as before.
         if (!options.OidcRequestUri.empty()) {
-            ValidateOidcRequestUri(options.OidcRequestUri);
+            Private::ValidateOidcRequestUri(options.OidcRequestUri);
         }
 
         ClientAssertionCredentialOptions exchange;
@@ -693,7 +514,7 @@ template <HttpClientLike THttp> class BasicAzurePipelinesCredential final {
                         done(make_error_code(BlobStorageErrorCode::AuthenticationFailed), {});
                         return;
                     }
-                    auto oidcToken = ParseOidcToken(response);
+                    auto oidcToken = Private::ParseOidcToken(response);
                     if (oidcToken.empty()) {
                         done(make_error_code(BlobStorageErrorCode::InvalidResponse), {});
                         return;

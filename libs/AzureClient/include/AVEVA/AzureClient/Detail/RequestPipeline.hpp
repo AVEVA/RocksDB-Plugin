@@ -63,51 +63,21 @@ template <typename Generator>
     return std::chrono::milliseconds{static_cast<std::int64_t>(std::llround(delay))};
 }
 
-[[nodiscard]] inline std::chrono::milliseconds ComputeBackoff(const RetryOptions& retry, int retryNumber) {
-    thread_local std::mt19937_64 generator{std::random_device{}()};
-    return ComputeBackoff(retry, retryNumber, generator);
-}
+[[nodiscard]] std::chrono::milliseconds ComputeBackoff(const RetryOptions& retry, int retryNumber);
 
 // Resolves the x-ms-copy-source-authorization placeholder (see CopySourceClientCredentialMarker): an empty
 // `bearerToken` means the client has no bearer token to forward, so the header is dropped before the request is
 // signed or sent.
-inline void ResolveCopySourceAuthorization(HttpRequest& request, std::string_view bearerToken) {
-    auto& headers = request.GetHeaders();
-    for (auto it = headers.begin(); it != headers.end(); ++it) {
-        if (!IEquals(it->GetName(), XMsCopySourceAuthorizationHeaderName) ||
-            it->GetValue() != CopySourceClientCredentialMarker) {
-            continue;
-        }
-        if (bearerToken.empty()) {
-            headers.erase(it);
-        } else {
-            it->SetValue("Bearer " + std::string{bearerToken});
-        }
-        return;
-    }
-}
+void ResolveCopySourceAuthorization(HttpRequest& request, std::string_view bearerToken);
 
-[[nodiscard]] inline std::error_code CanceledError() noexcept {
-    return std::make_error_code(std::errc::operation_canceled);
-}
+[[nodiscard]] std::error_code CanceledError() noexcept;
 
 // Replaces any Authorization header with the bearer token, so exactly one is ever sent.
-inline void SetBearerAuthorization(HttpRequest& request, std::string_view token) {
-    std::erase_if(request.GetHeaders(),
-                  [](const HttpHeader& header) { return IEquals(header.GetName(), AuthorizationHeaderName); });
-    request.AddHeader(HttpHeader{std::string{AuthorizationHeaderName}, "Bearer " + std::string{token}});
-}
+void SetBearerAuthorization(HttpRequest& request, std::string_view token);
 
 // A request that cannot be replayed safely after an ambiguous transport failure: a conditional create
 // (If-None-Match: *) would answer 409 BlobAlreadyExists and a delete 404 if the first attempt had in fact succeeded.
-[[nodiscard]] inline bool IsReplaySafe(const HttpRequest& request) {
-    if (request.GetMethod() == HttpMethod::Delete) {
-        return false;
-    }
-    return std::ranges::none_of(request.GetHeaders(), [](const HttpHeader& header) {
-        return IEquals(header.GetName(), IfNoneMatchHeaderName) && header.GetValue() == "*";
-    });
-}
+[[nodiscard]] bool IsReplaySafe(const HttpRequest& request);
 
 // The timer that waits out a retry delay. A client type may name its own `retry_timer_type` so tests can observe
 // the requested delay without really waiting; every real client uses a steady_timer.

@@ -4,6 +4,7 @@
 #include "AVEVA/AzureClient/BlobStorageError.hpp"
 #include "AVEVA/AzureClient/BlobStorageErrorCode.hpp"
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
+#include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
 
 #include <AVEVA/HttpClient/HttpClientError.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
@@ -14,6 +15,8 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <random>
+#include <string>
 #include <string_view>
 #include <system_error>
 
@@ -87,6 +90,46 @@ std::optional<std::chrono::milliseconds> ParseRetryAfter(const HttpResponse& res
     }
     return std::nullopt;
 }
+
+namespace RetryDetail {
+[[nodiscard]] std::chrono::milliseconds ComputeBackoff(const RetryOptions& retry, int retryNumber) {
+    thread_local std::mt19937_64 generator{std::random_device{}()};
+    return ComputeBackoff(retry, retryNumber, generator);
+}
+
+void ResolveCopySourceAuthorization(HttpRequest& request, std::string_view bearerToken) {
+    auto& headers = request.GetHeaders();
+    for (auto it = headers.begin(); it != headers.end(); ++it) {
+        if (!IEquals(it->GetName(), XMsCopySourceAuthorizationHeaderName) ||
+            it->GetValue() != CopySourceClientCredentialMarker) {
+            continue;
+        }
+        if (bearerToken.empty()) {
+            headers.erase(it);
+        } else {
+            it->SetValue("Bearer " + std::string{bearerToken});
+        }
+        return;
+    }
+}
+
+[[nodiscard]] std::error_code CanceledError() noexcept { return std::make_error_code(std::errc::operation_canceled); }
+
+void SetBearerAuthorization(HttpRequest& request, std::string_view token) {
+    std::erase_if(request.GetHeaders(),
+                  [](const HttpHeader& header) { return IEquals(header.GetName(), AuthorizationHeaderName); });
+    request.AddHeader(HttpHeader{std::string{AuthorizationHeaderName}, "Bearer " + std::string{token}});
+}
+
+[[nodiscard]] bool IsReplaySafe(const HttpRequest& request) {
+    if (request.GetMethod() == HttpMethod::Delete) {
+        return false;
+    }
+    return std::ranges::none_of(request.GetHeaders(), [](const HttpHeader& header) {
+        return IEquals(header.GetName(), IfNoneMatchHeaderName) && header.GetValue() == "*";
+    });
+}
+} // namespace RetryDetail
 } // namespace AVEVA::AzureClient::Private
 
 namespace AVEVA::AzureClient {

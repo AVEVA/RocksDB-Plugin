@@ -14,6 +14,7 @@ find_package(LibXml2 CONFIG REQUIRED)
 add_library(aveva-azure-client
     BlobClientOptions.cpp
     BlobBatch.cpp
+    BlobDownload.cpp
     BlobRequestHelpers.cpp
     SharedKeySigner.cpp
     BlobXmlParser.cpp
@@ -87,9 +88,9 @@ target_link_libraries(aveva-azure-client
     PUBLIC
         aveva::http-client
         Boost::asio
+    PRIVATE
         Boost::json
         Boost::url
-    PRIVATE
         OpenSSL::Crypto
         Boost::algorithm
         Boost::uuid

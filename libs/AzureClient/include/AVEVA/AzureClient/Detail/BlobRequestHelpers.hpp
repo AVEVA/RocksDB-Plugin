@@ -395,12 +395,7 @@ void AuthorizeRequest(const SharedKeySigner& signer, HttpRequest& request);
 [[nodiscard]] BlobStorageError MakeFailureFromCurrentException();
 
 // A BlobStorageError carrying only `error` and `message` (defaulting to error.message()).
-[[nodiscard]] inline BlobStorageError MakeClientError(std::error_code error, std::string message = {}) {
-    BlobStorageError details;
-    details.Message = message.empty() ? error.message() : std::move(message);
-    details.Code = error;
-    return details;
-}
+[[nodiscard]] BlobStorageError MakeClientError(std::error_code error, std::string message = {});
 
 // Folds a transport/service std::error_code into the single std::expected error channel. Success
 // is governed solely by `error`: Exists*/*IfExists* clear it while leaving the suppressed
@@ -646,17 +641,10 @@ void SendAndParse(THttp& httpClient, const TTarget& target, HttpRequest request,
 }
 
 // The lease id of a lease request comes from the options' LeaseId; Conditions.LeaseId is ignored.
-inline void ApplyLeaseRequestConditions(HttpRequest& request, Models::BlobRequestConditions conditions) {
-    conditions.LeaseId.clear();
-    ApplyBlobRequestConditions(request, conditions);
-}
+void ApplyLeaseRequestConditions(HttpRequest& request, Models::BlobRequestConditions conditions);
 
 // Lease requests (Lease Blob).
-[[nodiscard]] inline HttpRequest BuildLeaseRequest(const BlobTarget& target, std::string_view action) {
-    HttpRequest request = BuildBlobRequest(target, HttpMethod::Put, "comp=lease");
-    AddHeader(request, XMsLeaseActionHeaderName, action);
-    return request;
-}
+[[nodiscard]] HttpRequest BuildLeaseRequest(const BlobTarget& target, std::string_view action);
 
 template <HttpClientLike THttp, class TTarget, class TCompletion>
 void AcquireLeaseAsync(THttp& httpClient, const TTarget& target, AcquireLeaseOptions operationOptions,

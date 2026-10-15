@@ -73,40 +73,20 @@ struct ChunkLengthTag {};
 
 using ChunkLength = NumericLabel<std::uint64_t, ChunkLengthTag>;
 
-[[nodiscard]] inline BlobStorageError MakeFailure(std::errc error, std::string message = {}) {
-    const std::error_code code = std::make_error_code(error);
-    return MakeClientError(code, std::move(message));
-}
+[[nodiscard]] BlobStorageError MakeFailure(std::errc error, std::string message = {});
 
 // Preserves the real error category so operational failures (disk full, permission denied)
 // are not reported as caller input errors.
-[[nodiscard]] inline BlobStorageError MakeFailure(std::error_code error, std::string message) {
-    return MakeClientError(error, std::move(message));
-}
+[[nodiscard]] BlobStorageError MakeFailure(std::error_code error, std::string message);
 
 // errno is the only cause a failed stream open exposes.
-[[nodiscard]] inline std::error_code LastOpenError() noexcept {
-    return errno != 0 ? std::error_code{errno, std::generic_category()} : std::make_error_code(std::errc::io_error);
-}
+[[nodiscard]] std::error_code LastOpenError() noexcept;
 
-[[nodiscard]] inline BlobStorageError MakeInvalidResponse(std::string message) {
-    return MakeClientError(make_error_code(BlobStorageErrorCode::InvalidResponse), std::move(message));
-}
+[[nodiscard]] BlobStorageError MakeInvalidResponse(std::string message);
 
-[[nodiscard]] inline std::optional<BlobStorageError> ToFailure(std::error_code error, const HttpResponse& response) {
-    RequestFailure const failure = DetermineBlobStorageFailure(error, response);
-    if (!failure.Error) {
-        return std::nullopt;
-    }
-    BlobStorageError details = failure.Details.value_or(MakeClientError(failure.Error));
-    details.Code = failure.Error;
-    return details;
-}
+[[nodiscard]] std::optional<BlobStorageError> ToFailure(std::error_code error, const HttpResponse& response);
 
-[[nodiscard]] inline std::string TakeBody(HttpResponse& response) {
-    std::string body = std::move(response).GetBody();
-    return body;
-}
+[[nodiscard]] std::string TakeBody(HttpResponse& response);
 
 struct DownloadSummary {
     HttpResponse FirstResponse; // headers of the first response; its body has been consumed
@@ -622,13 +602,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
     bool m_done = false;
 };
 
-[[nodiscard]] inline Response<Models::DownloadBlobToResult> ToDownloadToResponse(DownloadSummary summary) {
-    Models::DownloadBlobToResult result;
-    result.Properties = std::move(summary.Properties);
-    result.BytesWritten = summary.BytesWritten;
-    result.ContentRange = summary.ContentRange;
-    return Response<Models::DownloadBlobToResult>{std::move(result), std::move(summary.FirstResponse), std::nullopt};
-}
+[[nodiscard]] Response<Models::DownloadBlobToResult> ToDownloadToResponse(DownloadSummary summary);
 
 template <HttpClientLike THttp, class TCred, class TDone>
 void StartDownload(THttp& httpClient, const BasicBlobTarget<TCred>& options, DownloadToOptions operationOptions,
@@ -638,35 +612,9 @@ void StartDownload(THttp& httpClient, const BasicBlobTarget<TCred>& options, Dow
         ->Start();
 }
 // Closes the temporary file and, on success, renames it over `target`; any failure removes the temporary file.
-[[nodiscard]] inline std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>
+[[nodiscard]] std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>
 FinalizeFileDownload(std::ofstream& file, const std::filesystem::path& tempPath, const std::filesystem::path& target,
-                     SummaryResult result) {
-    using FileResult = std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>;
-    file.close();
-    std::error_code ignored;
-    if (!result.has_value()) {
-        std::filesystem::remove(tempPath, ignored);
-        return FileResult{std::unexpect, std::move(result).error()};
-    }
-    if (file.fail()) {
-        std::filesystem::remove(tempPath, ignored);
-        return FileResult{std::unexpect, MakeFailure(std::errc::io_error, "I/O error writing destination file.")};
-    }
-    std::error_code renameError;
-    if (std::filesystem::is_directory(target, renameError)) {
-        std::filesystem::remove(tempPath, ignored);
-        return FileResult{std::unexpect, MakeFailure(std::make_error_code(std::errc::is_a_directory),
-                                                     "The destination path is a directory.")};
-    }
-    renameError.clear();
-    std::filesystem::rename(tempPath, target, renameError);
-    if (renameError) {
-        std::filesystem::remove(tempPath, ignored);
-        return FileResult{std::unexpect,
-                          MakeFailure(renameError, "Failed to rename temporary download file to destination.")};
-    }
-    return ToDownloadToResponse(std::move(*result));
-}
+                     SummaryResult result);
 } // namespace DownloadDetail
 
 template <HttpClientLike THttp, class TCred, class TCompletion>
