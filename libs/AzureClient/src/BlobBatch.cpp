@@ -52,9 +52,9 @@ constexpr std::string_view LineBreak = "\r\n";
     return line;
 }
 
-// Reads "Name: value" lines up to and including the blank line that ends the header block.
-[[nodiscard]] std::vector<HttpHeader> ReadHeaders(std::string_view text, std::size_t& pos) {
-    std::vector<HttpHeader> headers;
+// Calls `visit(name, value)` with views into `text` for each "Name: value" line, up to and including the blank
+// line that ends the header block. Allocates nothing.
+template <class TVisitor> void VisitHeaders(std::string_view text, std::size_t& pos, TVisitor&& visit) {
     while (pos < text.size()) {
         const std::string_view line = ReadLine(text, pos);
         if (line.empty()) {
@@ -64,9 +64,15 @@ constexpr std::string_view LineBreak = "\r\n";
         if (colon == std::string_view::npos) {
             throw std::invalid_argument("Malformed header line in batch response part.");
         }
-        headers.emplace_back(std::string{TrimWhitespace(line.substr(0, colon))},
-                             std::string{TrimWhitespace(line.substr(colon + 1U))});
+        visit(TrimWhitespace(line.substr(0, colon)), TrimWhitespace(line.substr(colon + 1U)));
     }
+}
+
+[[nodiscard]] std::vector<HttpHeader> ReadHeaders(std::string_view text, std::size_t& pos) {
+    std::vector<HttpHeader> headers;
+    VisitHeaders(text, pos, [&headers](std::string_view name, std::string_view value) {
+        headers.emplace_back(std::string{name}, std::string{value});
+    });
     return headers;
 }
 
@@ -79,26 +85,26 @@ constexpr std::string_view LineBreak = "\r\n";
     return text;
 }
 
+// One sub-response, as views into the batch response body. Headers are only materialised for failures.
 struct BatchPart {
     std::size_t ContentId = 0;
-    HttpResponse Response;
+    unsigned int Status = 0;
+    std::string_view HeaderBlock; // The sub-response's header lines and everything after them.
 };
 
 [[nodiscard]] BatchPart ParsePart(std::string_view part) {
     std::size_t pos = 0;
-    const std::vector<HttpHeader> partHeaders = ReadHeaders(part, pos);
     std::optional<std::size_t> contentId;
-    for (const HttpHeader& header : partHeaders) {
-        if (IEquals(header.GetName(), "Content-ID")) {
+    VisitHeaders(part, pos, [&contentId](std::string_view name, std::string_view text) {
+        if (IEquals(name, "Content-ID")) {
             std::size_t value = 0;
-            const std::string_view text = TrimWhitespace(header.GetValue());
             const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
             if (error != std::errc{} || end != text.data() + text.size()) {
                 throw std::invalid_argument("Batch response part has an invalid Content-ID.");
             }
             contentId = value;
         }
-    }
+    });
     if (!contentId) {
         throw std::invalid_argument("Batch response part has no Content-ID.");
     }
@@ -117,14 +123,24 @@ struct BatchPart {
         throw std::invalid_argument("Batch response part has a malformed status code.");
     }
 
-    std::vector<HttpHeader> headers = ReadHeaders(part, pos);
-    const std::string_view body = TrimTrailingLineBreak(part.substr(pos));
-    return BatchPart{.ContentId = *contentId, .Response = HttpResponse{status, std::move(headers), std::string{body}}};
+    return BatchPart{.ContentId = *contentId, .Status = status, .HeaderBlock = part.substr(pos)};
 }
 
-[[nodiscard]] Models::DeleteBlobItemResult ToItemResult(const std::string& name, const HttpResponse& response) {
+[[nodiscard]] HttpResponse MaterializeResponse(const BatchPart& part) {
+    std::size_t pos = 0;
+    std::vector<HttpHeader> headers = ReadHeaders(part.HeaderBlock, pos);
+    const std::string_view body = TrimTrailingLineBreak(part.HeaderBlock.substr(pos));
+    return HttpResponse{part.Status, std::move(headers), std::string{body}};
+}
+
+[[nodiscard]] Models::DeleteBlobItemResult ToItemResult(const std::string& name, const BatchPart& part) {
+    constexpr unsigned int FirstNonSuccessStatus = 300;
     Models::DeleteBlobItemResult item;
     item.Name = name;
+    if (part.Status < FirstNonSuccessStatus) {
+        return item;
+    }
+    const HttpResponse response = MaterializeResponse(part);
     RequestFailure failure = DetermineBlobStorageFailure({}, response);
     if (!failure.Error) {
         return item;
@@ -145,14 +161,20 @@ struct BatchPart {
 
 void AppendBatchDeletePart(std::string& body, std::string_view boundary, std::size_t contentId,
                            const HttpRequest& subrequest) {
+    // Validate before appending anything, so a bad URL leaves `body` untouched.
+    const std::string_view url = subrequest.GetUrl();
+    const std::size_t schemeEnd = url.find("://");
+    const std::size_t pathStart =
+        schemeEnd == std::string_view::npos ? std::string_view::npos : url.find('/', schemeEnd + 3U);
+    if (pathStart == std::string_view::npos) {
+        throw std::invalid_argument("Batch sub-request URL must be absolute and include a path.");
+    }
     body.append("--").append(boundary).append(LineBreak);
     body.append("Content-Type: application/http").append(LineBreak);
     body.append("Content-Transfer-Encoding: binary").append(LineBreak);
     body.append("Content-ID: ").append(std::to_string(contentId)).append(LineBreak);
     body.append(LineBreak);
     // The service rejects absolute-form targets inside a batch part, so send path and query only.
-    const std::string_view url = subrequest.GetUrl();
-    const std::size_t pathStart = url.find('/', url.find("://") + 3U);
     body.append("DELETE ").append(url.substr(pathStart)).append(" HTTP/1.1").append(LineBreak);
     for (const HttpHeader& header : subrequest.GetHeaders()) {
         body.append(header.GetName()).append(": ").append(header.GetValue()).append(LineBreak);
@@ -176,7 +198,7 @@ std::vector<Models::DeleteBlobItemResult> ParseBatchDeleteResponse(const HttpRes
     const std::string delimiter = "--" + std::string{boundary};
     const std::string_view body = response.GetBody();
 
-    std::vector<std::optional<HttpResponse>> byContentId(names.size());
+    std::vector<std::optional<BatchPart>> byContentId(names.size());
     // Delimiters only count at the start of a line, so a boundary-like string inside a part is not a split point.
     const auto findDelimiter = [&](std::size_t from) {
         for (std::size_t pos = body.find(delimiter, from); pos != std::string_view::npos;
@@ -201,11 +223,11 @@ std::vector<Models::DeleteBlobItemResult> ParseBatchDeleteResponse(const HttpRes
         if (next == std::string_view::npos) {
             throw std::invalid_argument("Batch response is missing its closing boundary.");
         }
-        BatchPart part = ParsePart(TrimTrailingLineBreak(body.substr(partStart, next - partStart)));
+        const BatchPart part = ParsePart(TrimTrailingLineBreak(body.substr(partStart, next - partStart)));
         if (part.ContentId >= names.size() || byContentId[part.ContentId].has_value()) {
             throw std::invalid_argument("Batch response has an unexpected or duplicate Content-ID.");
         }
-        byContentId[part.ContentId] = std::move(part.Response);
+        byContentId[part.ContentId] = part;
         delimiterPos = next;
     }
     if (!closed) {
