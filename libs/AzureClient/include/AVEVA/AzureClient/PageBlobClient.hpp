@@ -347,8 +347,7 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
             this->Http(), this->Target(), BuildCreateRequest(contentLength, options),
             Private::ParseETagAndLastModified<Models::CreatePageBlobResult>,
             Private::SuppressErrors<Models::CreatePageBlobResult>(
-                std::move(completion),
-                {BlobStorageErrorCode::BlobAlreadyExists, BlobStorageErrorCode::ConditionNotMet}),
+                std::move(completion), BlobStorageErrorCode::BlobAlreadyExists, BlobStorageErrorCode::ConditionNotMet),
             requestOptions, true);
     }
 

@@ -231,6 +231,15 @@ inline constexpr std::string_view XMsErrorCodeHeaderName = "x-ms-error-code";
 inline constexpr std::string_view XMsContentCrc64HeaderName = "x-ms-content-crc64";
 inline constexpr std::string_view XMsDeleteTypePermanentHeaderName = "x-ms-delete-type-permanent";
 inline constexpr std::string_view AuthorizationHeaderName = "Authorization";
+
+// "Bearer <token>" built with a single allocation, without first copying the token into a temporary string.
+[[nodiscard]] inline std::string MakeBearerValue(std::string_view token) {
+    constexpr std::string_view Scheme = "Bearer ";
+    std::string value;
+    value.reserve(Scheme.size() + token.size());
+    value.append(Scheme).append(token);
+    return value;
+}
 inline constexpr std::string_view XMsMetaHeaderPrefix = "x-ms-meta-";
 inline constexpr std::string_view XMsBlobTypeHeaderName = "x-ms-blob-type";
 inline constexpr std::string_view XMsBlobContentLengthHeaderName = "x-ms-blob-content-length";
@@ -417,9 +426,10 @@ template <class T>
 
 // Completion adapter for *IfExists / *IfNotExists: a failure whose code is one of `suppressed` completes as
 // success with the real raw response, keeping the suppressed error's details in Response<T>::Error().
-template <class TModel, class TCompletion>
-[[nodiscard]] auto SuppressErrors(TCompletion completion, std::initializer_list<BlobStorageErrorCode> suppressed) {
-    return [completion = std::move(completion), codes = std::vector<BlobStorageErrorCode>(suppressed)](
+template <class TModel, class TCompletion, std::same_as<BlobStorageErrorCode>... TCodes>
+[[nodiscard]] auto SuppressErrors(TCompletion completion, TCodes... suppressed) {
+    return [completion = std::move(completion),
+            codes = std::array<BlobStorageErrorCode, sizeof...(TCodes)>{suppressed...}](
                std::error_code error, Response<TModel> response) mutable {
         if (error && std::ranges::any_of(codes, [&error](BlobStorageErrorCode code) { return error == code; })) {
             error.clear();

@@ -335,8 +335,8 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
                                  AzureRequestOptions requestOptions) {
         Private::DeleteBlobAsync(
             *m_httpClient, *m_target, options,
-            Private::SuppressErrors<Models::DeleteBlobResult>(
-                std::move(completion), {BlobStorageErrorCode::BlobNotFound, BlobStorageErrorCode::ResourceNotFound}),
+            Private::SuppressErrors<Models::DeleteBlobResult>(std::move(completion), BlobStorageErrorCode::BlobNotFound,
+                                                              BlobStorageErrorCode::ResourceNotFound),
             requestOptions, true);
     }
 

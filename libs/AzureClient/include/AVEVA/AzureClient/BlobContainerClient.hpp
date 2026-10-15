@@ -263,9 +263,9 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContai
         Private::SendAndParse<Models::CreateBlobContainerResult>(
             *m_httpClient, *m_target, Private::BuildCreateContainerRequest(*m_target, options),
             Private::ParseETagAndLastModified<Models::CreateBlobContainerResult>,
-            Private::SuppressErrors<Models::CreateBlobContainerResult>(
-                std::move(completion),
-                {BlobStorageErrorCode::ContainerAlreadyExists, BlobStorageErrorCode::ConditionNotMet}),
+            Private::SuppressErrors<Models::CreateBlobContainerResult>(std::move(completion),
+                                                                       BlobStorageErrorCode::ContainerAlreadyExists,
+                                                                       BlobStorageErrorCode::ConditionNotMet),
             requestOptions);
     }
 
