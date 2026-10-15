@@ -20,3 +20,20 @@ TEST(BlobFilesystemTests, SupportedOpsAdvertisesOnlyAsyncIO) {
 
     EXPECT_EQ(supported, int64_t{1} << rocksdb::FSSupportedOps::kAsyncIO);
 }
+
+TEST(BlobFilesystemTests, AreFilesSameComparesNormalizedPaths) {
+    BlobFilesystem filesystem(rocksdb::FileSystem::Default(), nullptr, nullptr);
+    bool same = false;
+    ASSERT_TRUE(filesystem.AreFilesSame("db//a.sst", "db/a.sst", {}, &same, nullptr).ok());
+    EXPECT_TRUE(same);
+    ASSERT_TRUE(filesystem.AreFilesSame("db\\a.sst", "db/a.sst", {}, &same, nullptr).ok());
+    EXPECT_TRUE(same);
+    ASSERT_TRUE(filesystem.AreFilesSame("db/a.sst", "db/b.sst", {}, &same, nullptr).ok());
+    EXPECT_FALSE(same);
+}
+
+TEST(BlobFilesystemTests, TruncateRejectsSizesBeyondInt64) {
+    BlobFilesystem filesystem(rocksdb::FileSystem::Default(), nullptr, nullptr);
+    const auto status = filesystem.Truncate("db/a.sst", static_cast<size_t>(INT64_MAX) + 1, {}, nullptr);
+    EXPECT_TRUE(status.IsInvalidArgument());
+}

@@ -25,6 +25,24 @@ using namespace boost::log::trivial;
 using Impl::AbortAsyncReads;
 using Impl::PollAsyncReads;
 namespace {
+// Blob paths use forward slashes and have no notion of ".." or repeated separators, so two spellings of one path
+// compare equal once the separators are normalized.
+std::string NormalizePath(std::string_view path) {
+    std::string normalized;
+    normalized.reserve(path.size());
+    for (const char c : path) {
+        const char next = c == '\\' ? '/' : c;
+        if (next == '/' && !normalized.empty() && normalized.back() == '/') {
+            continue;
+        }
+        normalized.push_back(next);
+    }
+    if (normalized.size() > 1 && normalized.back() == '/') {
+        normalized.pop_back();
+    }
+    return normalized;
+}
+
 std::string FormatRequestFailedLogMessage(const RequestFailedException& ex, const std::string_view path = {}) {
     std::ostringstream formattedMessage;
     formattedMessage << "[" << ex.ErrorCode << "]" << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") ";
@@ -210,6 +228,7 @@ rocksdb::IOStatus BlobFilesystem::GetChildrenFileAttributes(const std::string& d
                                                             rocksdb::IODebugContext*) {
     return Guard("GetChildrenFileAttributes", dir, [&]() -> rocksdb::IOStatus {
         const auto attributes = m_filesystem->GetChildrenFileAttributes(dir);
+        result->clear();
         for (const auto& attr : attributes) {
             result->push_back({
                 .name = attr.GetName(),
@@ -235,18 +254,24 @@ rocksdb::IOStatus BlobFilesystem::DeleteFile(const std::string& f, const rocksdb
 rocksdb::IOStatus BlobFilesystem::Truncate(const std::string& fname, size_t size, const rocksdb::IOOptions&,
                                            rocksdb::IODebugContext*) {
     return Guard("Truncate", fname, [&]() -> rocksdb::IOStatus {
-        assert(size < static_cast<size_t>(std::numeric_limits<int64_t>::max()));
+        if (size > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+            return rocksdb::IOStatus::InvalidArgument("Truncate size exceeds the maximum blob size");
+        }
         m_filesystem->Truncate(fname, static_cast<int64_t>(size));
         return rocksdb::IOStatus::OK();
     });
 }
 
-rocksdb::IOStatus BlobFilesystem::CreateDir(const std::string&, const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
+rocksdb::IOStatus BlobFilesystem::CreateDir(const std::string& d, const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
+    std::scoped_lock lock(m_knownDirectoriesMutex);
+    m_knownDirectories.insert(NormalizePath(d));
     return rocksdb::IOStatus::OK();
 }
 
-rocksdb::IOStatus BlobFilesystem::CreateDirIfMissing(const std::string&, const rocksdb::IOOptions&,
+rocksdb::IOStatus BlobFilesystem::CreateDirIfMissing(const std::string& d, const rocksdb::IOOptions&,
                                                      rocksdb::IODebugContext*) {
+    std::scoped_lock lock(m_knownDirectoriesMutex);
+    m_knownDirectories.insert(NormalizePath(d));
     return rocksdb::IOStatus::OK();
 }
 
@@ -254,6 +279,8 @@ rocksdb::IOStatus BlobFilesystem::DeleteDir(const std::string& d, const rocksdb:
     return Guard("DeleteDir", d, [&]() -> rocksdb::IOStatus {
         const auto remainingFiles = m_filesystem->DeleteDir(d);
         if (remainingFiles == 0) {
+            std::scoped_lock lock(m_knownDirectoriesMutex);
+            m_knownDirectories.erase(NormalizePath(d));
             return rocksdb::IOStatus::OK();
         } else {
             BOOST_LOG_SEV(*m_logger, error) << "Failed to delete all contents within directory; some remain.";
@@ -306,9 +333,9 @@ rocksdb::IOStatus BlobFilesystem::NumFileLinks(const std::string&, const rocksdb
 }
 
 rocksdb::IOStatus BlobFilesystem::AreFilesSame(const std::string& first, const std::string& second,
-                                               const rocksdb::IOOptions& options, bool* res,
-                                               rocksdb::IODebugContext* dbg) {
-    return target_->AreFilesSame(first, second, options, res, dbg);
+                                               const rocksdb::IOOptions&, bool* res, rocksdb::IODebugContext*) {
+    *res = NormalizePath(first) == NormalizePath(second);
+    return rocksdb::IOStatus::OK();
 }
 
 rocksdb::IOStatus BlobFilesystem::LockFile(const std::string& f, const rocksdb::IOOptions&, rocksdb::FileLock** l,
@@ -377,10 +404,27 @@ rocksdb::IOStatus BlobFilesystem::GetFreeSpace(const std::string&, const rocksdb
     return rocksdb::IOStatus::OK();
 }
 
-rocksdb::IOStatus BlobFilesystem::IsDirectory(const std::string& path, const rocksdb::IOOptions& options, bool* is_dir,
-                                              rocksdb::IODebugContext* dbg) {
-    // TODO: figure out if there is a way to tell based on path separator
-    return target_->IsDirectory(path, options, is_dir, dbg);
+rocksdb::IOStatus BlobFilesystem::IsDirectory(const std::string& path, const rocksdb::IOOptions&, bool* is_dir,
+                                              rocksdb::IODebugContext*) {
+    return Guard("IsDirectory", path, [&]() -> rocksdb::IOStatus {
+        {
+            std::scoped_lock lock(m_knownDirectoriesMutex);
+            if (m_knownDirectories.contains(NormalizePath(path))) {
+                *is_dir = true;
+                return rocksdb::IOStatus::OK();
+            }
+        }
+        // A prefix is a directory exactly when something lives beneath it.
+        if (!m_filesystem->GetChildren(path, 1).empty()) {
+            *is_dir = true;
+            return rocksdb::IOStatus::OK();
+        }
+        if (m_filesystem->FileExists(path)) {
+            *is_dir = false;
+            return rocksdb::IOStatus::OK();
+        }
+        return rocksdb::IOStatus::NotFound();
+    });
 }
 
 // Reads issued via ReadAsync complete on the host io_context; their callbacks are delivered here on the caller's
