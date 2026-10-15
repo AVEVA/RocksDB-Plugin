@@ -184,7 +184,8 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
             std::move(options));
     }
 
-    // `content` is read when the operation is *initiated*; it must stay valid until then. With the default
+    // Copies `content` into the request body (use the shared-buffer overload above to avoid the copy). `content` is
+    // read when the operation is *initiated*; it must stay valid until then. With the default
     // deferred completion token, initiation happens when the returned operation is `co_await`ed or
     // launched, which may be long after this call returns. See the README lifetime section.
     template <class CompletionToken = DefaultCompletionToken>

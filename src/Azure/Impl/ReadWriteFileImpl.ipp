@@ -90,7 +90,7 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
         int64_t Start = 0;
         int64_t End = 0;
         std::vector<size_t> Chunks; // indices into m_bufferStats, in write order
-        std::vector<char> Data;
+        std::shared_ptr<std::vector<char>> Data; // shared so each upload's request views it without a copy
     };
 
     std::vector<size_t> order(m_bufferStats.size());
@@ -122,12 +122,12 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
     // Fills the bytes of an extent that no chunk supplies with what the blob already holds. Reads past the file's old
     // end are skipped: that region holds no data yet and stays zero.
     const auto prepare = [&](Extent& extent, std::vector<PendingRead>& reads) {
-        extent.Data.assign(static_cast<size_t>(extent.End - extent.Start), '\0');
+        extent.Data = std::make_shared<std::vector<char>>(static_cast<size_t>(extent.End - extent.Start), '\0');
         std::vector<std::pair<int64_t, int64_t>> covered;
         for (const auto index : extent.Chunks) {
             const auto& chunk = m_bufferStats[index];
             const auto* source = m_buffer.data() + chunk.bufferOffset + chunk.prePadding;
-            std::copy(source, source + chunk.dataLength, extent.Data.begin() + (chunk.targetOffset - extent.Start));
+            std::copy(source, source + chunk.dataLength, extent.Data->begin() + (chunk.targetOffset - extent.Start));
             covered.emplace_back(chunk.targetOffset, chunk.targetOffset + chunk.dataLength);
         }
         std::ranges::sort(covered);
@@ -136,7 +136,7 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
         const auto readGap = [&](int64_t gapStart, int64_t gapEnd) {
             gapEnd = std::min(gapEnd, sizeBefore);
             if (gapEnd > gapStart) {
-                std::span<char> target(extent.Data.data() + (gapStart - extent.Start),
+                std::span<char> target(extent.Data->data() + (gapStart - extent.Start),
                                        static_cast<size_t>(gapEnd - gapStart));
                 reads.push_back(BlobOperations::StartDownload(*m_h.Blob, target, gapStart, gapEnd - gapStart));
             }
@@ -191,7 +191,8 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
         finishAll(reads, finishRead);
 
         using PendingUploadT =
-            decltype(BlobOperations::StartUploadPages(*m_h.Runtime, *m_h.Blob, std::span<const char>{}, int64_t{0}));
+            decltype(BlobOperations::StartUploadPages(*m_h.Runtime, *m_h.Blob, std::shared_ptr<const std::vector<char>>{},
+                                                      int64_t{0}));
         std::vector<PendingUploadT> uploads;
         try {
             for (auto i = begin; i < end; ++i) {
@@ -209,7 +210,7 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
 
         for (auto i = begin; i < end; ++i) {
             BOOST_LOG_SEV(*m_h.Logger, boost::log::trivial::debug)
-                << "Flushed " << extents[i].Data.size() << " bytes to read/writeable file '" << m_h.Name << "'";
+                << "Flushed " << extents[i].Data->size() << " bytes to read/writeable file '" << m_h.Name << "'";
         }
     }
     m_bufferStats.clear();

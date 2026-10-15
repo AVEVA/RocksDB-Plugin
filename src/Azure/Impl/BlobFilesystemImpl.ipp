@@ -741,13 +741,13 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
         // goes through an emptied blob (there is no atomic replace), but that window is one upload wide instead of a
         // multi-request copy, and a failure leaves the source intact for a retry.
         constexpr auto PageSize = Configuration::PageBlob::PageSize;
-        std::vector<char> data(static_cast<size_t>((size + PageSize - 1) / PageSize * PageSize));
-        if (size > 0 && BlobOperations::Download(srcClient, std::span<char>(data).first(static_cast<size_t>(size)), 0,
+        auto data = std::make_shared<std::vector<char>>(static_cast<size_t>((size + PageSize - 1) / PageSize * PageSize));
+        if (size > 0 && BlobOperations::Download(srcClient, std::span<char>(*data).first(static_cast<size_t>(size)), 0,
                                                  size, etag) != size) {
             throw std::runtime_error("Unexpected end of blob while renaming '" + std::string(realPathFrom) + "'");
         }
         const auto writeInto = [&](auto& target) {
-            if (!data.empty()) {
+            if (!data->empty()) {
                 BlobOperations::UploadPages(*m_runtime, target, data, 0);
             }
             BlobOperations::SetSize(*m_runtime, target, size);

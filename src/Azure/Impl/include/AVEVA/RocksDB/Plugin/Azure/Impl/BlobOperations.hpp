@@ -189,6 +189,7 @@ template <typename TBlob>
     return Download(client, buffer, offset, length, std::string());
 }
 
+// Copies `buffer` into the request body; prefer the shared-buffer overload when the caller can hand over ownership.
 template <typename TBlob>
 void UploadPages(const ClientRuntimeBase& runtime, TBlob& client, std::span<const char> buffer, int64_t blobOffset) {
     runtime.ThrowIfWritesFenced();
@@ -198,21 +199,33 @@ void UploadPages(const ClientRuntimeBase& runtime, TBlob& client, std::span<cons
     });
 }
 
+// The request views `data` and keeps it alive itself, so the payload is not copied.
+template <typename TBlob>
+void UploadPages(const ClientRuntimeBase& runtime, TBlob& client, std::shared_ptr<const std::vector<char>> data,
+                 int64_t blobOffset) {
+    runtime.ThrowIfWritesFenced();
+    const auto size = data->size();
+    Call(client, [&](auto token) {
+        return client.UploadPagesAsync(static_cast<uint64_t>(blobOffset), data, token,
+                                       BoundByWriteDeadline(runtime, TransferOptions(client, size)));
+    });
+}
+
 // An upload that has been started but not finished; see StartUploadPages.
 template <typename TFuture> struct PendingUpload {
     TFuture Result;
 };
 
-// Starts the upload without waiting, so several can be in flight at once. The buffer and client must stay alive until
-// FinishUploadPages returns.
+// Starts the upload without waiting, so several can be in flight at once. The request views the shared buffer (no
+// copy) and keeps it alive; the client must stay alive until FinishUploadPages returns.
 template <typename TBlob>
-[[nodiscard]] auto StartUploadPages(const ClientRuntimeBase& runtime, TBlob& client, std::span<const char> buffer,
-                                    int64_t blobOffset) {
+[[nodiscard]] auto StartUploadPages(const ClientRuntimeBase& runtime, TBlob& client,
+                                    std::shared_ptr<const std::vector<char>> buffer, int64_t blobOffset) {
     runtime.ThrowIfWritesFenced();
     AzureClient::ThrowIfRunningOn(client.get_executor());
-    auto result =
-        client.UploadPagesAsync(static_cast<uint64_t>(blobOffset), std::as_bytes(buffer), boost::asio::use_future,
-                                BoundByWriteDeadline(runtime, TransferOptions(client, buffer.size())));
+    const auto size = buffer->size();
+    auto result = client.UploadPagesAsync(static_cast<uint64_t>(blobOffset), std::move(buffer), boost::asio::use_future,
+                                          BoundByWriteDeadline(runtime, TransferOptions(client, size)));
     return PendingUpload<decltype(result)>{std::move(result)};
 }
 
