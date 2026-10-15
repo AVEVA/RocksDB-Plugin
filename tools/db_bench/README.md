@@ -32,8 +32,10 @@ an installable static library that the wrapper links against.
 
 ## Run — local filesystem (smoke test)
 
-Set no `AVEVA_DB_BENCH_*` variables to pass through to stock `db_bench`. Use
-this mode to check the build before you point the tool at Azure.
+The wrapper always registers the Azure plugin, so it requires every `AVEVA_DB_BENCH_*` variable
+listed below and exits with status 2 when one is missing; there is no pass-through mode. Without
+`--fs_uri` the benchmark still runs on the local filesystem, which makes it a quick check of the build and a
+baseline to compare against.
 
 ```powershell
 ./build/WindowsRelease/tools/db_bench/RelWithDebInfo/db_bench.exe `
@@ -95,7 +97,7 @@ $exe = ".\build\WindowsRelease\tools\db_bench\RelWithDebInfo\db_bench.exe"
     --benchmarks=fillseq,readrandom `
     --num=10000 `
     --compression_type=zlib `
-    --fs_uri="azblobfs$($env:AVEVA_DB_BENCH_CONTAINER)" `
+    --fs_uri=auto `
     --db="$($env:AZURE_STORAGE_ACCOUNT_NAME)+$($env:AVEVA_DB_BENCH_CONTAINER)/bench-db"
 ```
 
@@ -113,20 +115,19 @@ this as soon as `Plugin::Register` succeeds.
 ```
 aveva_db_bench: Azure plugin registered.
   Suggested flags:
-    --fs_uri=azblobfs<container>
+    --fs_uri=<plugin name>   (or pass --fs_uri=auto and the wrapper substitutes it)
     --db=<account>+<container>/<your-db-name>
 ```
 
-If you instead see the line `AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL not set;
-Azure plugin will NOT be registered. Falling through to stock db_bench.`,
-you did not set the env vars above in that shell before you ran the tool.
+If the tool instead exits with status 2 and prints `missing required environment variable`, you did not set
+all of the env vars above in that shell before you ran the tool.
 
 Do not read the console output by hand to check this line. Capture stderr
 and search it instead.
 
 ```powershell
 $out = & $exe --benchmarks=fillseq --num=10 --compression_type=zlib `
-    --fs_uri="azblobfs$($env:AVEVA_DB_BENCH_CONTAINER)" `
+    --fs_uri=auto `
     --db="$($env:AZURE_STORAGE_ACCOUNT_NAME)+$($env:AVEVA_DB_BENCH_CONTAINER)/bench-db" 2>&1
 # Search the captured output for the registration message.
 if ($out -match "Azure plugin registered") { "PLUGIN OK" } else { "PLUGIN NOT REGISTERED" }
@@ -159,7 +160,7 @@ keys only if it downloads them back from Azure.
 
 ```powershell
 & $exe --benchmarks=readrandom --num=10000 --use_existing_db=1 --compression_type=zlib `
-    --fs_uri="azblobfs$($env:AVEVA_DB_BENCH_CONTAINER)" `
+    --fs_uri=auto `
     --db="$($env:AZURE_STORAGE_ACCOUNT_NAME)+$($env:AVEVA_DB_BENCH_CONTAINER)/bench-db"
 ```
 Check the `readrandom` result line for `(10000 of 10000 found)`.
@@ -171,7 +172,7 @@ Add these flags to get latency percentiles and RocksDB's internal counters.
 ```powershell
 & $exe --benchmarks=fillrandom,readrandom --num=50000 --value_size=1024 `
     --compression_type=zlib --statistics=1 --histogram=1 `
-    --fs_uri="azblobfs$($env:AVEVA_DB_BENCH_CONTAINER)" `
+    --fs_uri=auto `
     --db="$($env:AZURE_STORAGE_ACCOUNT_NAME)+$($env:AVEVA_DB_BENCH_CONTAINER)/bench-db" `
     *>&1 | Tee-Object -FilePath C:\temp\dbbench_output.txt
 ```
@@ -234,7 +235,7 @@ same flags.
 # Plugin: Azure-backed.
 & $exe --benchmarks=fillrandom,readrandom --num=200000 --value_size=1024 `
     --compression_type=zlib --statistics=1 --histogram=1 `
-    --fs_uri="azblobfs$($env:AVEVA_DB_BENCH_CONTAINER)" `
+    --fs_uri=auto `
     --db="$($env:AZURE_STORAGE_ACCOUNT_NAME)+$($env:AVEVA_DB_BENCH_CONTAINER)/bench-db"
 ```
 
