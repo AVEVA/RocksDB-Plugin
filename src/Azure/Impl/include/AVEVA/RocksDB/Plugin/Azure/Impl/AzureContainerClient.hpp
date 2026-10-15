@@ -27,7 +27,7 @@ template <typename TContainer> class BasicAzureContainerClient final : public Co
 
     int64_t GetBlobSize(const std::string& path) override {
         auto blob = m_client->GetPageBlobClient(path);
-        return BlobOperations::GetSize(blob);
+        return BlobOperations::GetInfo(blob).Size;
     }
 
     void DownloadBlobTo(const std::string& path, const std::filesystem::path& destinationPath, int64_t offset,

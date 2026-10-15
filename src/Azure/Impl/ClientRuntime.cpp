@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 
 #include <AVEVA/HttpClient/HttpClientOptions.hpp>
 
@@ -105,6 +106,52 @@ void ClientRuntimeBase::ThrowIfWritesFenced() const {
         remaining && *remaining <= std::chrono::steady_clock::duration::zero()) {
         throw WritesFencedException("Writes are disabled because the lease renewal deadline has passed");
     }
+}
+
+std::optional<int64_t> ClientRuntimeBase::CachedBlobSize(const std::string& blobUrl) const {
+    const std::scoped_lock lock(m_sizeMutex);
+    const auto it = m_sizes.find(blobUrl);
+    if (it == m_sizes.end()) {
+        return std::nullopt;
+    }
+    if (std::chrono::steady_clock::now() - it->second.FetchedAt >= Configuration::MetadataCacheTtl) {
+        m_sizes.erase(it);
+        return std::nullopt;
+    }
+    return it->second.Size;
+}
+
+uint64_t ClientRuntimeBase::BlobSizeEpoch() const noexcept { return m_sizeEpoch.load(); }
+
+void ClientRuntimeBase::CacheBlobSize(const std::string& blobUrl, const int64_t size, const uint64_t epoch) const {
+    constexpr std::size_t MaxCachedSizes = 4096;
+    const auto now = std::chrono::steady_clock::now();
+    const std::scoped_lock lock(m_sizeMutex);
+    // Invalidations bump the epoch under this lock, so a fetch that started before one can never be stored.
+    if (m_sizeEpoch.load() != epoch) {
+        return;
+    }
+    if (m_sizes.size() >= MaxCachedSizes) {
+        std::erase_if(m_sizes, [&](const auto& entry) {
+            return now - entry.second.FetchedAt >= Configuration::MetadataCacheTtl;
+        });
+        if (m_sizes.size() >= MaxCachedSizes) {
+            m_sizes.clear();
+        }
+    }
+    m_sizes[blobUrl] = CachedSize{size, now};
+}
+
+void ClientRuntimeBase::InvalidateBlobSize(const std::string& blobUrl) const {
+    const std::scoped_lock lock(m_sizeMutex);
+    ++m_sizeEpoch;
+    m_sizes.erase(blobUrl);
+}
+
+void ClientRuntimeBase::InvalidateAllBlobSizes() const {
+    const std::scoped_lock lock(m_sizeMutex);
+    ++m_sizeEpoch;
+    m_sizes.clear();
 }
 
 void ClientRuntimeBase::SetWriteDeadlineSource(WriteDeadlineSource source) {

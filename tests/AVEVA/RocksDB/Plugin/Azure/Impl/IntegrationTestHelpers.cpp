@@ -198,7 +198,7 @@ std::vector<char> AzureIntegrationTestBase::DownloadBlobData(size_t maxSize) {
     const auto pageBlobClientPtr = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient>(
         m_containerClient->GetPageBlobClient(m_blobName));
     auto& pageBlobClient = *pageBlobClientPtr;
-    const auto actualSize = BlobOperations::GetSize(pageBlobClient);
+    const auto actualSize = BlobOperations::GetInfo(pageBlobClient).Size;
 
     std::vector<char> data(std::min(static_cast<size_t>(actualSize), maxSize));
     if (!data.empty()) {

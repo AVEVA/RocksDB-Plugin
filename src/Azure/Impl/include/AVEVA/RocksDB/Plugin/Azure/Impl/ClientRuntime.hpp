@@ -22,6 +22,8 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
+#include <unordered_map>
 #include <utility>
 
 #ifdef _WIN32
@@ -79,6 +81,29 @@ class ClientRuntimeBase {
     void SetWriteDeadlineSource(WriteDeadlineSource source);
     /// <summary>Time left before mutations must stop; empty when no lease deadline applies.</summary>
     [[nodiscard]] std::optional<std::chrono::steady_clock::duration> WriteTimeRemaining() const;
+
+    /// <summary>
+    /// A short-lived cache of blobs' logical sizes (keyed by blob URL) for FileSystem::GetFileSize, which RocksDB
+    /// calls repeatedly for the same files. Every operation that can change a blob's size invalidates its entry
+    /// when it finishes, and a fetch that overlapped any invalidation is never stored (see BlobSizeEpoch), so only
+    /// another process's writes can be missed, and only for Configuration::MetadataCacheTtl.
+    /// </summary>
+    [[nodiscard]] std::optional<int64_t> CachedBlobSize(const std::string& blobUrl) const;
+    /// <summary>Read before fetching a size; pass it to CacheBlobSize so a racing invalidation wins.</summary>
+    [[nodiscard]] uint64_t BlobSizeEpoch() const noexcept;
+    void CacheBlobSize(const std::string& blobUrl, int64_t size, uint64_t epoch) const;
+    void InvalidateBlobSize(const std::string& blobUrl) const;
+    /// <summary>For operations that touch many blobs at once (directory delete, rename).</summary>
+    void InvalidateAllBlobSizes() const;
+
+  private:
+    struct CachedSize {
+        int64_t Size = 0;
+        std::chrono::steady_clock::time_point FetchedAt;
+    };
+    mutable std::mutex m_sizeMutex;
+    mutable std::unordered_map<std::string, CachedSize> m_sizes;
+    mutable std::atomic<uint64_t> m_sizeEpoch{0};
 };
 
 /// <summary>

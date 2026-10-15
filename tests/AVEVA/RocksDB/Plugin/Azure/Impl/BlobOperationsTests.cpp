@@ -125,20 +125,20 @@ class BlobOperationsFakeBlobTests : public ::testing::Test {
 TEST_F(BlobOperationsFakeBlobTests, GetEtagReadsThePropertiesOfTheBlob) {
     m_env.Blob->ETag = "\"fake\"";
 
-    EXPECT_EQ("\"fake\"", BlobOperations::GetEtag(*m_env.Client));
+    EXPECT_EQ("\"fake\"", BlobOperations::GetInfo(*m_env.Client).ETag);
 }
 
 TEST_F(BlobOperationsFakeBlobTests, SetCapacityResizesTheBlobToTheRequestedSize) {
     BlobOperations::SetCapacity(*m_env.Runtime, *m_env.Client, 1024);
 
     EXPECT_EQ((std::vector<int64_t>{1024}), m_env.Blob->CapacityWrites);
-    EXPECT_EQ(1024, BlobOperations::GetCapacity(*m_env.Client));
+    EXPECT_EQ(1024, BlobOperations::GetInfo(*m_env.Client).Capacity);
 }
 
 TEST_F(BlobOperationsFakeBlobTests, SetSizeRecordsTheSizeInTheBlobMetadata) {
     BlobOperations::SetSize(*m_env.Runtime, *m_env.Client, 77);
 
-    EXPECT_EQ(77, BlobOperations::GetSize(*m_env.Client));
+    EXPECT_EQ(77, BlobOperations::GetInfo(*m_env.Client).Size);
     EXPECT_EQ((std::vector<int64_t>{77}), m_env.Blob->SizeWrites);
 }
 
@@ -161,7 +161,7 @@ TEST_F(BlobOperationsFakeBlobTests, StorageFailuresSurfaceAsExceptions) {
         return std::nullopt;
     };
 
-    EXPECT_THROW((void)BlobOperations::GetEtag(*m_env.Client), RequestFailedException);
+    EXPECT_THROW((void)BlobOperations::GetInfo(*m_env.Client).ETag, RequestFailedException);
 }
 
 TEST_F(BlobOperationsFakeBlobTests, UploadPagesStoresTheBytesAtTheOffset) {

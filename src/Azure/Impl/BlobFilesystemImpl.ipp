@@ -526,6 +526,7 @@ template <typename THttp> bool BasicBlobFilesystemImpl<THttp>::DeleteFile(const 
     EnsureLiveness();
 
     auto [prefix, realPath, client] = ResolveBlob(filePath);
+    const BlobOperations::SizeInvalidation<decltype(client)> invalidateSize(*m_runtime, client);
     const auto res = CallResponse(client, [&](auto token) { return client.DeleteIfExistsAsync(token); });
 
     auto cache = m_fileCaches.find(prefix);
@@ -544,6 +545,7 @@ template <typename THttp> size_t BasicBlobFilesystemImpl<THttp>::DeleteDir(const
 
     const auto [prefix, realPath] = StorageAccount::StripPrefix(directoryPath);
     const auto& container = GetContainer(prefix);
+    const boost::scope::scope_exit invalidateSizes{[this] { m_runtime->InvalidateAllBlobSizes(); }};
 
     AzureClient::ListBlobsOptions options;
     options.Prefix = BlobFilesystemDetail::DirectoryPrefix(realPath);
@@ -634,7 +636,7 @@ template <typename THttp> int64_t BasicBlobFilesystemImpl<THttp>::GetFileSize(co
 
     auto [prefix, realPath, client] = ResolveBlob(filePath);
 
-    return BlobOperations::GetSize(client);
+    return BlobOperations::GetCachedSize(*m_runtime, client);
 }
 
 template <typename THttp>
@@ -705,6 +707,7 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
     // Whatever happens below, a cached copy of either name may no longer match its blob: a failed commit can leave
     // the destination emptied or partly written, and a failed source delete leaves both names holding data.
     boost::scope::scope_exit dropCached{[&] {
+        m_runtime->InvalidateAllBlobSizes();
         if (const auto cache = m_fileCaches.find(prefixAccountTo); cache != m_fileCaches.end()) {
             cache->second->RemoveFile(std::string(realPathFrom));
             cache->second->RemoveFile(std::string(realPathTo));
@@ -777,7 +780,7 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
             // Commit: replace the destination from the fully written temporary blob.
             // The temporary blob's capacity is the source's, already known; only its current ETag is needed to
             // condition the copy. The destination's logical size stays 0 until the last step.
-            const auto tempEtag = BlobOperations::GetEtag(tempClient);
+            const auto tempEtag = BlobOperations::GetInfo(tempClient).ETag;
             BlobOperations::CreateOrReplace(*m_runtime, destClient, cap);
             if (!BlobOperations::CopyPagesServerSide(*m_runtime, tempClient, destClient, size, tempEtag)) {
                 BlobOperations::CopyPages(*m_runtime, tempClient, destClient, size, tempEtag);

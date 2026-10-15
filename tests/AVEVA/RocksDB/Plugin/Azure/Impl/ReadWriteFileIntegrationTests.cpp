@@ -173,7 +173,7 @@ TEST_F(ReadWriteFileIntegrationTests, Sync_UpdatesFileSizeInBlob) {
 
     // Assert
     auto pageBlobClient = m_containerClient->GetPageBlobClient(m_blobName);
-    const auto actualSize = BlobOperations::GetSize(pageBlobClient);
+    const auto actualSize = BlobOperations::GetInfo(pageBlobClient).Size;
     EXPECT_EQ(static_cast<int64_t>(testData.size()), actualSize);
 }
 
@@ -230,7 +230,7 @@ TEST_F(ReadWriteFileIntegrationTests, GetFileSize_ReturnsCorrectSize) {
 
     // Assert - Verify size through blob client
     auto pageBlobClient = m_containerClient->GetPageBlobClient(m_blobName);
-    const auto actualSize = BlobOperations::GetSize(pageBlobClient);
+    const auto actualSize = BlobOperations::GetInfo(pageBlobClient).Size;
     EXPECT_EQ(static_cast<int64_t>(testData.size()), actualSize);
 }
 

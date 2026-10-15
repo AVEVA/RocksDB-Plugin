@@ -66,11 +66,18 @@ template <typename TBlob> [[nodiscard]] BlobInfo GetInfo(TBlob& client) {
             std::move(properties.ETag), std::chrono::time_point_cast<std::chrono::seconds>(properties.LastModified)};
 }
 
-template <typename TBlob> [[nodiscard]] int64_t GetSize(TBlob& client) { return GetInfo(client).Size; }
+// Drops the blob's cached logical size when the enclosing mutation ends, whether or not it succeeded: a failure part
+// way through may still have changed the blob.
+template <typename TBlob> class SizeInvalidation {
+    const ClientRuntimeBase& m_runtime;
+    std::string m_url;
 
-template <typename TBlob> [[nodiscard]] int64_t GetCapacity(TBlob& client) { return GetInfo(client).Capacity; }
-
-template <typename TBlob> [[nodiscard]] std::string GetEtag(TBlob& client) { return GetInfo(client).ETag; }
+  public:
+    SizeInvalidation(const ClientRuntimeBase& runtime, const TBlob& client) : m_runtime(runtime), m_url(client.Url()) {}
+    SizeInvalidation(const SizeInvalidation&) = delete;
+    SizeInvalidation& operator=(const SizeInvalidation&) = delete;
+    ~SizeInvalidation() { m_runtime.InvalidateBlobSize(m_url); }
+};
 
 // A single request, so the size and ETag describe the same version of the blob.
 template <typename TBlob> [[nodiscard]] BlobMetadata GetMetadata(TBlob& client) {
@@ -78,8 +85,21 @@ template <typename TBlob> [[nodiscard]] BlobMetadata GetMetadata(TBlob& client) 
     return {info.Size, std::move(info.ETag)};
 }
 
+// The blob's logical size, served from the runtime's short-lived cache when it is fresh.
+template <typename TBlob> [[nodiscard]] int64_t GetCachedSize(const ClientRuntimeBase& runtime, TBlob& client) {
+    const auto url = client.Url();
+    if (const auto cached = runtime.CachedBlobSize(url)) {
+        return *cached;
+    }
+    const auto epoch = runtime.BlobSizeEpoch();
+    const auto size = GetInfo(client).Size;
+    runtime.CacheBlobSize(url, size, epoch);
+    return size;
+}
+
 template <typename TBlob> void SetSize(const ClientRuntimeBase& runtime, TBlob& client, int64_t size) {
     runtime.ThrowIfWritesFenced();
+    const SizeInvalidation<TBlob> invalidate(runtime, client);
     AzureClient::SetBlobMetadataOptions options;
     options.Metadata.emplace(std::string(BlobHelpers::SizeMetadataKey), std::to_string(size));
     Call(client, [&](auto token) {
@@ -90,6 +110,7 @@ template <typename TBlob> void SetSize(const ClientRuntimeBase& runtime, TBlob& 
 
 template <typename TBlob> void SetCapacity(const ClientRuntimeBase& runtime, TBlob& client, int64_t capacity) {
     runtime.ThrowIfWritesFenced();
+    const SizeInvalidation<TBlob> invalidate(runtime, client);
     Call(client, [&](auto token) {
         return client.ResizeAsync(static_cast<uint64_t>(capacity), AzureClient::ResizePageBlobOptions{}, token,
                                   BoundByWriteDeadline(runtime, client.GetDefaultRequestOptions()));
@@ -100,6 +121,7 @@ template <typename TBlob> void SetCapacity(const ClientRuntimeBase& runtime, TBl
 // Blob without If-None-Match overwrites, so this is one request for both the new and the existing case.
 template <typename TBlob> void CreateOrReplace(const ClientRuntimeBase& runtime, TBlob& client, int64_t capacity) {
     runtime.ThrowIfWritesFenced();
+    const SizeInvalidation<TBlob> invalidate(runtime, client);
     AzureClient::CreatePageBlobOptions options;
     options.Metadata.emplace(std::string(BlobHelpers::SizeMetadataKey), "0");
     Call(client, [&](auto token) {
@@ -111,6 +133,7 @@ template <typename TBlob> void CreateOrReplace(const ClientRuntimeBase& runtime,
 // Creates the page blob with the given capacity unless it already exists. Returns true if it was created.
 template <typename TBlob> bool CreateIfNotExists(const ClientRuntimeBase& runtime, TBlob& client, int64_t capacity) {
     runtime.ThrowIfWritesFenced();
+    const SizeInvalidation<TBlob> invalidate(runtime, client);
     // The client suppresses BlobAlreadyExists and reports it through Response::Error() instead of failing.
     const auto response = CallResponse(client, [&](auto token) {
         return client.CreateIfNotExistsAsync(static_cast<uint64_t>(capacity), token,

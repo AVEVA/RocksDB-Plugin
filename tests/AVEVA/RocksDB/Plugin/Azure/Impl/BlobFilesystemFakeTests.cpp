@@ -90,6 +90,35 @@ TEST_F(BlobFilesystemFakeTests, WrittenFileCanBeReadBackAndReportsItsLogicalSize
     EXPECT_EQ(Read("000001.sst"), "hello page blob");
 }
 
+TEST_F(BlobFilesystemFakeTests, RepeatedGetFileSizeIsServedFromTheShortLivedCache) {
+    Write("a.sst", "12345");
+    EXPECT_EQ(m_fs->GetFileSize(Path("a.sst")), 5);
+    const auto before = m_server->PropertiesRequests;
+
+    EXPECT_EQ(m_fs->GetFileSize(Path("a.sst")), 5);
+    EXPECT_EQ(m_fs->GetFileSize(Path("a.sst")), 5);
+
+    EXPECT_EQ(m_server->PropertiesRequests, before);
+}
+
+TEST_F(BlobFilesystemFakeTests, WritesTruncatesAndDeletesInvalidateTheCachedSize) {
+    Write("a.sst", "12345");
+    EXPECT_EQ(m_fs->GetFileSize(Path("a.sst")), 5);
+
+    m_fs->Truncate(Path("a.sst"), 2);
+    EXPECT_EQ(m_fs->GetFileSize(Path("a.sst")), 2);
+
+    Write("a.sst", "123456789");
+    EXPECT_EQ(m_fs->GetFileSize(Path("a.sst")), 9);
+
+    m_fs->RenameFile(Path("a.sst"), Path("b.sst"));
+    EXPECT_THROW((void)m_fs->GetFileSize(Path("a.sst")), RequestFailedException);
+
+    EXPECT_EQ(m_fs->GetFileSize(Path("b.sst")), 9);
+    EXPECT_TRUE(m_fs->DeleteFile(Path("b.sst")));
+    EXPECT_THROW((void)m_fs->GetFileSize(Path("b.sst")), RequestFailedException);
+}
+
 TEST_F(BlobFilesystemFakeTests, MissingFileDoesNotExist) { EXPECT_FALSE(m_fs->FileExists(Path("missing.sst"))); }
 
 TEST_F(BlobFilesystemFakeTests, ChildrenAreListedRelativeToTheirDirectory) {

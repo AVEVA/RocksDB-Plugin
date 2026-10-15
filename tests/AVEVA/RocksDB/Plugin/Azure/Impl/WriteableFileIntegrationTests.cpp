@@ -136,7 +136,7 @@ TEST_F(WriteableFileIntegrationTests, Sync_PersistsDataAndSize_ToBlob) {
 
     // Assert
     auto pageBlobClient = m_containerClient->GetPageBlobClient(m_blobName);
-    const auto actualSize = BlobOperations::GetSize(pageBlobClient);
+    const auto actualSize = BlobOperations::GetInfo(pageBlobClient).Size;
     EXPECT_EQ(testData.size(), actualSize);
 
     const auto downloadedData = DownloadBlobData(testData.size());
@@ -155,7 +155,7 @@ TEST_F(WriteableFileIntegrationTests, Truncate_ReducesFileSize) {
 
     // Assert
     auto pageBlobClient = m_containerClient->GetPageBlobClient(m_blobName);
-    const auto actualSize = BlobOperations::GetSize(pageBlobClient);
+    const auto actualSize = BlobOperations::GetInfo(pageBlobClient).Size;
     EXPECT_EQ(500, actualSize);
     EXPECT_EQ(500, file.GetFileSize());
 }
