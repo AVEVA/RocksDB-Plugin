@@ -20,6 +20,7 @@ add_executable(aveva-http-client-tests
 	HttpClientRobustnessTests.cpp
 	HttpClientTestHelpers.cpp
 	HttpClientTlsTests.cpp
+	IdleSweeperTests.cpp
 	OriginLimiterTests.cpp
 	OptionValidationTests.cpp
 )

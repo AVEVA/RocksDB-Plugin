@@ -128,7 +128,8 @@ class IdleSweeper {
                 }
                 const auto due = m_queue.begin()->first;
                 if (Clock::now() < due) {
-                    m_wake.wait_until(lock, stop, due, [] { return false; });
+                    m_wake.wait_until(lock, stop, due,
+                                      [this, due] { return !m_queue.empty() && m_queue.begin()->first < due; });
                     continue;
                 }
                 auto sweeper = m_queue.begin()->second.lock();
