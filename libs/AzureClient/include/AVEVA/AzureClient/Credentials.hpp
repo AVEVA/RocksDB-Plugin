@@ -308,8 +308,9 @@ using WorkloadIdentityCredential = BasicWorkloadIdentityCredential<HttpClient>;
 template <HttpClientLike THttp> class BasicClientAssertionCredential final {
   public:
     BasicClientAssertionCredential(THttp& httpClient, ClientAssertionCredentialOptions options)
-        : m_httpClient(&httpClient), m_options(std::move(options)) {
-        static_cast<void>(Private::NormalizeAuthorityHost(m_options.AuthorityHost));
+        : m_httpClient(&httpClient) {
+        static_cast<void>(Private::NormalizeAuthorityHost(options.AuthorityHost));
+        m_options = std::make_shared<const ClientAssertionCredentialOptions>(std::move(options));
     }
     // Shares ownership of the HTTP client, so the credential (and requests it has in flight) keep it alive.
     BasicClientAssertionCredential(std::shared_ptr<THttp> httpClient, ClientAssertionCredentialOptions options)
@@ -328,16 +329,17 @@ template <HttpClientLike THttp> class BasicClientAssertionCredential final {
 
   private:
     template <class Handler> void Begin(std::vector<std::string> scopes, Handler completion) {
-        if (!Private::IsValidTenantId(m_options.TenantId) || m_options.ClientId.empty() ||
-            !m_options.AssertionProvider || scopes.empty()) {
+        if (!Private::IsValidTenantId(m_options->TenantId) || m_options->ClientId.empty() ||
+            !m_options->AssertionProvider || scopes.empty()) {
             Private::Fail(*m_httpClient, std::move(completion), std::make_error_code(std::errc::invalid_argument));
             return;
         }
         // The provider may complete on any thread; the token request is sent from there. Everything the continuation
-        // needs is copied or moved in, so it does not depend on this credential staying alive.
-        m_options.AssertionProvider([httpClient = m_httpClient, owner = m_httpOwner, options = m_options,
-                                     scopes = std::move(scopes), completion = std::move(completion)](
-                                        std::error_code error, std::string assertion) mutable {
+        // needs is copied or moved in, so it does not depend on this credential staying alive. The options are
+        // shared rather than copied, since the provider may run once per token request.
+        m_options->AssertionProvider([httpClient = m_httpClient, owner = m_httpOwner, options = m_options,
+                                      scopes = std::move(scopes), completion = std::move(completion)](
+                                         std::error_code error, std::string assertion) mutable {
             if (error) {
                 Private::Fail(*httpClient, std::move(completion), error);
                 return;
@@ -346,16 +348,17 @@ template <HttpClientLike THttp> class BasicClientAssertionCredential final {
                 Private::Fail(*httpClient, std::move(completion), std::make_error_code(std::errc::invalid_argument));
                 return;
             }
-            std::string body = Private::BuildClientAssertionBody(options.ClientId, assertion, scopes);
+            std::string body = Private::BuildClientAssertionBody(options->ClientId, assertion, scopes);
             Private::SendTokenRequest(
-                *httpClient, Private::BuildEntraTokenRequest(options.AuthorityHost, options.TenantId, std::move(body)),
-                options.RequestOptions, options.Retry, false, std::move(completion));
+                *httpClient,
+                Private::BuildEntraTokenRequest(options->AuthorityHost, options->TenantId, std::move(body)),
+                options->RequestOptions, options->Retry, false, std::move(completion));
         });
     }
 
     THttp* m_httpClient;
     std::shared_ptr<THttp> m_httpOwner;
-    ClientAssertionCredentialOptions m_options;
+    std::shared_ptr<const ClientAssertionCredentialOptions> m_options;
 };
 
 using ClientAssertionCredential = BasicClientAssertionCredential<HttpClient>;
