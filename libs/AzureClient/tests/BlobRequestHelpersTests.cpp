@@ -655,10 +655,11 @@ TEST(BlobRequestHelpersTests, MakeConnectionState_NormalisesOptionsOnce) {
     using AVEVA::AzureClient::Private::MakeBlobTarget;
     using AVEVA::AzureClient::Private::MakeConnectionState;
 
-    const auto sharedKey = MakeConnectionState(BlobServiceClientOptions{
-        .ServiceEndpoint = "http://127.0.0.1:10000/devstoreaccount1/",
-        .SharedKey = {.AccountName = "devstoreaccount1", .AccountKey = "MDEyMzQ1Njc4OWFiY2RlZg=="},
-        .AllowInsecureHttp = true});
+    BlobServiceClientOptions sharedKeyOptions;
+    sharedKeyOptions.ServiceEndpoint = "http://127.0.0.1:10000/devstoreaccount1/";
+    sharedKeyOptions.SharedKey = {.AccountName = "devstoreaccount1", .AccountKey = "MDEyMzQ1Njc4OWFiY2RlZg=="};
+    sharedKeyOptions.AllowInsecureHttp = true;
+    const auto sharedKey = MakeConnectionState(std::move(sharedKeyOptions));
     EXPECT_EQ(sharedKey->Signer->AccountName(), "devstoreaccount1");
     EXPECT_EQ(sharedKey->BasePrefix, "http://127.0.0.1:10000");
     EXPECT_EQ(sharedKey->BasePath, "/devstoreaccount1");
@@ -667,19 +668,22 @@ TEST(BlobRequestHelpersTests, MakeConnectionState_NormalisesOptionsOnce) {
     EXPECT_EQ(blob.Connection, sharedKey) << "child targets share, not copy, the connection";
     EXPECT_EQ(BuildBlobUrl(blob), "http://127.0.0.1:10000/devstoreaccount1/container/dir/blob.txt");
 
-    const auto unsigned_ =
-        MakeConnectionState(BlobServiceClientOptions{.ServiceEndpoint = "https://account.blob.core.windows.net"});
+    BlobServiceClientOptions unsignedOptions;
+    unsignedOptions.ServiceEndpoint = "https://account.blob.core.windows.net";
+    const auto unsigned_ = MakeConnectionState(std::move(unsignedOptions));
     EXPECT_EQ(unsigned_->Signer, nullptr);
     EXPECT_EQ(unsigned_->BasePath, "");
 
-    const auto sas = MakeConnectionState(BlobServiceClientOptions{
-        .ServiceEndpoint = "https://account.blob.core.windows.net", .SasToken = "?sv=1&sig=x"});
+    BlobServiceClientOptions sasOptions;
+    sasOptions.ServiceEndpoint = "https://account.blob.core.windows.net";
+    sasOptions.SasToken = "?sv=1&sig=x";
+    const auto sas = MakeConnectionState(std::move(sasOptions));
     EXPECT_EQ(sas->SasToken, "sv=1&sig=x");
 
-    EXPECT_THROW(static_cast<void>(MakeConnectionState(
-                     BlobServiceClientOptions{.ServiceEndpoint = "https://account.blob.core.windows.net",
-                                              .SharedKey = {.AccountName = "a", .AccountKey = "not base64!"}})),
-                 std::invalid_argument);
+    BlobServiceClientOptions badKeyOptions;
+    badKeyOptions.ServiceEndpoint = "https://account.blob.core.windows.net";
+    badKeyOptions.SharedKey = {.AccountName = "a", .AccountKey = "not base64!"};
+    EXPECT_THROW(static_cast<void>(MakeConnectionState(std::move(badKeyOptions))), std::invalid_argument);
     EXPECT_THROW(static_cast<void>(MakeBlobTarget(sharedKey, "Bad_Name", "blob")), std::invalid_argument);
     EXPECT_THROW(static_cast<void>(MakeBlobTarget(sharedKey, "container", "")), std::invalid_argument);
 }
@@ -689,8 +693,10 @@ TEST(BlobRequestHelpersTests, BlobTarget_CachesTheEncodedResourceAndAppendsOnlyT
     using AVEVA::AzureClient::Private::MakeBlobTarget;
     using AVEVA::AzureClient::Private::MakeConnectionState;
 
-    const auto connection = MakeConnectionState(BlobServiceClientOptions{
-        .ServiceEndpoint = "https://account.blob.core.windows.net/x", .SasToken = "sv=1&sig=s"});
+    BlobServiceClientOptions connectionOptions;
+    connectionOptions.ServiceEndpoint = "https://account.blob.core.windows.net/x";
+    connectionOptions.SasToken = "sv=1&sig=s";
+    const auto connection = MakeConnectionState(std::move(connectionOptions));
     const auto blob = MakeBlobTarget(connection, "container", "folder name/file?.txt");
 
     EXPECT_EQ(blob.EncodedResource, "https://account.blob.core.windows.net/x/container/folder%20name/file%3F.txt");

@@ -186,7 +186,7 @@ struct ParsedErrorBody {
 
 void NormalizeTokenScopes(std::vector<std::string>& scopes) {
     if (scopes.empty()) {
-        scopes.emplace_back("https://storage.azure.com/.default");
+        scopes.emplace_back(DefaultStorageScope);
     }
 }
 

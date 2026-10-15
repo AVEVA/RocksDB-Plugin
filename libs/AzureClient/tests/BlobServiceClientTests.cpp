@@ -62,10 +62,10 @@ TEST(BlobServiceClientTests, Constructor_ThrowsForInvalidEndpointSchemeAndPartia
 // signature must match a fresh one-off signature of the same request.
 TEST(BlobServiceClientTests, DerivedClientsSignWithTheSharedConnectionSigner) {
     FakeHttpClient httpClient;
-    BlobServiceClient service{
-        httpClient, BlobServiceClientOptions{
-                        .ServiceEndpoint = "https://storageaccount.blob.core.windows.net",
-                        .SharedKey = {.AccountName = "storageaccount", .AccountKey = "MDEyMzQ1Njc4OWFiY2RlZg=="}}};
+    BlobServiceClientOptions serviceOptions;
+    serviceOptions.ServiceEndpoint = "https://storageaccount.blob.core.windows.net";
+    serviceOptions.SharedKey = {.AccountName = "storageaccount", .AccountKey = "MDEyMzQ1Njc4OWFiY2RlZg=="};
+    BlobServiceClient service{httpClient, std::move(serviceOptions)};
 
     AVEVA::AzureClient::Tests::BlobContainerClient container = service.GetBlobContainerClient("images");
     auto blob = container.GetPageBlobClient("folder/photo.png");

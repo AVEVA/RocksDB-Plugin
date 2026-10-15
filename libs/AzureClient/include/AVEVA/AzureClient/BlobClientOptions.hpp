@@ -38,12 +38,12 @@ struct RetryOptions {
     std::chrono::milliseconds MaxDelay = DefaultRetryMaxDelay;
 };
 
-// Identifies a single blob (block blob or page blob) within a container, and
-// carries the same connection settings as BlobContainerClientOptions.
-struct BlobClientOptions {
+// The OAuth scope requested for storage tokens when none is configured.
+inline constexpr std::string_view DefaultStorageScope = "https://storage.azure.com/.default";
+
+// Connection settings shared by the service, container and blob client options.
+struct ConnectionOptions {
     std::string ServiceEndpoint;
-    std::string ContainerName;
-    std::string BlobName;
     // Already URL-encoded `key=value` pairs joined by '&'; one leading '?' is tolerated and stripped.
     std::string SasToken;
 
@@ -51,7 +51,7 @@ struct BlobClientOptions {
     // makes construction throw std::invalid_argument.
     // TokenCredential requires an https ServiceEndpoint (an http endpoint is rejected with
     // std::invalid_argument) unless the host is loopback (localhost, 127.0.0.1, [::1]).
-    std::vector<std::string> TokenScopes{"https://storage.azure.com/.default"};
+    std::vector<std::string> TokenScopes{std::string(DefaultStorageScope)};
     SharedKeyCredentialOptions SharedKey;
 
     RetryOptions Retry;
@@ -64,38 +64,17 @@ struct BlobClientOptions {
     bool AllowInsecureHttp = false;
 };
 
-struct BlobContainerClientOptions {
-    std::string ServiceEndpoint;
+// Identifies a storage account; carries only the connection settings.
+struct BlobServiceClientOptions : ConnectionOptions {};
+
+// Identifies a container within an account.
+struct BlobContainerClientOptions : ConnectionOptions {
     std::string ContainerName;
-    // Exactly one of SasToken, a shared key or a TokenCredential, or none; otherwise construction throws
-    // std::invalid_argument (see BlobClientOptions).
-    // TokenCredential requires https unless the host is loopback (see BlobClientOptions).
-    std::string SasToken;
-    std::vector<std::string> TokenScopes{"https://storage.azure.com/.default"};
-    SharedKeyCredentialOptions SharedKey;
-    std::string ApiVersion = std::string(DefaultApiVersion);
-
-    RetryOptions Retry;
-    AzureRequestOptions DefaultRequestOptions;
-
-    // See BlobClientOptions::AllowInsecureHttp.
-    bool AllowInsecureHttp = false;
 };
 
-struct BlobServiceClientOptions {
-    std::string ServiceEndpoint;
-    // Exactly one of SasToken, a shared key or a TokenCredential, or none; otherwise construction throws
-    // std::invalid_argument (see BlobClientOptions).
-    // TokenCredential requires https unless the host is loopback (see BlobClientOptions).
-    std::string SasToken;
-    std::vector<std::string> TokenScopes{"https://storage.azure.com/.default"};
-    SharedKeyCredentialOptions SharedKey;
-    std::string ApiVersion = std::string(DefaultApiVersion);
-
-    RetryOptions Retry;
-    AzureRequestOptions DefaultRequestOptions;
-
-    // See BlobClientOptions::AllowInsecureHttp.
-    bool AllowInsecureHttp = false;
+// Identifies a single blob (block blob or page blob) within a container.
+struct BlobClientOptions : ConnectionOptions {
+    std::string ContainerName;
+    std::string BlobName;
 };
 } // namespace AVEVA::AzureClient

@@ -35,13 +35,12 @@ inline constexpr std::string_view DefaultETag = "\"0x8D1234\"";
 
 [[nodiscard]] inline BlobClientOptions MakeBlobClientOptions(std::string containerName = "images",
                                                              std::string blobName = "photo.png") {
-    BlobClientOptions options{
-        .ServiceEndpoint = ResolveServiceEndpoint(),
-        .ContainerName = std::move(containerName),
-        .BlobName = std::move(blobName),
-        .SasToken = std::string(DefaultSasToken),
-        .ApiVersion = std::string(DefaultApiVersion),
-    };
+    BlobClientOptions options;
+    options.ServiceEndpoint = ResolveServiceEndpoint();
+    options.ContainerName = std::move(containerName);
+    options.BlobName = std::move(blobName);
+    options.SasToken = std::string(DefaultSasToken);
+    options.ApiVersion = std::string(DefaultApiVersion);
     // Scripted single-response tests must not consume extra responses through automatic
     // retries; retry behavior is covered explicitly by RetryTests.
     options.Retry.MaxRetries = 0;
@@ -49,22 +48,20 @@ inline constexpr std::string_view DefaultETag = "\"0x8D1234\"";
 }
 
 [[nodiscard]] inline BlobContainerClientOptions MakeBlobContainerClientOptions(std::string containerName = "images") {
-    BlobContainerClientOptions options{
-        .ServiceEndpoint = ResolveServiceEndpoint(),
-        .ContainerName = std::move(containerName),
-        .SasToken = std::string(DefaultSasToken),
-        .ApiVersion = std::string(DefaultApiVersion),
-    };
+    BlobContainerClientOptions options;
+    options.ServiceEndpoint = ResolveServiceEndpoint();
+    options.ContainerName = std::move(containerName);
+    options.SasToken = std::string(DefaultSasToken);
+    options.ApiVersion = std::string(DefaultApiVersion);
     options.Retry.MaxRetries = 0;
     return options;
 }
 
 [[nodiscard]] inline BlobServiceClientOptions MakeBlobServiceClientOptions() {
-    BlobServiceClientOptions options{
-        .ServiceEndpoint = ResolveServiceEndpoint(),
-        .SasToken = std::string(DefaultSasToken),
-        .ApiVersion = std::string(DefaultApiVersion),
-    };
+    BlobServiceClientOptions options;
+    options.ServiceEndpoint = ResolveServiceEndpoint();
+    options.SasToken = std::string(DefaultSasToken);
+    options.ApiVersion = std::string(DefaultApiVersion);
     options.Retry.MaxRetries = 0;
     return options;
 }

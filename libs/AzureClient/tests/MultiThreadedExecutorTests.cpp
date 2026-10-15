@@ -189,8 +189,9 @@ using PoolPageBlobClient = BasicPageBlobClient<ThreadPoolBlobService>;
 using PoolBlobContainerClient = BasicBlobContainerClient<ThreadPoolBlobService>;
 
 [[nodiscard]] BlobContainerClientOptions SharedKeyContainerOptions() {
-    BlobContainerClientOptions options{.ServiceEndpoint = "https://account.blob.core.windows.net",
-                                       .ContainerName = "container"};
+    BlobContainerClientOptions options;
+    options.ServiceEndpoint = "https://account.blob.core.windows.net";
+    options.ContainerName = "container";
     options.SharedKey = {.AccountName = "account", .AccountKey = "a2V5LWJ5dGVzLWZvci10aHJlYWQtc2FuaXRpemVyLXRlc3Q="};
     options.Retry.MaxRetries = 5;
     options.Retry.InitialDelay = std::chrono::milliseconds{0};
