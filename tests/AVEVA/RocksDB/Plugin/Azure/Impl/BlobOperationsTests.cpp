@@ -370,11 +370,41 @@ TEST(DownloadBufferPoolTests, ReleasedBufferIsReusedWithoutAllocating) {
     }
     EXPECT_EQ(1U, pool->PooledCount());
 
-    const auto again = pool->Acquire(2048);
+    const auto again = pool->Acquire(3000);
 
     EXPECT_EQ(first, again->Data());
-    EXPECT_EQ(2048U, again->Size());
+    EXPECT_EQ(3000U, again->Size());
     EXPECT_EQ(0U, pool->PooledCount());
+}
+
+TEST(DownloadBufferPoolTests, BuffersOfADifferentSizeClassAreNotShared) {
+    const auto pool = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::DownloadBufferPool>();
+    {
+        const auto big = pool->Acquire(1U << 20);
+    }
+    {
+        const auto small = pool->Acquire(100);
+    }
+    EXPECT_EQ(2U, pool->PooledCount());
+
+    const auto small = pool->Acquire(512);
+    EXPECT_EQ(512U, small->Size());
+    EXPECT_EQ(1U, pool->PooledCount());
+    const auto big = pool->Acquire((1U << 19) + 1);
+    EXPECT_EQ(0U, pool->PooledCount());
+}
+
+TEST(DownloadBufferPoolTests, ClassKeepsAtMostTheConfiguredNumberOfBuffers) {
+    using Pool = AVEVA::RocksDB::Plugin::Azure::Impl::DownloadBufferPool;
+    const auto pool = std::make_shared<Pool>();
+    {
+        std::vector<std::shared_ptr<Pool::Lease>> leases;
+        for (size_t i = 0; i < Pool::MaxPooledBuffersPerClass + 4; ++i) {
+            leases.push_back(pool->Acquire(1024));
+        }
+    }
+
+    EXPECT_EQ(Pool::MaxPooledBuffersPerClass, pool->PooledCount());
 }
 
 TEST(DownloadBufferPoolTests, OversizedBuffersAreNotRetained) {
