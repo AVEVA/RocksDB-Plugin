@@ -125,3 +125,29 @@ TEST(DnsCacheTests, EmptyResultsAreNotCached) {
     cache.Store("host", "80", Tcp::resolver::results_type{});
     EXPECT_FALSE(cache.Find("host", "80").has_value());
 }
+
+// A leader whose io_context never runs again must not strand requests that run on another one.
+TEST(DnsCacheTests, LookupsInDifferentScopesNeverJoinEachOther) {
+    boost::asio::io_context io;
+    const auto results = Loopback(io);
+    TestDnsCache cache;
+    int firstScope = 0;
+    int secondScope = 0;
+
+    RecordingWaiter stalledLeader;
+    ASSERT_TRUE(cache.JoinOrLead("host", "80", stalledLeader, &firstScope));
+
+    int delivered = 0;
+    RecordingWaiter sameScope{&delivered, nullptr};
+    EXPECT_FALSE(cache.JoinOrLead("host", "80", sameScope, &firstScope));
+
+    RecordingWaiter otherLeader;
+    EXPECT_TRUE(cache.JoinOrLead("host", "80", otherLeader, &secondScope));
+
+    cache.Finish("host", "80", {}, results, &secondScope);
+    EXPECT_EQ(delivered, 0);
+    EXPECT_TRUE(cache.Find("host", "80").has_value());
+
+    cache.Finish("host", "80", boost::asio::error::operation_aborted, {}, &firstScope);
+    EXPECT_EQ(delivered, 1);
+}

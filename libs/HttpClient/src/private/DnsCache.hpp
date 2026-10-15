@@ -106,10 +106,13 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     /// <param name="service">The port or service name to resolve.</param>
     /// <param name="waiter">Queued to receive the outcome when the caller is not the leader; left alone
     /// otherwise.</param>
+    /// <param name="scope">Identifies who may share a lookup, normally the caller's io_context. Callers with
+    /// different scopes never join each other, so a leader whose io_context stops cannot strand requests that
+    /// run elsewhere. Cached results are still shared across scopes.</param>
     /// <returns>True when the caller must perform the lookup and then call <see cref="Finish"/>.</returns>
-    bool JoinOrLead(std::string_view host, std::string_view service, Waiter& waiter) {
+    bool JoinOrLead(std::string_view host, std::string_view service, Waiter& waiter, const void* scope = nullptr) {
         std::lock_guard<std::mutex> lock(m_mutex);
-        const auto [it, inserted] = m_pending.try_emplace(Key{std::string(host), std::string(service)});
+        const auto [it, inserted] = m_pending.try_emplace(Key{std::string(host), std::string(service), scope});
         if (inserted) {
             return true;
         }
@@ -125,15 +128,16 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     /// <param name="service">The port or service name that was resolved.</param>
     /// <param name="error">The outcome of the lookup; a failure is published but not cached.</param>
     /// <param name="results">The endpoints found, if any.</param>
+    /// <param name="scope">The scope the leader passed to <see cref="JoinOrLead"/>.</param>
     void Finish(std::string_view host, std::string_view service, boost::system::error_code error,
-                const Tcp::resolver::results_type& results) {
+                const Tcp::resolver::results_type& results, const void* scope = nullptr) {
         if (!error) {
             Store(host, service, results);
         }
         std::vector<Waiter> waiters;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            const auto it = m_pending.find(KeyView{host, service});
+            const auto it = m_pending.find(KeyView{host, service, scope});
             if (it != m_pending.end()) {
                 waiters = std::move(it->second);
                 m_pending.erase(it);
@@ -159,6 +163,7 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     struct Key {
         std::string host;
         std::string service;
+        const void* scope = nullptr; // Only used by pending lookups; cached entries are shared.
     };
 
     /// <summary>
@@ -167,6 +172,7 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     struct KeyView {
         std::string_view host;
         std::string_view service;
+        const void* scope = nullptr;
     };
 
     /// <summary>
@@ -176,13 +182,14 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     struct KeyHash {
         using is_transparent = void;
 
-        static std::size_t Combine(std::string_view host, std::string_view service) noexcept {
+        static std::size_t Combine(std::string_view host, std::string_view service, const void* scope) noexcept {
             std::size_t seed = std::hash<std::string_view>{}(host);
             seed ^= std::hash<std::string_view>{}(service) + 0x9e3779b9U + (seed << 6) + (seed >> 2);
+            seed ^= std::hash<const void*>{}(scope) + 0x9e3779b9U + (seed << 6) + (seed >> 2);
             return seed;
         }
-        std::size_t operator()(const Key& key) const noexcept { return Combine(key.host, key.service); }
-        std::size_t operator()(const KeyView& key) const noexcept { return Combine(key.host, key.service); }
+        std::size_t operator()(const Key& key) const noexcept { return Combine(key.host, key.service, key.scope); }
+        std::size_t operator()(const KeyView& key) const noexcept { return Combine(key.host, key.service, key.scope); }
     };
 
     /// <summary>
@@ -191,12 +198,12 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     struct KeyEqual {
         using is_transparent = void;
 
-        static KeyView View(const Key& key) noexcept { return {key.host, key.service}; }
+        static KeyView View(const Key& key) noexcept { return {key.host, key.service, key.scope}; }
         static KeyView View(const KeyView& key) noexcept { return key; }
         template <typename L, typename R> bool operator()(const L& lhs, const R& rhs) const noexcept {
             const auto left = View(lhs);
             const auto right = View(rhs);
-            return left.host == right.host && left.service == right.service;
+            return left.host == right.host && left.service == right.service && left.scope == right.scope;
         }
     };
 

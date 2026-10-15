@@ -18,6 +18,7 @@
 #include "AVEVA/HttpClient/HttpResponse.hpp"
 
 #include <boost/asio/dispatch.hpp>
+#include <boost/asio/execution/context.hpp>
 #include <boost/asio/post.hpp>
 
 #include <boost/asio/ssl/context.hpp>
@@ -398,29 +399,41 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
             return;
         }
         ResolveWaiter waiter(this->shared_from_this());
-        if (!cache.JoinOrLead(m_key.host, m_key.service, waiter)) {
+        const void* const scope = LookupScope();
+        if (!cache.JoinOrLead(m_key.host, m_key.service, waiter, scope)) {
             return;
         }
         // If the handler is destroyed unrun (io_context torn down), the guard still releases the waiters.
         struct LeaderGuard {
             std::string host;
             std::string service;
+            const void* scope;
             bool finished = false;
 
             ~LeaderGuard() {
                 if (!finished) {
-                    DnsCache::Shared().Finish(host, service, asio::error::operation_aborted, {});
+                    DnsCache::Shared().Finish(host, service, asio::error::operation_aborted, {}, scope);
                 }
             }
         };
-        auto guard = std::make_shared<LeaderGuard>(LeaderGuard{m_key.host, m_key.service});
+        auto guard = std::make_shared<LeaderGuard>(LeaderGuard{m_key.host, m_key.service, scope});
         m_resolver.async_resolve(m_key.host, m_key.service,
                                  [self = this->shared_from_this(), guard](boost::system::error_code error,
                                                                           Tcp::resolver::results_type results) {
                                      guard->finished = true;
-                                     DnsCache::Shared().Finish(self->m_key.host, self->m_key.service, error, results);
+                                     DnsCache::Shared().Finish(self->m_key.host, self->m_key.service, error, results,
+                                                               guard->scope);
                                      self->OnResolve(error, std::move(results));
                                  });
+    }
+
+    /// <summary>
+    /// Identifies the io_context this request runs on. Lookups are only shared between requests on the same
+    /// context: a leader whose context is stopped never finishes, and requests on other contexts must not wait
+    /// for it.
+    /// </summary>
+    const void* LookupScope() const {
+        return static_cast<const void*>(&asio::query(m_executor, asio::execution::context));
     }
 
     /// <summary>
