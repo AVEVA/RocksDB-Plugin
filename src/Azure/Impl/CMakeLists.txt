@@ -51,8 +51,6 @@ target_link_libraries(aveva-rocksdb-plugin-azure-impl PRIVATE
     Boost::json
     $<$<PLATFORM_ID:Windows>:crypt32>
 )
-# Boost.Asio/Winapi/Atomic must agree on the target Windows version across every TU.
-target_compile_definitions(aveva-rocksdb-plugin-azure-impl PUBLIC $<$<PLATFORM_ID:Windows>:_WIN32_WINNT=0x0A00>)
 if(MSVC)
     target_compile_options(aveva-rocksdb-plugin-azure-impl PRIVATE /bigobj)
 endif()
