@@ -475,6 +475,48 @@ TEST_F(WriteableFileTests, Flush_ExactlyOnePage_OneUploadCall) {
     EXPECT_EQ(0, m_env.Blob->Uploads[0].Offset);
 }
 
+TEST_F(WriteableFileTests, Flush_PartialPage_UploadsNothingAndLeavesTheTailToSync) {
+    m_env.Blob->SetCapacity(Configuration::PageBlob::PageSize);
+
+    auto file = MakeFile();
+    file.Append(std::vector<char>(100, 'p'));
+    file.Flush();
+    file.Flush();
+
+    EXPECT_TRUE(m_env.Blob->Uploads.empty());
+    file.Sync();
+    ASSERT_EQ(1U, m_env.Blob->Uploads.size());
+    EXPECT_EQ(100, m_env.Blob->SizeWrites.back());
+}
+
+TEST_F(WriteableFileTests, Flush_FullPage_ReturnsWithoutWaitingForTheUpload) {
+    m_env.Blob->SetCapacity(4 * Configuration::PageBlob::PageSize);
+    m_env.Blob->DeferUploads = true;
+
+    auto file = MakeFile();
+    file.Append(std::vector<char>(Configuration::PageBlob::PageSize + 10, 'f'));
+    file.Flush();
+
+    ASSERT_EQ(1U, m_env.Blob->PendingUploads());
+    EXPECT_EQ(static_cast<size_t>(Configuration::PageBlob::PageSize), m_env.Blob->Uploads[0].Data.size());
+    m_env.Blob->CompleteUpload();
+    m_env.Blob->DeferUploads = false;
+    EXPECT_NO_THROW(file.Sync());
+}
+
+TEST_F(WriteableFileTests, Flush_AfterAnEarlierUploadFailed_ReportsTheFailure) {
+    m_env.Blob->SetCapacity(4 * Configuration::PageBlob::PageSize);
+    m_env.Blob->DeferUploads = true;
+
+    auto file = MakeFile();
+    file.Append(std::vector<char>(Configuration::PageBlob::PageSize, 'f'));
+    file.Flush();
+    ASSERT_EQ(1U, m_env.Blob->PendingUploads());
+    m_env.Blob->FailUpload(FakeBlobServer::Error(500, "upload failed"));
+
+    EXPECT_THROW(file.Flush(), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
+}
+
 TEST_F(WriteableFileTests, Truncate_ToZero_FileEmptied) {
     constexpr size_t initialDataSize = 1000;
     m_env.Blob->SetCapacity(Configuration::PageBlob::PageSize * 2);
