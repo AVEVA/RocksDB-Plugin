@@ -628,17 +628,37 @@ void SetBlobMetadataAsync(THttp& httpClient, const BasicBlobTarget<TCred>& optio
         std::move(requestOptions));
 }
 
-// Sends `request` to `target` and completes with the TModel produced by `parser`.
-template <class TModel, HttpClientLike THttp, class TTarget, class TParser, class TCompletion>
+// Sends `request` to `target` and completes with the TModel produced by `parser`. `extra` is forwarded to
+// SendAuthorizedRequestAsync (for a blob target, the replay-safety flag).
+template <class TModel, HttpClientLike THttp, class TTarget, class TParser, class TCompletion, class... TExtra>
 void SendAndParse(THttp& httpClient, const TTarget& target, HttpRequest request, TParser parser,
-                  TCompletion&& completion, AzureRequestOptions requestOptions) {
+                  TCompletion&& completion, AzureRequestOptions requestOptions, TExtra&&... extra) {
     SendAuthorizedRequestAsync(
         httpClient, target, std::move(request),
         [parser = std::move(parser),
          completion = std::forward<TCompletion>(completion)](std::error_code error, HttpResponse response) mutable {
             CompleteParsed<TModel>(error, std::move(response), parser, std::move(completion));
         },
-        std::move(requestOptions));
+        std::move(requestOptions), std::forward<TExtra>(extra)...);
+}
+
+// Completes `completion` with an invalid_argument failure carrying `message`.
+template <class TModel, HttpClientLike THttp, class THandler>
+void FailInvalidArgument(THttp& httpClient, THandler&& completion, std::string message) {
+    PostCompletion(httpClient, std::forward<THandler>(completion),
+                   MakeError<TModel>(std::make_error_code(std::errc::invalid_argument), std::move(message)));
+}
+
+// If `validationError` is set, completes `completion` with it as an invalid_argument failure.
+// Returns true when the caller must stop.
+template <class TModel, HttpClientLike THttp, class THandler>
+[[nodiscard]] bool ValidateOrFail(THttp& httpClient, THandler& completion,
+                                  const std::optional<std::string>& validationError) {
+    if (!validationError.has_value()) {
+        return false;
+    }
+    FailInvalidArgument<TModel>(httpClient, std::move(completion), *validationError);
+    return true;
 }
 
 // The lease id of a lease request comes from the options' LeaseId; Conditions.LeaseId is ignored.

@@ -301,21 +301,22 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     void GetPageRangesAsyncImpl(const GetPageRangesOptions& options, THandler completion,
                                 AzureRequestOptions requestOptions) {
         const auto fail = [&](std::string message) {
-            Private::PostCompletion(this->Http(), std::move(completion),
-                                    Private::MakeError<Models::GetPageRangesResult>(
-                                        std::make_error_code(std::errc::invalid_argument), std::move(message)));
+            Private::FailInvalidArgument<Models::GetPageRangesResult>(this->Http(), std::move(completion),
+                                                                      std::move(message));
         };
         std::optional<std::string> rangeHeader;
         if (options.Range.has_value()) {
-            if (const auto error = Private::ValidatePageAligned(options.Range->Offset, "offset")) {
-                return fail(*error);
+            if (Private::ValidateOrFail<Models::GetPageRangesResult>(
+                    this->Http(), completion, Private::ValidatePageAligned(options.Range->Offset, "offset"))) {
+                return;
             }
             if (!options.Range->Length.has_value()) {
                 // An open-ended window is the same as no window for a whole-blob scan from the offset.
                 rangeHeader = "bytes=" + std::to_string(options.Range->Offset) + "-";
             } else {
-                if (const auto error = Private::ValidatePageAligned(*options.Range->Length, "length")) {
-                    return fail(*error);
+                if (Private::ValidateOrFail<Models::GetPageRangesResult>(
+                        this->Http(), completion, Private::ValidatePageAligned(*options.Range->Length, "length"))) {
+                    return;
                 }
                 const auto header =
                     Private::BuildPageWriteRangeHeaderValue(options.Range->Offset, *options.Range->Length);
@@ -340,13 +341,9 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
         }
         Private::ApplyBlobRequestConditions(request, options.Conditions);
 
-        Private::SendAuthorizedRequestAsync(
-            this->Http(), this->Target(), std::move(request),
-            [completion = std::move(completion)](std::error_code error, HttpResponse response) mutable {
-                Private::CompleteParsed<Models::GetPageRangesResult>(
-                    error, std::move(response), Private::ParseGetPageRangesResult, std::move(completion));
-            },
-            requestOptions);
+        Private::SendAndParse<Models::GetPageRangesResult>(this->Http(), this->Target(), std::move(request),
+                                                           Private::ParseGetPageRangesResult, std::move(completion),
+                                                           requestOptions);
     }
 
     [[nodiscard]] HttpRequest BuildCreateRequest(std::uint64_t contentLength,
@@ -366,48 +363,32 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     template <class THandler>
     void CreateIfNotExistsAsyncImpl(std::uint64_t contentLength, CreatePageBlobOptions options, THandler completion,
                                     AzureRequestOptions requestOptions) {
-        if (const auto validationError = Private::ValidatePageAligned(contentLength, "contentLength");
-            validationError.has_value()) {
-            Private::PostCompletion(this->Http(), std::move(completion),
-                                    Private::MakeError<Models::CreatePageBlobResult>(
-                                        std::make_error_code(std::errc::invalid_argument), *validationError));
+        if (Private::ValidateOrFail<Models::CreatePageBlobResult>(
+                this->Http(), completion, Private::ValidatePageAligned(contentLength, "contentLength"))) {
             return;
         }
         if (options.Conditions.IfNoneMatch.empty()) {
             options.Conditions.IfNoneMatch = "*";
         }
-        Private::SendAuthorizedRequestAsync(
+        Private::SendAndParse<Models::CreatePageBlobResult>(
             this->Http(), this->Target(), BuildCreateRequest(contentLength, options),
-            [completion = std::move(completion)](std::error_code error, HttpResponse response) mutable {
-                Private::CompleteParsed<Models::CreatePageBlobResult>(
-                    error, std::move(response), Private::ParseETagAndLastModified<Models::CreatePageBlobResult>,
-                    Private::SuppressErrors<Models::CreatePageBlobResult>(
-                        std::move(completion),
-                        {BlobStorageErrorCode::BlobAlreadyExists, BlobStorageErrorCode::ConditionNotMet}));
-            },
+            Private::ParseETagAndLastModified<Models::CreatePageBlobResult>,
+            Private::SuppressErrors<Models::CreatePageBlobResult>(
+                std::move(completion),
+                {BlobStorageErrorCode::BlobAlreadyExists, BlobStorageErrorCode::ConditionNotMet}),
             requestOptions, true);
     }
 
     template <class THandler>
     void CreateAsyncImpl(std::uint64_t contentLength, const CreatePageBlobOptions& options, THandler completion,
                          AzureRequestOptions requestOptions) {
-        if (const auto validationError = Private::ValidatePageAligned(contentLength, "contentLength");
-            validationError.has_value()) {
-            Private::PostCompletion(this->Http(), std::move(completion),
-                                    Private::MakeError<Models::CreatePageBlobResult>(
-                                        std::make_error_code(std::errc::invalid_argument), *validationError));
+        if (Private::ValidateOrFail<Models::CreatePageBlobResult>(
+                this->Http(), completion, Private::ValidatePageAligned(contentLength, "contentLength"))) {
             return;
         }
-        HttpRequest request = BuildCreateRequest(contentLength, options);
-
-        Private::SendAuthorizedRequestAsync(
-            this->Http(), this->Target(), std::move(request),
-            [completion = std::move(completion)](std::error_code error, HttpResponse response) mutable {
-                Private::CompleteParsed<Models::CreatePageBlobResult>(
-                    error, std::move(response), Private::ParseETagAndLastModified<Models::CreatePageBlobResult>,
-                    std::move(completion));
-            },
-            requestOptions);
+        Private::SendAndParse<Models::CreatePageBlobResult>(
+            this->Http(), this->Target(), BuildCreateRequest(contentLength, options),
+            Private::ParseETagAndLastModified<Models::CreatePageBlobResult>, std::move(completion), requestOptions);
     }
 
     template <class THandler>
@@ -422,9 +403,8 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
                                     const UploadPagesOptions& options, THandler completion,
                                     AzureRequestOptions requestOptions) {
         if (!content) {
-            Private::PostCompletion(this->Http(), std::move(completion),
-                                    Private::MakeError<Models::UploadPagesResult>(
-                                        std::make_error_code(std::errc::invalid_argument), "content must not be null"));
+            Private::FailInvalidArgument<Models::UploadPagesResult>(this->Http(), std::move(completion),
+                                                                    "content must not be null");
             return;
         }
         const auto bytes = std::as_bytes(std::span<const char>(*content));
@@ -467,22 +447,17 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     [[nodiscard]] std::optional<HttpRequest> BuildUploadPagesRequest(std::uint64_t offset, std::size_t contentSize,
                                                                      const UploadPagesOptions& options,
                                                                      THandler& completion) {
-        const auto fail = [&](std::string_view message) {
-            Private::PostCompletion(this->Http(), std::move(completion),
-                                    Private::MakeError<Models::UploadPagesResult>(
-                                        std::make_error_code(std::errc::invalid_argument), std::string{message}));
+        if (Private::ValidateOrFail<Models::UploadPagesResult>(this->Http(), completion,
+                                                               Private::ValidatePageAligned(offset, "offset")) ||
+            Private::ValidateOrFail<Models::UploadPagesResult>(
+                this->Http(), completion, Private::ValidatePageAligned(contentSize, "content size"))) {
             return std::nullopt;
-        };
-        if (const auto validationError = Private::ValidatePageAligned(offset, "offset"); validationError.has_value()) {
-            return fail(*validationError);
-        }
-        if (const auto validationError = Private::ValidatePageAligned(contentSize, "content size");
-            validationError.has_value()) {
-            return fail(*validationError);
         }
         const auto rangeHeader = Private::BuildPageWriteRangeHeaderValue(offset, contentSize);
         if (!rangeHeader.has_value()) {
-            return fail(rangeHeader.error());
+            Private::FailInvalidArgument<Models::UploadPagesResult>(this->Http(), std::move(completion),
+                                                                    rangeHeader.error());
+            return std::nullopt;
         }
 
         HttpRequest request = Private::BuildBlobRequest(this->Target(), HttpMethod::Put, "comp=page");
@@ -497,14 +472,9 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
                                 AzureRequestOptions requestOptions) {
         Private::ApplyBlobRequestConditions(request, options.Conditions);
 
-        Private::SendAuthorizedRequestAsync(
-            this->Http(), this->Target(), std::move(request),
-            [completion = std::move(completion)](std::error_code error, HttpResponse response) mutable {
-                Private::CompleteParsed<Models::UploadPagesResult>(
-                    error, std::move(response), Private::ParseETagAndLastModified<Models::UploadPagesResult>,
-                    std::move(completion));
-            },
-            requestOptions);
+        Private::SendAndParse<Models::UploadPagesResult>(this->Http(), this->Target(), std::move(request),
+                                                         Private::ParseETagAndLastModified<Models::UploadPagesResult>,
+                                                         std::move(completion), requestOptions);
     }
 
     template <class THandler>
@@ -512,18 +482,16 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
                                      std::uint64_t length, const UploadPagesFromUrlOptions& options,
                                      THandler completion, AzureRequestOptions requestOptions) {
         const auto fail = [&](std::string message) {
-            Private::PostCompletion(this->Http(), std::move(completion),
-                                    Private::MakeError<Models::UploadPagesResult>(
-                                        std::make_error_code(std::errc::invalid_argument), std::move(message)));
+            Private::FailInvalidArgument<Models::UploadPagesResult>(this->Http(), std::move(completion),
+                                                                    std::move(message));
         };
-        if (const auto error = Private::ValidatePageAligned(offset, "offset")) {
-            return fail(*error);
-        }
-        if (const auto error = Private::ValidatePageAligned(sourceOffset, "sourceOffset")) {
-            return fail(*error);
-        }
-        if (const auto error = Private::ValidatePageAligned(length, "length")) {
-            return fail(*error);
+        if (Private::ValidateOrFail<Models::UploadPagesResult>(this->Http(), completion,
+                                                               Private::ValidatePageAligned(offset, "offset")) ||
+            Private::ValidateOrFail<Models::UploadPagesResult>(
+                this->Http(), completion, Private::ValidatePageAligned(sourceOffset, "sourceOffset")) ||
+            Private::ValidateOrFail<Models::UploadPagesResult>(this->Http(), completion,
+                                                               Private::ValidatePageAligned(length, "length"))) {
+            return;
         }
         if (length > MaxPagesFromUrlBytes) {
             return fail("length must not exceed 4 MiB.");
@@ -554,24 +522,16 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
         }
         Private::ApplyBlobRequestConditions(request, options.Conditions);
 
-        Private::SendAuthorizedRequestAsync(
-            this->Http(), this->Target(), std::move(request),
-            [completion = std::move(completion)](std::error_code error, HttpResponse response) mutable {
-                Private::CompleteParsed<Models::UploadPagesResult>(
-                    error, std::move(response), Private::ParseETagAndLastModified<Models::UploadPagesResult>,
-                    std::move(completion));
-            },
-            requestOptions);
+        Private::SendAndParse<Models::UploadPagesResult>(this->Http(), this->Target(), std::move(request),
+                                                         Private::ParseETagAndLastModified<Models::UploadPagesResult>,
+                                                         std::move(completion), requestOptions);
     }
 
     template <class THandler>
     void ResizeAsyncImpl(std::uint64_t newSize, const ResizePageBlobOptions& options, THandler completion,
                          AzureRequestOptions requestOptions) {
-        if (const auto validationError = Private::ValidatePageAligned(newSize, "newSize");
-            validationError.has_value()) {
-            Private::PostCompletion(this->Http(), std::move(completion),
-                                    Private::MakeError<Models::ResizePageBlobResult>(
-                                        std::make_error_code(std::errc::invalid_argument), *validationError));
+        if (Private::ValidateOrFail<Models::ResizePageBlobResult>(this->Http(), completion,
+                                                                  Private::ValidatePageAligned(newSize, "newSize"))) {
             return;
         }
 
@@ -579,14 +539,9 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
         Private::AddHeader(request, Private::XMsBlobContentLengthHeaderName, std::to_string(newSize));
         Private::ApplyBlobRequestConditions(request, options.Conditions);
 
-        Private::SendAuthorizedRequestAsync(
+        Private::SendAndParse<Models::ResizePageBlobResult>(
             this->Http(), this->Target(), std::move(request),
-            [completion = std::move(completion)](std::error_code error, HttpResponse response) mutable {
-                Private::CompleteParsed<Models::ResizePageBlobResult>(
-                    error, std::move(response), Private::ParseETagAndLastModified<Models::ResizePageBlobResult>,
-                    std::move(completion));
-            },
-            requestOptions);
+            Private::ParseETagAndLastModified<Models::ResizePageBlobResult>, std::move(completion), requestOptions);
     }
 };
 
