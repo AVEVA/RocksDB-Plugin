@@ -5,6 +5,7 @@
 
 #include "StreamTypes.hpp"
 #include "SweeperNotifier.hpp"
+#include <boost/asio/post.hpp>
 #include <boost/beast/core/flat_buffer.hpp>
 #include <boost/intrusive/list.hpp>
 #include <boost/unordered/unordered_node_map.hpp>
@@ -154,7 +155,9 @@ class ConnectionPool {
           m_maxTotalIdle(maxTotalIdle), m_notifier(std::move(notifier)) {}
 
     /// <summary>
-    /// Closes connections idle past the timeout without needing a request to arrive.
+    /// Closes connections idle past the timeout without needing a request to arrive. Runs on the sweeper's
+    /// thread, so the expired sockets are handed to their own executor to be destroyed there, where no
+    /// operation can be using them and the io_context's thread owns their teardown.
     /// </summary>
     /// <returns>How many idle connections remain.</returns>
     std::size_t Sweep() {
@@ -165,7 +168,7 @@ class ConnectionPool {
             DropExpired(Clock::now(), retired);
             remaining = m_lru.size();
         }
-        retired.clear_and_dispose(NodeDisposer{});
+        retired.clear_and_dispose(ExecutorDisposer{});
         return remaining;
     }
 
@@ -389,6 +392,28 @@ class ConnectionPool {
     /// </summary>
     struct NodeDisposer {
         void operator()(Node* node) const noexcept { delete node; }
+    };
+
+    /// <summary>
+    /// Destroys a node like <see cref="NodeDisposer"/>, but moves its connection to the stream's own executor
+    /// first when the stream has one. Falls back to destroying it in place if posting fails.
+    /// </summary>
+    struct ExecutorDisposer {
+        void operator()(Node* node) const noexcept {
+            if constexpr (requires { node->connection.stream->get_executor(); }) {
+                if (node->connection.stream) {
+                    auto executor = node->connection.stream->get_executor();
+                    try {
+                        boost::asio::post(executor, [connection = std::move(node->connection)]() mutable {
+                            connection = PooledConnection<Stream>{};
+                        });
+                    } catch (...) {
+                        // The handler (and the connection in it) is destroyed right here instead.
+                    }
+                }
+            }
+            delete node;
+        }
     };
 
     /// <summary>

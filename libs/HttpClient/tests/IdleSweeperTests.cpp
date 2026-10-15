@@ -50,3 +50,30 @@ TEST(IdleSweeper, EarlierDeadlineWakesTheSchedulerThread) {
     EXPECT_EQ(fast.plain->IdleCount(), 0U);
     EXPECT_EQ(slow.plain->IdleCount(), 1U);
 }
+
+// The shared scheduler thread belongs to the live sweepers: it is stopped and joined when the last one goes,
+// and started afresh for the next.
+TEST(IdleSweeper, SchedulerStopsWhenTheLastSweeperIsDestroyed) {
+    asio::io_context context;
+    EXPECT_FALSE(IdleSweeper::SchedulerIsAlive());
+    {
+        auto first = std::make_unique<SweeperFixture>(context, std::chrono::hours(1));
+        first->AddIdleConnection();
+        EXPECT_TRUE(IdleSweeper::SchedulerIsAlive());
+        {
+            SweeperFixture second(context, std::chrono::hours(1));
+            second.AddIdleConnection();
+        }
+        EXPECT_TRUE(IdleSweeper::SchedulerIsAlive());
+    }
+    EXPECT_FALSE(IdleSweeper::SchedulerIsAlive());
+
+    SweeperFixture again(context, std::chrono::seconds(1));
+    again.AddIdleConnection();
+    EXPECT_TRUE(IdleSweeper::SchedulerIsAlive());
+    const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    while (again.plain->IdleCount() != 0 && std::chrono::steady_clock::now() < limit) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    EXPECT_EQ(again.plain->IdleCount(), 0U);
+}

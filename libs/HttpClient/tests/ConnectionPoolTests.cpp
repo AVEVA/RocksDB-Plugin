@@ -367,6 +367,16 @@ TEST(ConnectionPool, RealSocketLivenessCheckDiscardsPeerClosedConnection) {
     EXPECT_FALSE(pool.Acquire(key).has_value());
 }
 
+TEST(ConnectionPool, SweepHandsExpiredSocketsToTheirExecutorInsteadOfClosingThemInline) {
+    asio::io_context context;
+    ConnectionPool<PlainStream, FakeClock> pool(4, ShortTimeout);
+    pool.Release({"127.0.0.1", "80"}, PooledConnection<PlainStream>{std::make_unique<PlainStream>(context), {}});
+    FakeClock::Advance(ShortTimeout * 2);
+
+    EXPECT_EQ(pool.Sweep(), 0U);
+    // The disposal is queued on the io_context rather than performed on the sweeping thread.
+    EXPECT_EQ(context.poll(), 1U);
+}
 TEST(ConnectionPool, ConcurrentAcquireReleaseAcrossThreadsStaysConsistent) {
     struct ConcurrentTrackedStream {
         explicit ConcurrentTrackedStream(int streamIdentity, std::atomic<int>& streamLiveCount)
