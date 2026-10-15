@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
+name: Set up vcpkg
+description: Points VCPKG_ROOT at the preinstalled vcpkg, fetches the baseline commit and restores the binary cache.
+
+inputs:
+  cache-key:
+    description: Job-specific part of the binary cache key, after the runner OS prefix.
+    required: true
+  restore-key:
+    description: Job-specific part of the fallback cache key prefix, after the runner OS prefix. Defaults to the OS only.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Point VCPKG_ROOT at the preinstalled vcpkg
+      shell: bash
+      run: |
+        echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
+        echo "VCPKG_DEFAULT_BINARY_CACHE=$RUNNER_TEMP/vcpkg-binary-cache" >> "$GITHUB_ENV"
+        mkdir -p "$RUNNER_TEMP/vcpkg-binary-cache"
+
+    # The runner image's vcpkg checkout can predate the builtin-baseline commit, which fails configure.
+    - name: Fetch the vcpkg baseline commit
+      shell: bash
+      run: |
+        baseline=$(sed -n 's/.*"builtin-baseline": *"\([0-9a-f]*\)".*/\1/p' vcpkg.json)
+        git -C "$VCPKG_INSTALLATION_ROOT" cat-file -e "$baseline^{commit}" 2>/dev/null ||
+          git -C "$VCPKG_INSTALLATION_ROOT" fetch --quiet origin "$baseline"
+
+    - name: Restore vcpkg binary cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ runner.temp }}/vcpkg-binary-cache
+        key: vcpkg-${{ runner.os }}-${{ inputs.cache-key }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'infrastructure/vcpkg-overlays/**') }}
+        restore-keys: vcpkg-${{ runner.os }}-${{ inputs.restore-key }}
