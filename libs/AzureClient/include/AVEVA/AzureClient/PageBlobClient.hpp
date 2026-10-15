@@ -406,7 +406,7 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
                         std::move(completion),
                         {BlobStorageErrorCode::BlobAlreadyExists, BlobStorageErrorCode::ConditionNotMet}));
             },
-            requestOptions);
+            requestOptions, true);
     }
 
     template <class THandler>

@@ -399,7 +399,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
             *m_httpClient, *m_target, options,
             Private::SuppressErrors<Models::DeleteBlobResult>(
                 std::move(completion), {BlobStorageErrorCode::BlobNotFound, BlobStorageErrorCode::ResourceNotFound}),
-            requestOptions);
+            requestOptions, true);
     }
 
     template <class THandler>

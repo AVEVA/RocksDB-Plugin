@@ -256,13 +256,13 @@ TEST(RetryTests, DeleteIsNotReplayedAfterAnAmbiguousTransportErrorBecauseItsOutc
 
 using CreateResult = std::expected<Response<Models::CreatePageBlobResult>, BlobStorageError>;
 
-TEST(RetryTests, ConditionalCreateIsNotReplayedAfterAnAmbiguousTransportErrorBecauseItsOutcomeIsUnknown) {
+TEST(RetryTests, ConditionalCreateIfNotExistsIsReplayedAfterAnAmbiguousTransportErrorBecauseTheReplayIsAbsorbed) {
     for (const std::error_code error :
          {std::error_code{AVEVA::HttpClientError::TimedOut}, std::error_code{AVEVA::HttpClientError::ReadFailed},
           std::make_error_code(std::errc::connection_reset)}) {
         FakeHttpClient httpClient;
         httpClient.EnqueueResponse(HttpResponse{}, error);
-        // A replay would find the blob the first attempt created and answer 409.
+        // The first attempt may have created the blob; the replay's 409 is suppressed by CreateIfNotExists.
         httpClient.EnqueueResponse(HttpResponse{409, {{"x-ms-error-code", "BlobAlreadyExists"}}, ""});
         PageBlobClient client{httpClient, MakeRetryOptions(3)};
 
@@ -271,9 +271,23 @@ TEST(RetryTests, ConditionalCreateIsNotReplayedAfterAnAmbiguousTransportErrorBec
                                       [&](CreateResult result) { observed = std::move(result); });
 
         ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); })) << error.message();
-        EXPECT_EQ(httpClient.RequestCount(), 1U) << error.message();
-        EXPECT_FALSE(ValueOrFail(observed).has_value()) << error.message();
+        EXPECT_EQ(httpClient.RequestCount(), 2U) << error.message();
+        EXPECT_TRUE(ValueOrFail(observed).has_value()) << error.message();
     }
+}
+
+TEST(RetryTests, DeleteIfExistsIsReplayedAfterAnAmbiguousTransportErrorBecauseTheReplayIsAbsorbed) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ReadFailed);
+    httpClient.EnqueueResponse(HttpResponse{404, {{"x-ms-error-code", "BlobNotFound"}}, ""});
+    BlockBlobClient client{httpClient, MakeRetryOptions(3)};
+
+    std::optional<DeleteResult> observed;
+    client.DeleteIfExistsAsync([&](DeleteResult result) { observed = std::move(result); });
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
+    EXPECT_EQ(httpClient.RequestCount(), 2U);
+    EXPECT_TRUE(ValueOrFail(observed).has_value());
 }
 
 TEST(RetryTests, ConditionalCreateIsRetriedAfterFailuresThatHappenedBeforeAnythingWasSent) {

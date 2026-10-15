@@ -125,13 +125,14 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
   public:
     RetryOperation(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
                    HttpRequest request, THandler completion, HttpRequestOptions requestOptions,
-                   bool retryNotFoundAndGone, AttemptRebuilder rebuild)
+                   bool retryNotFoundAndGone, AttemptRebuilder rebuild, bool callerAbsorbsReplay = false)
         : m_httpClient(httpClient), m_auth(std::move(auth)), m_credential(std::move(credential)), m_retry(retry),
           m_request(std::move(request)), m_completion(std::move(completion)), m_requestOptions(requestOptions),
           m_retryNotFoundAndGone(retryNotFoundAndGone), m_rebuild(std::move(rebuild)),
-          m_replaySafe(IsReplaySafe(m_request)), m_parentSlot(m_requestOptions.GetCancellationSlot()),
-          m_timer(httpClient.get_executor()), m_deadlineTimer(httpClient.get_executor()),
-          m_totalDeadline(m_requestOptions.GetTotalDeadline()), m_start(std::chrono::steady_clock::now()),
+          m_replaySafe(callerAbsorbsReplay || IsReplaySafe(m_request)),
+          m_parentSlot(m_requestOptions.GetCancellationSlot()), m_timer(httpClient.get_executor()),
+          m_deadlineTimer(httpClient.get_executor()), m_totalDeadline(m_requestOptions.GetTotalDeadline()),
+          m_start(std::chrono::steady_clock::now()),
           m_maxAttempts(ComputeMaxAttempts(m_requestOptions.GetMaxRetries().value_or(retry.MaxRetries))) {}
 
     void Start() {
@@ -576,17 +577,17 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
 template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
 void SendWithRetryAsync(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
                         HttpRequest request, THandler completion, HttpRequestOptions requestOptions,
-                        bool retryNotFoundAndGone, AttemptRebuilder rebuild) {
+                        bool retryNotFoundAndGone, AttemptRebuilder rebuild, bool replaySafe) {
     auto operation = std::make_shared<RetryDetail::RetryOperation<THttp, TCred, THandler>>(
         httpClient, std::move(auth), std::move(credential), retry, std::move(request), std::move(completion),
-        requestOptions, retryNotFoundAndGone, std::move(rebuild));
+        requestOptions, retryNotFoundAndGone, std::move(rebuild), replaySafe);
     operation->Start();
 }
 
 template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
 void SendAuthorizedRequestAsync(THttp& httpClient, const ConnectionState& connection, std::shared_ptr<TCred> credential,
                                 HttpRequest request, THandler completion, HttpRequestOptions requestOptions,
-                                AttemptRebuilder rebuild) {
+                                AttemptRebuilder rebuild, bool replaySafe) {
     // Checked here rather than per operation so every request carrying metadata, including the
     // internal commits issued by multi-part uploads, is rejected before reaching the service.
     for (const HttpHeader& header : request.GetHeaders()) {
@@ -604,6 +605,7 @@ void SendAuthorizedRequestAsync(THttp& httpClient, const ConnectionState& connec
     }
     const bool hasCredential = credential != nullptr;
     SendWithRetryAsync(httpClient, MakeRequestAuth(connection, hasCredential), std::move(credential), connection.Retry,
-                       std::move(request), std::move(completion), requestOptions, false, std::move(rebuild));
+                       std::move(request), std::move(completion), requestOptions, false, std::move(rebuild),
+                       replaySafe);
 }
 } // namespace AVEVA::AzureClient::Private

@@ -538,26 +538,28 @@ using AttemptRebuilder = std::function<void(HttpRequest& attempt, std::string_vi
 template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
 void SendWithRetryAsync(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
                         HttpRequest request, THandler completion, HttpRequestOptions requestOptions,
-                        bool retryNotFoundAndGone = false, AttemptRebuilder rebuild = {});
+                        bool retryNotFoundAndGone = false, AttemptRebuilder rebuild = {}, bool replaySafe = false);
 
-// Defined in RequestPipeline.hpp.
+// Defined in RequestPipeline.hpp. `replaySafe` marks a request whose caller absorbs the outcome of a replay (the
+// *IfExists/*IfNotExists operations), so it may be retried even after an ambiguous transport error.
 template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
 void SendAuthorizedRequestAsync(THttp& httpClient, const ConnectionState& connection, std::shared_ptr<TCred> credential,
                                 HttpRequest request, THandler completion, HttpRequestOptions requestOptions,
-                                AttemptRebuilder rebuild = {});
+                                AttemptRebuilder rebuild = {}, bool replaySafe = false);
 
 template <HttpClientLike THttp, class TCred, class THandler>
 void SendAuthorizedRequestAsync(THttp& httpClient, const BasicContainerTarget<TCred>& target, HttpRequest request,
-                                THandler completion, HttpRequestOptions requestOptions, AttemptRebuilder rebuild = {}) {
+                                THandler completion, HttpRequestOptions requestOptions, AttemptRebuilder rebuild = {},
+                                bool replaySafe = false) {
     SendAuthorizedRequestAsync(httpClient, *target.Connection, target.Credential, std::move(request),
-                               std::move(completion), requestOptions, std::move(rebuild));
+                               std::move(completion), requestOptions, std::move(rebuild), replaySafe);
 }
 
 template <HttpClientLike THttp, class TCred, class THandler>
 void SendAuthorizedRequestAsync(THttp& httpClient, const BasicBlobTarget<TCred>& target, HttpRequest request,
-                                THandler completion, HttpRequestOptions requestOptions) {
+                                THandler completion, HttpRequestOptions requestOptions, bool replaySafe = false) {
     SendAuthorizedRequestAsync(httpClient, *target.Connection, target.Credential, std::move(request),
-                               std::move(completion), requestOptions);
+                               std::move(completion), requestOptions, {}, replaySafe);
 }
 
 // Maps the single-request download options onto the chunked engine's options (default chunk
@@ -591,7 +593,7 @@ void DownloadBlobToFileAsync(THttp& httpClient, const BasicBlobTarget<TCred>& op
 template <HttpClientLike THttp, class TCred, class TCompletion>
 void DeleteBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
                      const DeleteBlobOptions& operationOptions, TCompletion&& completion,
-                     HttpRequestOptions requestOptions) {
+                     HttpRequestOptions requestOptions, bool replaySafe = false) {
     HttpRequest request = BuildBlobRequest(options, HttpMethod::Delete);
     ApplyBlobRequestConditions(request, operationOptions.Conditions);
 
@@ -601,7 +603,7 @@ void DeleteBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
             CompleteParsed<Models::DeleteBlobResult>(error, std::move(response), ParseDeleteBlobResult,
                                                      std::move(completion));
         },
-        std::move(requestOptions));
+        std::move(requestOptions), replaySafe);
 }
 
 template <HttpClientLike THttp, class TCred, class TCompletion>
