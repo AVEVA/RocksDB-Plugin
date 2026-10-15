@@ -418,7 +418,11 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                 // counted then.
                 if (const auto size = GetCurrentSizeUnsafe(); size > m_maxSize) {
                     EvictAtLeast(size - m_maxSize);
+                    if (GetCurrentSizeUnsafe() > m_maxSize) {
+                        RemoveFileUnsafe(filePath);
+                    }
                 }
+            } else {
                 // The file was likely deleted. We should clean up after ourselves; the delete runs on the next pass
                 // of this loop, outside the mutex.
                 BOOST_LOG_SEV(*m_logger, debug) << "File '" << filePath << "' was deleted. Removing file from cache";

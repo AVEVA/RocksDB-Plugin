@@ -556,3 +556,33 @@ TEST_F(FileCacheTests, Eviction_DoesNotRemoveMetadataOnlyStaleEntries) {
     EXPECT_TRUE(m_cache.HasFile("seen.sst"));
     EXPECT_FALSE(m_cache.HasFile("1.sst"));
 }
+
+TEST_F(FileCacheTests, SetCacheSize_WhileADownloadIsInFlight_EvictsAfterItActivates) {
+    // Arrange - the second file's download blocks until released.
+    const auto fileSize = static_cast<size_t>(100);
+    std::promise<void> started;
+    std::promise<void> release;
+    EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(fileSize));
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo("1.sst", _, _, _)).WillRepeatedly(Return());
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo("2.sst", _, _, _)).WillRepeatedly([&](auto&&...) {
+        started.set_value();
+        release.get_future().wait();
+    });
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
+        auto file = std::make_unique<FileMock>();
+        EXPECT_CALL(*file, Read(_, _, _)).WillRepeatedly([](char*, uint64_t, uint64_t length) { return length; });
+        return file;
+    });
+    EnsureReadFromCache("1.sst", fileSize);
+    EXPECT_FALSE(m_cache.ReadFile("2.sst", 0, 0, nullptr));
+    EXPECT_FALSE(m_cache.ReadFile("2.sst", 0, 0, nullptr));
+    started.get_future().wait();
+
+    // Act - the in-flight file is not counted yet, so nothing is evicted by the resize itself.
+    m_cache.SetCacheSize(fileSize);
+    release.set_value();
+    m_cache.WaitUntilIdle();
+
+    // Assert
+    EXPECT_LE(m_cache.CacheSize(), static_cast<int64_t>(fileSize));
+}
