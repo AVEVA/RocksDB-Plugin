@@ -118,8 +118,26 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
 
 Public headers include Boost.Asio, which must see the same `_WIN32_WINNT` in every translation unit. The plugin targets therefore export `_WIN32_WINNT=0x0A00` (Windows 10) as a PUBLIC compile definition; consumers that set their own value must use the same one.
 
+###### File cache
+
+SST files can be cached on local disk. Pass `cachePath` (a directory on local storage) and `maxCacheSize` (bytes,
+must be greater than zero for anything to be cached) to `Plugin::Register`; omit `cachePath` to disable the cache.
+Only the primary storage account is cached; the backup never is.
+
+```cpp
+Plugin::Register(primaryDbOptions, &env, &guard, ioContext, storageCredentials, std::nullopt, logger,
+                 MbToBytes(2),  /* dataFileBufferSize */
+                 MbToBytes(4),  /* dataFileInitialSize */
+                 "/var/cache/rocksdb-azure", /* cachePath */
+                 size_t{20} * 1024 * 1024 * 1024 /* maxCacheSize: 20 GiB */);
+```
+
+An SST is downloaded only on its second access, least recently used files are evicted to stay within
+`maxCacheSize`, and a file larger than `maxCacheSize` is never cached. See "File cache" in
+[ARCHITECTURE.md](ARCHITECTURE.md) for details.
+
 ###### Configuration Options
-- **Caching**: Enable local caching for frequently accessed data. SSTs are cached on repeat access, which avoids eager one-time startup scans downloading every SST.
+- **Caching**: Enable local caching for frequently accessed data (see [File cache](#file-cache)). SSTs are cached on repeat access, which avoids eager one-time startup scans downloading every SST.
 - **Bounded stale metadata**: Never-downloaded stale SST entries are capped and oldest metadata-only entries are pruned to prevent unbounded cache index growth.
 - **Async IO**: The filesystem advertises `FSSupportedOps::kAsyncIO` and implements `ReadAsync`/`Poll`/`AbortIO`, so setting `rocksdb::ReadOptions::async_io = true` overlaps blob downloads with RocksDB's work (iterator readahead, `MultiGet`). Async reads are issued directly on the host `io_context` (no extra threads); completion handlers only copy bytes into RocksDB's buffer, and RocksDB's callbacks are delivered from `Poll`/`AbortIO` on the calling thread.
 

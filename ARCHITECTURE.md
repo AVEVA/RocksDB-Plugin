@@ -38,6 +38,25 @@ stopping the host `io_context`.
 - Rename is copy + delete, not atomic. A crash in between can leave both blobs.
 - Writers are fenced by blob leases that a renewal loop keeps alive; losing the lease fails further writes.
 
+## File cache
+
+`Core::FileCache` keeps local copies of SST files (other file types are never cached). It is enabled per primary
+container by passing `cachePath` and `maxCacheSize` to `Plugin::Register`.
+
+- **Two-access admission.** The first read of an SST only records a metadata entry (stale, size 0). The second read
+  queues a download on the cache's background thread; reads are served from the blob until the download finishes and
+  the entry becomes active. This stops a startup scan from downloading every SST once.
+- **LRU.** Entries sit in a list ordered by last access. Before a download is admitted, entries are evicted from the
+  least recently used end until the new file fits; entries that are downloading or queued are skipped, and a file
+  larger than `maxCacheSize` is not cached.
+- **Invalidation.** Writing to or replacing a blob marks its entry stale and bumps a generation counter, so a
+  download that raced with the change is discarded rather than activated.
+- **Background deletes.** Evicted or removed entries leave the accounting immediately, but their read handles are
+  closed and files deleted on the background thread, outside the cache mutex (an open file cannot be deleted on
+  Windows). A failed delete is retried once at shutdown and then logged.
+- **Stale-entry cap.** Metadata-only stale entries are capped at 2048; beyond that the oldest are pruned in O(1) from a
+  dedicated list so the index cannot grow without bound.
+
 ## Breaking changes (0.2.0)
 
 See the migration section in `README.md`.
