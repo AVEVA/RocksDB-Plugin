@@ -107,6 +107,10 @@ template <typename TBlob> class BasicReadableFileImpl {
 
     // Serves a random read from the local file cache only; returns nullopt when it must go to the blob.
     [[nodiscard]] std::optional<size_t> TryReadFromCache(int64_t offset, int64_t bytesToRead, char* buffer) const;
+    // Serves a read from a completed in-memory prefetch only; never waits and never touches the file cache, so it is
+    // safe on a host io_context thread (FileCache reads are blocking disk I/O).
+    [[nodiscard]] std::optional<size_t> TryReadFromCompletedPrefetch(int64_t offset, int64_t bytesToRead,
+                                                                     char* buffer) const;
     // If a still-downloading prefetch fully covers the range, queues `resume` to run when that download settles
     // (successfully or not) and returns true; the caller must then not start its own read. Never blocks.
     [[nodiscard]] bool ChainOntoPendingPrefetch(int64_t offset, int64_t bytesToRead,

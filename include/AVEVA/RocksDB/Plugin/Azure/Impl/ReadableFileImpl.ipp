@@ -351,6 +351,13 @@ std::optional<size_t> BasicReadableFileImpl<TBlob>::TryReadFromCache(const int64
 }
 
 template <typename TBlob>
+std::optional<size_t> BasicReadableFileImpl<TBlob>::TryReadFromCompletedPrefetch(const int64_t offset,
+                                                                                 const int64_t bytesToRead,
+                                                                                 char* buffer) const {
+    return TryReadFromPrefetch(offset, bytesToRead, buffer, false);
+}
+
+template <typename TBlob>
 void BasicReadableFileImpl<TBlob>::ReadAsync(std::shared_ptr<const BasicReadableFileImpl<TBlob>> self,
                                              const int64_t offset, const int64_t bytesToRead, ReadCallback callback,
                                              const int attemptsLeft, const std::chrono::milliseconds timeout) {
