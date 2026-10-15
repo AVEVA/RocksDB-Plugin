@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -86,12 +87,20 @@ struct GetBlobPropertiesOptions {
     Models::BlobRequestConditions Conditions;
 };
 
+// Runs a blocking task (a disk write, file open or rename) off the I/O thread. The scheduler must eventually run
+// every task it accepts, on any thread; a thread pool's `post` is the typical implementation.
+using DownloadWriteScheduler = std::function<void(std::move_only_function<void()>)>;
+
 struct DownloadBlobOptions {
     std::optional<Models::BlobByteRange> Range;
     Models::BlobRequestConditions Conditions;
     // Largest download accepted; a bigger blob (or range) fails with std::errc::file_too_large before any
     // body is buffered. Unset applies no limit beyond available memory.
     std::optional<std::uint64_t> MaxSize;
+    // Where file downloads run their blocking filesystem calls. Unset uses the HTTP client's
+    // `GetDownloadWriter()` when it has one, otherwise a short-lived thread per task. The client owns no
+    // threads of its own, so supply a scheduler backed by your own pool to bound them.
+    DownloadWriteScheduler WriteScheduler;
 };
 
 // Chunked download options. The first request is a ranged GET of ChunkSize bytes that also learns
@@ -113,6 +122,10 @@ struct DownloadToOptions {
     // Largest download accepted; a bigger blob (or range) fails with std::errc::file_too_large before the
     // destination is written. Unset applies no limit.
     std::optional<std::uint64_t> MaxSize;
+    // Where file downloads run their blocking filesystem calls. Unset uses the HTTP client's
+    // `GetDownloadWriter()` when it has one, otherwise a short-lived thread per task. The client owns no
+    // threads of its own, so supply a scheduler backed by your own pool to bound them.
+    DownloadWriteScheduler WriteScheduler;
 };
 
 struct SetBlobMetadataOptions {

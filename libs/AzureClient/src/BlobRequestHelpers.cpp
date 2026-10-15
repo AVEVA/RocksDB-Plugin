@@ -62,6 +62,7 @@ DownloadToOptions ToDownloadToOptions(DownloadBlobOptions options) {
     result.Range = options.Range;
     result.Conditions = std::move(options.Conditions);
     result.MaxSize = options.MaxSize;
+    result.WriteScheduler = std::move(options.WriteScheduler);
     return result;
 }
 

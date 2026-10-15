@@ -214,6 +214,31 @@ TEST(T11_ParallelDownloadAcceptanceTests, OutOfOrderCompletionIsWrittenInOrderTo
     VerifyIfMatchHeaderOnChunkRequests(httpClient, "\"etag-a\"");
 }
 
+TEST(T11_ParallelDownloadAcceptanceTests, FileWritesRunOnTheInjectedWriteScheduler) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(18);
+    EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
+    BlobClient client{httpClient, BuildOptions()};
+
+    std::size_t scheduled = 0;
+    auto options = Parallel(3U, 3U);
+    options.WriteScheduler = [&scheduled](std::move_only_function<void()> task) {
+        ++scheduled;
+        task();
+    };
+
+    TempFile out;
+    int callbackCount = 0;
+    StartDownloadToAsyncAndExpectSuccess(client, out.Path, options, callbackCount, content.size());
+    ASSERT_TRUE(httpClient.CompleteRequest(0U));
+    const std::size_t peakPending = CompleteNewestUntilCallback(httpClient, 3U, callbackCount);
+
+    ASSERT_EQ(callbackCount, 1);
+    EXPECT_GT(peakPending, 0U);
+    EXPECT_GT(scheduled, 0U);
+    EXPECT_EQ(ReadFile(out.Path), content);
+}
+
 TEST(T11_ParallelDownloadAcceptanceTests, ReorderWindowBoundsBufferedChunksToConcurrency) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(30);

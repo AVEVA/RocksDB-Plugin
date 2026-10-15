@@ -11,7 +11,6 @@
 #include "AVEVA/AzureClient/Response.hpp"
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 #include <AVEVA/AzureClient/Detail/DownloadSinks.hpp>
-#include <AVEVA/AzureClient/Detail/DownloadWriterPool.hpp>
 #include <AVEVA/AzureClient/Detail/ProtocolConstants.hpp>
 
 #include <AVEVA/AzureClient/HttpClientLike.hpp>
@@ -22,7 +21,6 @@
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/cancellation_type.hpp>
 #include <boost/asio/post.hpp>
-#include <boost/asio/thread_pool.hpp>
 
 #include <algorithm>
 #include <cerrno>
@@ -46,10 +44,26 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 namespace AVEVA::AzureClient::Private {
 namespace DownloadDetail {
+// Runs a blocking task off the I/O thread: on the caller's scheduler, else the HTTP client's, else a short-lived
+// thread (so no process-wide pool outlives the clients).
+template <class THttp>
+void RunOnWriter(THttp& httpClient, const DownloadWriteScheduler& scheduler, std::move_only_function<void()> task) {
+    if (scheduler) {
+        scheduler(std::move(task));
+    } else if constexpr (requires {
+                             { httpClient.GetDownloadWriter() } -> std::convertible_to<DownloadWriteScheduler>;
+                         }) {
+        DownloadWriteScheduler{httpClient.GetDownloadWriter()}(std::move(task));
+    } else {
+        std::thread(std::move(task)).detach();
+    }
+}
+
 inline constexpr std::size_t DefaultDownloadChunkSize = BlobTransferLimits::DefaultDownloadChunkSize;
 inline constexpr std::uint64_t ResponseBodySlack = BlobTransferLimits::ResponseBodySlack;
 
@@ -440,7 +454,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         WriteReady();
     }
 
-    // Sinks that block on the disk or a caller's stream are written from a small worker pool so a slow
+    // Sinks that block on the disk are written from the writer scheduler (see RunOnWriter) so a slow
     // write never stalls the I/O thread that is also servicing every other connection. One write is in
     // flight at a time, which keeps the sink in offset order; completion re-enters on the I/O executor.
     void WriteReady() {
@@ -459,7 +473,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
                 continue;
             }
 
-            // Take every chunk that is already contiguous so one pool task (and one hop back to the
+            // Take every chunk that is already contiguous so one writer task (and one hop back to the
             // I/O executor) covers the whole run instead of one pair of hops per chunk.
             std::vector<std::string> batch;
             batch.push_back(std::move(data));
@@ -472,29 +486,26 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
 
             m_writing = true;
             m_writingChunks = batch.size();
-            PendingDownloadWrites().fetch_add(1U);
-            StartedDownloadWrites().fetch_add(1U);
-            boost::asio::post(DownloadWriterPool(),
-                              [self = this->shared_from_this(), batch = std::move(batch)]() mutable {
-                                  std::size_t size = 0U;
-                                  bool ok = true;
-                                  for (auto& chunk : batch) {
-                                      const std::size_t chunkSize = chunk.size();
-                                      try {
-                                          ok = self->m_sink->Write(std::move(chunk));
-                                      } catch (const std::exception&) {
-                                          ok = false;
-                                      }
-                                      if (!ok) {
-                                          break;
-                                      }
-                                      size += chunkSize;
-                                  }
-                                  boost::asio::post(self->m_httpClient.get_executor(), [self, ok, size]() {
-                                      self->Enqueue(Event{.WriteDone = true, .WriteOk = ok, .WriteSize = size});
-                                  });
-                                  PendingDownloadWrites().fetch_sub(1U);
-                              });
+            RunOnWriter(m_httpClient, m_options.WriteScheduler,
+                        [self = this->shared_from_this(), batch = std::move(batch)]() mutable {
+                            std::size_t size = 0U;
+                            bool ok = true;
+                            for (auto& chunk : batch) {
+                                const std::size_t chunkSize = chunk.size();
+                                try {
+                                    ok = self->m_sink->Write(std::move(chunk));
+                                } catch (const std::exception&) {
+                                    ok = false;
+                                }
+                                if (!ok) {
+                                    break;
+                                }
+                                size += chunkSize;
+                            }
+                            boost::asio::post(self->m_httpClient.get_executor(), [self, ok, size]() {
+                                self->Enqueue(Event{.WriteDone = true, .WriteOk = ok, .WriteSize = size});
+                            });
+                        });
             return;
         }
     }

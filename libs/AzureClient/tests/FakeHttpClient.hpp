@@ -16,8 +16,6 @@
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 
-#include <AVEVA/AzureClient/Detail/DownloadWriterPool.hpp>
-
 #include <algorithm>
 #include <atomic>
 #include <boost/asio/any_io_executor.hpp>
@@ -27,6 +25,7 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/thread_pool.hpp>
 
 #include <cassert>
 #include <chrono>
@@ -44,6 +43,19 @@
 #include <vector>
 
 namespace AVEVA::AzureClient::Tests {
+// Writer pool for downloads started through FakeHttpClient. It counts tasks so Poll() can settle a download
+// deterministically.
+struct TestDownloadWriters {
+    boost::asio::thread_pool Pool{2U};
+    std::atomic<std::size_t> Pending{0U};
+    std::atomic<std::size_t> Started{0U};
+};
+
+[[nodiscard]] inline TestDownloadWriters& DownloadWriters() {
+    static TestDownloadWriters writers;
+    return writers;
+}
+
 class FakeHttpClient final {
   public:
     using executor_type = boost::asio::io_context::executor_type;
@@ -170,6 +182,19 @@ class FakeHttpClient final {
     // Poll()/Run() instead of racing a background thread pool.
     executor_type get_executor() const noexcept { return m_context.get_executor(); }
 
+    // Lets file downloads run their blocking writes on a test pool whose activity Poll() can observe.
+    [[nodiscard]] static DownloadWriteScheduler GetDownloadWriter() {
+        return [](std::move_only_function<void()> task) {
+            auto& writers = DownloadWriters();
+            writers.Pending.fetch_add(1U);
+            writers.Started.fetch_add(1U);
+            boost::asio::post(writers.Pool, [task = std::move(task), &writers]() mutable {
+                task();
+                writers.Pending.fetch_sub(1U);
+            });
+        };
+    }
+
     template <boost::asio::completion_token_for<void(std::error_code, HttpResponse)> CompletionToken>
     auto SendAsync(HttpRequest request, HttpRequestOptions options, CompletionToken&& token) {
         return boost::asio::async_initiate<CompletionToken, void(std::error_code, HttpResponse)>(
@@ -192,7 +217,7 @@ class FakeHttpClient final {
     // Runs ready handlers on this client's executor without blocking; returns the number run.
     // Use after an ...Async call to observe a completion that Task 8's PostCompletion deferred.
     std::size_t Poll() {
-        const std::size_t writesBefore = Private::StartedDownloadWrites().load();
+        const std::size_t writesBefore = DownloadWriters().Started.load();
         const std::size_t ran = PollRaw();
         SettleIfWritesStarted(writesBefore);
         return ran;
@@ -201,16 +226,16 @@ class FakeHttpClient final {
     // Downloads write to their sink off the I/O thread; when a step started such a write this waits for it and
     // runs the completions it posts back, so a test observes the state a synchronous sink would have produced.
     void SettleIfWritesStarted(std::size_t writesBefore) {
-        if (Private::StartedDownloadWrites().load() == writesBefore) {
+        if (DownloadWriters().Started.load() == writesBefore) {
             return;
         }
         for (;;) {
-            while (Private::PendingDownloadWrites().load() > 0U) {
+            while (DownloadWriters().Pending.load() > 0U) {
                 std::this_thread::yield();
             }
-            const std::size_t startedNow = Private::StartedDownloadWrites().load();
-            if (PollRaw() == 0U && Private::PendingDownloadWrites().load() == 0U &&
-                Private::StartedDownloadWrites().load() == startedNow) {
+            const std::size_t startedNow = DownloadWriters().Started.load();
+            if (PollRaw() == 0U && DownloadWriters().Pending.load() == 0U &&
+                DownloadWriters().Started.load() == startedNow) {
                 return;
             }
         }
@@ -326,7 +351,7 @@ class FakeHttpClient final {
         // synchronous completions that the real transport would not provide. Tests that need
         // inline completion can set CompleteInline() = true.
         if (m_completeInline) {
-            const std::size_t writesBefore = Private::StartedDownloadWrites().load();
+            const std::size_t writesBefore = DownloadWriters().Started.load();
             if (scripted.OnComplete) {
                 scripted.OnComplete(scripted.Response);
             }
@@ -376,7 +401,7 @@ class FakeHttpClient final {
         // test assertions that expect the callback to have been invoked after calling
         // CompleteNext/CompletePending. SendAsyncErased still posts completions when
         // CompleteInline is false, so this keeps the non-reentrant testing helper behavior.
-        const std::size_t writesBefore = Private::StartedDownloadWrites().load();
+        const std::size_t writesBefore = DownloadWriters().Started.load();
         if (pending->OnComplete) {
             pending->OnComplete(pending->Response);
         }
@@ -405,7 +430,7 @@ class FakeHttpClient final {
         }
 
         // Invoke inline for test helper immediacy.
-        const std::size_t writesBefore = Private::StartedDownloadWrites().load();
+        const std::size_t writesBefore = DownloadWriters().Started.load();
         pending->Completion(error, std::move(response));
         SettleIfWritesStarted(writesBefore);
         return true;
