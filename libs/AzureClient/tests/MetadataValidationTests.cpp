@@ -4,7 +4,7 @@
 #include "AVEVA/AzureClient/BlobStorageError.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
 #include "FakeHttpClient.hpp"
-#include "TestFixtures.hpp"
+#include "TestSupport.hpp"
 #include "ValueOrFail.hpp"
 
 #include <AVEVA/AzureClient/BlobClient.hpp>

@@ -12,7 +12,7 @@
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
 #include "AVEVA/AzureClient/PageBlobClient.hpp"
 #include "AVEVA/AzureClient/Response.hpp"
-#include "FakeHttpUrl.hpp"
+#include "TestSupport.hpp"
 
 #include <AVEVA/HttpClient/HttpClient.hpp>
 #include <AVEVA/HttpClient/HttpHeader.hpp>

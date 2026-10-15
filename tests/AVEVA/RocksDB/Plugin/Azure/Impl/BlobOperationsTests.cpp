@@ -6,7 +6,7 @@
 
 #include "FakeBlobEnvironment.hpp"
 #include "FakeHttpClient.hpp"
-#include "TestFixtures.hpp"
+#include "TestSupport.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 

@@ -4,7 +4,7 @@
 #include "AVEVA/AzureClient/BlobOperationOptions.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
 #include "FakeHttpClient.hpp"
-#include "TestFixtures.hpp"
+#include "TestSupport.hpp"
 
 #include <AVEVA/HttpClient/HttpHeader.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>

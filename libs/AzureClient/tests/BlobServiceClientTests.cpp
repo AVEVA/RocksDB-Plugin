@@ -3,7 +3,7 @@
 
 #include "AVEVA/AzureClient/BlobClientOptions.hpp"
 #include "FakeHttpClient.hpp"
-#include "TestFixtures.hpp"
+#include "TestSupport.hpp"
 
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 

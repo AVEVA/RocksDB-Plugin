@@ -7,7 +7,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 
 #include "FakeHttpClient.hpp"
-#include "TestFixtures.hpp"
+#include "TestSupport.hpp"
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>

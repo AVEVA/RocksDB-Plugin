@@ -6,7 +6,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
 #include "FakeHttpClient.hpp"
-#include "TestFixtures.hpp"
+#include "TestSupport.hpp"
 
 #include <AVEVA/AzureClient/Credentials.hpp>
 

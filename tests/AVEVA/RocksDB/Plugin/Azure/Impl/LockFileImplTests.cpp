@@ -7,7 +7,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
 #include "FakeHttpClient.hpp"
-#include "TestFixtures.hpp"
+#include "TestSupport.hpp"
 
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>

@@ -2,8 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "FakeHttpClient.hpp"
-#include "TestFixtures.hpp"
-#include "TestHelpers.hpp"
+#include "TestSupport.hpp"
 
 #include <AVEVA/AzureClient/BlobClientOptions.hpp>
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>

@@ -30,7 +30,7 @@ set(AVEVA_AZURE_CLIENT_INSTALL_TEST OFF)
 set(AVEVA_AZURE_CLIENT_INSTALL_CONFIG_FILE_PACKAGE ON)
 add_subdirectory("${PROJECT_SOURCE_DIR}/libs/AzureClient" "${PROJECT_BINARY_DIR}/libs/AzureClient")
 
-# Header-only test support (FakeHttpClient.hpp, TestFixtures.hpp) of the vendored AzureClient tests, shared with
+# Header-only test support (FakeHttpClient.hpp, TestSupport.hpp) of the vendored AzureClient tests, shared with
 # the plugin tests. All dependence on the library's test layout is confined to this target.
 add_library(aveva-azure-client-test-support INTERFACE)
 target_include_directories(aveva-azure-client-test-support INTERFACE "${PROJECT_SOURCE_DIR}/libs/AzureClient/tests")

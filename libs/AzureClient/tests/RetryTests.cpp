@@ -6,8 +6,7 @@
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
 #include "AVEVA/AzureClient/Response.hpp"
 #include "FakeHttpClient.hpp"
-#include "TestFixtures.hpp"
-#include "TestHelpers.hpp"
+#include "TestSupport.hpp"
 #include "ValueOrFail.hpp"
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 #include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>

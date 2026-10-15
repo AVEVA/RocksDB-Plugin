@@ -6,7 +6,7 @@
 #include "BlobContainerClientMock.hpp"
 #include "FakeBlobEnvironment.hpp"
 #include "FakeBlobServer.hpp"
-#include "TestFixtures.hpp"
+#include "TestSupport.hpp"
 
 #include <boost/asio/io_context.hpp>
 

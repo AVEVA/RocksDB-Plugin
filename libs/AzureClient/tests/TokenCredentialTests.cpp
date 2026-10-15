@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "FakeHttpClient.hpp"
-#include "TestHelpers.hpp"
+#include "TestSupport.hpp"
 
 #include <AVEVA/AzureClient/TokenCredential.hpp>
 

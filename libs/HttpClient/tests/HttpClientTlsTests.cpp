@@ -45,25 +45,7 @@ TEST(HttpClientTls, StalledServerCompletesOnceWithTimeout) {
 TEST(HttpClientTls, UntrustedCertificateReturnsTlsError) {
     asio::io_context context;
     asio::ssl::context serverContext(asio::ssl::context::tls_server);
-    std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> key(EVP_PKEY_Q_keygen(nullptr, nullptr, "EC", "prime256v1"),
-                                                            EVP_PKEY_free);
-    std::unique_ptr<X509, decltype(&X509_free)> certificate(X509_new(), X509_free);
-    ASSERT_TRUE(key);
-    ASSERT_TRUE(certificate);
-    ASSERT_EQ(X509_set_version(certificate.get(), 2), 1);
-    ASSERT_TRUE(ASN1_INTEGER_set(X509_get_serialNumber(certificate.get()), 1));
-    ASSERT_TRUE(X509_gmtime_adj(X509_getm_notBefore(certificate.get()), -60));
-    ASSERT_TRUE(X509_gmtime_adj(X509_getm_notAfter(certificate.get()), 3600));
-    ASSERT_EQ(X509_set_pubkey(certificate.get(), key.get()), 1);
-
-    auto* subject = X509_get_subject_name(certificate.get());
-    ASSERT_EQ(X509_NAME_add_entry_by_txt(subject, "CN", MBSTRING_ASC,
-                                         reinterpret_cast<const unsigned char*>("localhost"), -1, -1, 0),
-              1);
-    ASSERT_EQ(X509_set_issuer_name(certificate.get(), subject), 1);
-    ASSERT_GT(X509_sign(certificate.get(), key.get(), EVP_sha256()), 0);
-    ASSERT_EQ(SSL_CTX_use_certificate(serverContext.native_handle(), certificate.get()), 1);
-    ASSERT_EQ(SSL_CTX_use_PrivateKey(serverContext.native_handle(), key.get()), 1);
+    HttpClientTests::MakeSelfSignedCertificate("localhost", "").InstallOn(serverContext);
 
     Tcp::acceptor acceptor(context, {asio::ip::make_address("127.0.0.1"), 0});
     asio::ssl::stream<Tcp::socket> stream(context, serverContext);
@@ -96,40 +78,10 @@ TEST(HttpClientTls, UntrustedCertificateReturnsTlsError) {
 std::error_code ConnectTrustingCertificateWithAltName(const std::string& subjectAltName, bool trustThroughPem = false) {
     asio::io_context context;
     asio::ssl::context serverContext(asio::ssl::context::tls_server);
-    std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> key(EVP_PKEY_Q_keygen(nullptr, nullptr, "EC", "prime256v1"),
-                                                            EVP_PKEY_free);
-    std::unique_ptr<X509, decltype(&X509_free)> certificate(X509_new(), X509_free);
-    EXPECT_TRUE(key);
-    EXPECT_TRUE(certificate);
-    X509_set_version(certificate.get(), 2);
-    ASN1_INTEGER_set(X509_get_serialNumber(certificate.get()), 1);
-    X509_gmtime_adj(X509_getm_notBefore(certificate.get()), -60);
-    X509_gmtime_adj(X509_getm_notAfter(certificate.get()), 3600);
-    X509_set_pubkey(certificate.get(), key.get());
-    auto* subject = X509_get_subject_name(certificate.get());
-    X509_NAME_add_entry_by_txt(subject, "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char*>("trusted.example"),
-                               -1, -1, 0);
-    X509_set_issuer_name(certificate.get(), subject);
-
-    X509V3_CTX extensionContext;
-    X509V3_set_ctx_nodb(&extensionContext);
-    X509V3_set_ctx(&extensionContext, certificate.get(), certificate.get(), nullptr, nullptr, 0);
-    std::unique_ptr<X509_EXTENSION, decltype(&X509_EXTENSION_free)> altName(
-        X509V3_EXT_conf_nid(nullptr, &extensionContext, NID_subject_alt_name, subjectAltName.c_str()),
-        X509_EXTENSION_free);
-    EXPECT_TRUE(altName);
-    X509_add_ext(certificate.get(), altName.get(), -1);
-    EXPECT_GT(X509_sign(certificate.get(), key.get(), EVP_sha256()), 0);
-    SSL_CTX_use_certificate(serverContext.native_handle(), certificate.get());
-    SSL_CTX_use_PrivateKey(serverContext.native_handle(), key.get());
-
-    const auto caFile = std::filesystem::temp_directory_path() /
-                        ("aveva-http-client-test-ca-" + std::to_string(std::random_device{}()) + ".pem");
-    {
-        std::unique_ptr<BIO, decltype(&BIO_free)> file(BIO_new_file(caFile.string().c_str(), "wb"), BIO_free);
-        EXPECT_TRUE(file);
-        PEM_write_bio_X509(file.get(), certificate.get());
-    }
+    const auto certificate = HttpClientTests::MakeSelfSignedCertificate("trusted.example", subjectAltName);
+    certificate.InstallOn(serverContext);
+    const HttpClientTests::TempFile caFile("aveva-http-client-test-ca-");
+    certificate.WriteTo(caFile);
 
     Tcp::acceptor acceptor(context, {asio::ip::make_address("127.0.0.1"), 0});
     asio::ssl::stream<Tcp::socket> stream(context, serverContext);
@@ -145,10 +97,10 @@ std::error_code ConnectTrustingCertificateWithAltName(const std::string& subject
     AVEVA::HttpClientOptions clientOptions;
     clientOptions.SetTlsVersion(AVEVA::TlsVersion::Tls12);
     if (trustThroughPem) {
-        std::ifstream pemFile(caFile, std::ios::binary);
+        std::ifstream pemFile(caFile.Path(), std::ios::binary);
         clientOptions.SetCaPem(std::string(std::istreambuf_iterator<char>(pemFile), {}));
     } else {
-        clientOptions.SetCaFile(caFile.string());
+        clientOptions.SetCaFile(caFile.Path().string());
     }
     auto client = AVEVA::HttpClient::Create(context, clientOptions);
     AVEVA::HttpRequest request;
@@ -160,7 +112,6 @@ std::error_code ConnectTrustingCertificateWithAltName(const std::string& subject
         stream.next_layer().close(ignored);
     });
     context.run();
-    std::filesystem::remove(caFile);
     return result;
 }
 
@@ -196,28 +147,8 @@ class TlsTestServer {
                   const char* bindAddress = "127.0.0.1")
         : m_context(context), m_sslContext(asio::ssl::context::tls_server),
           m_acceptor(context, {asio::ip::make_address(bindAddress), 0}), m_after(after) {
-        std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> key(EVP_PKEY_Q_keygen(nullptr, nullptr, "EC", "prime256v1"),
-                                                                EVP_PKEY_free);
-        std::unique_ptr<X509, decltype(&X509_free)> certificate(X509_new(), X509_free);
-        X509_set_version(certificate.get(), 2);
-        ASN1_INTEGER_set(X509_get_serialNumber(certificate.get()), 1);
-        X509_gmtime_adj(X509_getm_notBefore(certificate.get()), -60);
-        X509_gmtime_adj(X509_getm_notAfter(certificate.get()), 3600);
-        X509_set_pubkey(certificate.get(), key.get());
-        auto* subject = X509_get_subject_name(certificate.get());
-        X509_NAME_add_entry_by_txt(subject, "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char*>("tls-test"), -1,
-                                   -1, 0);
-        X509_set_issuer_name(certificate.get(), subject);
-        X509V3_CTX extensionContext;
-        X509V3_set_ctx_nodb(&extensionContext);
-        X509V3_set_ctx(&extensionContext, certificate.get(), certificate.get(), nullptr, nullptr, 0);
-        std::unique_ptr<X509_EXTENSION, decltype(&X509_EXTENSION_free)> altName(
-            X509V3_EXT_conf_nid(nullptr, &extensionContext, NID_subject_alt_name, subjectAltName.c_str()),
-            X509_EXTENSION_free);
-        X509_add_ext(certificate.get(), altName.get(), -1);
-        X509_sign(certificate.get(), key.get(), EVP_sha256());
-        SSL_CTX_use_certificate(m_sslContext.native_handle(), certificate.get());
-        SSL_CTX_use_PrivateKey(m_sslContext.native_handle(), key.get());
+        const auto certificate = HttpClientTests::MakeSelfSignedCertificate("tls-test", subjectAltName);
+        certificate.InstallOn(m_sslContext);
         SSL_CTX_set_session_id_context(m_sslContext.native_handle(), reinterpret_cast<const unsigned char*>("tls-test"),
                                        8);
         // Same as the SSL_CTX_set_tlsext_servername_callback macro, which uses a C-style cast.
@@ -225,11 +156,7 @@ class TlsTestServer {
                               reinterpret_cast<void (*)()>(&TlsTestServer::OnServerName));
         SSL_CTX_set_tlsext_servername_arg(m_sslContext.native_handle(), this);
 
-        std::unique_ptr<BIO, decltype(&BIO_free)> memory(BIO_new(BIO_s_mem()), BIO_free);
-        PEM_write_bio_X509(memory.get(), certificate.get());
-        char* data = nullptr;
-        const long length = BIO_get_mem_data(memory.get(), &data);
-        m_certificatePem.assign(data, static_cast<std::size_t>(length));
+        m_certificatePem = certificate.Pem();
         Accept();
     }
 
