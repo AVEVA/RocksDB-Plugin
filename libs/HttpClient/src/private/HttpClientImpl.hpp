@@ -20,7 +20,9 @@
 #include <boost/asio/strand.hpp>
 #include <boost/url.hpp>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -63,6 +65,7 @@ struct PendingRequest {
     HttpRequestOptions options;
     Detail::CompletionPointer completion;
     std::shared_ptr<CancelState> cancellation;
+    std::chrono::steady_clock::time_point deadline;
 };
 
 /// <summary>
@@ -180,14 +183,17 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
                 }
             });
             auto cancellation = BindCallerSlot(options);
+            // The deadline covers time spent queued behind the per-origin cap, not just the network exchange.
+            const auto deadline = DeadlineFor(options);
             auto route = Route::Of(request, options);
             // Unparseable URLs bypass the cap; they fail fast and never open a connection.
             if (m_limiter && route.Parsed) {
                 auto origin = route.Origin();
                 return SendLimited(std::move(origin), std::move(route), std::move(request), std::move(guarded),
-                                   std::move(options), std::move(cancellation));
+                                   std::move(options), std::move(cancellation), deadline);
             }
-            SendUnlimited(route, std::move(request), std::move(guarded), std::move(options), std::move(cancellation));
+            SendUnlimited(route, std::move(request), std::move(guarded), std::move(options), std::move(cancellation),
+                          deadline);
         } catch (...) {
             if (auto pending = cell->Take()) {
                 asio::post(context_, [pending = std::move(pending)]() mutable {
@@ -199,6 +205,12 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     }
 
   private:
+    static std::chrono::steady_clock::time_point DeadlineFor(const HttpRequestOptions& options) {
+        // Clamp so huge timeouts (e.g. milliseconds::max()) cannot overflow the clock's time_point.
+        constexpr auto MaxTimeout = std::chrono::duration_cast<std::chrono::milliseconds>(EffectivelyInfinite);
+        return std::chrono::steady_clock::now() + std::min(options.GetTimeout(), MaxTimeout);
+    }
+
     /// <summary>
     /// Connects the caller's cancellation slot, once and on the submitting thread, to a shared state that
     /// later stages retarget. Asio slots are single-owner and not thread-safe to reassign, so no later stage
@@ -227,6 +239,9 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// Cancellation: the caller's slot was wired once in Submit to a CancelState. While the request waits in
     /// the limiter, the state's target removes it from the queue; when it starts, the operation retargets the
     /// state to cancel itself. Nothing here ever reassigns the slot.
+    ///
+    /// Timeout: the deadline is fixed at submission, so queue time counts. A queued request is not woken when
+    /// its deadline passes; it fails with TimedOut, without connecting, as soon as it is given a slot.
     /// </summary>
     /// <param name="origin">The origin whose cap the request counts against.</param>
     /// <param name="route">The request's parsed destination.</param>
@@ -234,7 +249,8 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// <param name="completion">Invoked exactly once with the outcome.</param>
     /// <param name="options">The timeout, response limits, and cancellation slot for this request.</param>
     void SendLimited(std::string origin, Route route, HttpRequest request, Detail::CompletionPointer completion,
-                     HttpRequestOptions options, std::shared_ptr<CancelState> cancellation) {
+                     HttpRequestOptions options, std::shared_ptr<CancelState> cancellation,
+                     std::chrono::steady_clock::time_point deadline) {
         const auto ticket = m_limiter->NextTicket();
         // Set before queueing so a cancellation cannot slip in between; a started request retargets it.
         if (cancellation) {
@@ -246,7 +262,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         }
         m_limiter->Run(origin, ticket,
                        PendingRequest{origin, std::move(route), std::move(request), std::move(options),
-                                      std::move(completion), cancellation});
+                                      std::move(completion), cancellation, deadline});
         // A cancel that fired before the request was queued found nothing to remove; repeat it now.
         if (cancellation && cancellation->IsCancelled()) {
             m_limiter->Cancel(origin, ticket);
@@ -264,7 +280,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
                 Detail::Complete(std::move(inner), error, std::move(response));
             });
         SendUnlimited(pending.route, std::move(pending.request), std::move(wrapped), std::move(pending.options),
-                      std::move(pending.cancellation));
+                      std::move(pending.cancellation), pending.deadline);
     }
 
     /// <summary>
@@ -289,8 +305,10 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// <param name="options">The timeout, response limits, and cancellation slot for this request.</param>
     /// <param name="cancellation">The state the caller's cancellation slot is wired to; the operation makes itself
     /// its target. Null when the caller has no slot.</param>
+    /// <param name="deadline">When the request times out, measured from submission.</param>
     void SendUnlimited(const Route& route, HttpRequest request, Detail::CompletionPointer completion,
-                       HttpRequestOptions options, std::shared_ptr<CancelState> cancellation = nullptr) {
+                       HttpRequestOptions options, std::shared_ptr<CancelState> cancellation,
+                       std::chrono::steady_clock::time_point deadline) {
         // Only requests that pass the same validation the operation applies may take a pooled connection, so that
         // failing an invalid one cannot cost a healthy connection; invalid ones take the fresh-connection path.
         if (route.Sendable()) {
@@ -299,14 +317,14 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
                 if (auto pooled = m_tlsPool->Acquire(key)) {
                     return ResumeWithPooledConnection<TlsStream>(
                         route, std::move(*pooled), std::move(key), std::move(request), std::move(completion),
-                        std::move(options), m_tlsPool, std::move(cancellation));
+                        std::move(options), m_tlsPool, std::move(cancellation), deadline);
                 }
             } else {
                 BasicConnectionKey key{route.Host, route.Port};
                 if (auto pooled = m_plainPool->Acquire(key)) {
                     return ResumeWithPooledConnection<PlainStream>(
                         route, std::move(*pooled), std::move(key), std::move(request), std::move(completion),
-                        std::move(options), m_plainPool, std::move(cancellation));
+                        std::move(options), m_plainPool, std::move(cancellation), deadline);
                 }
             }
         }
@@ -318,6 +336,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
             auto operation = std::make_shared<RequestOperation<TlsStream>>(
                 m_tlsContext, std::move(stream), std::move(completion), std::move(options), m_tlsPool, std::move(key));
             operation->BindCancellation(cancellation);
+            operation->SetDeadline(deadline);
             asio::post(executor, [operation, request = std::move(request), route]() mutable {
                 operation->Start(std::move(request), route);
             });
@@ -330,6 +349,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         auto operation = std::make_shared<RequestOperation<PlainStream>>(
             m_tlsContext, std::move(stream), std::move(completion), std::move(options), m_plainPool, std::move(key));
         operation->BindCancellation(cancellation);
+        operation->SetDeadline(deadline);
         asio::post(executor, [operation, request = std::move(request), route]() mutable {
             operation->Start(std::move(request), route);
         });
@@ -350,12 +370,14 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     void ResumeWithPooledConnection(const Route& route, PooledConnection<Stream> pooled, ConnectionKey<Stream> key,
                                     HttpRequest request, Detail::CompletionPointer completion,
                                     HttpRequestOptions options, std::shared_ptr<ConnectionPool<Stream>> pool,
-                                    std::shared_ptr<CancelState> cancellation) {
+                                    std::shared_ptr<CancelState> cancellation,
+                                    std::chrono::steady_clock::time_point deadline) {
         auto executor = pooled.stream->get_executor();
         auto operation = std::make_shared<RequestOperation<Stream>>(
             m_tlsContext, std::move(pooled.stream), std::move(completion), std::move(options), std::move(pool),
             std::move(key), std::move(pooled.buffer));
         operation->BindCancellation(cancellation);
+        operation->SetDeadline(deadline);
         asio::post(executor, [operation, request = std::move(request), route]() mutable {
             operation->StartReused(std::move(request), route);
         });

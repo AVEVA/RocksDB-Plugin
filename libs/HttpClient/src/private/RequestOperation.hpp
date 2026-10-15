@@ -133,6 +133,14 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     }
 
     /// <summary>
+    /// Sets the instant the request times out. Called by the client with a deadline taken at submission, so
+    /// time spent queued behind the per-origin cap counts against the request's timeout. Must be called before
+    /// the operation is started; without it the timeout runs from the start.
+    /// </summary>
+    /// <param name="deadline">When the request times out.</param>
+    void SetDeadline(std::chrono::steady_clock::time_point deadline) { m_deadline = deadline; }
+
+    /// <summary>
     /// Fresh connection: resolve, connect, (TLS handshake), then send. Must run on the operation's strand.
     /// </summary>
     /// <param name="request">The request to send; its owned body is moved out.</param>
@@ -145,6 +153,9 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
         }
         if (IsCancellationRequested()) {
             return Cancel();
+        }
+        if (DeadlinePassed()) {
+            return Fail(HttpClientError::TimedOut);
         }
         m_reused = false;
         if constexpr (std::is_same_v<Stream, TlsStream>) {
@@ -170,6 +181,9 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
         }
         if (IsCancellationRequested()) {
             return Cancel();
+        }
+        if (DeadlinePassed()) {
+            return Fail(HttpClientError::TimedOut);
         }
         m_reused = true;
         ArmTimer();
@@ -254,9 +268,13 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// Starts the deadline covering the whole operation, failing it with TimedOut when it elapses.
     /// </summary>
     void ArmTimer() {
-        // Clamp so huge timeouts (e.g. milliseconds::max()) cannot overflow the clock's duration or time_point.
-        constexpr auto MaxTimeout = std::chrono::duration_cast<std::chrono::milliseconds>(EffectivelyInfinite);
-        m_timer.expires_after(std::min(m_options.GetTimeout(), MaxTimeout));
+        if (m_deadline) {
+            m_timer.expires_at(*m_deadline);
+        } else {
+            // Clamp so huge timeouts (e.g. milliseconds::max()) cannot overflow the clock's duration or time_point.
+            constexpr auto MaxTimeout = std::chrono::duration_cast<std::chrono::milliseconds>(EffectivelyInfinite);
+            m_timer.expires_after(std::min(m_options.GetTimeout(), MaxTimeout));
+        }
         auto self = this->shared_from_this();
         m_timer.async_wait([self](boost::system::error_code error) {
             if (!error) {
@@ -723,6 +741,11 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// <returns>True once cancellation has been requested.</returns>
     [[nodiscard]] bool IsCancellationRequested() const noexcept { return m_cancellationRequested.load(); }
 
+    /// <summary>
+    /// Whether the submission-time deadline, if one was set, has already passed.
+    /// </summary>
+    [[nodiscard]] bool DeadlinePassed() const { return m_deadline && std::chrono::steady_clock::now() >= *m_deadline; }
+
     std::shared_ptr<asio::ssl::context> m_tlsContext;
     // The operation's strand, fixed at construction so that threads other than the strand (the
     // cancellation handler) can post to it without touching m_stream, which is replaced and moved on it.
@@ -750,6 +773,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     bool m_receivedAnyResponse = false;
     bool m_hostIsName = false;
     std::atomic_bool m_cancellationRequested = false;
+    std::optional<std::chrono::steady_clock::time_point> m_deadline;
 };
 
 inline void ResolveWaiter::operator()(boost::system::error_code error, Tcp::resolver::results_type results) {

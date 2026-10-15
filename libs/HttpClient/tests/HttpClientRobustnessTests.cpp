@@ -449,6 +449,46 @@ TEST(HttpClientRobustness, MaxConnectionsPerHostQueuesExtraRequestsAndReusesTheC
     EXPECT_EQ(server.Accepted(), 1);
 }
 
+TEST(HttpClientRobustness, TimeSpentQueuedForASlotCountsAgainstTheRequestTimeout) {
+    asio::io_context context;
+    AVEVA::HttpClientOptions clientOptions;
+    clientOptions.SetMaxConnectionsPerHost(1);
+    auto client = AVEVA::HttpClient::Create(context, clientOptions);
+    ScriptedServer server(context,
+                          [](int, const http::request<http::string_body>&) -> ServerAction { return {.Hold = true}; });
+
+    AVEVA::HttpRequestOptions holdingOptions;
+    holdingOptions.SetTimeout(std::chrono::milliseconds(400));
+    AVEVA::HttpRequestOptions queuedOptions;
+    queuedOptions.SetTimeout(std::chrono::milliseconds(150));
+
+    std::error_code firstResult;
+    std::error_code queuedResult;
+    int completions = 0;
+    const auto finishWhenBothDone = [&] {
+        if (++completions == 2) {
+            server.Stop();
+        }
+    };
+    client->SendAsync(MakeRequest(server.Url("/held")), holdingOptions,
+                      [&](std::error_code error, AVEVA::HttpResponse) {
+                          firstResult = error;
+                          finishWhenBothDone();
+                      });
+    client->SendAsync(MakeRequest(server.Url("/queued")), queuedOptions,
+                      [&](std::error_code error, AVEVA::HttpResponse) {
+                          queuedResult = error;
+                          finishWhenBothDone();
+                      });
+    context.run();
+
+    EXPECT_EQ(firstResult, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
+    EXPECT_EQ(queuedResult, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
+    // The queued request's deadline passed while it waited, so it never opened a connection of its own.
+    EXPECT_EQ(server.Accepted(), 1);
+    EXPECT_EQ(server.TotalRequests(), 1);
+}
+
 TEST(HttpClientRobustness, CancellingAQueuedRequestFailsItWithoutStartingIt) {
     asio::io_context context;
     AVEVA::HttpClientOptions clientOptions;
