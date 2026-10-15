@@ -11,6 +11,7 @@ add_library(aveva-http-client
     HttpResponse.cpp
     private/HttpErrorCategory.cpp
     private/IdleSweeper.cpp
+    private/RequestOperation.cpp
     private/RequestValidation.cpp
     private/TlsContextConfigurator.cpp
 )

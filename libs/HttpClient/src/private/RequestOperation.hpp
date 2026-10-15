@@ -6,26 +6,16 @@
 #include "CancelState.hpp"
 #include "ConnectionPool.hpp"
 #include "DnsCache.hpp"
-#include "HttpVerb.hpp"
-#include "RequestValidation.hpp"
 #include "Route.hpp"
 #include "StreamTypes.hpp"
-#include "TlsContextConfigurator.hpp"
 
 #include "AVEVA/HttpClient/Detail/CompletionOperation.hpp"
 #include "AVEVA/HttpClient/HttpRequest.hpp"
 #include "AVEVA/HttpClient/HttpRequestOptions.hpp"
 #include "AVEVA/HttpClient/HttpResponse.hpp"
 
-#include <boost/asio/dispatch.hpp>
-#include <boost/asio/execution/context.hpp>
-#include <boost/asio/post.hpp>
-
 #include <boost/asio/ssl/context.hpp>
-#include <boost/asio/ssl/host_name_verification.hpp>
 #include <boost/asio/steady_timer.hpp>
-
-#include <openssl/ssl.h>
 
 #include <algorithm>
 #include <atomic>
@@ -120,18 +110,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// </summary>
     /// <param name="cancellation">The state shared with the caller's slot; null when the request has no
     /// cancellation slot.</param>
-    void BindCancellation(const std::shared_ptr<CancelState>& cancellation) {
-        if (!cancellation) {
-            return;
-        }
-        // The target runs on whichever thread emits the signal, so it only posts to the operation's strand,
-        // where Cancel() may safely use the stream.
-        cancellation->SetTarget([weak = this->weak_from_this()] {
-            if (auto self = weak.lock()) {
-                self->RequestCancellation();
-            }
-        });
-    }
+    void BindCancellation(const std::shared_ptr<CancelState>& cancellation);
 
     /// <summary>
     /// Sets the instant the request times out. Called by the client with a deadline taken at submission, so
@@ -145,51 +124,14 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// Fresh connection: resolve, connect, (TLS handshake), then send. Must run on the operation's strand.
     /// </summary>
     /// <param name="request">The request to send; its owned body is moved out.</param>
-    void Start(HttpRequest request, const Route& route) {
-        if (IsCancellationRequested()) {
-            return Cancel();
-        }
-        if (!BuildRequest(request, route)) {
-            return;
-        }
-        if (IsCancellationRequested()) {
-            return Cancel();
-        }
-        if (DeadlinePassed()) {
-            return Fail(HttpClientError::TimedOut);
-        }
-        m_reused = false;
-        if constexpr (std::is_same_v<Stream, TlsStream>) {
-            if (!ConfigureTlsForHost()) {
-                return;
-            }
-        }
-        ArmTimer();
-        Resolve();
-    }
+    void Start(HttpRequest request, const Route& route);
 
     /// <summary>
     /// Reused pooled connection: already connected (and, for TLS, already handshaked), so this writes
     /// straight away. Must run on the operation's strand.
     /// </summary>
     /// <param name="request">The request to send; its owned body is moved out.</param>
-    void StartReused(HttpRequest request, const Route& route) {
-        if (IsCancellationRequested()) {
-            return Cancel();
-        }
-        if (!BuildRequest(request, route)) {
-            return;
-        }
-        if (IsCancellationRequested()) {
-            return Cancel();
-        }
-        if (DeadlinePassed()) {
-            return Fail(HttpClientError::TimedOut);
-        }
-        m_reused = true;
-        ArmTimer();
-        Write();
-    }
+    void StartReused(HttpRequest request, const Route& route);
 
   private:
     /// <summary>
@@ -200,14 +142,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// </summary>
     /// <param name="request">The request to translate; its owned body is moved out.</param>
     /// <returns>True if the operation may continue.</returns>
-    bool BuildRequest(HttpRequest& request, const Route& route) {
-        try {
-            return BuildRequestUnchecked(request, route);
-        } catch (const std::exception&) {
-            Fail(HttpClientError::InvalidRequest);
-            return false;
-        }
-    }
+    bool BuildRequest(HttpRequest& request, const Route& route);
 
     /// <summary>
     /// Validates the URL, method, headers and options, and fills in the Beast request: target, Host,
@@ -216,95 +151,19 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// </summary>
     /// <param name="request">The request to translate; its owned body is moved out.</param>
     /// <returns>True if the operation may continue.</returns>
-    bool BuildRequestUnchecked(HttpRequest& request, const Route& route) {
-        if (!route.Parsed) {
-            Fail(HttpClientError::InvalidUrl);
-            return false;
-        }
-        if (route.Error) {
-            // ValidateRequest only ever reports HttpClientError values.
-            Fail(static_cast<HttpClientError>(route.Error.value()));
-            return false;
-        }
-
-        const auto verb = Private::ToBeastVerb(request.GetMethod());
-
-        m_request.version(11);
-        m_request.method(verb);
-        m_request.target(route.Target);
-        for (const auto& header : request.GetHeaders()) {
-            if (beast::iequals(header.GetName(), "Host") || beast::iequals(header.GetName(), "Content-Length") ||
-                beast::iequals(header.GetName(), "Transfer-Encoding") ||
-                beast::iequals(header.GetName(), "Connection")) {
-                continue;
-            }
-            m_request.insert(header.GetName(), header.GetValue());
-        }
-        m_request.set(http::field::host, route.Authority);
-        m_request.keep_alive(true);
-        if (request.HasBodyView()) {
-            const auto view = request.GetBodyView();
-            m_ownedBodyStorage.clear();
-            m_bodyKeepAlive = request.GetBodyKeepAlive();
-            m_request.body().data = const_cast<void*>(static_cast<const void*>(view.data()));
-            m_request.body().size = view.size();
-        } else {
-            m_bodyKeepAlive.reset();
-            m_ownedBodyStorage = request.ReleaseBody();
-            m_request.body().data = m_ownedBodyStorage.empty()
-                                        ? nullptr
-                                        : const_cast<void*>(static_cast<const void*>(m_ownedBodyStorage.data()));
-            m_request.body().size = m_ownedBodyStorage.size();
-        }
-        m_request.body().more = false;
-        // buffer_body has no BodyWriter::size(), so message::prepare_payload() cannot be used;
-        // set Content-Length manually instead (the same value it would have computed). A bodyless GET, HEAD or
-        // DELETE carries none, but a bodyless POST, PUT or PATCH must state an explicit zero.
-        const auto method = m_request.method();
-        if (m_request.body().size != 0 || method == http::verb::post || method == http::verb::put ||
-            method == http::verb::patch) {
-            m_request.set(http::field::content_length, std::to_string(m_request.body().size));
-        }
-        ResetParser();
-        m_hostIsName = route.HostIsName;
-        return true;
-    }
+    bool BuildRequestUnchecked(HttpRequest& request, const Route& route);
 
     /// <summary>
     /// Starts the deadline covering the whole operation, failing it with TimedOut when it elapses.
     /// </summary>
-    void ArmTimer() {
-        if (m_deadline) {
-            m_timer.expires_at(*m_deadline);
-        } else {
-            // Clamp so huge timeouts (e.g. milliseconds::max()) cannot overflow the clock's duration or time_point.
-            constexpr auto MaxTimeout = std::chrono::duration_cast<std::chrono::milliseconds>(EffectivelyInfinite);
-            m_timer.expires_after(std::min(m_options.GetTimeout(), MaxTimeout));
-        }
-        auto self = this->shared_from_this();
-        m_timer.async_wait([self](boost::system::error_code error) {
-            if (!error) {
-                self->Fail(HttpClientError::TimedOut);
-            }
-        });
-    }
+    void ArmTimer();
 
     /// <summary>
     /// Prepares the TLS stream for this origin: offers a resumable session, installs host name verification
     /// when verification is on, and sets SNI for a named host. Fails the operation if SNI could not be set.
     /// </summary>
     /// <returns>True if the operation may continue.</returns>
-    bool ConfigureTlsForHost() {
-        PrepareTlsSessionResumption(m_stream->native_handle(), m_key.host, m_key.service);
-        if (SSL_get_verify_mode(m_stream->native_handle()) != SSL_VERIFY_NONE) {
-            m_stream->set_verify_callback(asio::ssl::host_name_verification(m_key.host));
-        }
-        if (m_hostIsName && !SSL_set_tlsext_host_name(m_stream->native_handle(), m_key.host.c_str())) {
-            Fail(HttpClientError::TlsFailed);
-            return false;
-        }
-        return true;
-    }
+    bool ConfigureTlsForHost();
 
     /// <summary>
     /// A pooled connection may have been closed by the peer while idle. If nothing has been
@@ -316,30 +175,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// server.</param>
     /// <returns>True if a retry was started, in which case the caller must not also fail the
     /// operation.</returns>
-    bool MaybeRetryAfterReuseFailure(bool requestMayHaveBeenSent) {
-        if (IsCancellationRequested() || !m_reused || m_retried || m_receivedAnyResponse || m_parser->got_some() ||
-            (requestMayHaveBeenSent && !IsIdempotentMethod(m_request.method()))) {
-            return false;
-        }
-        m_retried = true;
-        m_reused = false;
-
-        boost::system::error_code ignored;
-        beast::get_lowest_layer(*m_stream).socket().close(ignored);
-        if constexpr (std::is_same_v<Stream, TlsStream>) {
-            m_stream = std::make_unique<TlsStream>(m_executor, *m_tlsContext);
-            if (!ConfigureTlsForHost()) {
-                return true;
-            }
-        } else {
-            m_stream = std::make_unique<PlainStream>(m_executor);
-        }
-        m_buffer.consume(m_buffer.size());
-        ResetParser();
-
-        Resolve();
-        return true;
-    }
+    bool MaybeRetryAfterReuseFailure(bool requestMayHaveBeenSent);
 
     /// <summary>
     /// Whether re-sending a method cannot have an effect beyond that of sending it once, and so may be
@@ -347,30 +183,13 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// </summary>
     /// <param name="method">The method to classify.</param>
     /// <returns>True if the method is idempotent.</returns>
-    static bool IsIdempotentMethod(http::verb method) noexcept {
-        switch (method) {
-        case http::verb::get:
-        case http::verb::head:
-        case http::verb::options:
-        case http::verb::trace:
-        case http::verb::put:
-        case http::verb::delete_:
-            return true;
-        default:
-            return false;
-        }
-    }
+    static bool IsIdempotentMethod(http::verb method) noexcept;
 
     /// <summary>
     /// Installs a fresh response parser carrying the request's limits, and skips the body for a HEAD
     /// response, which has none despite its Content-Length.
     /// </summary>
-    void ResetParser() {
-        m_parser.emplace();
-        m_parser->body_limit(m_options.GetResponseBodyLimit());
-        m_parser->header_limit(m_options.GetResponseHeaderLimit());
-        m_parser->skip(m_request.method() == http::verb::head);
-    }
+    void ResetParser();
 
   public:
     /// <summary>
@@ -379,15 +198,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// </summary>
     /// <param name="error">The leader's outcome.</param>
     /// <param name="results">The endpoints the leader found, if any.</param>
-    void OnSharedResolve(boost::system::error_code error, Tcp::resolver::results_type results) {
-        asio::post(m_executor, [self = this->shared_from_this(), error, results = std::move(results)]() mutable {
-            // The leader was cancelled or timed out, which says nothing about this request's lookup.
-            if (error == asio::error::operation_aborted && !self->m_finished && !self->IsCancellationRequested()) {
-                return self->Resolve();
-            }
-            self->OnResolve(error, std::move(results));
-        });
-    }
+    void OnSharedResolve(boost::system::error_code error, Tcp::resolver::results_type results);
 
   private:
     /// <summary>
@@ -395,153 +206,39 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// single resolve. Every caller already runs on this operation's strand, so a hit is handled inline.
     /// Completions are always posted, so the caller's handler is still never re-entered.
     /// </summary>
-    void Resolve() {
-        m_resolvedFromCache = false;
-        auto& cache = DnsCache::Shared();
-        if (auto cached = cache.Find(m_key.host, m_key.service)) {
-            m_resolvedFromCache = true;
-            return OnResolve({}, std::move(*cached));
-        }
-        const void* const scope = LookupScope();
-        if (!cache.JoinOrLead(
-                m_key.host, m_key.service, [this] { return ResolveWaiter(this->shared_from_this()); }, scope)) {
-            return;
-        }
-        // If the handler is destroyed unrun (io_context torn down), the guard still releases the waiters.
-        struct LeaderGuard {
-            std::string host;
-            std::string service;
-            const void* scope;
-            bool finished = false;
-
-            ~LeaderGuard() {
-                if (!finished) {
-                    DnsCache::Shared().Finish(host, service, asio::error::operation_aborted, {}, scope);
-                }
-            }
-        };
-        auto guard = std::make_shared<LeaderGuard>(LeaderGuard{m_key.host, m_key.service, scope});
-        m_resolver.async_resolve(m_key.host, m_key.service,
-                                 [self = this->shared_from_this(), guard](boost::system::error_code error,
-                                                                          Tcp::resolver::results_type results) {
-                                     guard->finished = true;
-                                     DnsCache::Shared().Finish(self->m_key.host, self->m_key.service, error, results,
-                                                               guard->scope);
-                                     self->OnResolve(error, std::move(results));
-                                 });
-    }
+    void Resolve();
 
     /// <summary>
     /// Identifies the io_context this request runs on. Lookups are only shared between requests on the same
     /// context: a leader whose context is stopped never finishes, and requests on other contexts must not wait
     /// for it.
     /// </summary>
-    const void* LookupScope() const {
-        return static_cast<const void*>(&asio::query(m_executor, asio::execution::context));
-    }
+    const void* LookupScope() const;
 
     /// <summary>
     /// Connects to the resolved endpoints, or fails the operation if the lookup did not succeed.
     /// </summary>
     /// <param name="error">The outcome of the lookup.</param>
     /// <param name="results">The endpoints to connect to.</param>
-    void OnResolve(boost::system::error_code error, Tcp::resolver::results_type results) {
-        if (m_finished) {
-            return;
-        }
-        if (IsCancellationRequested()) {
-            return Cancel();
-        }
-        if (error) {
-            return Fail(HttpClientError::ResolveFailed, error);
-        }
-        beast::get_lowest_layer(*m_stream).async_connect(
-            results, [self = this->shared_from_this()](boost::system::error_code connectError, const Tcp::endpoint&) {
-                self->OnConnect(connectError);
-            });
-    }
+    void OnResolve(boost::system::error_code error, Tcp::resolver::results_type results);
 
     /// <summary>
     /// Performs the TLS handshake on a secure stream and then writes, or writes straight away on a plain
     /// one. Fails the operation if the connect or the handshake did not succeed.
     /// </summary>
     /// <param name="error">The outcome of the connect.</param>
-    void OnConnect(boost::system::error_code error) {
-        if (m_finished) {
-            return;
-        }
-        if (IsCancellationRequested()) {
-            return Cancel();
-        }
-        if (error) {
-            if (m_resolvedFromCache) {
-                // The cached address may be stale; make the next request resolve again.
-                DnsCache::Shared().Invalidate(m_key.host, m_key.service);
-            }
-            return Fail(HttpClientError::ConnectFailed, error);
-        }
-        if constexpr (std::is_same_v<Stream, TlsStream>) {
-            m_stream->async_handshake(asio::ssl::stream_base::client,
-                                      [self = this->shared_from_this()](boost::system::error_code handshakeError) {
-                                          if (self->m_finished) {
-                                              return;
-                                          }
-                                          if (self->IsCancellationRequested()) {
-                                              return self->Cancel();
-                                          }
-                                          if (handshakeError) {
-                                              return self->Fail(HttpClientError::TlsFailed, handshakeError);
-                                          }
-                                          self->Write();
-                                      });
-        } else {
-            Write();
-        }
-    }
+    void OnConnect(boost::system::error_code error);
 
     /// <summary>
     /// Writes the request, then starts reading. A failure on a reused connection may be retried instead of
     /// reported.
     /// </summary>
-    void Write() {
-        if (m_finished) {
-            return;
-        }
-        if (IsCancellationRequested()) {
-            return Cancel();
-        }
-        http::async_write(*m_stream, m_request,
-                          [self = this->shared_from_this()](boost::system::error_code error, std::size_t bytesWritten) {
-                              if (self->m_finished) {
-                                  return;
-                              }
-                              if (self->IsCancellationRequested()) {
-                                  return self->Cancel();
-                              }
-                              if (error) {
-                                  if (self->MaybeRetryAfterReuseFailure(bytesWritten != 0)) {
-                                      return;
-                                  }
-                                  return self->Fail(HttpClientError::WriteFailed, error);
-                              }
-                              self->Read();
-                          });
-    }
+    void Write();
 
     /// <summary>
     /// Reads one complete response message into the parser.
     /// </summary>
-    void Read() {
-        if (m_finished) {
-            return;
-        }
-        if (IsCancellationRequested()) {
-            return Cancel();
-        }
-        http::async_read(
-            *m_stream, m_buffer, *m_parser,
-            [self = this->shared_from_this()](boost::system::error_code error, std::size_t) { self->OnRead(error); });
-    }
+    void Read();
 
     /// <summary>
     /// Completes the operation with the response just read: skips informational (1xx) responses, classifies
@@ -549,39 +246,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// the response to the completion handler.
     /// </summary>
     /// <param name="error">The outcome of the read.</param>
-    void OnRead(boost::system::error_code error) {
-        if (m_finished) {
-            return;
-        }
-        if (IsCancellationRequested()) {
-            return Cancel();
-        }
-        if (error) {
-            error = AcceptTruncatedTlsBody(error);
-        }
-        if (error) {
-            return FailRead(error);
-        }
-        const auto status = m_parser->get().result_int();
-        if (status == 101) {
-            return Fail(HttpClientError::ProtocolError);
-        }
-        if (status < 200) {
-            m_receivedAnyResponse = true; // The server has the request; ResetParser() would hide that.
-            ResetParser();
-            return Read();
-        }
-
-        // The parser-level check also rejects EOF-delimited bodies; leftover bytes would be mistaken for the
-        // next response on a pooled connection.
-        const bool keepAlive = m_parser->keep_alive() && m_buffer.size() == 0;
-        auto response = BuildResponse();
-        if (!response) {
-            // Without this the handler would never be called (e.g. bad_alloc while copying headers).
-            return Fail(HttpClientError::ReadFailed);
-        }
-        CompleteSuccess(std::move(*response), keepAlive);
-    }
+    void OnRead(boost::system::error_code error);
 
     /// <summary>
     /// A TLS server may close TCP without close_notify. An attacker can also truncate an EOF-delimited body
@@ -589,21 +254,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// </summary>
     /// <param name="error">The failed read's error.</param>
     /// <returns>An empty error code if the message turned out to be complete; otherwise the original error.</returns>
-    boost::system::error_code AcceptTruncatedTlsBody(boost::system::error_code error) {
-        if constexpr (std::is_same_v<Stream, TlsStream>) {
-            const auto status = m_parser->get().result_int();
-            const bool bodyless = status == 204 || status == 304;
-            if (error == asio::ssl::error::stream_truncated && m_parser->got_some() &&
-                (m_options.GetAcceptTruncatedTlsBody() || bodyless)) {
-                boost::system::error_code eofError;
-                m_parser->put_eof(eofError);
-                if (!eofError) {
-                    return {};
-                }
-            }
-        }
-        return error;
-    }
+    boost::system::error_code AcceptTruncatedTlsBody(boost::system::error_code error);
 
     /// <summary>
     /// Maps a failed read to the error reported to the caller.
@@ -611,76 +262,25 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// <param name="error">The failed read's (non-empty) error.</param>
     /// <returns>ResponseTooLarge for limit errors, ProtocolError for a malformed response, otherwise
     /// ReadFailed.</returns>
-    static HttpClientError ClassifyReadError(const boost::system::error_code& error) {
-        if (error == http::error::body_limit || error == http::error::header_limit) {
-            return HttpClientError::ResponseTooLarge;
-        }
-        // A connection that ends mid-message is a transport failure, not a malformed response.
-        const bool truncated = error == http::error::end_of_stream || error == http::error::partial_message;
-        return !truncated && IsBeastHttpError(error) ? HttpClientError::ProtocolError : HttpClientError::ReadFailed;
-    }
+    static HttpClientError ClassifyReadError(const boost::system::error_code& error);
 
     /// <summary>
     /// Completes a failed read, first retrying on a fresh connection when a reused one turned out to be dead.
     /// </summary>
     /// <param name="error">The failed read's (non-empty) error.</param>
-    void FailRead(const boost::system::error_code& error) {
-        const auto classified = ClassifyReadError(error);
-        // Limit errors are the response's fault, not the connection's, so they are never retried. For the rest,
-        // the request was fully written before the read started.
-        if (classified != HttpClientError::ResponseTooLarge && MaybeRetryAfterReuseFailure(true)) {
-            return;
-        }
-        Fail(classified, error);
-    }
+    void FailRead(const boost::system::error_code& error);
 
     /// <summary>
     /// Moves the parsed message into an HttpResponse.
     /// </summary>
     /// <returns>The response, or nothing if building it threw (for example bad_alloc).</returns>
-    std::optional<HttpResponse> BuildResponse() {
-        try {
-            auto message = m_parser->release();
-            std::vector<HttpHeader> headers;
-            // Beast keeps fields in a linked list, so sizing the vector first would cost a second walk.
-            for (const auto& header : message.base()) {
-                headers.emplace_back(std::string(header.name_string()), std::string(header.value()));
-            }
-            return HttpResponse(message.result_int(), std::move(headers), std::move(message.body()));
-        } catch (const std::exception&) {
-            return std::nullopt;
-        }
-    }
+    std::optional<HttpResponse> BuildResponse();
 
     /// <summary>
     /// Returns the connection to the pool when the response allows reuse, and otherwise shuts it down.
     /// </summary>
     /// <param name="keepAlive">Whether the connection may be reused.</param>
-    void ReleaseOrClose(bool keepAlive) {
-        bool pooled = false;
-        if (keepAlive) {
-            try {
-                // A pooled connection is idle for a long time; don't let it pin the last response's buffer.
-                TrimIdleBuffer(m_buffer);
-                m_pool->Release(m_key, PooledConnection<Stream>{std::move(m_stream), std::move(m_buffer)});
-                pooled = true;
-            } catch (const std::exception&) {
-                // The completion must still run; drop the connection if it could not be pooled.
-            }
-        }
-        if (!pooled && m_stream) {
-            // Only clean completions reach here (error paths close immediately in Finish), so the peer is in a known
-            // state and a close_notify lets it distinguish this from a truncation. The bounded grace period keeps a
-            // silent peer from holding the operation alive.
-            if constexpr (std::is_same_v<Stream, TlsStream>) {
-                beast::get_lowest_layer(*m_stream).expires_after(TlsShutdownGrace);
-                m_stream->async_shutdown(
-                    [self = this->shared_from_this()](boost::system::error_code) { self->Close(); });
-            } else {
-                Close();
-            }
-        }
-    }
+    void ReleaseOrClose(bool keepAlive);
 
     /// <summary>
     /// Finishes the operation successfully: stops the timer and resolver, disposes of the connection, and hands
@@ -688,41 +288,20 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// </summary>
     /// <param name="response">The response to report.</param>
     /// <param name="keepAlive">Whether the connection may be reused.</param>
-    void CompleteSuccess(HttpResponse response, bool keepAlive) {
-        m_timer.cancel();
-        m_resolver.cancel();
-        m_finished = true;
-        auto completion = std::move(m_completion);
-        ReleaseOrClose(keepAlive);
-        Detail::Complete(std::move(completion), {}, std::move(response));
-    }
+    void CompleteSuccess(HttpResponse response, bool keepAlive);
 
     /// <summary>
     /// Shuts down and closes the underlying socket, ignoring errors; a no-op once the stream has been
     /// released to the pool.
     /// </summary>
-    void Close() {
-        if (!m_stream) {
-            return;
-        }
-        boost::system::error_code ignored;
-        auto& socket = beast::get_lowest_layer(*m_stream).socket();
-        socket.shutdown(Tcp::socket::shutdown_both, ignored);
-        socket.close(ignored);
-    }
+    void Close();
 
     /// <summary>
     /// Completes the operation with an error and an empty response.
     /// </summary>
     /// <param name="error">The error to complete with.</param>
     /// <param name="cause">The underlying transport error, kept on the response for diagnostics.</param>
-    void Fail(HttpClientError error, boost::system::error_code cause = {}) {
-        HttpResponse response;
-        if (cause) {
-            response.SetCause(static_cast<std::error_code>(cause));
-        }
-        Finish(error, std::move(response));
-    }
+    void Fail(HttpClientError error, boost::system::error_code cause = {});
 
     /// <summary>
     /// Completes the operation with <c>operation_canceled</c> and an empty response.
@@ -735,28 +314,13 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// </summary>
     /// <param name="error">The outcome to report; empty on success.</param>
     /// <param name="response">The response to report; empty on failure.</param>
-    void Finish(std::error_code error, HttpResponse response) {
-        if (m_finished) {
-            return;
-        }
-        m_finished = true;
-        m_timer.cancel();
-        m_resolver.cancel();
-        Close();
-        auto completion = std::move(m_completion);
-        Detail::Complete(std::move(completion), error, std::move(response));
-    }
+    void Finish(std::error_code error, HttpResponse response);
 
     /// <summary>
     /// Records that cancellation was asked for and posts the cancellation to the strand. Safe to call from
     /// any thread, and only the first call has an effect.
     /// </summary>
-    void RequestCancellation() {
-        if (m_cancellationRequested.exchange(true)) {
-            return;
-        }
-        asio::post(m_executor, [self = this->shared_from_this()]() { self->Cancel(); });
-    }
+    void RequestCancellation();
 
     /// <summary>
     /// Whether cancellation has been asked for. Checked at every step so a cancelled operation stops as
@@ -801,7 +365,4 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     std::optional<std::chrono::steady_clock::time_point> m_deadline;
 };
 
-inline void ResolveWaiter::operator()(boost::system::error_code error, Tcp::resolver::results_type results) {
-    std::visit([&](auto& operation) { operation->OnSharedResolve(error, std::move(results)); }, m_operation);
-}
 } // namespace AVEVA::Private
