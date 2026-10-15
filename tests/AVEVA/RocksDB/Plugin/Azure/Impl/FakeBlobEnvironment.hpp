@@ -9,7 +9,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/SequentialFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
+#include "BasicReadableFile.ipp"
 #include "FakeBlobServer.hpp"
 #include "FakeHttpClient.hpp"
 

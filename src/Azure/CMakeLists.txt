@@ -29,7 +29,6 @@ target_sources(aveva-rocksdb-plugin-azure
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Logger.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/ReadableFile.ipp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/SequentialFile.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/WriteableFile.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/ReadWriteFile.hpp"
@@ -39,9 +38,9 @@ target_sources(aveva-rocksdb-plugin-azure
 )
 find_package(RocksDB CONFIG REQUIRED)
 find_package(aveva-install-library CONFIG REQUIRED)
-# The implementation target is a public dependency: the public headers include Impl headers (ReadableFile.hpp pulls in
-# ReadableFile.ipp, Plugin.hpp pulls in Impl/Configuration.hpp), which in turn need Boost.Asio and the
-# _WIN32_WINNT definition that the Impl target propagates. Boost.Log is part of the public API (loggers are passed to
+# The implementation target is linked publicly because this is a static library and its dependencies must reach the
+# final link. The public headers themselves only include Impl/Configuration.hpp (plain constants), not Asio or the
+# Azure client. Boost.Log is part of the public API (loggers are passed to
 # Plugin::Register).
 find_package(boost_log CONFIG REQUIRED)
 target_link_libraries(aveva-rocksdb-plugin-azure

@@ -29,7 +29,8 @@
 #if defined(_WIN32_WINNT) && _WIN32_WINNT < 0x0A00
 #error "aveva-rocksdb-plugin-azure-impl requires _WIN32_WINNT >= 0x0A00 (Windows 10)."
 #endif
-// Boost.Asio pulls in <windows.h>, whose macros clash with RocksDB method names (mirrors rocksdb/env.h).
+// Boost.Asio pulls in <windows.h>, whose macros clash with RocksDB method names (mirrors rocksdb/env.h). These
+// headers are internal (not installed), so the macros never reach consumers of the public headers.
 #undef DeleteFile
 #undef GetCurrentTime
 #undef GetFreeSpace

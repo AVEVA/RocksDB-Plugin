@@ -20,45 +20,17 @@ add_library(aveva-rocksdb-plugin-azure-impl
 )
 add_library(aveva::rocksdb-plugin-azure-impl ALIAS aveva-rocksdb-plugin-azure-impl)
 set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../../../include")
+# Only Configuration.hpp is public (Plugin.hpp uses it). Every other header here includes Boost.Asio and the Azure
+# client, so they live under include/ in this directory, are not installed, and are visible to in-tree consumers only.
 target_sources(aveva-rocksdb-plugin-azure-impl
   PUBLIC
   FILE_SET HEADERS
   BASE_DIRS "${base-include-dir}"
   FILES
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadRequest.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadTracker.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobFileHandles.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ClientFactory.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/DownloadBufferPool.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.ipp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ClientFactory.ipp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.ipp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.ipp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.ipp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/SequentialFileImpl.ipp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.ipp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/SequentialFileImpl.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BufferChunkInfo.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/CloseWithRetries.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/LoggerImpl.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/LogRateLimiter.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/LeaseRenewalLoop.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobAttributes.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/DirectoryImpl.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/AzureContainerClient.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/TokenCredentials.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/Environment.hpp"
+)
+target_include_directories(aveva-rocksdb-plugin-azure-impl PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 install(TARGETS aveva-rocksdb-plugin-azure-impl
     EXPORT

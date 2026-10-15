@@ -33,7 +33,8 @@
 #include <vector>
 
 #ifdef _WIN32
-// Boost.Asio pulls in <windows.h>, whose macros clash with RocksDB method names (mirrors rocksdb/env.h).
+// Boost.Asio pulls in <windows.h>, whose macros clash with RocksDB method names (mirrors rocksdb/env.h). These
+// headers are internal (not installed), so the macros never reach consumers of the public headers.
 #undef DeleteFile
 #undef GetCurrentTime
 #undef GetFreeSpace
