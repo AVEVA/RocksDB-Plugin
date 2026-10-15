@@ -117,10 +117,16 @@ function(aveva_install_library name)
     set(config_version_file
       "${CMAKE_CURRENT_BINARY_DIR}/${package_name}-config-version.cmake"
     )
+    # Pre-1.0 releases may break API between minors; from 1.0 on only a major bump is breaking.
+    if(PROJECT_VERSION_MAJOR EQUAL 0)
+      set(_aveva_version_compatibility SameMinorVersion)
+    else()
+      set(_aveva_version_compatibility SameMajorVersion)
+    endif()
     write_basic_package_version_file(
       "${config_version_file}"
       VERSION "${PROJECT_VERSION}"
-      COMPATIBILITY ExactVersion
+      COMPATIBILITY ${_aveva_version_compatibility}
     )
 
     install(
