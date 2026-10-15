@@ -695,6 +695,25 @@ TEST(RetryTests, RetryReSignsSharedKeyAndRefreshesDateHeader) {
     EXPECT_NE(FakeHttpClient::FindHeaderValue(first.Request, "Authorization"),
               FakeHttpClient::FindHeaderValue(second.Request, "Authorization"));
 }
+
+TEST(RetryTests, EveryAttemptOfARetriedUploadCarriesTheFullBody) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
+    httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
+    httpClient.EnqueueResponse(HttpResponse{201, MakeCanonicalSuccessHeaders(), ""});
+    BlockBlobClient client{httpClient, MakeRetryOptions(2)};
+
+    const std::string payload(64 * 1024, 'x');
+    UploadState uploadState;
+    StartUploadAsync(client, payload, uploadState);
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return uploadState.Done; }));
+    EXPECT_TRUE(uploadState.Succeeded);
+    ASSERT_EQ(httpClient.RequestCount(), 3U);
+    for (std::size_t i = 0; i < 3U; ++i) {
+        EXPECT_EQ(httpClient.RequestAt(i).Body, payload) << "attempt " << i;
+    }
+}
 } // namespace AVEVA::AzureClient::Tests
 
 namespace {
