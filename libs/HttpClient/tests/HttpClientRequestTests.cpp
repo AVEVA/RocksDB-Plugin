@@ -193,6 +193,29 @@ TEST(HttpClientRequest, HttpErrorPreservesRequestFraming) {
     EXPECT_EQ(result.received.count("X-Test"), 2u);
 }
 
+TEST(HttpClientRequest, ContentLengthIsSentOnlyWhenAppropriate) {
+    const std::string ok = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    for (const auto method : {AVEVA::HttpMethod::Get, AVEVA::HttpMethod::Head, AVEVA::HttpMethod::Delete}) {
+        AVEVA::HttpRequest request;
+        request.SetMethod(method);
+        auto result = Exchange(request, ok);
+        EXPECT_FALSE(result.error);
+        EXPECT_EQ(result.received.count(http::field::content_length), 0u);
+    }
+    for (const auto method : {AVEVA::HttpMethod::Post, AVEVA::HttpMethod::Put, AVEVA::HttpMethod::Patch}) {
+        AVEVA::HttpRequest request;
+        request.SetMethod(method);
+        auto result = Exchange(request, ok);
+        EXPECT_FALSE(result.error);
+        EXPECT_EQ(result.received[http::field::content_length], "0");
+    }
+    AVEVA::HttpRequest withBody;
+    withBody.SetMethod(AVEVA::HttpMethod::Delete);
+    withBody.SetBody("x");
+    auto result = Exchange(withBody, ok);
+    EXPECT_EQ(result.received[http::field::content_length], "1");
+}
+
 TEST(HttpClientRequest, SetBodyViewTransmitsTheReferencedBytes) {
     std::vector<std::byte> payload{std::byte{'v'}, std::byte{'i'}, std::byte{'e'}, std::byte{'w'}, std::byte{'!'}};
 

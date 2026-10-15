@@ -258,8 +258,13 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
         }
         m_request.body().more = false;
         // buffer_body has no BodyWriter::size(), so message::prepare_payload() cannot be used;
-        // set Content-Length manually instead (the same value it would have computed).
-        m_request.set(http::field::content_length, std::to_string(m_request.body().size));
+        // set Content-Length manually instead (the same value it would have computed). A bodyless GET, HEAD or
+        // DELETE carries none, but a bodyless POST, PUT or PATCH must state an explicit zero.
+        const auto method = m_request.method();
+        if (m_request.body().size != 0 || method == http::verb::post || method == http::verb::put ||
+            method == http::verb::patch) {
+            m_request.set(http::field::content_length, std::to_string(m_request.body().size));
+        }
         ResetParser();
         m_hostIsName = route.HostIsName;
         return true;
