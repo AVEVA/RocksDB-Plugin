@@ -61,7 +61,7 @@ struct BlobInfo {
 };
 
 template <typename TBlob> [[nodiscard]] BlobInfo GetInfo(TBlob& client) {
-    auto properties = Call(client, [&](auto token) { return client.GetPropertiesAsync(token); });
+    auto properties = Call([&](auto token) { return client.GetPropertiesAsync(token); });
     return {BlobHelpers::FileSizeFromProperties(properties), static_cast<int64_t>(properties.ContentLength),
             std::move(properties.ETag), std::chrono::time_point_cast<std::chrono::seconds>(properties.LastModified)};
 }
@@ -102,7 +102,7 @@ template <typename TBlob> void SetSize(const ClientRuntimeBase& runtime, TBlob& 
     const SizeInvalidation<TBlob> invalidate(runtime, client);
     AzureClient::SetBlobMetadataOptions options;
     options.Metadata.emplace(std::string(BlobHelpers::SizeMetadataKey), std::to_string(size));
-    Call(client, [&](auto token) {
+    Call([&](auto token) {
         return client.SetMetadataAsync(std::move(options), token,
                                        BoundByWriteDeadline(runtime, client.GetDefaultRequestOptions()));
     });
@@ -111,7 +111,7 @@ template <typename TBlob> void SetSize(const ClientRuntimeBase& runtime, TBlob& 
 template <typename TBlob> void SetCapacity(const ClientRuntimeBase& runtime, TBlob& client, int64_t capacity) {
     runtime.ThrowIfWritesFenced();
     const SizeInvalidation<TBlob> invalidate(runtime, client);
-    Call(client, [&](auto token) {
+    Call([&](auto token) {
         return client.ResizeAsync(static_cast<uint64_t>(capacity), AzureClient::ResizePageBlobOptions{}, token,
                                   BoundByWriteDeadline(runtime, client.GetDefaultRequestOptions()));
     });
@@ -124,7 +124,7 @@ template <typename TBlob> void CreateOrReplace(const ClientRuntimeBase& runtime,
     const SizeInvalidation<TBlob> invalidate(runtime, client);
     AzureClient::CreatePageBlobOptions options;
     options.Metadata.emplace(std::string(BlobHelpers::SizeMetadataKey), "0");
-    Call(client, [&](auto token) {
+    Call([&](auto token) {
         return client.CreateAsync(static_cast<uint64_t>(capacity), std::move(options), token,
                                   BoundByWriteDeadline(runtime, client.GetDefaultRequestOptions()));
     });
@@ -135,7 +135,7 @@ template <typename TBlob> bool CreateIfNotExists(const ClientRuntimeBase& runtim
     runtime.ThrowIfWritesFenced();
     const SizeInvalidation<TBlob> invalidate(runtime, client);
     // The client suppresses BlobAlreadyExists and reports it through Response::Error() instead of failing.
-    const auto response = CallResponse(client, [&](auto token) {
+    const auto response = CallResponse([&](auto token) {
         return client.CreateIfNotExistsAsync(static_cast<uint64_t>(capacity), token,
                                              BoundByWriteDeadline(runtime, client.GetDefaultRequestOptions()));
     });
@@ -157,7 +157,7 @@ void DownloadToFile(TBlob& client, const std::filesystem::path& path, int64_t of
     options.Range = Detail::ToRange(offset, length);
     options.ChunkSize = Configuration::Transfer::DownloadChunkSize;
     options.Concurrency = Configuration::Transfer::DownloadConcurrency;
-    Call(client, [&](auto token) { return client.DownloadToAsync(path, std::move(options), token); });
+    Call([&](auto token) { return client.DownloadToAsync(path, std::move(options), token); });
 }
 
 // A download into a caller-owned buffer that has been started but not finished; see StartDownload.
@@ -216,7 +216,7 @@ template <typename TBlob>
 template <typename TBlob>
 void UploadPages(const ClientRuntimeBase& runtime, TBlob& client, std::span<const char> buffer, int64_t blobOffset) {
     runtime.ThrowIfWritesFenced();
-    Call(client, [&](auto token) {
+    Call([&](auto token) {
         return client.UploadPagesAsync(static_cast<uint64_t>(blobOffset), std::as_bytes(buffer), token,
                                        BoundByWriteDeadline(runtime, TransferOptions(client, buffer.size())));
     });
@@ -228,7 +228,7 @@ void UploadPages(const ClientRuntimeBase& runtime, TBlob& client, std::shared_pt
                  int64_t blobOffset) {
     runtime.ThrowIfWritesFenced();
     const auto size = data->size();
-    Call(client, [&](auto token) {
+    Call([&](auto token) {
         return client.UploadPagesAsync(static_cast<uint64_t>(blobOffset), data, token,
                                        BoundByWriteDeadline(runtime, TransferOptions(client, size)));
     });
@@ -272,7 +272,7 @@ template <typename TBlob>
         options.Conditions.IfMatch = etag;
     }
     do {
-        auto page = Call(source, [&](auto token) { return source.GetPageRangesAsync(options, token); });
+        auto page = Call([&](auto token) { return source.GetPageRangesAsync(options, token); });
         for (const auto& range : page.Ranges) {
             auto offset = static_cast<int64_t>(range.Offset);
             const auto end = (std::min)(size, offset + static_cast<int64_t>(range.Length));

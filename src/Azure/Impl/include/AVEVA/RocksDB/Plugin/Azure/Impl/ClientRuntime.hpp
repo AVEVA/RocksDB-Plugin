@@ -187,15 +187,13 @@ template <class T> T Unwrap(std::expected<AzureClient::Response<T>, AzureClient:
 /// Starts an operation, waits for it on the calling thread and returns its value, throwing RequestFailedException on
 /// failure. The library's block_on token checks the thread before the request starts. `start` receives the completion
 /// token, e.g.
-/// `Call(c, [&](auto token) { return c.GetPropertiesAsync(token); })`.
+/// `Call([&](auto token) { return c.GetPropertiesAsync(token); })`.
 /// </summary>
-template <class Client, class Start> auto Call(Client&, Start&& start) {
-    return Unwrap(std::forward<Start>(start)(AzureClient::block_on));
-}
+template <class Start> auto Call(Start&& start) { return Unwrap(std::forward<Start>(start)(AzureClient::block_on)); }
 
 /// <summary>As Call, but returns the full response (for operations whose Response::Error() carries
 /// information).</summary>
-template <class Client, class Start> auto CallResponse(Client&, Start&& start) {
+template <class Start> auto CallResponse(Start&& start) {
     return UnwrapResponse(std::forward<Start>(start)(AzureClient::block_on));
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

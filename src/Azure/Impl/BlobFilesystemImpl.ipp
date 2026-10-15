@@ -43,7 +43,7 @@ namespace BlobFilesystemDetail {
 template <typename TContainer, std::predicate<const AzureClient::Models::BlobItem&> TOnBlob>
 void ForEachBlobUntil(TContainer& container, AzureClient::ListBlobsOptions options, TOnBlob&& onBlob) {
     while (true) {
-        auto page = Call(container, [&](auto token) { return container.ListBlobsAsync(options, token); });
+        auto page = Call([&](auto token) { return container.ListBlobsAsync(options, token); });
         for (const auto& blob : page.Blobs) {
             if (onBlob(blob)) {
                 return;
@@ -199,7 +199,7 @@ void BasicBlobFilesystemImpl<THttp>::PurgeOrphanedRenameTemps(const std::string&
                                           });
         for (const auto& name : orphans) {
             auto blob = container->GetPageBlobClient(name);
-            CallResponse(blob, [&](auto token) { return blob.DeleteIfExistsAsync(token); });
+            CallResponse([&](auto token) { return blob.DeleteIfExistsAsync(token); });
             BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::info)
                 << "Deleted the orphaned rename temporary blob '" << name << "'";
         }
@@ -438,11 +438,7 @@ template <typename THttp> bool BasicBlobFilesystemImpl<THttp>::FileExists(const 
 
     auto [prefix, realPath, client] = ResolveBlob(name);
 
-    auto exists = client.ExistsAsync(AzureClient::block_on);
-    if (!exists.has_value()) {
-        ThrowRequestFailed(exists.error());
-    }
-    if (exists->Value()) {
+    if (Call([&](auto token) { return client.ExistsAsync(token); })) {
         return true;
     }
 
@@ -527,7 +523,7 @@ template <typename THttp> bool BasicBlobFilesystemImpl<THttp>::DeleteFile(const 
 
     auto [prefix, realPath, client] = ResolveBlob(filePath);
     const BlobOperations::SizeInvalidation<decltype(client)> invalidateSize(*m_runtime, client);
-    const auto res = CallResponse(client, [&](auto token) { return client.DeleteIfExistsAsync(token); });
+    const auto res = CallResponse([&](auto token) { return client.DeleteIfExistsAsync(token); });
 
     auto cache = m_fileCaches.find(prefix);
     if (cache != m_fileCaches.end()) {
@@ -559,8 +555,7 @@ template <typename THttp> size_t BasicBlobFilesystemImpl<THttp>::DeleteDir(const
         // any) is thrown so callers never mistake a partial delete for success.
         AzureClient::DeleteBlobsOptions deleteOptions;
         deleteOptions.MaxConcurrentRequests = Configuration::Transfer::MaxConcurrentDeleteBatches;
-        const auto result =
-            Call(*container, [&](auto token) { return container->DeleteBlobsAsync(blobs, deleteOptions, token); });
+        const auto result = Call([&](auto token) { return container->DeleteBlobsAsync(blobs, deleteOptions, token); });
 
         std::optional<AzureClient::BlobStorageError> firstFailure;
         for (const auto& item : result.Items) {
@@ -733,7 +728,7 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
     // Best-effort cleanup that never masks the failure being unwound.
     const auto deleteQuietly = [this](auto& blob, const std::string_view name) {
         try {
-            CallResponse(blob, [&](auto token) { return blob.DeleteIfExistsAsync(token); });
+            CallResponse([&](auto token) { return blob.DeleteIfExistsAsync(token); });
         } catch (const std::exception& e) {
             BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
                 << "Could not delete '" << name << "' while rolling back a rename: " << e.what();
@@ -790,7 +785,7 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
         deleteQuietly(tempClient, tempName);
     }
 
-    CallResponse(srcClient, [&](auto token) { return srcClient.DeleteIfExistsAsync(token); });
+    CallResponse([&](auto token) { return srcClient.DeleteIfExistsAsync(token); });
 }
 
 template <typename THttp>
