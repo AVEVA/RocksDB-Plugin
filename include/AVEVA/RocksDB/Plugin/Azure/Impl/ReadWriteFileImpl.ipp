@@ -9,6 +9,8 @@
 #include <boost/log/trivial.hpp>
 
 #include <exception>
+#include <numeric>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -64,130 +66,150 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Sync() {
         << "Synced read/writeable file '" << m_h.Name << "' to " << m_size << " bytes";
 }
 
-// Writes buffered chunks to the blob. Padding pages are read first (in parallel when no two chunks share a page) so
-// partially covered pages keep their existing bytes.
+// Writes the buffered chunks to the blob. Chunks that touch the same page (or sit next to each other) are merged into
+// one page-aligned extent so each page is written once with the last write winning, and bytes of partially covered
+// pages that no chunk supplies are read from the blob first. Extents never share a page, so their reads and uploads
+// are independent and run concurrently, in bounded waves.
 template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
-    // The capacity is tracked locally (set on open and by Expand), so no round trip is needed here.
-    // Pre-calculate the maximum size we'll need and expand if necessary
-    auto maxSizeNeeded = m_size;
-    for (const auto& chunk : m_bufferStats) {
-        const auto chunkEnd = chunk.targetOffset + chunk.dataLength;
-        if (chunkEnd > maxSizeNeeded) {
-            maxSizeNeeded = chunkEnd;
-        }
+    if (m_bufferStats.empty()) {
+        return;
     }
 
-    // Expand capacity if needed BEFORE processing chunks
-    while ((maxSizeNeeded + Configuration::PageBlob::PageSize) > m_capacity) {
+    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
+
+    // The capacity is tracked locally (set on open and by Expand), so no round trip is needed here.
+    auto maxSizeNeeded = m_size;
+    for (const auto& chunk : m_bufferStats) {
+        maxSizeNeeded = std::max(maxSizeNeeded, chunk.targetOffset + chunk.dataLength);
+    }
+    while ((maxSizeNeeded + pageSize) > m_capacity) {
         Expand();
     }
 
-    using Pending = BlobOperations::PendingDownload<TBlob>;
-
-    // Starts the reads that fill a chunk's partial first and last pages with the blob's existing bytes. `sizeBefore`
-    // is the file size just before this chunk is written.
-    const auto startPaddingReads = [&](const auto& chunk, int64_t sizeBefore, std::vector<Pending>& reads) {
-        assert(chunk.targetOffset >= chunk.prePadding && "Target Offset is smaller than Pre-padding");
-        const auto targetStart = chunk.targetOffset - chunk.prePadding;
-        assert(targetStart % Configuration::PageBlob::PageSize == 0 && "TargetStart should be page aligned");
-
-        if (chunk.prePadding > 0) {
-            assert(chunk.prePadding < Configuration::PageBlob::PageSize && "Pre-padding should not exceed page size");
-            std::span<char> prePaddingBuffer(m_buffer.data() + chunk.bufferOffset,
-                                             static_cast<size_t>(chunk.prePadding));
-            reads.push_back(BlobOperations::StartDownload(*m_h.Blob, prePaddingBuffer, targetStart, chunk.prePadding));
-        }
-        if (chunk.postPadding > 0) {
-            const auto targetEnd = chunk.targetOffset + chunk.dataLength;
-            assert((targetEnd + chunk.postPadding) % Configuration::PageBlob::PageSize == 0 &&
-                   "TargetEnd should be page aligned");
-            assert((targetEnd + chunk.postPadding) <= m_capacity &&
-                   "We shouldn't try to read data that isn't at least reserved");
-
-            // NOTE: If the data we're writing is APPENDED at the end, this post padding may be trash data and can be
-            // skipped.
-            if (!(targetEnd > sizeBefore)) {
-                assert(chunk.postPadding < Configuration::PageBlob::PageSize &&
-                       "PostPadding shouldn't be greater than a page's size");
-                std::span<char> postPaddingBuffer(
-                    &m_buffer[static_cast<size_t>(chunk.bufferOffset + chunk.prePadding + chunk.dataLength)],
-                    static_cast<size_t>(chunk.postPadding));
-                reads.push_back(
-                    BlobOperations::StartDownload(*m_h.Blob, postPaddingBuffer, targetEnd, chunk.postPadding));
-            }
-        }
+    struct Extent {
+        int64_t Start = 0;
+        int64_t End = 0;
+        std::vector<size_t> Chunks; // indices into m_bufferStats, in write order
+        std::vector<char> Data;
     };
 
-    // Waits for every read before reporting the first failure: the reads write into m_buffer, which must not be
-    // touched or released while any of them is still in flight.
-    const auto finishReads = [](std::vector<Pending>& reads) {
+    std::vector<size_t> order(m_bufferStats.size());
+    std::iota(order.begin(), order.end(), size_t{0});
+    const auto rangeStart = [&](size_t i) { return m_bufferStats[i].targetOffset - m_bufferStats[i].prePadding; };
+    const auto rangeEnd = [&](size_t i) {
+        return m_bufferStats[i].targetOffset + m_bufferStats[i].dataLength + m_bufferStats[i].postPadding;
+    };
+    std::ranges::stable_sort(order, [&](size_t a, size_t b) { return rangeStart(a) < rangeStart(b); });
+
+    std::vector<Extent> extents;
+    for (const auto index : order) {
+        if (extents.empty() || rangeStart(index) > extents.back().End) {
+            extents.push_back(Extent{rangeStart(index), rangeEnd(index), {}, {}});
+        }
+        auto& extent = extents.back();
+        extent.End = std::max(extent.End, rangeEnd(index));
+        extent.Chunks.push_back(index);
+    }
+    for (auto& extent : extents) {
+        std::ranges::sort(extent.Chunks); // later writes must overwrite earlier ones
+    }
+
+    const auto sizeBefore = m_size;
+    m_size = maxSizeNeeded;
+
+    using PendingRead = BlobOperations::PendingDownload<TBlob>;
+
+    // Fills the bytes of an extent that no chunk supplies with what the blob already holds. Reads past the file's old
+    // end are skipped: that region holds no data yet and stays zero.
+    const auto prepare = [&](Extent& extent, std::vector<PendingRead>& reads) {
+        extent.Data.assign(static_cast<size_t>(extent.End - extent.Start), '\0');
+        std::vector<std::pair<int64_t, int64_t>> covered;
+        for (const auto index : extent.Chunks) {
+            const auto& chunk = m_bufferStats[index];
+            const auto* source = m_buffer.data() + chunk.bufferOffset + chunk.prePadding;
+            std::copy(source, source + chunk.dataLength, extent.Data.begin() + (chunk.targetOffset - extent.Start));
+            covered.emplace_back(chunk.targetOffset, chunk.targetOffset + chunk.dataLength);
+        }
+        std::ranges::sort(covered);
+
+        auto cursor = extent.Start;
+        const auto readGap = [&](int64_t gapStart, int64_t gapEnd) {
+            gapEnd = std::min(gapEnd, sizeBefore);
+            if (gapEnd > gapStart) {
+                std::span<char> target(extent.Data.data() + (gapStart - extent.Start),
+                                       static_cast<size_t>(gapEnd - gapStart));
+                reads.push_back(BlobOperations::StartDownload(*m_h.Blob, target, gapStart, gapEnd - gapStart));
+            }
+        };
+        for (const auto& [start, end] : covered) {
+            if (start > cursor) {
+                readGap(cursor, start);
+            }
+            cursor = std::max(cursor, end);
+        }
+        readGap(cursor, extent.End);
+    };
+
+    // Waits for everything before reporting the first failure: the operations write into / read from the extents'
+    // buffers, which must not be released while any of them is still in flight.
+    const auto finishAll = [](auto& pending, auto&& finish) {
         std::exception_ptr failure;
-        for (auto& read : reads) {
+        for (auto& item : pending) {
             try {
-                [[maybe_unused]] const auto bytes = BlobOperations::FinishDownload(read);
+                finish(item);
             } catch (...) {
                 if (!failure) {
                     failure = std::current_exception();
                 }
             }
         }
-        reads.clear();
+        pending.clear();
         if (failure) {
             std::rethrow_exception(failure);
         }
     };
-
-    const auto upload = [&](const auto& chunk) {
-        const auto targetStart = chunk.targetOffset - chunk.prePadding;
-        if ((chunk.targetOffset + chunk.dataLength) > m_size) {
-            m_size = chunk.targetOffset + chunk.dataLength;
-        }
-
-        std::span<char> uploadBuffer(&m_buffer[static_cast<size_t>(chunk.bufferOffset)],
-                                     static_cast<size_t>(chunk.ChunkSize()));
-        BlobOperations::UploadPages(*m_h.Runtime, *m_h.Blob, uploadBuffer, targetStart);
-
-        BOOST_LOG_SEV(*m_h.Logger, boost::log::trivial::debug)
-            << "Flushed " << chunk.ChunkSize() << " bytes to read/writeable file '" << m_h.Name << "'";
+    const auto finishRead = [](PendingRead& read) {
+        [[maybe_unused]] const auto bytes = BlobOperations::FinishDownload(read);
     };
+    const auto finishUpload = [](auto& upload) { BlobOperations::FinishUploadPages(upload); };
 
-    // A chunk's padding must see the bytes earlier chunks wrote to the same page, so the reads can only all be issued
-    // up front when no two chunks touch the same page.
-    std::vector<std::pair<int64_t, int64_t>> pageRanges;
-    pageRanges.reserve(m_bufferStats.size());
-    for (const auto& chunk : m_bufferStats) {
-        pageRanges.emplace_back(chunk.targetOffset - chunk.prePadding,
-                                chunk.targetOffset + chunk.dataLength + chunk.postPadding);
-    }
-    std::ranges::sort(pageRanges);
-    const bool independentPages = std::ranges::adjacent_find(pageRanges, [](const auto& earlier, const auto& later) {
-                                      return later.first < earlier.second;
-                                  }) == pageRanges.end();
+    for (size_t begin = 0; begin < extents.size(); begin += Configuration::Transfer::MaxConcurrentPageCopies) {
+        const auto end = std::min(extents.size(), begin + Configuration::Transfer::MaxConcurrentPageCopies);
 
-    std::vector<Pending> reads;
-    if (independentPages) {
-        auto sizeBefore = m_size;
+        std::vector<PendingRead> reads;
         try {
-            for (const auto& chunk : m_bufferStats) {
-                startPaddingReads(chunk, sizeBefore, reads);
-                sizeBefore = std::max(sizeBefore, chunk.targetOffset + chunk.dataLength);
+            for (auto i = begin; i < end; ++i) {
+                prepare(extents[i], reads);
             }
         } catch (...) {
             try {
-                finishReads(reads);
+                finishAll(reads, finishRead);
             } catch (...) {
             }
             throw;
         }
-        finishReads(reads);
-        for (const auto& chunk : m_bufferStats) {
-            upload(chunk);
+        finishAll(reads, finishRead);
+
+        using PendingUploadT =
+            decltype(BlobOperations::StartUploadPages(*m_h.Runtime, *m_h.Blob, std::span<const char>{}, int64_t{0}));
+        std::vector<PendingUploadT> uploads;
+        try {
+            for (auto i = begin; i < end; ++i) {
+                uploads.push_back(
+                    BlobOperations::StartUploadPages(*m_h.Runtime, *m_h.Blob, extents[i].Data, extents[i].Start));
+            }
+        } catch (...) {
+            try {
+                finishAll(uploads, finishUpload);
+            } catch (...) {
+            }
+            throw;
         }
-    } else {
-        for (const auto& chunk : m_bufferStats) {
-            startPaddingReads(chunk, m_size, reads);
-            finishReads(reads);
-            upload(chunk);
+        finishAll(uploads, finishUpload);
+
+        for (auto i = begin; i < end; ++i) {
+            BOOST_LOG_SEV(*m_h.Logger, boost::log::trivial::debug)
+                << "Flushed " << extents[i].Data.size() << " bytes to read/writeable file '" << m_h.Name << "'";
         }
     }
     m_bufferStats.clear();

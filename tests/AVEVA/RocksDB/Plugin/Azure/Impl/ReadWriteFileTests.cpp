@@ -10,6 +10,11 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <future>
+#include <optional>
+#include <thread>
+
 using namespace AVEVA::RocksDB::Plugin::Azure::Impl;
 using namespace AVEVA::RocksDB::Plugin::Core;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobEnvironment;
@@ -207,6 +212,135 @@ TEST_F(ReadWriteFileImplTests, Flush_WritesSharingAPage_KeepEarlierWrites) {
     std::vector<char> expected(static_cast<size_t>(page), 'X');
     std::fill_n(expected.begin() + 100, first.size(), 'A');
     std::fill_n(expected.begin() + 200, second.size(), 'B');
+    EXPECT_EQ(expected, actual);
+}
+
+TEST_F(ReadWriteFileImplTests, Flush_WritesSharingAPage_AreMergedIntoOneUploadAndOnlyTheGapsAreRead) {
+    // Arrange
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    std::fill_n(m_env.Blob->Data.begin(), 2 * page, 'X');
+    m_env.Blob->Size = 2 * page;
+    auto file = CreateFile();
+
+    // Act - two writes in page 0 and one in page 1: all three share one page-aligned extent
+    const std::string payload(10, 'A');
+    file->Write(100, payload.data(), static_cast<int64_t>(payload.size()));
+    file->Write(200, payload.data(), static_cast<int64_t>(payload.size()));
+    file->Write(page + 50, payload.data(), static_cast<int64_t>(payload.size()));
+    file->Sync();
+
+    // Assert
+    ASSERT_EQ(1u, m_env.Blob->Uploads.size());
+    EXPECT_EQ(0, m_env.Blob->Uploads[0].Offset);
+    EXPECT_EQ(static_cast<size_t>(2 * page), m_env.Blob->Uploads[0].Data.size());
+    // Four gaps (before, between and after the writes), no read of the bytes the writes supply.
+    EXPECT_EQ(4u, m_env.Blob->Downloads.size());
+    std::vector<char> actual(static_cast<size_t>(2 * page));
+    ASSERT_EQ(2 * page, file->Read(0, 2 * page, actual.data()));
+    std::vector<char> expected(static_cast<size_t>(2 * page), 'X');
+    std::fill_n(expected.begin() + 100, payload.size(), 'A');
+    std::fill_n(expected.begin() + 200, payload.size(), 'A');
+    std::fill_n(expected.begin() + page + 50, payload.size(), 'A');
+    EXPECT_EQ(expected, actual);
+}
+
+TEST_F(ReadWriteFileImplTests, Flush_OverlappingWritesToOnePage_LastWriteWins) {
+    // Arrange
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    std::fill_n(m_env.Blob->Data.begin(), page, 'X');
+    m_env.Blob->Size = page;
+    auto file = CreateFile();
+
+    // Act
+    const std::string first(50, 'A');
+    const std::string second(20, 'B');
+    file->Write(100, first.data(), static_cast<int64_t>(first.size()));
+    file->Write(120, second.data(), static_cast<int64_t>(second.size()));
+    file->Sync();
+
+    // Assert
+    EXPECT_EQ(1u, m_env.Blob->Uploads.size());
+    std::vector<char> actual(static_cast<size_t>(page));
+    ASSERT_EQ(page, file->Read(0, page, actual.data()));
+    std::vector<char> expected(static_cast<size_t>(page), 'X');
+    std::fill_n(expected.begin() + 100, first.size(), 'A');
+    std::fill_n(expected.begin() + 120, second.size(), 'B');
+    EXPECT_EQ(expected, actual);
+}
+
+TEST_F(ReadWriteFileImplTests, Flush_AppendingPastTheEnd_ReadsNothing) {
+    // Arrange
+    auto file = CreateFile();
+
+    // Act - the file is empty, so the unwritten bytes around the data hold nothing worth reading
+    const std::string payload(300, 'A');
+    file->Write(0, payload.data(), static_cast<int64_t>(payload.size()));
+    file->Sync();
+
+    // Assert
+    EXPECT_TRUE(m_env.Blob->Downloads.empty());
+    EXPECT_EQ(1u, m_env.Blob->Uploads.size());
+}
+
+TEST_F(ReadWriteFileImplTests, Flush_WritesOnDifferentPages_AreUploadedConcurrently) {
+    // Arrange
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    std::fill_n(m_env.Blob->Data.begin(), 5 * page, 'X');
+    m_env.Blob->Size = 5 * page;
+    auto file = CreateFile();
+    const std::string payload(10, 'A');
+    // Every other page, so the extents are not adjacent and stay separate requests
+    for (int64_t i = 0; i < 3; ++i) {
+        file->Write(2 * i * page + 10, payload.data(), static_cast<int64_t>(payload.size()));
+    }
+    m_env.Blob->DeferUploads = true;
+
+    // Act - the flush blocks until the uploads complete, so it runs on its own thread
+    auto sync = std::async(std::launch::async, [&] { file->Sync(); });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (m_env.Blob->PendingUploads() < 3 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    // Assert - all three were in flight at once, before any completed
+    const auto inFlight = m_env.Blob->PendingUploads();
+    m_env.Blob->DeferUploads = false;
+    for (size_t i = 0; i < inFlight; ++i) {
+        m_env.Blob->CompleteUpload();
+    }
+    sync.get();
+    EXPECT_EQ(3u, inFlight);
+}
+
+TEST_F(ReadWriteFileImplTests, Flush_UploadFailure_KeepsTheBufferedWritesForARetry) {
+    // Arrange
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    std::fill_n(m_env.Blob->Data.begin(), 2 * page, 'X');
+    m_env.Blob->Size = 2 * page;
+    auto file = CreateFile();
+    const std::string payload(10, 'A');
+    file->Write(10, payload.data(), static_cast<int64_t>(payload.size()));
+    file->Write(page + 10, payload.data(), static_cast<int64_t>(payload.size()));
+    bool fail = true;
+    m_env.Blob->Fault =
+        [&](FakeBlobServer::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (fail && operation == FakeBlobServer::Operation::UploadPages) {
+            return FakeBlobServer::Error(400, "InvalidInput");
+        }
+        return std::nullopt;
+    };
+
+    // Act
+    EXPECT_ANY_THROW(file->Sync());
+    fail = false;
+    file->Sync();
+
+    // Assert
+    std::vector<char> actual(static_cast<size_t>(2 * page));
+    ASSERT_EQ(2 * page, file->Read(0, 2 * page, actual.data()));
+    std::vector<char> expected(static_cast<size_t>(2 * page), 'X');
+    std::fill_n(expected.begin() + 10, payload.size(), 'A');
+    std::fill_n(expected.begin() + page + 10, payload.size(), 'A');
     EXPECT_EQ(expected, actual);
 }
 

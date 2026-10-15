@@ -198,6 +198,27 @@ void UploadPages(const ClientRuntimeBase& runtime, TBlob& client, std::span<cons
     });
 }
 
+// An upload that has been started but not finished; see StartUploadPages.
+template <typename TFuture> struct PendingUpload {
+    TFuture Result;
+};
+
+// Starts the upload without waiting, so several can be in flight at once. The buffer and client must stay alive until
+// FinishUploadPages returns.
+template <typename TBlob>
+[[nodiscard]] auto StartUploadPages(const ClientRuntimeBase& runtime, TBlob& client, std::span<const char> buffer,
+                                    int64_t blobOffset) {
+    runtime.ThrowIfWritesFenced();
+    AzureClient::ThrowIfRunningOn(client.get_executor());
+    auto result =
+        client.UploadPagesAsync(static_cast<uint64_t>(blobOffset), std::as_bytes(buffer), boost::asio::use_future,
+                                BoundByWriteDeadline(runtime, TransferOptions(client, buffer.size())));
+    return PendingUpload<decltype(result)>{std::move(result)};
+}
+
+// Waits for the upload, throwing RequestFailedException on failure.
+template <typename TFuture> void FinishUploadPages(PendingUpload<TFuture>& pending) { Unwrap(pending.Result.get()); }
+
 /// <summary>A run of populated bytes in a page blob.</summary>
 struct PageChunk {
     int64_t Offset = 0;
