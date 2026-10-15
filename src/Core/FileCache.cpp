@@ -34,12 +34,12 @@ FileCache::~FileCache() {
     m_backgroundDownloader.join();
 }
 
-bool FileCache::HasFile(std::string_view filePath) {
+bool FileCache::HasFile(std::string_view filePath) const {
     std::scoped_lock lock(m_mutex);
     auto it = m_cache.find(filePath);
 #ifndef NDEBUG
     auto result = std::find_if(m_entryList.begin(), m_entryList.end(),
-                               [&filePath](FileCacheEntry& entry) { return entry.GetFilePath() == filePath; });
+                               [&filePath](const FileCacheEntry& entry) { return entry.GetFilePath() == filePath; });
     if (it != m_cache.end()) {
         assert(result != m_entryList.end() && "FileCacheEntry should also be in the entry list");
     }
@@ -177,7 +177,7 @@ void FileCache::RemoveFile(const std::string_view filePath) {
     RemoveFileUnsafe(filePath);
 }
 
-int64_t FileCache::CacheSize() {
+int64_t FileCache::CacheSize() const {
     std::scoped_lock lock(m_mutex);
     ValidateCountersUnsafe();
     return GetCurrentSizeUnsafe();
@@ -199,19 +199,33 @@ void FileCache::SetCacheSize(int64_t size) {
     m_maxSize = size;
 }
 
-void FileCache::WaitUntilIdle() {
+bool FileCache::WaitUntilIdle(const std::optional<std::chrono::milliseconds> timeout) {
     std::unique_lock lock(m_mutex);
-    m_idleCv.wait(lock,
-                  [this] { return m_fileDownloadQueue.empty() && m_pendingReleases.empty() && !m_downloadInFlight; });
-}
-
-bool FileCache::WaitUntilIdleForTesting(const std::chrono::milliseconds timeout) {
-    std::unique_lock lock(m_mutex);
-    return m_idleCv.wait_for(lock, timeout, [this] {
+    const auto idle = [this] {
         return m_fileDownloadQueue.empty() && m_pendingReleases.empty() && !m_downloadInFlight;
-    });
+    };
+    if (!timeout) {
+        m_idleCv.wait(lock, idle);
+        return true;
+    }
+    return m_idleCv.wait_for(lock, *timeout, idle);
 }
 
+// A delete that failed earlier gets one last attempt at shutdown; anything still left would otherwise sit in the cache
+// directory unnoticed, so it is logged for the operator.
+void FileCache::RetryFailedDeletesOnShutdown() {
+    std::vector<std::string> leftovers;
+    {
+        std::scoped_lock lock(m_mutex);
+        leftovers.swap(m_failedDeletes);
+    }
+    for (const auto& key : leftovers) {
+        if (!TryDeleteCachedFile(key)) {
+            BOOST_LOG_SEV(*m_logger, error)
+                << "Cached file '" << key << "' could not be deleted and was left in '" << m_cachePath.string() << "'";
+        }
+    }
+}
 void FileCache::BackgroundDownload(std::stop_token stopToken) {
     while (true) {
         try {
@@ -295,6 +309,7 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
             }
 
             if (stopping) {
+                RetryFailedDeletesOnShutdown();
                 return;
             }
             if (filePath.empty()) {

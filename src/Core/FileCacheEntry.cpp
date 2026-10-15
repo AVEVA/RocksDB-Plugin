@@ -22,14 +22,14 @@ uint64_t FileCacheEntry::GetGeneration() const noexcept { return m_generation; }
 
 void FileCacheEntry::BumpGeneration() noexcept { ++m_generation; }
 
-std::shared_ptr<CachedReadHandle> FileCacheEntry::GetOrCreateReadHandle() {
+std::shared_ptr<detail::CachedReadHandle> FileCacheEntry::GetOrCreateReadHandle() {
     if (!m_readHandle) {
-        m_readHandle = std::make_shared<CachedReadHandle>();
+        m_readHandle = std::make_shared<detail::CachedReadHandle>();
     }
     return m_readHandle;
 }
 
-std::shared_ptr<CachedReadHandle> FileCacheEntry::TakeReadHandle() noexcept { return std::move(m_readHandle); }
+std::shared_ptr<detail::CachedReadHandle> FileCacheEntry::TakeReadHandle() noexcept { return std::move(m_readHandle); }
 
 void FileCacheEntry::unlink() {
     boost::intrusive::list_base_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>>::unlink();

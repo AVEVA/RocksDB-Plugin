@@ -655,7 +655,7 @@ bool BasicBlobFilesystemImpl<THttp>::WaitForFileCachesIdleForTesting(const std::
     for (const auto& [prefix, cache] : m_fileCaches) {
         const auto remaining =
             std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
-        if (!cache->WaitUntilIdleForTesting((std::max)(remaining, std::chrono::milliseconds::zero()))) {
+        if (!cache->WaitUntilIdle((std::max)(remaining, std::chrono::milliseconds::zero()))) {
             return false;
         }
     }

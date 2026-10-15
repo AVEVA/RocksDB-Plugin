@@ -30,7 +30,7 @@ class FileCache {
     std::shared_ptr<Filesystem> m_filesystem;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
 
-    std::mutex m_mutex;
+    mutable std::mutex m_mutex;
     std::condition_variable m_cv;
     std::condition_variable m_idleCv;
     bool m_downloadInFlight = false;
@@ -43,7 +43,7 @@ class FileCache {
     // never land on a file that has since been downloaded again.
     struct PendingRelease {
         std::string FilePath; // The cache key; the file is m_cachePath / FilePath.
-        std::shared_ptr<CachedReadHandle> Handle;
+        std::shared_ptr<detail::CachedReadHandle> Handle;
         bool RemoveFromDisk;
     };
     std::vector<PendingRelease> m_pendingReleases;
@@ -65,22 +65,21 @@ class FileCache {
     FileCache(FileCache&&) = delete;
     FileCache& operator=(FileCache&&) = delete;
 
-    [[nodiscard]] bool HasFile(std::string_view filePath);
+    [[nodiscard]] bool HasFile(std::string_view filePath) const;
     void MarkFileAsStaleIfExists(const std::string& filePath);
     [[nodiscard]] std::optional<int64_t> ReadFile(std::string_view filePath, int64_t offset, int64_t bytesToRead,
                                                   char* buffer);
     void RemoveFile(std::string_view filePath);
-    [[nodiscard]] int64_t CacheSize();
+    [[nodiscard]] int64_t CacheSize() const;
     void SetCacheSize(int64_t size);
-    // Blocks until the background downloader has no queued or in-flight work. Lets tests assert that
-    // something did NOT happen without guessing how long to wait.
-    void WaitUntilIdle();
-    // Same as WaitUntilIdle, but gives up after `timeout` (a guard against hangs) and reports whether the
-    // downloader went idle.
-    [[nodiscard]] bool WaitUntilIdleForTesting(std::chrono::milliseconds timeout);
+    // Blocks until the background downloader has no queued or in-flight work, so a caller can assert that
+    // something did NOT happen without guessing how long to wait. With a `timeout` it gives up (a guard against
+    // hangs) and returns whether the downloader went idle; without one it waits indefinitely and returns true.
+    bool WaitUntilIdle(std::optional<std::chrono::milliseconds> timeout = std::nullopt);
 
   private:
     void BackgroundDownload(std::stop_token stopToken);
+    void RetryFailedDeletesOnShutdown();
     void EntryAccessedUnsafe(FileCacheEntry& file);
     void PruneUndownloadedStaleEntriesUnsafe();
     bool EvictAtLeast(int64_t bytes);

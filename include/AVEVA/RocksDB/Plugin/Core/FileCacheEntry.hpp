@@ -10,6 +10,7 @@
 #include <mutex>
 #include <string>
 namespace AVEVA::RocksDB::Plugin::Core {
+namespace detail {
 // One open handle on a cached file, shared by every reader of that file so a read does not pay for an open.
 // File::Read is not thread-safe (it seeks, then reads), so readers take Mutex around the whole access.
 // Close() marks the handle unusable for good: readers that still hold it fall back to the blob instead of
@@ -26,6 +27,7 @@ class CachedReadHandle {
         Opened.reset();
     }
 };
+} // namespace detail
 
 class FileCacheEntry
     : public boost::intrusive::list_base_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>> {
@@ -42,7 +44,7 @@ class FileCacheEntry
     std::string m_filePath;
     int64_t m_size;
     uint64_t m_generation = 0;
-    std::shared_ptr<CachedReadHandle> m_readHandle;
+    std::shared_ptr<detail::CachedReadHandle> m_readHandle;
 
   public:
     FileCacheEntry(std::string_view filePath, int64_t size);
@@ -60,9 +62,9 @@ class FileCacheEntry
     void BumpGeneration() noexcept;
 
     // The handle readers share; created on first use. Callers must hold the owning cache's mutex.
-    std::shared_ptr<CachedReadHandle> GetOrCreateReadHandle();
+    std::shared_ptr<detail::CachedReadHandle> GetOrCreateReadHandle();
     // Detaches the handle (null if none) so the owner can close it outside its mutex.
-    std::shared_ptr<CachedReadHandle> TakeReadHandle() noexcept;
+    std::shared_ptr<detail::CachedReadHandle> TakeReadHandle() noexcept;
 
     void unlink();
     bool is_linked();

@@ -608,3 +608,37 @@ TEST_F(FileCacheTests, Download_PassesTheCachePathThroughWithoutNarrowing) {
     // Assert
     EXPECT_EQ(cacheDir / "1.sst", path);
 }
+
+TEST(FileCacheShutdownTests, FailedDelete_IsRetriedOnceAtShutdown) {
+    // Arrange
+    auto filesystem = std::make_shared<FilesystemMock>();
+    auto containerClient = std::make_shared<ContainerClientMock>();
+    auto logger = std::make_shared<severity_logger_mt<severity_level>>();
+    std::atomic<int> deleteCalls = 0;
+    EXPECT_CALL(*containerClient, GetBlobSize(_)).WillRepeatedly(Return(100));
+    EXPECT_CALL(*containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
+    EXPECT_CALL(*filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
+        auto file = std::make_unique<FileMock>();
+        EXPECT_CALL(*file, Read(_, _, _)).WillRepeatedly([](char*, uint64_t, uint64_t length) { return length; });
+        return file;
+    });
+    ON_CALL(*filesystem, DeleteFile(_)).WillByDefault([&deleteCalls](const std::filesystem::path&) -> bool {
+        // The first attempt fails; only the shutdown retry succeeds.
+        return deleteCalls++ > 0;
+    });
+
+    {
+        FileCache cache("tmp", 100, containerClient, filesystem, logger);
+        for (const auto* name : {"1.sst", "2.sst"}) {
+            for (int attempt = 0; attempt < 4; ++attempt) {
+                (void)cache.ReadFile(name, 0, 0, nullptr);
+                cache.WaitUntilIdle();
+            }
+        }
+
+        // Act: destruction stops the downloader
+    }
+
+    // Assert
+    EXPECT_EQ(2, deleteCalls.load());
+}
