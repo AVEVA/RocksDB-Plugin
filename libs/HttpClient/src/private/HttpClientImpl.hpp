@@ -173,6 +173,12 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         auto cell = std::make_shared<CompletionCell>(std::move(completion));
         try {
             FaultPolicy::OnSubmit();
+            auto route = Route::Of(request, options);
+            // A request that can never be sent fails without building a strand, stream or operation.
+            if (!route.Sendable()) {
+                return FailLater(cell, route.Parsed ? make_error_code(static_cast<HttpClientError>(route.Error.value()))
+                                                    : make_error_code(HttpClientError::InvalidUrl));
+            }
             auto guarded = Detail::MakeCompletion([cell](std::error_code error, HttpResponse response) {
                 if (auto pending = cell->Take()) {
                     Detail::Complete(std::move(pending), error, std::move(response));
@@ -181,16 +187,6 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
             auto cancellation = BindCallerSlot(options);
             // The deadline covers time spent queued behind the per-origin cap, not just the network exchange.
             const auto deadline = DeadlineFor(options);
-            auto route = Route::Of(request, options);
-            // A request that can never be sent fails without building a strand, stream or operation.
-            if (!route.Sendable()) {
-                const auto error = route.Parsed ? make_error_code(static_cast<HttpClientError>(route.Error.value()))
-                                                : make_error_code(HttpClientError::InvalidUrl);
-                asio::post(context_, [pending = std::move(guarded), error]() mutable {
-                    Detail::Complete(std::move(pending), error, HttpResponse{});
-                });
-                return;
-            }
             if (m_limiter) {
                 auto origin = route.Origin();
                 return SendLimited(std::move(origin), std::move(route), std::move(request), std::move(guarded),
@@ -199,16 +195,37 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
             SendUnlimited(std::move(route), std::move(request), std::move(guarded), std::move(options),
                           std::move(cancellation), deadline);
         } catch (...) {
-            if (auto pending = cell->Take()) {
-                asio::post(context_, [pending = std::move(pending)]() mutable {
-                    Detail::Complete(std::move(pending), make_error_code(HttpClientError::InvalidRequest),
-                                     HttpResponse{});
-                });
-            }
+            FailLater(cell, make_error_code(HttpClientError::InvalidRequest));
         }
     }
 
   private:
+    /// <summary>
+    /// Fails the request still parked in the cell, posted so the handler never runs inside the submitting
+    /// call. The cell stays populated until the posted function runs, so if the post itself throws the handler
+    /// is completed inline as a last resort rather than lost or thrown into the caller.
+    /// </summary>
+    /// <param name="cell">The cell holding the request's completion.</param>
+    /// <param name="error">Why the request failed.</param>
+    void FailLater(const std::shared_ptr<CompletionCell>& cell, std::error_code error) noexcept {
+        try {
+            asio::post(context_, [cell, error] {
+                if (auto pending = cell->Take()) {
+                    Detail::Complete(std::move(pending), error, HttpResponse{});
+                }
+            });
+            return;
+        } catch (...) {
+        }
+        try {
+            if (auto pending = cell->Take()) {
+                Detail::Complete(std::move(pending), error, HttpResponse{});
+            }
+        } catch (...) {
+            // The handler or response construction threw; nothing remains to report it to.
+        }
+    }
+
     static std::chrono::steady_clock::time_point DeadlineFor(const HttpRequestOptions& options) {
         // Clamp so huge timeouts (e.g. milliseconds::max()) cannot overflow the clock's time_point.
         constexpr auto MaxTimeout = std::chrono::duration_cast<std::chrono::milliseconds>(EffectivelyInfinite);
