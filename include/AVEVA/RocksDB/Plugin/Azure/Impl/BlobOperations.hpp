@@ -119,12 +119,13 @@ template <typename TBlob> bool CreateIfNotExists(const ClientRuntimeBase& runtim
     return !response.Error().has_value();
 }
 // Downloads [offset, offset + length) to a local file; a non-positive length produces an empty file.
-template <typename TBlob> void DownloadToFile(TBlob& client, const std::string& path, int64_t offset, int64_t length) {
+template <typename TBlob>
+void DownloadToFile(TBlob& client, const std::filesystem::path& path, int64_t offset, int64_t length) {
     // An explicit zero-length range is rejected by the client, and there is nothing to fetch for an empty blob.
     if (length <= 0) {
-        std::ofstream file(std::filesystem::path(path), std::ios::binary | std::ios::trunc);
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
         if (!file) {
-            throw std::runtime_error("Could not create empty file '" + path + "'");
+            throw std::runtime_error("Could not create empty file '" + path.string() + "'");
         }
         return;
     }
@@ -133,8 +134,7 @@ template <typename TBlob> void DownloadToFile(TBlob& client, const std::string& 
     options.Range = Detail::ToRange(offset, length);
     options.ChunkSize = Configuration::Transfer::DownloadChunkSize;
     options.Concurrency = Configuration::Transfer::DownloadConcurrency;
-    Call(client,
-         [&](auto token) { return client.DownloadToAsync(std::filesystem::path(path), std::move(options), token); });
+    Call(client, [&](auto token) { return client.DownloadToAsync(path, std::move(options), token); });
 }
 
 // A download into a caller-owned buffer that has been started but not finished; see StartDownload.

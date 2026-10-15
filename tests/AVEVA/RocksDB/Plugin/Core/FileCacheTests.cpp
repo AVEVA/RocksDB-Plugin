@@ -159,7 +159,7 @@ TEST_F(FileCacheTests, ReadFileFromCache) {
     EXPECT_CALL(*m_containerClient, GetBlobSize("1.sst")).WillRepeatedly(Return(fileData.size()));
     EXPECT_CALL(*m_containerClient, DownloadBlobTo("1.sst", _, _, _))
         .WillRepeatedly(
-            [&downloadCount](const std::string&, const std::string&, int64_t, int64_t) { downloadCount++; });
+            [&downloadCount](const std::string&, const std::filesystem::path&, int64_t, int64_t) { downloadCount++; });
     EXPECT_CALL(*m_filesystem, Open(std::filesystem::path(m_folderName) / "1.sst"))
         .WillRepeatedly([&fileData](const std::filesystem::path&) {
             auto file = std::make_unique<FileMock>();
@@ -189,8 +189,9 @@ TEST_F(FileCacheTests, EmptyBlobIsDownloadedWithZeroLength) {
     std::atomic<int64_t> lastLength{-1};
     EXPECT_CALL(*m_containerClient, GetBlobSize("1.sst")).WillRepeatedly(Return(0));
     EXPECT_CALL(*m_containerClient, DownloadBlobTo("1.sst", _, _, _))
-        .WillRepeatedly(
-            [&lastLength](const std::string&, const std::string&, int64_t, int64_t length) { lastLength = length; });
+        .WillRepeatedly([&lastLength](const std::string&, const std::filesystem::path&, int64_t, int64_t length) {
+            lastLength = length;
+        });
     EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
         return std::make_unique<FileMock>();
     });
@@ -585,4 +586,25 @@ TEST_F(FileCacheTests, SetCacheSize_WhileADownloadIsInFlight_EvictsAfterItActiva
 
     // Assert
     EXPECT_LE(m_cache.CacheSize(), static_cast<int64_t>(fileSize));
+}
+
+TEST_F(FileCacheTests, Download_PassesTheCachePathThroughWithoutNarrowing) {
+    // Arrange - a directory name that is not representable in the ANSI code page.
+    const std::filesystem::path cacheDir = std::filesystem::path(u8"tmp-\u65E5\u672C\u8A9E");
+    FileCache cache(cacheDir, static_cast<int64_t>(1000), m_containerClient, m_filesystem, m_logger);
+    std::promise<std::filesystem::path> destination;
+    EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(1));
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo("1.sst", _, _, _))
+        .WillOnce([&](const std::string&, const std::filesystem::path& path, int64_t, int64_t) {
+            destination.set_value(path);
+        });
+
+    // Act
+    EXPECT_FALSE(cache.ReadFile("1.sst", 0, 0, nullptr));
+    EXPECT_FALSE(cache.ReadFile("1.sst", 0, 0, nullptr));
+    const auto path = destination.get_future().get();
+    cache.WaitUntilIdle();
+
+    // Assert
+    EXPECT_EQ(cacheDir / "1.sst", path);
 }

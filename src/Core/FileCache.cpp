@@ -381,7 +381,7 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
 
                 // No need to download the _whole_ blob. There could be lots of padding
                 // at the end of the file. We can just download the actual size.
-                m_containerClient->DownloadBlobTo(filePath, actualFilePath.string(), 0, fileSize);
+                m_containerClient->DownloadBlobTo(filePath, actualFilePath, 0, fileSize);
             } catch (std::exception& e) {
                 // NOTE: We're not putting the filePath back on the download queue because
                 // this operation could _also_ throw. Let the next read be a cache miss which

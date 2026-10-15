@@ -3,6 +3,7 @@
 
 #pragma once
 #include <cstdint>
+#include <filesystem>
 #include <string>
 namespace AVEVA::RocksDB::Plugin::Core {
 class ContainerClient {
@@ -18,7 +19,7 @@ class ContainerClient {
     /// <summary>
     /// Downloads [offset, offset + length) of the blob to the local file at destinationPath.
     /// </summary>
-    virtual void DownloadBlobTo(const std::string& path, const std::string& destinationPath, int64_t offset,
+    virtual void DownloadBlobTo(const std::string& path, const std::filesystem::path& destinationPath, int64_t offset,
                                 int64_t length) = 0;
 };
 } // namespace AVEVA::RocksDB::Plugin::Core

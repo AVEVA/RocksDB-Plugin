@@ -58,7 +58,7 @@ TEST_F(BlobOperationsTests, DownloadToFileWithZeroLengthCreatesEmptyFileWithoutR
         stale << "stale contents";
     }
 
-    BlobOperations::DownloadToFile(*m_blob, path.string(), 0, 0);
+    BlobOperations::DownloadToFile(*m_blob, path, 0, 0);
 
     EXPECT_TRUE(std::filesystem::exists(path));
     EXPECT_EQ(0U, std::filesystem::file_size(path));

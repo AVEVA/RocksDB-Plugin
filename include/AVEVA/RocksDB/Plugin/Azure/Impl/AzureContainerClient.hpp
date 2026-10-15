@@ -8,6 +8,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <utility>
@@ -29,7 +30,7 @@ template <typename TContainer> class BasicAzureContainerClient final : public Co
         return BlobOperations::GetSize(blob);
     }
 
-    void DownloadBlobTo(const std::string& path, const std::string& destinationPath, int64_t offset,
+    void DownloadBlobTo(const std::string& path, const std::filesystem::path& destinationPath, int64_t offset,
                         int64_t length) override {
         auto blob = m_client->GetPageBlobClient(path);
         BlobOperations::DownloadToFile(blob, destinationPath, offset, length);
