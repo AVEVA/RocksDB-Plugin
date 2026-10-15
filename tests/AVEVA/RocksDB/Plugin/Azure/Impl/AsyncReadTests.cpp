@@ -387,6 +387,152 @@ TEST_F(AsyncReadTests, Prefetch_ZeroBudget_NeverStartsADownload) {
     EXPECT_EQ(0, budget->load());
 }
 
+namespace {
+void FillPattern(FakeBlobEnvironment& env, const int64_t size) {
+    env.Fill(size);
+    for (size_t i = 0; i < env.Blob->Data.size(); ++i) {
+        env.Blob->Data[i] = static_cast<char>('a' + (i % 26));
+    }
+}
+
+std::string Expected(const uint64_t offset, const size_t length) {
+    std::string out(length, '\0');
+    for (size_t i = 0; i < length; ++i) {
+        out[i] = static_cast<char>('a' + ((offset + i) % 26));
+    }
+    return out;
+}
+
+void SetRequest(rocksdb::FSReadRequest& req, const uint64_t offset, std::vector<char>& scratch) {
+    req.offset = offset;
+    req.len = scratch.size();
+    req.scratch = scratch.data();
+}
+
+template <class TPredicate> bool WaitUntil(TPredicate predicate) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!predicate()) {
+        if (std::chrono::steady_clock::now() > deadline) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return true;
+}
+} // namespace
+
+TEST_F(AsyncReadTests, MultiRead_AdjacentAndNearbyRanges_AreFetchedWithOneDownload) {
+    FillPattern(m_inlineEnv, 100000);
+    auto file = CreateFile(m_inlineEnv);
+    std::vector<char> scratchA(256);
+    std::vector<char> scratchB(256);
+    std::vector<char> scratchC(100);
+    std::vector<rocksdb::FSReadRequest> reqs(3);
+    SetRequest(reqs[0], 256, scratchB);
+    SetRequest(reqs[1], 0, scratchA);
+    SetRequest(reqs[2], 600, scratchC);
+
+    ASSERT_TRUE(file.MultiRead(reqs.data(), reqs.size(), rocksdb::IOOptions{}, nullptr).ok());
+
+    ASSERT_EQ(1U, m_inlineEnv.Blob->Downloads.size());
+    EXPECT_EQ(0, m_inlineEnv.Blob->Downloads.front().Offset);
+    EXPECT_EQ(700, m_inlineEnv.Blob->Downloads.front().Length);
+    EXPECT_TRUE(reqs[0].status.ok());
+    EXPECT_EQ(Expected(256, 256), reqs[0].result.ToString());
+    EXPECT_EQ(Expected(0, 256), reqs[1].result.ToString());
+    EXPECT_EQ(Expected(600, 100), reqs[2].result.ToString());
+}
+
+TEST_F(AsyncReadTests, MultiRead_OverlappingRanges_EachGetsItsOwnBytes) {
+    FillPattern(m_inlineEnv, 100000);
+    auto file = CreateFile(m_inlineEnv);
+    std::vector<char> scratchA(300);
+    std::vector<char> scratchB(300);
+    std::vector<rocksdb::FSReadRequest> reqs(2);
+    SetRequest(reqs[0], 0, scratchA);
+    SetRequest(reqs[1], 100, scratchB);
+
+    ASSERT_TRUE(file.MultiRead(reqs.data(), reqs.size(), rocksdb::IOOptions{}, nullptr).ok());
+
+    EXPECT_EQ(1U, m_inlineEnv.Blob->Downloads.size());
+    EXPECT_EQ(Expected(0, 300), reqs[0].result.ToString());
+    EXPECT_EQ(Expected(100, 300), reqs[1].result.ToString());
+}
+
+TEST_F(AsyncReadTests, MultiRead_RangesFartherApartThanTheGap_AreFetchedSeparately) {
+    FillPattern(m_inlineEnv, 100000);
+    auto file = CreateFile(m_inlineEnv);
+    std::vector<char> scratchA(100);
+    std::vector<char> scratchB(100);
+    std::vector<rocksdb::FSReadRequest> reqs(2);
+    SetRequest(reqs[0], 0, scratchA);
+    SetRequest(reqs[1], 100 + 4097, scratchB);
+
+    ASSERT_TRUE(file.MultiRead(reqs.data(), reqs.size(), rocksdb::IOOptions{}, nullptr).ok());
+
+    EXPECT_EQ(2U, m_inlineEnv.Blob->Downloads.size());
+    EXPECT_EQ(Expected(0, 100), reqs[0].result.ToString());
+    EXPECT_EQ(Expected(4197, 100), reqs[1].result.ToString());
+}
+
+TEST_F(AsyncReadTests, MultiRead_MergedDownloadFails_EveryMemberReportsTheError) {
+    FillPattern(m_inlineEnv, 100000);
+    auto file = CreateFile(m_inlineEnv);
+    std::vector<char> scratchA(100);
+    std::vector<char> scratchB(100);
+    std::vector<rocksdb::FSReadRequest> reqs(2);
+    SetRequest(reqs[0], 0, scratchA);
+    SetRequest(reqs[1], 100, scratchB);
+    m_inlineEnv.Blob->Fault = [](const auto operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::Download) {
+            return FakeBlobServer::Error(403, "denied");
+        }
+        return std::nullopt;
+    };
+
+    ASSERT_TRUE(file.MultiRead(reqs.data(), reqs.size(), rocksdb::IOOptions{}, nullptr).ok());
+
+    EXPECT_FALSE(reqs[0].status.ok());
+    EXPECT_FALSE(reqs[1].status.ok());
+    EXPECT_EQ(0U, reqs[0].result.size());
+    EXPECT_EQ(0U, reqs[1].result.size());
+}
+
+TEST_F(AsyncReadTests, MultiRead_StartsTheNextDownloadAsSoonAsAnyFinishes) {
+    FillPattern(m_deferredEnv, 1000000);
+    auto file = CreateFile(m_deferredEnv);
+    constexpr size_t count = 40;
+    std::vector<std::vector<char>> scratch(count, std::vector<char>(16));
+    std::vector<rocksdb::FSReadRequest> reqs(count);
+    for (size_t i = 0; i < count; ++i) {
+        SetRequest(reqs[i], i * 20000, scratch[i]);
+    }
+
+    rocksdb::IOStatus status;
+    std::jthread reader([&] { status = file.MultiRead(reqs.data(), reqs.size(), rocksdb::IOOptions{}, nullptr); });
+
+    ASSERT_TRUE(WaitUntil([&] { return m_deferredEnv.Blob->PendingDownloads() == 32; }));
+    auto first = m_deferredEnv.Blob->TakeDownload();
+    first.Succeed(Expected(first.Request.Offset, 16));
+    // The window refills while the other 31 are still outstanding.
+    ASSERT_TRUE(WaitUntil([&] { return m_deferredEnv.Blob->PendingDownloads() == 32; }));
+
+    size_t served = 1;
+    while (served < count) {
+        ASSERT_TRUE(WaitUntil([&] { return m_deferredEnv.Blob->PendingDownloads() > 0; }));
+        auto download = m_deferredEnv.Blob->TakeDownload();
+        download.Succeed(Expected(download.Request.Offset, 16));
+        ++served;
+    }
+    reader.join();
+
+    EXPECT_TRUE(status.ok()) << status.ToString();
+    for (size_t i = 0; i < count; ++i) {
+        EXPECT_TRUE(reqs[i].status.ok()) << i;
+        EXPECT_EQ(Expected(i * 20000, 16), reqs[i].result.ToString()) << i;
+    }
+}
+
 TEST_F(AsyncReadTests, ReadAsync_PassesIoOptionsTimeoutToTheDownload) {
     auto file = CreateFile(m_deferredEnv);
     std::vector<char> scratch(64);

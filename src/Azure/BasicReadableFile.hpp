@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadRequest.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
 
 #include <boost/log/sources/severity_logger.hpp>
@@ -19,7 +20,20 @@ template <class TImpl> class BasicReadableFile final : public rocksdb::FSRandomA
     std::shared_ptr<TImpl> m_file;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
 
+    // ReadAsync's body; `signal`, when set, is notified as the read finishes (used by MultiRead's sliding window).
+    rocksdb::IOStatus StartRead(rocksdb::FSReadRequest& req, const rocksdb::IOOptions& opts,
+                                std::function<void(rocksdb::FSReadRequest&, void*)> cb, void* cb_arg, void** io_handle,
+                                rocksdb::IOHandleDeleter* del_fn, std::shared_ptr<Impl::AsyncReadSignal> signal);
+
   public:
+    // MultiRead keeps at most this many blob downloads outstanding, so a large batch cannot open unbounded
+    // connections.
+    static constexpr size_t kMultiReadMaxInFlight = 32;
+    // Requests separated by at most this many bytes are fetched with one GET; the few wasted bytes cost less than
+    // another round trip.
+    static constexpr uint64_t kMultiReadMaxGap = 4 * 1024;
+    // Upper bound of one merged GET, so coalescing cannot build an arbitrarily large buffer.
+    static constexpr uint64_t kMultiReadMaxMergedBytes = 8 * 1024 * 1024;
     explicit BasicReadableFile(
         TImpl&& file,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger = nullptr);

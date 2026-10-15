@@ -15,6 +15,23 @@
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// <summary>
+/// A counter that async reads bump when they finish, so one thread can wait for "any of these reads" (see
+/// BasicReadableFile::MultiRead) instead of waiting on them in a fixed order.
+/// </summary>
+class AsyncReadSignal {
+  public:
+    void Notify();
+    [[nodiscard]] uint64_t Count();
+    /// <summary>Blocks until the count exceeds `seen`.</summary>
+    void WaitPast(uint64_t seen);
+
+  private:
+    std::mutex m_mutex;
+    std::condition_variable m_changed;
+    uint64_t m_count = 0;
+};
+
+/// <summary>
 /// Shared state of one FSRandomAccessFile::ReadAsync request.
 ///
 /// The blob download completes on a thread of the host io_context, which only copies the bytes into RocksDB's scratch
@@ -26,10 +43,14 @@ class AsyncReadRequest {
   public:
     using Callback = std::function<void(rocksdb::FSReadRequest&, void*)>;
 
-    AsyncReadRequest(const rocksdb::FSReadRequest& request, Callback callback, void* callbackArg);
+    AsyncReadRequest(const rocksdb::FSReadRequest& request, Callback callback, void* callbackArg,
+                     std::shared_ptr<AsyncReadSignal> signal = nullptr);
 
     [[nodiscard]] uint64_t Offset() const noexcept { return m_offset; }
     [[nodiscard]] size_t Length() const noexcept { return m_length; }
+
+    /// <summary>True once the request completed or was aborted.</summary>
+    [[nodiscard]] bool Finished();
 
     /// <summary>
     /// Records the outcome. On success `data` is copied into the scratch buffer, unless the request was aborted (the
@@ -61,6 +82,7 @@ class AsyncReadRequest {
     char* const m_scratch;
     Callback m_callback;
     void* const m_callbackArg;
+    std::shared_ptr<AsyncReadSignal> m_signal;
 
     std::mutex m_mutex;
     std::condition_variable m_finished;

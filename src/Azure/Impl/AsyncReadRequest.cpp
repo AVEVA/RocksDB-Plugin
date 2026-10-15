@@ -8,9 +8,33 @@
 #include <utility>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-AsyncReadRequest::AsyncReadRequest(const rocksdb::FSReadRequest& request, Callback callback, void* callbackArg)
+void AsyncReadSignal::Notify() {
+    {
+        std::scoped_lock lock(m_mutex);
+        ++m_count;
+    }
+    m_changed.notify_all();
+}
+
+uint64_t AsyncReadSignal::Count() {
+    std::scoped_lock lock(m_mutex);
+    return m_count;
+}
+
+void AsyncReadSignal::WaitPast(const uint64_t seen) {
+    std::unique_lock lock(m_mutex);
+    m_changed.wait(lock, [&] { return m_count > seen; });
+}
+
+AsyncReadRequest::AsyncReadRequest(const rocksdb::FSReadRequest& request, Callback callback, void* callbackArg,
+                                   std::shared_ptr<AsyncReadSignal> signal)
     : m_offset(request.offset), m_length(request.len), m_scratch(request.scratch), m_callback(std::move(callback)),
-      m_callbackArg(callbackArg) {}
+      m_callbackArg(callbackArg), m_signal(std::move(signal)) {}
+
+bool AsyncReadRequest::Finished() {
+    std::scoped_lock lock(m_mutex);
+    return m_state != State::InFlight;
+}
 
 void AsyncReadRequest::Complete(rocksdb::IOStatus status, const std::string_view data) {
     {
@@ -29,6 +53,9 @@ void AsyncReadRequest::Complete(rocksdb::IOStatus status, const std::string_view
         m_state = State::Completed;
     }
     m_finished.notify_all();
+    if (m_signal) {
+        m_signal->Notify();
+    }
 }
 
 void AsyncReadRequest::Wait() {
