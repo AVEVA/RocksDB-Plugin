@@ -58,6 +58,15 @@ class TestServer {
 };
 } // namespace
 
+std::string ClosedLocalUrl() {
+    // Binding then closing yields a port that nothing listens on right now, unlike a hard-coded port.
+    asio::io_context context;
+    Tcp::acceptor acceptor(context, {asio::ip::make_address("127.0.0.1"), 0});
+    const auto port = acceptor.local_endpoint().port();
+    acceptor.close();
+    return "http://127.0.0.1:" + std::to_string(port) + "/";
+}
+
 ExchangeResult Exchange(AVEVA::HttpRequest request, std::string wireResponse, AVEVA::HttpRequestOptions options,
                         bool holdResponse) {
     asio::io_context context;

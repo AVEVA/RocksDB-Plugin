@@ -408,7 +408,7 @@ TEST(HttpClientRequest, CancellationBeforeStartCompletesWithOperationCanceled) {
     options.SetCancellationSlot(cancellation.slot());
 
     AVEVA::HttpRequest request;
-    request.SetUrl("http://127.0.0.1:1/");
+    request.SetUrl(HttpClientTests::ClosedLocalUrl());
 
     int completions = 0;
     client->SendAsync(request, options, [&](std::error_code error, AVEVA::HttpResponse response) {

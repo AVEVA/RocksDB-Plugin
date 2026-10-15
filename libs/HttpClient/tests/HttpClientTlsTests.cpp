@@ -365,7 +365,7 @@ std::vector<TlsOutcome> SendSequentialRequests(asio::io_context& context, TlsTes
     std::shared_ptr<AVEVA::HttpClient> client = AVEVA::HttpClient::Create(context, options);
     const std::string url = "https://" + host + ":" + std::to_string(server.Port()) + "/";
     std::vector<TlsOutcome> outcomes;
-    asio::steady_timer guard(context, std::chrono::seconds(20));
+    asio::steady_timer guard(context, std::chrono::seconds(8)); // Must stay below the ctest TIMEOUT of 10 s.
     guard.async_wait([&](boost::system::error_code error) {
         if (!error) {
             server.Stop();

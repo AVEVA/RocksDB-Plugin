@@ -9,20 +9,19 @@
 
 #include <string>
 
-namespace HttpClientTests
-{
-    namespace http = boost::beast::http;
+namespace HttpClientTests {
+namespace http = boost::beast::http;
 
-    struct ExchangeResult
-    {
-        std::error_code error;
-        AVEVA::HttpResponse response;
-        http::request<http::string_body> received;
-        std::string authority;
-    };
+struct ExchangeResult {
+    std::error_code error;
+    AVEVA::HttpResponse response;
+    http::request<http::string_body> received;
+    std::string authority;
+};
 
-    ExchangeResult Exchange(AVEVA::HttpRequest request,
-        std::string wireResponse,
-        AVEVA::HttpRequestOptions options = {},
-        bool holdResponse = false);
+// URL of a loopback port that has no listener.
+std::string ClosedLocalUrl();
+
+ExchangeResult Exchange(AVEVA::HttpRequest request, std::string wireResponse, AVEVA::HttpRequestOptions options = {},
+                        bool holdResponse = false);
 } // namespace HttpClientTests

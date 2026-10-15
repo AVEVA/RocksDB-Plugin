@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/HttpClient/HttpClient.hpp"
+#include "HttpClientTestHelpers.hpp"
 #include "private/HttpClientImpl.hpp"
 
 #include <gtest/gtest.h>
@@ -736,7 +737,7 @@ TEST(HttpClientRobustness, ThrowingInitiationCompletesTheHandlerExactlyOnceAndNe
     int completions = 0;
     std::error_code result;
     bool inSubmit = true;
-    impl.Submit(MakeRequest("http://127.0.0.1:1/"), AVEVA::HttpRequestOptions{},
+    impl.Submit(MakeRequest(HttpClientTests::ClosedLocalUrl()), AVEVA::HttpRequestOptions{},
                 AVEVA::Detail::MakeCompletion([&](std::error_code error, AVEVA::HttpResponse) {
                     ++completions;
                     result = error;
