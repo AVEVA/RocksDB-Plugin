@@ -77,7 +77,8 @@ class HttpRequest {
     void SetHeaders(std::vector<HttpHeader> headers);
 
     /// <summary>
-    /// Appends a header. Duplicate names are kept as separate entries rather than merged.
+    /// Appends a header. Duplicate names are kept as separate entries rather than merged. Headers the client
+    /// manages itself (Connection, Transfer-Encoding, Host and Content-Length) are silently dropped when sent.
     /// </summary>
     /// <param name="header">The header to append.</param>
     void AddHeader(HttpHeader header);

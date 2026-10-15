@@ -110,6 +110,8 @@ class HttpClientOptions {
     /// <summary>
     /// Trusted CA certificates as concatenated PEM text, used in addition to <see cref="SetCaFile"/> and
     /// <see cref="SetCaDirectory"/>.
+    /// On Windows the default OpenSSL verify paths usually find no CA bundle, so supply trust roots here (or via
+    /// <see cref="SetCaFile"/>) when connecting to servers that are not covered by another trust source.
     /// </summary>
     /// <param name="caPem">Concatenated PEM certificates; empty to set none.</param>
     void SetCaPem(std::string caPem);
@@ -121,7 +123,8 @@ class HttpClientOptions {
     void SetMaxIdleConnectionsPerHost(std::size_t maxIdleConnectionsPerHost) noexcept;
 
     /// <summary>
-    /// How long a pooled connection may stay idle before it is closed.
+    /// How long a pooled connection may stay idle before it is closed. Expiry is checked by a periodic sweep, so
+    /// an idle socket can linger for up to about twice this timeout.
     /// </summary>
     /// <param name="idleConnectionTimeout">The idle timeout.</param>
     /// <exception cref="std::invalid_argument">Thrown when the timeout is negative.</exception>
