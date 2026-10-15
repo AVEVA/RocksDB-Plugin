@@ -8,6 +8,9 @@ be active; it installs RocksDB's db_bench_tool as a static library (via \
 
 if (${AVEVA_ROCKSDB_BUILD_DB_BENCH})
     list(APPEND VCPKG_MANIFEST_FEATURES "db-bench")
+    # The patched RocksDB port is only needed for db_bench; ordinary builds use the baseline port. This must be set
+    # before project(), where the vcpkg toolchain reads it.
+    list(APPEND VCPKG_OVERLAY_PORTS "${CMAKE_CURRENT_SOURCE_DIR}/infrastructure/vcpkg-overlays/rocksdb")
 endif()
 
 project(aveva-rocksdb-plugin LANGUAGES CXX VERSION 0.2.0)

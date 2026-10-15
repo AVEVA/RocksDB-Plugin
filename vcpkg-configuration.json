@@ -1,7 +1,4 @@
 {
-  "overlay-ports": [
-    "./infrastructure/vcpkg-overlays/rocksdb"
-  ],
   "registries": [
     {
       "kind": "artifact",

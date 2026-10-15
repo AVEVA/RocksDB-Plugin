@@ -23,7 +23,8 @@ This repository is currently maintained by AVEVA teams.
 - `vcpkg-configuration.json` pins the `microsoft` artifact catalog to a commit archive
   (`.../vcpkg-ce-catalog/archive/<commit>.zip`) so a build never changes underneath you. To bump it, pick a new
   commit of `microsoft/vcpkg-ce-catalog`, replace the commit in the URL, and run a full configure and build.
-- `infrastructure/vcpkg-overlays/rocksdb/` overrides the RocksDB port; see its `README.md` before touching it.
+- `infrastructure/vcpkg-overlays/rocksdb/` overrides the RocksDB port only for `AVEVA_ROCKSDB_BUILD_DB_BENCH=ON`
+  builds (the root `CMakeLists.txt` adds it to `VCPKG_OVERLAY_PORTS`); see its `README.md` before touching it.
 
 ## Code Guidelines
 

@@ -4,7 +4,7 @@ A vcpkg overlay replaces the whole upstream port, so every patch the port applie
 including the ones that are identical to upstream.
 
 - **Forked from:** `microsoft/vcpkg` `ports/rocksdb` at version `11.8.1` (see `vcpkg.json`).
-- **Registered by:** `overlay-ports` in the repository's `vcpkg-configuration.json`.
+''s `vcpkg-configuration.json`.
 
 ## Patches
 
@@ -16,7 +16,7 @@ including the ones that are identical to upstream.
 
 ## When to remove the overlay
 
-Remove the whole overlay (and the `overlay-ports` entry) when the upstream port can provide
+Remove the whole overlay (and the `VCPKG_OVERLAY_PORTS` line in the root `CMakeLists.txt`) when the upstream port can provide
 `RocksDB::db_bench_tool`, or when nothing in this repository still needs the `db-bench` feature
 (`AVEVA_ROCKSDB_BUILD_DB_BENCH`). Until then, 0001 and 0002 cannot be deleted on their own: the portfile lists
 them under `PATCHES`.
