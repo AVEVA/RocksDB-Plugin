@@ -3,6 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/RocksDBHelpers.hpp"
+#include <algorithm>
 #include <boost/log/trivial.hpp>
 #include <cassert>
 #include <utility>
@@ -36,7 +37,7 @@ FileCache::~FileCache() {
 bool FileCache::HasFile(std::string_view filePath) {
     std::scoped_lock lock(m_mutex);
     auto it = m_cache.find(filePath);
-#if _DEBUG
+#ifndef NDEBUG
     auto result = std::find_if(m_entryList.begin(), m_entryList.end(),
                                [&filePath](FileCacheEntry& entry) { return entry.GetFilePath() == filePath; });
     if (it != m_cache.end()) {
@@ -585,7 +586,7 @@ int64_t FileCache::GetCurrentSizeUnsafe() const noexcept { return m_activeBytes;
 
 // Debug-only cross-check of the running totals against a full scan of the entries.
 void FileCache::ValidateCountersUnsafe() const {
-#if _DEBUG
+#ifndef NDEBUG
     int64_t bytes = 0;
     size_t stale = 0;
     for (const auto& entry : m_entryList) {
