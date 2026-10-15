@@ -37,8 +37,7 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
 2. **Authentication**: Configure authentication using one of the following methods:
    - **Service Principal**: See [Microsoft's documentation on accessing Storage Accounts with Service Principals](https://learn.microsoft.com/en-us/azure/databricks/connect/storage/aad-storage-service-principal)
    - **Managed Identity**: See [Microsoft's documentation on accessing Storage Accounts with Managed Identity](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/azure-managed-identities)
-   - **Connection String**: For development and testing
-3. **RocksDB**: Build RocksDB with plugin support enabled
+ 3. **RocksDB**: Build RocksDB with plugin support enabled
 
 ###### Basic Usage
 
