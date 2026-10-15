@@ -34,14 +34,6 @@ namespace {
 namespace asio = boost::asio;
 using Tcp = asio::ip::tcp;
 
-TEST(HttpClientTls, StalledServerCompletesOnceWithTimeout) {
-    AVEVA::HttpRequestOptions requestOptions;
-    requestOptions.SetTimeout(std::chrono::milliseconds(100));
-    auto result = HttpClientTests::Exchange({}, {}, requestOptions, true);
-
-    EXPECT_EQ(result.error, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
-}
-
 TEST(HttpClientTls, UntrustedCertificateReturnsTlsError) {
     asio::io_context context;
     asio::ssl::context serverContext(asio::ssl::context::tls_server);

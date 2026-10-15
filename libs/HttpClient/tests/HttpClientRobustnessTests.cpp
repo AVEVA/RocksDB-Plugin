@@ -198,6 +198,14 @@ TEST(HttpClientRobustness, GetLostOnAReusedConnectionIsRetried) {
     EXPECT_EQ(server.Accepted(), 2);
 }
 
+TEST(HttpClientRobustness, StalledServerCompletesOnceWithTimeout) {
+    AVEVA::HttpRequestOptions requestOptions;
+    requestOptions.SetTimeout(std::chrono::milliseconds(100));
+    auto result = HttpClientTests::Exchange({}, {}, requestOptions, true);
+
+    EXPECT_EQ(result.error, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
+}
+
 TEST(HttpClientRobustness, PlainHttpRequestTimesOut) {
     asio::io_context context;
     auto client = AVEVA::HttpClient::Create(context);
