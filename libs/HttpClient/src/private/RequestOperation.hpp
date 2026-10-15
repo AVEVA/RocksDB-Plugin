@@ -110,8 +110,8 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
                      std::shared_ptr<ConnectionPool<Stream>> pool, ConnectionKey<Stream> key,
                      beast::flat_buffer buffer = {})
         : m_tlsContext(std::move(tlsContext)), m_executor(stream->get_executor()), m_stream(std::move(stream)),
-          m_resolver(m_executor), m_timer(m_executor), m_completion(std::move(completion)), m_options(options),
-          m_pool(std::move(pool)), m_key(std::move(key)), m_buffer(std::move(buffer)) {}
+          m_resolver(m_executor), m_timer(m_executor), m_completion(std::move(completion)),
+          m_options(std::move(options)), m_pool(std::move(pool)), m_key(std::move(key)), m_buffer(std::move(buffer)) {}
 
     /// <summary>
     /// Makes this operation the target of the request's cancellation state, so a cancel (including one that
@@ -382,7 +382,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     void OnSharedResolve(boost::system::error_code error, Tcp::resolver::results_type results) {
         asio::post(m_executor, [self = this->shared_from_this(), error, results = std::move(results)]() mutable {
             // The leader was cancelled or timed out, which says nothing about this request's lookup.
-            if (error == asio::error::operation_aborted && !self->finished_ && !self->IsCancellationRequested()) {
+            if (error == asio::error::operation_aborted && !self->m_finished && !self->IsCancellationRequested()) {
                 return self->Resolve();
             }
             self->OnResolve(error, std::move(results));
@@ -446,7 +446,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// <param name="error">The outcome of the lookup.</param>
     /// <param name="results">The endpoints to connect to.</param>
     void OnResolve(boost::system::error_code error, Tcp::resolver::results_type results) {
-        if (finished_) {
+        if (m_finished) {
             return;
         }
         if (IsCancellationRequested()) {
@@ -467,7 +467,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// </summary>
     /// <param name="error">The outcome of the connect.</param>
     void OnConnect(boost::system::error_code error) {
-        if (finished_) {
+        if (m_finished) {
             return;
         }
         if (IsCancellationRequested()) {
@@ -483,7 +483,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
         if constexpr (std::is_same_v<Stream, TlsStream>) {
             m_stream->async_handshake(asio::ssl::stream_base::client,
                                       [self = this->shared_from_this()](boost::system::error_code handshakeError) {
-                                          if (self->finished_) {
+                                          if (self->m_finished) {
                                               return;
                                           }
                                           if (self->IsCancellationRequested()) {
@@ -504,7 +504,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// reported.
     /// </summary>
     void Write() {
-        if (finished_) {
+        if (m_finished) {
             return;
         }
         if (IsCancellationRequested()) {
@@ -512,7 +512,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
         }
         http::async_write(*m_stream, m_request,
                           [self = this->shared_from_this()](boost::system::error_code error, std::size_t bytesWritten) {
-                              if (self->finished_) {
+                              if (self->m_finished) {
                                   return;
                               }
                               if (self->IsCancellationRequested()) {
@@ -532,7 +532,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// Reads one complete response message into the parser.
     /// </summary>
     void Read() {
-        if (finished_) {
+        if (m_finished) {
             return;
         }
         if (IsCancellationRequested()) {
@@ -550,7 +550,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// </summary>
     /// <param name="error">The outcome of the read.</param>
     void OnRead(boost::system::error_code error) {
-        if (finished_) {
+        if (m_finished) {
             return;
         }
         if (IsCancellationRequested()) {
@@ -691,7 +691,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     void CompleteSuccess(HttpResponse response, bool keepAlive) {
         m_timer.cancel();
         m_resolver.cancel();
-        finished_ = true;
+        m_finished = true;
         auto completion = std::move(m_completion);
         ReleaseOrClose(keepAlive);
         Detail::Complete(std::move(completion), {}, std::move(response));
@@ -736,10 +736,10 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// <param name="error">The outcome to report; empty on success.</param>
     /// <param name="response">The response to report; empty on failure.</param>
     void Finish(std::error_code error, HttpResponse response) {
-        if (finished_) {
+        if (m_finished) {
             return;
         }
-        finished_ = true;
+        m_finished = true;
         m_timer.cancel();
         m_resolver.cancel();
         Close();
@@ -791,7 +791,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     // Keeps a shared body view alive for as long as this operation can still read it.
     std::shared_ptr<const void> m_bodyKeepAlive;
     std::optional<http::response_parser<http::string_body>> m_parser;
-    bool finished_ = false;
+    bool m_finished = false;
     bool m_reused = false;
     bool m_retried = false;
     bool m_receivedAnyResponse = false;

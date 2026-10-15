@@ -6,16 +6,14 @@
 #include "private/HttpVerb.hpp"
 
 #include <boost/beast/http/verb.hpp>
-#include <ostream>
-namespace AVEVA
-{
-    std::string ToString(HttpMethod method)
-    {
-        const auto verb = Private::ToBeastVerb(method);
-        if (verb == boost::beast::http::verb::unknown)
-        {
-            return {};
-        }
-        return std::string(boost::beast::http::to_string(verb));
+
+#include <ostream> // Needed by Boost's string_view stream operator pulled in via Beast.
+namespace AVEVA {
+std::string_view ToString(HttpMethod method) {
+    const auto verb = Private::ToBeastVerb(method);
+    if (verb == boost::beast::http::verb::unknown) {
+        return {};
     }
+    return boost::beast::http::to_string(verb); // Beast returns views of static literals.
+}
 } // namespace AVEVA

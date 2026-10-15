@@ -128,7 +128,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// client.</param>
     /// <param name="options">The TLS, pooling, and concurrency settings to build from.</param>
     BasicHttpClientCore(asio::io_context& runtime, const HttpClientOptions& options)
-        : context_(runtime), m_tlsContext(std::make_shared<asio::ssl::context>(asio::ssl::context::tls_client)),
+        : m_context(runtime), m_tlsContext(std::make_shared<asio::ssl::context>(asio::ssl::context::tls_client)),
           m_sweeper(IdleSweeper::Create(options.GetMaxIdleConnectionsPerHost(), options.GetIdleConnectionTimeout())),
           m_plainPool(m_sweeper->PlainPool()), m_tlsPool(m_sweeper->TlsPool()) {
         m_tlsContext->set_options(asio::ssl::context::default_workarounds | asio::ssl::context::no_sslv2 |
@@ -209,7 +209,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// <param name="error">Why the request failed.</param>
     void FailLater(const std::shared_ptr<CompletionCell>& cell, std::error_code error) noexcept {
         try {
-            asio::post(context_, [cell, error] {
+            asio::post(m_context, [cell, error] {
                 if (auto pending = cell->Take()) {
                     Detail::Complete(std::move(pending), error, HttpResponse{});
                 }
@@ -314,7 +314,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// <param name="pending">The request to fail.</param>
     /// <param name="error">Why it was dropped.</param>
     void AbortLimited(PendingRequest&& pending, std::error_code error) {
-        asio::post(context_, [completion = std::move(pending.completion), error]() mutable {
+        asio::post(m_context, [completion = std::move(pending.completion), error]() mutable {
             Detail::Complete(std::move(completion), error, HttpResponse{});
         });
     }
@@ -363,7 +363,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
             }
         }
 
-        auto executor = asio::make_strand(context_);
+        auto executor = asio::make_strand(m_context);
         auto stream = [&] {
             if constexpr (std::is_same_v<Stream, TlsStream>) {
                 return std::make_unique<TlsStream>(executor, *m_tlsContext);
@@ -409,7 +409,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         });
     }
 
-    asio::io_context& context_;
+    asio::io_context& m_context;
     std::shared_ptr<asio::ssl::context> m_tlsContext;
     std::shared_ptr<IdleSweeper> m_sweeper;
     std::shared_ptr<PlainConnectionPool> m_plainPool;
