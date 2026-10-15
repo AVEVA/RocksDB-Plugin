@@ -68,6 +68,27 @@ void RequestWaitersForSharedToken(const std::shared_ptr<TestCachingCredential>& 
 }
 } // namespace
 
+TEST(TokenCredentialTests, CachingTokenCredential_InvalidateForcesANewInnerRequestForThoseScopes) {
+    auto inner = std::make_shared<ScriptedTokenCredential>();
+    inner->EnqueueImmediate({}, MakeToken("first", std::chrono::hours(1)));
+    inner->EnqueueImmediate({}, MakeToken("second", std::chrono::hours(1)));
+    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+
+    std::string received;
+    RequestTokenCapturingValue(credential, {"scope-a"}, received);
+    EXPECT_EQ(received, "first");
+
+    credential->Invalidate(std::make_shared<const std::vector<std::string>>(std::vector<std::string>{"scope-b"}));
+    RequestTokenCapturingValue(credential, {"scope-a"}, received);
+    EXPECT_EQ(received, "first");
+    EXPECT_EQ(inner->CallCount(), 1);
+
+    credential->Invalidate(std::make_shared<const std::vector<std::string>>(std::vector<std::string>{"scope-a"}));
+    RequestTokenCapturingValue(credential, {"scope-a"}, received);
+    EXPECT_EQ(received, "second");
+    EXPECT_EQ(inner->CallCount(), 2);
+}
+
 TEST(TokenCredentialTests, CachingTokenCredential_ReusesCachedTokenOutsideRefreshWindow) {
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate({}, MakeToken("cached-token", std::chrono::hours(1)));

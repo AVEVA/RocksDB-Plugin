@@ -319,6 +319,51 @@ TEST(RetryTests, UnconditionalCreateOverwriteIsReplayedAfterAnAmbiguousTransport
     EXPECT_TRUE(ValueOrFail(observed).has_value());
 }
 
+TEST(RetryTests, UnauthorizedResponseIsRepeatedOnceWithAFreshToken) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{401, {{"x-ms-error-code", "InvalidAuthenticationInfo"}}, ""});
+    httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
+    auto credential = std::make_shared<ScriptedTokenCredential>();
+    credential->EnqueueImmediate({}, MakeToken("old-token", std::chrono::hours(1)));
+    credential->EnqueueImmediate({}, MakeToken("new-token", std::chrono::hours(1)));
+
+    BlobClientOptions options = MakeRetryOptions(0);
+    options.SasToken.clear();
+    BasicBlockBlobClient<FakeHttpClient, ScriptedTokenCredential> client{httpClient, std::move(options), credential};
+
+    std::optional<DeleteResult> observed;
+    client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
+    ASSERT_EQ(httpClient.RequestCount(), 2U);
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(0).Request, "Authorization"), "Bearer old-token");
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(1).Request, "Authorization"), "Bearer new-token");
+    EXPECT_EQ(credential->CallCount(), 2);
+    EXPECT_TRUE(ValueOrFail(observed).has_value());
+}
+
+TEST(RetryTests, UnauthorizedResponseIsOnlyRefreshedOnce) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{401, {}, ""});
+    httpClient.EnqueueResponse(HttpResponse{401, {}, ""});
+    httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
+    auto credential = std::make_shared<ScriptedTokenCredential>();
+    credential->EnqueueImmediate({}, MakeToken("old-token", std::chrono::hours(1)));
+    credential->EnqueueImmediate({}, MakeToken("new-token", std::chrono::hours(1)));
+
+    BlobClientOptions options = MakeRetryOptions(0);
+    options.SasToken.clear();
+    BasicBlockBlobClient<FakeHttpClient, ScriptedTokenCredential> client{httpClient, std::move(options), credential};
+
+    std::optional<DeleteResult> observed;
+    client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
+    EXPECT_EQ(httpClient.RequestCount(), 2U);
+    ASSERT_FALSE(ValueOrFail(observed).has_value());
+    EXPECT_EQ(ValueOrFail(observed).error().StatusCode, 401U);
+}
+
 TEST(RetryTests, GivesUpAfterMaxRetriesAndReportsLastResponse) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{503, {{"x-ms-request-id", "first"}}, ""});

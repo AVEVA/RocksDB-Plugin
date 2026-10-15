@@ -287,7 +287,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     }
 
     [[nodiscard]] HttpRequest BuildAttemptRequest() {
-        if (m_maxAttempts == 1) {
+        if (m_attempt >= m_maxAttempts && !CanRefreshToken() && !m_sharedBody) {
             return std::move(m_request);
         }
 
@@ -478,10 +478,31 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         return m_retryNotFoundAndGone && !error && (response.GetStatus() == NotFound || response.GetStatus() == Gone);
     }
 
+    // A 401 on a token-authorized request usually means the cached token was revoked or rotated, so one extra
+    // attempt with a freshly requested token is allowed regardless of the retry budget.
+    [[nodiscard]] bool CanRefreshToken() const {
+        if constexpr (requires { m_credential->Invalidate(m_auth.TokenScopes); }) {
+            return m_auth.Type == RequestAuth::Kind::Token && m_credential != nullptr && !m_tokenRefreshed;
+        } else {
+            return false;
+        }
+    }
+
     void OnAttemptCompleteOnStrand(std::error_code error, HttpResponse response) {
         if (m_cancelled) {
             Finish(CancelError(), std::move(response));
             return;
+        }
+
+        constexpr unsigned int Unauthorized = 401;
+        if (!error && response.GetStatus() == Unauthorized && CanRefreshToken()) {
+            if constexpr (requires { m_credential->Invalidate(m_auth.TokenScopes); }) {
+                m_tokenRefreshed = true;
+                m_credential->Invalidate(m_auth.TokenScopes);
+                --m_attempt; // The refresh does not consume the retry budget.
+                StartAttempt();
+                return;
+            }
         }
 
         if (m_attempt >= m_maxAttempts ||
@@ -571,6 +592,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     std::atomic<bool> m_cancelled{false};
     std::atomic<bool> m_finished{false};
     bool m_timedOut = false;
+    bool m_tokenRefreshed = false;
 };
 } // namespace RetryDetail
 
