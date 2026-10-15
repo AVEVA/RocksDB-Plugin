@@ -230,12 +230,14 @@ TEST(T11_ParallelDownloadAcceptanceTests, FileWritesRunOnTheInjectedWriteSchedul
     TempFile out;
     int callbackCount = 0;
     StartDownloadToAsyncAndExpectSuccess(client, out.Path, options, callbackCount, content.size());
+    httpClient.Poll();
     ASSERT_TRUE(httpClient.CompleteRequest(0U));
     const std::size_t peakPending = CompleteNewestUntilCallback(httpClient, 3U, callbackCount);
 
     ASSERT_EQ(callbackCount, 1);
     EXPECT_GT(peakPending, 0U);
-    EXPECT_GT(scheduled, 0U);
+    // Open, at least one chunk write and the finalize all went through the injected scheduler.
+    EXPECT_GE(scheduled, 3U);
     EXPECT_EQ(ReadFile(out.Path), content);
 }
 

@@ -226,9 +226,22 @@ class FakeHttpClient final {
     // Downloads write to their sink off the I/O thread; when a step started such a write this waits for it and
     // runs the completions it posts back, so a test observes the state a synchronous sink would have produced.
     void SettleIfWritesStarted(std::size_t writesBefore) {
-        if (DownloadWriters().Started.load() == writesBefore) {
+        if (DownloadWriters().Started.load() == writesBefore && DownloadWriters().Pending.load() == 0U) {
             return;
         }
+        SettleLoop();
+    }
+
+    // File downloads start (and finish) on the writer pool, so a test that inspects the client right after starting
+    // one first lets those steps run: this is a no-op unless a writer task started since the last settle.
+    void SettleWriters() const {
+        if (DownloadWriters().Pending.load() == 0U && DownloadWriters().Started.load() == m_settledStarted.load()) {
+            return;
+        }
+        const_cast<FakeHttpClient*>(this)->SettleLoop();
+    }
+
+    void SettleLoop() {
         for (;;) {
             while (DownloadWriters().Pending.load() > 0U) {
                 std::this_thread::yield();
@@ -236,6 +249,7 @@ class FakeHttpClient final {
             const std::size_t startedNow = DownloadWriters().Started.load();
             if (PollRaw() == 0U && DownloadWriters().Pending.load() == 0U &&
                 DownloadWriters().Started.load() == startedNow) {
+                m_settledStarted.store(startedNow);
                 return;
             }
         }
@@ -389,7 +403,10 @@ class FakeHttpClient final {
 
     [[nodiscard]] bool CompleteNext() { return CompletePending(0U); }
 
-    [[nodiscard]] bool CompletePending(std::size_t index) { return CompleteTaken(TakePending(index)); }
+    [[nodiscard]] bool CompletePending(std::size_t index) {
+        SettleWriters();
+        return CompleteTaken(TakePending(index));
+    }
 
     // Templated only because PendingCompletion is declared further down.
     template <class TPending> [[nodiscard]] bool CompleteTaken(TPending pending) {
@@ -411,9 +428,13 @@ class FakeHttpClient final {
     }
 
     // True while the request is deferred and neither completed, failed nor cancelled.
-    [[nodiscard]] bool IsPending(std::size_t requestIndex) const { return FindPending(requestIndex).has_value(); }
+    [[nodiscard]] bool IsPending(std::size_t requestIndex) const {
+        SettleWriters();
+        return FindPending(requestIndex).has_value();
+    }
 
     [[nodiscard]] bool CompleteRequest(std::size_t requestIndex) {
+        SettleWriters();
         return CompleteTaken(TakePendingRequest(requestIndex));
     }
 
@@ -458,11 +479,13 @@ class FakeHttpClient final {
     }
 
     [[nodiscard]] std::size_t RequestCount() const {
+        SettleWriters();
         std::scoped_lock lock(m_mutex);
         return m_requests.size();
     }
 
     [[nodiscard]] std::size_t PendingCount() const {
+        SettleWriters();
         std::scoped_lock lock(m_mutex);
         return m_pending.size();
     }
@@ -474,6 +497,7 @@ class FakeHttpClient final {
     [[nodiscard]] const std::deque<RequestRecord>& Requests() const noexcept { return m_requests; }
 
     [[nodiscard]] const RequestRecord& RequestAt(std::size_t index) const {
+        SettleWriters();
         std::scoped_lock lock(m_mutex);
         return m_requests.at(index);
     }
@@ -618,6 +642,7 @@ class FakeHttpClient final {
     // Guards the containers below; never held while a completion or responder runs.
     mutable std::mutex m_mutex;
     std::recursive_mutex m_pollMutex;
+    mutable std::atomic<std::size_t> m_settledStarted{0U};
     Responder m_responder;
     std::exception_ptr m_initiationFailure;
 

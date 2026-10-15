@@ -637,6 +637,36 @@ void StartDownload(THttp& httpClient, const BasicBlobTarget<TCred>& options, Dow
                                                              requestOptions, std::move(sink), std::move(completion))
         ->Start();
 }
+// Closes the temporary file and, on success, renames it over `target`; any failure removes the temporary file.
+[[nodiscard]] inline std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>
+FinalizeFileDownload(std::ofstream& file, const std::filesystem::path& tempPath, const std::filesystem::path& target,
+                     SummaryResult result) {
+    using FileResult = std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>;
+    file.close();
+    std::error_code ignored;
+    if (!result.has_value()) {
+        std::filesystem::remove(tempPath, ignored);
+        return FileResult{std::unexpect, std::move(result).error()};
+    }
+    if (file.fail()) {
+        std::filesystem::remove(tempPath, ignored);
+        return FileResult{std::unexpect, MakeFailure(std::errc::io_error, "I/O error writing destination file.")};
+    }
+    std::error_code renameError;
+    if (std::filesystem::is_directory(target, renameError)) {
+        std::filesystem::remove(tempPath, ignored);
+        return FileResult{std::unexpect, MakeFailure(std::make_error_code(std::errc::is_a_directory),
+                                                     "The destination path is a directory.")};
+    }
+    renameError.clear();
+    std::filesystem::rename(tempPath, target, renameError);
+    if (renameError) {
+        std::filesystem::remove(tempPath, ignored);
+        return FileResult{std::unexpect,
+                          MakeFailure(renameError, "Failed to rename temporary download file to destination.")};
+    }
+    return ToDownloadToResponse(std::move(*result));
+}
 } // namespace DownloadDetail
 
 template <HttpClientLike THttp, class TCred, class TCompletion>
@@ -676,67 +706,64 @@ void DownloadBlobToSpanAsync(THttp& httpClient, const BasicBlobTarget<TCred>& op
         requestOptions);
 }
 
+// Every blocking filesystem call (directory check, open, close, rename, remove) runs on the write scheduler (see
+// RunOnWriter), never on the thread that initiates the download or on the transport thread that completes it. The
+// handler then completes on its associated executor.
 template <HttpClientLike THttp, class TCred, class TCompletion>
 void DownloadBlobToFileAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
                              DownloadToOptions operationOptions, const std::filesystem::path& path,
                              TCompletion completion, HttpRequestOptions requestOptions) {
-    std::error_code statusError;
-    if (std::filesystem::is_directory(path, statusError)) {
-        PostCompletion(httpClient, std::move(completion),
-                       std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>{
-                           std::unexpect, DownloadDetail::MakeFailure(std::make_error_code(std::errc::is_a_directory),
+    using FileResult = std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>;
+    auto scheduler = operationOptions.WriteScheduler;
+    DownloadDetail::RunOnWriter(
+        httpClient, scheduler,
+        [&httpClient, scheduler, options, operationOptions = std::move(operationOptions), path,
+         completion = std::move(completion), requestOptions]() mutable {
+            std::error_code statusError;
+            if (std::filesystem::is_directory(path, statusError)) {
+                PostCompletion(httpClient, std::move(completion),
+                               FileResult{std::unexpect,
+                                          DownloadDetail::MakeFailure(std::make_error_code(std::errc::is_a_directory),
                                                                       "The destination path is a directory.")});
-        return;
-    }
+                return;
+            }
 
-    // Download into a sibling temporary file and rename it over the target only on success, so a
-    // failed download never leaves a truncated target behind.
-    std::filesystem::path tempPath = path;
-    tempPath += ".partial-" + CreateClientRequestId();
-    errno = 0;
-    auto file = std::make_shared<std::ofstream>(tempPath, std::ios::binary | std::ios::trunc);
-    if (!*file) {
-        PostCompletion(httpClient, std::move(completion),
-                       std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>{
-                           std::unexpect, DownloadDetail::MakeFailure(DownloadDetail::LastOpenError(),
-                                                                      "Failed to open destination file.")});
-        return;
-    }
+            // Download into a sibling temporary file and rename it over the target only on success, so a
+            // failed download never leaves a truncated target behind.
+            std::filesystem::path tempPath = path;
+            tempPath += ".partial-" + CreateClientRequestId();
+            errno = 0;
+            auto file = std::make_shared<std::ofstream>(tempPath, std::ios::binary | std::ios::trunc);
+            if (!*file) {
+                PostCompletion(
+                    httpClient, std::move(completion),
+                    FileResult{std::unexpect, DownloadDetail::MakeFailure(DownloadDetail::LastOpenError(),
+                                                                          "Failed to open destination file.")});
+                return;
+            }
 
-    DownloadDetail::StartDownload(
-        httpClient, options, std::move(operationOptions), std::make_shared<FileSink>(file),
-        [file, tempPath, target = path,
-         completion = std::move(completion)](DownloadDetail::SummaryResult result) mutable {
-            file->close();
-            std::error_code ignored;
-            if (!result.has_value()) {
-                std::filesystem::remove(tempPath, ignored);
-                completion(std::unexpected(std::move(result).error()));
-                return;
-            }
-            if (file->fail()) {
-                std::filesystem::remove(tempPath, ignored);
-                completion(std::unexpected(
-                    DownloadDetail::MakeFailure(std::errc::io_error, "I/O error writing destination file.")));
-                return;
-            }
-            std::error_code renameError;
-            if (std::filesystem::is_directory(target, renameError)) {
-                std::filesystem::remove(tempPath, ignored);
-                completion(std::unexpected(DownloadDetail::MakeFailure(std::make_error_code(std::errc::is_a_directory),
-                                                                       "The destination path is a directory.")));
-                return;
-            }
-            renameError.clear();
-            std::filesystem::rename(tempPath, target, renameError);
-            if (renameError) {
-                std::filesystem::remove(tempPath, ignored);
-                completion(std::unexpected(DownloadDetail::MakeFailure(
-                    renameError, "Failed to rename temporary download file to destination.")));
-                return;
-            }
-            completion(DownloadDetail::ToDownloadToResponse(std::move(*result)));
-        },
-        requestOptions);
+            // The chunk requests are started from the I/O executor, like any other download.
+            boost::asio::post(
+                httpClient.get_executor(),
+                [&httpClient, scheduler = std::move(scheduler), options = std::move(options),
+                 operationOptions = std::move(operationOptions), file, tempPath = std::move(tempPath),
+                 target = std::move(path), completion = std::move(completion), requestOptions]() mutable {
+                    DownloadDetail::StartDownload(
+                        httpClient, options, std::move(operationOptions), std::make_shared<FileSink>(file),
+                        [&httpClient, scheduler = std::move(scheduler), file, tempPath = std::move(tempPath),
+                         target = std::move(target),
+                         completion = std::move(completion)](DownloadDetail::SummaryResult result) mutable {
+                            DownloadDetail::RunOnWriter(
+                                httpClient, scheduler,
+                                [&httpClient, file, tempPath = std::move(tempPath), target = std::move(target),
+                                 completion = std::move(completion), result = std::move(result)]() mutable {
+                                    PostCompletion(httpClient, std::move(completion),
+                                                   DownloadDetail::FinalizeFileDownload(*file, tempPath, target,
+                                                                                        std::move(result)));
+                                });
+                        },
+                        requestOptions);
+                });
+        });
 }
 } // namespace AVEVA::AzureClient::Private
