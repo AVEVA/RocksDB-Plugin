@@ -509,3 +509,27 @@ TEST_F(FileCacheTests, RunningTotals_StayConsistentThroughEvictionAndRefresh) {
     // Assert
     EXPECT_LE(m_cache.CacheSize(), 20U);
 }
+TEST_F(FileCacheTests, EvictedFiles_AreDeletedBeforeTheNextFileIsDownloaded) {
+    // Arrange
+    const auto fileSize = static_cast<size_t>(100);
+    m_cache.SetCacheSize(fileSize);
+    std::atomic<bool> deletedBeforeDownload = false;
+    EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(fileSize));
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo("2.sst", _, _, _)).WillRepeatedly([&](auto&&...) {
+        deletedBeforeDownload = m_removedFiles.size() == 1;
+    });
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo("1.sst", _, _, _)).WillRepeatedly(Return());
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
+        auto file = std::make_unique<FileMock>();
+        EXPECT_CALL(*file, Read(_, _, _)).WillRepeatedly([](char*, uint64_t, uint64_t length) { return length; });
+        return file;
+    });
+    EnsureReadFromCache("1.sst", fileSize);
+
+    // Act
+    EnsureReadFromCache("2.sst", fileSize);
+    m_cache.WaitUntilIdle();
+
+    // Assert
+    EXPECT_TRUE(deletedBeforeDownload);
+}

@@ -317,6 +317,9 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                 continue;
             }
 
+            // Files evicted to make room; deleted before the download so disk use never exceeds the maximum.
+            std::vector<PendingRelease> evicted;
+
             // Set the cache entries size and evict
             {
                 std::unique_lock lock(m_mutex);
@@ -369,7 +372,9 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                 // Mark the file as downloading now so we don't queue it again.
                 UpdateEntryUnsafe(it->second,
                                   [](FileCacheEntry& entry) { entry.SetState(FileCacheEntry::State::Downloading); });
+                evicted.swap(m_pendingReleases);
             }
+            ReleaseOnBackgroundThread(evicted);
 
             try {
                 const auto actualFilePath = m_cachePath / filePath;
