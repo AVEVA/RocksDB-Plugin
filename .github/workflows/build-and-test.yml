@@ -95,9 +95,9 @@ jobs:
       matrix:
         include:
           - name: asan-ubsan
-            flags: -DAVEVA_AZURE_CLIENT_ENABLE_ASAN=ON -DAVEVA_AZURE_CLIENT_ENABLE_UBSAN=ON
+            flags: -DAVEVA_ROCKSDB_SANITIZER=address;undefined
           - name: tsan
-            flags: -DAVEVA_AZURE_CLIENT_ENABLE_TSAN=ON
+            flags: -DAVEVA_ROCKSDB_SANITIZER=thread
     name: sanitizers (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -126,7 +126,7 @@ jobs:
           restore-keys: vcpkg-
 
       - name: Configure
-        run: cmake --preset LinuxDebug ${{ matrix.flags }}
+        run: cmake --preset LinuxDebug "${{ matrix.flags }}"
 
       - name: Build
         run: cmake --build build/LinuxDebug --config Debug
