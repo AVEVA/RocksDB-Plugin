@@ -500,6 +500,7 @@ RequestFailure DetermineBlobStorageFailure(std::error_code transportError, const
     details.Message = errorBody.Message;
     details.AuthenticationDetail = errorBody.AuthenticationDetail;
     details.RequestId = std::string{FindHeaderValue(response, XMsRequestIdHeaderName)};
+    details.RetryAfter = ParseRetryAfter(response);
     BlobStorageErrorCode code =
         errorCode.empty() ? BlobStorageErrorCode::ServiceError : ParseBlobStorageErrorCode(errorCode);
     if (errorCode.empty() && response.GetStatus() == HttpStatusNotModified) {

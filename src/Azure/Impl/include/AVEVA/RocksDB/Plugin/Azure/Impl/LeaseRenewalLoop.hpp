@@ -13,6 +13,7 @@
 #include <boost/log/sources/severity_logger.hpp>
 #include <boost/log/trivial.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <concepts>
 #include <condition_variable>
@@ -21,6 +22,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <string>
 #include <utility>
 #include <vector>
@@ -29,12 +31,14 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// <summary>
 /// Keeps leases alive from the host io_context, with no thread of its own: a timer wakes every `interval`, all
 /// leases returned by the snapshot are renewed side by side through LockFileImpl::RenewAsync, and failed renewals
-/// are retried after `retryDelay`.
+/// are retried with exponential backoff and jitter starting at `retryDelay` (never later than the earliest renewal
+/// deadline, and not sooner than a Retry-After hint from the service allows).
 ///
 /// A conflict or other lease-lost failure (by status or BlobStorageErrorCode), any other permanent failure (a status
 /// that is not 408, 429 or 5xx, e.g. 401/403/404), a non-service exception, or a lease
 /// that is still overdue once the retries are spent is fatal: the loop stops and `onFatal` is invoked once so the
-/// owner can fence writes. Transient failures (transport errors with status 0, 408, 429, 5xx) are retried and only logged.
+/// owner can fence writes. Transient failures (transport errors with status 0, 408, 429, 5xx) are retried and only
+/// logged.
 ///
 /// While armed, the timer keeps io_context::run() from returning, so the owner must call Stop() (or destroy the
 /// loop's owner, which should) before expecting run() to drain.
@@ -100,12 +104,9 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
     static constexpr auto StopWarningInterval = std::chrono::seconds(5);
 
     // These failures can never succeed on retry: the service no longer recognises our lease. The code is checked in
-    // addition to the status because 400/412 lease failures carry the same meaning as a 409.
+    // because 400/412 lease failures carry the same meaning as a 409 (which IsTransient already rejects).
     static bool IsFatalLeaseFailure(const RequestFailedException& e) {
         using AzureClient::BlobStorageErrorCode;
-        if (e.StatusCode == HttpStatus::Conflict) {
-            return true;
-        }
         for (const auto code :
              {BlobStorageErrorCode::LeaseLost, BlobStorageErrorCode::LeaseIdMissing,
               BlobStorageErrorCode::LeaseAlreadyPresent, BlobStorageErrorCode::LeaseIdMismatchWithBlobOperation,
@@ -144,7 +145,7 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
                           const std::chrono::milliseconds retryDelay, const size_t maxAttempts)
         : m_executor(executor), m_logger(std::move(logger)), m_snapshot(std::move(snapshot)),
           m_onFatal(std::move(onFatal)), m_interval(interval), m_retryDelay(retryDelay), m_maxAttempts(maxAttempts),
-          m_timer(std::move(executor)) {}
+          m_timer(std::move(executor)), m_random(std::random_device{}()) {}
 
     // All of the following require m_mutex.
 
@@ -210,20 +211,21 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
     void StartRound(const std::shared_ptr<Round>& round) {
         try {
             for (size_t i = 0; i < round->Locks.size(); ++i) {
-                round->Locks[i]->RenewAsync([self = this->shared_from_this(), round, i](std::exception_ptr error, bool) {
-                    bool last = false;
-                    {
-                        std::scoped_lock guard(round->Mutex);
-                        round->Errors[i] = std::move(error);
-                        last = --round->Pending == 0;
-                    }
-                    if (last) {
-                        boost::asio::post(self->m_executor, [self, round] {
-                            std::scoped_lock lock(self->m_mutex);
-                            self->OnRoundDone(round);
-                        });
-                    }
-                });
+                round->Locks[i]->RenewAsync(
+                    [self = this->shared_from_this(), round, i](std::exception_ptr error, bool) {
+                        bool last = false;
+                        {
+                            std::scoped_lock guard(round->Mutex);
+                            round->Errors[i] = std::move(error);
+                            last = --round->Pending == 0;
+                        }
+                        if (last) {
+                            boost::asio::post(self->m_executor, [self, round] {
+                                std::scoped_lock lock(self->m_mutex);
+                                self->OnRoundDone(round);
+                            });
+                        }
+                    });
             }
         } catch (const std::exception& e) {
             AbandonRound(e.what());
@@ -255,6 +257,7 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
         }
 
         std::vector<std::shared_ptr<TLock>> stillPending;
+        std::chrono::milliseconds serverHint{0};
         std::string fatal;
         for (size_t i = 0; i < round->Locks.size() && fatal.empty(); ++i) {
             if (!round->Errors[i]) {
@@ -270,6 +273,7 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
                 } else {
                     BOOST_LOG_SEV(*m_logger, boost::log::trivial::error) << "Failed to renew lease: " << e.what();
                     stillPending.push_back(round->Locks[i]);
+                    serverHint = std::max(serverHint, e.RetryAfter.value_or(std::chrono::milliseconds{0}));
                 }
             } catch (const std::exception& e) {
                 fatal = e.what();
@@ -287,7 +291,8 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
         const size_t nextAttempt = round->Attempt + 1;
         if (!stillPending.empty() && nextAttempt < m_maxAttempts) {
             finish();
-            ArmTimer(m_retryDelay, Retry{std::move(stillPending), nextAttempt});
+            const auto delay = NextRetryDelay(stillPending, round->Attempt, serverHint);
+            ArmTimer(delay, Retry{std::move(stillPending), nextAttempt});
             return;
         }
 
@@ -303,6 +308,30 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
 
         finish();
         ScheduleWakeUp(m_interval);
+    }
+
+    // Exponential backoff with jitter (half to full of the step, so concurrent filesystems do not retry in
+    // lockstep), raised to the service's Retry-After hint but never past the earliest renewal deadline: a retry that
+    // lands after the lease is overdue is worthless.
+    std::chrono::milliseconds NextRetryDelay(const std::vector<std::shared_ptr<TLock>>& pending, const size_t attempt,
+                                             const std::chrono::milliseconds serverHint) {
+        auto step = m_retryDelay;
+        for (size_t i = 0; i < attempt && step < m_interval; ++i) {
+            step *= 2;
+        }
+        step = std::min(step, std::max(m_interval, m_retryDelay));
+        const auto low = step.count() / 2;
+        auto delay = std::chrono::milliseconds(
+            std::uniform_int_distribution<std::chrono::milliseconds::rep>(low, std::max(low, step.count()))(m_random));
+        delay = std::max(delay, serverHint);
+
+        for (const auto& lock : pending) {
+            if (const auto remaining = lock->RenewalTimeRemaining()) {
+                delay = std::min(delay, std::max(std::chrono::milliseconds{0},
+                                                 std::chrono::duration_cast<std::chrono::milliseconds>(*remaining)));
+            }
+        }
+        return delay;
     }
 
     void Fail(const std::string& reason) {
@@ -324,5 +353,6 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
     boost::asio::steady_timer m_timer;
     size_t m_activeRounds = 0;
     bool m_stopped = false;
+    std::mt19937 m_random;
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

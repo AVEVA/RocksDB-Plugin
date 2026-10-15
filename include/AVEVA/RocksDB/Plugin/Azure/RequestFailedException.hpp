@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #pragma once
+#include <chrono>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -40,10 +42,11 @@ class WritesFencedException : public std::runtime_error {
 class RequestFailedException : public std::runtime_error {
   public:
     RequestFailedException(unsigned int statusCode, std::string errorCode, std::string message, std::string requestId,
-                           std::error_code code, std::string authenticationDetail = {})
+                           std::error_code code, std::string authenticationDetail = {},
+                           std::optional<std::chrono::milliseconds> retryAfter = std::nullopt)
         : std::runtime_error(FormatWhat(statusCode, errorCode, message, requestId, code)), StatusCode(statusCode),
           ErrorCode(std::move(errorCode)), Message(std::move(message)), RequestId(std::move(requestId)), Code(code),
-          AuthenticationDetail(std::move(authenticationDetail)) {}
+          AuthenticationDetail(std::move(authenticationDetail)), RetryAfter(retryAfter) {}
 
     /// Describes the failure as "<status> <ErrorCode>: <message> (request id: <id>)"; the request id is what Azure
     /// support asks for.
@@ -57,6 +60,8 @@ class RequestFailedException : public std::runtime_error {
     /// Service diagnostics for a failed authentication. Kept out of what() because it can echo the string-to-sign;
     /// only log it at debug level.
     std::string AuthenticationDetail;
+    /// The service's retry hint (Retry-After), when the failed response carried one.
+    std::optional<std::chrono::milliseconds> RetryAfter;
     static std::string FormatWhat(unsigned int statusCode, const std::string& errorCode, const std::string& message,
                                   const std::string& requestId, const std::error_code& code) {
         std::string what = message.empty() ? code.message() : message;

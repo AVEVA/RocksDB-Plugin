@@ -17,8 +17,8 @@
 
 #include <gtest/gtest.h>
 
-#include <atomic>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <exception>
 #include <functional>
@@ -186,16 +186,17 @@ TEST_F(LockFileImplTests, RenewThatOutlastsTheLeaseIsCancelledAtTheDeadlineAndTh
     // 15s is the shortest lease the service accepts. The lease clock is simulated so that only ~200ms of real time
     // remain before the renewal deadline, which the client enforces with a real timer.
     const auto leaseLength = std::chrono::seconds(15);
-    const auto margin = std::min<std::chrono::milliseconds>(AVEVA::RocksDB::Plugin::Azure::Impl::Configuration::LeaseSafetyMargin,
-                                                            std::chrono::milliseconds(leaseLength) / 10);
+    const auto margin =
+        std::min<std::chrono::milliseconds>(AVEVA::RocksDB::Plugin::Azure::Impl::Configuration::LeaseSafetyMargin,
+                                            std::chrono::milliseconds(leaseLength) / 10);
     auto lock = CreateLock(leaseLength);
-    auto offset = std::make_shared<std::atomic<std::chrono::steady_clock::duration>>(
-        std::chrono::steady_clock::duration::zero());
+    auto offset =
+        std::make_shared<std::atomic<std::chrono::steady_clock::duration>>(std::chrono::steady_clock::duration::zero());
     lock->SetClockForTesting([offset] { return std::chrono::steady_clock::now() + offset->load(); });
     ASSERT_TRUE(lock->Lock());
 
-    *offset = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-        std::chrono::milliseconds(leaseLength) - margin - std::chrono::milliseconds(200));
+    *offset = std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::milliseconds(leaseLength) -
+                                                                              margin - std::chrono::milliseconds(200));
     ASSERT_FALSE(lock->HasExceededLeaseLength());
 
     const auto start = std::chrono::steady_clock::now();
@@ -428,6 +429,8 @@ struct ScriptedLock {
         State->Completions.emplace_back([callback = std::move(callback)] { callback(nullptr, true); });
     }
     [[nodiscard]] bool IsRenewalOverdue() const { return false; }
+    [[nodiscard]] std::optional<std::chrono::steady_clock::duration> RenewalTimeRemaining() const { return Remaining; }
+    std::optional<std::chrono::steady_clock::duration> Remaining;
 };
 
 struct ScriptedSnapshot {
@@ -445,8 +448,9 @@ TEST(LeaseRenewalLoopThrowTests, ThrowOnTheNthRenewAsyncIsFatalOnceAndLateComple
     boost::asio::io_context context;
     auto guard = boost::asio::make_work_guard(context);
     std::jthread thread([&context] { context.run(); });
-    auto logger = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::BasicLeaseRenewalLoop<
-        ScriptedSnapshot, ScriptedFatal, ScriptedLock>::Logger>();
+    auto logger =
+        std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::BasicLeaseRenewalLoop<ScriptedSnapshot, ScriptedFatal,
+                                                                                    ScriptedLock>::Logger>();
 
     auto state = std::make_shared<ScriptedLock::Shared>();
     state->ThrowOnCall = 3; // the first two renewals are started, the third throws
@@ -483,4 +487,112 @@ TEST(LeaseRenewalLoopThrowTests, ThrowOnTheNthRenewAsyncIsFatalOnceAndLateComple
     EXPECT_EQ(fatal, 1);
     EXPECT_TRUE(loop->IsStopped());
     EXPECT_EQ(state->Calls, 3u);
+}
+
+namespace {
+// A lock whose renewals always fail with a transient error, recording when each attempt happened.
+struct FailingLock {
+    struct Shared {
+        std::mutex Mutex;
+        std::vector<std::chrono::steady_clock::time_point> Calls;
+        std::optional<std::chrono::milliseconds> RetryAfter;
+    };
+    std::shared_ptr<Shared> State;
+    std::optional<std::chrono::steady_clock::duration> Remaining;
+
+    void RenewAsync(std::function<void(std::exception_ptr, bool)> callback) const {
+        std::optional<std::chrono::milliseconds> hint;
+        {
+            std::scoped_lock lock(State->Mutex);
+            State->Calls.push_back(std::chrono::steady_clock::now());
+            hint = State->RetryAfter;
+        }
+        callback(std::make_exception_ptr(RequestFailedException(503, "ServerBusy", "busy", "id",
+                                                                std::make_error_code(std::errc::io_error), {}, hint)),
+                 false);
+    }
+    [[nodiscard]] bool IsRenewalOverdue() const { return false; }
+    [[nodiscard]] std::optional<std::chrono::steady_clock::duration> RenewalTimeRemaining() const { return Remaining; }
+};
+
+struct FailingSnapshot {
+    std::vector<std::shared_ptr<FailingLock>> Locks;
+    std::vector<std::shared_ptr<FailingLock>> operator()() const { return Locks; }
+};
+
+struct FailingLoopRun {
+    std::shared_ptr<FailingLock::Shared> State = std::make_shared<FailingLock::Shared>();
+    std::atomic<int> Fatal{0};
+
+    // Runs one wake-up whose renewals keep failing, and returns the gaps between the attempts.
+    std::vector<std::chrono::milliseconds> Run(const std::optional<std::chrono::steady_clock::duration> remaining,
+                                               const std::chrono::milliseconds retryDelay) {
+        using Loop = BasicLeaseRenewalLoop<FailingSnapshot, ScriptedFatal, FailingLock>;
+        boost::asio::io_context context;
+        auto guard = boost::asio::make_work_guard(context);
+        std::jthread thread([&context] { context.run(); });
+        auto logger = std::make_shared<Loop::Logger>();
+        FailingSnapshot snapshot{{std::make_shared<FailingLock>(FailingLock{State, remaining})}};
+
+        auto loop = Loop::Start(context.get_executor(), logger, snapshot, ScriptedFatal{&Fatal},
+                                std::chrono::milliseconds(500), retryDelay, 5);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        for (;;) {
+            {
+                std::scoped_lock lock(State->Mutex);
+                if (State->Calls.size() >= 5) {
+                    break;
+                }
+            }
+            if (std::chrono::steady_clock::now() > deadline) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        loop->Stop();
+        guard.reset();
+        thread.join();
+
+        std::vector<std::chrono::milliseconds> gaps;
+        for (size_t i = 1; i < State->Calls.size(); ++i) {
+            gaps.push_back(
+                std::chrono::duration_cast<std::chrono::milliseconds>(State->Calls[i] - State->Calls[i - 1]));
+        }
+        return gaps;
+    }
+};
+} // namespace
+
+TEST(LeaseRenewalLoopBackoffTests, RetryDelayGrowsExponentiallyWithJitter) {
+    FailingLoopRun run;
+    // The wake-up fires after 10 s, so shorten the test by making the first round start immediately via interval.
+    const auto gaps = run.Run(std::nullopt, std::chrono::milliseconds(40));
+
+    ASSERT_GE(gaps.size(), 4u);
+    // Gap k lies in [step/2, step] with step = 40 ms * 2^k.
+    for (size_t k = 0; k < 4; ++k) {
+        const auto step = 40 * (1 << k);
+        EXPECT_GE(gaps[k].count(), step / 2 - 5) << "gap " << k;
+    }
+    EXPECT_GE(gaps[3].count(), 75); // a fixed 40 ms delay would fail this
+    EXPECT_EQ(run.Fatal, 0);
+}
+
+TEST(LeaseRenewalLoopBackoffTests, RetryAfterHintRaisesTheDelay) {
+    FailingLoopRun run;
+    run.State->RetryAfter = std::chrono::milliseconds(150);
+    const auto gaps = run.Run(std::nullopt, std::chrono::milliseconds(5));
+
+    ASSERT_GE(gaps.size(), 1u);
+    EXPECT_GE(gaps[0].count(), 145);
+}
+
+TEST(LeaseRenewalLoopBackoffTests, RetryDelayNeverOutlastsTheRenewalDeadline) {
+    FailingLoopRun run;
+    const auto gaps = run.Run(std::chrono::milliseconds(10), std::chrono::milliseconds(500));
+
+    ASSERT_GE(gaps.size(), 4u);
+    for (const auto& gap : gaps) {
+        EXPECT_LT(gap.count(), 200);
+    }
 }

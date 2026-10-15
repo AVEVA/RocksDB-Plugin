@@ -181,7 +181,7 @@ HttpRequestOptions BoundByWriteDeadline(const ClientRuntimeBase& runtime, HttpRe
 void ThrowRequestFailed(const AzureClient::BlobStorageError& error) {
     throw RequestFailedException(error.StatusCode, error.ErrorCode,
                                  error.Message.empty() ? error.Code.message() : error.Message, error.RequestId,
-                                 error.Code, error.AuthenticationDetail);
+                                 error.Code, error.AuthenticationDetail, error.RetryAfter);
 }
 
 HttpRequestOptions RequestOptionsForTransfer(const HttpRequestOptions& defaults, uint64_t bytes) {
