@@ -28,29 +28,45 @@ using TlsConnectionPool = ConnectionPool<TlsStream>;
 /// connection, and goes back to sleep once both pools are empty. A dedicated thread is used instead of an
 /// io_context timer so a pending timer cannot keep the caller's io_context::run() from returning.
 /// </summary>
-class IdleSweeper {
+class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
   public:
     /// <summary>
-    /// Constructs a sweeper over a plain and a TLS pool.
+    /// Creates a sweeper together with the plain and TLS pools it sweeps. The pools are built here, with a
+    /// notifier that refers back to the sweeper, so neither side needs a second setup step.
     /// </summary>
-    /// <param name="plainPool">The plain pool to sweep.</param>
-    /// <param name="tlsPool">The TLS pool to sweep.</param>
-    /// <param name="idleTimeout">How often to sweep while either pool is non-empty; clamped to at least one
-    /// second.</param>
-    IdleSweeper(std::shared_ptr<PlainConnectionPool> plainPool, std::shared_ptr<TlsConnectionPool> tlsPool,
-                std::chrono::seconds idleTimeout)
-        : m_plainPool(std::move(plainPool)), m_tlsPool(std::move(tlsPool)),
-          m_interval(std::clamp(idleTimeout, std::chrono::seconds{1}, std::chrono::seconds{EffectivelyInfinite})) {}
+    /// <param name="maxIdlePerKey">How many idle connections each pool keeps per origin.</param>
+    /// <param name="idleTimeout">How long a connection may sit idle; also how often to sweep while either pool
+    /// is non-empty (clamped to at least one second).</param>
+    /// <returns>The sweeper; its pools are available through <see cref="PlainPool"/> and
+    /// <see cref="TlsPool"/>.</returns>
+    static std::shared_ptr<IdleSweeper> Create(std::size_t maxIdlePerKey, std::chrono::seconds idleTimeout) {
+        std::shared_ptr<IdleSweeper> sweeper(new IdleSweeper(idleTimeout));
+        sweeper->m_plainPool = std::make_shared<PlainConnectionPool>(
+            maxIdlePerKey, idleTimeout, PlainConnectionPool::DefaultMaxTotalIdle, SweeperNotifier(sweeper));
+        sweeper->m_tlsPool = std::make_shared<TlsConnectionPool>(
+            maxIdlePerKey, idleTimeout, TlsConnectionPool::DefaultMaxTotalIdle, SweeperNotifier(sweeper));
+        return sweeper;
+    }
 
     IdleSweeper(const IdleSweeper&) = delete;
     IdleSweeper& operator=(const IdleSweeper&) = delete;
+
+    /// <summary>
+    /// The pool of plain HTTP connections this sweeper sweeps.
+    /// </summary>
+    const std::shared_ptr<PlainConnectionPool>& PlainPool() const noexcept { return m_plainPool; }
+
+    /// <summary>
+    /// The pool of HTTPS connections this sweeper sweeps.
+    /// </summary>
+    const std::shared_ptr<TlsConnectionPool>& TlsPool() const noexcept { return m_tlsPool; }
 
     /// <summary>
     /// Called when a pool gains an idle connection; schedules a sweep unless one is already pending.
     /// </summary>
     void Notify() {
         if (!m_scheduled.exchange(true)) {
-            SweepScheduler::Instance().Schedule(m_self, m_interval);
+            SweepScheduler::Instance().Schedule(weak_from_this(), m_interval);
         }
     }
 
@@ -62,18 +78,14 @@ class IdleSweeper {
     void RunSweep() {
         m_scheduled = false;
         if (m_plainPool->Sweep() + m_tlsPool->Sweep() > 0 && !m_scheduled.exchange(true)) {
-            SweepScheduler::Instance().Schedule(m_self, m_interval);
+            SweepScheduler::Instance().Schedule(weak_from_this(), m_interval);
         }
     }
 
-    /// <summary>
-    /// Must be called once the sweeper is owned by a shared_ptr, so it can be scheduled weakly and simply
-    /// be skipped once it is gone.
-    /// </summary>
-    /// <param name="self">The shared_ptr that owns this sweeper.</param>
-    void BindSelf(const std::shared_ptr<IdleSweeper>& self) { m_self = self; }
-
   private:
+    explicit IdleSweeper(std::chrono::seconds idleTimeout)
+        : m_interval(std::clamp(idleTimeout, std::chrono::seconds{1}, std::chrono::seconds{EffectivelyInfinite})) {}
+
     /// <summary>
     /// One thread for the whole process, started on first use, that runs every sweeper's sweeps in deadline
     /// order. A per-sweeper thread would cost a stack for each of many short-lived clients.
@@ -158,6 +170,5 @@ class IdleSweeper {
     std::shared_ptr<TlsConnectionPool> m_tlsPool;
     std::chrono::seconds m_interval;
     std::atomic<bool> m_scheduled{false};
-    std::weak_ptr<IdleSweeper> m_self;
 };
 } // namespace AVEVA::Private

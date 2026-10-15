@@ -18,20 +18,16 @@ namespace asio = boost::asio;
 
 struct SweeperFixture {
     SweeperFixture(asio::io_context& context, std::chrono::seconds interval)
-        : plain(std::make_shared<PlainConnectionPool>(4, interval)),
-          tls(std::make_shared<TlsConnectionPool>(4, interval)),
-          sweeper(std::make_shared<IdleSweeper>(plain, tls, interval)), context(context) {
-        sweeper->BindSelf(sweeper);
-        plain->SetNotifier(SweeperNotifier(sweeper));
-    }
+        : sweeper(IdleSweeper::Create(4, interval)), plain(sweeper->PlainPool()), tls(sweeper->TlsPool()),
+          context(context) {}
 
     void AddIdleConnection() {
         plain->Release({"127.0.0.1", "80"}, PooledConnection<PlainStream>{std::make_unique<PlainStream>(context), {}});
     }
 
+    std::shared_ptr<IdleSweeper> sweeper;
     std::shared_ptr<PlainConnectionPool> plain;
     std::shared_ptr<TlsConnectionPool> tls;
-    std::shared_ptr<IdleSweeper> sweeper;
     asio::io_context& context;
 };
 } // namespace

@@ -256,8 +256,8 @@ struct CountingNotifier {
 TEST(ConnectionPool, NotifiesWhenTheFirstIdleConnectionIsAdded) {
     int live = 0;
     int notifications = 0;
-    ConnectionPool<TrackedStream, std::chrono::steady_clock, CountingNotifier> pool(4, LongTimeout);
-    pool.SetNotifier(CountingNotifier{&notifications});
+    ConnectionPool<TrackedStream, std::chrono::steady_clock, CountingNotifier> pool(4, LongTimeout, 256,
+                                                                                    CountingNotifier{&notifications});
 
     pool.Release(MakeKey("a.com"), MakeConnection(1, live));
     pool.Release(MakeKey("b.com"), MakeConnection(2, live));

@@ -145,22 +145,13 @@ class ConnectionPool {
     /// <param name="idleTimeout">How long a connection may sit idle before it is closed; clamped to
     /// <see cref="MaxIdleTimeout"/>.</param>
     /// <param name="maxTotalIdle">How many idle connections to keep across all origins; 0 disables pooling.</param>
+    /// <param name="notifier">Invoked (outside the lock) when a release makes an empty pool non-empty, so an
+    /// owner can schedule Sweep().</param>
     ConnectionPool(std::size_t maxIdlePerKey, std::chrono::seconds idleTimeout,
-                   std::size_t maxTotalIdle = DefaultMaxTotalIdle)
+                   std::size_t maxTotalIdle = DefaultMaxTotalIdle, Notifier notifier = {})
         : m_maxIdlePerKey(maxIdlePerKey),
           m_idleTimeout(std::clamp(idleTimeout, std::chrono::seconds::zero(), MaxIdleTimeout)),
-          m_maxTotalIdle(maxTotalIdle) {}
-
-    /// <summary>
-    /// Called (outside the lock) when a release makes an empty pool non-empty, so an owner can schedule
-    /// Sweep().
-    /// </summary>
-    /// <param name="notifier">The notification to invoke; replaces any previous one.</param>
-    void SetNotifier(Notifier notifier) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_notifier = std::move(notifier);
-        m_hasNotifier = true;
-    }
+          m_maxTotalIdle(maxTotalIdle), m_notifier(std::move(notifier)) {}
 
     /// <summary>
     /// Closes connections idle past the timeout without needing a request to arrive.
@@ -271,7 +262,7 @@ class ConnectionPool {
             LruList& list;
             ~DisposeOnExit() { list.clear_and_dispose(NodeDisposer{}); }
         } disposeRetired{retired};
-        std::optional<Notifier> notify;
+        bool notify = false;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             const auto now = Clock::now();
@@ -318,12 +309,10 @@ class ConnectionPool {
                 }
                 retired.push_back(oldest);
             }
-            if (wasEmpty && m_hasNotifier) {
-                notify = m_notifier;
-            }
+            notify = wasEmpty;
         }
         if (notify) {
-            (*notify)();
+            m_notifier();
         }
     }
 
@@ -463,8 +452,7 @@ class ConnectionPool {
     std::size_t m_maxIdlePerKey;
     std::chrono::seconds m_idleTimeout;
     std::size_t m_maxTotalIdle;
-    Notifier m_notifier;
-    bool m_hasNotifier = false;
+    const Notifier m_notifier;
     mutable std::mutex m_mutex;
     boost::unordered_node_map<ConnectionKey<Stream>, Origin, ConnectionKeyHash<Stream>, ConnectionKeyEqual<Stream>>
         m_origins;

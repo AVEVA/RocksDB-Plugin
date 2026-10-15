@@ -129,14 +129,8 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// <param name="options">The TLS, pooling, and concurrency settings to build from.</param>
     BasicHttpClientCore(asio::io_context& runtime, const HttpClientOptions& options)
         : context_(runtime), m_tlsContext(std::make_shared<asio::ssl::context>(asio::ssl::context::tls_client)),
-          m_plainPool(std::make_shared<PlainConnectionPool>(options.GetMaxIdleConnectionsPerHost(),
-                                                            options.GetIdleConnectionTimeout())),
-          m_tlsPool(std::make_shared<TlsConnectionPool>(options.GetMaxIdleConnectionsPerHost(),
-                                                        options.GetIdleConnectionTimeout())),
-          m_sweeper(std::make_shared<IdleSweeper>(m_plainPool, m_tlsPool, options.GetIdleConnectionTimeout())) {
-        m_sweeper->BindSelf(m_sweeper);
-        m_plainPool->SetNotifier(SweeperNotifier(m_sweeper));
-        m_tlsPool->SetNotifier(SweeperNotifier(m_sweeper));
+          m_sweeper(IdleSweeper::Create(options.GetMaxIdleConnectionsPerHost(), options.GetIdleConnectionTimeout())),
+          m_plainPool(m_sweeper->PlainPool()), m_tlsPool(m_sweeper->TlsPool()) {
         m_tlsContext->set_options(asio::ssl::context::default_workarounds | asio::ssl::context::no_sslv2 |
                                   asio::ssl::context::no_sslv3 | asio::ssl::context::no_tlsv1 |
                                   asio::ssl::context::no_tlsv1_1);
@@ -392,11 +386,11 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
 
     asio::io_context& context_;
     std::shared_ptr<asio::ssl::context> m_tlsContext;
+    std::shared_ptr<IdleSweeper> m_sweeper;
     std::shared_ptr<PlainConnectionPool> m_plainPool;
     std::shared_ptr<TlsConnectionPool> m_tlsPool;
     std::size_t m_maxPerOrigin = 0;
-    std::shared_ptr<Limiter> m_limiter;     // Null when no per-origin cap is configured.
-    std::shared_ptr<IdleSweeper> m_sweeper; // Last: stops scheduling sweeps before the pools it sweeps go away.
+    std::shared_ptr<Limiter> m_limiter; // Null when no per-origin cap is configured.
 };
 /// <summary>
 /// The client's owner-facing handle. The real state lives in a shared Core so that limiter callbacks racing
