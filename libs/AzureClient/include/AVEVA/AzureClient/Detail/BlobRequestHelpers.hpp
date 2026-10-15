@@ -487,7 +487,8 @@ template <class T>
 }
 
 // Authorization material captured (by value) for the lifetime of a single logical request,
-// including all of its retry attempts. Precedence: SAS (in URL) > SharedKey > TokenCredential.
+// including all of its retry attempts. Exactly one of SAS (in URL), SharedKey or TokenCredential, or none;
+// otherwise construction of the client throws std::invalid_argument.
 struct RequestAuth {
     enum class Kind : std::uint8_t { None, SharedKey, Token };
 

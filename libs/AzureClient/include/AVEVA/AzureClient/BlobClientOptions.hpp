@@ -47,7 +47,8 @@ struct BlobClientOptions {
     // Already URL-encoded `key=value` pairs joined by '&'; one leading '?' is tolerated and stripped.
     std::string SasToken;
 
-    // Authorization precedence is SAS > SharedKey > TokenCredential.
+    // Supply exactly one of SasToken, a shared key or a TokenCredential, or none (anonymous); supplying more than one
+    // makes construction throw std::invalid_argument.
     // TokenCredential requires an https ServiceEndpoint (an http endpoint is rejected with
     // std::invalid_argument) unless the host is loopback (localhost, 127.0.0.1, [::1]).
     std::vector<std::string> TokenScopes{"https://storage.azure.com/.default"};
@@ -66,7 +67,8 @@ struct BlobClientOptions {
 struct BlobContainerClientOptions {
     std::string ServiceEndpoint;
     std::string ContainerName;
-    // Authorization precedence is SAS > SharedKey > TokenCredential (see BlobClientOptions).
+    // Exactly one of SasToken, a shared key or a TokenCredential, or none; otherwise construction throws
+    // std::invalid_argument (see BlobClientOptions).
     // TokenCredential requires https unless the host is loopback (see BlobClientOptions).
     std::string SasToken;
     std::vector<std::string> TokenScopes{"https://storage.azure.com/.default"};
@@ -82,7 +84,8 @@ struct BlobContainerClientOptions {
 
 struct BlobServiceClientOptions {
     std::string ServiceEndpoint;
-    // Authorization precedence is SAS > SharedKey > TokenCredential (see BlobClientOptions).
+    // Exactly one of SasToken, a shared key or a TokenCredential, or none; otherwise construction throws
+    // std::invalid_argument (see BlobClientOptions).
     // TokenCredential requires https unless the host is loopback (see BlobClientOptions).
     std::string SasToken;
     std::vector<std::string> TokenScopes{"https://storage.azure.com/.default"};
