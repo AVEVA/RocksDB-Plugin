@@ -153,5 +153,3 @@ class ReadableFileImpl : public BasicReadableFileImpl<PageBlobClient> {
     using BasicReadableFileImpl<PageBlobClient>::BasicReadableFileImpl;
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
-
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.ipp"

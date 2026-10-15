@@ -89,5 +89,3 @@ class LockFileImpl : public BasicLockFileImpl<PageBlobClient> {
     using BasicLockFileImpl<PageBlobClient>::BasicLockFileImpl;
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
-
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.ipp"

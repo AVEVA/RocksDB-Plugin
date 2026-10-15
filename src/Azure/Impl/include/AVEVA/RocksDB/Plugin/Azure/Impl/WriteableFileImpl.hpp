@@ -99,5 +99,3 @@ class WriteableFileImpl : public BasicWriteableFileImpl<PageBlobClient> {
     using BasicWriteableFileImpl<PageBlobClient>::BasicWriteableFileImpl;
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
-
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.ipp"

@@ -62,5 +62,3 @@ class ReadWriteFileImpl : public BasicReadWriteFileImpl<PageBlobClient> {
     using BasicReadWriteFileImpl<PageBlobClient>::BasicReadWriteFileImpl;
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
-
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.ipp"

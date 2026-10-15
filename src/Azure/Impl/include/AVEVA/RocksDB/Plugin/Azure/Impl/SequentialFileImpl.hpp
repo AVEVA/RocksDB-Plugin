@@ -44,5 +44,3 @@ class SequentialFileImpl : public BasicSequentialFileImpl<PageBlobClient> {
     using BasicSequentialFileImpl<PageBlobClient>::BasicSequentialFileImpl;
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
-
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/SequentialFileImpl.ipp"

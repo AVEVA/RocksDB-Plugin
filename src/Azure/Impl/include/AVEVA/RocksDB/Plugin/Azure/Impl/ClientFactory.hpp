@@ -97,5 +97,3 @@ CreatePipelinesServiceClient<::AVEVA::HttpClient>(const std::shared_ptr<ClientRu
                                                   const std::string&, const std::string&, const std::string&,
                                                   const std::string&);
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl::ClientFactory
-
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientFactory.ipp"

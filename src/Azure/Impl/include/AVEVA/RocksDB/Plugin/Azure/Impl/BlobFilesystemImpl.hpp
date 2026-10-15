@@ -224,5 +224,3 @@ class BlobFilesystemImpl : public BasicBlobFilesystemImpl<::AVEVA::HttpClient> {
     using BasicBlobFilesystemImpl<::AVEVA::HttpClient>::BasicBlobFilesystemImpl;
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
-
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.ipp"

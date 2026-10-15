@@ -21,14 +21,18 @@ add_executable(aveva-rocksdb-plugin-azure-impl-tests
     BlobHelpersTests.cpp
     TokenCredentialsTests.cpp
     PublicHeadersTests.cpp
+    FakeInstantiations.cpp
 )
 
 target_link_libraries(aveva-rocksdb-plugin-azure-impl-tests PRIVATE GTest::gtest GTest::gmock aveva-rocksdb-plugin-azure aveva-rocksdb-plugin-azure-impl aveva-rocksdb-plugin-core-mocks aveva::azure-client-testing)
 if(MSVC)
     target_compile_options(aveva-rocksdb-plugin-azure-impl-tests PRIVATE /bigobj)
 endif()
-# The file adapter template is internal, so the tests that run it over fakes reach it through the source tree.
-target_include_directories(aveva-rocksdb-plugin-azure-impl-tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../src/Azure")
+# The template bodies (*.ipp) are private to the library, so the tests that instantiate them over fakes reach them
+# through the source tree.
+target_include_directories(aveva-rocksdb-plugin-azure-impl-tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../src/Azure"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../src/Azure/Impl")
 include(GoogleTest)
 gtest_discover_tests(aveva-rocksdb-plugin-azure-impl-tests DISCOVERY_TIMEOUT 15)
 
