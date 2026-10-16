@@ -21,6 +21,9 @@ namespace AVEVA::Private {
 /// <param name="tlsContext">The context to configure; must not have been used for a connection yet.</param>
 /// <param name="options">The TLS version, verification mode, and trust roots to apply.</param>
 /// <exception cref="std::runtime_error">The requested TLS version could not be configured.</exception>
+/// <exception cref="boost::system::system_error">A configured CA file, directory or PEM could not be used
+/// (a std::runtime_error as well); reported here so a bad trust setting fails client construction, not the first
+/// request.</exception>
 void ConfigureTlsContext(boost::asio::ssl::context& tlsContext, const HttpClientOptions& options);
 
 /// <summary>

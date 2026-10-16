@@ -5,8 +5,14 @@
 
 #include "AVEVA/HttpClient/HttpClientOptions.hpp"
 
-#include <openssl/ssl.h>
+#include <boost/system/system_error.hpp>
 
+#include <openssl/err.h>
+#include <openssl/pem.h>
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
+
+#include <filesystem>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -21,6 +27,31 @@ struct SessionDeleter {
 };
 
 using UniqueSession = std::unique_ptr<SSL_SESSION, SessionDeleter>;
+
+// Keeps the underlying error code and adds which setting failed, so a bad option is easy to find.
+void ThrowIfFailed(const boost::system::error_code& error, const std::string& what) {
+    if (error) {
+        throw boost::system::system_error(error, what);
+    }
+}
+
+struct BioDeleter {
+    void operator()(BIO* bio) const noexcept { BIO_free(bio); }
+};
+
+int CountPemCertificates(const std::string& pem) {
+    const std::unique_ptr<BIO, BioDeleter> bio(BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size())));
+    if (!bio) {
+        return 0;
+    }
+    int count = 0;
+    while (X509* certificate = PEM_read_bio_X509(bio.get(), nullptr, nullptr, nullptr)) {
+        X509_free(certificate);
+        ++count;
+    }
+    ERR_clear_error(); // The loop always ends on a read error, normally just the end of the input.
+    return count;
+}
 
 // Sessions remembered per origin ("host:service") for one SSL_CTX. Shared by every connection of the
 // owning client, so access is serialized.
@@ -158,17 +189,39 @@ void ConfigureTlsContext(boost::asio::ssl::context& tlsContext, const HttpClient
     if (options.GetVerifyPeer()) {
         tlsContext.set_verify_mode(boost::asio::ssl::verify_peer);
         if (!options.GetCaFile().empty()) {
-            tlsContext.load_verify_file(options.GetCaFile());
+            boost::system::error_code error;
+            tlsContext.load_verify_file(options.GetCaFile(), error);
+            ThrowIfFailed(error, "Unable to load the TLS CA file '" + options.GetCaFile() + "'");
         }
         if (!options.GetCaDirectory().empty()) {
-            tlsContext.add_verify_path(options.GetCaDirectory());
+            // OpenSSL only looks inside a CA directory when verifying, so a bad path would otherwise surface as a
+            // verification failure on the first request.
+            if (std::error_code directoryError;
+                !std::filesystem::is_directory(options.GetCaDirectory(), directoryError)) {
+                throw boost::system::system_error(
+                    boost::system::error_code(boost::system::errc::not_a_directory, boost::system::generic_category()),
+                    "The TLS CA directory '" + options.GetCaDirectory() + "' is not a directory");
+            }
+            boost::system::error_code error;
+            tlsContext.add_verify_path(options.GetCaDirectory(), error);
+            ThrowIfFailed(error, "Unable to use the TLS CA directory '" + options.GetCaDirectory() + "'");
         }
         if (!options.GetCaPem().empty()) {
             const auto& pem = options.GetCaPem();
-            tlsContext.add_certificate_authority(boost::asio::buffer(pem.data(), pem.size()));
+            // add_certificate_authority silently accepts text that holds no certificate at all.
+            if (CountPemCertificates(pem) == 0) {
+                throw boost::system::system_error(
+                    boost::system::error_code(boost::system::errc::invalid_argument, boost::system::generic_category()),
+                    "The TLS CA PEM does not contain a readable certificate");
+            }
+            boost::system::error_code error;
+            tlsContext.add_certificate_authority(boost::asio::buffer(pem.data(), pem.size()), error);
+            ThrowIfFailed(error, "Unable to load the TLS CA PEM");
         }
         if (options.GetCaFile().empty() && options.GetCaDirectory().empty() && options.GetCaPem().empty()) {
-            tlsContext.set_default_verify_paths();
+            boost::system::error_code error;
+            tlsContext.set_default_verify_paths(error);
+            ThrowIfFailed(error, "Unable to load the default TLS CA paths");
         }
     } else {
         tlsContext.set_verify_mode(boost::asio::ssl::verify_none);
