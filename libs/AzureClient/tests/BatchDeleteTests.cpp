@@ -95,7 +95,9 @@ void RespondToBatches(FakeHttpClient& http, std::function<PartOutcome(const std:
     std::optional<BatchOutcome> outcome;
     client.DeleteBlobsAsync(std::move(names), options,
                             [&outcome](BatchOutcome result) { outcome = std::move(result); });
-    EXPECT_TRUE(http.RunUntil([&] { return outcome.has_value(); }));
+    if (!http.RunUntil([&] { return outcome.has_value(); })) {
+        throw std::runtime_error("DeleteBlobsAsync did not complete");
+    }
     return outcome.value();
 }
 

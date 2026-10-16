@@ -83,7 +83,7 @@ TEST(RetryTests, MaxRetriesAtIntMaxDoesNotOverflow) {
         cb.MarkInvoked();
     });
 
-    EXPECT_TRUE(httpClient.WaitForRequest(2));
+    ASSERT_TRUE(httpClient.WaitForRequest(2));
     httpClient.Poll();
 
     EXPECT_EQ(httpClient.RequestCount(), 2U);
@@ -116,7 +116,7 @@ TEST(RetryTests, Retries_OnTransientThenSucceeds) {
     });
 
     // Wait for the retry to occur without sleeping.
-    EXPECT_TRUE(httpClient.WaitForRequest(2));
+    ASSERT_TRUE(httpClient.WaitForRequest(2));
     // Run remaining handlers
     httpClient.Poll();
 
