@@ -682,15 +682,6 @@ void ApplyBlobRequestConditions(HttpRequest& request, const Models::BlobRequestC
     }
 }
 
-void ApplyBlobHttpHeadersForUpload(HttpRequest& request, const Models::BlobHttpHeaders& headers) {
-    AddHeaderIfNotEmpty(request, XMsBlobContentTypeHeaderName, headers.ContentType);
-    AddHeaderIfNotEmpty(request, XMsBlobContentMd5HeaderName, headers.ContentMd5);
-    AddHeaderIfNotEmpty(request, XMsBlobCacheControlHeaderName, headers.CacheControl);
-    AddHeaderIfNotEmpty(request, XMsBlobContentEncodingHeaderName, headers.ContentEncoding);
-    AddHeaderIfNotEmpty(request, XMsBlobContentLanguageHeaderName, headers.ContentLanguage);
-    AddHeaderIfNotEmpty(request, XMsBlobContentDispositionHeaderName, headers.ContentDisposition);
-}
-
 bool IsValidMetadataName(std::string_view name) noexcept {
     const auto isAsciiLetter = [](char c) noexcept { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); };
     if (name.empty() || (!isAsciiLetter(name.front()) && name.front() != '_')) {

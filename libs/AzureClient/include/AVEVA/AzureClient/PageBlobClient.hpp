@@ -276,45 +276,12 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     template <class THandler>
     void GetPageRangesAsyncImpl(const GetPageRangesOptions& options, THandler completion,
                                 AzureRequestOptions requestOptions) {
-        const auto fail = [&](std::string message) {
-            Private::FailInvalidArgument<Models::GetPageRangesResult>(this->Http(), std::move(completion),
-                                                                      std::move(message));
-        };
-        std::optional<std::string> rangeHeader;
-        if (options.Range.has_value()) {
-            if (Private::ValidateOrFail<Models::GetPageRangesResult>(
-                    this->Http(), completion, Private::ValidatePageAligned(options.Range->Offset, "offset"))) {
-                return;
-            }
-            if (!options.Range->Length.has_value()) {
-                // An open-ended window is the same as no window for a whole-blob scan from the offset.
-                rangeHeader = "bytes=" + std::to_string(options.Range->Offset) + "-";
-            } else {
-                if (Private::ValidateOrFail<Models::GetPageRangesResult>(
-                        this->Http(), completion, Private::ValidatePageAligned(*options.Range->Length, "length"))) {
-                    return;
-                }
-                const auto header =
-                    Private::BuildPageWriteRangeHeaderValue(options.Range->Offset, *options.Range->Length);
-                if (!header.has_value()) {
-                    return fail(header.error());
-                }
-                rangeHeader = *header;
-            }
-        }
-
         std::vector<std::pair<std::string, std::string>> queryParameters{{"comp", "pagelist"}};
         if (!options.Marker.empty()) {
             queryParameters.emplace_back("marker", options.Marker);
         }
-        if (options.MaxResults.has_value()) {
-            queryParameters.emplace_back("maxresults", std::to_string(*options.MaxResults));
-        }
         HttpRequest request =
             Private::BuildBlobRequest(this->Target(), HttpMethod::Get, Private::BuildQueryString(queryParameters));
-        if (rangeHeader.has_value()) {
-            Private::AddHeader(request, Private::XMsRangeHeaderName, *rangeHeader);
-        }
         Private::ApplyBlobRequestConditions(request, options.Conditions);
 
         Private::SendAndParse<Models::GetPageRangesResult>(this->Http(), this->Target(), std::move(request),
@@ -327,9 +294,7 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
         HttpRequest request = Private::BuildBlobRequest(this->Target(), HttpMethod::Put);
         Private::AddHeader(request, Private::XMsBlobTypeHeaderName, Private::PageBlobTypeValue);
         Private::AddHeader(request, Private::XMsBlobContentLengthHeaderName, std::to_string(contentLength));
-        Private::ApplyBlobHttpHeadersForUpload(request, options.HttpHeaders);
         Private::ApplyMetadata(request, options.Metadata);
-        Private::AddHeaderIfNotEmpty(request, Private::XMsAccessTierHeaderName, options.AccessTier.ToString());
         Private::ApplyBlobRequestConditions(request, options.Conditions);
         return request;
     }
@@ -392,7 +357,7 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     void UploadPagesCoreAsync(std::uint64_t offset, std::span<const std::byte> content,
                               std::shared_ptr<const void> keepAlive, const UploadPagesOptions& options,
                               THandler completion, AzureRequestOptions requestOptions) {
-        auto request = BuildUploadPagesRequest(offset, content.size(), options, completion);
+        auto request = BuildUploadPagesRequest(offset, content.size(), completion);
         if (!request.has_value()) {
             return;
         }
@@ -408,7 +373,7 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     template <class THandler>
     void UploadPagesStringAsyncImpl(std::uint64_t offset, std::string content, const UploadPagesOptions& options,
                                     THandler completion, AzureRequestOptions requestOptions) {
-        auto request = BuildUploadPagesRequest(offset, content.size(), options, completion);
+        auto request = BuildUploadPagesRequest(offset, content.size(), completion);
         if (!request.has_value()) {
             return;
         }
@@ -420,7 +385,6 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     // error to `completion` (which is left usable only for that purpose) and returns nullopt.
     template <class THandler>
     [[nodiscard]] std::optional<HttpRequest> BuildUploadPagesRequest(std::uint64_t offset, std::size_t contentSize,
-                                                                     const UploadPagesOptions& options,
                                                                      THandler& completion) {
         if (Private::ValidateOrFail<Models::UploadPagesResult>(this->Http(), completion,
                                                                Private::ValidatePageAligned(offset, "offset")) ||
@@ -438,7 +402,6 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
         HttpRequest request = Private::BuildBlobRequest(this->Target(), HttpMethod::Put, "comp=page");
         Private::AddHeader(request, Private::XMsPageWriteHeaderName, Private::PageWriteUpdateValue);
         Private::AddHeader(request, Private::XMsRangeHeaderName, *rangeHeader);
-        Private::AddHeaderIfNotEmpty(request, Private::ContentMd5HeaderName, options.ContentMd5);
         return request;
     }
 
@@ -489,9 +452,7 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
         Private::AddHeader(request, Private::XMsCopySourceHeaderName, sourceUrl);
         Private::AddHeader(request, Private::XMsSourceRangeHeaderName, *sourceRangeHeader);
         Private::AddHeaderIfNotEmpty(request, Private::XMsSourceIfMatchHeaderName, options.SourceIfMatch);
-        if (!options.SourceAuthorization.empty()) {
-            Private::AddHeader(request, Private::XMsCopySourceAuthorizationHeaderName, options.SourceAuthorization);
-        } else if (options.AuthorizeSourceWithClientCredential) {
+        if (options.AuthorizeSourceWithClientCredential) {
             Private::AddHeader(request, Private::XMsCopySourceAuthorizationHeaderName,
                                Private::CopySourceClientCredentialMarker);
         }

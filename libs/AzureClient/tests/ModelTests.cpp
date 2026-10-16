@@ -38,7 +38,6 @@ using AVEVA::AzureClient::AcquireLeaseOptions;
 using AVEVA::AzureClient::CreatePageBlobOptions;
 using AVEVA::AzureClient::DeleteBlobOptions;
 using AVEVA::AzureClient::ResizePageBlobOptions;
-using AVEVA::AzureClient::Models::AccessTier;
 using AVEVA::AzureClient::Models::LeaseDurationType;
 using AVEVA::AzureClient::Models::LeaseState;
 using AVEVA::AzureClient::Models::LeaseStatus;
@@ -71,7 +70,6 @@ void ExpectMalformedExtendedHeadersAreRejected() {
     for (const auto& [name, value] :
          std::vector<std::pair<std::string, std::string>>{{"x-ms-creation-time", "yesterday"},
                                                           {"x-ms-server-encrypted", "maybe"},
-                                                          {"x-ms-access-tier-inferred", "1"},
                                                           {"x-ms-blob-sequence-number", "-1"},
                                                           {"x-ms-is-current-version", "yes"}}) {
         ExpectMalformedExtendedHeaderIsRejected(name, value);
@@ -102,8 +100,6 @@ TEST(ModelTests, GetPropertiesParsesExtendedHeaders) {
                                  {"Content-Disposition", "attachment; filename=a.txt"},
                                  {"x-ms-blob-type", "AppendBlob"},
                                  {"x-ms-creation-time", "Wed, 01 Oct 2025 10:00:00 GMT"},
-                                 {"x-ms-access-tier", "Cool"},
-                                 {"x-ms-access-tier-inferred", "true"},
                                  {"x-ms-lease-status", "locked"},
                                  {"x-ms-lease-state", "leased"},
                                  {"x-ms-lease-duration", "infinite"},
@@ -120,8 +116,6 @@ TEST(ModelTests, GetPropertiesParsesExtendedHeaders) {
     EXPECT_EQ(properties.ContentDisposition, "attachment; filename=a.txt");
     ASSERT_TRUE(properties.CreatedOn.has_value());
     EXPECT_EQ(*properties.CreatedOn, *Private::ParseHttpDateHeader("Wed, 01 Oct 2025 10:00:00 GMT"));
-    EXPECT_EQ(properties.AccessTier, AccessTier::Cool());
-    EXPECT_EQ(properties.AccessTierInferred, std::optional<bool>{true});
     EXPECT_EQ(properties.LeaseStatus, LeaseStatus::Locked);
     EXPECT_EQ(properties.LeaseState, LeaseState::Leased);
     EXPECT_EQ(properties.LeaseDuration, LeaseDurationType::Infinite);
@@ -135,8 +129,6 @@ TEST(ModelTests, GetPropertiesLeavesAbsentExtendedFieldsUnset) {
     const auto properties = Private::ParseBlobProperties(HttpResponse{200, {{"ETag", "\"0x1\""}}, ""});
 
     EXPECT_FALSE(properties.CreatedOn.has_value());
-    EXPECT_TRUE(properties.AccessTier.empty());
-    EXPECT_FALSE(properties.AccessTierInferred.has_value());
     EXPECT_EQ(properties.LeaseStatus, LeaseStatus::Unknown);
     EXPECT_FALSE(properties.ServerEncrypted.has_value());
     EXPECT_FALSE(properties.IsCurrentVersion.has_value());
@@ -158,8 +150,6 @@ TEST(ModelTests, ListBlobsParsesExtendedPropertiesAndVersionSiblings) {
     <Content-Disposition>inline</Content-Disposition>
     <x-ms-blob-sequence-number>3</x-ms-blob-sequence-number>
     <BlobType>PageBlob</BlobType>
-    <AccessTier>Archive</AccessTier>
-    <AccessTierInferred>false</AccessTierInferred>
     <LeaseStatus>unlocked</LeaseStatus>
     <LeaseState>available</LeaseState>
     <ServerEncrypted>true</ServerEncrypted>
@@ -175,35 +165,9 @@ TEST(ModelTests, ListBlobsParsesExtendedPropertiesAndVersionSiblings) {
     EXPECT_EQ(properties.ContentLanguage, "de");
     EXPECT_EQ(properties.ContentDisposition, "inline");
     EXPECT_EQ(properties.SequenceNumber, std::optional<std::uint64_t>{3});
-    EXPECT_EQ(properties.AccessTier, AccessTier::Archive());
-    EXPECT_EQ(properties.AccessTierInferred, std::optional<bool>{false});
     EXPECT_EQ(properties.LeaseStatus, LeaseStatus::Unlocked);
     EXPECT_EQ(properties.LeaseState, LeaseState::Available);
     EXPECT_EQ(properties.ServerEncrypted, std::optional<bool>{true});
-}
-
-TEST(ModelTests, CreatePageBlobSendsContentEncodingLanguageAndDisposition) {
-    FakeHttpClient httpClient;
-    PageBlobClient client{httpClient, MakeBlobClientOptions()};
-
-    CreatePageBlobOptions options;
-    options.HttpHeaders.ContentEncoding = "gzip";
-    options.HttpHeaders.ContentLanguage = "fr";
-    options.HttpHeaders.ContentDisposition = "attachment";
-    options.AccessTier = AccessTier::Cold();
-    client.CreateAsync(512U, std::move(options), IgnoreResult);
-    httpClient.Poll();
-
-    const auto& request = httpClient.LastRequest();
-    EXPECT_EQ(Header(request, "x-ms-blob-content-encoding"), "gzip");
-    EXPECT_EQ(Header(request, "x-ms-blob-content-language"), "fr");
-    EXPECT_EQ(Header(request, "x-ms-blob-content-disposition"), "attachment");
-    EXPECT_EQ(Header(request, "x-ms-access-tier"), "Cold");
-
-    client.CreateAsync(512U, IgnoreResult);
-    httpClient.Poll();
-    EXPECT_FALSE(HasHeader(httpClient.LastRequest(), "x-ms-blob-content-encoding"));
-    EXPECT_FALSE(HasHeader(httpClient.LastRequest(), "x-ms-access-tier"));
 }
 
 TEST(ModelTests, SharedKeyStringToSignIncludesContentEncodingAndLanguage) {
@@ -250,20 +214,4 @@ TEST(ModelTests, ResizeUsesResizePageBlobOptionsConditions) {
 
     EXPECT_EQ(Header(httpClient.LastRequest(), "x-ms-blob-content-length"), "1024");
     EXPECT_EQ(Header(httpClient.LastRequest(), "If-Match"), "\"etag\"");
-}
-
-TEST(ModelTests, ExtensibleEnumComparesInBothOrdersAndKeepsEmbeddedNulls) {
-    const AccessTier tier = "Hot";
-    EXPECT_TRUE(tier == "Hot");
-    EXPECT_TRUE("Hot" == tier);
-    EXPECT_FALSE("Cool" == tier);
-    EXPECT_TRUE(tier == AccessTier::Hot());
-
-    const AccessTier fromString = std::string{"Cool"};
-    EXPECT_EQ(fromString, AccessTier::Cool());
-
-    const AccessTier withNull{std::string_view{"a\0b", 3}};
-    EXPECT_EQ(withNull.ToString().size(), 3U);
-    const std::string_view embedded{"a\0b", 3};
-    EXPECT_TRUE(embedded == withNull);
 }

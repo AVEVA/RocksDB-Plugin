@@ -378,24 +378,11 @@ TEST(PageBlobClientTests, UploadPagesFromUrlAsync_SendsCopySourceHeadersAndNoBod
     EXPECT_EQ(request.GetUrl(),
               "https://storageaccount.blob.core.windows.net/disks/disk.vhd?comp=page&sv=2025-01-05&sig=fakesig");
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-page-write"), "update");
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-range"), "bytes=1024-3071");
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-copy-source"),
               "https://account.blob.core.windows.net/files/src.sst");
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-source-range"), "bytes=512-2559");
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-source-if-match"), "\"etag\"");
     EXPECT_TRUE(request.GetBody().empty());
-}
-
-TEST(PageBlobClientTests, UploadPagesFromUrlAsync_ExplicitSourceAuthorizationIsForwarded) {
-    FakeHttpClient httpClient;
-    PageBlobClient client{httpClient, BuildOptions()};
-
-    client.UploadPagesFromUrlAsync(0, "https://a/b/c", 0, 512,
-                                   AVEVA::AzureClient::UploadPagesFromUrlOptions{.SourceAuthorization = "Bearer abc"},
-                                   [](std::expected<Response<UploadPagesResult>, BlobStorageError>) {});
-
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.LastRequest(), "x-ms-copy-source-authorization"),
-              "Bearer abc");
 }
 
 TEST(PageBlobClientTests, UploadPagesFromUrlAsync_ClientCredentialIsForwardedAsBearerToken) {
@@ -488,15 +475,13 @@ TEST(PageBlobClientTests, GetPageRangesAsync_ParsesRangesAndHeaders) {
     EXPECT_TRUE(FakeHttpClient::FindHeaderValue(request, "x-ms-range").empty());
 }
 
-TEST(PageBlobClientTests, GetPageRangesAsync_SendsRangeMarkerAndMaxResults) {
+TEST(PageBlobClientTests, GetPageRangesAsync_SendsMarker) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{200, {}, "<PageList />"};
     PageBlobClient client{httpClient, BuildOptions()};
 
     AVEVA::AzureClient::GetPageRangesOptions options;
-    options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 1024, .Length = 2048};
     options.Marker = "abc";
-    options.MaxResults = 10;
     bool invoked = false;
     client.GetPageRangesAsync(
         options,
@@ -509,29 +494,7 @@ TEST(PageBlobClientTests, GetPageRangesAsync_SendsRangeMarkerAndMaxResults) {
 
     EXPECT_TRUE(invoked);
     const auto& request = httpClient.LastRequest();
-    EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-range"), "bytes=1024-3071");
     EXPECT_NE(request.GetUrl().find("marker=abc"), std::string::npos);
-    EXPECT_NE(request.GetUrl().find("maxresults=10"), std::string::npos);
-}
-
-TEST(PageBlobClientTests, GetPageRangesAsync_RejectsUnalignedRangeWithoutSending) {
-    FakeHttpClient httpClient;
-    PageBlobClient client{httpClient, BuildOptions()};
-
-    AVEVA::AzureClient::GetPageRangesOptions options;
-    options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 100, .Length = 512};
-    bool invoked = false;
-    client.GetPageRangesAsync(
-        options,
-        [&](std::expected<Response<AVEVA::AzureClient::Models::GetPageRangesResult>, BlobStorageError> result) {
-            ASSERT_FALSE(result.has_value());
-            EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
-            invoked = true;
-        });
-    httpClient.Poll();
-
-    EXPECT_TRUE(invoked);
-    EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
 TEST(PageBlobClientTests, GetPageRangesAsync_MalformedRangeIsInvalidResponse) {

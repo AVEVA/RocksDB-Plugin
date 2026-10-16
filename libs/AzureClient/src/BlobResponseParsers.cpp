@@ -143,8 +143,6 @@ struct BlobPropertyNames {
     std::string_view ContentLanguage;
     std::string_view ContentDisposition;
     std::string_view CreatedOn;
-    std::string_view AccessTier;
-    std::string_view AccessTierInferred;
     std::string_view LeaseStatus;
     std::string_view LeaseState;
     std::string_view LeaseDuration;
@@ -156,8 +154,6 @@ constexpr BlobPropertyNames HeaderPropertyNames{.ContentEncoding = "Content-Enco
                                                 .ContentLanguage = "Content-Language",
                                                 .ContentDisposition = "Content-Disposition",
                                                 .CreatedOn = "x-ms-creation-time",
-                                                .AccessTier = "x-ms-access-tier",
-                                                .AccessTierInferred = "x-ms-access-tier-inferred",
                                                 .LeaseStatus = "x-ms-lease-status",
                                                 .LeaseState = "x-ms-lease-state",
                                                 .LeaseDuration = "x-ms-lease-duration",
@@ -168,8 +164,6 @@ constexpr BlobPropertyNames XmlPropertyNames{.ContentEncoding = "Content-Encodin
                                              .ContentLanguage = "Content-Language",
                                              .ContentDisposition = "Content-Disposition",
                                              .CreatedOn = "Creation-Time",
-                                             .AccessTier = "AccessTier",
-                                             .AccessTierInferred = "AccessTierInferred",
                                              .LeaseStatus = "LeaseStatus",
                                              .LeaseState = "LeaseState",
                                              .LeaseDuration = "LeaseDuration",
@@ -184,8 +178,6 @@ void ParseExtendedBlobProperties(Models::BlobProperties& properties, const BlobP
     properties.ContentLanguage = std::string{get(names.ContentLanguage)};
     properties.ContentDisposition = std::string{get(names.ContentDisposition)};
     properties.CreatedOn = ParseOptionalHttpDate(get(names.CreatedOn), names.CreatedOn);
-    properties.AccessTier = std::string{get(names.AccessTier)};
-    properties.AccessTierInferred = ParseOptionalBool(get(names.AccessTierInferred), names.AccessTierInferred);
     properties.LeaseStatus = ParseLeaseStatus(get(names.LeaseStatus));
     properties.LeaseState = ParseLeaseState(get(names.LeaseState));
     properties.LeaseDuration = ParseLeaseDurationType(get(names.LeaseDuration));
@@ -806,14 +798,6 @@ namespace {
     return decoded->decode();
 }
 
-[[nodiscard]] Models::BlobTags ParseBlobTagsXml(const XmlNode& tags) {
-    Models::BlobTags result;
-    const XmlNode* tagSet = FindChildByLocalName(tags, "TagSet");
-    for (const XmlNode* tag : GetChildrenByLocalName(tagSet != nullptr ? *tagSet : tags, "Tag")) {
-        result.insert_or_assign(GetChildTextOrEmpty(*tag, "Key"), GetChildTextOrEmpty(*tag, "Value"));
-    }
-    return result;
-}
 } // namespace
 
 Models::ListBlobsResult ParseListBlobsResultXml(std::string_view xml) {
@@ -825,7 +809,6 @@ Models::ListBlobsResult ParseListBlobsResultXml(std::string_view xml) {
     }
 
     result.Prefix = GetChildTextOrEmpty(*root, "Prefix");
-    result.Delimiter = GetChildTextOrEmpty(*root, "Delimiter");
     result.Marker = GetChildTextOrEmpty(*root, "Marker");
     result.NextMarker = GetChildTextOrEmpty(*root, "NextMarker");
 
@@ -833,11 +816,6 @@ Models::ListBlobsResult ParseListBlobsResultXml(std::string_view xml) {
         for (const XmlNode* block : GetChildrenByLocalName(*blobs, "Blob")) {
             Models::BlobItem item;
             item.Name = GetBlobItemName(*block);
-            item.Deleted = ParseOptionalBool(GetChildTextOrEmpty(*block, "Deleted"), "Deleted").value_or(false);
-            if (const XmlNode* tags = FindChildByLocalName(*block, "Tags"); tags != nullptr) {
-                item.Tags = ParseBlobTagsXml(*tags);
-            }
-            item.Snapshot = GetChildTextOrEmpty(*block, "Snapshot");
             if (const XmlNode* properties = FindChildByLocalName(*block, "Properties"); properties != nullptr) {
                 item.Properties = ParseBlobPropertiesXml(*properties);
             }
@@ -850,10 +828,6 @@ Models::ListBlobsResult ParseListBlobsResultXml(std::string_view xml) {
                 item.Properties.Metadata = ParseMetadataXml(*metadata);
             }
             result.Blobs.push_back(std::move(item));
-        }
-
-        for (const XmlNode* block : GetChildrenByLocalName(*blobs, "BlobPrefix")) {
-            result.BlobPrefixes.push_back(GetBlobItemName(*block));
         }
     }
 

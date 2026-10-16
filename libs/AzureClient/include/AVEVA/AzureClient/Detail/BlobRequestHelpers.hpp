@@ -243,12 +243,6 @@ inline constexpr std::string_view AuthorizationHeaderName = "Authorization";
 inline constexpr std::string_view XMsMetaHeaderPrefix = "x-ms-meta-";
 inline constexpr std::string_view XMsBlobTypeHeaderName = "x-ms-blob-type";
 inline constexpr std::string_view XMsBlobContentLengthHeaderName = "x-ms-blob-content-length";
-inline constexpr std::string_view XMsBlobContentTypeHeaderName = "x-ms-blob-content-type";
-inline constexpr std::string_view XMsBlobContentMd5HeaderName = "x-ms-blob-content-md5";
-inline constexpr std::string_view XMsBlobCacheControlHeaderName = "x-ms-blob-cache-control";
-inline constexpr std::string_view XMsBlobContentEncodingHeaderName = "x-ms-blob-content-encoding";
-inline constexpr std::string_view XMsBlobContentLanguageHeaderName = "x-ms-blob-content-language";
-inline constexpr std::string_view XMsBlobContentDispositionHeaderName = "x-ms-blob-content-disposition";
 inline constexpr std::string_view XMsPageWriteHeaderName = "x-ms-page-write";
 inline constexpr std::string_view XMsRangeHeaderName = "x-ms-range";
 inline constexpr std::string_view XMsCopySourceHeaderName = "x-ms-copy-source";
@@ -259,7 +253,6 @@ inline constexpr std::string_view XMsCopySourceAuthorizationHeaderName = "x-ms-c
 // credential the client itself authorizes with (a fresh token on every retry), or removes when that credential
 // is not a bearer token.
 inline constexpr std::string_view CopySourceClientCredentialMarker = "{client-credential}";
-inline constexpr std::string_view XMsAccessTierHeaderName = "x-ms-access-tier";
 inline constexpr std::string_view XMsLeaseIdHeaderName = "x-ms-lease-id";
 inline constexpr std::string_view XMsLeaseActionHeaderName = "x-ms-lease-action";
 inline constexpr std::string_view XMsLeaseDurationHeaderName = "x-ms-lease-duration";
@@ -392,7 +385,6 @@ struct ParsedContentRange {
 void AddHeader(HttpRequest& request, std::string_view name, std::string_view value);
 void AddHeaderIfNotEmpty(HttpRequest& request, std::string_view name, std::string_view value);
 void ApplyBlobRequestConditions(HttpRequest& request, const Models::BlobRequestConditions& conditions);
-void ApplyBlobHttpHeadersForUpload(HttpRequest& request, const Models::BlobHttpHeaders& headers);
 void ApplyMetadata(HttpRequest& request, const Models::MetadataMap& metadata);
 // Azure requires metadata names to be C# identifiers: [A-Za-z_][A-Za-z0-9_]*.
 [[nodiscard]] bool IsValidMetadataName(std::string_view name) noexcept;

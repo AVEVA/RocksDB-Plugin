@@ -54,19 +54,6 @@ TEST(HeaderInjectionTests, MetadataValueWithCrLfIsRejected) {
     ExpectRejected(httpClient, result);
 }
 
-TEST(HeaderInjectionTests, ContentTypeWithCrLfIsRejected) {
-    FakeHttpClient httpClient;
-    PageBlobClient client{httpClient, MakeBlobClientOptions()};
-    CreatePageBlobOptions options;
-    options.HttpHeaders.ContentType = Injected;
-
-    using Result = std::expected<AVEVA::AzureClient::Response<AVEVA::AzureClient::Models::CreatePageBlobResult>,
-                                 AVEVA::AzureClient::BlobStorageError>;
-    std::optional<Result> result;
-    client.CreateAsync(512U, std::move(options), [&](Result value) { result = std::move(value); });
-    ExpectRejected(httpClient, result);
-}
-
 TEST(HeaderInjectionTests, LeaseIdWithCrLfIsRejected) {
     FakeHttpClient httpClient;
     BlobClient client{httpClient, MakeBlobClientOptions()};

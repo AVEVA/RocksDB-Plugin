@@ -75,10 +75,7 @@ void VerifyMalformedListBlobsStatusAndMessage(const BlobStorageError& error, boo
     callbackInvoked = true;
 }
 
-void VerifyListBlobsWithOptionsMarkers(const ListBlobsResult& result) {
-    EXPECT_EQ(result.Prefix, "pref/");
-    EXPECT_EQ(result.Delimiter, "/");
-}
+void VerifyListBlobsWithOptionsMarkers(const ListBlobsResult& result) { EXPECT_EQ(result.Prefix, "pref/"); }
 
 void VerifyListBlobsWithOptionsPaging(const ListBlobsResult& result) {
     EXPECT_EQ(result.Marker, "page-1");
@@ -88,12 +85,6 @@ void VerifyListBlobsWithOptionsPaging(const ListBlobsResult& result) {
 void VerifyListBlobsWithOptionsItems(const ListBlobsResult& result) {
     ASSERT_EQ(result.Blobs.size(), 1U);
     EXPECT_EQ(result.Blobs.at(0).Name, "pref/blob.txt");
-}
-
-void VerifyListBlobsWithOptionsPrefixes(const ListBlobsResult& result, CallbackExpectation& callback) {
-    ASSERT_EQ(result.BlobPrefixes.size(), 1U);
-    EXPECT_EQ(result.BlobPrefixes.at(0), "pref/folder/");
-    callback.MarkInvoked();
 }
 
 void ListBlobsAndVerifyMalformedXml(BlobContainerClient& client, bool& callbackInvoked) {
@@ -107,7 +98,6 @@ void ListBlobsAndVerifyMalformedXml(BlobContainerClient& client, bool& callbackI
 void ListBlobsWithOptionsAndVerifyResult(BlobContainerClient& client, CallbackExpectation& callback) {
     AVEVA::AzureClient::ListBlobsOptions options;
     options.Prefix = "pref/";
-    options.Delimiter = "/";
     options.Marker = "page-1";
     options.MaxResults = 7U;
     options.IncludeMetadata = true;
@@ -117,7 +107,7 @@ void ListBlobsWithOptionsAndVerifyResult(BlobContainerClient& client, CallbackEx
         VerifyListBlobsWithOptionsMarkers(result->Value());
         VerifyListBlobsWithOptionsPaging(result->Value());
         VerifyListBlobsWithOptionsItems(result->Value());
-        VerifyListBlobsWithOptionsPrefixes(result->Value(), callback);
+        callback.MarkInvoked();
     });
 }
 
@@ -270,7 +260,7 @@ TEST(BlobContainerClientTests, GetPageBlobClient_BuildsBlobScopedClient) {
               "https://storageaccount.blob.core.windows.net/images/disk.vhd?sv=2025-01-05&sig=fakesig");
 }
 
-TEST(BlobContainerClientTests, ListBlobsAsync_OptionsOverloadIncludesAllSupportedQueryParametersAndParsesPagination) {
+TEST(BlobContainerClientTests, ListBlobsAsync_OptionsOverloadIncludesSupportedQueryParametersAndParsesPagination) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{200, MakeCanonicalSuccessHeaders(),
                                                 R"(<?xml version="1.0" encoding="utf-8"?>
@@ -290,11 +280,10 @@ TEST(BlobContainerClientTests, ListBlobsAsync_OptionsOverloadIncludesAllSupporte
     ListBlobsWithOptionsAndVerifyResult(client, callback);
 
     httpClient.Poll(); // drive the posted (async) completion (T26)
-    EXPECT_EQ(
-        httpClient.LastRequest().GetUrl(),
-        "https://storageaccount.blob.core.windows.net/"
-        "images?restype=container&comp=list&prefix=pref%2F&delimiter=%2F&marker=page-1&maxresults=7&include=metadata&"
-        "sv=2025-01-05&sig=fakesig");
+    EXPECT_EQ(httpClient.LastRequest().GetUrl(),
+              "https://storageaccount.blob.core.windows.net/"
+              "images?restype=container&comp=list&prefix=pref%2F&marker=page-1&maxresults=7&include=metadata&"
+              "sv=2025-01-05&sig=fakesig");
 }
 
 TEST(BlobContainerClientTests, CreateIfNotExists_TreatsAlreadyExistsAsNonFatal) {

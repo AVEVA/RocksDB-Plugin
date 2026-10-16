@@ -92,17 +92,6 @@ constexpr auto Ignore = [](auto&&...) {};
     return metadata;
 }
 
-[[nodiscard]] Models::BlobHttpHeaders HttpHeaders() {
-    Models::BlobHttpHeaders headers;
-    headers.ContentType = "text/plain";
-    headers.ContentEncoding = "gzip";
-    headers.ContentLanguage = "en";
-    headers.CacheControl = "no-cache";
-    headers.ContentDisposition = "inline";
-    headers.ContentMd5 = "bWQ1";
-    return headers;
-}
-
 [[nodiscard]] Pairs Concat(Pairs first, const Pairs& second) {
     first.insert(first.end(), second.begin(), second.end());
     return first;
@@ -325,41 +314,35 @@ std::vector<RequestShapeCase> TypedBlobCases() {
     const std::string blob = "/images/photo.png";
     std::vector<RequestShapeCase> cases;
 
-    cases.push_back({.Name = "Page_Create",
-                     .Start =
-                         [](Clients& c) {
-                             CreatePageBlobOptions o;
-                             o.HttpHeaders = HttpHeaders();
-                             o.Metadata = Metadata();
-                             o.AccessTier = Models::AccessTier::P10();
-                             o.Conditions = FullConditions();
-                             c.Page.CreateAsync(1024, std::move(o), Ignore);
-                         },
-                     .Method = HttpMethod::Put,
-                     .Path = blob,
-                     .Query = {},
-                     .Headers = Concat({{"x-ms-blob-type", "PageBlob"},
-                                        {"x-ms-blob-content-length", "1024"},
-                                        {"x-ms-blob-content-type", "text/plain"},
-                                        {"x-ms-meta-Project", "alpha"},
-                                        {"x-ms-access-tier", "P10"}},
-                                       ConditionHeaders()),
-                     .AbsentHeaders = {},
-                     .Body = std::nullopt});
+    cases.push_back(
+        {.Name = "Page_Create",
+         .Start =
+             [](Clients& c) {
+                 CreatePageBlobOptions o;
+                 o.Metadata = Metadata();
+                 o.Conditions = FullConditions();
+                 c.Page.CreateAsync(1024, std::move(o), Ignore);
+             },
+         .Method = HttpMethod::Put,
+         .Path = blob,
+         .Query = {},
+         .Headers = Concat(
+             {{"x-ms-blob-type", "PageBlob"}, {"x-ms-blob-content-length", "1024"}, {"x-ms-meta-Project", "alpha"}},
+             ConditionHeaders()),
+         .AbsentHeaders = {},
+         .Body = std::nullopt});
     cases.push_back(
         {.Name = "Page_UploadPages",
          .Start =
              [](Clients& c) {
                  UploadPagesOptions o;
-                 o.ContentMd5 = "bWQ1";
                  o.Conditions = FullConditions();
                  c.Page.UploadPagesAsync(512, std::string(512, 'x'), std::move(o), Ignore);
              },
          .Method = HttpMethod::Put,
          .Path = blob,
          .Query = {{"comp", "page"}},
-         .Headers = Concat({{"x-ms-page-write", "update"}, {"x-ms-range", "bytes=512-1023"}, {"Content-MD5", "bWQ1"}},
-                           ConditionHeaders()),
+         .Headers = Concat({{"x-ms-page-write", "update"}, {"x-ms-range", "bytes=512-1023"}}, ConditionHeaders()),
          .AbsentHeaders = {},
          .Body = std::string(512, 'x')});
     cases.push_back({.Name = "Page_Resize",
@@ -391,36 +374,27 @@ std::vector<RequestShapeCase> ContainerCases() {
                      .Headers = {},
                      .AbsentHeaders = {},
                      .Body = std::nullopt});
-    cases.push_back(
-        {.Name = "Container_ListBlobs",
-         .Start =
-             [](Clients& c) {
-                 ListBlobsOptions o;
-                 o.Prefix = "dir/a b";
-                 o.Delimiter = "/";
-                 o.Marker = "m1";
-                 o.MaxResults = 10;
-                 o.IncludeMetadata = true;
-                 o.IncludeSnapshots = true;
-                 o.IncludeVersions = true;
-                 o.IncludeDeleted = true;
-                 o.IncludeTags = true;
-                 o.IncludeUncommittedBlobs = true;
-                 o.IncludeCopy = true;
-                 c.Container.ListBlobsAsync(std::move(o), Ignore);
-             },
-         .Method = HttpMethod::Get,
-         .Path = container,
-         .Query = {{"restype", "container"},
-                   {"comp", "list"},
-                   {"prefix", "dir%2Fa%20b"},
-                   {"delimiter", "%2F"},
-                   {"marker", "m1"},
-                   {"maxresults", "10"},
-                   {"include", "copy%2Cdeleted%2Cmetadata%2Csnapshots%2Ctags%2Cuncommittedblobs%2Cversions"}},
-         .Headers = {},
-         .AbsentHeaders = {},
-         .Body = std::nullopt});
+    cases.push_back({.Name = "Container_ListBlobs",
+                     .Start =
+                         [](Clients& c) {
+                             ListBlobsOptions o;
+                             o.Prefix = "dir/a b";
+                             o.Marker = "m1";
+                             o.MaxResults = 10;
+                             o.IncludeMetadata = true;
+                             c.Container.ListBlobsAsync(std::move(o), Ignore);
+                         },
+                     .Method = HttpMethod::Get,
+                     .Path = container,
+                     .Query = {{"restype", "container"},
+                               {"comp", "list"},
+                               {"prefix", "dir%2Fa%20b"},
+                               {"marker", "m1"},
+                               {"maxresults", "10"},
+                               {"include", "metadata"}},
+                     .Headers = {},
+                     .AbsentHeaders = {},
+                     .Body = std::nullopt});
     return cases;
 }
 

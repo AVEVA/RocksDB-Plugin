@@ -151,7 +151,6 @@ TEST(ParserRobustnessTests, ListBlobs_MissingOptionalFieldsUseDefaults) {
 
     const auto empty = ParseListBlobsResultXml("<EnumerationResults/>");
     EXPECT_TRUE(empty.Blobs.empty());
-    EXPECT_TRUE(empty.BlobPrefixes.empty());
 }
 
 TEST(ParserRobustnessTests, ListBlobs_MalformedNumbersAndDatesThrow) {
@@ -176,7 +175,6 @@ TEST(ParserRobustnessTests, ListBlobs_NamespacesEntitiesAndCdataAreDecoded) {
     EXPECT_EQ(result.Blobs.at(0).Name, "a&b<c>\"'AB");
     EXPECT_EQ(result.Blobs.at(0).Properties.ContentLength, 7U);
     EXPECT_EQ(result.Blobs.at(1).Name, "x<y");
-    EXPECT_EQ(result.BlobPrefixes, (std::vector<std::string>{"dir&/"}));
     EXPECT_EQ(result.NextMarker, "m&2");
 }
 

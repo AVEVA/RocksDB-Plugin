@@ -219,32 +219,14 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContai
         if (!options.Prefix.empty()) {
             queryParameters.emplace_back("prefix", options.Prefix);
         }
-        if (!options.Delimiter.empty()) {
-            queryParameters.emplace_back("delimiter", options.Delimiter);
-        }
         if (!options.Marker.empty()) {
             queryParameters.emplace_back("marker", options.Marker);
         }
         if (options.MaxResults.has_value()) {
             queryParameters.emplace_back("maxresults", std::to_string(*options.MaxResults));
         }
-        std::string include;
-        for (const auto& [enabled, name] : {
-                 std::pair{options.IncludeCopy, "copy"},
-                 std::pair{options.IncludeDeleted, "deleted"},
-                 std::pair{options.IncludeMetadata, "metadata"},
-                 std::pair{options.IncludeSnapshots, "snapshots"},
-                 std::pair{options.IncludeTags, "tags"},
-                 std::pair{options.IncludeUncommittedBlobs, "uncommittedblobs"},
-                 std::pair{options.IncludeVersions, "versions"},
-             }) {
-            if (enabled) {
-                include += include.empty() ? "" : ",";
-                include += name;
-            }
-        }
-        if (!include.empty()) {
-            queryParameters.emplace_back("include", std::move(include));
+        if (options.IncludeMetadata) {
+            queryParameters.emplace_back("include", "metadata");
         }
 
         HttpRequest request =

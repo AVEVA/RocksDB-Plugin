@@ -725,7 +725,6 @@ TEST(BlobRequestHelpersTests, ParseListBlobsResultXml_HandlesEntitiesCdataCommen
     EXPECT_EQ(result.Blobs.at(0).Name, "part1part2<raw>&");
     EXPECT_EQ(result.Blobs.at(0).Properties.Metadata.at("Key1"), "v<1>");
     EXPECT_EQ(result.Blobs.at(0).Properties.Metadata.at("Key2"), "v2");
-    EXPECT_EQ(result.BlobPrefixes, (std::vector<std::string>{"dir/"}));
     EXPECT_TRUE(result.NextMarker.empty());
 
     EXPECT_THROW(static_cast<void>(ParseListBlobsResultXml("<EnumerationResults><Blobs></EnumerationResults>")),

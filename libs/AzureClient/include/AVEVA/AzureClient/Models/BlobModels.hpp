@@ -36,8 +36,6 @@ struct MetadataKeyCaseInsensitiveLess {
 };
 
 using MetadataMap = std::map<std::string, std::string, MetadataKeyCaseInsensitiveLess>;
-// Blob index tags (case-sensitive keys).
-using BlobTags = std::map<std::string, std::string>;
 
 enum class BlobType : std::uint8_t { Unknown, BlockBlob, PageBlob, AppendBlob };
 
@@ -47,159 +45,12 @@ enum class LeaseState : std::uint8_t { Unknown, Available, Leased, Expired, Brea
 
 enum class LeaseDurationType : std::uint8_t { Unknown, Infinite, Fixed };
 
-// Base for string-valued service enumerations ("extensible enums"): the documented values are
-// named accessors on the derived type, but any string the service returns round-trips unchanged,
-// so new service values never get lost. An empty value means "not set". Derived types stay
-// implicitly constructible from a string so `options.AccessTier = "Hot"` keeps working.
-template <class Derived> class ExtensibleEnum {
-  public:
-    [[nodiscard]] const std::string& ToString() const noexcept { return m_value; }
-
-    [[nodiscard]] bool empty() const noexcept { return m_value.empty(); }
-
-    friend bool operator==(const ExtensibleEnum&, const ExtensibleEnum&) = default;
-
-    // Lets callers compare against a literal without materialising a temporary, and keeps
-    // `tier == "Hot"` working now that the base constructors are protected.
-    friend bool operator==(const ExtensibleEnum& lhs, std::string_view rhs) noexcept { return lhs.m_value == rhs; }
-
-    friend bool operator==(std::string_view lhs, const ExtensibleEnum& rhs) noexcept { return rhs.m_value == lhs; }
-
-  private:
-    // Private (with `Derived` as the only friend) so an unrelated type cannot inherit from
-    // someone else's instantiation of this CRTP base.
-    ExtensibleEnum() = default;
-
-    explicit ExtensibleEnum(std::string value) : m_value(std::move(value)) {}
-
-    friend Derived;
-
-    std::string m_value;
-};
-
-class AccessTier : public ExtensibleEnum<AccessTier> {
-  public:
-    AccessTier() = default;
-
-    template <class T>
-        requires std::convertible_to<const T&, std::string_view>
-    AccessTier(const T& value) : ExtensibleEnum(std::string{std::string_view{value}}) {}
-
-    // The documented tiers. These are accessors rather than static data members so that no
-    // std::string is constructed before main(), where a failure could not be caught.
-    [[nodiscard]] static const AccessTier& Hot();
-    [[nodiscard]] static const AccessTier& Cool();
-    [[nodiscard]] static const AccessTier& Cold();
-    [[nodiscard]] static const AccessTier& Archive();
-    [[nodiscard]] static const AccessTier& Premium();
-    [[nodiscard]] static const AccessTier& P4();
-    [[nodiscard]] static const AccessTier& P6();
-    [[nodiscard]] static const AccessTier& P10();
-    [[nodiscard]] static const AccessTier& P15();
-    [[nodiscard]] static const AccessTier& P20();
-    [[nodiscard]] static const AccessTier& P30();
-    [[nodiscard]] static const AccessTier& P40();
-    [[nodiscard]] static const AccessTier& P50();
-    [[nodiscard]] static const AccessTier& P60();
-    [[nodiscard]] static const AccessTier& P70();
-    [[nodiscard]] static const AccessTier& P80();
-};
-
-inline const AccessTier& AccessTier::Hot() {
-    static const AccessTier Value{"Hot"};
-    return Value;
-}
-
-inline const AccessTier& AccessTier::Cool() {
-    static const AccessTier Value{"Cool"};
-    return Value;
-}
-
-inline const AccessTier& AccessTier::Cold() {
-    static const AccessTier Value{"Cold"};
-    return Value;
-}
-
-inline const AccessTier& AccessTier::Archive() {
-    static const AccessTier Value{"Archive"};
-    return Value;
-}
-
-inline const AccessTier& AccessTier::Premium() {
-    static const AccessTier Value{"Premium"};
-    return Value;
-}
-
-inline const AccessTier& AccessTier::P4() {
-    static const AccessTier Value{"P4"};
-    return Value;
-}
-
-inline const AccessTier& AccessTier::P6() {
-    static const AccessTier Value{"P6"};
-    return Value;
-}
-
-inline const AccessTier& AccessTier::P10() {
-    static const AccessTier Value{"P10"};
-    return Value;
-}
-
-inline const AccessTier& AccessTier::P15() {
-    static const AccessTier Value{"P15"};
-    return Value;
-}
-
-inline const AccessTier& AccessTier::P20() {
-    static const AccessTier Value{"P20"};
-    return Value;
-}
-
-inline const AccessTier& AccessTier::P30() {
-    static const AccessTier Value{"P30"};
-    return Value;
-}
-
-inline const AccessTier& AccessTier::P40() {
-    static const AccessTier Value{"P40"};
-    return Value;
-}
-
-inline const AccessTier& AccessTier::P50() {
-    static const AccessTier Value{"P50"};
-    return Value;
-}
-
-inline const AccessTier& AccessTier::P60() {
-    static const AccessTier Value{"P60"};
-    return Value;
-}
-
-inline const AccessTier& AccessTier::P70() {
-    static const AccessTier Value{"P70"};
-    return Value;
-}
-
-inline const AccessTier& AccessTier::P80() {
-    static const AccessTier Value{"P80"};
-    return Value;
-}
-
 struct BlobRequestConditions {
     std::string LeaseId;
     std::string IfMatch;
     std::string IfNoneMatch;
     std::optional<std::chrono::system_clock::time_point> IfModifiedSince;
     std::optional<std::chrono::system_clock::time_point> IfUnmodifiedSince;
-};
-
-struct BlobHttpHeaders {
-    std::string ContentType;
-    std::string ContentMd5;
-    std::string CacheControl;
-    std::string ContentEncoding;
-    std::string ContentLanguage;
-    std::string ContentDisposition;
 };
 
 struct BlobByteRange {
@@ -227,8 +78,6 @@ struct BlobProperties {
     BlobType Type = BlobType::Unknown;
     MetadataMap Metadata;
     std::optional<std::chrono::system_clock::time_point> CreatedOn;
-    Models::AccessTier AccessTier;
-    std::optional<bool> AccessTierInferred;
     Models::LeaseStatus LeaseStatus = Models::LeaseStatus::Unknown;
     Models::LeaseState LeaseState = Models::LeaseState::Unknown;
     Models::LeaseDurationType LeaseDuration = Models::LeaseDurationType::Unknown;
@@ -255,20 +104,12 @@ struct DownloadBlobToResult {
 
 struct BlobItem {
     std::string Name;
-    // Informational only; see BlobProperties::VersionId.
-    std::string Snapshot;
     BlobProperties Properties;
-    // Set when listed with ListBlobsOptions::IncludeDeleted and the blob is soft-deleted.
-    bool Deleted = false;
-    // Populated when listed with ListBlobsOptions::IncludeTags.
-    BlobTags Tags;
 };
 
 struct ListBlobsResult {
     std::vector<BlobItem> Blobs;
-    std::vector<std::string> BlobPrefixes;
     std::string Prefix;
-    std::string Delimiter;
     std::string Marker;
     std::string NextMarker;
 };

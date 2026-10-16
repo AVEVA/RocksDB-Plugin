@@ -20,31 +20,20 @@ struct CreateBlobContainerOptions {
 
 struct ListBlobsOptions {
     std::string Prefix;
-    std::string Delimiter;
     std::string Marker;
     // Count of items per page (not a total cap); the service allows 1..5000 and rejects larger values
     // with a service error; unset uses the service default (5000).
     std::optional<std::uint32_t> MaxResults;
-    // Datasets to include in the listing (the `include` query parameter).
+    // Adds the blobs' metadata to the listing (the `include=metadata` query parameter).
     bool IncludeMetadata = false;
-    bool IncludeSnapshots = false;
-    bool IncludeVersions = false;
-    bool IncludeDeleted = false;
-    bool IncludeTags = false;
-    bool IncludeUncommittedBlobs = false;
-    bool IncludeCopy = false;
 };
 
 struct CreatePageBlobOptions {
-    Models::BlobHttpHeaders HttpHeaders;
     Models::MetadataMap Metadata;
-    // Empty omits the x-ms-access-tier header (the service default applies).
-    Models::AccessTier AccessTier;
     Models::BlobRequestConditions Conditions;
 };
 
 struct UploadPagesOptions {
-    std::string ContentMd5;
     Models::BlobRequestConditions Conditions;
 };
 
@@ -52,12 +41,9 @@ struct UploadPagesOptions {
 struct UploadPagesFromUrlOptions {
     // Sent as x-ms-source-if-match: fails the copy with 412 when the source ETag has changed.
     std::string SourceIfMatch;
-    // The complete x-ms-copy-source-authorization value (for example "Bearer <token>") for a private source
-    // that is not addressed with a SAS.
-    std::string SourceAuthorization;
     // Authorizes the source with the same bearer token the client uses for the destination (renewed on
     // every retry). Needs a bearer-authorized client, with the source in a storage account that identity can
-    // read; ignored when SourceAuthorization is set. A SAS or Shared Key client has no bearer token to forward:
+    // read. A SAS or Shared Key client has no bearer token to forward:
     // address the source with a SAS URL instead.
     bool AuthorizeSourceWithClientCredential = false;
     // Conditions on the destination blob.
@@ -65,11 +51,8 @@ struct UploadPagesFromUrlOptions {
 };
 
 struct GetPageRangesOptions {
-    // Page-aligned window to inspect; unset covers the whole blob.
-    std::optional<Models::BlobByteRange> Range;
     // NextMarker from a previous truncated result.
     std::string Marker;
-    std::optional<std::uint32_t> MaxResults;
     Models::BlobRequestConditions Conditions;
 };
 
