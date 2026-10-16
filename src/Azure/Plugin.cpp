@@ -9,6 +9,7 @@
 
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/log/trivial.hpp>
 
 #include <functional>
 #include <memory>
@@ -167,7 +168,21 @@ class OwnedIoContext {
     std::thread m_thread;
 
   public:
-    OwnedIoContext() : m_thread([this] { m_context.run(); }) {}
+    // A handler that throws would otherwise end run() and kill the worker silently, leaving every later operation
+    // on this shared context to hang. Keep serving until the work guard is released and the queue drains.
+    OwnedIoContext()
+        : m_thread([this] {
+              for (;;) {
+                  try {
+                      m_context.run();
+                      return;
+                  } catch (const std::exception& ex) {
+                      BOOST_LOG_TRIVIAL(error) << "An io_context handler threw; continuing: " << ex.what();
+                  } catch (...) {
+                      BOOST_LOG_TRIVIAL(error) << "An io_context handler threw a non-standard exception; continuing";
+                  }
+              }
+          }) {}
     ~OwnedIoContext() {
         m_workGuard.reset();
         m_thread.join();
