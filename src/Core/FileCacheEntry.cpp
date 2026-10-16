@@ -35,7 +35,7 @@ void FileCacheEntry::unlink() {
     boost::intrusive::list_base_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>>::unlink();
 }
 
-bool FileCacheEntry::is_linked() {
+bool FileCacheEntry::is_linked() const {
     return boost::intrusive::list_base_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>>::is_linked();
 }
 } // namespace AVEVA::RocksDB::Plugin::Core

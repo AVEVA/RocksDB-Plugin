@@ -37,13 +37,9 @@ FileCache::~FileCache() {
 bool FileCache::HasFile(std::string_view filePath) const {
     std::scoped_lock lock(m_mutex);
     auto it = m_cache.find(filePath);
-#ifndef NDEBUG
-    auto result = std::find_if(m_entryList.begin(), m_entryList.end(),
-                               [&filePath](const FileCacheEntry& entry) { return entry.GetFilePath() == filePath; });
-    if (it != m_cache.end()) {
-        assert(result != m_entryList.end() && "FileCacheEntry should also be in the entry list");
-    }
-#endif
+    // The intrusive hook answers "is it in the entry list" in O(1); a list scan per call made Debug runs with large
+    // caches quadratic.
+    assert((it == m_cache.end() || it->second.is_linked()) && "FileCacheEntry should also be in the entry list");
     return it != m_cache.end();
 }
 

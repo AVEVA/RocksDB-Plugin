@@ -73,6 +73,6 @@ class FileCacheEntry
     std::shared_ptr<detail::CachedReadHandle> TakeReadHandle() noexcept;
 
     void unlink();
-    bool is_linked();
+    bool is_linked() const;
 };
 } // namespace AVEVA::RocksDB::Plugin::Core
