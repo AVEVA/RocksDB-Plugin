@@ -213,6 +213,19 @@ TEST(AzureErrorTranslatorTests, WritesFencedExceptionIsIOFenced) {
     EXPECT_FALSE(status.GetRetryable());
 }
 
+TEST(AzureErrorTranslatorTests, FencedExceptionRaisedFromAFilesystemOperationIsIOFenced) {
+    boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level> logger;
+    // BlobFilesystem::Guard delegates here from its catch-all, so fencing must not degrade to a generic IOError.
+    const auto status = [&] {
+        try {
+            throw WritesFencedException("Unable to ensure safe database access");
+        } catch (...) {
+            return AzureErrorTranslator::FromCurrentException(logger, "NewWritableFile");
+        }
+    }();
+    EXPECT_TRUE(status.IsIOFenced());
+}
+
 TEST(AzureErrorTranslatorTests, CapturedExceptionIsLoggedWithTheRequestIdAndTranslated) {
     namespace sinks = boost::log::sinks;
     auto stream = std::make_shared<std::ostringstream>();

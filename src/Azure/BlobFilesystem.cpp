@@ -109,12 +109,10 @@ template <class F> rocksdb::IOStatus BlobFilesystem::Guard(std::string_view oper
     } catch (const std::invalid_argument& ex) {
         BOOST_LOG_SEV(*m_logger, error) << operation << " rejected: " << ex.what();
         return rocksdb::IOStatus::InvalidArgument(ex.what());
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << operation << " failed: " << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
     } catch (...) {
-        BOOST_LOG_SEV(*m_logger, error) << operation << " failed with an unknown error";
-        return rocksdb::IOStatus::IOError(std::string("Unknown error when calling ") + std::string(operation));
+        // Everything else (fencing, generic and unknown exceptions) shares the translator's mapping so that
+        // filesystem-level operations report IOFenced just like file-level ones.
+        return AzureErrorTranslator::FromCurrentException(*m_logger, operation);
     }
 }
 
