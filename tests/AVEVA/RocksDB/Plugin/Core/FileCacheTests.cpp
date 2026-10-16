@@ -746,6 +746,38 @@ TEST_F(FileCacheTests, Download_PassesTheCachePathThroughWithoutNarrowing) {
     EXPECT_EQ(cacheDir / "1.sst", path);
 }
 
+TEST(FileCacheShutdownTests, DestroyingTheCacheWithQueuedDownloads_StopsWithoutHangingOrCrashing) {
+    // Arrange - the first download blocks while two more are queued behind it.
+    auto filesystem = std::make_shared<NiceMock<FilesystemMock>>();
+    auto containerClient = std::make_shared<ContainerClientMock>();
+    auto logger = std::make_shared<severity_logger_mt<severity_level>>();
+    std::promise<void> started;
+    Gate release;
+    std::atomic<int> downloads{0};
+    EXPECT_CALL(*containerClient, GetBlobSize(_)).WillRepeatedly(Return(1));
+    EXPECT_CALL(*containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly([&](auto&&...) {
+        if (++downloads == 1) {
+            started.set_value();
+            release.Wait();
+        }
+    });
+    auto cache = std::make_unique<FileCache>("tmp", 1000, containerClient, filesystem, logger);
+    for (const auto* name : {"1.sst", "2.sst", "3.sst"}) {
+        (void)cache->ReadFile(name, 0, 0, nullptr);
+        (void)cache->ReadFile(name, 0, 0, nullptr);
+    }
+    started.get_future().wait();
+
+    // Act - destruction must wait for the running download, then drop the queued ones.
+    auto destruction = std::async(std::launch::async, [&cache] { cache.reset(); });
+    EXPECT_EQ(destruction.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+    release.Open();
+
+    // Assert
+    ASSERT_EQ(destruction.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    destruction.get();
+}
+
 TEST(FileCacheShutdownTests, FailedDelete_IsRetriedOnceAtShutdown) {
     // Arrange
     auto filesystem = std::make_shared<NiceMock<FilesystemMock>>();
