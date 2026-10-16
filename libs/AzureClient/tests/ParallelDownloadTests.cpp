@@ -502,6 +502,40 @@ DownloadIntoThrowingSink(bool inlineWrites, bool throwOnReserve) {
 }
 } // namespace
 
+class DiscardingSink final : public AVEVA::AzureClient::Private::DownloadSink {
+  public:
+    [[nodiscard]] bool WritesInline() const noexcept override { return true; }
+
+    [[nodiscard]] bool Write(std::string /*data*/) override { return true; }
+};
+
+TEST(AC_R15_DownloadBufferCapTests, ChunksInFlightAreCappedByBytesNotJustByCount) {
+    using AVEVA::AzureClient::NoTokenCredential;
+    using AVEVA::AzureClient::Private::BasicBlobTarget;
+    constexpr std::size_t ChunkSize = std::size_t{64} * 1024U * 1024U;
+
+    FakeHttpClient httpClient;
+    BasicBlobTarget<NoTokenCredential> target{AVEVA::AzureClient::Private::MakeBlobTarget(BuildOptions()), nullptr};
+    DownloadToOptions options;
+    options.ChunkSize = ChunkSize;
+    options.Concurrency = 16;
+    httpClient.EnqueueDeferredResponse(
+        HttpResponse{206, MakeCanonicalSuccessHeaders({{"Content-Range", "bytes 0-67108863/1073741824"}}),
+                     std::string(ChunkSize, 'x')});
+    for (int i = 0; i < 16; ++i) {
+        httpClient.EnqueueDeferredResponse(
+            HttpResponse{206, MakeCanonicalSuccessHeaders({{"Content-Range", "bytes 0-0/1073741824"}}), "x"});
+    }
+    AVEVA::AzureClient::Private::DownloadDetail::StartDownload(
+        httpClient, target, options, std::make_shared<DiscardingSink>(),
+        [](AVEVA::AzureClient::Private::DownloadDetail::SummaryResult) {}, AVEVA::AzureClient::AzureRequestOptions{});
+    ASSERT_TRUE(httpClient.RunUntil([&] { return httpClient.PendingCount() == 1U; }));
+    ASSERT_TRUE(httpClient.CompleteNext());
+    // 256 MiB of buffering at 64 MiB per chunk allows 4 chunk requests, not the 16 that Concurrency alone allows.
+    ASSERT_TRUE(httpClient.RunUntil([&] { return httpClient.PendingCount() >= 4U; }));
+    EXPECT_EQ(httpClient.PendingCount(), 4U);
+}
+
 TEST(AC_R05_DownloadSinkExceptionTests, NonStandardExceptionFromAnInlineWriteIsAnIoError) {
     const auto result = DownloadIntoThrowingSink(true, false);
     ASSERT_TRUE(result.has_value());

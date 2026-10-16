@@ -23,5 +23,8 @@ struct BlobTransferLimits {
     static constexpr std::size_t DefaultDownloadChunkSize = std::size_t{4} * 1024U * 1024U;
     // Client policy: headroom on top of the requested range length for each response body limit.
     static constexpr std::uint64_t ResponseBodySlack = std::uint64_t{64} * 1024U;
+    // Client policy: chunks in flight, buffered out of order or being written never exceed this many bytes, so a
+    // large ChunkSize combined with a high Concurrency cannot exhaust memory.
+    static constexpr std::uint64_t MaxBufferedDownloadBytes = std::uint64_t{256} * 1024U * 1024U;
 };
 } // namespace AVEVA::AzureClient::Private

@@ -66,6 +66,7 @@ void RunOnWriter(THttp& httpClient, const DownloadWriteScheduler& scheduler, std
 
 inline constexpr std::size_t DefaultDownloadChunkSize = BlobTransferLimits::DefaultDownloadChunkSize;
 inline constexpr std::uint64_t ResponseBodySlack = BlobTransferLimits::ResponseBodySlack;
+inline constexpr std::uint64_t MaxBufferedDownloadBytes = BlobTransferLimits::MaxBufferedDownloadBytes;
 
 // Tags the chunk length with its own type so it's never adjacent-and-same-type with the
 // chunk offset parameter.
@@ -133,7 +134,8 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
           m_requestOptions(requestOptions), m_sink(std::move(sink)), m_completion(std::move(completion)),
           m_parentSlot(m_requestOptions.GetCancellationSlot()),
           m_chunkSize(m_options.ChunkSize == 0U ? DefaultDownloadChunkSize : m_options.ChunkSize),
-          m_concurrency(std::max<std::size_t>(1U, m_options.Concurrency)) {}
+          m_concurrency(std::min(std::max<std::size_t>(1U, m_options.Concurrency),
+                                 std::max<std::size_t>(1U, MaxBufferedDownloadBytes / m_chunkSize))) {}
 
     void Start() {
         std::unique_lock lock(m_mutex);
@@ -495,6 +497,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
             // Take every chunk that is already contiguous so one writer task (and one hop back to the
             // I/O executor) covers the whole run instead of one pair of hops per chunk.
             std::vector<std::string> batch;
+            batch.reserve(m_ready.size() + 1U);
             batch.push_back(std::move(data));
             std::uint64_t next = *cursor;
             while (true) {
