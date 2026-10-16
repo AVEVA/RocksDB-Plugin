@@ -72,6 +72,9 @@ class FileCacheEntry
     // Detaches the handle (null if none) so the owner can close it outside its mutex.
     std::shared_ptr<detail::CachedReadHandle> TakeReadHandle() noexcept;
 
+  private:
+    // Intrusive-hook operations; only the owning cache, which holds its mutex, may relink an entry.
+    friend class FileCache;
     void unlink();
     bool is_linked() const;
 };
