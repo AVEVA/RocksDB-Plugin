@@ -33,33 +33,33 @@ class HttpResponse {
     /// The HTTP status code.
     /// </summary>
     /// <returns>The status code; 0 on a default-constructed response.</returns>
-    unsigned int GetStatus() const noexcept;
+    [[nodiscard]] unsigned int GetStatus() const noexcept;
 
     /// <summary>
     /// The response headers.
     /// </summary>
     /// <returns>The headers, in the order the server sent them.</returns>
-    const std::vector<HttpHeader>& GetHeaders() const& noexcept;
+    [[nodiscard]] const std::vector<HttpHeader>& GetHeaders() const& noexcept;
 
     /// <summary>
     /// Moves the headers out of an rvalue response, so a caller that owns the response can take them
     /// without copying.
     /// </summary>
     /// <returns>The headers; the response is left with none.</returns>
-    std::vector<HttpHeader> GetHeaders() && noexcept;
+    [[nodiscard]] std::vector<HttpHeader> GetHeaders() && noexcept;
 
     /// <summary>
     /// The response body.
     /// </summary>
     /// <returns>The fully buffered body; empty for a bodiless response.</returns>
-    const std::string& GetBody() const& noexcept;
+    [[nodiscard]] const std::string& GetBody() const& noexcept;
 
     /// <summary>
     /// Moves the body out of an rvalue response, so a caller that owns the response can take it
     /// without copying.
     /// </summary>
     /// <returns>The body; the response is left with none.</returns>
-    std::string GetBody() && noexcept;
+    [[nodiscard]] std::string GetBody() && noexcept;
 
     /// <summary>
     /// Appends a header to the response.
@@ -73,7 +73,7 @@ class HttpResponse {
     /// telling, for example, a certificate verification failure from a refused connection.
     /// </summary>
     /// <returns>The cause; empty on success or when the failure had no lower-level code.</returns>
-    std::error_code GetCause() const noexcept;
+    [[nodiscard]] std::error_code GetCause() const noexcept;
 
     /// <summary>
     /// Records the underlying transport error of a failed request.

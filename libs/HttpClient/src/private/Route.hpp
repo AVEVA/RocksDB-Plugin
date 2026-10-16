@@ -8,8 +8,12 @@
 #include "RequestValidation.hpp"
 #include "StreamTypes.hpp"
 
-#include <boost/url.hpp>
+#include <boost/url/parse.hpp>
+#include <boost/url/scheme.hpp>
+#include <boost/url/url_view.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <string>
 #include <system_error>
 
@@ -50,8 +54,14 @@ struct Route {
         route.Parsed = true;
         route.Error = ValidateRequest(request, options, *parsed);
         route.Tls = parsed->scheme_id() == urls::scheme::https;
-        route.Scheme = std::string(parsed->scheme());
+        // Scheme and DNS host names are case-insensitive, so they are folded here: the pool, limiter, DNS cache and TLS
+        // session keys are all derived from them and must not split one origin into several.
+        route.Scheme = route.Tls ? "https" : "http";
         route.Host = parsed->host_address();
+        if (parsed->host_type() == urls::host_type::name) {
+            std::ranges::transform(route.Host, route.Host.begin(),
+                                   [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        }
         route.Port = parsed->has_port() ? std::string(parsed->port()) : (route.Tls ? "443" : "80");
         route.HostIsName = parsed->host_type() == urls::host_type::name;
         route.Target = std::string(parsed->encoded_target());

@@ -20,25 +20,25 @@ class HttpRequestOptions {
     /// The deadline covering the whole request.
     /// </summary>
     /// <returns>The timeout; 30 seconds unless set otherwise.</returns>
-    std::chrono::milliseconds GetTimeout() const noexcept;
+    [[nodiscard]] std::chrono::milliseconds GetTimeout() const noexcept;
 
     /// <summary>
     /// The maximum response body size in bytes.
     /// </summary>
     /// <returns>The body limit; 8 MiB unless set otherwise.</returns>
-    std::uint64_t GetResponseBodyLimit() const noexcept;
+    [[nodiscard]] std::uint64_t GetResponseBodyLimit() const noexcept;
 
     /// <summary>
     /// The maximum combined size in bytes of the response status line and headers.
     /// </summary>
     /// <returns>The header limit; 64 KiB unless set otherwise.</returns>
-    std::uint32_t GetResponseHeaderLimit() const noexcept;
+    [[nodiscard]] std::uint32_t GetResponseHeaderLimit() const noexcept;
 
     /// <summary>
     /// The slot the request watches for cancellation.
     /// </summary>
     /// <returns>The slot, disconnected when none was set.</returns>
-    boost::asio::cancellation_slot GetCancellationSlot() const noexcept;
+    [[nodiscard]] boost::asio::cancellation_slot GetCancellationSlot() const noexcept;
 
     /// <summary>
     /// Sets the deadline covering the whole request.
@@ -74,7 +74,7 @@ class HttpRequestOptions {
     /// default because an attacker can truncate such a body undetected.
     /// </summary>
     /// <returns>True if truncated TLS bodies are accepted.</returns>
-    bool GetAcceptTruncatedTlsBody() const noexcept;
+    [[nodiscard]] bool GetAcceptTruncatedTlsBody() const noexcept;
 
     /// <summary>
     /// Opts in to accepting EOF-delimited bodies whose TLS stream ended without close_notify.

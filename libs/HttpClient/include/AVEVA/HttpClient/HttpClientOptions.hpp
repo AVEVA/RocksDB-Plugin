@@ -148,7 +148,9 @@ class HttpClientOptions {
 
     /// <summary>
     /// Caps in-flight requests per origin (scheme, host, port); further requests wait in FIFO order until one
-    /// finishes, and a waiting request still honors its cancellation slot.
+    /// finishes, and a waiting request still honors its cancellation slot. The request timeout counts from
+    /// submission, so queue time is part of it, but a waiting request is not woken when its timeout passes: it
+    /// completes with <c>HttpClientError::TimedOut</c>, without connecting, once it is given a slot.
     /// </summary>
     /// <param name="maxConnectionsPerHost">The per-origin cap; 0 (the default) means unlimited.</param>
     void SetMaxConnectionsPerHost(std::size_t maxConnectionsPerHost) noexcept;

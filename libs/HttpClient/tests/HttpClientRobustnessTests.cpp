@@ -933,4 +933,62 @@ TEST(HttpClientRobustness, CancellingTheSharedDnsLeaderStillCompletesEveryJoined
         EXPECT_NE(followerResult, std::make_error_code(std::errc::operation_canceled));
     }
 }
+
+TEST(HttpClientRobustness, MixedCaseSchemeReusesTheSameConnection) {
+    asio::io_context context;
+    auto client = AVEVA::HttpClient::Create(context);
+    ScriptedServer server(
+        context, [](int, const http::request<http::string_body>&) -> ServerAction { return {.Wire = OkResponse}; });
+    const auto port = server.Url("/").substr(std::string("http://127.0.0.1").size());
+
+    std::vector<std::error_code> errors;
+    client->SendAsync(MakeRequest("http://127.0.0.1" + port + "a"), AVEVA::HttpRequestOptions{},
+                      [&](std::error_code error, AVEVA::HttpResponse) {
+                          errors.push_back(error);
+                          client->SendAsync(MakeRequest("HtTp://127.0.0.1" + port + "b"), AVEVA::HttpRequestOptions{},
+                                            [&](std::error_code secondError, AVEVA::HttpResponse) {
+                                                errors.push_back(secondError);
+                                                server.Stop();
+                                            });
+                      });
+    RunBounded(context);
+
+    ASSERT_EQ(errors.size(), 2U);
+    EXPECT_FALSE(errors[0]);
+    EXPECT_FALSE(errors[1]);
+    EXPECT_EQ(server.Accepted(), 1);
+}
+
+TEST(HttpClientRobustness, RouteFoldsSchemeAndDnsHostCaseButKeepsTheTarget) {
+    const auto route =
+        AVEVA::Private::Route::Of(MakeRequest("HTTP://Example.COM:8080/Path?Q=1"), AVEVA::HttpRequestOptions{});
+
+    ASSERT_TRUE(route.Sendable());
+    EXPECT_EQ(route.Origin(), "http://example.com:8080");
+    EXPECT_EQ(route.Target, "/Path?Q=1");
+}
+
+TEST(HttpClientRobustness, ConnectingToAClosedPortFailsWithConnectFailed) {
+    asio::io_context context;
+    auto client = AVEVA::HttpClient::Create(context);
+
+    std::error_code result;
+    client->SendAsync(MakeRequest(HttpClientTests::ClosedLocalUrl()), AVEVA::HttpRequestOptions{},
+                      [&](std::error_code error, AVEVA::HttpResponse) { result = error; });
+    RunBounded(context);
+
+    EXPECT_EQ(result, AVEVA::make_error_code(AVEVA::HttpClientError::ConnectFailed));
+}
+
+TEST(HttpClientRobustness, UnresolvableHostFailsWithResolveFailed) {
+    asio::io_context context;
+    auto client = AVEVA::HttpClient::Create(context);
+
+    std::error_code result;
+    client->SendAsync(MakeRequest("http://no-such-host.invalid/"), AVEVA::HttpRequestOptions{},
+                      [&](std::error_code error, AVEVA::HttpResponse) { result = error; });
+    RunBounded(context);
+
+    EXPECT_EQ(result, AVEVA::make_error_code(AVEVA::HttpClientError::ResolveFailed));
+}
 } // namespace

@@ -18,7 +18,6 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/ssl/context.hpp>
 #include <boost/asio/strand.hpp>
-#include <boost/url.hpp>
 
 #include <algorithm>
 #include <atomic>

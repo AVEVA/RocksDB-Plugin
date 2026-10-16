@@ -27,13 +27,13 @@ class HttpHeader {
     /// The field name.
     /// </summary>
     /// <returns>The name, empty on a default-constructed header.</returns>
-    const std::string& GetName() const noexcept;
+    [[nodiscard]] const std::string& GetName() const noexcept;
 
     /// <summary>
     /// The field value.
     /// </summary>
     /// <returns>The value, empty on a default-constructed header.</returns>
-    const std::string& GetValue() const noexcept;
+    [[nodiscard]] const std::string& GetValue() const noexcept;
 
     /// <summary>
     /// Replaces the field name.
