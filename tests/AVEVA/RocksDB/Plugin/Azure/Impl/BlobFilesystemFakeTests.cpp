@@ -263,13 +263,14 @@ TEST_F(BlobFilesystemFakeTests, CrashDuringALargeRenameLeavesATemporaryBlobThatI
     EXPECT_EQ(Read("d/new"), LargeContent());
 }
 
-TEST_F(BlobFilesystemFakeTests, RenameCopiesInsideTheServiceWithoutDownloadingTheData) {
+// The filesystem authenticates with Shared Key, which cannot authorize a SAS-less copy source, so the rename copies
+// through the client without first sending a Put Page From URL that is bound to be refused.
+TEST_F(BlobFilesystemFakeTests, SharedKeyRenameCopiesThroughTheClientWithoutSendingAServerSideCopy) {
     Write("old.sst", LargeContent());
 
     m_fs->RenameFile(Path("old.sst"), Path("new.sst"));
 
-    EXPECT_FALSE(m_server->PageCopies.empty());
-    EXPECT_TRUE(m_server->Downloads.empty());
+    EXPECT_TRUE(m_server->PageCopies.empty());
     EXPECT_EQ(Read("new.sst"), LargeContent());
 }
 
@@ -588,7 +589,7 @@ TEST_P(RenameFailureTests, FailureWhileCopyingToANewDestinationLeavesNoPartialDe
 }
 
 INSTANTIATE_TEST_SUITE_P(CopyAndSizeSteps, RenameFailureTests,
-                         ::testing::Values(FakeBlobServer::Operation::UploadPagesFromUrl,
+                         ::testing::Values(FakeBlobServer::Operation::UploadPages,
                                            FakeBlobServer::Operation::SetMetadata));
 
 TEST_F(BlobFilesystemFakeTests, FailureToDeleteTheSourceKeepsTheNewDestinationAndLeavesNoTemporaryBlob) {

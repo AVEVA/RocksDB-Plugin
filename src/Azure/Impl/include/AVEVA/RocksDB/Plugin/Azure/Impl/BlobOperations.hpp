@@ -382,6 +382,11 @@ template <typename TBlob>
 [[nodiscard]] bool CopyPagesServerSide(const ClientRuntimeBase& runtime, TBlob& source, TBlob& destination,
                                        int64_t size, const std::string& etag) {
     runtime.ThrowIfWritesFenced();
+    // A destination that cannot forward a bearer token cannot authorize a SAS-less source either; the service would
+    // refuse the copy, so skip the doomed request and let the caller copy the bytes through the client.
+    if (!destination.CanForwardCredential() && !source.HasSasToken()) {
+        return false;
+    }
     const auto chunks = PlanPageCopy(source, size, etag);
     if (chunks.empty()) {
         return true;

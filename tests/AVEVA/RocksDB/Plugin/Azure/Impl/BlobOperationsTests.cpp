@@ -308,6 +308,22 @@ TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyReportsAnUnauthorizedSourceSoT
     EXPECT_EQ(1U, m_env.Blob->PageCopies.size());
 }
 
+TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyIsSkippedWhenNeitherSideCanAuthorizeTheSource) {
+    m_env.Fill(1024, 'q');
+    // Shared Key clients have no bearer token to forward and the source URL carries no SAS.
+    auto sharedKeyOptions = MakeBlobClientOptions("files", "000001.sst");
+    sharedKeyOptions.SasToken.clear();
+    sharedKeyOptions.SharedKey = {.AccountName = "account", .AccountKey = "a2V5"};
+    FakeBlobServer::BlobClientType source(m_env.Http, sharedKeyOptions);
+    sharedKeyOptions.BlobName = "copy.sst";
+    FakeBlobServer::BlobClientType destination(m_env.Http, sharedKeyOptions);
+    const auto requestsBefore = m_env.Blob->PageCopies.size();
+
+    EXPECT_FALSE(BlobOperations::CopyPagesServerSide(*m_env.Runtime, source, destination, 1024, m_env.Blob->ETag));
+
+    EXPECT_EQ(requestsBefore, m_env.Blob->PageCopies.size());
+}
+
 TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyFailsWhenTheSourceChangedSincePlanning) {
     m_env.Fill(1024, 'q');
     const auto destination = m_env.Blob->AddBlob("copy.sst", 1024);

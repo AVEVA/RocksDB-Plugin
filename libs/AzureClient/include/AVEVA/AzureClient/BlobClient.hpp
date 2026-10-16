@@ -92,6 +92,14 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
     // an identity key.
     [[nodiscard]] const std::string& ResourceUrl() const noexcept { return m_target->EncodedResource; }
 
+    // True when Url() carries a SAS token, so the blob can be named as a copy source without any other authorization.
+    [[nodiscard]] bool HasSasToken() const noexcept { return !m_target->Connection->SasToken.empty(); }
+
+    // True when this client authorizes with a bearer token that UploadPagesFromUrlOptions::
+    // AuthorizeSourceWithClientCredential can forward to the service. A SAS or Shared Key client cannot forward
+    // anything, so a copy from a source without a SAS is bound to be refused.
+    [[nodiscard]] bool CanForwardCredential() const noexcept { return m_target->Credential != nullptr; }
+
     // Request options (timeout, response body limit, cancellation slot) applied to every operation
     // that is not given its own via WithRequestOptions(...) or the trailing requestOptions argument.
     [[nodiscard]] const AzureRequestOptions& GetDefaultRequestOptions() const noexcept {
