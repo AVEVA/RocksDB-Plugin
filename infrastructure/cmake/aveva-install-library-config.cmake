@@ -34,11 +34,11 @@ function(aveva_install_library name)
   string(LENGTH "aveva-" prefix_length)
   string(SUBSTRING "${name}" ${prefix_length} -1 component_name)
 
-  message(STATUS "Target name: ${target_name}")
-  message(STATUS "Export name: ${export_name}")
-  message(STATUS "Package name: ${package_name}")
-  message(STATUS "Install component name: ${install_component_name}")
-  message(STATUS "Component name: ${component_name}")
+  message(VERBOSE "Target name: ${target_name}")
+  message(VERBOSE "Export name: ${export_name}")
+  message(VERBOSE "Package name: ${package_name}")
+  message(VERBOSE "Install component name: ${install_component_name}")
+  message(VERBOSE "Component name: ${component_name}")
 
   install(
     TARGETS "${target_name}" COMPONENT "${install_component_name}"
@@ -64,28 +64,8 @@ function(aveva_install_library name)
     ${PROJECT_IS_TOP_LEVEL}
   )
 
-  # By default, install the config package
-  set(install_config_package ON)
-
-  # Turn OFF installation of config package by default if,
-  # in order of precedence:
-  # 1. The specific package variable is set to OFF
-  # 2. The package name is not in the list of packages to install config files
-  if(DEFINED aveva_INSTALL_CONFIG_FILE_PACKAGES)
-    if(
-      NOT "${install_component_name}"
-          IN_LIST
-          aveva_INSTALL_CONFIG_FILE_PACKAGES
-    )
-        set(install_config_package OFF)
-    endif()
-  endif()
-
-  if(DEFINED ${project_prefix}_INSTALL_CONFIG_FILE_PACKAGE)
-    set(install_config_package
-      ${${project_prefix}_INSTALL_CONFIG_FILE_PACKAGE}
-    )
-  endif()
+  # The per-package option is the only switch; it always exists after option() above.
+  set(install_config_package ${${project_prefix}_INSTALL_CONFIG_FILE_PACKAGE})
 
   if(install_config_package)
     message(
