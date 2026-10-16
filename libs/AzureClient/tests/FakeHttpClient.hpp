@@ -45,6 +45,8 @@
 #include <variant>
 #include <vector>
 
+#include <gtest/gtest.h>
+
 // Request-URL helpers and held-request bookkeeping shared by the test fakes (FakeHttpClient, FakeBlobServer and the
 // loopback servers), so each does not carry its own copy.
 namespace AVEVA::AzureClient::Tests {
@@ -232,6 +234,12 @@ class FakeHttpClient final {
         Delays().clear();
     }
 
+    // Clears the process-global knobs so one test cannot leak retry behaviour into the next (shuffle, repeat).
+    static void ResetGlobalState() {
+        InstantRetryFlag().store(false);
+        ClearRetryDelays();
+    }
+
     // Return a snapshot of live instances. Tests may call this to Poll all clients.
     static std::vector<FakeHttpClient*> Instances() {
         const std::scoped_lock lock(InstancesMutex());
@@ -336,10 +344,20 @@ class FakeHttpClient final {
         const_cast<FakeHttpClient*>(this)->SettleLoop();
     }
 
+    // Bounded so a writer that never finishes fails the test instead of hanging the whole run.
     void SettleLoop() {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
         for (;;) {
             while (DownloadWriters().Pending.load() > 0U) {
+                if (std::chrono::steady_clock::now() > deadline) {
+                    ADD_FAILURE() << "FakeHttpClient::SettleLoop gave up waiting for download writers";
+                    return;
+                }
                 std::this_thread::yield();
+            }
+            if (std::chrono::steady_clock::now() > deadline) {
+                ADD_FAILURE() << "FakeHttpClient::SettleLoop did not settle";
+                return;
             }
             const std::size_t startedNow = DownloadWriters().Started.load();
             if (PollRaw() == 0U && DownloadWriters().Pending.load() == 0U &&
@@ -925,4 +943,16 @@ class ScriptedTokenCredential final {
     std::deque<Script> m_scripts;
     std::deque<PendingRequest> m_pending;
 };
+
+namespace Detail {
+class FakeHttpClientResetListener : public ::testing::EmptyTestEventListener {
+    void OnTestStart(const ::testing::TestInfo&) override { FakeHttpClient::ResetGlobalState(); }
+};
+
+// One registration per test binary: the inline variable is initialised once however many files include the header.
+inline const bool FakeHttpClientResetRegistered = [] {
+    ::testing::UnitTest::GetInstance()->listeners().Append(new FakeHttpClientResetListener);
+    return true;
+}();
+} // namespace Detail
 } // namespace AVEVA::AzureClient::Tests
