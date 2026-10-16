@@ -157,7 +157,9 @@ The Azure client is now trimmed and in-tree, which changed the public surface:
 * `http:` endpoints are rejected unless `AllowInsecureHttp = true` is set on the client options (credentials are still refused over non-loopback `http`).
 * Ranged downloads now require a valid `Content-Range` on every `206` response.
 * `AzureClient::AzureRequestOptions::SetMaxRetries` and `HttpClientOptions::SetIdleConnectionTimeout` throw `std::invalid_argument` for negative values.
-
+* `BlobFilesystem`'s private members moved behind a pimpl, so its size and layout changed (an ABI change; rebuild consumers). Its header no longer includes `RequestFailedException.hpp` or `LockFile.hpp`.
+* `AzureClient` options and models trimmed to what the plugin uses: `ListBlobsOptions` keeps only `IncludeMetadata` of the `Include*` flags and lost `Delimiter`; `CreatePageBlobOptions::HttpHeaders` and `AccessTier`, `UploadPagesOptions::ContentMd5`, `UploadPagesFromUrlOptions::SourceAuthorization` and `GetPageRangesOptions::Range`/`MaxResults` were removed, as were `BlobHttpHeaders`, `AccessTier`, `BlobTags`, `ListBlobsResult::BlobPrefixes`/`Delimiter` and `BlobItem::Snapshot`/`Deleted`/`Tags`.
+* Token endpoint failures now carry the HTTP status and OAuth error code (`TokenEndpointErrorCategory()`, `GetTokenEndpointFailure()` in `AVEVA/AzureClient/TokenEndpointError.hpp`) instead of mapping to `BlobStorageErrorCode::AuthenticationFailed`.
 ## Building
 
 1. Ensure that vcpkg is installed and in the PATH

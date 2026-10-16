@@ -2,38 +2,32 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
-#include "AVEVA/RocksDB/Plugin/Azure/LockFile.hpp"
-
-#include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include <boost/log/sources/severity_logger.hpp>
 #include <boost/log/trivial.hpp>
 
 #include <rocksdb/file_system.h>
 
 #include <memory>
-#include <mutex>
-#include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 class BlobFilesystemImpl;
-class LogRateLimiter;
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
 namespace AVEVA::RocksDB::Plugin::Azure {
+class RequestFailedException;
+
 class BlobFilesystem final : public rocksdb::FileSystemWrapper {
     // Declared first so it is released last: the filesystem below must be destroyed while its owner (e.g. a
     // plugin-owned io_context) is still running.
     std::shared_ptr<void> m_keepAlive;
     std::unique_ptr<Impl::BlobFilesystemImpl> m_filesystem;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
-    std::vector<std::unique_ptr<Azure::LockFile>> m_lockFiles;
-    std::mutex m_lockFilesMutex; // RocksDB may call LockFile/UnlockFile from different threads.
-    // Directories RocksDB created explicitly. Blob storage has no empty directories, so these are the only way to
-    // report a directory that does not hold a blob yet.
-    std::set<std::string> m_knownDirectories;
-    std::mutex m_knownDirectoriesMutex;
-    std::unique_ptr<Impl::LogRateLimiter> m_blobNotFoundRateLimiter;
+    // Lock, directory and log-rate-limiter bookkeeping. Defined in the .cpp so this header needs neither the
+    // containers nor the exception types it holds.
+    struct State;
+    std::unique_ptr<State> m_state;
 
     // Logs a RequestFailedException, suppressing repeated BlobNotFound (404) messages
     // during the rate-limit cooldown window.

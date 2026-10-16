@@ -12,16 +12,31 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Logger.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/ReadWriteFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/SequentialFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/WriteableFile.hpp"
 
 #include <boost/log/trivial.hpp>
 #include <boost/scope/scope_exit.hpp>
 #include <boost/scope/scope_fail.hpp>
+#include <mutex>
+#include <set>
 #include <sstream>
 #include <string_view>
 namespace AVEVA::RocksDB::Plugin::Azure {
 using namespace boost::log::trivial;
+
+struct BlobFilesystem::State {
+    std::vector<std::unique_ptr<Azure::LockFile>> LockFiles;
+    std::mutex LockFilesMutex; // RocksDB may call LockFile/UnlockFile from different threads.
+    // Directories RocksDB created explicitly. Blob storage has no empty directories, so these are the only way to
+    // report a directory that does not hold a blob yet.
+    std::set<std::string> KnownDirectories;
+    std::mutex KnownDirectoriesMutex;
+    Impl::LogRateLimiter BlobNotFoundRateLimiter{std::vector<std::string>{"BlobNotFound"},
+                                                 Impl::Configuration::LogRateLimiterCooldown};
+};
+
 using Impl::AbortAsyncReads;
 using Impl::PollAsyncReads;
 namespace {
@@ -65,18 +80,16 @@ BlobFilesystem::BlobFilesystem(
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     std::shared_ptr<void> keepAlive)
     : rocksdb::FileSystemWrapper(std::move(rocksdbFs)), m_keepAlive(std::move(keepAlive)),
-      m_filesystem(std::move(filesystem)), m_logger(std::move(logger)),
-      m_blobNotFoundRateLimiter(std::make_unique<Impl::LogRateLimiter>(std::vector<std::string>{"BlobNotFound"},
-                                                                       Impl::Configuration::LogRateLimiterCooldown)) {}
+      m_filesystem(std::move(filesystem)), m_logger(std::move(logger)), m_state(std::make_unique<State>()) {}
 
 void BlobFilesystem::LogRequestFailed(const RequestFailedException& ex, std::string_view path) {
     if (ex.ErrorCode == "BlobNotFound") {
-        const auto result = m_blobNotFoundRateLimiter->CheckAndRecord(ex.ErrorCode.c_str());
+        const auto result = m_state->BlobNotFoundRateLimiter.CheckAndRecord(ex.ErrorCode.c_str());
         if (result.decision == Impl::RateDecision::Suppress) {
             return;
         }
         if (result.decision == Impl::RateDecision::AllowWithSummary) {
-            const auto seconds = m_blobNotFoundRateLimiter->Cooldown().count();
+            const auto seconds = m_state->BlobNotFoundRateLimiter.Cooldown().count();
             BOOST_LOG_SEV(*m_logger, warning)
                 << "[" << result.suppressedCount << " BlobNotFound messages suppressed in last " << seconds << "s]";
         }
@@ -88,7 +101,7 @@ void BlobFilesystem::LogRequestFailed(const RequestFailedException& ex, std::str
 
 BlobFilesystem::~BlobFilesystem() {
     // A destructor must not throw: a failed release is logged and the lease simply expires on the service.
-    for (auto& lock : m_lockFiles) {
+    for (auto& lock : m_state->LockFiles) {
         try {
             m_filesystem->UnlockFile(lock->GetImpl());
         } catch (const std::exception& ex) {
@@ -261,15 +274,15 @@ rocksdb::IOStatus BlobFilesystem::Truncate(const std::string& fname, size_t size
 }
 
 rocksdb::IOStatus BlobFilesystem::CreateDir(const std::string& d, const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    std::scoped_lock lock(m_knownDirectoriesMutex);
-    m_knownDirectories.insert(NormalizePath(d));
+    std::scoped_lock lock(m_state->KnownDirectoriesMutex);
+    m_state->KnownDirectories.insert(NormalizePath(d));
     return rocksdb::IOStatus::OK();
 }
 
 rocksdb::IOStatus BlobFilesystem::CreateDirIfMissing(const std::string& d, const rocksdb::IOOptions&,
                                                      rocksdb::IODebugContext*) {
-    std::scoped_lock lock(m_knownDirectoriesMutex);
-    m_knownDirectories.insert(NormalizePath(d));
+    std::scoped_lock lock(m_state->KnownDirectoriesMutex);
+    m_state->KnownDirectories.insert(NormalizePath(d));
     return rocksdb::IOStatus::OK();
 }
 
@@ -277,8 +290,8 @@ rocksdb::IOStatus BlobFilesystem::DeleteDir(const std::string& d, const rocksdb:
     return Guard("DeleteDir", d, [&]() -> rocksdb::IOStatus {
         const auto remainingFiles = m_filesystem->DeleteDir(d);
         if (remainingFiles == 0) {
-            std::scoped_lock lock(m_knownDirectoriesMutex);
-            m_knownDirectories.erase(NormalizePath(d));
+            std::scoped_lock lock(m_state->KnownDirectoriesMutex);
+            m_state->KnownDirectories.erase(NormalizePath(d));
             return rocksdb::IOStatus::OK();
         } else {
             BOOST_LOG_SEV(*m_logger, error) << "Failed to delete all contents within directory; some remain.";
@@ -354,9 +367,9 @@ rocksdb::IOStatus BlobFilesystem::LockFile(const std::string& f, const rocksdb::
             }
         }};
         auto lockFileWrapper = std::make_unique<Plugin::Azure::LockFile>(lock);
-        std::scoped_lock _(m_lockFilesMutex);
-        m_lockFiles.push_back(std::move(lockFileWrapper));
-        *l = m_lockFiles.back().get();
+        std::scoped_lock _(m_state->LockFilesMutex);
+        m_state->LockFiles.push_back(std::move(lockFileWrapper));
+        *l = m_state->LockFiles.back().get();
         return rocksdb::IOStatus::OK();
     });
 }
@@ -373,8 +386,8 @@ rocksdb::IOStatus BlobFilesystem::UnlockFile(rocksdb::FileLock* l, const rocksdb
         // The wrapper is dropped even if the release fails: the lock is unlinked from renewal either way, so keeping
         // it would only make RocksDB or the destructor retry a release that cannot succeed.
         const boost::scope::scope_exit forget{[&] {
-            std::scoped_lock _(m_lockFilesMutex);
-            std::erase_if(m_lockFiles, [lockFile](const auto& entry) { return entry.get() == lockFile; });
+            std::scoped_lock _(m_state->LockFilesMutex);
+            std::erase_if(m_state->LockFiles, [lockFile](const auto& entry) { return entry.get() == lockFile; });
         }};
         m_filesystem->UnlockFile(lockFile->GetImpl());
         return rocksdb::IOStatus::OK();
@@ -406,8 +419,8 @@ rocksdb::IOStatus BlobFilesystem::IsDirectory(const std::string& path, const roc
                                               rocksdb::IODebugContext*) {
     return Guard("IsDirectory", path, [&]() -> rocksdb::IOStatus {
         {
-            std::scoped_lock lock(m_knownDirectoriesMutex);
-            if (m_knownDirectories.contains(NormalizePath(path))) {
+            std::scoped_lock lock(m_state->KnownDirectoriesMutex);
+            if (m_state->KnownDirectories.contains(NormalizePath(path))) {
                 *is_dir = true;
                 return rocksdb::IOStatus::OK();
             }
