@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <latch>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -185,6 +186,8 @@ TEST(OriginLimiterTests, ConcurrentRunReleaseCancelAndCloseStartOrAbortEveryRequ
         });
     }
 
+    // Close lands mid-run: after every producer has issued a share of its requests, before any has finished.
+    std::latch producersUnderway{producers};
     {
         std::vector<std::jthread> workers;
         for (int p = 0; p < producers; ++p) {
@@ -195,11 +198,14 @@ TEST(OriginLimiterTests, ConcurrentRunReleaseCancelAndCloseStartOrAbortEveryRequ
                     if (i % 3 == 0) {
                         limiter.Cancel("origin", ticket);
                     }
+                    if (i == perProducer / 4) {
+                        producersUnderway.count_down();
+                    }
                 }
             });
         }
         workers.emplace_back([&] {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            producersUnderway.wait();
             limiter.Close();
         });
     }

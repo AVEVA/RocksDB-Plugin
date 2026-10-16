@@ -606,7 +606,7 @@ Result FakeBlobServer::PageWrite(const FakeHttpClient::RequestRecord& record, co
             }
         };
         m_heldUploads.Add(record.Index);
-        m_uploadHeld.notify_all();
+        m_requestHeld.notify_all();
         return deferred;
     }
     const auto etag = Apply(blob, offset, payload, clear);
@@ -659,6 +659,7 @@ Result FakeBlobServer::Download(const FakeHttpClient::RequestRecord& record, Sto
         Result deferred = Success(MakeResponse(206U));
         deferred.Deferred = true;
         m_heldDownloads.Add(record.Index, download);
+        m_requestHeld.notify_all();
         return deferred;
     }
 

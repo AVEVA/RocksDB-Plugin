@@ -455,17 +455,6 @@ void SetRequest(rocksdb::FSReadRequest& req, const uint64_t offset, std::vector<
     req.len = scratch.size();
     req.scratch = scratch.data();
 }
-
-template <class TPredicate> bool WaitUntil(TPredicate predicate) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (!predicate()) {
-        if (std::chrono::steady_clock::now() > deadline) {
-            return false;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    return true;
-}
 } // namespace
 
 TEST_F(AsyncReadTests, MultiRead_AdjacentAndNearbyRanges_AreFetchedWithOneDownload) {
@@ -558,15 +547,15 @@ TEST_F(AsyncReadTests, MultiRead_StartsTheNextDownloadAsSoonAsAnyFinishes) {
     rocksdb::IOStatus status;
     std::jthread reader([&] { status = file.MultiRead(reqs.data(), reqs.size(), rocksdb::IOOptions{}, nullptr); });
 
-    ASSERT_TRUE(WaitUntil([&] { return m_deferredEnv.Blob->PendingDownloads() == 32; }));
+    ASSERT_TRUE(m_deferredEnv.Blob->WaitForPendingDownloads(32));
     auto first = m_deferredEnv.Blob->TakeDownload();
     first.Succeed(Expected(first.Request.Offset, 16));
     // The window refills while the other 31 are still outstanding.
-    ASSERT_TRUE(WaitUntil([&] { return m_deferredEnv.Blob->PendingDownloads() == 32; }));
+    ASSERT_TRUE(m_deferredEnv.Blob->WaitForPendingDownloads(32));
 
     size_t served = 1;
     while (served < count) {
-        ASSERT_TRUE(WaitUntil([&] { return m_deferredEnv.Blob->PendingDownloads() > 0; }));
+        ASSERT_TRUE(m_deferredEnv.Blob->WaitForPendingDownloads(1));
         auto download = m_deferredEnv.Blob->TakeDownload();
         download.Succeed(Expected(download.Request.Offset, 16));
         ++served;
