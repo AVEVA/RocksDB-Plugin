@@ -232,7 +232,10 @@ TEST_F(BlobFilesystemFakeTests, CrashDuringALargeRenameLeavesATemporaryBlobThatI
     FakeFilesystem restarted(
         m_runtime, Container, AccountUrl, AccountKey, 4096, 1024,
         std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>());
+    EXPECT_EQ(orphans(), 1) << "Constructing a second filesystem must not delete a temp it does not own the lock for";
+    const auto lock = restarted.LockFile(Path("LOCK"));
     EXPECT_EQ(orphans(), 0);
+    restarted.UnlockFile(*lock);
     EXPECT_EQ(Read("d/old"), LargeContent());
     restarted.RenameFile(Path("d/old"), Path("d/new"));
     EXPECT_EQ(Read("d/new"), LargeContent());

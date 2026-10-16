@@ -153,7 +153,7 @@ void BasicBlobFilesystemImpl<THttp>::AddContainers(const TInfo& primary, const s
                  primary.GetDbName(), cachePath, maxCacheSize);
     if (backup) {
         AddContainer(ClientFactory::CreateServiceClient(m_runtime, *backup), backup->GetStorageAccountUrl(),
-                     backup->GetDbName(), std::nullopt, maxCacheSize, false);
+                     backup->GetDbName(), std::nullopt, maxCacheSize);
     }
 }
 
@@ -164,8 +164,7 @@ void BasicBlobFilesystemImpl<THttp>::AddContainers(const TInfo& primary, const s
 template <typename THttp>
 void BasicBlobFilesystemImpl<THttp>::AddContainer(const BlobServiceClientOn<THttp>& serviceClient,
                                                   const std::string& storageAccountUrl, const std::string& name,
-                                                  std::optional<std::string_view> cachePath, size_t maxCacheSize,
-                                                  bool purgeRenameTemps) {
+                                                  std::optional<std::string_view> cachePath, size_t maxCacheSize) {
     auto containerClient = BlobHelpers::GetContainerClient(serviceClient, name);
     const auto uniquePrefix = StorageAccount::UniquePrefix(storageAccountUrl, name);
     if (cachePath) {
@@ -176,16 +175,14 @@ void BasicBlobFilesystemImpl<THttp>::AddContainer(const BlobServiceClientOn<THtt
     }
 
     m_clients.emplace(uniquePrefix, std::move(containerClient));
-    if (purgeRenameTemps) {
-        PurgeOrphanedRenameTemps(uniquePrefix);
-    }
 }
 
 // A rename that crashed (or could not delete its temporary blob) leaves a ".rename-<uuid>" blob behind. Nothing else
-// refers to those, and the writer is the only process that renames, so they are removed when it starts. Failures
-// only cost some storage, so they are logged rather than allowed to stop the filesystem from opening.
+// refers to those. The lock holder is the only process that renames, so this runs only once the DB lock is held:
+// purging at construction would let a second (read-only or standby) process delete the writer's in-flight temp.
+// Failures only cost some storage, so they are logged rather than allowed to fail the lock.
 template <typename THttp>
-void BasicBlobFilesystemImpl<THttp>::PurgeOrphanedRenameTemps(const std::string& prefix) const {
+void BasicBlobFilesystemImpl<THttp>::PurgeOrphanedRenameTemps(const std::string_view prefix) const {
     try {
         const auto& container = GetContainer(prefix);
         std::vector<std::string> orphans;
