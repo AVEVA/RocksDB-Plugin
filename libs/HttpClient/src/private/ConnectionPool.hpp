@@ -158,13 +158,26 @@ class ConnectionPool {
     /// owner can schedule Sweep().</param>
     /// <param name="probeThreshold">Connections idle at least this long are probed for liveness when taken;
     /// zero probes every reused connection.</param>
-    ConnectionPool(std::size_t maxIdlePerKey, std::chrono::seconds idleTimeout,
+    ConnectionPool(std::size_t maxIdlePerKey, std::chrono::milliseconds idleTimeout,
                    std::size_t maxTotalIdle = DefaultMaxTotalIdle, Notifier notifier = {},
                    std::chrono::milliseconds probeThreshold = DefaultProbeThreshold)
         : m_maxIdlePerKey(maxIdlePerKey),
-          m_idleTimeout(std::clamp(idleTimeout, std::chrono::seconds::zero(), MaxIdleTimeout)),
+          m_idleTimeout(std::clamp(idleTimeout, std::chrono::milliseconds::zero(),
+                                   std::chrono::duration_cast<std::chrono::milliseconds>(MaxIdleTimeout))),
           m_maxTotalIdle(maxTotalIdle), m_notifier(std::move(notifier)),
           m_probeThreshold(std::max(probeThreshold, std::chrono::milliseconds::zero())) {}
+
+    /// <summary>
+    /// Whole-second timeouts, including values (such as seconds::max()) that would overflow if converted to
+    /// milliseconds directly; they are clamped first.
+    /// </summary>
+    ConnectionPool(std::size_t maxIdlePerKey, std::chrono::seconds idleTimeout,
+                   std::size_t maxTotalIdle = DefaultMaxTotalIdle, Notifier notifier = {},
+                   std::chrono::milliseconds probeThreshold = DefaultProbeThreshold)
+        : ConnectionPool(maxIdlePerKey,
+                         std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::clamp(idleTimeout, std::chrono::seconds::zero(), MaxIdleTimeout)),
+                         maxTotalIdle, std::move(notifier), probeThreshold) {}
 
     /// <summary>
     /// Closes connections idle past the timeout without needing a request to arrive. Runs on the sweeper's
@@ -490,7 +503,7 @@ class ConnectionPool {
     static constexpr std::size_t MaxRecycledNodes = 32;
 
     std::size_t m_maxIdlePerKey;
-    std::chrono::seconds m_idleTimeout;
+    std::chrono::milliseconds m_idleTimeout;
     std::size_t m_maxTotalIdle;
     const Notifier m_notifier;
     std::chrono::milliseconds m_probeThreshold;

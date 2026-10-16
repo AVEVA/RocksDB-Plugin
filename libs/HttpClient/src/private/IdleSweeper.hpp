@@ -30,21 +30,26 @@ using TlsConnectionPool = ConnectionPool<TlsStream>;
 /// </summary>
 class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
   public:
+    static constexpr std::chrono::milliseconds DefaultMinInterval{1000};
+
     /// <summary>
     /// Creates a sweeper together with the plain and TLS pools it sweeps. The pools are built here, with a
     /// notifier that refers back to the sweeper, so neither side needs a second setup step.
     /// </summary>
     /// <param name="maxIdlePerKey">How many idle connections each pool keeps per origin.</param>
     /// <param name="idleTimeout">How long a connection may sit idle; also how often to sweep while either pool
-    /// is non-empty (clamped to at least one second).</param>
+    /// is non-empty (clamped to at least <paramref name="minInterval"/>).</param>
     /// <param name="probeThreshold">How long a pooled connection must have been idle before it is probed for
     /// liveness when reused.</param>
+    /// <param name="minInterval">Floor for the sweep interval. Production keeps the one-second default so a tiny idle
+    /// timeout cannot spin the shared thread; tests lower it so they run in milliseconds.</param>
     /// <returns>The sweeper; its pools are available through <see cref="PlainPool"/> and
     /// <see cref="TlsPool"/>.</returns>
     static std::shared_ptr<IdleSweeper>
-    Create(std::size_t maxIdlePerKey, std::chrono::seconds idleTimeout,
-           std::chrono::milliseconds probeThreshold = PlainConnectionPool::DefaultProbeThreshold) {
-        std::shared_ptr<IdleSweeper> sweeper(new IdleSweeper(idleTimeout));
+    Create(std::size_t maxIdlePerKey, std::chrono::milliseconds idleTimeout,
+           std::chrono::milliseconds probeThreshold = PlainConnectionPool::DefaultProbeThreshold,
+           std::chrono::milliseconds minInterval = DefaultMinInterval) {
+        std::shared_ptr<IdleSweeper> sweeper(new IdleSweeper(idleTimeout, minInterval));
         sweeper->m_plainPool =
             std::make_shared<PlainConnectionPool>(maxIdlePerKey, idleTimeout, PlainConnectionPool::DefaultMaxTotalIdle,
                                                   SweeperNotifier(sweeper), probeThreshold);
@@ -52,6 +57,19 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
             std::make_shared<TlsConnectionPool>(maxIdlePerKey, idleTimeout, TlsConnectionPool::DefaultMaxTotalIdle,
                                                 SweeperNotifier(sweeper), probeThreshold);
         return sweeper;
+    }
+
+    /// <summary>
+    /// Whole-second timeouts (the public option's unit), clamped before conversion so seconds::max() cannot
+    /// overflow.
+    /// </summary>
+    static std::shared_ptr<IdleSweeper>
+    Create(std::size_t maxIdlePerKey, std::chrono::seconds idleTimeout,
+           std::chrono::milliseconds probeThreshold = PlainConnectionPool::DefaultProbeThreshold) {
+        return Create(maxIdlePerKey,
+                      std::chrono::duration_cast<std::chrono::milliseconds>(std::clamp(
+                          idleTimeout, std::chrono::seconds::zero(), std::chrono::seconds{EffectivelyInfinite})),
+                      probeThreshold, DefaultMinInterval);
     }
 
     IdleSweeper(const IdleSweeper&) = delete;
@@ -97,8 +115,9 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
   private:
     class SweepScheduler;
 
-    explicit IdleSweeper(std::chrono::seconds idleTimeout)
-        : m_interval(std::clamp(idleTimeout, std::chrono::seconds{1}, std::chrono::seconds{EffectivelyInfinite})) {}
+    IdleSweeper(std::chrono::milliseconds idleTimeout, std::chrono::milliseconds minInterval)
+        : m_interval(std::clamp(idleTimeout, minInterval,
+                                std::chrono::duration_cast<std::chrono::milliseconds>(EffectivelyInfinite))) {}
 
     /// <summary>
     /// One thread shared by every live sweeper, running their sweeps in deadline order. A per-sweeper thread
@@ -141,7 +160,7 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
         /// </summary>
         /// <param name="sweeper">The sweeper to run.</param>
         /// <param name="delay">How long to wait before running it.</param>
-        void Schedule(const std::weak_ptr<IdleSweeper>& sweeper, std::chrono::seconds delay) {
+        void Schedule(const std::weak_ptr<IdleSweeper>& sweeper, std::chrono::milliseconds delay) {
             {
                 std::lock_guard<std::mutex> lock(m_state->mutex);
                 m_state->queue.emplace(Clock::now() + delay, sweeper);
@@ -227,7 +246,7 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
     };
     std::shared_ptr<PlainConnectionPool> m_plainPool;
     std::shared_ptr<TlsConnectionPool> m_tlsPool;
-    std::chrono::seconds m_interval;
+    std::chrono::milliseconds m_interval;
     std::atomic<bool> m_scheduled{false};
     std::shared_ptr<SweepScheduler> m_scheduler = SweepScheduler::Acquire();
 };

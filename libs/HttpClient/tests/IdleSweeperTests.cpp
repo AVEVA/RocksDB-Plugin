@@ -16,10 +16,23 @@ namespace {
 using namespace AVEVA::Private;
 namespace asio = boost::asio;
 
+// The production floor is one second; tests sweep every few tens of milliseconds instead.
+constexpr std::chrono::milliseconds MinInterval{5};
+// Generous because a healthy run needs a fraction of it; it only bounds how long a failing run takes to report.
+constexpr std::chrono::seconds Deadline{10};
+
+template <typename Predicate> bool WaitUntil(Predicate done) {
+    const auto limit = std::chrono::steady_clock::now() + Deadline;
+    while (!done() && std::chrono::steady_clock::now() < limit) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return done();
+}
+
 struct SweeperFixture {
-    SweeperFixture(asio::io_context& context, std::chrono::seconds interval)
-        : sweeper(IdleSweeper::Create(4, interval)), plain(sweeper->PlainPool()), tls(sweeper->TlsPool()),
-          context(context) {}
+    SweeperFixture(asio::io_context& context, std::chrono::milliseconds interval)
+        : sweeper(IdleSweeper::Create(4, interval, PlainConnectionPool::DefaultProbeThreshold, MinInterval)),
+          plain(sweeper->PlainPool()), tls(sweeper->TlsPool()), context(context) {}
 
     void AddIdleConnection() {
         plain->Release({"127.0.0.1", "80"}, PooledConnection<PlainStream>{std::make_unique<PlainStream>(context), {}});
@@ -40,14 +53,10 @@ TEST(IdleSweeper, EarlierDeadlineWakesTheSchedulerThread) {
     slow.AddIdleConnection();
     std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Let the thread start waiting on the slow deadline.
 
-    SweeperFixture fast(context, std::chrono::seconds(1));
+    SweeperFixture fast(context, std::chrono::milliseconds(50));
     fast.AddIdleConnection();
 
-    const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-    while (fast.plain->IdleCount() != 0 && std::chrono::steady_clock::now() < limit) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    EXPECT_EQ(fast.plain->IdleCount(), 0U);
+    EXPECT_TRUE(WaitUntil([&] { return fast.plain->IdleCount() == 0; }));
     EXPECT_EQ(slow.plain->IdleCount(), 1U);
 }
 
@@ -55,22 +64,16 @@ TEST(IdleSweeper, EarlierDeadlineWakesTheSchedulerThread) {
 // own sweep afterwards.
 TEST(IdleSweeper, SweepersRunInDeadlineOrderNotSchedulingOrder) {
     asio::io_context context;
-    SweeperFixture later(context, std::chrono::seconds(3));
+    // The 30x gap keeps later pending even if this thread is descheduled for a few hundred milliseconds.
+    SweeperFixture later(context, std::chrono::milliseconds(1000));
     later.AddIdleConnection();
-    SweeperFixture sooner(context, std::chrono::seconds(1));
+    SweeperFixture sooner(context, std::chrono::milliseconds(30));
     sooner.AddIdleConnection();
 
-    const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-    while (sooner.plain->IdleCount() != 0 && std::chrono::steady_clock::now() < limit) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    EXPECT_EQ(sooner.plain->IdleCount(), 0U);
+    ASSERT_TRUE(WaitUntil([&] { return sooner.plain->IdleCount() == 0; }));
     EXPECT_EQ(later.plain->IdleCount(), 1U);
 
-    while (later.plain->IdleCount() != 0 && std::chrono::steady_clock::now() < limit) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    EXPECT_EQ(later.plain->IdleCount(), 0U);
+    EXPECT_TRUE(WaitUntil([&] { return later.plain->IdleCount() == 0; }));
 }
 
 // The shared scheduler thread belongs to the live sweepers: it is stopped and joined when the last one goes,
@@ -90,12 +93,8 @@ TEST(IdleSweeper, SchedulerStopsWhenTheLastSweeperIsDestroyed) {
     }
     EXPECT_FALSE(IdleSweeper::SchedulerIsAlive());
 
-    SweeperFixture again(context, std::chrono::seconds(1));
+    SweeperFixture again(context, std::chrono::milliseconds(50));
     again.AddIdleConnection();
     EXPECT_TRUE(IdleSweeper::SchedulerIsAlive());
-    const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-    while (again.plain->IdleCount() != 0 && std::chrono::steady_clock::now() < limit) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    EXPECT_EQ(again.plain->IdleCount(), 0U);
+    EXPECT_TRUE(WaitUntil([&] { return again.plain->IdleCount() == 0; }));
 }
