@@ -118,11 +118,16 @@ int main(int argc, char** argv) {
               << "    --fs_uri=" << fsUri << "\n"
               << "    --db=" << dbPath << "/<your-db-name>\n";
 
-    // Lets scripts pass --fs_uri=auto instead of re-deriving the plugin name.
+    // Lets scripts pass `auto` instead of re-deriving the plugin name, in every form gflags accepts:
+    // --fs_uri=auto, -fs_uri=auto, --fs_uri auto and -fs_uri auto.
+    std::string fsUriValue = fsUri;
     std::string fsUriFlag = "--fs_uri=" + fsUri;
     for (int i = 1; i < argc; ++i) {
-        if (std::string_view{argv[i]} == "--fs_uri=auto") {
+        const std::string_view arg{argv[i]};
+        if (arg == "--fs_uri=auto" || arg == "-fs_uri=auto") {
             argv[i] = fsUriFlag.data();
+        } else if ((arg == "--fs_uri" || arg == "-fs_uri") && i + 1 < argc && std::string_view{argv[i + 1]} == "auto") {
+            argv[++i] = fsUriValue.data();
         }
     }
 
