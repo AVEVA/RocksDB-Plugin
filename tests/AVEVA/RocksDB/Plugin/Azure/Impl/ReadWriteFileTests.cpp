@@ -742,3 +742,14 @@ TEST(PageBlobWriterTests, EnsureCapacityHonoursTheRequirementAndDoublesOtherwise
     writer.EnsureCapacity(before + 1);
     EXPECT_GE(writer.Capacity(), before * 2);
 }
+TEST(PageBlobWriterTests, GrowthTarget_NearInt64Max_SaturatesInsteadOfOverflowing) {
+    using Writer = AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobWriter<
+        std::remove_reference_t<decltype(*FakeBlobEnvironment{}.Client)>>;
+    constexpr auto max = std::numeric_limits<int64_t>::max();
+
+    EXPECT_EQ(max, Writer::GrowthTarget(1, max / 2 + 1));
+    EXPECT_EQ(max, Writer::GrowthTarget(max, max));
+    EXPECT_EQ(Configuration::PageBlob::DefaultSize * 4,
+              Writer::GrowthTarget(1, Configuration::PageBlob::DefaultSize * 2));
+    EXPECT_EQ(max - 5, Writer::GrowthTarget(max - 5, 10));
+}

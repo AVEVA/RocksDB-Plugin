@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <string_view>
 #include <utility>
 
@@ -39,12 +40,21 @@ template <typename TBlob> class PageBlobWriter {
         if (requiredCapacity <= m_capacity) {
             return;
         }
-        const auto wanted = std::max({requiredCapacity, m_capacity * 2, Configuration::PageBlob::DefaultSize});
-        const auto [_, desiredSize] = BlobHelpers::RoundToEndOfNearestPage(wanted);
+        const auto [_, desiredSize] = BlobHelpers::RoundToEndOfNearestPage(GrowthTarget(requiredCapacity, m_capacity));
 
         BOOST_LOG_SEV(*H.Logger, boost::log::trivial::debug)
             << "Expanding file '" << H.Name << "' to " << desiredSize << " bytes";
         Resize(desiredSize);
+    }
+
+    /// <summary>
+    /// The capacity to grow to before page rounding: at least `required`, at least double `capacity` (saturating
+    /// rather than overflowing) and at least the default blob size.
+    /// </summary>
+    [[nodiscard]] static int64_t GrowthTarget(const int64_t required, const int64_t capacity) noexcept {
+        const auto doubled =
+            capacity > std::numeric_limits<int64_t>::max() / 2 ? std::numeric_limits<int64_t>::max() : capacity * 2;
+        return std::max({required, doubled, static_cast<int64_t>(Configuration::PageBlob::DefaultSize)});
     }
 
     /// <summary>Records a capacity already known from the service (no request is made).</summary>
