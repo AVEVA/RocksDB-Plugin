@@ -417,6 +417,83 @@ TEST(BatchDeleteTests, AppendBatchDeletePartRejectsUrlsWithoutSchemeOrPath) {
     EXPECT_NE(body.find("DELETE /container/blob?sig=x HTTP/1.1"), std::string::npos);
 }
 
+namespace {
+std::string OnePart(const std::string& status, const std::string& closing = "--b--\r\n") {
+    return "--b\r\nContent-Type: application/http\r\nContent-ID: 0\r\n\r\n" + status +
+           "\r\nx-ms-request-id: r0\r\n\r\n\r\n" + closing;
+}
+
+void ExpectBatchRejected(const std::string& body, const std::string& contentType = "multipart/mixed; boundary=b") {
+    const std::vector<std::string> names{"a"};
+    const HttpResponse response{202, {{"Content-Type", contentType}}, body};
+    EXPECT_THROW(static_cast<void>(AVEVA::AzureClient::Private::ParseBatchDeleteResponse(response, names)),
+                 std::invalid_argument)
+        << body << " / " << contentType;
+}
+} // namespace
+
+TEST(AS_R01_BatchStatusLineTests, RejectsTrailingGarbageWrongPrefixAndOutOfRangeCodes) {
+    ExpectBatchRejected(OnePart("HTTP/1.1 202junk"));
+    ExpectBatchRejected(OnePart("HTTP/1.1 20"));
+    ExpectBatchRejected(OnePart("HTTP/1.1 2020 Accepted"));
+    ExpectBatchRejected(OnePart("HTTP/1.1 099 Low"));
+    ExpectBatchRejected(OnePart("HTTP/1.1 600 High"));
+    ExpectBatchRejected(OnePart("HTTP/2 202 Accepted"));
+    ExpectBatchRejected(OnePart("HTTP/1.1 +20 Accepted"));
+}
+
+TEST(AS_R02_BatchBoundaryTests, ParsesMediaTypeParametersStrictly) {
+    const std::string body = OnePart("HTTP/1.1 202 Accepted");
+    const std::vector<std::string> names{"a"};
+    const auto parse = [&](const std::string& contentType) {
+        return AVEVA::AzureClient::Private::ParseBatchDeleteResponse(
+            HttpResponse{202, {{"Content-Type", contentType}}, body}, names);
+    };
+    EXPECT_EQ(parse("multipart/mixed; boundary=\"b\"; charset=utf-8").size(), 1U);
+    EXPECT_EQ(parse("multipart/mixed; charset=utf-8; BOUNDARY=b").size(), 1U);
+    ExpectBatchRejected(body, "multipart/mixed; xboundary=b");
+    ExpectBatchRejected(body, "multipart/mixed; charset=\"boundary=b\"");
+    ExpectBatchRejected(body, "multipart/mixed; boundary=");
+    ExpectBatchRejected(body, "multipart/mixed; boundary=\"b\"\"");
+    ExpectBatchRejected(body, "multipart/mixed; boundary=a@b");
+    ExpectBatchRejected(body, "multipart/mixed; boundary=" + std::string(71, 'b'));
+}
+
+TEST(AS_R03_BatchClosingDelimiterTests, RequiresALineEndAfterTheClosingDelimiter) {
+    ExpectBatchRejected(OnePart("HTTP/1.1 202 Accepted", "--b--garbage"));
+    ExpectBatchRejected(OnePart("HTTP/1.1 202 Accepted", "--b--  x\r\n"));
+    const std::vector<std::string> names{"a"};
+    for (const char* closing : {"--b--", "--b--\r\n", "--b--  \t\r\n"}) {
+        const HttpResponse response{
+            202, {{"Content-Type", "multipart/mixed; boundary=b"}}, OnePart("HTTP/1.1 202 Accepted", closing)};
+        EXPECT_EQ(AVEVA::AzureClient::Private::ParseBatchDeleteResponse(response, names).size(), 1U) << closing;
+    }
+}
+
+TEST(AS_R05_BatchSubrequestHeaderTests, RejectsLineBreaksInSubrequestHeaders) {
+    for (const auto& [name, value] : std::vector<std::pair<std::string, std::string>>{
+             {"x-ms-a", "v\r\nInjected: 1"}, {"x-ms-a", "v\nx"}, {"x-ms-a\r\nb", "v"}, {"", "v"}, {"a:b", "v"}}) {
+        AVEVA::HttpRequest subrequest;
+        subrequest.SetMethod(HttpMethod::Delete);
+        subrequest.SetUrl("https://account.blob.core.windows.net/container/blob");
+        subrequest.AddHeader(AVEVA::HttpHeader{name, value});
+        std::string body;
+        EXPECT_THROW(AVEVA::AzureClient::Private::AppendBatchDeletePart(body, "b", 0, subrequest),
+                     std::invalid_argument);
+        EXPECT_TRUE(body.empty());
+    }
+}
+
+TEST(AS_R12_BatchBoundaryLineTests, ABoundaryLikeLineInsideAPartBodyIsNotASplitPoint) {
+    const std::vector<std::string> names{"a"};
+    const std::string body = "--b\r\nContent-Type: application/http\r\nContent-ID: 0\r\n\r\nHTTP/1.1 404 Not Found\r\n"
+                             "x-ms-error-code: BlobNotFound\r\n\r\nnote --b inline and --bb\r\n--b--\r\n";
+    const HttpResponse response{202, {{"Content-Type", "multipart/mixed; boundary=b"}}, body};
+    const auto items = AVEVA::AzureClient::Private::ParseBatchDeleteResponse(response, names);
+    ASSERT_EQ(items.size(), 1U);
+    EXPECT_TRUE(items[0].AlreadyAbsent);
+}
+
 TEST(BatchDeleteTests, SuccessfulPartsNeedNoHeaderParsingAndFailedPartsKeepTheirErrorDetails) {
     const std::vector<std::string> names{"ok", "gone", "denied"};
     const std::string body =

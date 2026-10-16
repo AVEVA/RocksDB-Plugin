@@ -7,6 +7,7 @@
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 #include <AVEVA/HttpClient/HttpHeader.hpp>
 
+#include <algorithm>
 #include <charconv>
 #include <cstddef>
 #include <optional>
@@ -18,29 +19,55 @@
 #include <utility>
 #include <vector>
 
+using namespace std::string_view_literals;
 namespace AVEVA::AzureClient::Private {
 namespace {
 constexpr std::string_view LineBreak = "\r\n";
 
+[[nodiscard]] bool IsValidBoundary(std::string_view boundary) noexcept {
+    // RFC 2046 section 5.1.1: 1 to 70 bchars, not ending in a space.
+    constexpr std::size_t MaxBoundaryLength = 70;
+    if (boundary.empty() || boundary.size() > MaxBoundaryLength || boundary.back() == ' ') {
+        return false;
+    }
+    return std::ranges::all_of(boundary, [](char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+               std::string_view{"'()+_,-./:=? "}.find(c) != std::string_view::npos;
+    });
+}
+
+// Finds the `boundary` media-type parameter by walking the ';'-separated parameters (quoted values may contain ';').
+// Returns an empty view when it is missing or not a valid RFC 2046 boundary.
 [[nodiscard]] std::string_view BoundaryOf(std::string_view contentType) {
-    constexpr std::string_view key = "boundary=";
-    for (std::size_t pos = 0; pos + key.size() <= contentType.size(); ++pos) {
-        if (!IEquals(contentType.substr(pos, key.size()), key)) {
+    std::size_t pos = 0;
+    bool first = true;
+    while (pos < contentType.size()) {
+        bool quoted = false;
+        std::size_t end = pos;
+        while (end < contentType.size() && (quoted || contentType[end] != ';')) {
+            if (contentType[end] == '"') {
+                quoted = !quoted;
+            }
+            ++end;
+        }
+        const std::string_view parameter = TrimWhitespace(contentType.substr(pos, end - pos));
+        pos = end + 1U;
+        if (first) {
+            first = false;
             continue;
         }
-        std::string_view value = contentType.substr(pos + key.size());
-        if (const std::size_t end = value.find(';'); end != std::string_view::npos) {
-            value = value.substr(0, end);
+        const std::size_t equals = parameter.find('=');
+        if (equals == std::string_view::npos || !IEquals(TrimWhitespace(parameter.substr(0, equals)), "boundary")) {
+            continue;
         }
-        value = TrimWhitespace(value);
+        std::string_view value = TrimWhitespace(parameter.substr(equals + 1U));
         if (value.size() >= 2U && value.front() == '"' && value.back() == '"') {
             value = value.substr(1, value.size() - 2U);
         }
-        return value;
+        return IsValidBoundary(value) ? value : std::string_view{};
     }
     return {};
 }
-
 // Reads one line (terminated by CRLF or a bare LF) from `text` and advances `pos` past it.
 [[nodiscard]] std::string_view ReadLine(std::string_view text, std::size_t& pos) {
     const std::size_t end = text.find('\n', pos);
@@ -111,15 +138,21 @@ struct BatchPart {
 
     // "HTTP/1.1 202 Accepted"
     const std::string_view statusLine = ReadLine(part, pos);
-    const std::size_t statusStart = statusLine.find(' ');
-    if (!statusLine.starts_with("HTTP/") || statusStart == std::string_view::npos) {
+    constexpr std::string_view StatusPrefix = "HTTP/1.1 ";
+    constexpr std::size_t StatusDigits = 3;
+    constexpr unsigned int MinStatus = 100;
+    constexpr unsigned int MaxStatus = 599;
+    if (!statusLine.starts_with(StatusPrefix)) {
         throw std::invalid_argument("Batch response part has a malformed status line.");
     }
-    const std::string_view statusText = statusLine.substr(statusStart + 1U);
+    const std::string_view statusText = statusLine.substr(StatusPrefix.size());
+    if (statusText.size() < StatusDigits || (statusText.size() > StatusDigits && statusText[StatusDigits] != ' ')) {
+        throw std::invalid_argument("Batch response part has a malformed status code.");
+    }
     unsigned int status = 0;
-    const auto [statusEnd, statusError] =
-        std::from_chars(statusText.data(), statusText.data() + statusText.size(), status);
-    if (statusError != std::errc{} || statusEnd == statusText.data()) {
+    const auto [statusEnd, statusError] = std::from_chars(statusText.data(), statusText.data() + StatusDigits, status);
+    if (statusError != std::errc{} || statusEnd != statusText.data() + StatusDigits || status < MinStatus ||
+        status > MaxStatus) {
         throw std::invalid_argument("Batch response part has a malformed status code.");
     }
 
@@ -159,15 +192,30 @@ struct BatchPart {
 }
 } // namespace
 
+namespace {
+[[nodiscard]] bool IsSafeSubrequestHeader(const HttpHeader& header) noexcept {
+    // CR, LF and NUL would let a header value smuggle extra lines into the multipart body.
+    const auto clean = [](std::string_view text) { return text.find_first_of("\r\n\0"sv) == std::string_view::npos; };
+    const std::string_view name = header.GetName();
+    return !name.empty() && name.find(':') == std::string_view::npos && clean(name) && clean(header.GetValue());
+}
+} // namespace
+
 void AppendBatchDeletePart(std::string& body, std::string_view boundary, std::size_t contentId,
                            const HttpRequest& subrequest) {
     // Validate before appending anything, so a bad URL leaves `body` untouched.
     const std::string_view url = subrequest.GetUrl();
+    if (url.find_first_of("\r\n") != std::string_view::npos) {
+        throw std::invalid_argument("Batch sub-request URL contains forbidden characters.");
+    }
     const std::size_t schemeEnd = url.find("://");
     const std::size_t pathStart =
         schemeEnd == std::string_view::npos ? std::string_view::npos : url.find('/', schemeEnd + 3U);
     if (pathStart == std::string_view::npos) {
         throw std::invalid_argument("Batch sub-request URL must be absolute and include a path.");
+    }
+    if (!std::ranges::all_of(subrequest.GetHeaders(), IsSafeSubrequestHeader)) {
+        throw std::invalid_argument("Batch sub-request header contains forbidden characters.");
     }
     body.append("--").append(boundary).append(LineBreak);
     body.append("Content-Type: application/http").append(LineBreak);
@@ -203,7 +251,13 @@ std::vector<Models::DeleteBlobItemResult> ParseBatchDeleteResponse(const HttpRes
     const auto findDelimiter = [&](std::size_t from) {
         for (std::size_t pos = body.find(delimiter, from); pos != std::string_view::npos;
              pos = body.find(delimiter, pos + 1U)) {
-            if (pos == 0U || body[pos - 1U] == '\n') {
+            if (pos != 0U && body[pos - 1U] != '\n') {
+                continue;
+            }
+            // "--b" must be followed by "--", transport padding or a line break; "--bb" is another boundary.
+            const std::string_view rest = body.substr(pos + delimiter.size());
+            if (rest.empty() || rest.starts_with("--") ||
+                std::string_view{" \t\r\n"}.find(rest.front()) != std::string_view::npos) {
                 return pos;
             }
         }
@@ -214,11 +268,20 @@ std::vector<Models::DeleteBlobItemResult> ParseBatchDeleteResponse(const HttpRes
     bool closed = false;
     while (delimiterPos != std::string_view::npos && !closed) {
         std::size_t partStart = delimiterPos + delimiter.size();
-        if (body.substr(partStart).starts_with("--")) {
+        if (const std::string_view tail = body.substr(partStart); tail.starts_with("--")) {
+            // Only transport padding may follow the closing delimiter on its line.
+            const std::string_view afterClose = tail.substr(2U);
+            const std::size_t padding = afterClose.find_first_not_of(" \t");
+            if (padding != std::string_view::npos && afterClose[padding] != '\r' && afterClose[padding] != '\n') {
+                throw std::invalid_argument("Batch response has a malformed closing boundary.");
+            }
             closed = true;
             break;
         }
-        static_cast<void>(ReadLine(body, partStart));
+        const std::string_view delimiterLine = ReadLine(body, partStart);
+        if (delimiterLine.find_first_not_of(" \t") != std::string_view::npos) {
+            throw std::invalid_argument("Batch response has a malformed delimiter line.");
+        }
         const std::size_t next = findDelimiter(partStart);
         if (next == std::string_view::npos) {
             throw std::invalid_argument("Batch response is missing its closing boundary.");
