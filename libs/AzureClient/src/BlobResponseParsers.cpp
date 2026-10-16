@@ -595,6 +595,8 @@ std::optional<std::chrono::system_clock::time_point> ParseIso8601Utc(std::string
         return std::nullopt;
     }
     auto result = BuildUtcTimePoint(*year, *month, *day, *hour, *minute, *second);
+    // Digits beyond the seventh are dropped (truncated, not rounded): the service emits 100 ns ticks, so nothing real
+    // is lost.
     std::string_view fraction = value.substr(FractionOffset, value.size() - MinLength);
     if (!result || (!fraction.empty() && (fraction.front() != '.' || fraction.size() < MinFractionLength))) {
         return std::nullopt;
@@ -689,12 +691,16 @@ Models::BlobProperties ParseBlobProperties(const HttpResponse& response) {
     Models::BlobProperties properties;
     ApplyETagAndLastModified(properties, response);
 
-    // Prefer Content-Range total when present (for 206 responses)
+    // Prefer the Content-Range total when present (206 responses). A header that is present but malformed is an
+    // error rather than a silent fallback to Content-Length, which would describe only the partial body.
     bool contentLengthPresent = false;
     const std::string_view contentRangeHeader = FindHeaderValue(response, "Content-Range");
     if (!contentRangeHeader.empty()) {
-        if (const auto parsed = ParseContentRange(contentRangeHeader);
-            parsed.has_value() && parsed->Total.has_value()) {
+        const auto parsed = ParseContentRange(contentRangeHeader);
+        if (!parsed.has_value()) {
+            throw std::invalid_argument("Content-Range header is malformed.");
+        }
+        if (parsed->Total.has_value()) {
             properties.ContentLength = *parsed->Total;
             contentLengthPresent = true;
         }

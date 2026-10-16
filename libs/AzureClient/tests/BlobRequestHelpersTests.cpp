@@ -373,7 +373,7 @@ TEST(BlobRequestHelpersTests, ParseBlobProperties_ZeroContentLengthIsPresentAndN
     EXPECT_EQ(ParseBlobProperties(ranged).ContentLength, 10U);
 
     const HttpResponse emptyTotal{206, {{"Content-Range", "bytes 0-0/0"}, {"Content-Length", "1"}}, ""};
-    EXPECT_EQ(ParseBlobProperties(emptyTotal).ContentLength, 1U);
+    EXPECT_THROW(static_cast<void>(ParseBlobProperties(emptyTotal)), std::invalid_argument);
 }
 
 TEST(BlobRequestHelpersTests, BoostUrlHelpers_PreserveExistingUrlShapes) {

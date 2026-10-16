@@ -244,6 +244,40 @@ TEST(ParserRobustnessTests, ContentRange_RejectsMalformedAndOverflowingValues) {
     EXPECT_FALSE(ValueOrFail(unknownTotal).Total.has_value());
 }
 
+TEST(AS_R08_HttpDateFormsTests, AcceptsRfc1123Rfc850AndAsctime) {
+    const auto expected = sys_days{1994y / November / 6} + 8h + 49min + 37s;
+    for (const std::string_view value :
+         {"Sun, 06 Nov 1994 08:49:37 GMT", "Sunday, 06-Nov-94 08:49:37 GMT", "Sun Nov  6 08:49:37 1994"}) {
+        SCOPED_TRACE(value);
+        const auto parsed = ParseHttpDateHeader(value);
+        ASSERT_TRUE(parsed.has_value());
+        EXPECT_EQ(floor<seconds>(*parsed), expected);
+    }
+}
+
+TEST(AS_R07_Iso8601FractionTests, DigitsBeyondTheSeventhAreTruncatedNotRounded) {
+    const auto seven = ParseIso8601Utc("2024-01-02T03:04:05.1234567Z");
+    const auto nine = ParseIso8601Utc("2024-01-02T03:04:05.123456789Z");
+    const auto roundingBait = ParseIso8601Utc("2024-01-02T03:04:05.1234569999Z");
+    ASSERT_TRUE(seven.has_value());
+    EXPECT_EQ(seven, nine);
+    EXPECT_EQ(roundingBait, ParseIso8601Utc("2024-01-02T03:04:05.1234569Z"));
+}
+
+TEST(AS_R04_ContentRangePresenceTests, PresentButInvalidContentRangeIsRejectedAndAbsentFallsBack) {
+    HttpResponse invalid{206, {{"Content-Range", "bytes 0-9/5"}, {"Content-Length", "10"}}, ""};
+    EXPECT_THROW(static_cast<void>(ParseBlobProperties(invalid)), std::invalid_argument);
+
+    HttpResponse valid{206, {{"Content-Range", "bytes 0-9/100"}, {"Content-Length", "10"}}, ""};
+    EXPECT_EQ(ParseBlobProperties(valid).ContentLength, 100U);
+
+    HttpResponse unknownTotal{206, {{"Content-Range", "bytes 0-9/*"}, {"Content-Length", "10"}}, ""};
+    EXPECT_EQ(ParseBlobProperties(unknownTotal).ContentLength, 10U);
+
+    HttpResponse absent{200, {{"Content-Length", "42"}}, ""};
+    EXPECT_EQ(ParseBlobProperties(absent).ContentLength, 42U);
+}
+
 TEST(ParserRobustnessTests, ErrorResponses_MalformedBodiesStillMapToAFailure) {
     for (const std::string_view body : {"", "<Error>", "not xml", "<Error><Code>ContainerNotFound</Code></Error>",
                                         "<e:Error xmlns:e=\"urn:x\"><e:Code>BlobNotFound</e:Code></e:Error>"}) {
