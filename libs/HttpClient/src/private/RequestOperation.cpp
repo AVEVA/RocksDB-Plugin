@@ -100,6 +100,8 @@ bool RequestOperation<Stream>::BuildRequestUnchecked(HttpRequest& request, const
 
     const auto verb = Private::ToBeastVerb(request.GetMethod());
 
+    // Each build starts from an empty message, so no field of an earlier attempt can survive.
+    m_request = {};
     m_request.version(11);
     m_request.method(verb);
     m_request.target(route.Target);
