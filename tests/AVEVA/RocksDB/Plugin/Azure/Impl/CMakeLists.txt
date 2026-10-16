@@ -54,4 +54,4 @@ if(MSVC)
 endif()
 target_include_directories(aveva-rocksdb-plugin-azure-impl-integration-tests PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../src/Azure")
-gtest_discover_tests(aveva-rocksdb-plugin-azure-impl-integration-tests DISCOVERY_TIMEOUT 60 PROPERTIES LABELS integration)
+gtest_discover_tests(aveva-rocksdb-plugin-azure-impl-integration-tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600 LABELS integration)
