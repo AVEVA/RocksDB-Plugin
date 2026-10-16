@@ -16,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <type_traits>
@@ -140,7 +141,12 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
     CachingTokenCredential(CreateKey, std::shared_ptr<TInner> inner, std::chrono::seconds refreshWindow,
                            std::optional<boost::asio::io_context::executor_type> executor, TClock clock)
         : m_inner(std::move(inner)), m_refreshWindow(refreshWindow), m_executor(std::move(executor)),
-          m_clock(std::move(clock)) {}
+          m_clock(std::move(clock)) {
+        // A negative window makes every token look about to expire, so each request would start a refresh.
+        if (m_refreshWindow < std::chrono::seconds::zero()) {
+            throw std::invalid_argument("CachingTokenCredential refreshWindow must not be negative.");
+        }
+    }
 
     template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
     auto GetTokenAsync(std::vector<std::string> scopes, CompletionToken&& token) {

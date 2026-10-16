@@ -11,6 +11,7 @@
 
 #include <chrono>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -67,6 +68,13 @@ void RequestWaitersForSharedToken(const std::shared_ptr<TestCachingCredential>& 
     }
 }
 } // namespace
+
+TEST(TokenCredentialTests, CachingTokenCredential_NegativeRefreshWindowIsRejected) {
+    auto inner = std::make_shared<ScriptedTokenCredential>();
+    EXPECT_THROW(static_cast<void>(TestCachingCredential::Create(inner, std::chrono::seconds(-1))),
+                 std::invalid_argument);
+    EXPECT_NO_THROW(static_cast<void>(TestCachingCredential::Create(inner, std::chrono::seconds(0))));
+}
 
 TEST(TokenCredentialTests, CachingTokenCredential_InvalidateForcesANewInnerRequestForThoseScopes) {
     auto inner = std::make_shared<ScriptedTokenCredential>();
