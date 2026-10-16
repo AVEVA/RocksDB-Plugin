@@ -4,7 +4,10 @@ A vcpkg overlay replaces the whole upstream port, so every patch the port applie
 including the ones that are identical to upstream.
 
 - **Forked from:** `microsoft/vcpkg` `ports/rocksdb` at version `11.8.1` (see `vcpkg.json`).
-''s `vcpkg-configuration.json`.
+- **Activated by:** the root `CMakeLists.txt`, which appends this directory to `VCPKG_OVERLAY_PORTS` when
+  `AVEVA_ROCKSDB_BUILD_DB_BENCH=ON`; it is deliberately not listed in the repository's `vcpkg-configuration.json`.
+- **Features:** the port keeps upstream's feature set unchanged (including `tbb`, which this repository does not
+  enable) so the overlay stays a small diff; only `db-bench` is AVEVA-specific.
 
 ## Patches
 
