@@ -49,22 +49,23 @@ template <typename Stream> class RequestOperation;
 class ResolveWaiter {
   public:
     /// <summary>
-    /// Constructs a waiter for one request.
+    /// Constructs a waiter for one request. The waiter only observes the request, so a request that has already
+    /// finished (for example by timing out while the lookup was still in flight) is not kept alive until the
+    /// leader's lookup ends.
     /// </summary>
     /// <param name="operation">The request waiting for the lookup.</param>
     template <typename Stream>
-    explicit ResolveWaiter(std::shared_ptr<RequestOperation<Stream>> operation) : m_operation(std::move(operation)) {}
+    explicit ResolveWaiter(const std::shared_ptr<RequestOperation<Stream>>& operation) : m_operation(operation) {}
 
     /// <summary>
-    /// Delivers the lookup's outcome to the request.
+    /// Delivers the lookup's outcome to the request, if it still exists.
     /// </summary>
     /// <param name="error">The leader's outcome.</param>
     /// <param name="results">The endpoints the leader found, if any.</param>
-    void operator()(boost::system::error_code error, Tcp::resolver::results_type results);
+    void operator()(boost::system::error_code error, SharedResolveResults results);
 
   private:
-    std::variant<std::shared_ptr<RequestOperation<PlainStream>>, std::shared_ptr<RequestOperation<TlsStream>>>
-        m_operation;
+    std::variant<std::weak_ptr<RequestOperation<PlainStream>>, std::weak_ptr<RequestOperation<TlsStream>>> m_operation;
 };
 
 /// <summary>
@@ -198,7 +199,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// </summary>
     /// <param name="error">The leader's outcome.</param>
     /// <param name="results">The endpoints the leader found, if any.</param>
-    void OnSharedResolve(boost::system::error_code error, Tcp::resolver::results_type results);
+    void OnSharedResolve(boost::system::error_code error, SharedResolveResults results);
 
   private:
     /// <summary>
@@ -220,7 +221,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// </summary>
     /// <param name="error">The outcome of the lookup.</param>
     /// <param name="results">The endpoints to connect to.</param>
-    void OnResolve(boost::system::error_code error, Tcp::resolver::results_type results);
+    void OnResolve(boost::system::error_code error, const Tcp::resolver::results_type& results);
 
     /// <summary>
     /// Performs the TLS handshake on a secure stream and then writes, or writes straight away on a plain

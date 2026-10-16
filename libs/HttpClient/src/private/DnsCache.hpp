@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -19,6 +20,12 @@
 
 namespace AVEVA::Private {
 /// <summary>
+/// An immutable resolution shared between the cache and everyone who received it, so a hit or a publish copies
+/// a pointer instead of the endpoint list.
+/// </summary>
+using SharedResolveResults = std::shared_ptr<const Tcp::resolver::results_type>;
+
+/// <summary>
 /// Short-lived cache of successful resolutions, so a burst of fresh connections to one origin does a single
 /// lookup. The TTL stays small because a long-lived connection is kept by a pool rather than here; a stale
 /// address only costs a failed connect on the next request. Failures are never cached.
@@ -29,7 +36,7 @@ namespace AVEVA::Private {
 /// </summary>
 /// <typeparam name="Clock">The clock entries expire against.</typeparam>
 /// <typeparam name="Waiter">What receives the outcome of a lookup led by another caller; must be movable
-/// and callable as <c>(boost::system::error_code, Tcp::resolver::results_type)</c>. A template parameter
+/// and callable as <c>(boost::system::error_code, SharedResolveResults)</c>. A template parameter
 /// rather than a type-erased function, because each owner has exactly one kind of waiter.</typeparam>
 template <typename Clock, typename Waiter> class BasicDnsCache {
   public:
@@ -55,16 +62,16 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     /// </summary>
     /// <param name="host">The host to look up.</param>
     /// <param name="service">The port or service name to look up.</param>
-    /// <returns>The cached endpoints, or nullopt if there is no entry or it has expired.</returns>
-    std::optional<Tcp::resolver::results_type> Find(std::string_view host, std::string_view service) {
+    /// <returns>The cached endpoints, or null if there is no entry or it has expired.</returns>
+    SharedResolveResults Find(std::string_view host, std::string_view service) {
         std::lock_guard<std::mutex> lock(m_mutex);
         const auto it = m_entries.find(KeyView{host, service});
         if (it == m_entries.end()) {
-            return std::nullopt;
+            return nullptr;
         }
         if (Clock::now() >= it->second.expires) {
             m_entries.erase(it);
-            return std::nullopt;
+            return nullptr;
         }
         return it->second.results;
     }
@@ -90,6 +97,20 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
         if (results.empty()) {
             return;
         }
+        Store(host, service, std::make_shared<const Tcp::resolver::results_type>(results));
+    }
+
+    /// <summary>
+    /// Caches an already shared resolution for the cache's TTL, so nothing is copied under the lock. A null or
+    /// empty result set is ignored.
+    /// </summary>
+    /// <param name="host">The host that was resolved.</param>
+    /// <param name="service">The port or service name that was resolved.</param>
+    /// <param name="results">The endpoints to cache.</param>
+    void Store(std::string_view host, std::string_view service, SharedResolveResults results) {
+        if (!results || results->empty()) {
+            return;
+        }
         std::lock_guard<std::mutex> lock(m_mutex);
         const auto now = Clock::now();
         if (m_entries.size() >= MaxEntries) {
@@ -98,7 +119,8 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
                 m_entries.clear();
             }
         }
-        m_entries.insert_or_assign(Key{std::string(host), std::string(service)}, Entry{results, now + m_ttl});
+        m_entries.insert_or_assign(Key{std::string(host), std::string(service)},
+                                   Entry{std::move(results), now + m_ttl});
     }
 
     /// <summary>
@@ -160,8 +182,10 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     /// <param name="scope">The scope the leader passed to <see cref="JoinOrLead"/>.</param>
     void Finish(std::string_view host, std::string_view service, boost::system::error_code error,
                 const Tcp::resolver::results_type& results, const void* scope = nullptr) {
+        // One copy, made before the lock is taken; the cache and every waiter then share it.
+        const auto shared = std::make_shared<const Tcp::resolver::results_type>(results);
         if (!error) {
-            Store(host, service, results);
+            Store(host, service, shared);
         }
         std::vector<Waiter> waiters;
         {
@@ -173,7 +197,7 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
             }
         }
         for (auto& waiter : waiters) {
-            waiter(error, results);
+            waiter(error, shared);
         }
     }
 
@@ -182,7 +206,7 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     /// A cached resolution and the point in time it stops being usable.
     /// </summary>
     struct Entry {
-        Tcp::resolver::results_type results;
+        SharedResolveResults results;
         typename Clock::time_point expires;
     };
 

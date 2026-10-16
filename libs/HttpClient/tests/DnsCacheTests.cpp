@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "private/DnsCache.hpp"
+#include "private/RequestOperation.hpp"
 
 #include <boost/asio/io_context.hpp>
 
@@ -18,13 +19,17 @@ using AVEVA::Private::Tcp;
 struct RecordingWaiter {
     int* delivered = nullptr;
     boost::system::error_code* seenError = nullptr;
+    AVEVA::Private::SharedResolveResults* seenResults = nullptr;
 
-    void operator()(boost::system::error_code error, Tcp::resolver::results_type) const {
+    void operator()(boost::system::error_code error, AVEVA::Private::SharedResolveResults results) const {
         if (delivered) {
             ++*delivered;
         }
         if (seenError) {
             *seenError = error;
+        }
+        if (seenResults) {
+            *seenResults = std::move(results);
         }
     }
 };
@@ -55,19 +60,21 @@ TEST(DnsCacheTests, ReturnsAStoredResultUntilTheTtlElapses) {
     TestDnsCache cache(std::chrono::seconds{1});
     FakeClock::Current = {};
 
-    EXPECT_FALSE(cache.Find("host", "80").has_value());
+    EXPECT_FALSE(cache.Find("host", "80"));
     cache.Store("host", "80", results);
     const auto hit = cache.Find("host", "80");
-    ASSERT_TRUE(hit.has_value());
+    ASSERT_TRUE(hit);
     EXPECT_EQ(hit->begin()->endpoint(), results.begin()->endpoint());
+    // Repeated hits share one immutable result rather than copying it.
+    EXPECT_EQ(cache.Find("host", "80"), hit);
 
-    EXPECT_FALSE(cache.Find("host", "81").has_value());
-    EXPECT_FALSE(cache.Find("other", "80").has_value());
+    EXPECT_FALSE(cache.Find("host", "81"));
+    EXPECT_FALSE(cache.Find("other", "80"));
 
     FakeClock::Current += std::chrono::milliseconds{999};
-    EXPECT_TRUE(cache.Find("host", "80").has_value());
+    EXPECT_TRUE(cache.Find("host", "80"));
     FakeClock::Current += std::chrono::milliseconds{1};
-    EXPECT_FALSE(cache.Find("host", "80").has_value());
+    EXPECT_FALSE(cache.Find("host", "80"));
 }
 
 TEST(DnsCacheTests, ConcurrentLookupsForOneOriginShareASingleLeader) {
@@ -90,7 +97,7 @@ TEST(DnsCacheTests, ConcurrentLookupsForOneOriginShareASingleLeader) {
     cache.Finish("host", "80", {}, results);
     EXPECT_EQ(delivered, 3);
     EXPECT_FALSE(seenError);
-    EXPECT_TRUE(cache.Find("host", "80").has_value());
+    EXPECT_TRUE(cache.Find("host", "80"));
 
     // The key is free again once the leader has finished.
     RecordingWaiter next;
@@ -130,12 +137,48 @@ TEST(DnsCacheTests, AbortedLeaderDeliversTheErrorToFollowersCachesNothingAndFree
 
     EXPECT_EQ(delivered, 1);
     EXPECT_EQ(seenError, boost::asio::error::operation_aborted);
-    EXPECT_FALSE(cache.Find("host", "80").has_value());
+    EXPECT_FALSE(cache.Find("host", "80"));
 
     // A late follower becomes the new leader instead of inheriting the abort.
     RecordingWaiter next;
     EXPECT_TRUE(cache.JoinOrLead("host", "80", next));
     cache.Finish("host", "80", boost::asio::error::host_not_found, {});
+}
+
+TEST(DnsCacheTests, FinishPublishesOneSharedResultToTheCacheAndEveryWaiter) {
+    boost::asio::io_context io;
+    const auto results = Loopback(io);
+    TestDnsCache cache;
+
+    RecordingWaiter leader;
+    ASSERT_TRUE(cache.JoinOrLead("host", "80", leader));
+    AVEVA::Private::SharedResolveResults first;
+    AVEVA::Private::SharedResolveResults second;
+    RecordingWaiter firstWaiter{nullptr, nullptr, &first};
+    RecordingWaiter secondWaiter{nullptr, nullptr, &second};
+    EXPECT_FALSE(cache.JoinOrLead("host", "80", firstWaiter));
+    EXPECT_FALSE(cache.JoinOrLead("host", "80", secondWaiter));
+
+    cache.Finish("host", "80", {}, results);
+
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first, second);
+    EXPECT_EQ(cache.Find("host", "80"), first);
+}
+
+TEST(DnsCacheTests, ResolveWaiterDoesNotKeepAFinishedRequestAlive) {
+    boost::asio::io_context io;
+    auto operation = std::make_shared<AVEVA::Private::RequestOperation<AVEVA::Private::PlainStream>>(
+        nullptr, std::make_unique<AVEVA::Private::PlainStream>(io), AVEVA::Detail::CompletionPointer{},
+        AVEVA::HttpRequestOptions{}, nullptr, AVEVA::Private::BasicConnectionKey{"host", "80"});
+    std::weak_ptr<AVEVA::Private::RequestOperation<AVEVA::Private::PlainStream>> weak = operation;
+
+    AVEVA::Private::ResolveWaiter waiter(operation);
+    operation.reset();
+
+    // A follower that timed out stays queued in the cache until the leader finishes; that must not pin it.
+    EXPECT_TRUE(weak.expired());
+    waiter(boost::asio::error::operation_aborted, std::make_shared<const Tcp::resolver::results_type>());
 }
 
 TEST(DnsCacheTests, InvalidateDropsOnlyTheNamedEntry) {
@@ -147,15 +190,15 @@ TEST(DnsCacheTests, InvalidateDropsOnlyTheNamedEntry) {
 
     cache.Invalidate("host", "80");
 
-    EXPECT_FALSE(cache.Find("host", "80").has_value());
-    EXPECT_TRUE(cache.Find("host", "81").has_value());
+    EXPECT_FALSE(cache.Find("host", "80"));
+    EXPECT_TRUE(cache.Find("host", "81"));
     cache.Invalidate("missing", "80"); // Dropping an absent entry is a no-op.
 }
 
 TEST(DnsCacheTests, EmptyResultsAreNotCached) {
     TestDnsCache cache;
     cache.Store("host", "80", Tcp::resolver::results_type{});
-    EXPECT_FALSE(cache.Find("host", "80").has_value());
+    EXPECT_FALSE(cache.Find("host", "80"));
 }
 
 // A leader whose io_context never runs again must not strand requests that run on another one.
@@ -178,7 +221,7 @@ TEST(DnsCacheTests, LookupsInDifferentScopesNeverJoinEachOther) {
 
     cache.Finish("host", "80", {}, results, &secondScope);
     EXPECT_EQ(delivered, 0);
-    EXPECT_TRUE(cache.Find("host", "80").has_value());
+    EXPECT_TRUE(cache.Find("host", "80"));
 
     cache.Finish("host", "80", boost::asio::error::operation_aborted, {}, &firstScope);
     EXPECT_EQ(delivered, 1);

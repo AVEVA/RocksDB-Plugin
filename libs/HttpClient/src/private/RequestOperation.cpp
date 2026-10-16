@@ -216,13 +216,13 @@ template <typename Stream> void RequestOperation<Stream>::ResetParser() {
 }
 
 template <typename Stream>
-void RequestOperation<Stream>::OnSharedResolve(boost::system::error_code error, Tcp::resolver::results_type results) {
+void RequestOperation<Stream>::OnSharedResolve(boost::system::error_code error, SharedResolveResults results) {
     asio::post(m_executor, [self = this->shared_from_this(), error, results = std::move(results)]() mutable {
         // The leader was cancelled or timed out, which says nothing about this request's lookup.
         if (error == asio::error::operation_aborted && !self->m_finished && !self->IsCancellationRequested()) {
             return self->Resolve();
         }
-        self->OnResolve(error, std::move(results));
+        self->OnResolve(error, *results);
     });
 }
 
@@ -231,7 +231,7 @@ template <typename Stream> void RequestOperation<Stream>::Resolve() {
     auto& cache = DnsCache::Shared();
     if (auto cached = cache.Find(m_key.host, m_key.service)) {
         m_resolvedFromCache = true;
-        return OnResolve({}, std::move(*cached));
+        return OnResolve({}, *cached);
     }
     const void* const scope = LookupScope();
     if (!cache.JoinOrLead(
@@ -257,7 +257,7 @@ template <typename Stream> void RequestOperation<Stream>::Resolve() {
         [self = this->shared_from_this(), guard](boost::system::error_code error, Tcp::resolver::results_type results) {
             guard->finished = true;
             DnsCache::Shared().Finish(self->m_key.host, self->m_key.service, error, results, guard->scope);
-            self->OnResolve(error, std::move(results));
+            self->OnResolve(error, results);
         });
 }
 
@@ -266,7 +266,7 @@ template <typename Stream> const void* RequestOperation<Stream>::LookupScope() c
 }
 
 template <typename Stream>
-void RequestOperation<Stream>::OnResolve(boost::system::error_code error, Tcp::resolver::results_type results) {
+void RequestOperation<Stream>::OnResolve(boost::system::error_code error, const Tcp::resolver::results_type& results) {
     if (m_finished) {
         return;
     }
@@ -516,8 +516,14 @@ template <typename Stream> void RequestOperation<Stream>::RequestCancellation() 
     asio::post(m_executor, [self = this->shared_from_this()]() { self->Cancel(); });
 }
 
-void ResolveWaiter::operator()(boost::system::error_code error, Tcp::resolver::results_type results) {
-    std::visit([&](auto& operation) { operation->OnSharedResolve(error, std::move(results)); }, m_operation);
+void ResolveWaiter::operator()(boost::system::error_code error, SharedResolveResults results) {
+    std::visit(
+        [&](auto& operation) {
+            if (auto strong = operation.lock()) {
+                strong->OnSharedResolve(error, std::move(results));
+            }
+        },
+        m_operation);
 }
 
 template class RequestOperation<PlainStream>;
