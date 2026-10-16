@@ -415,7 +415,7 @@ rocksdb::IOStatus BlobFilesystem::IsDirectory(const std::string& path, const roc
             }
         }
         // A prefix is a directory exactly when something lives beneath it.
-        if (!m_filesystem->GetChildren(path, 1).empty()) {
+        if (m_filesystem->HasChildren(path)) {
             *is_dir = true;
             return rocksdb::IOStatus::OK();
         }

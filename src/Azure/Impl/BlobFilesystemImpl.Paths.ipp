@@ -26,8 +26,15 @@ template <typename THttp> bool BasicBlobFilesystemImpl<THttp>::FileExists(const 
     // Fallback: check if this is a directory
     // NOTE: This doesn't map 100% to how a filesystem would work because you can have empty
     // directories in any respectable fs. This probably won't matter for our use case.
-    // Stop at the first child instead of walking every page, which would cost a request per blob.
-    // Match only children below "realPath/" so that "foo" does not match a sibling such as "foobar".
+    return HasChildren(name);
+}
+
+// Stops at the first child instead of walking every page, which would cost a request per blob. Matches only children
+// below "realPath/" so that "foo" does not match a sibling such as "foobar"; rename temporaries are not children.
+template <typename THttp> bool BasicBlobFilesystemImpl<THttp>::HasChildren(const std::string& directoryPath) {
+    EnsureLiveness();
+
+    const auto [prefix, realPath] = StorageAccount::StripPrefix(directoryPath);
     const auto dirPrefix = BlobFilesystemDetail::DirectoryPrefix(realPath);
     AzureClient::ListBlobsOptions options;
     options.Prefix = dirPrefix;
@@ -35,7 +42,8 @@ template <typename THttp> bool BasicBlobFilesystemImpl<THttp>::FileExists(const 
     bool found = false;
     BlobFilesystemDetail::ForEachBlobUntil(*GetContainer(prefix), std::move(options),
                                            [&](const AzureClient::Models::BlobItem& blob) {
-                                               found = !BlobFilesystemDetail::ChildName(blob.Name, dirPrefix).empty();
+                                               found = !BlobFilesystemDetail::IsRenameTempName(blob.Name) &&
+                                                       !BlobFilesystemDetail::ChildName(blob.Name, dirPrefix).empty();
                                                return found;
                                            });
     return found;

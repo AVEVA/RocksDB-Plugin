@@ -180,6 +180,8 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     DirectoryType CreateDirectory(const std::string& directoryPath);
 
     [[nodiscard]] bool FileExists(const std::string& name);
+    // True when at least one blob lives below the directory; stops at the first one rather than listing every page.
+    [[nodiscard]] bool HasChildren(const std::string& directoryPath);
     std::vector<std::string> GetChildren(const std::string& directoryPath,
                                          int32_t sizeHint = 10000 /* hopefully plenty for now */);
     std::vector<BlobAttributes> GetChildrenFileAttributes(const std::string& directoryPath);

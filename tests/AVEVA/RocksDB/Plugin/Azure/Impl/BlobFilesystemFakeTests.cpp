@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -117,6 +118,25 @@ TEST_F(BlobFilesystemFakeTests, WritesTruncatesAndDeletesInvalidateTheCachedSize
 }
 
 TEST_F(BlobFilesystemFakeTests, MissingFileDoesNotExist) { EXPECT_FALSE(m_fs->FileExists(Path("missing.sst"))); }
+
+TEST_F(BlobFilesystemFakeTests, HasChildrenIssuesOneListRequestRegardlessOfDirectorySize) {
+    for (int i = 0; i < 5000; ++i) {
+        (void)m_server->AddBlob("big/" + std::to_string(i), 1);
+    }
+    std::atomic<int> lists = 0;
+    m_server->Fault = [&lists](const auto operation) -> std::optional<AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::ListBlobs) {
+            ++lists;
+        }
+        return std::nullopt;
+    };
+
+    EXPECT_TRUE(m_fs->HasChildren(Path("big")));
+    EXPECT_EQ(lists.load(), 1);
+    EXPECT_FALSE(m_fs->HasChildren(Path("bi")));
+    EXPECT_FALSE(m_fs->HasChildren(Path("missing")));
+    m_server->Fault = nullptr;
+}
 
 TEST_F(BlobFilesystemFakeTests, ChildrenAreListedRelativeToTheirDirectory) {
     Write("dir/a.log", "a");
