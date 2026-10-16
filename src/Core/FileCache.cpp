@@ -149,6 +149,7 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
         const auto handle = fileEntry.GetOrCreateReadHandle();
         // Taken under the lock: the entry may be replaced or evicted once it is released.
         const int64_t entrySize = fileEntry.GetSize();
+        const auto generation = fileEntry.GetGeneration();
         const int64_t expectedBytes = std::max<int64_t>(0, std::min(bytesToRead, entrySize - offset));
 
         // The read is disk I/O, so it must not hold the cache-wide mutex. If an eviction closes the handle after the
@@ -192,8 +193,13 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
         }
 
         // Done after the handle lock is released so the two locks are never nested.
+        // Only the entry this read used is dropped: a newer valid one may have replaced it meanwhile.
         if (shortRead) {
-            RemoveFile(filePath);
+            std::scoped_lock relock(m_mutex);
+            if (const auto current = m_cache.find(filePath);
+                current != m_cache.end() && current->second.GetGeneration() == generation) {
+                RemoveFileUnsafe(filePath);
+            }
         }
         return result;
     }

@@ -727,6 +727,31 @@ TEST_F(FileCacheTests, SetCacheSize_ShrinkingBelowTheCurrentSizeEvictsAgainstThe
     EXPECT_LE(m_cache.CacheSize(), 10U);
 }
 
+TEST_F(FileCacheTests, ShortRead_DoesNotRemoveAnEntryThatWasReplacedDuringTheRead) {
+    // Arrange
+    EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(10));
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([this](const std::filesystem::path&) {
+        auto file = std::make_unique<FileMock>();
+        EXPECT_CALL(*file, Read(_, _, _)).WillRepeatedly([this](char*, uint64_t, uint64_t) {
+            // The blob changes while this read is in flight, so the entry being read is no longer the current one.
+            m_cache.MarkFileAsStaleIfExists("1.sst");
+            return 0;
+        });
+        return file;
+    });
+    std::array<char, 10> buffer{};
+    (void)m_cache.ReadFile("1.sst", 0, 10, buffer.data());
+    m_cache.WaitUntilIdle();
+
+    // Act
+    (void)m_cache.ReadFile("1.sst", 0, 10, buffer.data());
+    m_cache.WaitUntilIdle();
+
+    // Assert
+    EXPECT_TRUE(m_cache.HasFile("1.sst"));
+}
+
 TEST_F(FileCacheTests, EvictedFiles_AreDeletedBeforeTheNextFileIsDownloaded) {
     // Arrange
     const auto fileSize = static_cast<int64_t>(100);
