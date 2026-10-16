@@ -109,11 +109,14 @@ auto InitiateClientOperation(Client* client, Impl impl, CompletionToken&& token,
                              std::optional<AzureRequestOptions> requestOptions, Args&&... args) {
     using Signature = void(std::expected<Response<Result>, BlobStorageError>);
 
-    AzureRequestOptions effectiveOptions =
-        requestOptions ? std::move(*requestOptions) : client->GetDefaultRequestOptions();
-    if constexpr (IsRequestOptionsToken<std::remove_cvref_t<CompletionToken>>) {
-        effectiveOptions = token.Options;
-    }
+    // Chosen once so only the options actually used are copied (the client defaults are the costly fallback).
+    AzureRequestOptions effectiveOptions = [&]() -> AzureRequestOptions {
+        if constexpr (IsRequestOptionsToken<std::remove_cvref_t<CompletionToken>>) {
+            return token.Options;
+        } else {
+            return requestOptions ? std::move(*requestOptions) : client->GetDefaultRequestOptions();
+        }
+    }();
 
     // A WithRequestOptions(...) wrapper is transparent: the token it carries is what gets initiated.
     auto&& innerToken = [&]() -> decltype(auto) {
