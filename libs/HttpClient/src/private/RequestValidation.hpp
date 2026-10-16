@@ -8,6 +8,7 @@
 
 #include <boost/url/url_view.hpp>
 
+#include <exception>
 #include <string>
 #include <system_error>
 
@@ -46,4 +47,14 @@ bool IsValidRequestUrl(const boost::urls::url_view& url);
 /// <returns>An empty error code if the request may be sent; otherwise InvalidUrl or InvalidRequest.</returns>
 std::error_code ValidateRequest(const HttpRequest& request, const HttpRequestOptions& options,
                                 const boost::urls::url_view& url);
+
+/// <summary>
+/// Maps an exception thrown while building the wire request to the error reported to the caller. Only the
+/// errors Beast and the validation layer raise for input that cannot be represented are the request's fault;
+/// running out of memory or any other failure is not, and must not be reported as an invalid request.
+/// </summary>
+/// <param name="failure">The exception that was caught.</param>
+/// <returns>InvalidRequest for rejected input, not_enough_memory for bad_alloc, otherwise
+/// state_not_recoverable.</returns>
+std::error_code ClassifyBuildFailure(std::exception_ptr failure) noexcept;
 } // namespace AVEVA::Private

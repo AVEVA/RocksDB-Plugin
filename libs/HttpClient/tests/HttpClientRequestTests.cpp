@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "HttpClientTestHelpers.hpp"
+#include "private/RequestValidation.hpp"
 
 #include <gtest/gtest.h>
 
@@ -19,7 +20,9 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <new>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -562,5 +565,23 @@ TEST(HttpClientRequest, SharedBodyViewIsTransmitted) {
 
     EXPECT_FALSE(result.error);
     EXPECT_EQ(result.received.body(), "shared payload");
+}
+
+TEST(HttpClientRequest, BuildFailuresAreNotAllReportedAsInvalidRequests) {
+    using AVEVA::Private::ClassifyBuildFailure;
+    const auto classify = [](auto exception) {
+        try {
+            throw exception;
+        } catch (...) {
+            return ClassifyBuildFailure(std::current_exception());
+        }
+    };
+
+    EXPECT_EQ(classify(std::length_error("header too long")), AVEVA::HttpClientError::InvalidRequest);
+    EXPECT_EQ(classify(std::invalid_argument("bad")), AVEVA::HttpClientError::InvalidRequest);
+    EXPECT_EQ(classify(boost::system::system_error(http::error::bad_field)), AVEVA::HttpClientError::InvalidRequest);
+    EXPECT_EQ(classify(std::bad_alloc()), std::make_error_code(std::errc::not_enough_memory));
+    EXPECT_EQ(classify(std::runtime_error("unexpected")), std::make_error_code(std::errc::state_not_recoverable));
+    EXPECT_EQ(classify(42), std::make_error_code(std::errc::state_not_recoverable));
 }
 } // namespace

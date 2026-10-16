@@ -8,7 +8,10 @@
 
 #include <algorithm>
 #include <boost/beast/http/fields.hpp>
+#include <boost/system/system_error.hpp>
 #include <boost/url/scheme.hpp>
+#include <new>
+#include <stdexcept>
 #include <string_view>
 
 namespace AVEVA::Private {
@@ -55,5 +58,21 @@ std::error_code ValidateRequest(const HttpRequest& request, const HttpRequestOpt
         return HttpClientError::InvalidRequest;
     }
     return {};
+}
+
+std::error_code ClassifyBuildFailure(std::exception_ptr failure) noexcept {
+    try {
+        std::rethrow_exception(std::move(failure));
+    } catch (const std::bad_alloc&) {
+        return std::make_error_code(std::errc::not_enough_memory);
+    } catch (const std::length_error&) {
+        return HttpClientError::InvalidRequest;
+    } catch (const std::invalid_argument&) {
+        return HttpClientError::InvalidRequest;
+    } catch (const boost::system::system_error&) {
+        return HttpClientError::InvalidRequest;
+    } catch (...) {
+        return std::make_error_code(std::errc::state_not_recoverable);
+    }
 }
 } // namespace AVEVA::Private

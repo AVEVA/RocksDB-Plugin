@@ -79,8 +79,8 @@ template <typename Stream> void RequestOperation<Stream>::StartReused(HttpReques
 template <typename Stream> bool RequestOperation<Stream>::BuildRequest(HttpRequest& request, const Route& route) {
     try {
         return BuildRequestUnchecked(request, route);
-    } catch (const std::exception&) {
-        Fail(HttpClientError::InvalidRequest);
+    } catch (...) {
+        Finish(ClassifyBuildFailure(std::current_exception()), {});
         return false;
     }
 }
