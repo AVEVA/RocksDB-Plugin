@@ -2,6 +2,12 @@
 # gflags targets must be importable before RocksDB's exported config is loaded.
 find_package(gflags CONFIG REQUIRED)
 find_package(RocksDB CONFIG REQUIRED)
+if(NOT TARGET RocksDB::db_bench_tool)
+    message(FATAL_ERROR
+        "RocksDB::db_bench_tool is missing: the installed RocksDB was not built from the patched overlay port. "
+        "Set VCPKG_OVERLAY_PORTS=infrastructure/vcpkg-overlays (or configure with "
+        "-DAVEVA_ROCKSDB_BUILD_DB_BENCH=ON from the top level) and reconfigure with a fresh build directory.")
+endif()
 
 add_executable(aveva_db_bench BenchmarkRunner.cpp)
 target_compile_features(aveva_db_bench PRIVATE cxx_std_23)
