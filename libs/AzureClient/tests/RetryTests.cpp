@@ -357,8 +357,7 @@ TEST(RetryTests, UnauthorizedResponseAfterTheDeadlineDoesNotRefreshTheToken) {
     requestOptions.SetTotalDeadline(std::chrono::milliseconds{50});
     std::optional<DeleteResult> observed;
     client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) { observed = std::move(result); }));
-    ASSERT_EQ(httpClient.PendingCount(), 1U);
-
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return httpClient.PendingCount() == 1U; }, std::chrono::seconds{2}));
     // The 401 arrives after the deadline but before its timer has been serviced.
     std::this_thread::sleep_for(std::chrono::milliseconds{120});
     ASSERT_TRUE(httpClient.CompleteNext());

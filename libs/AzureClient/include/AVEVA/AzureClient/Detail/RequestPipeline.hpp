@@ -299,8 +299,11 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         return attempt;
     }
 
-    void StartAttempt() {
-        ++m_attempt;
+    // `countsAsAttempt` is false for the one token-refresh repeat, which must not consume the retry budget.
+    void StartAttempt(bool countsAsAttempt = true) {
+        if (countsAsAttempt) {
+            ++m_attempt;
+        }
         HttpRequest attempt = BuildAttemptRequest();
 
         switch (m_auth.Type) {
@@ -480,8 +483,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
                 }
                 m_tokenRefreshed = true;
                 m_credential->Invalidate(m_auth.TokenScopes);
-                --m_attempt; // The refresh does not consume the retry budget.
-                StartAttempt();
+                StartAttempt(false);
                 return;
             }
         }
