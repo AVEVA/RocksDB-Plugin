@@ -407,6 +407,24 @@ TEST(DownloadBufferPoolTests, ClassKeepsAtMostTheConfiguredNumberOfBuffers) {
     EXPECT_EQ(Pool::MaxPooledBuffersPerClass, pool->PooledCount());
 }
 
+TEST(DownloadBufferPoolTests, RetainedBytesAreCappedAndTheLargestBuffersGoFirst) {
+    using Pool = AVEVA::RocksDB::Plugin::Azure::Impl::DownloadBufferPool;
+    const auto pool = std::make_shared<Pool>();
+    {
+        std::vector<std::shared_ptr<Pool::Lease>> leases;
+        for (size_t i = 0; i < Pool::MaxPooledBuffersPerClass; ++i) {
+            leases.push_back(pool->Acquire(Pool::MaxPooledBufferBytes));
+        }
+        leases.push_back(pool->Acquire(1024));
+    }
+
+    EXPECT_LE(pool->PooledBytes(), Pool::MaxPooledTotalBytes);
+    // The small buffer survives while the big ones were evicted to make room.
+    EXPECT_GE(pool->PooledBytes(), size_t{1024});
+    auto small = pool->Acquire(1024);
+    EXPECT_LT(pool->PooledBytes(), Pool::MaxPooledTotalBytes);
+}
+
 TEST(DownloadBufferPoolTests, OversizedBuffersAreNotRetained) {
     const auto pool = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::DownloadBufferPool>();
     {

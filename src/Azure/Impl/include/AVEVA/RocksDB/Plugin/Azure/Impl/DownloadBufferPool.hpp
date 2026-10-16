@@ -32,6 +32,8 @@ class DownloadBufferPool : public std::enable_shared_from_this<DownloadBufferPoo
     static constexpr std::size_t MinBufferBytes = 512;
     // Buffers retained per size class.
     static constexpr std::size_t MaxPooledBuffersPerClass = 8;
+    // Total bytes retained across every class; when exceeded the largest free buffers are released first.
+    static constexpr std::size_t MaxPooledTotalBytes = 16U * 1024U * 1024U;
 
     /// <summary>A buffer on loan from the pool; it returns itself when the last owner lets go.</summary>
     class Lease {
@@ -69,12 +71,19 @@ class DownloadBufferPool : public std::enable_shared_from_this<DownloadBufferPoo
             if (!free.empty()) {
                 buffer = std::move(free.back());
                 free.pop_back();
+                m_pooledBytes -= capacity;
             }
         }
         if (!buffer) {
             buffer = std::make_unique_for_overwrite<char[]>(capacity);
         }
         return std::make_shared<Lease>(shared_from_this(), std::move(buffer), capacity, size);
+    }
+
+    /// <summary>Bytes currently held for reuse (for tests and diagnostics).</summary>
+    [[nodiscard]] std::size_t PooledBytes() const {
+        std::scoped_lock lock(m_mutex);
+        return m_pooledBytes;
     }
 
     /// <summary>Buffers currently held for reuse (for tests and diagnostics).</summary>
@@ -100,12 +109,29 @@ class DownloadBufferPool : public std::enable_shared_from_this<DownloadBufferPoo
             return;
         }
         std::scoped_lock lock(m_mutex);
-        if (auto& free = m_free[ClassOf(capacity)]; free.size() < MaxPooledBuffersPerClass) {
-            free.push_back(std::move(buffer));
+        auto& free = m_free[ClassOf(capacity)];
+        if (free.size() >= MaxPooledBuffersPerClass) {
+            return;
+        }
+        free.push_back(std::move(buffer));
+        m_pooledBytes += capacity;
+        EvictLargestWhileOverCap();
+    }
+
+    // Caller holds m_mutex. Largest buffers go first: they free the most memory per eviction and are the costliest
+    // to keep for the rare big read.
+    void EvictLargestWhileOverCap() {
+        for (std::size_t sizeClass = ClassCount; sizeClass-- > 0 && m_pooledBytes > MaxPooledTotalBytes;) {
+            auto& free = m_free[sizeClass];
+            while (!free.empty() && m_pooledBytes > MaxPooledTotalBytes) {
+                free.pop_back();
+                m_pooledBytes -= MinBufferBytes << sizeClass;
+            }
         }
     }
 
     mutable std::mutex m_mutex;
+    std::size_t m_pooledBytes = 0;
     std::array<std::vector<std::unique_ptr<char[]>>, ClassCount> m_free;
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
