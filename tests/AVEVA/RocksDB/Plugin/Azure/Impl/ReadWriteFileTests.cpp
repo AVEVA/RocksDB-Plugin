@@ -54,6 +54,16 @@ TEST_F(ReadWriteFileImplTests, Constructor_InitializesCorrectly) {
     SUCCEED();
 }
 
+TEST_F(ReadWriteFileImplTests, WriteAndRead_RangeOverflowingInt64_ThrowInvalidArgument) {
+    const auto file = CreateFile();
+    char byte = 'x';
+
+    EXPECT_THROW(file->Write(std::numeric_limits<int64_t>::max(), &byte, 1), std::invalid_argument);
+    EXPECT_THROW(file->Write(-1, &byte, 1), std::invalid_argument);
+    EXPECT_THROW([[maybe_unused]] auto n = file->Read(std::numeric_limits<int64_t>::max() - 1, 2, &byte),
+                 std::invalid_argument);
+}
+
 TEST_F(ReadWriteFileImplTests, Constructor_InitializesFromEmptyBlob) {
     // Arrange - simulator starts with fileSize = 0
 

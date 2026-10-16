@@ -753,6 +753,47 @@ TEST(AsyncReadRequestTests, DeliverCallback_NullCallback_DoesNotCrash) {
     EXPECT_NO_THROW(request.DeliverCallback());
 }
 
+TEST_F(AsyncReadTests, Read_RangeOverflowingInt64_ReturnsInvalidArgument) {
+    auto file = CreateFile(m_deferredEnv);
+    std::vector<char> scratch(16);
+    rocksdb::Slice result;
+    constexpr auto max = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+
+    EXPECT_TRUE(file.Read(max, 1, rocksdb::IOOptions{}, &result, scratch.data(), nullptr).IsInvalidArgument());
+    EXPECT_TRUE(file.Read(max - 4, 5, rocksdb::IOOptions{}, &result, scratch.data(), nullptr).IsInvalidArgument());
+    EXPECT_TRUE(
+        file.Read(std::numeric_limits<uint64_t>::max(), 1, rocksdb::IOOptions{}, &result, scratch.data(), nullptr)
+            .IsInvalidArgument());
+}
+
+TEST_F(AsyncReadTests, ReadAsyncAndPrefetch_RangeOverflowingInt64_ReturnInvalidArgument) {
+    auto file = CreateFile(m_deferredEnv);
+    std::vector<char> scratch(16);
+    auto req = MakeRequest(static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) - 4, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+
+    EXPECT_TRUE(Submit(file, req, record, handle).IsInvalidArgument());
+    EXPECT_TRUE(
+        file.Prefetch(static_cast<uint64_t>(std::numeric_limits<int64_t>::max()), 1, rocksdb::IOOptions{}, nullptr)
+            .IsInvalidArgument());
+    EXPECT_EQ(0U, m_deferredEnv.Blob->PendingDownloads());
+}
+
+TEST_F(AsyncReadTests, MultiRead_OverflowingRequest_FailsOnlyThatRequest) {
+    auto file = CreateFile(m_inlineEnv);
+    std::vector<char> good(16);
+    std::vector<char> bad(16);
+    std::vector<rocksdb::FSReadRequest> reqs(2);
+    reqs[0] = MakeRequest(0, good);
+    reqs[1] = MakeRequest(UINT64_MAX - 3, bad);
+
+    ASSERT_TRUE(file.MultiRead(reqs.data(), reqs.size(), rocksdb::IOOptions{}, nullptr).ok());
+
+    EXPECT_TRUE(reqs[0].status.ok()) << reqs[0].status.ToString();
+    EXPECT_TRUE(reqs[1].status.IsInvalidArgument()) << reqs[1].status.ToString();
+}
+
 TEST_F(AsyncReadTests, ReadAsync_NullCallback_ReturnsInvalidArgument) {
     auto file = CreateFile(m_deferredEnv);
     std::vector<char> scratch(16);

@@ -3,6 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/ReadWriteFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/RangeCheck.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include <boost/log/trivial.hpp>
@@ -20,8 +21,7 @@ ReadWriteFile::~ReadWriteFile() = default;
 rocksdb::IOStatus ReadWriteFile::Write(uint64_t offset, const rocksdb::Slice& data, const rocksdb::IOOptions&,
                                        rocksdb::IODebugContext*) {
     try {
-        constexpr auto max = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
-        if (offset > max || data.size() > max) {
+        if (!Impl::RangeCheck::IsValid(offset, data.size())) {
             return rocksdb::IOStatus::InvalidArgument("Write offset or size is out of range");
         }
 
@@ -36,8 +36,7 @@ rocksdb::IOStatus ReadWriteFile::Write(uint64_t offset, const rocksdb::Slice& da
 rocksdb::IOStatus ReadWriteFile::Read(uint64_t offset, size_t n, const rocksdb::IOOptions&, rocksdb::Slice* result,
                                       char* scratch, rocksdb::IODebugContext*) const {
     try {
-        constexpr auto max = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
-        if (offset > max || n > max) {
+        if (!Impl::RangeCheck::IsValid(offset, n)) {
             return rocksdb::IOStatus::InvalidArgument("Read offset or size is out of range");
         }
 

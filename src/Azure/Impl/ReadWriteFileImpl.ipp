@@ -5,6 +5,7 @@
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/RangeCheck.hpp"
 #include <algorithm>
 #include <boost/log/trivial.hpp>
 
@@ -219,6 +220,7 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
 // Buffers a write at its page-aligned slot with room around it, so Flush can merge the existing bytes of partially
 // covered pages and upload whole pages. Flushes early when the buffer is nearly full.
 template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Write(int64_t offset, const char* data, int64_t size) {
+    RangeCheck::ThrowIfInvalid(offset, size, "Write");
     // This one is TRICKY. Incomplete pages must track the location within a page
     // along with length information and then fetch the relevant page before committing
     // likely to be lots of room for optimization maybe around allocation
@@ -278,6 +280,7 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Write(int64_t offs
 // m_size rather than the published m_syncSize.
 template <typename TBlob>
 int64_t BasicReadWriteFileImpl<TBlob>::Read(int64_t offset, int64_t bytesRequested, char* buffer) const {
+    RangeCheck::ThrowIfInvalid(offset, bytesRequested, "Read");
     if (!m_bufferStats.empty()) {
         // Read is logically const; flushing only moves buffered bytes to the blob.
         const_cast<BasicReadWriteFileImpl*>(this)->Flush();

@@ -4,6 +4,7 @@
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadRequest.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/RangeCheck.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include "BasicReadableFile.hpp"
 
@@ -37,10 +38,9 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::Read(const uint64_t offset, const si
                                                  rocksdb::Slice* result, char* scratch,
                                                  rocksdb::IODebugContext*) const {
     try {
-        assert(offset <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) &&
-               "offset exceeds int64_t max value");
-        assert(n <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) &&
-               "size_t value exceeds int64_t max value");
+        if (!Impl::RangeCheck::IsValid(offset, n)) {
+            return rocksdb::IOStatus::InvalidArgument("Read offset or size is out of range");
+        }
         const auto bytesRead = m_file->RandomRead(static_cast<int64_t>(offset), static_cast<int64_t>(n), scratch);
         assert(bytesRead >= 0 && "RandomRead should not return negative values");
         assert(static_cast<uint64_t>(bytesRead) <= std::numeric_limits<size_t>::max() &&
@@ -70,10 +70,9 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& re
                                                       std::function<void(rocksdb::FSReadRequest&, void*)> cb,
                                                       void* cb_arg, void** io_handle, rocksdb::IOHandleDeleter* del_fn,
                                                       std::shared_ptr<Impl::AsyncReadSignal> signal) {
-    assert(req.offset <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) &&
-           "offset exceeds int64_t max value");
-    assert(req.len <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) &&
-           "size_t value exceeds int64_t max value");
+    if (!Impl::RangeCheck::IsValid(req.offset, req.len)) {
+        return rocksdb::IOStatus::InvalidArgument("ReadAsync offset or size is out of range");
+    }
     if (!cb) {
         return rocksdb::IOStatus::InvalidArgument("ReadAsync requires a callback");
     }
@@ -141,9 +140,16 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
         std::vector<char> Buffer;
     };
 
-    std::vector<size_t> order(num_reqs);
+    // A request whose range overflows cannot be merged or read; it fails on its own like any per-request error.
+    std::vector<size_t> order;
+    order.reserve(num_reqs);
     for (size_t i = 0; i < num_reqs; ++i) {
-        order[i] = i;
+        if (Impl::RangeCheck::IsValid(reqs[i].offset, reqs[i].len)) {
+            order.push_back(i);
+        } else {
+            reqs[i].status = rocksdb::IOStatus::InvalidArgument("MultiRead offset or size is out of range");
+            reqs[i].result = rocksdb::Slice();
+        }
     }
     std::ranges::sort(order, [&](const size_t a, const size_t b) { return reqs[a].offset < reqs[b].offset; });
 
@@ -269,8 +275,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
 template <class TImpl>
 rocksdb::IOStatus BasicReadableFile<TImpl>::Prefetch(const uint64_t offset, const size_t n, const rocksdb::IOOptions&,
                                                      rocksdb::IODebugContext*) {
-    if (offset > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
-        n > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+    if (!Impl::RangeCheck::IsValid(offset, n)) {
         return rocksdb::IOStatus::InvalidArgument("Prefetch range exceeds int64_t");
     }
 

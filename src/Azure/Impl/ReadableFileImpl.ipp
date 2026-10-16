@@ -4,6 +4,7 @@
 // Definitions of BasicReadableFileImpl; included at the end of ReadableFileImpl.hpp.
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/RangeCheck.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include <algorithm>
 #include <boost/log/trivial.hpp>
@@ -61,7 +62,11 @@ BasicReadableFileImpl<TBlob>::BasicReadableFileImpl(
 }
 
 template <typename TBlob>
-int64_t BasicReadableFileImpl<TBlob>::RandomRead(const int64_t offset, const int64_t bytesToRead, char* buffer) const {
+int64_t BasicReadableFileImpl<TBlob>::RandomRead(const int64_t offset, int64_t bytesToRead, char* buffer) const {
+    // Readahead past a saturated sequential position would overflow the end offset; nothing exists out there.
+    if (offset >= 0 && !RangeCheck::IsValid(offset, bytesToRead) && bytesToRead > 0) {
+        bytesToRead = RangeCheck::MaxOffset - offset;
+    }
     if (offset < 0 || bytesToRead <= 0) {
         return 0;
     }

@@ -3,6 +3,7 @@
 
 // Definitions of BasicSequentialFileImpl; included at the end of SequentialFileImpl.hpp.
 #pragma once
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/RangeCheck.hpp"
 #include <algorithm>
 #include <utility>
 
@@ -68,7 +69,10 @@ int64_t BasicSequentialFileImpl<TBlob>::ReadThroughReadahead(const int64_t bytes
 
 template <typename TBlob> int64_t BasicSequentialFileImpl<TBlob>::GetOffset() const { return m_offset; }
 
-template <typename TBlob> void BasicSequentialFileImpl<TBlob>::Skip(const int64_t n) { m_offset += n; }
+template <typename TBlob> void BasicSequentialFileImpl<TBlob>::Skip(const int64_t n) {
+    // Saturates instead of overflowing; no blob is that large, so every later read just reports end of file.
+    m_offset = n > RangeCheck::MaxOffset - m_offset ? RangeCheck::MaxOffset : m_offset + std::max<int64_t>(n, 0);
+}
 
 template <typename TBlob> int64_t BasicSequentialFileImpl<TBlob>::GetSize() const { return m_file.GetSize(); }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
