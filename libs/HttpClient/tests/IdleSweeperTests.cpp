@@ -50,8 +50,10 @@ struct SweeperFixture {
 TEST(IdleSweeper, EarlierDeadlineWakesTheSchedulerThread) {
     asio::io_context context;
     SweeperFixture slow(context, std::chrono::hours(1));
+    const auto waitsBefore = IdleSweeper::SchedulerWaitCount();
     slow.AddIdleConnection();
-    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Let the thread start waiting on the slow deadline.
+    // Let the thread start waiting on the slow deadline.
+    ASSERT_TRUE(WaitUntil([&] { return IdleSweeper::SchedulerWaitCount() > waitsBefore; }));
 
     SweeperFixture fast(context, std::chrono::milliseconds(50));
     fast.AddIdleConnection();

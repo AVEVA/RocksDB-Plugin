@@ -112,6 +112,12 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
     /// </summary>
     static bool SchedulerIsAlive() { return SweepScheduler::IsAlive(); }
 
+    /// <summary>
+    /// How many times the scheduler thread has gone to sleep on a deadline, process-wide. Lets a test wait for the
+    /// thread to be asleep instead of guessing with a fixed delay.
+    /// </summary>
+    static std::uint64_t SchedulerWaitCount() noexcept { return SweepScheduler::WaitCount().load(); }
+
   private:
     class SweepScheduler;
 
@@ -149,6 +155,11 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
         static bool IsAlive() {
             std::lock_guard<std::mutex> lock(RegistryMutex());
             return !Registered().expired();
+        }
+
+        static std::atomic<std::uint64_t>& WaitCount() noexcept {
+            static std::atomic<std::uint64_t> count{0};
+            return count;
         }
 
         SweepScheduler(const SweepScheduler&) = delete;
@@ -219,6 +230,7 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
                 }
                 const auto due = state.queue.begin()->first;
                 if (Clock::now() < due) {
+                    WaitCount().fetch_add(1);
                     state.wake.wait_until(lock, stop, due, [&state, due] {
                         return !state.queue.empty() && state.queue.begin()->first < due;
                     });
