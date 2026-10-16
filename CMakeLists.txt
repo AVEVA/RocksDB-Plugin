@@ -1,4 +1,15 @@
 cmake_minimum_required(VERSION 3.22)
+
+option(AVEVA_ROCKSDB_BUILD_DB_BENCH
+    "Build the aveva_db_bench wrapper around RocksDB's db_bench tool. \
+Requires the vcpkg overlay port in infrastructure/vcpkg-overlays/rocksdb to \
+be active; it installs RocksDB's db_bench_tool as a static library (via \
+0004-install-db-bench-tool-lib.patch) that the wrapper links against." OFF)
+
+if (${AVEVA_ROCKSDB_BUILD_DB_BENCH})
+    list(APPEND VCPKG_MANIFEST_FEATURES "db-bench")
+endif()
+
 project(aveva-rocksdb-plugin LANGUAGES CXX VERSION 0.0.1)
 option(AVEVA_ROCKSDB_TESTS "Build tests for plugins" ON)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
@@ -16,4 +27,7 @@ if (${AVEVA_ROCKSDB_TESTS})
     include(CTest)
     enable_testing()
     add_subdirectory(tests)
+endif()
+if (${AVEVA_ROCKSDB_BUILD_DB_BENCH})
+    add_subdirectory(tools)
 endif()
