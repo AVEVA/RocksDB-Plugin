@@ -354,8 +354,9 @@ template <class TOptions> void ValidateConnectionOptions(const TOptions& options
 
 template <class TOptions>
 [[nodiscard]] std::shared_ptr<const ConnectionState> BuildConnection(TOptions& options, bool hasTokenCredential) {
-    options.ServiceEndpoint = std::string{TrimTrailingSlashes(options.ServiceEndpoint)};
-    options.SasToken = std::string{TrimLeadingQuestionMark(options.SasToken)};
+    // Trim in place: re-assigning from a view would copy the SAS token into a fresh string.
+    options.ServiceEndpoint.resize(TrimTrailingSlashes(options.ServiceEndpoint).size());
+    options.SasToken.erase(0, options.SasToken.size() - TrimLeadingQuestionMark(options.SasToken).size());
     ValidateConnectionOptions(options, hasTokenCredential);
 
     auto state = std::make_shared<ConnectionState>();
