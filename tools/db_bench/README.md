@@ -162,6 +162,71 @@ keys only if it downloads them back from Azure.
 ```
 Check the `readrandom` result line for `(10000 of 10000 found)`.
 
+## Attaching a secondary cache
+
+The wrapper registers two AVEVA `rocksdb::SecondaryCache` backends with the
+`ObjectLibrary`, so you can select one with db_bench's own
+`--secondary_cache_uri` flag, the same way `--fs_uri` selects the Azure
+plugin:
+
+- `aveva-file-based-secondary-cache://` — `FileBasedCompressedSecondaryCache`
+  (one file per entry, on local disk).
+- `aveva-cachelib-secondary-cache://` — `CacheLibSecondaryCache`, backed by
+  Facebook CacheLib's Navy engine. Only registered in builds configured with
+  `-DAVEVA_ROCKSDB_WITH_CACHELIB=ON` (Linux x64 only; the CMake build fails
+  fast with a `FATAL_ERROR` if you force it on elsewhere).
+
+Both backends require a cache directory. Set these before launching:
+
+```powershell
+$env:AVEVA_DB_BENCH_SECONDARY_CACHE_DIR          = "C:\temp\secondary-cache"
+$env:AVEVA_DB_BENCH_SECONDARY_CACHE_CAPACITY_MB  = "512"   # optional, default 512
+```
+
+Then add `--secondary_cache_uri` alongside your usual flags:
+
+```powershell
+& $exe --benchmarks=fillrandom,readrandom --num=200000 --value_size=1024 `
+    --compression_type=zlib --statistics=1 --histogram=1 `
+    --fs_uri="azblobfs$($env:AVEVA_DB_BENCH_CONTAINER)" `
+    --db="$($env:AZURE_STORAGE_ACCOUNT_NAME)+$($env:AVEVA_DB_BENCH_CONTAINER)/bench-db" `
+    --secondary_cache_uri="aveva-file-based-secondary-cache://"
+```
+
+On CacheLib builds, swap the URI for `aveva-cachelib-secondary-cache://` and
+optionally tune Navy through its own env vars (all optional; defaults shown):
+
+```
+AVEVA_DB_BENCH_CACHELIB_REGION_SIZE_BYTES                   (16777216)
+AVEVA_DB_BENCH_CACHELIB_CLEAN_REGIONS                       (1)
+AVEVA_DB_BENCH_CACHELIB_BLOCK_SIZE                          (4096)
+AVEVA_DB_BENCH_CACHELIB_READER_THREADS                      (4)
+AVEVA_DB_BENCH_CACHELIB_WRITER_THREADS                      (4)
+AVEVA_DB_BENCH_CACHELIB_MAX_PARCEL_MEMORY_MB                (32)
+AVEVA_DB_BENCH_CACHELIB_EVICTION_POLICY                     (fifo|lru, default fifo)
+AVEVA_DB_BENCH_CACHELIB_DATA_CHECKSUM                       (0|1, default 1)
+AVEVA_DB_BENCH_CACHELIB_ADMISSION_WRITE_RATE_BYTES_PER_SEC  (unset = admit everything)
+AVEVA_DB_BENCH_CACHELIB_LOG_LEVEL                           (WARN)
+AVEVA_DB_BENCH_CACHELIB_FILE_NAME                           (navy.cache)
+```
+
+The wrapper's stderr banner echoes the exact URIs and env vars available in
+your build, so you don't need to remember this list.
+
+### Known caveat: `aveva-file-based-secondary-cache` under-reports hits
+
+`FileBasedCompressedSecondaryCache::Lookup()` currently passes
+`rocksdb::CacheTier::kNonVolatileBlockTier` to RocksDB's `create_cb`, which
+RocksDB's block-cache helpers reject. The lookup is treated as a miss at the
+RocksDB layer even when the on-disk entry is valid, so
+`rocksdb.secondary.cache.hits` (and friends) stay at zero for this backend
+regardless of actual cache behavior. This is a known, tracked-in-tests issue
+(`SecondaryCacheRocksDbTests.ReadsAreCorrectAndServedFromSecondaryCache`
+skips the assertion for this backend) — not a benchmark artifact. Do not
+use `--statistics=1`'s `SECONDARY_CACHE_*` tickers to judge this backend's
+effectiveness until it's fixed; the CacheLib backend does not have this
+issue (it round-trips the real tier through its own record header).
+
 ## Stats and histograms
 
 Add these flags to get latency percentiles and RocksDB's internal counters.
@@ -244,7 +309,7 @@ Check these signals, in priority order, for follow-up investigation:
 
 2. **`rocksdb.manifest.file.sync.micros`.** This event is infrequent, but also network-bound. Optimize this path only when MANIFEST churn is high, for example under many small DB reopens or compactions.
 
-3. **Read-path cache effectiveness**, through `rocksdb.block.cache.hit`/`rocksdb.block.cache.miss` from `--statistics=1`. A high miss rate under a workload larger than memory sends every miss to Azure over the network. Adjust the block cache size, or use the plugin's secondary cache (`Core/FileBasedCompressedSecondaryCache`), to reduce this cost.
+3. **Read-path cache effectiveness**, through `rocksdb.block.cache.hit`/`rocksdb.block.cache.miss` from `--statistics=1`. A high miss rate under a workload larger than memory sends every miss to Azure over the network. Adjust the block cache size, or attach an AVEVA secondary cache with `--secondary_cache_uri` (see "Attaching a secondary cache" above) to reduce this cost. When comparing backends, prefer the CacheLib backend's `SECONDARY_CACHE_*` tickers over the FileBased backend's — see the known caveat above.
 
 4. **Concurrent benchmarks, with `--threads>1`.** Real deployments run concurrent workloads. A `fillseq`/`readrandom`-only baseline does not show lock contention or lease-renewal thread overhead. Run the `db_bench` benchmarks named for concurrent read and write mixes, and profile the `BlobFilesystemImpl` lease-renewal thread under load.
 
