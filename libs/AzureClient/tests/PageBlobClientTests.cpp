@@ -182,6 +182,15 @@ void StartDownloadToPathAsyncAndVerify(PageBlobClient& client, const std::filesy
 
 } // namespace
 
+TEST(PageBlobClientTests, ResourceUrl_HasNoQueryStringWhileUrlCarriesTheSas) {
+    FakeHttpClient httpClient;
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    EXPECT_EQ(client.ResourceUrl(), "https://storageaccount.blob.core.windows.net/disks/disk.vhd");
+    EXPECT_EQ(client.ResourceUrl().find("sig="), std::string::npos);
+    EXPECT_NE(client.Url().find("sig=fakesig"), std::string::npos);
+}
+
 TEST(PageBlobClientTests, CreateAsync_BuildsPutRequestWithPageBlobType) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{201, MakeCanonicalSuccessHeaders(), ""};

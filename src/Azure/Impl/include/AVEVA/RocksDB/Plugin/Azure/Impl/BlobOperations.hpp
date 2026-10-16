@@ -76,7 +76,8 @@ template <typename TBlob> class SizeInvalidation {
     std::string m_url;
 
   public:
-    SizeInvalidation(const ClientRuntimeBase& runtime, const TBlob& client) : m_runtime(runtime), m_url(client.Url()) {}
+    SizeInvalidation(const ClientRuntimeBase& runtime, const TBlob& client)
+        : m_runtime(runtime), m_url(client.ResourceUrl()) {}
     SizeInvalidation(const SizeInvalidation&) = delete;
     SizeInvalidation& operator=(const SizeInvalidation&) = delete;
     ~SizeInvalidation() { m_runtime.InvalidateBlobSize(m_url); }
@@ -90,7 +91,7 @@ template <typename TBlob> [[nodiscard]] BlobMetadata GetMetadata(TBlob& client) 
 
 // The blob's logical size, served from the runtime's short-lived cache when it is fresh.
 template <typename TBlob> [[nodiscard]] int64_t GetCachedSize(const ClientRuntimeBase& runtime, TBlob& client) {
-    const auto url = client.Url();
+    const auto& url = client.ResourceUrl();
     if (const auto cached = runtime.CachedBlobSize(url)) {
         return *cached;
     }

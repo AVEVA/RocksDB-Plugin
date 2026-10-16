@@ -83,8 +83,13 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
 
     [[nodiscard]] executor_type get_executor() const { return m_httpClient->get_executor(); }
 
-    // The blob's URL, carrying the client's SAS token when it has one. Use it as the source of a server-side copy.
+    // The blob's URL carrying the client's SAS token when it has one, so it is a secret: use it as the source of a
+    // server-side copy, never as a key or in a log line (use ResourceUrl() for those).
     [[nodiscard]] std::string Url() const { return Private::BuildBlobUrl(*m_target); }
+
+    // The blob's URL without any query string (no SAS), stable for the blob's lifetime and safe to log or to use as
+    // an identity key.
+    [[nodiscard]] const std::string& ResourceUrl() const noexcept { return m_target->EncodedResource; }
 
     // Request options (timeout, response body limit, cancellation slot) applied to every operation
     // that is not given its own via WithRequestOptions(...) or the trailing requestOptions argument.
