@@ -262,9 +262,7 @@ template <typename Stream> void RequestOperation<Stream>::Resolve() {
         });
 }
 
-template <typename Stream> const void* RequestOperation<Stream>::LookupScope() const {
-    return static_cast<const void*>(&asio::query(m_executor, asio::execution::context));
-}
+template <typename Stream> const void* RequestOperation<Stream>::LookupScope() const { return m_lookupScope; }
 
 template <typename Stream>
 void RequestOperation<Stream>::OnResolve(boost::system::error_code error, const Tcp::resolver::results_type& results) {

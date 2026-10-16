@@ -14,6 +14,7 @@
 #include "AVEVA/HttpClient/HttpRequestOptions.hpp"
 #include "AVEVA/HttpClient/HttpResponse.hpp"
 
+#include <boost/asio/execution/context.hpp>
 #include <boost/asio/ssl/context.hpp>
 #include <boost/asio/steady_timer.hpp>
 
@@ -100,8 +101,9 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
                      Detail::CompletionPointer completion, HttpRequestOptions options,
                      std::shared_ptr<ConnectionPool<Stream>> pool, ConnectionKey<Stream> key,
                      beast::flat_buffer buffer = {})
-        : m_tlsContext(std::move(tlsContext)), m_executor(stream->get_executor()), m_stream(std::move(stream)),
-          m_resolver(m_executor), m_timer(m_executor), m_completion(std::move(completion)),
+        : m_tlsContext(std::move(tlsContext)), m_executor(stream->get_executor()),
+          m_lookupScope(static_cast<const void*>(&asio::query(m_executor, asio::execution::context))),
+          m_stream(std::move(stream)), m_resolver(m_executor), m_timer(m_executor), m_completion(std::move(completion)),
           m_options(std::move(options)), m_pool(std::move(pool)), m_key(std::move(key)), m_buffer(std::move(buffer)) {}
 
     /// <summary>
@@ -339,6 +341,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     // The operation's strand, fixed at construction so that threads other than the strand (the
     // cancellation handler) can post to it without touching m_stream, which is replaced and moved on it.
     typename Stream::executor_type m_executor;
+    const void* m_lookupScope; // Identity of m_executor's execution context, fixed for the operation's lifetime.
     std::unique_ptr<Stream> m_stream;
     Tcp::resolver m_resolver;
     asio::steady_timer m_timer;
