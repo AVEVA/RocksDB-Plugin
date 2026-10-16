@@ -6,6 +6,7 @@
 #include "AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp"
 #include "Mocks/FilesystemMock.hpp"
+#include "Mocks/TempDirectory.hpp"
 
 #include <rocksdb/advanced_options.h>
 #include <rocksdb/slice.h>
@@ -33,6 +34,7 @@
 
 using AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache;
 using AVEVA::RocksDB::Plugin::Core::Mocks::FilesystemMock;
+using AVEVA::RocksDB::Plugin::Core::Mocks::TempDirectory;
 using ::testing::_;
 using ::testing::NiceMock;
 using ::testing::Return;
@@ -71,14 +73,6 @@ rocksdb::Status TestCreateCb(const rocksdb::Slice& data, rocksdb::CompressionTyp
 
 void TestDeleteCb(rocksdb::Cache::ObjectPtr obj, rocksdb::MemoryAllocator*) { delete static_cast<TestPayload*>(obj); }
 
-// Returns a temporary directory that is removed when the test fixture tears down.
-std::filesystem::path MakeTempDir(const std::string& suffix) {
-    auto base = std::filesystem::temp_directory_path() / ("aveva_sec_cache_test_" + suffix);
-    std::filesystem::remove_all(base);
-    std::filesystem::create_directories(base);
-    return base;
-}
-
 // Counts .del graveyard files remaining under cacheDir.
 // RemoveEntryLocked renames evicted files to .del under the lock and the
 // caller deletes them after releasing it.  By the time the mutating
@@ -113,6 +107,7 @@ std::filesystem::path MakeTempDir(const std::string& suffix) {
 // ---------------------------------------------------------------------------
 class FileBasedCompressedSecondaryCacheTests : public ::testing::Test {
   protected:
+    TempDirectory m_tempDir{"sec_cache_test"};
     std::filesystem::path m_cacheDir;
     std::shared_ptr<AVEVA::RocksDB::Plugin::Core::LocalFilesystem> m_fs;
     std::unique_ptr<FileBasedCompressedSecondaryCache> m_cache;
@@ -127,7 +122,7 @@ class FileBasedCompressedSecondaryCacheTests : public ::testing::Test {
         rocksdb::CacheEntryRole::kDataBlock, TestDeleteCb, TestSizeCb, TestSaveToCb, TestCreateCb, &m_helperNoSec};
 
     void SetUp() override {
-        m_cacheDir = MakeTempDir(::testing::UnitTest::GetInstance()->current_test_info()->name());
+        m_cacheDir = m_tempDir.Path();
         m_fs = std::make_shared<AVEVA::RocksDB::Plugin::Core::LocalFilesystem>();
         m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(
             m_cacheDir, m_fs, FileBasedCompressedSecondaryCache::kDefaultCapacity, MakeNullLogger());
@@ -148,6 +143,7 @@ class FileBasedCompressedSecondaryCacheTests : public ::testing::Test {
 // ---------------------------------------------------------------------------
 class FileBasedCompressedSecondaryCacheMockTests : public ::testing::Test {
   protected:
+    TempDirectory m_tempDir{"sec_cache_mock_test"};
     std::filesystem::path m_cacheDir;
     std::shared_ptr<NiceMock<FilesystemMock>> m_mockFs;
 
@@ -156,7 +152,7 @@ class FileBasedCompressedSecondaryCacheMockTests : public ::testing::Test {
         rocksdb::CacheEntryRole::kDataBlock, TestDeleteCb, TestSizeCb, TestSaveToCb, TestCreateCb, &m_helperNoSec};
 
     void SetUp() override {
-        m_cacheDir = std::filesystem::temp_directory_path() / "aveva_sec_cache_mock_test";
+        m_cacheDir = m_tempDir.Path();
         m_mockFs = std::make_shared<NiceMock<FilesystemMock>>();
         // The FileBasedCompressedSecondaryCache constructor calls DeleteDir and
         // CreateDir (×257) but ignores their return values, so the NiceMock

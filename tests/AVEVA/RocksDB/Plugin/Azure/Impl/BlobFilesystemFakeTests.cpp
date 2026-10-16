@@ -3,6 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/Mocks/TempDirectory.hpp"
 #include "BlobFilesystemImpl.ipp"
 #include "ClientFactory.ipp"
 #include "FakeBlobEnvironment.hpp"
@@ -29,6 +30,7 @@
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl::Tests {
 namespace {
+using TempDirectory = Core::Mocks::TempDirectory;
 using FakeFilesystem = BasicBlobFilesystemImpl<FakeHttpClient>;
 
 constexpr const char* AccountUrl = "https://account.blob.core.windows.net";
@@ -299,20 +301,12 @@ TEST_F(BlobFilesystemFakeTests, TruncateToALargerSizeIsRejectedAndKeepsTheConten
     EXPECT_EQ(Read("a.log"), "0123456789");
 }
 TEST_F(BlobFilesystemFakeTests, TruncateDropsTheCachedCopyOfTheFile) {
-    const auto cacheDir = std::filesystem::temp_directory_path() / ("aveva_truncate_cache_" + m_prefix.substr(0, 8));
-    std::filesystem::create_directories(cacheDir);
-    struct Cleanup {
-        std::filesystem::path Path;
-        ~Cleanup() {
-            std::error_code ec;
-            std::filesystem::remove_all(Path, ec);
-        }
-    } cleanup{cacheDir};
-    const auto cacheDirString = cacheDir.string();
+    const TempDirectory tempDir("truncate_cache");
+    const auto cacheString = tempDir.Path().string();
     FakeFilesystem cached(
         m_runtime, Container, AccountUrl, AccountKey, 4096, 1024,
         std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>(),
-        std::string_view(cacheDirString));
+        std::string_view(cacheString));
     {
         auto writer = cached.CreateWriteableFile(Path("t.sst"));
         const std::string content(1024, 'C');
@@ -356,21 +350,15 @@ TEST_F(BlobFilesystemFakeTests, FailedTruncateResizeKeepsTheOriginalLogicalSize)
 // A filesystem with a disk cache, to check that failed mutations still drop cached copies.
 class CachedFailureTests : public BlobFilesystemFakeTests {
   protected:
-    CachedFailureTests()
-        : m_cacheDir(std::filesystem::temp_directory_path() / ("aveva_failure_cache_" + m_prefix.substr(0, 8))) {
-        std::filesystem::create_directories(m_cacheDir);
-        const auto dir = m_cacheDir.string();
+    CachedFailureTests() : m_tempDir("failure_cache") {
+        const auto dir = m_tempDir.Path().string();
         m_cached = std::make_unique<FakeFilesystem>(
             m_runtime, Container, AccountUrl, AccountKey, 4096, 1024,
             std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>(),
             std::string_view(dir));
     }
 
-    ~CachedFailureTests() override {
-        m_cached.reset();
-        std::error_code ec;
-        std::filesystem::remove_all(m_cacheDir, ec);
-    }
+    ~CachedFailureTests() override { m_cached.reset(); }
 
     void WriteCached(const std::string& name, const std::string& content) {
         auto file = m_cached->CreateWriteableFile(Path(name));
@@ -392,7 +380,8 @@ class CachedFailureTests : public BlobFilesystemFakeTests {
         return false;
     }
 
-    std::filesystem::path m_cacheDir;
+    // Declared before m_cached so the filesystem releases the directory before it is removed.
+    Core::Mocks::TempDirectory m_tempDir;
     std::unique_ptr<FakeFilesystem> m_cached;
 };
 
