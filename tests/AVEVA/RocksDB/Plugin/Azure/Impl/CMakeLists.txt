@@ -47,7 +47,7 @@ set(aveva_impl_filesystem_suites
     AzureContainerClientTests BlobFilesystemFakeRuntimeTests BlobFilesystemFakeTests CachedFailureTests
     PageBoundaryTests RenameFailureTests BlobFilesystemTests BlobHelpersCredentialLifetimeTests
     BlobHelpersTests CredentialChainTests FileSizeMetadataTests PageRoundingTests BlobOperationsFakeBlobTests
-    BlobOperationsTests DownloadBufferPoolTests PluginTests)
+    BlobOperationsTests DownloadToFileTests DownloadBufferPoolTests PluginTests)
 set(aveva_impl_lock_suites
     AsyncReadTrackerDrainTests LeaseDeadlineTests WriteDeadlineTests WriteFenceTests
     LeaseRenewalLoopBackoffTests LeaseRenewalLoopTests LeaseRenewalLoopThrowTests LockFileImplTests)

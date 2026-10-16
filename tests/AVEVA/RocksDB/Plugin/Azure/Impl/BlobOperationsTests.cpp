@@ -4,6 +4,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
+#include "AVEVA/RocksDB/Plugin/Core/Mocks/TempDirectory.hpp"
 #include "FakeBlobEnvironment.hpp"
 #include "FakeHttpClient.hpp"
 #include "TestSupport.hpp"
@@ -15,6 +16,8 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -358,6 +361,94 @@ TEST_F(BlobOperationsFakeBlobTests, CopyPagesFailsWhenTheSourceChangesMidCopy) {
 
     EXPECT_THROW(BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, 1024, m_env.Blob->ETag),
                  RequestFailedException);
+}
+
+namespace {
+class DownloadToFileTests : public BlobOperationsFakeBlobTests {
+  protected:
+    static std::string ReadAll(const std::filesystem::path& path) {
+        std::ifstream in(path, std::ios::binary);
+        return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    }
+
+    // Anything the client leaves next to the destination (partial files) counts as a leak.
+    size_t FilesInDirectory() const {
+        size_t count = 0;
+        for ([[maybe_unused]] const auto& entry : std::filesystem::directory_iterator(m_dir.Path())) {
+            ++count;
+        }
+        return count;
+    }
+
+    AVEVA::RocksDB::Plugin::Core::Mocks::TempDirectory m_dir{"download-to-file"};
+};
+} // namespace
+
+TEST_F(DownloadToFileTests, FullBlobIsWrittenToTheFile) {
+    m_env.Fill(4096, 'f');
+    const auto path = m_dir.Path() / "full.sst";
+
+    BlobOperations::DownloadToFile(*m_env.Client, path, 0, 4096);
+
+    EXPECT_EQ(std::string(4096, 'f'), ReadAll(path));
+}
+
+TEST_F(DownloadToFileTests, OnlyTheRequestedRangeIsWritten) {
+    m_env.Fill(4096, 'a');
+    std::fill(m_env.Blob->Data.begin() + 1024, m_env.Blob->Data.begin() + 2048, 'b');
+    const auto path = m_dir.Path() / "range.sst";
+
+    BlobOperations::DownloadToFile(*m_env.Client, path, 1024, 1024);
+
+    EXPECT_EQ(std::string(1024, 'b'), ReadAll(path));
+}
+
+TEST_F(DownloadToFileTests, MissingBlobThrowsAndLeavesNoFile) {
+    m_env.Fill(1024);
+    m_env.Blob->Fault =
+        [](const FakeBlobServer::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::Download) {
+            return FakeBlobServer::Error(404, "BlobNotFound");
+        }
+        return std::nullopt;
+    };
+    const auto path = m_dir.Path() / "missing.sst";
+
+    EXPECT_THROW(BlobOperations::DownloadToFile(*m_env.Client, path, 0, 1024), RequestFailedException);
+    EXPECT_FALSE(std::filesystem::exists(path));
+    EXPECT_EQ(0U, FilesInDirectory());
+}
+
+TEST_F(DownloadToFileTests, ShortBodyThrowsAndDoesNotLeaveATruncatedFile) {
+    m_env.Fill(4096);
+    m_env.Blob->DownloadOverride = [](const FakeBlobServer::DownloadRequest&) { return std::string(100, 'x'); };
+    const auto path = m_dir.Path() / "short.sst";
+
+    EXPECT_ANY_THROW(BlobOperations::DownloadToFile(*m_env.Client, path, 0, 4096));
+    EXPECT_FALSE(std::filesystem::exists(path));
+    EXPECT_EQ(0U, FilesInDirectory());
+}
+
+TEST_F(DownloadToFileTests, TransientServerErrorIsRetriedAndTheDownloadSucceeds) {
+    m_env.Fill(2048, 'r');
+    std::atomic<int> attempts{0};
+    m_env.Blob->Fault =
+        [&attempts](const FakeBlobServer::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::Download && attempts.fetch_add(1) == 0) {
+            return FakeBlobServer::Error(503, "ServerBusy");
+        }
+        return std::nullopt;
+    };
+    const auto path = m_dir.Path() / "retried.sst";
+    auto options = MakeBlobClientOptions("files", "test.sst");
+    options.Retry.MaxRetries = 2;
+    options.Retry.InitialDelay = std::chrono::milliseconds{0};
+    FakeBlobServer::BlobClientType retrying(m_env.Http, options);
+
+    BlobOperations::DownloadToFile(retrying, path, 0, 2048);
+
+    EXPECT_GE(attempts.load(), 2);
+    EXPECT_EQ(std::string(2048, 'r'), ReadAll(path));
 }
 
 TEST(DownloadBufferPoolTests, ReleasedBufferIsReusedWithoutAllocating) {
