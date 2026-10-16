@@ -210,6 +210,12 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
         ReadAsync(std::move(self), offset, n,
                   [state, id, logger = std::move(logger), name = std::move(name)](std::exception_ptr error,
                                                                                   std::string_view data) {
+                      // Copied before taking the lock so readers are not blocked behind an n-byte memcpy; the slot is
+                      // filled by a move.
+                      std::string copied;
+                      if (!error) {
+                          copied.assign(data);
+                      }
                       std::vector<std::move_only_function<void()>> waiters;
                       {
                           std::scoped_lock lock(state->Mutex);
@@ -219,7 +225,7 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
                                   state->Drop(slot);
                               } else {
                                   slot->Pending = false;
-                                  slot->Data.assign(data);
+                                  slot->Data = std::move(copied);
                               }
                           }
                           for (auto it = state->Waiters.begin(); it != state->Waiters.end();) {
