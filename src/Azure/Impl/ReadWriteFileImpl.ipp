@@ -22,7 +22,7 @@ BasicReadWriteFileImpl<TBlob>::BasicReadWriteFileImpl(
     std::shared_ptr<Core::FileCache> fileCache,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
     : m_w(name, std::move(runtime), std::move(blob), std::move(fileCache), std::move(logger), 0), m_size(0),
-      m_syncSize(0), m_closed(false), m_buffer(Configuration::PageBlob::DefaultBufferSize) {
+      m_syncSize(0), m_buffer(Configuration::PageBlob::DefaultBufferSize) {
     // One GetProperties call yields both the size and the capacity.
     const auto info = BlobOperations::GetInfo(*m_w.H.Blob);
     m_size = info.Size;
@@ -32,24 +32,16 @@ BasicReadWriteFileImpl<TBlob>::BasicReadWriteFileImpl(
 
 template <typename TBlob> BasicReadWriteFileImpl<TBlob>::~BasicReadWriteFileImpl() {
     // Close() is the durability boundary; a destructor must not run sleeping retries on RocksDB's cleanup threads.
-    if (!m_closed && (!m_bufferStats.empty() || m_size != m_syncSize || m_dirty)) {
-        BOOST_LOG_SEV(*m_w.H.Logger, boost::log::trivial::error)
-            << "File '" << m_w.H.Name
-            << "' was destroyed without a successful Close(); buffered data was not persisted";
-    }
+    m_close.LogIfUnclosed(*m_w.H.Logger, m_w.H.Name, !m_bufferStats.empty() || m_size != m_syncSize || m_dirty);
 }
 
 template <typename TBlob>
 BasicReadWriteFileImpl<TBlob>::BasicReadWriteFileImpl(BasicReadWriteFileImpl<TBlob>&& other) noexcept
-    : m_w(std::move(other.m_w)), m_size(other.m_size), m_syncSize(other.m_syncSize),
-      m_closed(std::exchange(other.m_closed, true)), m_dirty(other.m_dirty), m_buffer(std::move(other.m_buffer)),
-      m_bufferStats(std::move(other.m_bufferStats)) {}
+    : m_w(std::move(other.m_w)), m_size(other.m_size), m_syncSize(other.m_syncSize), m_close(std::move(other.m_close)),
+      m_dirty(other.m_dirty), m_buffer(std::move(other.m_buffer)), m_bufferStats(std::move(other.m_bufferStats)) {}
 
 template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Close() {
-    if (!m_closed) {
-        Sync();
-        m_closed = true;
-    }
+    m_close.Close([this] { Sync(); });
 }
 
 template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Sync() {

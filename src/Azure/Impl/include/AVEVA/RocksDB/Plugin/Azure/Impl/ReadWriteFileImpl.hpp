@@ -6,6 +6,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BufferChunkInfo.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/CloseState.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlobWriter.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
@@ -25,7 +26,7 @@ template <typename TBlob> class BasicReadWriteFileImpl {
 
     int64_t m_size;
     int64_t m_syncSize;
-    bool m_closed;
+    CloseState m_close;
     // True from the first Write after a Sync until the next Sync; cached pages must not be served in between.
     bool m_dirty = false;
     std::vector<char> m_buffer;

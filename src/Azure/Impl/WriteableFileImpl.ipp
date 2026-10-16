@@ -30,8 +30,7 @@ BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     const int64_t bufferSize, const BlobState knownState)
     : m_w(name, std::move(runtime), std::move(blob), std::move(fileCache), std::move(logger), knownState.Capacity),
-      m_bufferSize(bufferSize), m_lastPageOffset(0), m_size(knownState.Size), m_bufferOffset(0), m_closed(false),
-      m_flushed(true) {
+      m_bufferSize(bufferSize), m_lastPageOffset(0), m_size(knownState.Size), m_bufferOffset(0), m_flushed(true) {
     if (m_bufferSize < Configuration::PageBlob::PageSize) {
         throw std::invalid_argument("Buffer size cannot be smaller than a page");
     }
@@ -62,11 +61,7 @@ BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(
 template <typename TBlob> BasicWriteableFileImpl<TBlob>::~BasicWriteableFileImpl() {
     // Close() is the durability boundary. A destructor that ran sleeping retries would stall RocksDB's cleanup
     // threads, so it only reports unpersisted data and waits for uploads that are already running.
-    if (!m_closed && m_unsyncedSize) {
-        BOOST_LOG_SEV(*m_w.H.Logger, boost::log::trivial::error)
-            << "File '" << m_w.H.Name
-            << "' was destroyed without a successful Close(); buffered data was not persisted";
-    }
+    m_close.LogIfUnclosed(*m_w.H.Logger, m_w.H.Name, m_unsyncedSize);
 
     // Outstanding upload completions use the blob client and logger, which are released below.
     DrainUploads();
@@ -91,15 +86,12 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::DrainUploads() noe
 template <typename TBlob>
 BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(BasicWriteableFileImpl<TBlob>&& other) noexcept
     : m_w(std::move(other.m_w)), m_bufferSize(other.m_bufferSize), m_lastPageOffset(other.m_lastPageOffset),
-      m_size(other.m_size), m_bufferOffset(other.m_bufferOffset), m_closed(std::exchange(other.m_closed, true)),
+      m_size(other.m_size), m_bufferOffset(other.m_bufferOffset), m_close(std::move(other.m_close)),
       m_flushed(other.m_flushed), m_unsyncedSize(other.m_unsyncedSize), m_buffer(std::move(other.m_buffer)),
       m_uploads(std::move(other.m_uploads)) {}
 
 template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Close() {
-    if (!m_closed) {
-        Sync();
-        m_closed = true;
-    }
+    m_close.Close([this] { Sync(); });
 }
 
 // Appends to the page-aligned buffer and starts an asynchronous upload whenever less than a page of space remains,

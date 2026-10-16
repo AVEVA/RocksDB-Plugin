@@ -5,6 +5,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFileHandles.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/CloseState.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlobWriter.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
@@ -28,7 +29,7 @@ template <typename TBlob> class BasicWriteableFileImpl {
     int64_t m_lastPageOffset;
     int64_t m_size;
     int64_t m_bufferOffset;
-    bool m_closed;
+    CloseState m_close;
     bool m_flushed;
     // Set while data has been appended that the blob's size metadata does not yet reflect.
     bool m_unsyncedSize = false;
