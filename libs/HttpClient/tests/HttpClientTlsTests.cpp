@@ -19,6 +19,7 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -27,6 +28,7 @@
 #include <iterator>
 #include <memory>
 #include <random>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -449,5 +451,38 @@ TEST(HttpClientTls, ConnectionCloseSendsTlsCloseNotify) {
     ASSERT_EQ(server.CloseObservations().size(), 1U);
     // A graceful TLS shutdown surfaces as a clean EOF; an abrupt TCP close would be stream_truncated.
     EXPECT_EQ(server.CloseObservations()[0], asio::error::eof) << server.CloseObservations()[0].message();
+}
+
+TEST(HttpClientTls, RequestStateIsReleasedAtCompletionNotAfterTheTlsShutdownGracePeriod) {
+    asio::io_context context;
+    // The server never answers the client's close_notify, so the shutdown only ends at the grace timeout.
+    TlsTestServer server(context, "IP:127.0.0.1", TlsTestServer::AfterResponse::AdvertiseClose);
+    AVEVA::HttpClientOptions options;
+    options.SetCaPem(server.CertificatePem());
+    auto client = AVEVA::HttpClient::Create(context, options);
+
+    auto body = std::make_shared<std::array<std::byte, 4>>();
+    std::weak_ptr<const void> weakBody = body;
+    AVEVA::HttpRequest request;
+    request.SetUrl("https://127.0.0.1:" + std::to_string(server.Port()) + "/");
+    request.SetBodyView(std::span<const std::byte>(*body), body);
+    body.reset();
+
+    bool completed = false;
+    bool releasedPromptly = false;
+    asio::steady_timer check(context);
+    client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{}, [&](std::error_code error, AVEVA::HttpResponse) {
+        EXPECT_FALSE(error) << error.message();
+        completed = true;
+        check.expires_after(std::chrono::milliseconds(200));
+        check.async_wait([&](boost::system::error_code) {
+            releasedPromptly = weakBody.expired();
+            server.Stop();
+        });
+    });
+    context.run();
+
+    EXPECT_TRUE(completed);
+    EXPECT_TRUE(releasedPromptly);
 }
 } // namespace
