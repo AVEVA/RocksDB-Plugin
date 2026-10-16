@@ -6,6 +6,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
+#include "BasicReadableFile.hpp"
 #include "IntegrationTestHelpers.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
@@ -1274,7 +1275,8 @@ TEST_F(BlobFilesystemIntegrationTests, ReadAsync_MultipleRequests_PollDeliversDa
     writeFile.Append(data);
     writeFile.Sync();
     writeFile.Close();
-    AVEVA::RocksDB::Plugin::Azure::ReadableFile file{m_filesystem->CreateReadableFile(blobName)};
+    AVEVA::RocksDB::Plugin::Azure::BasicReadableFile<AVEVA::RocksDB::Plugin::Azure::Impl::ReadableFileImpl> file{
+        m_filesystem->CreateReadableFile(blobName)};
 
     // Act
     constexpr size_t Count = 8;
@@ -1321,7 +1323,8 @@ TEST_F(BlobFilesystemIntegrationTests, MultiRead_MultipleRequests_FillsEveryRequ
     writeFile.Append(data);
     writeFile.Sync();
     writeFile.Close();
-    AVEVA::RocksDB::Plugin::Azure::ReadableFile file{m_filesystem->CreateReadableFile(blobName)};
+    AVEVA::RocksDB::Plugin::Azure::BasicReadableFile<AVEVA::RocksDB::Plugin::Azure::Impl::ReadableFileImpl> file{
+        m_filesystem->CreateReadableFile(blobName)};
 
     constexpr size_t Count = 8;
     std::vector<std::vector<char>> scratches(Count, std::vector<char>(512));
@@ -1357,7 +1360,8 @@ TEST_F(BlobFilesystemIntegrationTests, MultiRead_MoreRequestsThanOneWave_FillsEv
     writeFile.Append(data);
     writeFile.Sync();
     writeFile.Close();
-    AVEVA::RocksDB::Plugin::Azure::ReadableFile file{m_filesystem->CreateReadableFile(blobName)};
+    AVEVA::RocksDB::Plugin::Azure::BasicReadableFile<AVEVA::RocksDB::Plugin::Azure::Impl::ReadableFileImpl> file{
+        m_filesystem->CreateReadableFile(blobName)};
 
     constexpr size_t Count = 70;
     std::vector<std::vector<char>> scratches(Count, std::vector<char>(512));
@@ -1393,7 +1397,8 @@ TEST_F(BlobFilesystemIntegrationTests, Prefetch_ThenRead_ReturnsPrefetchedData) 
     writeFile.Append(data);
     writeFile.Sync();
     writeFile.Close();
-    AVEVA::RocksDB::Plugin::Azure::ReadableFile file{m_filesystem->CreateReadableFile(blobName)};
+    AVEVA::RocksDB::Plugin::Azure::BasicReadableFile<AVEVA::RocksDB::Plugin::Azure::Impl::ReadableFileImpl> file{
+        m_filesystem->CreateReadableFile(blobName)};
 
     // Act
     ASSERT_TRUE(file.Prefetch(1024, 2048, rocksdb::IOOptions{}, nullptr).ok());

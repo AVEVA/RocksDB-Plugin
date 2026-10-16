@@ -14,19 +14,21 @@ class ReadableFileImpl;
 }
 
 namespace AVEVA::RocksDB::Plugin::Azure {
+class BlobFilesystem;
+
 /// <summary>
 /// A random access file over a page blob. The implementation (and with it Boost.Asio and the Azure client) stays
 /// behind a pimpl, so this header pulls in nothing beyond RocksDB and Boost.Log.
 /// </summary>
 class ReadableFile final : public rocksdb::FSRandomAccessFile {
+    friend class BlobFilesystem; // the only creator; instances come from BlobFilesystem::NewRandomAccessFile
     std::unique_ptr<rocksdb::FSRandomAccessFile> m_delegate;
 
-  public:
-    /// <param name="file">The implementation to take over. The type is incomplete here; callers that construct a
-    /// ReadableFile include Impl/ReadableFileImpl.hpp.</param>
     explicit ReadableFile(
         Impl::ReadableFileImpl&& file,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger = nullptr);
+
+  public:
     ~ReadableFile() override;
 
     rocksdb::IOStatus Read(uint64_t offset, size_t n, const rocksdb::IOOptions& options, rocksdb::Slice* result,

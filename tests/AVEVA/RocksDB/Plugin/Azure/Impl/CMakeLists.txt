@@ -52,4 +52,6 @@ target_link_libraries(aveva-rocksdb-plugin-azure-impl-integration-tests PRIVATE 
 if(MSVC)
     target_compile_options(aveva-rocksdb-plugin-azure-impl-integration-tests PRIVATE /bigobj)
 endif()
+target_include_directories(aveva-rocksdb-plugin-azure-impl-integration-tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../src/Azure")
 gtest_discover_tests(aveva-rocksdb-plugin-azure-impl-integration-tests DISCOVERY_TIMEOUT 60 PROPERTIES LABELS integration)

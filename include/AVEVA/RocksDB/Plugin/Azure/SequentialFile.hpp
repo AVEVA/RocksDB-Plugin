@@ -13,14 +13,18 @@ class SequentialFileImpl;
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
 namespace AVEVA::RocksDB::Plugin::Azure {
+class BlobFilesystem;
+
 class SequentialFile final : public rocksdb::FSSequentialFile {
+    friend class BlobFilesystem; // the only creator
     std::unique_ptr<Impl::SequentialFileImpl> m_file;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
 
-  public:
     SequentialFile(
         Impl::SequentialFileImpl&& file,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
+
+  public:
     ~SequentialFile() override;
 
     rocksdb::IOStatus Read(size_t n, const rocksdb::IOOptions& options, rocksdb::Slice* result, char* scratch,

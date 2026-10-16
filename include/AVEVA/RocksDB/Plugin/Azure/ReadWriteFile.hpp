@@ -11,13 +11,17 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 class ReadWriteFileImpl;
 }
 namespace AVEVA::RocksDB::Plugin::Azure {
+class BlobFilesystem;
+
 class ReadWriteFile final : public rocksdb::FSRandomRWFile {
+    friend class BlobFilesystem; // the only creator
     std::unique_ptr<Impl::ReadWriteFileImpl> m_file;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
 
-  public:
     ReadWriteFile(Impl::ReadWriteFileImpl&& file,
                   std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
+
+  public:
     // Close() is the only durability boundary. The destructor does not flush or retry: it logs an error if buffered
     // data was never persisted.
     ~ReadWriteFile() override;
