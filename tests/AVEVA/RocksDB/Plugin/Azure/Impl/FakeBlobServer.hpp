@@ -9,6 +9,7 @@
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <charconv>
 #include <chrono>
@@ -30,6 +31,62 @@
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl::Tests {
 using AzureClient::Tests::FakeHttpClient;
+
+// A request log written by the fake service's transport thread and read by tests. Every read returns a copy taken
+// under the lock, so a test can inspect it while requests are still arriving.
+template <class T> class RequestLog {
+  public:
+    RequestLog() = default;
+    RequestLog(const RequestLog&) = delete;
+    RequestLog& operator=(const RequestLog&) = delete;
+
+    void push_back(T value) {
+        const std::scoped_lock lock(m_mutex);
+        m_items.push_back(std::move(value));
+    }
+
+    [[nodiscard]] std::vector<T> Snapshot() const {
+        const std::scoped_lock lock(m_mutex);
+        return m_items;
+    }
+    [[nodiscard]] std::size_t size() const {
+        const std::scoped_lock lock(m_mutex);
+        return m_items.size();
+    }
+    [[nodiscard]] bool empty() const { return size() == 0U; }
+    [[nodiscard]] T operator[](const std::size_t index) const {
+        const std::scoped_lock lock(m_mutex);
+        return m_items.at(index);
+    }
+    [[nodiscard]] T front() const { return (*this)[0]; }
+    [[nodiscard]] T back() const {
+        const std::scoped_lock lock(m_mutex);
+        return m_items.at(m_items.size() - 1U);
+    }
+    [[nodiscard]] bool operator==(const std::vector<T>& other) const { return Snapshot() == other; }
+
+  private:
+    mutable std::mutex m_mutex;
+    std::vector<T> m_items;
+};
+
+// A request counter that converts to int, so tests read it like a plain value while the transport thread bumps it.
+class RequestCounter {
+  public:
+    RequestCounter() = default;
+    RequestCounter(const RequestCounter& other) : m_value(other.m_value.load()) {}
+    RequestCounter& operator=(const RequestCounter&) = delete;
+
+    RequestCounter& operator++() {
+        ++m_value;
+        return *this;
+    }
+    // NOLINTNEXTLINE(google-explicit-constructor)
+    operator int() const { return m_value.load(); }
+
+  private:
+    std::atomic<int> m_value{0};
+};
 
 // An in-memory page blob service behind the library's FakeHttpClient. It answers the REST subset the page blob client
 // speaks (properties, metadata, resize, page update/clear, ranged download, page list, create), so the plugin's file
@@ -143,22 +200,23 @@ class FakeBlobServer {
     // The real page blob client, bound to the primary blob and to the fake transport.
     std::shared_ptr<BlobClientType> Client;
 
-    // Requests received, in order. Uploads are recorded when they start, whether or not they are deferred.
-    std::vector<Upload> Uploads;
+    // Requests received, in order. Uploads are recorded when they start, whether or not they are deferred. Reads
+    // return copies taken under a lock, so they are safe while other threads keep sending.
+    RequestLog<Upload> Uploads;
     // Address of the zero-copy body of every upload that was sent as a view of a caller-owned buffer.
-    std::vector<const char*> SharedUploadPayloadAddresses;
-    std::vector<int64_t> SizeWrites;
-    std::vector<int64_t> CapacityWrites;
+    RequestLog<const char*> SharedUploadPayloadAddresses;
+    RequestLog<int64_t> SizeWrites;
+    RequestLog<int64_t> CapacityWrites;
     // One entry per ranged GET, so a download split into several requests is recorded as several.
-    std::vector<DownloadRequest> Downloads;
-    int PropertiesRequests = 0;
-    int PageRangeRequests = 0;
-    int LeaseAcquisitions = 0;
-    int LeaseRenewals = 0;
-    int LeaseReleases = 0;
-    int LeaseBreaks = 0;
+    RequestLog<DownloadRequest> Downloads;
+    RequestCounter PropertiesRequests;
+    RequestCounter PageRangeRequests;
+    RequestCounter LeaseAcquisitions;
+    RequestCounter LeaseRenewals;
+    RequestCounter LeaseReleases;
+    RequestCounter LeaseBreaks;
     // One entry per Put Page From URL request that reached the service, whether or not it succeeded.
-    std::vector<PageCopy> PageCopies;
+    RequestLog<PageCopy> PageCopies;
     // Like a private source: a copy without x-ms-copy-source-authorization fails with 401 CannotVerifyCopySource.
     bool RequireCopySourceAuthorization = false;
     // Replaces the page listing, which otherwise reports every 512-byte page that holds a non-zero byte.

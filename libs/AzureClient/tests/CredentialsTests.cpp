@@ -638,7 +638,7 @@ TEST(CredentialsTests, AzurePipelinesCredentialExchangesTheOidcTokenAsClientAsse
     EXPECT_FALSE(result.Error);
     EXPECT_EQ(result.Token.Token, "tok");
     ASSERT_EQ(httpClient.Requests().size(), 2U);
-    const HttpRequest& oidc = httpClient.Requests().front().Request;
+    const HttpRequest oidc = httpClient.RequestAt(0).Request;
     EXPECT_EQ(oidc.GetMethod(), HttpMethod::Post);
     EXPECT_EQ(oidc.GetUrl(), "https://pipelines.example/oidc?api-version=7.1&serviceConnectionId=conn%26id");
     EXPECT_EQ(Header(oidc, "Authorization"), "Bearer system");

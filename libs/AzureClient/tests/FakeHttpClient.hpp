@@ -598,9 +598,12 @@ class FakeHttpClient final {
 
     [[nodiscard]] bool NoRequestMade() const { return RequestCount() == 0U; }
 
-    // A deque, so references to records stay valid while other threads keep sending. Iterating while requests are
-    // still being sent is not synchronised; use RequestCount()/RequestAt() for that.
-    [[nodiscard]] const std::deque<RequestRecord>& Requests() const noexcept { return m_requests; }
+    // A copy of the records taken under the lock, so it can be inspected while other threads keep sending.
+    [[nodiscard]] std::deque<RequestRecord> Requests() const {
+        SettleWriters();
+        std::scoped_lock lock(m_mutex);
+        return m_requests;
+    }
 
     [[nodiscard]] const RequestRecord& RequestAt(std::size_t index) const {
         SettleWriters();

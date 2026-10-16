@@ -100,7 +100,7 @@ TEST_F(SequentialFileTests, SequentialRead_SmallReads_ShareOneReadaheadAndRefill
 
     // 2.5 MB is read in three GETs instead of four.
     std::vector<int64_t> downloads;
-    for (const auto& download : m_env.Blob->Downloads) {
+    for (const auto& download : m_env.Blob->Downloads.Snapshot()) {
         downloads.push_back(download.Offset);
     }
     EXPECT_EQ((std::vector<int64_t>{0, megabyte, 2 * megabyte}), downloads);

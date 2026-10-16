@@ -67,8 +67,8 @@ TEST_F(WriteableFileTests, Flush_ReusesBuffersAndKeepsTheTailAcrossTheSwap) {
 
     EXPECT_EQ(expected, Prefix(m_env.Blob->Data, expected.size()));
     ASSERT_EQ(4U, m_env.Blob->SharedUploadPayloadAddresses.size());
-    const std::set<const char*> distinct(m_env.Blob->SharedUploadPayloadAddresses.begin(),
-                                         m_env.Blob->SharedUploadPayloadAddresses.end());
+    const auto addresses = m_env.Blob->SharedUploadPayloadAddresses.Snapshot();
+    const std::set<const char*> distinct(addresses.begin(), addresses.end());
     EXPECT_LE(distinct.size(), 2U) << "uploads should alternate between two pooled buffers";
 }
 
