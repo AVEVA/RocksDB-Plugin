@@ -18,7 +18,7 @@ Azure Blob Storage as a local filesystem.
 | Path | Purpose |
 |------|---------|
 | `src/Azure/` | Azure Page Blob Filesystem plugin (blob storage integration, file read/write, directory ops, error translation) |
-| `src/Core/` | Filesystem abstractions: local filesystem, compressed secondary cache, file cache with LRU index, utilities |
+| `src/Core/` | Filesystem abstractions: local filesystem, file cache with an intrusive LRU list, compressed secondary cache (which has its own `LruFileIndex`), utilities |
 | `include/AVEVA/RocksDB/Plugin/` | Public C++ headers |
 | `tests/` | C++ test suites |
 | `infrastructure/` | Build and CI infrastructure |
@@ -92,7 +92,8 @@ support, CMake, clang-format/clang-tidy, gitleaks, vcpkg, and git hook configura
 - CMake cache issues are common after branch switches — delete `build/` and reconfigure
   rather than patching the cache.
 - On Windows, long path support must be enabled for stable builds (`devdoctor.ps1` reports this).
-- Azure client (`libs/AzureClient`) calls are asynchronous; the plugin blocks on them with `boost::asio::use_future` + `.get()` — never call `.get()` on a thread running the host-supplied `io_context` (the plugin never owns or runs one; it is injected via `Plugin::Register` / `BlobFilesystemImpl`) to
-  avoid races.
+- Azure client (`libs/AzureClient`) calls are asynchronous; the plugin blocks on them with `boost::asio::use_future` + `.get()` . Never call `.get()` on a thread that runs the host-supplied `io_context`: it can deadlock or race with
+ the completion that must run on that thread. The plugin never owns or runs an `io_context` itself; it is injected
+ via `Plugin::Register` / `BlobFilesystemImpl`.
 - `vcpkg` is used for dependency management — ensure `VCPKG_ROOT` is set and bootstrap vcpkg
   before the first build.
