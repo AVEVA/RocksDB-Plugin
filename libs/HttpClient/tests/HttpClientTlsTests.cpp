@@ -132,7 +132,8 @@ class TlsTestServer {
         KeepOpen,
         AbortConnection,
         AdvertiseClose,
-        EofDelimitedAbort // No Content-Length; the TCP connection closes without a TLS close_notify.
+        EofDelimitedAbort, // No Content-Length; the TCP connection closes without a TLS close_notify.
+        ShortBodyAbort     // Content-Length promises more than is sent; closes without a TLS close_notify.
     };
 
     TlsTestServer(asio::io_context& context, const std::string& subjectAltName, AfterResponse after,
@@ -230,7 +231,9 @@ class TlsTestServer {
                 session->Buffer.consume(bytes);
                 ++m_requests;
                 auto response = std::make_shared<std::string>(
-                    m_after == AfterResponse::EofDelimitedAbort
+                    m_after == AfterResponse::ShortBodyAbort
+                        ? std::string{"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nok"}
+                    : m_after == AfterResponse::EofDelimitedAbort
                         ? std::string{"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nok"}
                         : std::string{"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"} +
                               (m_after == AfterResponse::AdvertiseClose ? "Connection: close\r\n" : "") + "\r\nok");
@@ -240,7 +243,8 @@ class TlsTestServer {
                                           return;
                                       }
                                       if (m_after == AfterResponse::AbortConnection ||
-                                          m_after == AfterResponse::EofDelimitedAbort) {
+                                          m_after == AfterResponse::EofDelimitedAbort ||
+                                          m_after == AfterResponse::ShortBodyAbort) {
                                           boost::system::error_code ignored;
                                           session->Stream.next_layer().close(ignored);
                                           return;
@@ -372,6 +376,17 @@ TEST(HttpClientTls, EofDelimitedResponseWithoutCloseNotifyCompletesWhenOptedIn) 
     EXPECT_FALSE(outcomes[0].Error) << outcomes[0].Error.message();
     EXPECT_EQ(outcomes[0].Status, 200U);
     EXPECT_EQ(outcomes[0].Body, "ok");
+}
+
+TEST(HttpClientTls, FixedLengthBodyTruncatedWithoutCloseNotifyFailsEvenWhenTruncationIsAccepted) {
+    asio::io_context context;
+    TlsTestServer server(context, "IP:127.0.0.1", TlsTestServer::AfterResponse::ShortBodyAbort);
+    AVEVA::HttpRequestOptions requestOptions;
+    requestOptions.SetAcceptTruncatedTlsBody(true);
+    const auto outcomes = SendSequentialRequests(context, server, {}, "127.0.0.1", 1, true, requestOptions);
+
+    ASSERT_EQ(outcomes.size(), 1U);
+    EXPECT_TRUE(outcomes[0].Error);
 }
 
 TEST(HttpClientTls, ServerNameIsSentForDnsHosts) {
