@@ -516,6 +516,42 @@ TEST_F(FileCacheTests, DownloadThatFailsAfterTheFileWasMarkedStale_LeavesNothing
     EXPECT_GE(downloads.load(), 2);
 }
 
+TEST_F(FileCacheTests, DownloadThatFailsAfterTheFileWasMarkedStaleAndRequeued_KeepsTheQueuedEntryAndRetries) {
+    // Arrange - the first download blocks, then fails; the retry succeeds.
+    std::promise<void> started;
+    Gate release;
+    std::atomic<int> downloads{0};
+    EXPECT_CALL(*m_containerClient, GetBlobSize("1.sst")).WillRepeatedly(Return(1));
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo("1.sst", _, _, _)).WillRepeatedly([&](auto&&...) {
+        if (++downloads == 1) {
+            started.set_value();
+            release.Wait();
+            throw std::runtime_error("download failed");
+        }
+    });
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
+        auto file = std::make_unique<FileMock>();
+        ON_CALL(*file, Read(_, _, _)).WillByDefault([](char*, uint64_t, uint64_t length) -> uint64_t {
+            return length;
+        });
+        return file;
+    });
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", 0, 0, nullptr));
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", 0, 0, nullptr));
+    started.get_future().wait();
+
+    // Act - replaced and queued again while the first download is still running, then that download fails.
+    m_cache.MarkFileAsStaleIfExists("1.sst");
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", 0, 0, nullptr));
+    release.Open();
+    ASSERT_TRUE(m_cache.WaitUntilIdle(std::chrono::seconds(5)));
+
+    // Assert - the failure did not discard the newer queued state, so the queued download ran and activated it.
+    EXPECT_EQ(downloads, 2);
+    EXPECT_TRUE(m_cache.HasFile("1.sst"));
+    EXPECT_TRUE(m_cache.ReadFile("1.sst", 0, 0, nullptr).has_value());
+}
+
 TEST_F(FileCacheTests, ReadFile_TooManyUndownloadedStaleEntries_PrunesOldest) {
     // Arrange
     EXPECT_CALL(*m_containerClient, GetBlobSize(_)).Times(0);
