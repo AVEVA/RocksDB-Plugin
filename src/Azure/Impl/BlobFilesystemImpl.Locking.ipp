@@ -61,7 +61,8 @@ template <typename THttp> void BasicBlobFilesystemImpl<THttp>::UnlockFile(LockFi
             return !shared || shared.get() == &lock;
         });
     }
-    // Released outside the list mutex; LockFileType serializes this against an in-flight renewal.
+    // Released outside the list mutex. Unlock marks the lock as releasing first, so a renewal already in flight that
+    // the service rejects because the release won is treated as benign rather than fatal.
     lock.Unlock();
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

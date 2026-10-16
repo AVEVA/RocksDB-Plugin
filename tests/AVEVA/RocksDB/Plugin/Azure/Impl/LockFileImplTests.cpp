@@ -76,6 +76,31 @@ class LockFileImplTests : public ::testing::Test {
 };
 } // namespace
 
+TEST_F(LockFileImplTests, UnlockDuringInFlightRenewalMakesTheRejectedRenewalBenign) {
+    m_httpClient.EnqueueResponse(Acquired());
+    auto lock = CreateLock(std::chrono::seconds(20));
+    ASSERT_TRUE(lock->Lock());
+
+    // The service rejects the renewal because the release won; it reaches the completion before Unlock returns.
+    m_httpClient.EnqueueDeferredResponse(MakeAzureErrorResponse(409, "LeaseIdMismatchWithLeaseOperation", "m", "r2"));
+    m_httpClient.EnqueueDeferredResponse(HttpResponse{200, MakeCanonicalSuccessHeaders({}), ""});
+
+    std::promise<std::pair<std::exception_ptr, bool>> outcome;
+    lock->RenewAsync([&outcome](std::exception_ptr error, bool renewed) { outcome.set_value({error, renewed}); });
+    ASSERT_TRUE(m_httpClient.WaitForRequest(2));
+
+    std::thread unlocker([&lock] { lock->Unlock(); });
+    ASSERT_TRUE(m_httpClient.WaitForRequest(3));
+    // The rejected renewal completes while the release is still in flight.
+    ASSERT_TRUE(m_httpClient.CompleteNext());
+    ASSERT_TRUE(m_httpClient.CompleteNext());
+    unlocker.join();
+
+    const auto [error, renewed] = outcome.get_future().get();
+    EXPECT_FALSE(error);
+    EXPECT_FALSE(renewed);
+}
+
 TEST_F(LockFileImplTests, RetryReusesTheSameProposedLeaseId) {
     m_httpClient.EnqueueResponse(MakeAzureErrorResponse(503, "ServerBusy", "busy", "r1"));
     m_httpClient.EnqueueResponse(Acquired());

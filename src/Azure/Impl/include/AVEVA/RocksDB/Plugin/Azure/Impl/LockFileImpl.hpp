@@ -33,6 +33,9 @@ class BasicLockFileImpl
     // cannot stall the renewal thread or state queries.
     mutable std::mutex m_stateMutex;
     bool m_lockInProgress = false;
+    // Set before ReleaseLease is issued so a renewal already in flight that the service rejects because the release
+    // won is classified as benign instead of fencing the filesystem. Guarded by m_stateMutex.
+    bool m_releasing = false;
 
     [[nodiscard]] std::optional<std::string> CurrentLeaseId() const;
     void RenewLease() const;

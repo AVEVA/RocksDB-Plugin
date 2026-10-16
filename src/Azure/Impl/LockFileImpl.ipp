@@ -171,6 +171,10 @@ template <typename TBlob> bool BasicLockFileImpl<TBlob>::RenewIfLocked() const {
 
 template <typename TBlob> std::optional<std::string> BasicLockFileImpl<TBlob>::CurrentLeaseId() const {
     const std::scoped_lock lock(m_stateMutex);
+    // A lease being released is already as good as gone: renewals must not start or report errors for it.
+    if (m_releasing) {
+        return std::nullopt;
+    }
     return m_leaseId;
 }
 
@@ -275,12 +279,17 @@ template <typename TBlob> void BasicLockFileImpl<TBlob>::Unlock() {
     options.LeaseId = *leaseId;
     // UnlockFile has already unlinked this lock from renewal, so the lease will lapse regardless of the outcome.
     // Clearing the local state on failure keeps IsRenewalOverdue() from reporting a lease nobody renews as held.
+    {
+        const std::scoped_lock lock(m_stateMutex);
+        m_releasing = true;
+    }
     const boost::scope::scope_exit clearState([this, &leaseId] {
         {
             const std::scoped_lock lock(m_stateMutex);
             if (m_leaseId == leaseId) {
                 m_leaseId.reset();
             }
+            m_releasing = false;
         }
         m_held = false;
     });
