@@ -42,6 +42,30 @@
 #endif
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// <summary>
+/// Returns why the data-file sizes cannot be used, or an empty view when they are valid. Page blobs are written in
+/// 512-byte pages, so the buffer size must be a positive multiple of 512; the initial size only has to be
+/// non-negative.
+/// </summary>
+[[nodiscard]] constexpr std::string_view InvalidDataFileSizes(int64_t dataFileInitialSize,
+                                                              int64_t dataFileBufferSize) noexcept {
+    if (dataFileBufferSize <= 0 || dataFileBufferSize % 512 != 0) {
+        return "dataFileBufferSize must be a positive multiple of 512";
+    }
+    if (dataFileInitialSize < 0) {
+        return "dataFileInitialSize cannot be negative";
+    }
+    return {};
+}
+
+// Validates in a member initializer, so a bad value throws before the lease-renewal worker is started.
+[[nodiscard]] inline int64_t RequireValidDataFileSizes(int64_t dataFileInitialSize, int64_t dataFileBufferSize) {
+    if (const auto problem = InvalidDataFileSizes(dataFileInitialSize, dataFileBufferSize); !problem.empty()) {
+        throw std::invalid_argument(std::string(problem));
+    }
+    return dataFileInitialSize;
+}
+
+/// <summary>
 /// Maps an HTTP client type to the file and directory types the filesystem hands out. The production client gets the
 /// non-template classes (which can be forward declared by the public headers); any other client gets the templates.
 /// </summary>

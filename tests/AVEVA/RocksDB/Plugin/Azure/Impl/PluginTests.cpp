@@ -106,6 +106,28 @@ TEST(PluginTests, Register_WithSharedIoContext_KeepsItAliveUntilUnregistered) {
     EXPECT_FALSE(created.ok());
 }
 
+TEST(PluginTests, Register_WithInvalidDataFileSizes_IsRejected) {
+    const auto logger =
+        std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
+    rocksdb::ConfigOptions configOptions;
+    rocksdb::Env* env = nullptr;
+    std::shared_ptr<rocksdb::Env> guard;
+    boost::asio::io_context context;
+    constexpr int64_t kGoodBuffer = 4096;
+
+    for (const int64_t badBuffer : {int64_t{0}, int64_t{-512}, int64_t{1000}}) {
+        EXPECT_TRUE(Plugin::Register(configOptions, &env, &guard, context, MakeInfo("sizes-db"), std::nullopt, logger,
+                                     badBuffer)
+                        .IsInvalidArgument())
+            << badBuffer;
+    }
+    EXPECT_TRUE(Plugin::Register(configOptions, &env, &guard, context, MakeInfo("sizes-db"), std::nullopt, logger,
+                                 kGoodBuffer, -1)
+                    .IsInvalidArgument());
+    EXPECT_EQ(nullptr, rocksdb::ObjectLibrary::Default()->FindFactory<rocksdb::FileSystem>(
+                           Plugin::NameFor(MakeInfo("sizes-db"))));
+}
+
 TEST(PluginTests, Register_WithNullSharedIoContext_IsRejected) {
     const auto logger =
         std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();

@@ -207,6 +207,9 @@ RegisterImpl(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::sha
     if (maxPrefetchBytes < 0) {
         return rocksdb::Status::InvalidArgument("maxPrefetchBytes cannot be negative");
     }
+    if (const auto problem = Impl::InvalidDataFileSizes(dataFileInitialSize, dataFileBufferSize); !problem.empty()) {
+        return rocksdb::Status::InvalidArgument(std::string(problem));
+    }
     auto pluginName = PluginNameFor(primary, backup);
     auto legacyName = LegacyPluginNameFor(primary, backup);
 

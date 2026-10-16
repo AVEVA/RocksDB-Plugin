@@ -285,8 +285,9 @@ BasicBlobFilesystemImpl<THttp>::BasicBlobFilesystemImpl(
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>&& logger,
     std::shared_ptr<BasicClientRuntime<THttp>> runtime, int64_t dataFileInitialSize, int64_t dataFileBufferSize,
     std::optional<std::chrono::milliseconds> lockAcquireTimeout)
-    : m_logger(std::move(logger)), m_dataFileInitialSize(dataFileInitialSize), m_dataFileBufferSize(dataFileBufferSize),
-      m_lockAcquireTimeout(lockAcquireTimeout), m_runtime(std::move(runtime)),
+    : m_logger(std::move(logger)),
+      m_dataFileInitialSize(RequireValidDataFileSizes(dataFileInitialSize, dataFileBufferSize)),
+      m_dataFileBufferSize(dataFileBufferSize), m_lockAcquireTimeout(lockAcquireTimeout), m_runtime(std::move(runtime)),
       m_asyncReads(std::make_shared<AsyncReadTracker>(m_runtime->HttpClient().get_executor())),
       m_leaseRenewal{LeaseRenewal::Start(
           m_runtime->HttpClient().get_executor(), m_logger, RenewableLocksSnapshot{this}, FenceWritesOnFatal{this},
