@@ -34,6 +34,7 @@ using Tcp = asio::ip::tcp;
 
 constexpr const char* const OkResponse = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
 
+using HttpClientTests::RunBounded;
 using HttpClientTests::ScriptedServer;
 using HttpClientTests::ServerAction;
 

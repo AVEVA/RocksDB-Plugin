@@ -34,6 +34,7 @@
 
 namespace {
 namespace asio = boost::asio;
+using HttpClientTests::RunBounded;
 using Tcp = asio::ip::tcp;
 
 TEST(HttpClientTls, UntrustedCertificateReturnsTlsError) {

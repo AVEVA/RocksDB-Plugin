@@ -32,6 +32,7 @@ namespace asio = boost::asio;
 namespace beast = boost::beast;
 namespace http = boost::beast::http;
 using HttpClientTests::Exchange;
+using HttpClientTests::RunBounded;
 using Tcp = asio::ip::tcp;
 
 TEST(HttpClientRequest, InvalidRequestCompletesAsynchronously) {
