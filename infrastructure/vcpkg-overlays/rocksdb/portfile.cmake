@@ -5,6 +5,8 @@
 # Sync procedure when the vcpkg builtin-baseline is bumped:
 #   1. Diff $VCPKG_ROOT/ports/rocksdb against this directory.
 #   2. Re-apply the changes below on top of the upstream port.
+#   3. Update VERSION (vcpkg.json), the SHA512 below and the patches together; see README.md in this directory.
+#      0004 is AVEVA-only (no upstream issue or PR); 0001 and 0002 mirror the upstream port.
 vcpkg_from_github(
   OUT_SOURCE_PATH SOURCE_PATH
   REPO facebook/rocksdb
