@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 AVEVA
+#Requires -Version 7.2
 <#
 .SYNOPSIS
-    Runs a db_bench suite against real Azure Blob Storage for the Azure SDK backend (main) and the Boost.Asio
-    backend (this branch), then prints a side-by-side table.
+    Runs a db_bench suite against real Azure Blob Storage for a baseline build and a candidate build, then prints a
+    side-by-side table.
 
 .DESCRIPTION
-    Needs two db_bench executables: -SdkExe (built from main with the tool backported) and -AsioExe (this branch).
-    Credentials come from AZURE_STORAGE_ACCOUNT_NAME, AZURE_TENANT_ID, AZURE_SERVICE_PRINCIPAL_ID and
-    AZURE_SERVICE_PRINCIPAL_SECRET (never printed). Each backend uses its own container, <ContainerPrefix>-sdk and
-    <ContainerPrefix>-asio; they must already exist. Every run uses a fresh blob path and the test blobs are left
+    Needs two db_bench executables: -BaselineExe (for example built from main) and -CandidateExe (for example this
+    branch). Credentials come from AZURE_STORAGE_ACCOUNT_NAME, AZURE_TENANT_ID, AZURE_SERVICE_PRINCIPAL_ID and
+    AZURE_SERVICE_PRINCIPAL_SECRET (never printed). Each side uses its own container, <ContainerPrefix>-baseline and
+    <ContainerPrefix>-candidate; they must already exist. Every run uses a fresh blob path and the test blobs are left
     behind, so delete the containers when finished.
+
+    -BaselineFsUri / -CandidateFsUri are the --fs_uri values passed to each executable. 'auto' makes the wrapper use
+    the plugin name it registered; the default baseline value is the name the Azure SDK backend registers.
 
     Setup (see tools/db_bench/README.md): configure a preset with -DAVEVA_ROCKSDB_BUILD_DB_BENCH=ON, e.g.
       cmake --preset WindowsRelease -DAVEVA_ROCKSDB_BUILD_DB_BENCH=ON
@@ -30,17 +34,19 @@
       multiget-*        batched MultiGet (32 keys), async_io off/on (exercises MultiRead)
 
 .EXAMPLE
-    .\Compare-Backends.ps1 -SdkExe D:\bench-main\...\db_bench.exe -AsioExe D:\repo\build\WindowsRelease\tools\db_bench\db_bench.exe
+    .\Compare-Backends.ps1 -BaselineExe D:\bench-main\...\db_bench.exe -CandidateExe D:\repo\build\WindowsRelease\tools\db_bench\db_bench.exe
 
 .EXAMPLE
-    .\Compare-Backends.ps1 -SdkExe ... -AsioExe ... -Quick -Scenarios seek,multiget
+    .\Compare-Backends.ps1 -BaselineExe ... -CandidateExe ... -Quick -Scenarios seek,multiget
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)] [string] $SdkExe,
-    [Parameter(Mandatory)] [string] $AsioExe,
+    [Parameter(Mandatory)] [string] $BaselineExe,
+    [Parameter(Mandatory)] [string] $CandidateExe,
     [string] $Account = $env:AZURE_STORAGE_ACCOUNT_NAME,
     [string] $ContainerPrefix = 'bench',
+    [string] $BaselineFsUri = "azblobfs$ContainerPrefix-baseline",
+    [string] $CandidateFsUri = 'auto',
     [int] $Num = 200000,
     [int] $Reps = 2,
     [ValidateSet('write', 'load', 'readrandom', 'seek', 'multiget')]
@@ -51,7 +57,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-foreach ($exe in $SdkExe, $AsioExe) {
+Set-StrictMode -Version Latest
+foreach ($exe in $BaselineExe, $CandidateExe) {
     if (-not (Test-Path $exe)) { throw "db_bench not found: $exe" }
 }
 foreach ($v in 'AZURE_TENANT_ID', 'AZURE_SERVICE_PRINCIPAL_ID', 'AZURE_SERVICE_PRINCIPAL_SECRET') {
@@ -72,10 +79,8 @@ $env:AVEVA_DB_BENCH_TENANT_ID = $env:AZURE_TENANT_ID
 $env:AVEVA_DB_BENCH_CLIENT_ID = $env:AZURE_SERVICE_PRINCIPAL_ID
 $env:AVEVA_DB_BENCH_CLIENT_SECRET = $env:AZURE_SERVICE_PRINCIPAL_SECRET
 
-$backends = [ordered]@{ sdk = $SdkExe; asio = $AsioExe }
-# The SDK backend registers as azblobfs<container>; the asio plugin name is derived from the account, so the wrapper
-# resolves it when given 'auto'.
-function FsUri($b) { if ($b -eq 'sdk') { "azblobfs$ContainerPrefix-sdk" } else { 'auto' } }
+$backends = [ordered]@{ baseline = $BaselineExe; candidate = $CandidateExe }
+function FsUri($b) { if ($b -eq 'baseline') { $BaselineFsUri } else { $CandidateFsUri } }
 function UseContainer($b) { $env:AVEVA_DB_BENCH_CONTAINER = "$ContainerPrefix-$b" }
 function NewDb($b, $tag) { "$Account+$ContainerPrefix-$b/cmp-$tag-$([guid]::NewGuid().ToString('N').Substring(0, 6))" }
 
@@ -87,7 +92,7 @@ $shape = '--write_buffer_size=4194304', '--target_file_size_base=4194304', '--ma
 # Results: scenario -> backend -> list of values. Order of scenarios is preserved for printing.
 $results = [ordered]@{}
 function Record($scenario, $backend, $value) {
-    if (-not $results.Contains($scenario)) { $results[$scenario] = @{ sdk = @(); asio = @() } }
+    if (-not $results.Contains($scenario)) { $results[$scenario] = @{ baseline = @(); candidate = @() } }
     if ($null -ne $value) { $results[$scenario][$backend] += $value }
 }
 
@@ -138,7 +143,7 @@ Write-Host "Output: $OutDir`nAccount: $Account  num=$Num reps=$Reps quick=$Quick
 try {
 for ($rep = 1; $rep -le $Reps; $rep++) {
     # Alternate which backend goes first so drift in the network or account throttling doesn't favor one.
-    $order = if ($rep % 2) { 'sdk', 'asio' } else { 'asio', 'sdk' }
+    $order = if ($rep % 2) { 'baseline', 'candidate' } else { 'candidate', 'baseline' }
     Write-Host "== Rep $rep (order: $($order -join ', '))"
     $dbs = @{}
 
@@ -208,19 +213,19 @@ finally {
 function Mean($values) { if ($values.Count) { ($values | Measure-Object -Average).Average } else { $null } }
 
 $rows = foreach ($name in $results.Keys) {
-    $s = Mean $results[$name].sdk
-    $a = Mean $results[$name].asio
+    $s = Mean $results[$name].baseline
+    $a = Mean $results[$name].candidate
     [pscustomobject]@{
         Scenario = $name
-        'sdk (main)' = if ($null -ne $s) { '{0:N1}' -f $s } else { 'n/a' }
-        'asio (branch)' = if ($null -ne $a) { '{0:N1}' -f $a } else { 'n/a' }
-        'asio vs sdk' = if ($null -ne $s -and $null -ne $a -and $s -ne 0) { '{0:+0;-0;0}%' -f (($a - $s) / $s * 100) } else { 'n/a' }
-        Samples = '{0}/{1}' -f $results[$name].sdk.Count, $results[$name].asio.Count
+        'baseline' = if ($null -ne $s) { '{0:N1}' -f $s } else { 'n/a' }
+        'candidate' = if ($null -ne $a) { '{0:N1}' -f $a } else { 'n/a' }
+        'candidate vs baseline' = if ($null -ne $s -and $null -ne $a -and $s -ne 0) { '{0:+0;-0;0}%' -f (($a - $s) / $s * 100) } else { 'n/a' }
+        Samples = '{0}/{1}' -f $results[$name].baseline.Count, $results[$name].candidate.Count
     }
 }
 
-Write-Host "`n=== Results (mean of reps; lower is better; negative % = asio faster) ==="
+Write-Host "`n=== Results (mean of reps; lower is better; negative % = candidate faster) ==="
 $rows | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
 $rows | Export-Csv (Join-Path $OutDir 'summary.csv') -NoTypeInformation
 Write-Host ("Total time {0:N0} min. Logs and summary.csv: {1}" -f $sw0.Elapsed.TotalMinutes, $OutDir)
-Write-Host "Test blobs remain in containers $ContainerPrefix-sdk and $ContainerPrefix-asio; delete them when finished."
+Write-Host "Test blobs remain in containers $ContainerPrefix-baseline and $ContainerPrefix-candidate; delete them when finished."

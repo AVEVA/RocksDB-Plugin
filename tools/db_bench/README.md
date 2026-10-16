@@ -262,12 +262,14 @@ service-principal login from above, or the Azure Python SDK.
 az storage container delete --account-name $env:AZURE_STORAGE_ACCOUNT_NAME --name $env:AVEVA_DB_BENCH_CONTAINER --auth-mode login
 ```
 
-## Comparing the Azure SDK and Asio backends — `Compare-Backends.ps1`
+## Comparing two builds — `Compare-Backends.ps1`
 
-`Compare-Backends.ps1` runs the same db_bench scenarios against real Azure Blob Storage with two executables and prints
-a side-by-side table: `-SdkExe` (built from `main` with the tool backported) and `-AsioExe` (this branch).
+`Compare-Backends.ps1` (PowerShell 7.2 or later) runs the same db_bench scenarios against real Azure Blob Storage with
+two executables and prints a side-by-side table: `-BaselineExe` (for example built from `main` with the tool
+backported) and `-CandidateExe` (for example this branch). `-BaselineFsUri` and `-CandidateFsUri` set the `--fs_uri`
+each one receives; `auto` means the plugin name the wrapper registered.
 
-- **Build the Asio executable** with a preset plus the option, which also activates the overlay port through
+- **Build the candidate executable** with a preset plus the option, which also activates the overlay port through
   `VCPKG_OVERLAY_PORTS` (the root `CMakeLists.txt` appends `infrastructure/vcpkg-overlays/rocksdb` for you):
 
   ```powershell
@@ -279,14 +281,15 @@ a side-by-side table: `-SdkExe` (built from `main` with the tool backported) and
   missing; use a fresh build directory when you toggle it.
 - **Credentials** come from `AZURE_STORAGE_ACCOUNT_NAME`, `AZURE_TENANT_ID`, `AZURE_SERVICE_PRINCIPAL_ID` and
   `AZURE_SERVICE_PRINCIPAL_SECRET`. The service principal needs **Storage Blob Data Contributor** on the storage
-  account, or on both containers `<ContainerPrefix>-sdk` and `<ContainerPrefix>-asio` (default prefix `bench`), which must
+  account, or on both containers `<ContainerPrefix>-baseline` and `<ContainerPrefix>-candidate` (default prefix
+  `bench`), which must
   already exist.
 - **Outputs** go to `-OutDir` (default `db_bench_compare_<timestamp>` under your temp directory): one log per db_bench
   run plus `summary.csv`. The script never deletes them, and it scrubs the client secret from every log. Delete the
   folder, and the test blobs left in the two containers, when you finish.
 
 ```powershell
-.\tools\db_bench\Compare-Backends.ps1 -SdkExe <main db_bench.exe> -AsioExe .\build\WindowsRelease\tools\db_bench\Release\db_bench.exe -Quick
+.\tools\db_bench\Compare-Backends.ps1 -BaselineExe <main db_bench.exe> -CandidateExe .\build\WindowsRelease\tools\db_bench\Release\db_bench.exe -Quick
 ```
 
 ## Notes
