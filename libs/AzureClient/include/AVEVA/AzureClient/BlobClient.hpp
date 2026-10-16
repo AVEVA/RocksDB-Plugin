@@ -261,6 +261,8 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
             std::forward<CompletionToken>(token), std::move(requestOptions), std::move(options));
     }
 
+    // If a retried release gets 409 LeaseNotPresentWithLeaseOperation (the lost earlier attempt already released
+    // the lease) it completes as success with the 409 details in Response::Error(); on the first attempt it fails.
     template <class CompletionToken = DefaultCompletionToken>
     [[nodiscard]] auto ReleaseLeaseAsync(ReleaseLeaseOptions options, CompletionToken&& token = CompletionToken{},
                                          std::optional<AzureRequestOptions> requestOptions = std::nullopt) {

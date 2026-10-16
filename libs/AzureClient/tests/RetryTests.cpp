@@ -289,6 +289,40 @@ TEST(RetryTests, DeleteIfExistsIsReplayedAfterAnAmbiguousTransportErrorBecauseTh
     EXPECT_TRUE(ValueOrFail(observed).has_value());
 }
 
+using ReleaseResult = std::expected<Response<Models::ReleaseBlobLeaseResult>, BlobStorageError>;
+
+TEST(RetryTests, ReleaseLeaseReplayedAfterAnAmbiguousErrorAbsorbsTheLeaseAlreadyReleased409) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ReadFailed);
+    httpClient.EnqueueResponse(HttpResponse{409, {{"x-ms-error-code", "LeaseNotPresentWithLeaseOperation"}}, ""});
+    BlobClient client{httpClient, MakeRetryOptions(3)};
+
+    std::optional<ReleaseResult> observed;
+    client.ReleaseLeaseAsync(ReleaseLeaseOptions{.LeaseId = "lease"},
+                             [&](ReleaseResult result) { observed = std::move(result); });
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
+    EXPECT_EQ(httpClient.RequestCount(), 2U);
+    const auto& value = ValueOrFail(observed);
+    ASSERT_TRUE(value.has_value());
+    ASSERT_TRUE(value->Error().has_value());
+    EXPECT_EQ(value->Error()->StatusCode, 409U);
+}
+
+TEST(RetryTests, ReleaseLeaseFirstAttempt409StillFails) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{409, {{"x-ms-error-code", "LeaseNotPresentWithLeaseOperation"}}, ""});
+    BlobClient client{httpClient, MakeRetryOptions(3)};
+
+    std::optional<ReleaseResult> observed;
+    client.ReleaseLeaseAsync(ReleaseLeaseOptions{.LeaseId = "lease"},
+                             [&](ReleaseResult result) { observed = std::move(result); });
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
+    EXPECT_EQ(httpClient.RequestCount(), 1U);
+    EXPECT_FALSE(ValueOrFail(observed).has_value());
+}
+
 TEST(RetryTests, ConditionalCreateIsRetriedAfterFailuresThatHappenedBeforeAnythingWasSent) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ConnectFailed);

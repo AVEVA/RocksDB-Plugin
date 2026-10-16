@@ -55,7 +55,9 @@ enum class BlobStorageErrorCode : std::uint8_t {
     InvalidMetadata,
     // Client-side: a response reported success but could not be parsed. The parser's
     // diagnostic is in BlobStorageError::Message.
-    InvalidResponse
+    InvalidResponse,
+    // 409 from Lease Blob: the lease being released/renewed/changed does not exist (e.g. already released).
+    LeaseNotPresentWithLeaseOperation
 };
 
 // Found via ADL by std::error_code's constructor; do not call directly, compare

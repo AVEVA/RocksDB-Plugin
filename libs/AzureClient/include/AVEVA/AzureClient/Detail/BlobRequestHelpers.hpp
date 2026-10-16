@@ -733,8 +733,23 @@ void ReleaseLeaseAsync(THttp& httpClient, const TTarget& target, ReleaseLeaseOpt
     HttpRequest request = BuildLeaseRequest(target, "release");
     AddHeader(request, XMsLeaseIdHeaderName, operationOptions.LeaseId);
     ApplyLeaseRequestConditions(request, std::move(operationOptions.Conditions));
-    SendAndParse<Models::ReleaseBlobLeaseResult>(httpClient, target, std::move(request), ParseReleaseBlobLeaseResult,
-                                                 std::forward<TCompletion>(completion), std::move(requestOptions));
+    // A release replayed after the first attempt's outcome was lost may find the lease already gone; counting
+    // attempts lets that 409 be told apart from a genuine one on the first attempt.
+    auto attempts = std::make_shared<int>(0);
+    auto absorb = [attempts, completion = std::forward<TCompletion>(completion)](
+                      std::error_code error, Response<Models::ReleaseBlobLeaseResult> response) mutable {
+        if (error && *attempts > 1 && error == BlobStorageErrorCode::LeaseNotPresentWithLeaseOperation) {
+            error.clear();
+        }
+        completion(ToExpected(error, std::move(response)));
+    };
+    SendAuthorizedRequestAsync(
+        httpClient, *target.Connection, target.Credential, std::move(request),
+        [absorb = std::move(absorb)](std::error_code error, HttpResponse response) mutable {
+            CompleteParsed<Models::ReleaseBlobLeaseResult>(error, std::move(response), ParseReleaseBlobLeaseResult,
+                                                           absorb);
+        },
+        std::move(requestOptions), [attempts](HttpRequest&, std::string_view) { ++*attempts; }, true);
 }
 
 template <HttpClientLike THttp, class TCred, class TCompletion>

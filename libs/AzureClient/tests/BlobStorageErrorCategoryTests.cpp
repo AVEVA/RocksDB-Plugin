@@ -144,7 +144,7 @@ struct EnumeratorCase {
 
 // Every enumerator, in declaration order. Adding an enumerator without a row here fails
 // EveryEnumerator_IsCovered below.
-constexpr std::array<EnumeratorCase, 35> AllEnumerators{{
+constexpr std::array<EnumeratorCase, 36> AllEnumerators{{
     {.Code = BlobStorageErrorCode::ContainerAlreadyExists, .ServiceName = "ContainerAlreadyExists"},
     {.Code = BlobStorageErrorCode::ContainerNotFound, .ServiceName = "ContainerNotFound"},
     {.Code = BlobStorageErrorCode::ContainerBeingDeleted, .ServiceName = "ContainerBeingDeleted"},
@@ -181,6 +181,8 @@ constexpr std::array<EnumeratorCase, 35> AllEnumerators{{
      .ServiceName = "BlobTierInadequateForContentLength"},
     {.Code = BlobStorageErrorCode::InvalidMetadata, .ServiceName = "InvalidMetadata"},
     {.Code = BlobStorageErrorCode::InvalidResponse, .ServiceName = ""},
+    {.Code = BlobStorageErrorCode::LeaseNotPresentWithLeaseOperation,
+     .ServiceName = "LeaseNotPresentWithLeaseOperation"},
 }};
 } // namespace
 
@@ -188,8 +190,8 @@ TEST(BlobStorageErrorCategoryTests, EveryEnumerator_IsCovered) {
     for (std::size_t i = 0; i < AllEnumerators.size(); ++i) {
         EXPECT_EQ(static_cast<std::size_t>(AllEnumerators.at(i).Code), i + 1U) << "row " << i;
     }
-    EXPECT_EQ(AllEnumerators.back().Code, BlobStorageErrorCode::InvalidResponse)
-        << "InvalidResponse must stay the last enumerator";
+    EXPECT_EQ(AllEnumerators.back().Code, BlobStorageErrorCode::LeaseNotPresentWithLeaseOperation)
+        << "new enumerators are appended, so this must stay the last one until another is added";
 }
 
 TEST(BlobStorageErrorCategoryTests, EveryEnumerator_HasMessageAndRoundTripsThroughParse) {
