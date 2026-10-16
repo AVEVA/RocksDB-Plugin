@@ -108,7 +108,13 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     void Start() {
         if (m_parentSlot.is_connected()) {
             std::weak_ptr<RetryOperation> const weak = this->weak_from_this();
+            // Only terminal and total cancellation abort the operation; a request that is merely partial has nothing
+            // safe to hand back half-done here, so it is ignored.
             m_parentSlot.assign([weak](boost::asio::cancellation_type_t type) {
+                if ((type & (boost::asio::cancellation_type::terminal | boost::asio::cancellation_type::total)) ==
+                    boost::asio::cancellation_type::none) {
+                    return;
+                }
                 if (auto self = weak.lock()) {
                     self->OnCancel(type);
                 }

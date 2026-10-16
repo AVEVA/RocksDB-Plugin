@@ -55,7 +55,8 @@ namespace AVEVA::AzureClient {
 //
 // Cancellation: AzureRequestOptions carries a boost::asio::cancellation_slot that aborts in-flight work
 // (completing with an operation_aborted-flavored BlobStorageError); a slot associated with the
-// completion token is adopted when AzureRequestOptions has none.
+// completion token is adopted when AzureRequestOptions has none. Only terminal and total cancellation
+// abort an operation; a partial cancellation request is ignored.
 //
 // Completion tokens: every ...Async operation accepts any Boost.Asio CompletionToken (callback,
 // use_future, use_awaitable, ...) and completes with std::expected<Response<T>, BlobStorageError>.
