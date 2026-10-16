@@ -6,7 +6,7 @@ Requires the vcpkg overlay port in infrastructure/vcpkg-overlays/rocksdb to \
 be active; it installs RocksDB's db_bench_tool as a static library (via \
 0004-install-db-bench-tool-lib.patch) that the wrapper links against." OFF)
 
-if (${AVEVA_ROCKSDB_BUILD_DB_BENCH})
+if(AVEVA_ROCKSDB_BUILD_DB_BENCH)
     list(APPEND VCPKG_MANIFEST_FEATURES "db-bench")
     # The patched RocksDB port is only needed for db_bench; ordinary builds use the baseline port. This must be set
     # before project(), where the vcpkg toolchain reads it.
@@ -56,6 +56,6 @@ if (${AVEVA_ROCKSDB_TESTS})
     enable_testing()
     add_subdirectory(tests)
 endif()
-if (${AVEVA_ROCKSDB_BUILD_DB_BENCH})
+if(AVEVA_ROCKSDB_BUILD_DB_BENCH)
     add_subdirectory(tools)
 endif()
