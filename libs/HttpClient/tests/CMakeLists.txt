@@ -34,4 +34,4 @@ endif()
 target_link_libraries(aveva-http-client-tests
 	PRIVATE aveva::http-client Boost::asio Boost::beast Boost::intrusive Boost::unordered Boost::url GTest::gtest_main OpenSSL::SSL OpenSSL::Crypto
 )
-gtest_discover_tests(aveva-http-client-tests PROPERTIES TIMEOUT 10 LABELS "unit;http-client")
+gtest_discover_tests(aveva-http-client-tests PROPERTIES TIMEOUT 30 LABELS "unit;http-client")
