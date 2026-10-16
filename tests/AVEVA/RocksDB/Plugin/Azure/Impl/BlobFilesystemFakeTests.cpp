@@ -666,6 +666,13 @@ TEST_F(BlobFilesystemFakeTests, SecondFilesystemCannotLockWhileTheLeaseIsHeldAnd
 
     const auto start = std::chrono::steady_clock::now();
     EXPECT_THROW((void)second.LockFile(Path("LOCK")), std::runtime_error);
+    try {
+        (void)second.LockFile(Path("LOCK"));
+        ADD_FAILURE() << "expected the lock to be contended";
+    } catch (const std::runtime_error& ex) {
+        EXPECT_NE(std::string(ex.what()).find("LOCK"), std::string::npos) << ex.what();
+        EXPECT_NE(std::string(ex.what()).find(Container), std::string::npos) << ex.what();
+    }
     EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(10));
     EXPECT_EQ(second.GetLeaseClientCount(), 0U);
     EXPECT_EQ(m_server->LeaseAcquisitions, 1);

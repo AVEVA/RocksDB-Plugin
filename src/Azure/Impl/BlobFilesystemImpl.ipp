@@ -26,6 +26,7 @@
 #include <cstddef>
 #include <deque>
 #include <expected>
+#include <format>
 #include <functional>
 #include <future>
 #include <mutex>

@@ -47,7 +47,10 @@ BasicBlobFilesystemImpl<THttp>::LockFile(const std::string& filePath) {
         assert(lockFile->is_linked());
         return lockFile;
     } else {
-        throw std::runtime_error("The targeted storage location is locked");
+        const auto message =
+            std::format("The targeted storage location is locked: container '{}', path '{}'", prefix, realPath);
+        BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning) << message;
+        throw std::runtime_error(message);
     }
 }
 
