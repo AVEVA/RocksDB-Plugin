@@ -606,6 +606,7 @@ Result FakeBlobServer::PageWrite(const FakeHttpClient::RequestRecord& record, co
             }
         };
         m_heldUploads.Add(record.Index);
+        m_uploadHeld.notify_all();
         return deferred;
     }
     const auto etag = Apply(blob, offset, payload, clear);

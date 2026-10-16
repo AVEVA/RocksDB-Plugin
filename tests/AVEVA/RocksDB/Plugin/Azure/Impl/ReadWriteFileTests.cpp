@@ -308,19 +308,28 @@ TEST_F(ReadWriteFileImplTests, Flush_WritesOnDifferentPages_AreUploadedConcurren
 
     // Act - the flush blocks until the uploads complete, so it runs on its own thread
     auto sync = std::async(std::launch::async, [&] { file->Sync(); });
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-    while (m_env.Blob->PendingUploads() < 3 && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    // Releases whatever is held however the test exits, so a failed assertion cannot leave Sync (and the future's
+    // destructor) blocked forever.
+    struct Release {
+        FakeBlobServer& Blob;
+        ~Release() {
+            Blob.DeferUploads = false;
+            while (Blob.PendingUploads() > 0) {
+                Blob.CompleteUpload();
+            }
+        }
+    } release{*m_env.Blob};
+    const bool allHeld = m_env.Blob->WaitForPendingUploads(3);
 
     // Assert - all three were in flight at once, before any completed
-    const auto inFlight = m_env.Blob->PendingUploads();
+    ASSERT_TRUE(allHeld);
+    ASSERT_EQ(3u, m_env.Blob->PendingUploads());
     m_env.Blob->DeferUploads = false;
-    for (size_t i = 0; i < inFlight; ++i) {
+    for (size_t i = 0; i < 3; ++i) {
         m_env.Blob->CompleteUpload();
     }
-    sync.get();
-    EXPECT_EQ(3u, inFlight);
+    EXPECT_NO_THROW(sync.get());
+    EXPECT_EQ(3u, m_env.Blob->Uploads.size());
 }
 
 TEST_F(ReadWriteFileImplTests, Flush_UploadFailure_KeepsTheBufferedWritesForARetry) {

@@ -12,6 +12,7 @@
 #include <cctype>
 #include <charconv>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -102,6 +103,8 @@ class FakeBlobServer {
     std::map<std::string, StoredBlob> m_blobs;
     std::string m_primaryPath;
     std::set<std::string> m_containers;
+    // Signalled, with m_mutex held, whenever an upload is deferred.
+    std::condition_variable m_uploadHeld;
     AzureClient::Tests::HeldRequests<> m_heldUploads;
     AzureClient::Tests::HeldRequests<> m_heldProperties;
     AzureClient::Tests::HeldRequests<DownloadRequest> m_heldDownloads;
@@ -187,6 +190,12 @@ class FakeBlobServer {
     }
 
     size_t PendingUploads() { return Count(m_heldUploads); }
+    // Blocks until at least `count` uploads are held, or the timeout passes. Returns whether they are.
+    [[nodiscard]] bool WaitForPendingUploads(const size_t count,
+                                             const std::chrono::milliseconds timeout = std::chrono::seconds(30)) {
+        std::unique_lock lock(m_mutex);
+        return m_uploadHeld.wait_for(lock, timeout, [&] { return m_heldUploads.Count(*m_http) >= count; });
+    }
     size_t PendingDownloads() { return Count(m_heldDownloads); }
 
     // Completes a deferred upload; the bytes land in the blob only now.
