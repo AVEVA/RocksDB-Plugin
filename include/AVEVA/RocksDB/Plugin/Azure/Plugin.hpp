@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Defaults.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ChainedCredentialInfo.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ServicePrincipalStorageInfo.hpp"
 
@@ -53,10 +53,10 @@ struct Plugin {
              boost::asio::io_context& ioContext, Models::ServicePrincipalStorageInfo primary,
              std::optional<Models::ServicePrincipalStorageInfo> backup,
              std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
-             int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
+             int64_t dataFileBufferSize = Defaults::DataFileBufferSize,
+             int64_t dataFileInitialSize = Defaults::DataFileInitialSize,
              std::optional<std::string_view> cachePath = std::nullopt, size_t maxCacheSize = 0,
-             int64_t maxPrefetchBytes = Impl::Configuration::DefaultPrefetchBudgetBytes);
+             int64_t maxPrefetchBytes = Defaults::MaxPrefetchBytes);
 
     /// <summary>
     /// Registers the Azure blob filesystem plugin with the RocksDB ObjectLibrary, performing all Azure I/O on
@@ -67,10 +67,10 @@ struct Plugin {
              boost::asio::io_context& ioContext, Models::ChainedCredentialInfo primary,
              std::optional<Models::ChainedCredentialInfo> backup,
              std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
-             int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
+             int64_t dataFileBufferSize = Defaults::DataFileBufferSize,
+             int64_t dataFileInitialSize = Defaults::DataFileInitialSize,
              std::optional<std::string_view> cachePath = std::nullopt, size_t maxCacheSize = 0,
-             int64_t maxPrefetchBytes = Impl::Configuration::DefaultPrefetchBudgetBytes);
+             int64_t maxPrefetchBytes = Defaults::MaxPrefetchBytes);
 
     /// <summary>
     /// Like the io_context& overloads, but the registration and every filesystem created from it share ownership of
@@ -82,10 +82,10 @@ struct Plugin {
              std::shared_ptr<boost::asio::io_context> ioContext, Models::ServicePrincipalStorageInfo primary,
              std::optional<Models::ServicePrincipalStorageInfo> backup,
              std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
-             int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
+             int64_t dataFileBufferSize = Defaults::DataFileBufferSize,
+             int64_t dataFileInitialSize = Defaults::DataFileInitialSize,
              std::optional<std::string_view> cachePath = std::nullopt, size_t maxCacheSize = 0,
-             int64_t maxPrefetchBytes = Impl::Configuration::DefaultPrefetchBudgetBytes);
+             int64_t maxPrefetchBytes = Defaults::MaxPrefetchBytes);
 
     /// <summary>See the shared_ptr&lt;io_context&gt; overload taking ServicePrincipalStorageInfo.</summary>
     static rocksdb::Status
@@ -93,10 +93,10 @@ struct Plugin {
              std::shared_ptr<boost::asio::io_context> ioContext, Models::ChainedCredentialInfo primary,
              std::optional<Models::ChainedCredentialInfo> backup,
              std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
-             int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
+             int64_t dataFileBufferSize = Defaults::DataFileBufferSize,
+             int64_t dataFileInitialSize = Defaults::DataFileInitialSize,
              std::optional<std::string_view> cachePath = std::nullopt, size_t maxCacheSize = 0,
-             int64_t maxPrefetchBytes = Impl::Configuration::DefaultPrefetchBudgetBytes);
+             int64_t maxPrefetchBytes = Defaults::MaxPrefetchBytes);
 
     /// <summary>
     /// Removes the registration for this primary/backup pair (under both its current and legacy name), releasing
@@ -134,10 +134,10 @@ struct Plugin {
     Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::shared_ptr<rocksdb::Env>* guard,
              Models::ServicePrincipalStorageInfo primary, std::optional<Models::ServicePrincipalStorageInfo> backup,
              std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
-             int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
+             int64_t dataFileBufferSize = Defaults::DataFileBufferSize,
+             int64_t dataFileInitialSize = Defaults::DataFileInitialSize,
              std::optional<std::string_view> cachePath = std::nullopt, size_t maxCacheSize = 0,
-             int64_t maxPrefetchBytes = Impl::Configuration::DefaultPrefetchBudgetBytes);
+             int64_t maxPrefetchBytes = Defaults::MaxPrefetchBytes);
 
     /// <summary>See the deprecated ServicePrincipalStorageInfo overload without an io_context.</summary>
     [[deprecated("Pass the host io_context to Register; this overload runs its own io_context thread.")]]
@@ -145,9 +145,9 @@ struct Plugin {
     Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::shared_ptr<rocksdb::Env>* guard,
              Models::ChainedCredentialInfo primary, std::optional<Models::ChainedCredentialInfo> backup,
              std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-             int64_t dataFileBufferSize = Impl::Configuration::PageBlob::DefaultBufferSize,
-             int64_t dataFileInitialSize = Impl::Configuration::PageBlob::DefaultSize,
+             int64_t dataFileBufferSize = Defaults::DataFileBufferSize,
+             int64_t dataFileInitialSize = Defaults::DataFileInitialSize,
              std::optional<std::string_view> cachePath = std::nullopt, size_t maxCacheSize = 0,
-             int64_t maxPrefetchBytes = Impl::Configuration::DefaultPrefetchBudgetBytes);
+             int64_t maxPrefetchBytes = Defaults::MaxPrefetchBytes);
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure

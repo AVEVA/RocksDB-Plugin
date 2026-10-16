@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
+#include "AVEVA/RocksDB/Plugin/Azure/Defaults.hpp"
+
 #include <chrono>
 #include <cstdint>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
@@ -9,8 +11,8 @@ struct Configuration {
     struct PageBlob {
         static const constexpr int64_t PageSize = 512;
         static const constexpr int64_t PageBits = 9;
-        static const constexpr int64_t DefaultSize = 128 * PageSize * 2;
-        static const constexpr int64_t DefaultBufferSize = 128 * PageSize * 2;
+        static const constexpr int64_t DefaultSize = Defaults::DataFileInitialSize;
+        static const constexpr int64_t DefaultBufferSize = Defaults::DataFileBufferSize;
     };
 
     // Request sizing and fan-out used by the filesystem layer.
@@ -47,7 +49,7 @@ struct Configuration {
     static const constexpr std::chrono::milliseconds MetadataCacheTtl = std::chrono::milliseconds(100);
     static const constexpr std::chrono::seconds LogRateLimiterCooldown = std::chrono::seconds(30);
     // Default cap on bytes held by prefetch buffers across all files of one filesystem.
-    static const constexpr int64_t DefaultPrefetchBudgetBytes = static_cast<int64_t>(256) * 1024 * 1024;
+    static const constexpr int64_t DefaultPrefetchBudgetBytes = Defaults::MaxPrefetchBytes;
     static const constexpr size_t MaxCacheSize = static_cast<size_t>(1024) * 1024 * 1024; // 1GB
     static const constexpr int MaxClientRetries = 8;
     // Caps the backoff between retries. With 8 retries from the 800 ms default initial delay the waits total at most

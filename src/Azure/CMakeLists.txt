@@ -34,12 +34,13 @@ target_sources(aveva-rocksdb-plugin-azure
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/ReadWriteFile.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Plugin.hpp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Defaults.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 )
 find_package(RocksDB CONFIG REQUIRED)
 find_package(aveva-install-library CONFIG REQUIRED)
 # The implementation target is linked publicly because this is a static library and its dependencies must reach the
-# final link. The public headers themselves only include Impl/Configuration.hpp (plain constants), not Asio or the
+# final link. The public headers themselves only include Defaults.hpp (plain constants), not Asio or the
 # Azure client. Boost.Log is part of the public API (loggers are passed to
 # Plugin::Register).
 find_package(boost_log CONFIG REQUIRED)
