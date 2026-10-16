@@ -19,7 +19,9 @@ updates:
 
   # GitHub Actions referenced by the repository's workflows.
   - package-ecosystem: "github-actions"
-    directory: "/"
+    directories:
+      - "/"
+      - "/.github/actions/*"
     schedule:
       interval: "weekly"
       day: "monday"
