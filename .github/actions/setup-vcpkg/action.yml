@@ -4,14 +4,13 @@
 name: Set up vcpkg
 description: Checks out vcpkg at the builtin-baseline commit, bootstraps it as VCPKG_ROOT and restores the binary cache.
 
-inputs:
+outputs:
+  cache-hit:
+    description: "true when the binary cache was restored from an exact key match."
+    value: ${{ steps.cache.outputs.cache-hit }}
   cache-key:
-    description: Job-specific part of the binary cache key, after the runner OS prefix.
-    required: true
-  restore-key:
-    description: Job-specific part of the fallback cache key prefix, after the runner OS prefix. Defaults to the OS only.
-    required: false
-    default: ''
+    description: Key to pass to actions/cache/save.
+    value: ${{ steps.key.outputs.key }}
 
 runs:
   using: composite
@@ -40,9 +39,15 @@ runs:
         echo "VCPKG_ROOT=$vcpkg_dir" >> "$GITHUB_ENV"
         echo "VCPKG_DEFAULT_BINARY_CACHE=$RUNNER_TEMP/vcpkg-binary-cache" >> "$GITHUB_ENV"
         mkdir -p "$RUNNER_TEMP/vcpkg-binary-cache"
+    # One cache per OS: Debug, Release and sanitizer jobs share the same vcpkg ABI. Jobs only restore; a designated
+    # job per OS saves on main (see build-and-test.yml), so PRs never write duplicate multi-GB entries.
+    - name: Compute vcpkg binary cache key
+      id: key
+      shell: bash
+      run: echo "key=vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'infrastructure/vcpkg-overlays/**') }}" >> "$GITHUB_OUTPUT"
     - name: Restore vcpkg binary cache
-      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      id: cache
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: ${{ runner.temp }}/vcpkg-binary-cache
-        key: vcpkg-${{ runner.os }}-${{ inputs.cache-key }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'infrastructure/vcpkg-overlays/**') }}
-        restore-keys: vcpkg-${{ runner.os }}-${{ inputs.restore-key }}
+        key: ${{ steps.key.outputs.key }}

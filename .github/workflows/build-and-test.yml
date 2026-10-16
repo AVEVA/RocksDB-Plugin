@@ -48,9 +48,11 @@ jobs:
           - os: windows-latest
             preset: WindowsDebug
             tests: true
+            save-cache: true
           - os: ubuntu-latest
             preset: LinuxDebug
             tests: true
+            save-cache: true
           - os: ubuntu-latest
             preset: LinuxRelease
             config: Release
@@ -69,9 +71,7 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/setup-vcpkg
-        with:
-          cache-key: build-${{ matrix.preset }}-tests-${{ matrix.tests }}
-          restore-key: build-${{ matrix.preset }}-
+        id: vcpkg
 
       # Plugin tests and the vendored AzureClient/HttpClient test suites.
       - name: Configure
@@ -93,6 +93,14 @@ jobs:
         if: matrix.tests
         run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure --build-config ${{ matrix.config || 'Debug' }} --parallel 4
 
+      # One writer per OS, on main only; an exact hit means the entry already exists.
+      - name: Save vcpkg binary cache
+        if: ${{ always() && matrix.save-cache && github.ref == 'refs/heads/main' && steps.vcpkg.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/vcpkg-binary-cache
+          key: ${{ steps.vcpkg.outputs.cache-key }}
+
   sanitizers:
     strategy:
       fail-fast: false
@@ -113,8 +121,6 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/setup-vcpkg
-        with:
-          cache-key: sanitizers-${{ matrix.name }}
 
       - name: Configure
         run: cmake --preset LinuxDebug "${{ matrix.flags }}"
@@ -185,8 +191,6 @@ jobs:
 
       - uses: ./.github/actions/setup-vcpkg
         if: steps.changes.outputs.relevant == 'true'
-        with:
-          cache-key: db-bench
 
       - name: Configure and build with db_bench
         if: steps.changes.outputs.relevant == 'true'
@@ -216,8 +220,6 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/setup-vcpkg
-        with:
-          cache-key: install-${{ matrix.preset }}
 
       - name: Configure, build and install
         shell: bash
