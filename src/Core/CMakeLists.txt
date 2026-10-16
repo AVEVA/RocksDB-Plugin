@@ -42,16 +42,21 @@ find_package(boost_static_string CONFIG REQUIRED)
 
 find_package(RocksDB CONFIG REQUIRED)
 find_package(aveva-install-library CONFIG REQUIRED)
-target_link_libraries(aveva-rocksdb-plugin-core PUBLIC
-    Boost::algorithm
-    Boost::container
-    Boost::scope
-    Boost::log
-    Boost::intrusive
-    Boost::thread
-    Boost::unordered
-    Boost::static_string
-    RocksDB::rocksdb
+# PUBLIC only for libraries whose headers appear in installed Core headers; the rest are implementation details.
+# The package config still calls find_dependency for all of them because a static build re-exports PRIVATE
+# dependencies as $<LINK_ONLY:...> link requirements.
+target_link_libraries(aveva-rocksdb-plugin-core
+    PUBLIC
+        Boost::log
+        Boost::intrusive
+        Boost::static_string
+        RocksDB::rocksdb
+    PRIVATE
+        Boost::algorithm
+        Boost::container
+        Boost::unordered
+        Boost::scope
+        Boost::thread
 )
 if(MSVC)
     target_compile_options(aveva-rocksdb-plugin-core PRIVATE /bigobj)
