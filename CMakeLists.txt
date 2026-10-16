@@ -51,7 +51,7 @@ endif()
 include(infrastructure/cmake/AvevaClientLibraries.cmake)
 
 add_subdirectory(src)
-if (${AVEVA_ROCKSDB_TESTS})
+if (AVEVA_ROCKSDB_TESTS)
     include(CTest)
     enable_testing()
     add_subdirectory(tests)
