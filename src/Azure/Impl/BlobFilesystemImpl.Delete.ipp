@@ -38,6 +38,16 @@ template <typename THttp> size_t BasicBlobFilesystemImpl<THttp>::DeleteDir(const
     BlobFilesystemDetail::ForEachBlob(
         *container, options, [&blobs](const AzureClient::Models::BlobItem& blob) { blobs.push_back(blob.Name); });
 
+    // Dropped whether or not every delete succeeds: a blob recreated under the same name must never be served the
+    // old bytes from the cache. Removing a name that is not cached is a no-op.
+    const boost::scope::scope_exit dropCached{[&] {
+        if (const auto cache = m_fileCaches.find(prefix); cache != m_fileCaches.end()) {
+            for (const auto& name : blobs) {
+                cache->second->RemoveFile(name);
+            }
+        }
+    }};
+
     if (!blobs.empty()) {
         // Batched deletes cut the request count by up to 256x. Every blob is attempted, then the first failure (if
         // any) is thrown so callers never mistake a partial delete for success.
