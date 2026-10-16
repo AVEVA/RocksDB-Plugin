@@ -198,6 +198,35 @@ TEST(HttpClientRobustness, GetLostOnAReusedConnectionIsRetried) {
     EXPECT_EQ(server.Accepted(), 2);
 }
 
+TEST(HttpClientRobustness, GetIsNotRetriedOnceResponseBytesWereReceivedOnAReusedConnection) {
+    asio::io_context context;
+    auto client = AVEVA::HttpClient::Create(context);
+    ScriptedServer server(context, [](int connection, const http::request<http::string_body>& request) -> ServerAction {
+        if (connection == 0 && request.target() == "/second") {
+            // The server accepted the request and started answering before dying.
+            return {"HTTP/1.1 200 OK\r\nContent-Le", true};
+        }
+        return {OkResponse};
+    });
+
+    std::error_code secondError;
+    client->SendAsync(
+        MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{}, [&](std::error_code, AVEVA::HttpResponse) {
+            client->SendAsync(MakeRequest(server.Url("/second")), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  secondError = error;
+                                  auto settle =
+                                      std::make_shared<asio::steady_timer>(context, std::chrono::milliseconds(200));
+                                  settle->async_wait([&, settle](boost::system::error_code) { server.Stop(); });
+                              });
+        });
+    context.run();
+
+    EXPECT_TRUE(secondError);
+    EXPECT_EQ(server.Accepted(), 1);
+    EXPECT_EQ(server.TotalRequests(), 2);
+}
+
 TEST(HttpClientRobustness, StalledServerCompletesOnceWithTimeout) {
     AVEVA::HttpRequestOptions requestOptions;
     requestOptions.SetTimeout(std::chrono::milliseconds(100));
