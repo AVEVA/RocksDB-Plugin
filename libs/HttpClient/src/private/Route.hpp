@@ -30,8 +30,8 @@ struct Route {
     std::string Authority; // The Host header value.
 
     /// <summary>
-    /// Whether a pooled connection may be used: the request passes the same validation the operation applies,
-    /// so failing an invalid one cannot cost a healthy connection.
+    /// Whether the request can be sent at all: the URL parsed and the request passed validation. The client
+    /// fails every other route at submission, so nothing past that point ever sees one.
     /// </summary>
     bool Sendable() const noexcept { return Parsed && !Error; }
 

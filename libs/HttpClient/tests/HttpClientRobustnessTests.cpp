@@ -788,7 +788,7 @@ TEST(HttpClientRobustness, ThrowingInitiationCompletesTheHandlerExactlyOnceAndNe
     RunBounded(context);
 
     EXPECT_EQ(completions, 1);
-    EXPECT_EQ(result, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidRequest));
+    EXPECT_EQ(result, std::make_error_code(std::errc::not_enough_memory));
 }
 
 TEST(HttpClientRobustness, DestroyingTheClientFailsQueuedRequestsAndCompletesActiveOnesOnce) {

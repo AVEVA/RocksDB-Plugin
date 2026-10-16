@@ -15,6 +15,7 @@
 #include <openssl/ssl.h>
 
 #include <algorithm>
+#include <cassert>
 #include <iterator>
 #include <string>
 #include <type_traits>
@@ -88,15 +89,8 @@ template <typename Stream> bool RequestOperation<Stream>::BuildRequest(HttpReque
 
 template <typename Stream>
 bool RequestOperation<Stream>::BuildRequestUnchecked(HttpRequest& request, const Route& route) {
-    if (!route.Parsed) {
-        Fail(HttpClientError::InvalidUrl);
-        return false;
-    }
-    if (route.Error) {
-        // ValidateRequest only ever reports HttpClientError values.
-        Fail(static_cast<HttpClientError>(route.Error.value()));
-        return false;
-    }
+    // HttpClient::Submit fails unparseable or invalid requests before any operation exists.
+    assert(route.Sendable());
 
     const auto verb = Private::ToBeastVerb(request.GetMethod());
 
@@ -219,13 +213,13 @@ template <typename Stream> void RequestOperation<Stream>::ResetParser() {
 }
 
 template <typename Stream>
-void RequestOperation<Stream>::OnSharedResolve(boost::system::error_code error, SharedResolveResults results) {
+void RequestOperation<Stream>::OnSharedResolve(boost::system::error_code error, ResolveResults results) {
     asio::post(m_executor, [self = this->shared_from_this(), error, results = std::move(results)]() mutable {
         // The leader was cancelled or timed out, which says nothing about this request's lookup.
         if (error == asio::error::operation_aborted && !self->m_finished && !self->IsCancellationRequested()) {
             return self->Resolve();
         }
-        self->OnResolve(error, *results);
+        self->OnResolve(error, results);
     });
 }
 
@@ -374,7 +368,7 @@ template <typename Stream> void RequestOperation<Stream>::OnRead(boost::system::
     auto response = BuildResponse();
     if (!response) {
         // Without this the handler would never be called (e.g. bad_alloc while copying headers).
-        return Fail(HttpClientError::ReadFailed);
+        return Finish(response.error(), {});
     }
     CompleteSuccess(std::move(*response), keepAlive);
 }
@@ -416,7 +410,7 @@ template <typename Stream> void RequestOperation<Stream>::FailRead(const boost::
     Fail(classified, error);
 }
 
-template <typename Stream> std::optional<HttpResponse> RequestOperation<Stream>::BuildResponse() {
+template <typename Stream> std::expected<HttpResponse, std::error_code> RequestOperation<Stream>::BuildResponse() {
     try {
         auto message = m_parser->release();
         std::vector<HttpHeader> headers;
@@ -427,8 +421,8 @@ template <typename Stream> std::optional<HttpResponse> RequestOperation<Stream>:
             headers.emplace_back(std::string(header.name_string()), std::string(header.value()));
         }
         return HttpResponse(message.result_int(), std::move(headers), std::move(message.body()));
-    } catch (const std::exception&) {
-        return std::nullopt;
+    } catch (...) {
+        return std::unexpected(ClassifyBuildFailure(std::current_exception()));
     }
 }
 
@@ -511,7 +505,7 @@ template <typename Stream> void RequestOperation<Stream>::RequestCancellation() 
     asio::post(m_executor, [self = this->shared_from_this()]() { self->Cancel(); });
 }
 
-void ResolveWaiter::operator()(boost::system::error_code error, SharedResolveResults results) {
+void ResolveWaiter::operator()(boost::system::error_code error, ResolveResults results) {
     std::visit(
         [&](auto& operation) {
             if (auto strong = operation.lock()) {

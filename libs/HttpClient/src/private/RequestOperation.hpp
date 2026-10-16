@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <expected>
 #include <memory>
 #include <optional>
 #include <string>
@@ -63,7 +64,7 @@ class ResolveWaiter {
     /// </summary>
     /// <param name="error">The leader's outcome.</param>
     /// <param name="results">The endpoints the leader found, if any.</param>
-    void operator()(boost::system::error_code error, SharedResolveResults results);
+    void operator()(boost::system::error_code error, ResolveResults results);
 
   private:
     std::variant<std::weak_ptr<RequestOperation<PlainStream>>, std::weak_ptr<RequestOperation<TlsStream>>> m_operation;
@@ -201,7 +202,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// </summary>
     /// <param name="error">The leader's outcome.</param>
     /// <param name="results">The endpoints the leader found, if any.</param>
-    void OnSharedResolve(boost::system::error_code error, SharedResolveResults results);
+    void OnSharedResolve(boost::system::error_code error, ResolveResults results);
 
   private:
     /// <summary>
@@ -276,8 +277,8 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// <summary>
     /// Moves the parsed message into an HttpResponse.
     /// </summary>
-    /// <returns>The response, or nothing if building it threw (for example bad_alloc).</returns>
-    std::optional<HttpResponse> BuildResponse();
+    /// <returns>The response, or the classified error if building it threw (not_enough_memory for bad_alloc).</returns>
+    std::expected<HttpResponse, std::error_code> BuildResponse();
 
     /// <summary>
     /// Returns the connection to the pool when the response allows reuse, and otherwise shuts it down.

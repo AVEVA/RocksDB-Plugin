@@ -19,9 +19,9 @@ using AVEVA::Private::Tcp;
 struct RecordingWaiter {
     int* delivered = nullptr;
     boost::system::error_code* seenError = nullptr;
-    AVEVA::Private::SharedResolveResults* seenResults = nullptr;
+    AVEVA::Private::ResolveResults* seenResults = nullptr;
 
-    void operator()(boost::system::error_code error, AVEVA::Private::SharedResolveResults results) const {
+    void operator()(boost::system::error_code error, AVEVA::Private::ResolveResults results) const {
         if (delivered) {
             ++*delivered;
         }
@@ -65,8 +65,9 @@ TEST(DnsCacheTests, ReturnsAStoredResultUntilTheTtlElapses) {
     const auto hit = cache.Find("host", "80");
     ASSERT_TRUE(hit);
     EXPECT_EQ(hit->begin()->endpoint(), results.begin()->endpoint());
-    // Repeated hits share one immutable result rather than copying it.
-    EXPECT_EQ(cache.Find("host", "80"), hit);
+    // Repeated hits return the same endpoints.
+    ASSERT_TRUE(cache.Find("host", "80"));
+    EXPECT_EQ(cache.Find("host", "80")->begin()->endpoint(), hit->begin()->endpoint());
 
     EXPECT_FALSE(cache.Find("host", "81"));
     EXPECT_FALSE(cache.Find("other", "80"));
@@ -145,15 +146,15 @@ TEST(DnsCacheTests, AbortedLeaderDeliversTheErrorToFollowersCachesNothingAndFree
     cache.Finish("host", "80", boost::asio::error::host_not_found, {});
 }
 
-TEST(DnsCacheTests, FinishPublishesOneSharedResultToTheCacheAndEveryWaiter) {
+TEST(DnsCacheTests, FinishPublishesTheResultToTheCacheAndEveryWaiter) {
     boost::asio::io_context io;
     const auto results = Loopback(io);
     TestDnsCache cache;
 
     RecordingWaiter leader;
     ASSERT_TRUE(cache.JoinOrLead("host", "80", leader));
-    AVEVA::Private::SharedResolveResults first;
-    AVEVA::Private::SharedResolveResults second;
+    AVEVA::Private::ResolveResults first;
+    AVEVA::Private::ResolveResults second;
     RecordingWaiter firstWaiter{nullptr, nullptr, &first};
     RecordingWaiter secondWaiter{nullptr, nullptr, &second};
     EXPECT_FALSE(cache.JoinOrLead("host", "80", firstWaiter));
@@ -161,9 +162,11 @@ TEST(DnsCacheTests, FinishPublishesOneSharedResultToTheCacheAndEveryWaiter) {
 
     cache.Finish("host", "80", {}, results);
 
-    ASSERT_TRUE(first);
-    EXPECT_EQ(first, second);
-    EXPECT_EQ(cache.Find("host", "80"), first);
+    ASSERT_FALSE(first.empty());
+    EXPECT_EQ(first.begin()->endpoint(), results.begin()->endpoint());
+    EXPECT_EQ(second.begin()->endpoint(), results.begin()->endpoint());
+    ASSERT_TRUE(cache.Find("host", "80"));
+    EXPECT_EQ(cache.Find("host", "80")->begin()->endpoint(), first.begin()->endpoint());
 }
 
 TEST(DnsCacheTests, ResolveWaiterDoesNotKeepAFinishedRequestAlive) {
@@ -178,7 +181,7 @@ TEST(DnsCacheTests, ResolveWaiterDoesNotKeepAFinishedRequestAlive) {
 
     // A follower that timed out stays queued in the cache until the leader finishes; that must not pin it.
     EXPECT_TRUE(weak.expired());
-    waiter(boost::asio::error::operation_aborted, std::make_shared<const Tcp::resolver::results_type>());
+    waiter(boost::asio::error::operation_aborted, Tcp::resolver::results_type{});
 }
 
 TEST(DnsCacheTests, InvalidateDropsOnlyTheNamedEntry) {

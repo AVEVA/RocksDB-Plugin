@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -197,7 +198,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
             SendUnlimited(std::move(route), std::move(request), std::move(guarded), std::move(options),
                           std::move(cancellation), deadline);
         } catch (...) {
-            FailLater(cell, make_error_code(HttpClientError::InvalidRequest));
+            FailLater(cell, ClassifyBuildFailure(std::current_exception()));
         }
     }
 
@@ -413,7 +414,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     void SendUnlimited(Route route, HttpRequest request, Detail::CompletionPointer completion,
                        HttpRequestOptions options, std::shared_ptr<CancelState> cancellation,
                        std::chrono::steady_clock::time_point deadline) {
-        if (route.Parsed && route.Tls) {
+        if (route.Tls) {
             SendOver<TlsStream>(std::move(route), m_tlsPool, std::move(request), std::move(completion),
                                 std::move(options), std::move(cancellation), deadline);
         } else {
@@ -430,17 +431,15 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     void SendOver(Route route, const std::shared_ptr<ConnectionPool<Stream>>& pool, HttpRequest request,
                   Detail::CompletionPointer completion, HttpRequestOptions options,
                   std::shared_ptr<CancelState> cancellation, std::chrono::steady_clock::time_point deadline) {
-        // An unparseable URL has an empty route; the operation then fails it with InvalidUrl.
-        ConnectionKey<Stream> key{std::move(route.Host), route.Parsed ? std::move(route.Port) : std::string("80")};
+        // Submit has already failed every route that cannot be sent, so a pooled connection is never risked on a
+        // request that validation would reject.
+        assert(route.Sendable());
+        ConnectionKey<Stream> key{std::move(route.Host), std::move(route.Port)};
 
-        // Only requests that pass the same validation the operation applies may take a pooled connection, so that
-        // failing an invalid one cannot cost a healthy connection; invalid ones take the fresh-connection path.
-        if (route.Sendable()) {
-            if (auto pooled = pool->Acquire(key)) {
-                return ResumeWithPooledConnection<Stream>(std::move(route), std::move(*pooled), std::move(key),
-                                                          std::move(request), std::move(completion), std::move(options),
-                                                          pool, std::move(cancellation), deadline);
-            }
+        if (auto pooled = pool->Acquire(key)) {
+            return ResumeWithPooledConnection<Stream>(std::move(route), std::move(*pooled), std::move(key),
+                                                      std::move(request), std::move(completion), std::move(options),
+                                                      pool, std::move(cancellation), deadline);
         }
 
         auto executor = asio::make_strand(m_context);
