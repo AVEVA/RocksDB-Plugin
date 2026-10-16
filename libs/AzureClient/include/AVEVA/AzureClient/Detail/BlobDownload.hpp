@@ -73,6 +73,15 @@ struct ChunkLengthTag {};
 
 using ChunkLength = NumericLabel<std::uint64_t, ChunkLengthTag>;
 
+// Range-end arithmetic must never wrap: a wrapped end would make the download look complete or place data at the
+// wrong offset.
+[[nodiscard]] constexpr std::optional<std::uint64_t> CheckedAdd(std::uint64_t lhs, std::uint64_t rhs) noexcept {
+    if (rhs > std::numeric_limits<std::uint64_t>::max() - lhs) {
+        return std::nullopt;
+    }
+    return lhs + rhs;
+}
+
 [[nodiscard]] BlobStorageError MakeFailure(std::errc error, std::string message = {});
 
 // Preserves the real error category so operational failures (disk full, permission denied)
@@ -345,7 +354,11 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         if (total.has_value()) {
             m_end = m_end.has_value() ? std::min(*m_end, *total) : *total;
         } else if (body.size() < probeLength) {
-            m_end = m_begin + body.size();
+            m_end = CheckedAdd(m_begin, body.size());
+            if (!m_end.has_value()) {
+                Fail(MakeInvalidResponse("The download response range overflows."));
+                return;
+            }
         } else if (!m_end.has_value()) {
             Fail(MakeInvalidResponse("The download response does not report the blob size."));
             return;
@@ -372,7 +385,12 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         if (m_chunkConditions.IfMatch.empty()) {
             m_chunkConditions.IfMatch = m_etag;
         }
-        m_next = m_begin + body.size();
+        const auto next = CheckedAdd(m_begin, body.size());
+        if (!next.has_value()) {
+            Fail(MakeInvalidResponse("The download response range overflows."));
+            return;
+        }
+        m_next = *next;
         Deliver(m_begin, std::move(body));
     }
 
@@ -385,7 +403,11 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
             return;
         }
         std::string body = TakeBody(response);
-        m_end = m_begin + body.size();
+        m_end = CheckedAdd(m_begin, body.size());
+        if (!m_end.has_value()) {
+            Fail(MakeInvalidResponse("The download response range overflows."));
+            return;
+        }
         m_summary.FirstResponse = std::move(response);
         if (ExceedsMaxSize(body.size())) {
             return;
@@ -439,7 +461,12 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
     // flight at a time, which keeps the sink in offset order; completion re-enters on the I/O executor.
     void WriteReady() {
         while (!m_writing && !m_failure.has_value()) {
-            const auto it = m_ready.find(m_written + m_begin);
+            const auto cursor = CheckedAdd(m_written, m_begin);
+            if (!cursor.has_value()) {
+                Fail(MakeInvalidResponse("The download write offset overflows."));
+                return;
+            }
+            const auto it = m_ready.find(*cursor);
             if (it == m_ready.end()) {
                 return;
             }
@@ -457,9 +484,18 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
             // I/O executor) covers the whole run instead of one pair of hops per chunk.
             std::vector<std::string> batch;
             batch.push_back(std::move(data));
-            std::uint64_t next = m_written + m_begin + batch.back().size();
-            for (auto following = m_ready.find(next); following != m_ready.end(); following = m_ready.find(next)) {
-                next += following->second.size();
+            std::uint64_t next = *cursor;
+            while (true) {
+                const auto advanced = CheckedAdd(next, batch.back().size());
+                if (!advanced.has_value()) {
+                    Fail(MakeInvalidResponse("The download write offset overflows."));
+                    return;
+                }
+                next = *advanced;
+                const auto following = m_ready.find(next);
+                if (following == m_ready.end()) {
+                    break;
+                }
                 batch.push_back(std::move(following->second));
                 m_ready.erase(following);
             }

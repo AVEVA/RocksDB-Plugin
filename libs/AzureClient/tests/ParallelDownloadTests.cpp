@@ -25,6 +25,7 @@
 #include <fstream>
 #include <ios>
 #include <iterator>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -421,6 +422,39 @@ TEST(T08_DownloadContentRangeTests, ContentRangeEndThatDisagreesWithTheBodyIsInv
     EXPECT_EQ(result->error().Code, AVEVA::AzureClient::BlobStorageErrorCode::InvalidResponse);
 }
 
+TEST(AC_R01_DownloadRangeOverflowTests, OffsetWhoseProbeRangeWouldWrapIsRejectedWithoutSendingARequest) {
+    FakeHttpClient httpClient;
+    BlobClient client{httpClient, BuildOptions()};
+
+    DownloadToOptions options;
+    options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = std::numeric_limits<std::uint64_t>::max() - 1U};
+    TempFile out;
+    std::optional<DownloadToResult> result;
+    client.DownloadToAsync(out.Path, options, [&](DownloadToResult value) { result = std::move(value); });
+    ASSERT_TRUE(httpClient.RunUntil([&] { return result.has_value(); }));
+
+    ASSERT_FALSE(result->has_value());
+    EXPECT_EQ(result->error().Code, std::make_error_code(std::errc::invalid_argument));
+    EXPECT_EQ(httpClient.RequestCount(), 0U);
+    EXPECT_FALSE(std::filesystem::exists(out.Path));
+}
+
+TEST(AC_R01_DownloadRangeOverflowTests, LengthThatOverflowsTheRangeEndIsRejected) {
+    FakeHttpClient httpClient;
+    BlobClient client{httpClient, BuildOptions()};
+
+    DownloadToOptions options;
+    options.Range =
+        AVEVA::AzureClient::Models::BlobByteRange{.Offset = 10U, .Length = std::numeric_limits<std::uint64_t>::max()};
+    TempFile out;
+    std::optional<DownloadToResult> result;
+    client.DownloadToAsync(out.Path, options, [&](DownloadToResult value) { result = std::move(value); });
+    ASSERT_TRUE(httpClient.RunUntil([&] { return result.has_value(); }));
+
+    ASSERT_FALSE(result->has_value());
+    EXPECT_EQ(result->error().Code, std::make_error_code(std::errc::invalid_argument));
+    EXPECT_EQ(httpClient.RequestCount(), 0U);
+}
 TEST(B05_DownloadIgnoredRangeTests, OffsetRangeAnswered200IsInvalidResponse) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(20);
