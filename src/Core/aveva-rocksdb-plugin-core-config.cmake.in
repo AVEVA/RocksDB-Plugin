@@ -3,6 +3,8 @@ set(AVEVA_ROCKSDB_PLUGIN_CORE_VERSION @PROJECT_VERSION@)
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
+# Keep this list in sync with every target_link_libraries() entry in src/Core/CMakeLists.txt, PUBLIC and PRIVATE:
+# the library is static, so its PRIVATE dependencies are still link requirements of consumers.
 find_dependency(boost_algorithm REQUIRED)
 find_dependency(boost_container REQUIRED)
 find_dependency(boost_scope REQUIRED)
