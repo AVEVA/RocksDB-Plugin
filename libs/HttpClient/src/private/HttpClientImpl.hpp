@@ -35,6 +35,7 @@ namespace AVEVA::Private {
 /// </summary>
 struct NoFault {
     static void OnSubmit() noexcept {}
+    static void OnStartLimited() noexcept {}
 };
 
 /// <summary>
@@ -297,15 +298,93 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// Sends a request the limiter has given a slot, and hands the slot back when it completes.
     /// </summary>
     /// <param name="pending">The request to send.</param>
-    void StartLimited(PendingRequest&& pending) {
-        auto wrapped = Detail::MakeCompletion(
-            [limiter = m_limiter, origin = std::move(pending.origin),
-             inner = std::move(pending.completion)](std::error_code error, HttpResponse response) mutable {
+    void StartLimited(PendingRequest&& pending) noexcept {
+        std::shared_ptr<LimitedStart> start;
+        try {
+            start = std::make_shared<LimitedStart>(m_limiter, pending.origin, std::move(pending.completion));
+        } catch (...) {
+            // Nothing could be allocated to track the request, so the handler is still in `pending`. The slot is
+            // returned and the handler failed without allocating, from this call as a last resort.
+            FailUntracked(std::move(pending), ClassifyBuildFailure(std::current_exception()));
+            return;
+        }
+        try {
+            FaultPolicy::OnStartLimited();
+            auto wrapped = Detail::MakeCompletion(
+                [start](std::error_code error, HttpResponse response) { start->Finish(error, std::move(response)); });
+            SendUnlimited(std::move(pending.route), std::move(pending.request), std::move(wrapped),
+                          std::move(pending.options), std::move(pending.cancellation), pending.deadline);
+        } catch (...) {
+            // Whatever threw, the slot must come back and the handler must be completed exactly once. `start`
+            // decides which of this path and the (possibly already queued) normal completion gets there first.
+            FailLimitedLater(start, ClassifyBuildFailure(std::current_exception()));
+        }
+    }
+
+    /// <summary>
+    /// A started request's handler and its origin slot. Whichever of the normal completion and the failure path
+    /// runs first completes the handler and returns the slot; the other finds both already done.
+    /// </summary>
+    struct LimitedStart {
+        LimitedStart(std::shared_ptr<Limiter> limiterIn, std::string originIn, Detail::CompletionPointer completion)
+            : cell(std::move(completion)), limiter(std::move(limiterIn)), origin(std::move(originIn)) {}
+
+        CompletionCell cell;
+        std::shared_ptr<Limiter> limiter;
+        std::string origin;
+        std::atomic<bool> released{false};
+
+        void ReleaseSlot() {
+            if (!released.exchange(true)) {
                 limiter->Release(origin);
-                Detail::Complete(std::move(inner), error, std::move(response));
-            });
-        SendUnlimited(std::move(pending.route), std::move(pending.request), std::move(wrapped),
-                      std::move(pending.options), std::move(pending.cancellation), pending.deadline);
+            }
+        }
+
+        void Finish(std::error_code error, HttpResponse response) {
+            // The slot is returned even if the handler throws, so one bad handler cannot hang the origin.
+            try {
+                if (auto inner = cell.Take()) {
+                    Detail::Complete(std::move(inner), error, std::move(response));
+                }
+            } catch (...) {
+                ReleaseSlot();
+                throw;
+            }
+            ReleaseSlot();
+        }
+    };
+
+    /// <summary>
+    /// Fails a started request whose initiation threw, posted so the handler never runs inside the call that
+    /// triggered it (which may be another request's completion). Falls back to completing inline if the post
+    /// throws, rather than dropping the handler or leaking the slot.
+    /// </summary>
+    void FailLimitedLater(const std::shared_ptr<LimitedStart>& start, std::error_code error) noexcept {
+        try {
+            asio::post(m_context, [start, error] { start->Finish(error, HttpResponse{}); });
+            return;
+        } catch (...) {
+        }
+        try {
+            start->Finish(error, HttpResponse{});
+        } catch (...) {
+            // The handler threw; nothing remains to report it to.
+        }
+    }
+
+    /// <summary>
+    /// Last resort when even the tracking state could not be allocated: fail the handler inline and return the
+    /// slot, so the origin is never left permanently one request short.
+    /// </summary>
+    void FailUntracked(PendingRequest&& pending, std::error_code error) noexcept {
+        try {
+            Detail::Complete(std::move(pending.completion), error, HttpResponse{});
+        } catch (...) {
+        }
+        try {
+            m_limiter->Release(pending.origin);
+        } catch (...) {
+        }
     }
 
     /// <summary>

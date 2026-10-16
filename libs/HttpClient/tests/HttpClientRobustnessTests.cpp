@@ -688,7 +688,86 @@ TEST(HttpClientRobustness, RequestTargetIsBuiltFromPathAndQuery) {
 
 struct ThrowBadAlloc {
     static void OnSubmit() { throw std::bad_alloc(); }
+    static void OnStartLimited() noexcept {}
 };
+
+// Throws from the Nth call to StartLimited, counted across the process; each test resets the counters.
+struct ThrowOnStartLimited {
+    static inline std::atomic<int> Calls{0};
+    static inline std::atomic<int> ThrowOnCall{0};
+    static void OnSubmit() noexcept {}
+    static void OnStartLimited() {
+        if (++Calls == ThrowOnCall) {
+            throw std::bad_alloc();
+        }
+    }
+};
+
+TEST(HttpClientRobustness, ThrowingFirstStartReturnsTheOriginSlotAndFailsTheRequestOnce) {
+    ThrowOnStartLimited::Calls = 0;
+    ThrowOnStartLimited::ThrowOnCall = 1;
+    asio::io_context context;
+    AVEVA::HttpClientOptions clientOptions;
+    clientOptions.SetMaxConnectionsPerHost(1);
+    AVEVA::Private::BasicHttpClientImpl<ThrowOnStartLimited> impl(context, clientOptions);
+    ScriptedServer server(
+        context, [](int, const http::request<http::string_body>&) -> ServerAction { return {.Wire = OkResponse}; });
+
+    std::vector<int> completions(2, 0);
+    std::vector<std::error_code> results(2);
+    impl.Submit(MakeRequest(server.Url("/0")), AVEVA::HttpRequestOptions{},
+                AVEVA::Detail::MakeCompletion([&](std::error_code error, AVEVA::HttpResponse) {
+                    ++completions[0];
+                    results[0] = error;
+                    // With a cap of 1 this only starts if the failed request gave its slot back.
+                    impl.Submit(MakeRequest(server.Url("/1")), AVEVA::HttpRequestOptions{},
+                                AVEVA::Detail::MakeCompletion([&](std::error_code second, AVEVA::HttpResponse) {
+                                    ++completions[1];
+                                    results[1] = second;
+                                    server.Stop();
+                                }));
+                }));
+    EXPECT_NO_THROW(context.run());
+
+    EXPECT_EQ(completions, (std::vector<int>{1, 1}));
+    EXPECT_EQ(results[0], std::make_error_code(std::errc::not_enough_memory));
+    EXPECT_FALSE(results[1]);
+}
+
+TEST(HttpClientRobustness, ThrowingReleaseTriggeredStartCompletesBothHandlersOnceAndKeepsTheOriginUsable) {
+    ThrowOnStartLimited::Calls = 0;
+    ThrowOnStartLimited::ThrowOnCall = 2;
+    asio::io_context context;
+    AVEVA::HttpClientOptions clientOptions;
+    clientOptions.SetMaxConnectionsPerHost(1);
+    AVEVA::Private::BasicHttpClientImpl<ThrowOnStartLimited> impl(context, clientOptions);
+    ScriptedServer server(context, [](int, const http::request<http::string_body>&) -> ServerAction {
+        return {.Wire = OkResponse, .Delay = std::chrono::milliseconds(50)};
+    });
+
+    std::vector<int> completions(3, 0);
+    std::vector<std::error_code> results(3);
+    const auto submit = [&](const int index, std::function<void()> then = {}) {
+        impl.Submit(MakeRequest(server.Url("/" + std::to_string(index))), AVEVA::HttpRequestOptions{},
+                    AVEVA::Detail::MakeCompletion([&, index, then](std::error_code error, AVEVA::HttpResponse) {
+                        ++completions[index];
+                        results[index] = error;
+                        if (then) {
+                            then();
+                        }
+                    }));
+    };
+    // The first request holds the only slot; the second waits and is started by the first one's release, which
+    // is the start that throws. A third request afterwards proves the slot was not lost.
+    submit(0);
+    submit(1, [&] { submit(2, [&] { server.Stop(); }); });
+    EXPECT_NO_THROW(context.run());
+
+    EXPECT_EQ(completions, (std::vector<int>{1, 1, 1}));
+    EXPECT_FALSE(results[0]);
+    EXPECT_EQ(results[1], std::make_error_code(std::errc::not_enough_memory));
+    EXPECT_FALSE(results[2]);
+}
 
 TEST(HttpClientRobustness, ThrowingInitiationCompletesTheHandlerExactlyOnceAndNeverInline) {
     asio::io_context context;
