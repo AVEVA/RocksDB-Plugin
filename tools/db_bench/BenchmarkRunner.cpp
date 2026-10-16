@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 // AVEVA db_bench wrapper: registers the Azure Page Blob filesystem plugin
-// with the RocksDB ObjectLibrary and then hands control to the stock
-// rocksdb::db_bench_tool. Configure the plugin via environment variables:
+// and the AVEVA secondary cache backends with the RocksDB ObjectLibrary,
+// then hands control to the stock rocksdb::db_bench_tool. Configure the
+// Azure plugin via environment variables:
 //
 //   AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL  (required to enable Azure backend)
 //   AVEVA_DB_BENCH_CONTAINER            (blob container name; used as dbName)
@@ -17,17 +18,31 @@
 //   --fs_uri=azblobfs<container>
 //   --db=<account>+<container>/<db-subpath>
 //
+// To benchmark with an AVEVA secondary cache attached to the block cache,
+// pass db_bench's own --secondary_cache_uri flag, e.g.:
+//
+//   --secondary_cache_uri=aveva-file-based-secondary-cache://
+//
+// configured via:
+//
+//   AVEVA_DB_BENCH_SECONDARY_CACHE_DIR           (required to use this backend)
+//   AVEVA_DB_BENCH_SECONDARY_CACHE_CAPACITY_MB   (optional, default 512)
+//
 // See tools/db_bench/README.md for concrete invocation examples.
 
 #include <AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp>
 #include <AVEVA/RocksDB/Plugin/Azure/Models/ServicePrincipalStorageInfo.hpp>
 #include <AVEVA/RocksDB/Plugin/Azure/Plugin.hpp>
+#include <AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp>
+#include <AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp>
 
 #include <boost/log/sources/severity_logger.hpp>
 #include <boost/log/trivial.hpp>
 #include <rocksdb/convenience.h>
 #include <rocksdb/db_bench_tool.h>
 #include <rocksdb/env.h>
+#include <rocksdb/secondary_cache.h>
+#include <rocksdb/utilities/object_registry.h>
 
 #include <cstdlib>
 #include <iostream>
@@ -51,6 +66,54 @@ std::string Require(const char* name, const std::optional<std::string>& value) {
         std::exit(2);
     }
     return *value;
+}
+
+// Name used both as the ObjectLibrary registration id and the
+// --secondary_cache_uri value that selects this backend.
+constexpr const char* kFileBasedSecondaryCacheName = "aveva-file-based-secondary-cache";
+
+// Registers a factory for AVEVA's file-based secondary cache
+// (FileBasedCompressedSecondaryCache) so db_bench's own --secondary_cache_uri
+// flag can select it, the same way --fs_uri selects the Azure plugin. The
+// factory reads its configuration from environment variables when db_bench
+// actually instantiates the cache (i.e. only when --secondary_cache_uri
+// requests it), so registering is always safe even if the cache is never used.
+void RegisterFileBasedSecondaryCache() {
+    using AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache;
+    using AVEVA::RocksDB::Plugin::Core::LocalFilesystem;
+
+    if (rocksdb::ObjectLibrary::Default()->FindFactory<rocksdb::SecondaryCache>(kFileBasedSecondaryCacheName) !=
+        nullptr) {
+        return;
+    }
+
+    rocksdb::ObjectLibrary::Default()->AddFactory<rocksdb::SecondaryCache>(
+        kFileBasedSecondaryCacheName,
+        [](const std::string& /* uri */, std::unique_ptr<rocksdb::SecondaryCache>* guard,
+           std::string* errmsg) -> rocksdb::SecondaryCache* {
+            const auto cacheDir = Env("AVEVA_DB_BENCH_SECONDARY_CACHE_DIR");
+            if (!cacheDir) {
+                *errmsg = "AVEVA_DB_BENCH_SECONDARY_CACHE_DIR must be set to use " +
+                          std::string(kFileBasedSecondaryCacheName);
+                return nullptr;
+            }
+
+            size_t capacity = FileBasedCompressedSecondaryCache::kDefaultCapacity;
+            if (const auto capacityMb = Env("AVEVA_DB_BENCH_SECONDARY_CACHE_CAPACITY_MB")) {
+                capacity = static_cast<size_t>(std::stoull(*capacityMb)) * 1024ULL * 1024ULL;
+            }
+
+            auto logger = std::make_shared<
+                boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
+
+            // Ownership is transferred through *guard, the same way the Azure
+            // filesystem factory in Plugin.cpp does it; the caller (RocksDB's
+            // SecondaryCache::CreateFromString) moves the unique_ptr into the
+            // shared_ptr it hands back to db_bench.
+            *guard = std::make_unique<FileBasedCompressedSecondaryCache>(
+                std::filesystem::path(*cacheDir), std::make_shared<LocalFilesystem>(), capacity, std::move(logger));
+            return guard->get();
+        });
 }
 
 } // namespace
@@ -91,10 +154,16 @@ int main(int argc, char** argv) {
     const auto fsUri  = std::string{Plugin::Name} + container;
     const auto dbPath = StorageAccount::UniquePrefix(storageAccountUrl, container);
 
+    RegisterFileBasedSecondaryCache();
+
     std::cerr << "aveva_db_bench: Azure plugin registered.\n"
               << "  Suggested flags:\n"
               << "    --fs_uri=" << fsUri << "\n"
-              << "    --db=" << dbPath << "/<your-db-name>\n";
+              << "    --db=" << dbPath << "/<your-db-name>\n"
+              << "  To also attach a secondary cache, add:\n"
+              << "    --secondary_cache_uri=" << kFileBasedSecondaryCacheName << "://\n"
+              << "  with AVEVA_DB_BENCH_SECONDARY_CACHE_DIR set (and optionally\n"
+              << "  AVEVA_DB_BENCH_SECONDARY_CACHE_CAPACITY_MB).\n";
 
     std::fflush(nullptr);
     std::cout.flush();
