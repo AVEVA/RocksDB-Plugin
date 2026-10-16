@@ -604,6 +604,49 @@ TEST(HttpClientRobustness, MalformedStatusLineIsAProtocolError) {
     EXPECT_EQ(SendOnce("NOT-HTTP garbage\r\n\r\n"), AVEVA::make_error_code(AVEVA::HttpClientError::ProtocolError));
 }
 
+TEST(HttpClientRobustness, MalformedChunkFramingIsAProtocolError) {
+    EXPECT_EQ(SendOnce("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nZZ\r\nhello\r\n0\r\n\r\n"),
+              AVEVA::make_error_code(AVEVA::HttpClientError::ProtocolError));
+}
+
+TEST(HttpClientRobustness, DestroyingTheClientWithPooledIdleConnectionsClosesThem) {
+    asio::io_context context;
+    auto client = AVEVA::HttpClient::Create(context);
+    ScriptedServer server(context,
+                          [](int, const http::request<http::string_body>&) -> ServerAction { return {OkResponse}; });
+
+    std::error_code result;
+    client->SendAsync(MakeRequest(server.Url("/")), AVEVA::HttpRequestOptions{},
+                      [&](std::error_code error, AVEVA::HttpResponse) {
+                          result = error;
+                          // The connection is now idle in the pool; tear the client down with it inside.
+                          client.reset();
+                          auto settle = std::make_shared<asio::steady_timer>(context, std::chrono::milliseconds(100));
+                          settle->async_wait([&, settle](boost::system::error_code) { server.Stop(); });
+                      });
+    context.run();
+
+    EXPECT_FALSE(result);
+    EXPECT_EQ(client, nullptr);
+}
+
+TEST(HttpClientRobustness, DestroyingTheClientWhileLeadingASharedLookupCompletesTheRequestOnce) {
+    asio::io_context context;
+    auto client = AVEVA::HttpClient::Create(context);
+    int completions = 0;
+    for (int i = 0; i < 2; ++i) {
+        client->SendAsync(MakeRequest("http://shared-lookup.invalid/" + std::to_string(i)), AVEVA::HttpRequestOptions{},
+                          [&](std::error_code error, AVEVA::HttpResponse) {
+                              EXPECT_TRUE(error);
+                              ++completions;
+                          });
+    }
+    client.reset();
+    context.run();
+
+    EXPECT_EQ(completions, 2);
+}
+
 TEST(HttpClientRobustness, OversizedBodyIsReportedAsResponseTooLarge) {
     AVEVA::HttpRequestOptions options;
     options.SetResponseBodyLimit(4);
