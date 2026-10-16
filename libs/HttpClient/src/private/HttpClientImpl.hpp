@@ -450,12 +450,8 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
             }
         }();
         auto operation = std::make_shared<RequestOperation<Stream>>(
-            m_tlsContext, std::move(stream), std::move(completion), std::move(options), pool, std::move(key));
-        operation->BindCancellation(cancellation);
-        operation->SetDeadline(deadline);
-        asio::post(executor, [operation, request = std::move(request), route = std::move(route)]() mutable {
-            operation->Start(std::move(request), route);
-        });
+            m_tlsContext, std::move(stream), std::move(completion), std::move(options), pool, std::move(key), deadline);
+        Launch(operation, executor, cancellation, std::move(request), std::move(route), false);
     }
 
     /// <summary>
@@ -479,11 +475,25 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         auto executor = pooled.stream->get_executor();
         auto operation = std::make_shared<RequestOperation<Stream>>(
             m_tlsContext, std::move(pooled.stream), std::move(completion), std::move(options), std::move(pool),
-            std::move(key), std::move(pooled.buffer));
+            std::move(key), deadline, std::move(pooled.buffer));
+        Launch(operation, executor, cancellation, std::move(request), std::move(route), true);
+    }
+
+    /// <summary>
+    /// Wires the operation to the caller's cancellation and starts it on its executor, as a fresh connection or on
+    /// an already-connected pooled one.
+    /// </summary>
+    template <typename Stream, typename Executor>
+    static void Launch(const std::shared_ptr<RequestOperation<Stream>>& operation, const Executor& executor,
+                       const std::shared_ptr<CancelState>& cancellation, HttpRequest request, Route route,
+                       bool reused) {
         operation->BindCancellation(cancellation);
-        operation->SetDeadline(deadline);
-        asio::post(executor, [operation, request = std::move(request), route = std::move(route)]() mutable {
-            operation->StartReused(std::move(request), route);
+        asio::post(executor, [operation, request = std::move(request), route = std::move(route), reused]() mutable {
+            if (reused) {
+                operation->StartReused(std::move(request), route);
+            } else {
+                operation->Start(std::move(request), route);
+            }
         });
     }
 

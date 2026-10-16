@@ -97,15 +97,18 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// <param name="options">The timeout, response limits, and cancellation slot for this request.</param>
     /// <param name="pool">The pool the connection is returned to if the response allows reuse.</param>
     /// <param name="key">The origin the connection belongs to.</param>
+    /// <param name="deadline">When the request times out, measured from submission so time spent queued behind the
+    /// per-origin cap counts against its timeout.</param>
     /// <param name="buffer">The read buffer carried over from a reused connection; empty otherwise.</param>
     RequestOperation(std::shared_ptr<asio::ssl::context> tlsContext, std::unique_ptr<Stream> stream,
                      Detail::CompletionPointer completion, HttpRequestOptions options,
                      std::shared_ptr<ConnectionPool<Stream>> pool, ConnectionKey<Stream> key,
-                     beast::flat_buffer buffer = {})
+                     std::chrono::steady_clock::time_point deadline, beast::flat_buffer buffer = {})
         : m_tlsContext(std::move(tlsContext)), m_executor(stream->get_executor()),
           m_lookupScope(static_cast<const void*>(&asio::query(m_executor, asio::execution::context))),
           m_stream(std::move(stream)), m_resolver(m_executor), m_timer(m_executor), m_completion(std::move(completion)),
-          m_options(std::move(options)), m_pool(std::move(pool)), m_key(std::move(key)), m_buffer(std::move(buffer)) {}
+          m_options(std::move(options)), m_pool(std::move(pool)), m_key(std::move(key)), m_deadline(deadline),
+          m_buffer(std::move(buffer)) {}
 
     /// <summary>
     /// Makes this operation the target of the request's cancellation state, so a cancel (including one that
@@ -115,14 +118,6 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// <param name="cancellation">The state shared with the caller's slot; null when the request has no
     /// cancellation slot.</param>
     void BindCancellation(const std::shared_ptr<CancelState>& cancellation);
-
-    /// <summary>
-    /// Sets the instant the request times out. Called by the client with a deadline taken at submission, so
-    /// time spent queued behind the per-origin cap counts against the request's timeout. Must be called before
-    /// the operation is started; without it the timeout runs from the start.
-    /// </summary>
-    /// <param name="deadline">When the request times out.</param>
-    void SetDeadline(std::chrono::steady_clock::time_point deadline) { m_deadline = deadline; }
 
     /// <summary>
     /// Fresh connection: resolve, connect, (TLS handshake), then send. Must run on the operation's strand.
@@ -343,7 +338,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// <summary>
     /// Whether the submission-time deadline, if one was set, has already passed.
     /// </summary>
-    [[nodiscard]] bool DeadlinePassed() const { return m_deadline && std::chrono::steady_clock::now() >= *m_deadline; }
+    [[nodiscard]] bool DeadlinePassed() const { return std::chrono::steady_clock::now() >= m_deadline; }
 
     std::shared_ptr<asio::ssl::context> m_tlsContext;
     // The operation's strand, fixed at construction so that threads other than the strand (the
@@ -374,7 +369,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     bool m_hostIsName = false;
     bool m_resolvedFromCache = false;
     std::atomic_bool m_cancellationRequested = false;
-    std::optional<std::chrono::steady_clock::time_point> m_deadline;
+    std::chrono::steady_clock::time_point m_deadline; // Taken at submission, so queueing counts against the timeout.
 };
 
 } // namespace AVEVA::Private

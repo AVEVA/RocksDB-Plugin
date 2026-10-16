@@ -173,7 +173,8 @@ TEST(DnsCacheTests, ResolveWaiterDoesNotKeepAFinishedRequestAlive) {
     boost::asio::io_context io;
     auto operation = std::make_shared<AVEVA::Private::RequestOperation<AVEVA::Private::PlainStream>>(
         nullptr, std::make_unique<AVEVA::Private::PlainStream>(io), AVEVA::Detail::CompletionPointer{},
-        AVEVA::HttpRequestOptions{}, nullptr, AVEVA::Private::BasicConnectionKey{"host", "80"});
+        AVEVA::HttpRequestOptions{}, nullptr, AVEVA::Private::BasicConnectionKey{"host", "80"},
+        std::chrono::steady_clock::now() + std::chrono::seconds{30});
     std::weak_ptr<AVEVA::Private::RequestOperation<AVEVA::Private::PlainStream>> weak = operation;
 
     AVEVA::Private::ResolveWaiter waiter(operation);

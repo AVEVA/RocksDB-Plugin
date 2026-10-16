@@ -137,13 +137,7 @@ bool RequestOperation<Stream>::BuildRequestUnchecked(HttpRequest& request, const
 }
 
 template <typename Stream> void RequestOperation<Stream>::ArmTimer() {
-    if (m_deadline) {
-        m_timer.expires_at(*m_deadline);
-    } else {
-        // Clamp so huge timeouts (e.g. milliseconds::max()) cannot overflow the clock's duration or time_point.
-        constexpr auto MaxTimeout = std::chrono::duration_cast<std::chrono::milliseconds>(EffectivelyInfinite);
-        m_timer.expires_after(std::min(m_options.GetTimeout(), MaxTimeout));
-    }
+    m_timer.expires_at(m_deadline);
     auto self = this->shared_from_this();
     m_timer.async_wait([self](boost::system::error_code error) {
         if (!error) {
