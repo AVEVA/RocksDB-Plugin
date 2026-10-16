@@ -8,7 +8,7 @@ find_package(OpenSSL REQUIRED)
 
 include(GoogleTest)
 
-set(aveva_azure_client_unit_test_labels unit)
+set(aveva_azure_client_unit_test_labels unit azure-client)
 if(AVEVA_AZURE_CLIENT_ENABLE_ASAN)
     list(APPEND aveva_azure_client_unit_test_labels sanitizer asan)
 elseif(AVEVA_AZURE_CLIENT_ENABLE_UBSAN)
@@ -39,7 +39,7 @@ function(aveva_azure_client_add_unit_tests target)
     if(MSVC)
         target_compile_options(${target} PRIVATE /bigobj)
     endif()
-    gtest_discover_tests(${target} DISCOVERY_TIMEOUT 15 PROPERTIES TIMEOUT 30 LABELS "${aveva_azure_client_unit_test_labels}")
+    gtest_discover_tests(${target} DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 30 LABELS "${aveva_azure_client_unit_test_labels}")
 endfunction()
 
 aveva_azure_client_add_unit_tests(aveva-azure-client-pipeline-tests
@@ -91,7 +91,7 @@ aveva_azure_client_instrument(aveva-azure-client-public-api-tests)
 if(WIN32)
     target_link_libraries(aveva-azure-client-public-api-tests PRIVATE Crypt32)
 endif()
-gtest_discover_tests(aveva-azure-client-public-api-tests PROPERTIES TIMEOUT 30 LABELS "${aveva_azure_client_unit_test_labels}")
+gtest_discover_tests(aveva-azure-client-public-api-tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 30 LABELS "${aveva_azure_client_unit_test_labels}")
 
 # Engines driven by a multi-threaded executor (T30). Label `concurrency`; run under LinuxDebugTSan.
 add_executable(aveva-azure-client-concurrency-tests MultiThreadedExecutorTests.cpp)
@@ -107,6 +107,7 @@ if(WIN32)
 endif()
 gtest_discover_tests(
     aveva-azure-client-concurrency-tests
+    DISCOVERY_TIMEOUT 60
     PROPERTIES TIMEOUT 60 LABELS "${aveva_azure_client_unit_test_labels};concurrency")
 
 if(AVEVA_AZURE_CLIENT_ENABLE_ASAN OR AVEVA_AZURE_CLIENT_ENABLE_UBSAN OR AVEVA_AZURE_CLIENT_ENABLE_TSAN)
