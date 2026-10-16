@@ -113,6 +113,15 @@ jobs:
       - name: Configure
         run: cmake --preset LinuxDebug "${{ matrix.flags }}"
 
+      # The flags value contains a ';'. It is passed as one quoted argument, so CMake stores a two-element list; fail
+      # fast if a shell change ever splits it and a sanitizer is silently dropped.
+      - name: Verify sanitizer flags reached CMake
+        run: |
+          grep -E '^AVEVA_ROCKSDB_SANITIZER:STRING=' build/LinuxDebug/CMakeCache.txt
+          for san in $(echo "${{ matrix.flags }}" | sed 's/.*SANITIZER=//; s/;/ /g'); do
+            grep -E "^AVEVA_ROCKSDB_SANITIZER:STRING=.*\b${san}\b" build/LinuxDebug/CMakeCache.txt
+          done
+
       - name: Build
         run: cmake --build build/LinuxDebug --config Debug
 
