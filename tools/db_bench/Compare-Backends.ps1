@@ -12,6 +12,16 @@
     <ContainerPrefix>-asio; they must already exist. Every run uses a fresh blob path and the test blobs are left
     behind, so delete the containers when finished.
 
+    Setup (see tools/db_bench/README.md): configure a preset with -DAVEVA_ROCKSDB_BUILD_DB_BENCH=ON, e.g.
+      cmake --preset WindowsRelease -DAVEVA_ROCKSDB_BUILD_DB_BENCH=ON
+    which adds the vcpkg overlay infrastructure/vcpkg-overlays (equivalent to VCPKG_OVERLAY_PORTS=<repo>/infrastructure/vcpkg-overlays/rocksdb).
+    The service principal needs 'Storage Blob Data Contributor' on the storage account or on both containers.
+
+    Outputs: per-run db_bench logs (NNN-<backend>-<label>.txt) and summary.csv are written to -OutDir (default: a
+    db_bench_compare_<timestamp> folder under the user's temp directory). They are never deleted automatically; remove
+    the folder when finished. The client secret is passed only through an environment variable, is never echoed, and
+    is scrubbed from every log before this script moves on; summary.csv holds only aggregated timings.
+
     Scenarios (latency in ms/op unless noted; lower is better):
       write-*           single-thread fillseq / fillrandom / overwrite (network round trip bound)
       load+compact      fillrandom then waitforcompaction, wall-clock seconds (SST write pipelining)
@@ -82,6 +92,13 @@ function Record($scenario, $backend, $value) {
 }
 
 $script:logIndex = 0
+# Defense in depth: db_bench output is not expected to contain the secret, but a log must never be able to leak it.
+function Remove-Secret([string]$path) {
+    $secret = $env:AVEVA_DB_BENCH_CLIENT_SECRET
+    if (-not $secret -or -not (Test-Path $path)) { return }
+    $text = [IO.File]::ReadAllText($path)
+    if ($text.Contains($secret)) { [IO.File]::WriteAllText($path, $text.Replace($secret, '***REDACTED***')) }
+}
 # Runs db_bench; returns the parsed "<name> : <x> micros/op" values by benchmark name, or $null on failure.
 function Invoke-Bench($backend, $label, [string[]]$benchArgs) {
     UseContainer $backend
@@ -91,6 +108,7 @@ function Invoke-Bench($backend, $label, [string[]]$benchArgs) {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     & $backends[$backend] @benchArgs --fs_uri=$(FsUri $backend) *> $log
     $rc = $LASTEXITCODE
+    Remove-Secret $log
     Write-Host (" rc={0} {1:N0}s" -f $rc, $sw.Elapsed.TotalSeconds)
     if ($rc -ne 0) { return $null }
 
@@ -181,8 +199,10 @@ for ($rep = 1; $rep -le $Reps; $rep++) {
 }
 }
 finally {
-    # Don't leave the client secret in the caller's session environment.
-    Remove-Item Env:AVEVA_DB_BENCH_CLIENT_SECRET -ErrorAction SilentlyContinue
+    # Don't leave the credentials in the caller's session environment.
+    foreach ($v in 'AVEVA_DB_BENCH_CLIENT_SECRET', 'AVEVA_DB_BENCH_CLIENT_ID', 'AVEVA_DB_BENCH_TENANT_ID') {
+        Remove-Item "env:$v" -ErrorAction SilentlyContinue
+    }
 }
 
 function Mean($values) { if ($values.Count) { ($values | Measure-Object -Average).Average } else { $null } }
