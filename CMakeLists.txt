@@ -44,6 +44,11 @@ if(AVEVA_ROCKSDB_SANITIZER)
     if("thread" IN_LIST AVEVA_ROCKSDB_SANITIZER)
         set(AVEVA_AZURE_CLIENT_ENABLE_TSAN ON CACHE BOOL "" FORCE)
     endif()
+else()
+    # A cache variable forced ON by an earlier configure would otherwise survive clearing AVEVA_ROCKSDB_SANITIZER.
+    set(AVEVA_AZURE_CLIENT_ENABLE_ASAN OFF CACHE BOOL "" FORCE)
+    set(AVEVA_AZURE_CLIENT_ENABLE_UBSAN OFF CACHE BOOL "" FORCE)
+    set(AVEVA_AZURE_CLIENT_ENABLE_TSAN OFF CACHE BOOL "" FORCE)
 endif()
 
 # In-tree Azure Blob Storage client libraries (libs/). Their own tests are built together with the plugin
