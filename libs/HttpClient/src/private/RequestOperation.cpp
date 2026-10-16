@@ -15,6 +15,7 @@
 #include <openssl/ssl.h>
 
 #include <algorithm>
+#include <iterator>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -427,7 +428,9 @@ template <typename Stream> std::optional<HttpResponse> RequestOperation<Stream>:
     try {
         auto message = m_parser->release();
         std::vector<HttpHeader> headers;
-        // Beast keeps fields in a linked list, so sizing the vector first would cost a second walk.
+        // Walking Beast's linked list twice is cheaper than the reallocations of a growing vector. Each name and
+        // value is built once, straight from the parser's view, and moved into the header.
+        headers.reserve(static_cast<std::size_t>(std::distance(message.base().begin(), message.base().end())));
         for (const auto& header : message.base()) {
             headers.emplace_back(std::string(header.name_string()), std::string(header.value()));
         }
