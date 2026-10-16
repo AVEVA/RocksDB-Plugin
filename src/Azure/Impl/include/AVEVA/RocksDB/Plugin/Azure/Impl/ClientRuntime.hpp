@@ -95,6 +95,12 @@ class ClientRuntimeBase {
     void InvalidateBlobSize(const std::string& blobUrl) const;
     /// <summary>For operations that touch many blobs at once (directory delete, rename).</summary>
     void InvalidateAllBlobSizes() const;
+    /// <summary>
+    /// The time source of the size and metadata caches (Configuration::MetadataCacheTtl). Tests replace it with a
+    /// manual clock, set before any file is created, so expiry never depends on sleeping.
+    /// </summary>
+    [[nodiscard]] std::chrono::steady_clock::time_point MetadataNow() const;
+    void SetMetadataClockForTesting(std::function<std::chrono::steady_clock::time_point()> clock);
 
   private:
     struct CachedSize {
@@ -104,6 +110,7 @@ class ClientRuntimeBase {
     mutable std::mutex m_sizeMutex;
     mutable std::unordered_map<std::string, CachedSize> m_sizes;
     mutable std::atomic<uint64_t> m_sizeEpoch{0};
+    std::function<std::chrono::steady_clock::time_point()> m_metadataClock;
 };
 
 /// <summary>

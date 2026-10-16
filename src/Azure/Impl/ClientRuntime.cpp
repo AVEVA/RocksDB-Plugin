@@ -114,18 +114,26 @@ std::optional<int64_t> ClientRuntimeBase::CachedBlobSize(const std::string& blob
     if (it == m_sizes.end()) {
         return std::nullopt;
     }
-    if (std::chrono::steady_clock::now() - it->second.FetchedAt >= Configuration::MetadataCacheTtl) {
+    if (MetadataNow() - it->second.FetchedAt >= Configuration::MetadataCacheTtl) {
         m_sizes.erase(it);
         return std::nullopt;
     }
     return it->second.Size;
 }
 
+std::chrono::steady_clock::time_point ClientRuntimeBase::MetadataNow() const {
+    return m_metadataClock ? m_metadataClock() : std::chrono::steady_clock::now();
+}
+
+void ClientRuntimeBase::SetMetadataClockForTesting(std::function<std::chrono::steady_clock::time_point()> clock) {
+    m_metadataClock = std::move(clock);
+}
+
 uint64_t ClientRuntimeBase::BlobSizeEpoch() const noexcept { return m_sizeEpoch.load(); }
 
 void ClientRuntimeBase::CacheBlobSize(const std::string& blobUrl, const int64_t size, const uint64_t epoch) const {
     constexpr std::size_t MaxCachedSizes = 4096;
-    const auto now = std::chrono::steady_clock::now();
+    const auto now = MetadataNow();
     const std::scoped_lock lock(m_sizeMutex);
     // Invalidations bump the epoch under this lock, so a fetch that started before one can never be stored.
     if (m_sizeEpoch.load() != epoch) {

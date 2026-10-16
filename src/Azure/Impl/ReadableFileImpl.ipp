@@ -58,7 +58,7 @@ BasicReadableFileImpl<TBlob>::BasicReadableFileImpl(
     auto metadata = BlobOperations::GetMetadata(*m_h.Blob);
     m_size = metadata.Size;
     m_etag = std::move(metadata.ETag);
-    m_metadataFetchedAt = std::chrono::steady_clock::now();
+    m_metadataFetchedAt = m_h.Runtime ? m_h.Runtime->MetadataNow() : std::chrono::steady_clock::now();
 }
 
 template <typename TBlob>
@@ -103,7 +103,8 @@ template <typename TBlob> bool BasicReadableFileImpl<TBlob>::HasETag(const std::
 template <typename TBlob> int64_t BasicReadableFileImpl<TBlob>::GetSize() const {
     {
         std::scoped_lock lock(*m_metadataMutex);
-        if (std::chrono::steady_clock::now() - m_metadataFetchedAt < Configuration::MetadataCacheTtl) {
+        const auto now = m_h.Runtime ? m_h.Runtime->MetadataNow() : std::chrono::steady_clock::now();
+        if (now - m_metadataFetchedAt < Configuration::MetadataCacheTtl) {
             return m_size;
         }
     }
@@ -128,7 +129,7 @@ template <typename TBlob> void BasicReadableFileImpl<TBlob>::SetMetadata(const i
         changed = m_etag != etag;
         m_size = size;
         m_etag = std::move(etag);
-        m_metadataFetchedAt = std::chrono::steady_clock::now();
+        m_metadataFetchedAt = m_h.Runtime ? m_h.Runtime->MetadataNow() : std::chrono::steady_clock::now();
     }
     if (changed) {
         ClearPrefetch();

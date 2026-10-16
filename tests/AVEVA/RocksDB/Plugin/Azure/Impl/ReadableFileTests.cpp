@@ -152,10 +152,20 @@ TEST_F(ReadableFileTests, GetSize_RefreshesWithOneMetadataCallOnceTheCachedMetad
     m_env.Fill(1024);
     const auto file = MakeFile();
     m_env.Blob->Size = 2048;
-    std::this_thread::sleep_for(Configuration::MetadataCacheTtl + std::chrono::milliseconds(50));
+    m_env.AdvanceMetadataClock(Configuration::MetadataCacheTtl);
 
     EXPECT_EQ(2048, file.GetSize());
     EXPECT_EQ(2, m_env.Blob->PropertiesRequests);
+}
+
+TEST_F(ReadableFileTests, GetSize_OneTickBeforeTheTtlElapses_IsStillServedFromCachedMetadata) {
+    m_env.Fill(1024);
+    const auto file = MakeFile();
+    m_env.Blob->Size = 2048;
+    m_env.AdvanceMetadataClock(Configuration::MetadataCacheTtl - std::chrono::milliseconds(1));
+
+    EXPECT_EQ(1024, file.GetSize());
+    EXPECT_EQ(1, m_env.Blob->PropertiesRequests);
 }
 
 TEST_F(ReadableFileTests, GetSize_WithinTheTtl_IsServedFromCachedMetadata) {

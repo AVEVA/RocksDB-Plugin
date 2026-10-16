@@ -280,7 +280,7 @@ TEST_F(AsyncReadTests, GetSize_RefreshThatFindsTheSameEtag_KeepsThePrefetchedByt
                                                        m_logger);
     ASSERT_TRUE(FakeReadableFileImpl::Prefetch(file, 0, 512));
     m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'P'));
-    std::this_thread::sleep_for(Configuration::MetadataCacheTtl + std::chrono::milliseconds(50));
+    m_deferredEnv.AdvanceMetadataClock(Configuration::MetadataCacheTtl);
     const auto propertiesBefore = m_deferredEnv.Blob->PropertiesRequests;
 
     EXPECT_EQ(BlobSize, file->GetSize());
@@ -297,7 +297,7 @@ TEST_F(AsyncReadTests, GetSize_RefreshThatFindsANewEtag_DropsThePrefetchedBytes)
     ASSERT_TRUE(FakeReadableFileImpl::Prefetch(file, 0, 512));
     m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'P'));
     m_deferredEnv.Blob->ETag = "etag2";
-    std::this_thread::sleep_for(Configuration::MetadataCacheTtl + std::chrono::milliseconds(50));
+    m_deferredEnv.AdvanceMetadataClock(Configuration::MetadataCacheTtl);
 
     EXPECT_EQ(BlobSize, file->GetSize());
 

@@ -15,6 +15,9 @@
 
 #include <boost/asio/io_context.hpp>
 
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <memory>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl::Tests {
@@ -32,6 +35,8 @@ using FakeReadableFile = BasicReadableFile<FakeReadableFileImpl>;
 // Members are declared so that teardown runs in the production order: the client is released before the transport,
 // which is released before the runtime.
 struct FakeBlobEnvironment {
+    // Declared first so it outlives the runtime whose clock reads it.
+    std::atomic<int64_t> m_metadataClockNanos{1'000'000'000'000};
     boost::asio::io_context Context;
     // The runtime owns the fake transport, as it owns the real HTTP client in production.
     std::shared_ptr<BasicClientRuntime<FakeHttpClient>> Runtime =
@@ -43,6 +48,14 @@ struct FakeBlobEnvironment {
     FakeBlobEnvironment() {
         Http.CompleteInline() = true;
         Http.StartBackgroundPump();
+        Runtime->SetMetadataClockForTesting([this] {
+            return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(m_metadataClockNanos.load()));
+        });
+    }
+
+    // The metadata and size caches read a manual clock, so their TTL expires only when a test says so.
+    void AdvanceMetadataClock(const std::chrono::steady_clock::duration by) {
+        m_metadataClockNanos += std::chrono::duration_cast<std::chrono::nanoseconds>(by).count();
     }
 
     // Makes the blob hold `size` bytes of `fill`, with that size also recorded in its metadata.
