@@ -1,0 +1,8 @@
+# ThreadSanitizer suppressions for CI (TSAN_OPTIONS=suppressions=.github/tsan.supp).
+#
+# Only third-party noise that cannot be fixed in this repository belongs here. Each entry needs a comment with the
+# library, the symptom and a link to the upstream report. Races in code under src/, include/ or libs/ must be fixed,
+# never suppressed.
+#
+# Example:
+#   race:libssl.so

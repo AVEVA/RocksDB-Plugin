@@ -132,7 +132,22 @@ jobs:
         run: cmake --build build/LinuxDebug --config Debug
 
       - name: Test
+        if: matrix.name != 'tsan'
         run: ctest --test-dir build/LinuxDebug --output-on-failure --build-config Debug --parallel 4
+
+      # TSan is 5-15x slower and reports on the first race, so the deterministic Core and HttpClient suites run first as
+      # their own step: a failure there points at the library, not at the timing-sensitive plugin and AzureClient tests.
+      - name: Test (tsan, Core and HttpClient)
+        if: matrix.name == 'tsan'
+        env:
+          TSAN_OPTIONS: suppressions=${{ github.workspace }}/.github/tsan.supp halt_on_error=1 second_deadlock_stack=1
+        run: ctest --test-dir build/LinuxDebug --output-on-failure --build-config Debug --parallel 4 -L 'core|http-client'
+
+      - name: Test (tsan, remaining suites)
+        if: matrix.name == 'tsan'
+        env:
+          TSAN_OPTIONS: suppressions=${{ github.workspace }}/.github/tsan.supp halt_on_error=1 second_deadlock_stack=1
+        run: ctest --test-dir build/LinuxDebug --output-on-failure --build-config Debug --parallel 4 -LE 'core|http-client'
 
   db-bench:
     # Builds the patched RocksDB overlay and tools/db_bench, which no other job exercises. Runs on manual request, and
