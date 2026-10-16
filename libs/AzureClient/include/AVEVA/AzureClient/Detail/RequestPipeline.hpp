@@ -459,6 +459,10 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         }
     }
 
+    [[nodiscard]] bool DeadlineExpired() const {
+        return m_totalDeadline.has_value() && std::chrono::steady_clock::now() - m_start >= *m_totalDeadline;
+    }
+
     void OnAttemptCompleteOnStrand(std::error_code error, HttpResponse response) {
         if (m_cancelled) {
             Finish(CancelError(), std::move(response));
@@ -468,6 +472,12 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         constexpr unsigned int Unauthorized = 401;
         if (!error && response.GetStatus() == Unauthorized && CanRefreshToken()) {
             if constexpr (requires { m_credential->Invalidate(m_auth.TokenScopes); }) {
+                // Don't invalidate the cached token and fetch a new one for an attempt that can never be sent.
+                if (DeadlineExpired()) {
+                    m_timedOut = true;
+                    Finish(std::make_error_code(std::errc::timed_out), std::move(response));
+                    return;
+                }
                 m_tokenRefreshed = true;
                 m_credential->Invalidate(m_auth.TokenScopes);
                 --m_attempt; // The refresh does not consume the retry budget.

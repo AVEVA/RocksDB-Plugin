@@ -341,6 +341,35 @@ TEST(RetryTests, UnauthorizedResponseIsRepeatedOnceWithAFreshToken) {
     EXPECT_TRUE(ValueOrFail(observed).has_value());
 }
 
+TEST(RetryTests, UnauthorizedResponseAfterTheDeadlineDoesNotRefreshTheToken) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueDeferredResponse(HttpResponse{401, {}, ""});
+    httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
+    auto credential = std::make_shared<ScriptedTokenCredential>();
+    credential->EnqueueImmediate({}, MakeToken("old-token", std::chrono::hours(1)));
+    credential->EnqueueImmediate({}, MakeToken("new-token", std::chrono::hours(1)));
+
+    BlobClientOptions options = MakeRetryOptions(0);
+    options.SasToken.clear();
+    BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{httpClient, std::move(options), credential};
+
+    AVEVA::AzureClient::AzureRequestOptions requestOptions;
+    requestOptions.SetTotalDeadline(std::chrono::milliseconds{50});
+    std::optional<DeleteResult> observed;
+    client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) { observed = std::move(result); }));
+    ASSERT_EQ(httpClient.PendingCount(), 1U);
+
+    // The 401 arrives after the deadline but before its timer has been serviced.
+    std::this_thread::sleep_for(std::chrono::milliseconds{120});
+    ASSERT_TRUE(httpClient.CompleteNext());
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}));
+
+    ASSERT_FALSE(ValueOrFail(observed).has_value());
+    EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::timed_out));
+    EXPECT_EQ(credential->CallCount(), 1);
+    EXPECT_EQ(httpClient.RequestCount(), 1U);
+}
+
 TEST(RetryTests, UnauthorizedResponseIsOnlyRefreshedOnce) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{401, {}, ""});
@@ -471,6 +500,37 @@ TEST(RetryTests, ComputedBackoffIsCappedByMaxDelay) {
     BlobClientOptions options = MakeRetryOptions(1, std::chrono::minutes{1});
     options.Retry.MaxDelay = std::chrono::milliseconds{0};
     BlobClient client{httpClient, options};
+
+    std::optional<DeleteResult> observed;
+    client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}));
+    EXPECT_EQ(httpClient.RequestCount(), 2U);
+    EXPECT_TRUE(ValueOrFail(observed).has_value());
+}
+
+TEST(RetryTests, MalformedOrNegativeRetryAfterHintsAreTreatedAsAbsent) {
+    for (const std::string_view value : {"-5", "-0", "+3", "abc", "1.5", "5 seconds", "", "99999999999999999999"}) {
+        const HttpResponse response{503, {{"Retry-After", std::string{value}}}, ""};
+        const auto hint = AVEVA::AzureClient::Private::ParseRetryAfter(response);
+        EXPECT_FALSE(hint.has_value()) << value;
+    }
+    const HttpResponse negativeMs{503, {{"x-ms-retry-after-ms", "-100"}}, ""};
+    EXPECT_FALSE(AVEVA::AzureClient::Private::ParseRetryAfter(negativeMs).has_value());
+}
+
+TEST(RetryTests, RetryAfterHintsAreNeverNegative) {
+    const HttpResponse pastDate{503, {{"Retry-After", "Wed, 21 Oct 2015 07:28:00 GMT"}}, ""};
+    const auto hint = AVEVA::AzureClient::Private::ParseRetryAfter(pastDate);
+    ASSERT_TRUE(hint.has_value());
+    EXPECT_GE(*hint, std::chrono::milliseconds{0});
+}
+
+TEST(RetryTests, NegativeRetryAfterFallsBackToTheComputedBackoff) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{503, {{"Retry-After", "-30"}}, ""});
+    httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
+    BlobClient client{httpClient, MakeRetryOptions(1, std::chrono::milliseconds{0})};
 
     std::optional<DeleteResult> observed;
     client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
