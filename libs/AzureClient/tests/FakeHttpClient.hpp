@@ -136,6 +136,30 @@ template <typename TMeta = std::monostate> class HeldRequests {
 } // namespace AVEVA::AzureClient::Tests
 
 namespace AVEVA::AzureClient::Tests {
+
+// A test-settable value that transport or pump threads read while the test thread may be changing it. Assignment and
+// reads take a lock and reads return a copy, so a callback is never invoked under the lock and a copy stays valid.
+template <class T> class Knob {
+  public:
+    Knob() = default;
+    explicit Knob(T initial) : m_value(std::move(initial)) {}
+    Knob(const Knob&) = delete;
+    Knob& operator=(const Knob&) = delete;
+
+    template <class U> Knob& operator=(U&& value) {
+        const std::scoped_lock lock(m_mutex);
+        m_value = std::forward<U>(value);
+        return *this;
+    }
+    [[nodiscard]] T Get() const {
+        const std::scoped_lock lock(m_mutex);
+        return m_value;
+    }
+
+  private:
+    mutable std::mutex m_mutex;
+    T m_value{};
+};
 // Writer pool for downloads started through FakeHttpClient. It counts tasks so Poll() can settle a download
 // deterministically.
 struct TestDownloadWriters {
@@ -274,9 +298,12 @@ class FakeHttpClient final {
     // scripts. Called outside the client's lock, possibly from several threads at once.
     using Responder = std::function<std::optional<ScriptedResult>(const RequestRecord&)>;
 
+    // Returns only once no thread is still inside the previous responder, so what it captured can be destroyed.
+    // Must not be called from inside a responder.
     void SetResponder(Responder responder) {
-        std::scoped_lock lock(m_mutex);
+        std::unique_lock lock(m_mutex);
         m_responder = std::move(responder);
+        m_responderIdle.wait(lock, [&] { return m_respondersInFlight == 0U; });
     }
 
     // Backed by a real io_context (rather than boost::asio::system_executor) so that tests can
@@ -455,11 +482,15 @@ class FakeHttpClient final {
             // A deque never relocates its elements on push_back, so this stays valid for later requests.
             record = &m_requests.back();
             responder = m_responder;
+            if (responder) {
+                ++m_respondersInFlight;
+            }
         }
         m_requestCv.notify_all();
 
         std::optional<ScriptedResult> custom;
         if (responder) {
+            const ResponderCall call(*this);
             custom = responder(*record);
         }
         ScriptedResult scripted = custom.has_value() ? std::move(*custom) : DequeueResult(*record);
@@ -490,7 +521,7 @@ class FakeHttpClient final {
         // Default to posting completions on the client's io_context to avoid re-entrant
         // synchronous completions that the real transport would not provide. Tests that need
         // inline completion can set CompleteInline() = true.
-        if (m_completeInline) {
+        if (m_completeInline.Get()) {
             const std::size_t writesBefore = DownloadWriters().Started.load();
             if (scripted.OnComplete) {
                 scripted.OnComplete(scripted.Response);
@@ -696,16 +727,17 @@ class FakeHttpClient final {
         return {reinterpret_cast<const char*>(view.data()), view.size()};
     }
 
-    [[nodiscard]] HttpResponse& DefaultResponse() noexcept { return m_defaultResponse; }
+    // These are assigned (`client.DeferByDefault() = true;`) by the test while the pump thread may be consulting them.
+    [[nodiscard]] Knob<HttpResponse>& DefaultResponse() noexcept { return m_defaultResponse; }
 
-    [[nodiscard]] std::error_code& DefaultError() noexcept { return m_defaultError; }
+    [[nodiscard]] Knob<std::error_code>& DefaultError() noexcept { return m_defaultError; }
 
-    [[nodiscard]] bool& DeferByDefault() noexcept { return m_deferByDefault; }
+    [[nodiscard]] Knob<bool>& DeferByDefault() noexcept { return m_deferByDefault; }
 
     // When true, completions are delivered inline (synchronous). Default false: completions are posted
     // to the internal io_context to better approximate a real transport that never invokes
     // completions on the initiating thread.
-    [[nodiscard]] bool& CompleteInline() noexcept { return m_completeInline; }
+    [[nodiscard]] Knob<bool>& CompleteInline() noexcept { return m_completeInline; }
 
   private:
     struct PendingCompletion {
@@ -756,10 +788,32 @@ class FakeHttpClient final {
         return std::nullopt;
     }
 
+    [[nodiscard]] ScriptedResult DefaultResult() const {
+        return ScriptedResult{
+            .Error = m_defaultError.Get(), .Response = m_defaultResponse.Get(), .Deferred = m_deferByDefault.Get()};
+    }
+
+    // Counts a responder call in progress so SetResponder() can wait for it.
+    class ResponderCall {
+      public:
+        explicit ResponderCall(FakeHttpClient& owner) : m_owner(owner) {}
+        ResponderCall(const ResponderCall&) = delete;
+        ResponderCall& operator=(const ResponderCall&) = delete;
+        ~ResponderCall() {
+            const std::scoped_lock lock(m_owner.m_mutex);
+            if (--m_owner.m_respondersInFlight == 0U) {
+                m_owner.m_responderIdle.notify_all();
+            }
+        }
+
+      private:
+        FakeHttpClient& m_owner;
+    };
+
     [[nodiscard]] ScriptedResult DequeueResult(const RequestRecord& request) {
         std::scoped_lock lock(m_mutex);
         if (m_scriptedResults.empty()) {
-            return ScriptedResult{.Error = m_defaultError, .Response = m_defaultResponse, .Deferred = m_deferByDefault};
+            return DefaultResult();
         }
 
         for (auto it = m_scriptedResults.begin(); it != m_scriptedResults.end(); ++it) {
@@ -770,13 +824,14 @@ class FakeHttpClient final {
             }
         }
 
-        return ScriptedResult{.Error = m_defaultError, .Response = m_defaultResponse, .Deferred = m_deferByDefault};
+        return DefaultResult();
     }
 
-    HttpResponse m_defaultResponse{201, {}, ""};
-    std::error_code m_defaultError;
-    bool m_deferByDefault = false;
-    bool m_completeInline = false; // default to async (posted) completions per the HttpClient contract (T26)
+    Knob<HttpResponse> m_defaultResponse{HttpResponse{201, {}, ""}};
+    Knob<std::error_code> m_defaultError;
+    Knob<bool> m_deferByDefault;
+    Knob<bool> m_completeInline; // false: async (posted) completions // default to async (posted) completions per the
+                                 // HttpClient contract (T26)
 
     // Backs m_context unless the client is built on a caller-owned io_context.
     boost::asio::io_context m_ownedContext;
@@ -784,6 +839,8 @@ class FakeHttpClient final {
     // Guards the containers below; never held while a completion or responder runs.
     mutable std::mutex m_mutex;
     std::condition_variable m_requestCv;
+    std::condition_variable m_responderIdle;
+    std::size_t m_respondersInFlight = 0U;
     std::recursive_mutex m_pollMutex;
     mutable std::atomic<std::size_t> m_settledStarted{0U};
     Responder m_responder;

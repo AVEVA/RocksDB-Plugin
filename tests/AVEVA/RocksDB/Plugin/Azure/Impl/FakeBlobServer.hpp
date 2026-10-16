@@ -88,6 +88,8 @@ class RequestCounter {
     std::atomic<int> m_value{0};
 };
 
+using AzureClient::Tests::Knob;
+
 // An in-memory page blob service behind the library's FakeHttpClient. It answers the REST subset the page blob client
 // speaks (properties, metadata, resize, page update/clear, ranged download, page list, create), so the plugin's file
 // classes run against the real AzureClient request and response handling instead of a hand-written mirror of it.
@@ -219,20 +221,20 @@ class FakeBlobServer {
     // One entry per Put Page From URL request that reached the service, whether or not it succeeded.
     RequestLog<PageCopy> PageCopies;
     // Like a private source: a copy without x-ms-copy-source-authorization fails with 401 CannotVerifyCopySource.
-    bool RequireCopySourceAuthorization = false;
+    Knob<bool> RequireCopySourceAuthorization;
     // Replaces the page listing, which otherwise reports every 512-byte page that holds a non-zero byte.
-    std::optional<std::vector<AzureClient::Models::PageRange>> PageRangeOverride;
+    Knob<std::optional<std::vector<AzureClient::Models::PageRange>>> PageRangeOverride;
 
     // Returns an error to fail the operation with, or nullopt to let it succeed. Both download operations map to
     // the same GET, so a download is offered as DownloadToBuffer first and then as Download.
-    std::function<std::optional<AzureClient::BlobStorageError>(Operation)> Fault;
+    Knob<std::function<std::optional<AzureClient::BlobStorageError>(Operation)>> Fault;
     // Replaces the contents of a download; receives the request and returns the bytes to serve.
-    std::function<std::string(const DownloadRequest&)> DownloadOverride;
+    Knob<std::function<std::string(const DownloadRequest&)>> DownloadOverride;
     // Holds page uploads / ranged downloads until the test releases them.
-    bool DeferUploads = false;
-    bool DeferDownloads = false;
+    Knob<bool> DeferUploads;
+    Knob<bool> DeferDownloads;
     // Holds Get Blob Properties until CompleteProperties; the response carries the values it had when sent.
-    bool DeferProperties = false;
+    Knob<bool> DeferProperties;
     size_t PendingProperties() { return Count(m_heldProperties); }
     void CompleteProperties() {
         if (!m_http->CompleteRequest(
@@ -336,7 +338,8 @@ class FakeBlobServer {
     }
 
     [[nodiscard]] std::optional<AzureClient::BlobStorageError> FaultFor(const Operation operation) const {
-        return Fault ? Fault(operation) : std::nullopt;
+        const auto fault = Fault.Get();
+        return fault ? fault(operation) : std::nullopt;
     }
 
     // Parses "bytes=a-b" (inclusive; b optional). Returns {offset, length}; length 0 means "to the end".

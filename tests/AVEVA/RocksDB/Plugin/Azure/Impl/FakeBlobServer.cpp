@@ -454,7 +454,7 @@ Result FakeBlobServer::GetProperties(const StoredBlob& blob, const std::size_t r
     auto headers = BlobHeaders(blob);
     headers.emplace_back("Content-Length", std::to_string(blob.Data.size()));
     Result result = Success(MakeResponse(200U, std::move(headers)));
-    if (DeferProperties) {
+    if (DeferProperties.Get()) {
         result.Deferred = true;
         m_heldProperties.Add(requestIndex);
     }
@@ -503,8 +503,8 @@ Result FakeBlobServer::GetPageRanges(const HttpRequest& request, const StoredBlo
         return Failure(412U, "ConditionNotMet");
     }
     std::vector<AzureClient::Models::PageRange> ranges;
-    if (PageRangeOverride) {
-        ranges = *PageRangeOverride;
+    if (const auto override = PageRangeOverride.Get()) {
+        ranges = *override;
     } else {
         // A page is populated if it was written (even with zeros) or, for seeded data, holds a non-zero byte.
         for (size_t offset = 0; offset < blob.Data.size(); offset += PageSize) {
@@ -555,7 +555,7 @@ Result FakeBlobServer::PageCopyFromUrl(const HttpRequest& request, StoredBlob& b
         sourceRange->first % 512 != 0) {
         return Failure(400U, "InvalidHeaderValue");
     }
-    if (RequireCopySourceAuthorization && copy.SourceAuthorization.empty()) {
+    if (RequireCopySourceAuthorization.Get() && copy.SourceAuthorization.empty()) {
         return Failure(401U, "CannotVerifyCopySource");
     }
     const auto source = m_blobs.find(AzureClient::Tests::UrlPath(copy.SourceUrl));
@@ -617,7 +617,7 @@ Result FakeBlobServer::PageWrite(const FakeHttpClient::RequestRecord& record, co
     }
 
     const std::string payload = clear ? std::string(static_cast<size_t>(length), '\0') : record.Body;
-    if (!clear && DeferUploads) {
+    if (!clear && DeferUploads.Get()) {
         Result deferred = Success(MakeResponse(201U));
         deferred.Deferred = true;
         deferred.OnComplete = [this, path, offset, payload](HttpResponse& response) {
@@ -679,7 +679,7 @@ Result FakeBlobServer::Download(const FakeHttpClient::RequestRecord& record, Sto
         return FailureResult(*fault);
     }
     Downloads.push_back(download);
-    if (DeferDownloads) {
+    if (DeferDownloads.Get()) {
         Result deferred = Success(MakeResponse(206U));
         deferred.Deferred = true;
         m_heldDownloads.Add(record.Index, download);
@@ -687,8 +687,8 @@ Result FakeBlobServer::Download(const FakeHttpClient::RequestRecord& record, Sto
         return deferred;
     }
 
-    if (DownloadOverride) {
-        auto content = DownloadOverride(download);
+    if (const auto downloadOverride = DownloadOverride.Get()) {
+        auto content = downloadOverride(download);
         const auto offset = static_cast<size_t>(download.Offset);
         const auto total = (std::max)(blob.Data.size(), offset + content.size());
         return Success(RangeResponse(offset, std::move(content), total, blob.ETag));
