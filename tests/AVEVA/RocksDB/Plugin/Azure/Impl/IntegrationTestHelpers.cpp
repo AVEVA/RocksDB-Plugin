@@ -13,6 +13,8 @@
 
 #include <boost/asio/use_future.hpp>
 #include <boost/log/trivial.hpp>
+#include <boost/uuid/random_generator.hpp>
+#include <boost/uuid/uuid_io.hpp>
 
 #include <algorithm>
 #include <cstring>
@@ -61,10 +63,7 @@ std::optional<Models::ServicePrincipalStorageInfo> LoadAzureCredentialsFromEnvir
 }
 
 std::string GenerateRandomBlobName(const std::string& prefix) {
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dis(100000, 999999);
-    return prefix + "-" + std::to_string(dis(gen)) + ".blob";
+    return prefix + "-" + boost::uuids::to_string(boost::uuids::random_generator()()) + ".blob";
 }
 
 bool IsAuthenticationError(const std::exception& e) {
@@ -82,7 +81,9 @@ void AzureIntegrationTestBase::SetUp() {
     }
 
     m_blobName = GenerateRandomBlobName(GetBlobNamePrefix());
-    m_containerPrefix = StorageAccount::UniquePrefix(m_credentials->GetStorageAccountUrl(), m_credentials->GetDbName());
+    m_root = "it-" + boost::uuids::to_string(boost::uuids::random_generator()());
+    m_containerPrefix =
+        StorageAccount::UniquePrefix(m_credentials->GetStorageAccountUrl(), m_credentials->GetDbName()) + "/" + m_root;
     m_logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
 
     CreateContainerClient();
@@ -141,21 +142,38 @@ void AzureIntegrationTestBase::HandleAuthenticationError(const RequestFailedExce
 }
 
 void AzureIntegrationTestBase::CleanupBlob() {
-    if (m_containerClient && !m_blobName.empty()) {
-        try {
-            auto pageBlobClient = m_containerClient->GetPageBlobClient(m_blobName);
-            Unwrap(pageBlobClient.DeleteAsync(boost::asio::use_future).get());
-        } catch (const std::exception& e) {
-            BOOST_LOG_SEV(*m_logger, error) << e.what();
-        } catch (...) {
-            // Ignore cleanup errors
+    if (!m_containerClient || m_root.empty()) {
+        return;
+    }
+    try {
+        AzureClient::ListBlobsOptions options;
+        options.Prefix = m_root + "/";
+        std::vector<std::string> names;
+        while (true) {
+            auto page = Unwrap(m_containerClient->ListBlobsAsync(options, boost::asio::use_future).get());
+            for (const auto& blob : page.Blobs) {
+                names.push_back(blob.Name);
+            }
+            if (page.NextMarker.empty()) {
+                break;
+            }
+            options.Marker = std::move(page.NextMarker);
         }
+        if (!names.empty()) {
+            Unwrap(
+                m_containerClient->DeleteBlobsAsync(names, AzureClient::DeleteBlobsOptions{}, boost::asio::use_future)
+                    .get());
+        }
+    } catch (const std::exception& e) {
+        BOOST_LOG_SEV(*m_logger, error) << "Cleanup of '" << m_root << "' failed: " << e.what();
+    } catch (...) {
+        // Ignore cleanup errors
     }
 }
 
 std::shared_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient> AzureIntegrationTestBase::CreateEmptyBlob() {
     const auto pageBlobClientPtr = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient>(
-        m_containerClient->GetPageBlobClient(m_blobName));
+        m_containerClient->GetPageBlobClient(BlobPath()));
     Unwrap(pageBlobClientPtr->CreateAsync(Configuration::PageBlob::DefaultSize, boost::asio::use_future).get());
     BlobOperations::SetSize(*m_runtime, *pageBlobClientPtr, 0);
     return pageBlobClientPtr;
@@ -164,7 +182,7 @@ std::shared_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient> AzureIntegr
 std::shared_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient>
 AzureIntegrationTestBase::CreateBlobWithData(const std::vector<char>& data) {
     const auto pageBlobClientPtr = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient>(
-        m_containerClient->GetPageBlobClient(m_blobName));
+        m_containerClient->GetPageBlobClient(BlobPath()));
     auto& pageBlobClient = *pageBlobClientPtr;
 
     // Calculate capacity rounded to page size
@@ -196,7 +214,7 @@ AzureIntegrationTestBase::CreateBlobWithData(const std::vector<char>& data) {
 
 std::vector<char> AzureIntegrationTestBase::DownloadBlobData(size_t maxSize) {
     const auto pageBlobClientPtr = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient>(
-        m_containerClient->GetPageBlobClient(m_blobName));
+        m_containerClient->GetPageBlobClient(BlobPath()));
     auto& pageBlobClient = *pageBlobClientPtr;
     const auto actualSize = BlobOperations::GetInfo(pageBlobClient).Size;
 

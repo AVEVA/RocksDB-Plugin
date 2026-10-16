@@ -23,7 +23,8 @@
 namespace AVEVA::RocksDB::Plugin::Azure::Impl::Testing {
 /// <summary>
 /// Loads Azure credentials from environment variables and creates a ServicePrincipalStorageInfo. Live tests are
-/// opt-in: nothing is returned unless AVEVA_RUN_AZURE_INTEGRATION_TESTS=1.
+/// Opt-in: nothing is returned unless AVEVA_RUN_AZURE_INTEGRATION_TESTS=1; without it every live test is skipped
+/// (GTEST_SKIP). A rejected credential, by contrast, fails the test.
 /// Required: AVEVA_RUN_AZURE_INTEGRATION_TESTS=1, AZURE_SERVICE_PRINCIPAL_ID, AZURE_SERVICE_PRINCIPAL_SECRET,
 /// AZURE_STORAGE_ACCOUNT_NAME, AZURE_TEST_CONTAINER
 /// Optional: AZURE_TENANT_ID
@@ -73,8 +74,18 @@ class AzureIntegrationTestBase : public ::testing::Test {
     std::shared_ptr<ClientRuntime> m_runtime;
     std::shared_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::BlobContainerClient> m_containerClient;
     std::string m_blobName;
+    // Every blob a fixture touches lives under "<m_root>/" so concurrent runs and failed tests cannot interfere, and
+    // TearDown can remove it all in one sweep even when an ASSERT skipped the inline cleanup.
+    std::string m_root;
+    // The storage account's unique prefix followed by the fixture root: build filesystem paths from this.
     std::string m_containerPrefix;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
+
+    /// <summary>
+    /// The container-relative name of m_blobName, the same blob that "m_containerPrefix + '/' + m_blobName" names
+    /// through the filesystem.
+    /// </summary>
+    [[nodiscard]] std::string BlobPath() const { return m_root + "/" + m_blobName; }
 
     /// <summary>
     /// Override this to provide a custom blob name prefix.
@@ -100,7 +111,7 @@ class AzureIntegrationTestBase : public ::testing::Test {
     void HandleAuthenticationError(const RequestFailedException& e);
 
     /// <summary>
-    /// Deletes the test blob created during the test.
+    /// Deletes every blob under the fixture's root, including those the test did not clean up itself.
     /// </summary>
     void CleanupBlob();
 
