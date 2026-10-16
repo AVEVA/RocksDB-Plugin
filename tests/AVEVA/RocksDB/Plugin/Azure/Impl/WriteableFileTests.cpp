@@ -286,6 +286,30 @@ TEST_F(WriteableFileTests, Constructor_PartialLastPageInBlob_DataDownloaded) {
     EXPECT_EQ(partialPageSize, m_env.Blob->Downloads[0].Length);
 }
 
+TEST_F(WriteableFileTests, Constructor_ShortDownloadOfThePartialPage_ThrowsAndUploadsNothing) {
+    constexpr size_t partialPageSize = 333;
+    m_env.Blob->SetCapacity(Configuration::PageBlob::PageSize);
+    std::fill_n(m_env.Blob->Data.begin(), partialPageSize, 'p');
+    m_env.Blob->Size = partialPageSize;
+    m_env.Blob->DownloadOverride = [](const auto&) { return std::string(10, 'p'); };
+
+    EXPECT_THROW(MakeFile(), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
+    EXPECT_EQ(0U, m_env.Blob->Uploads.size());
+}
+
+TEST_F(WriteableFileTests, Truncate_ShortDownloadOfThePartialPage_ThrowsAndUploadsNothing) {
+    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
+    m_env.Blob->SetCapacity(pageSize * 2);
+    m_env.Blob->Size = pageSize * 2;
+    auto file = MakeFile();
+    m_env.Blob->DownloadOverride = [](const auto&) { return std::string(10, 'p'); };
+
+    EXPECT_THROW(file.Truncate(pageSize + 100), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
+    // The failed reload must not leave zeros in the buffer for a later Sync to upload over the real data.
+    EXPECT_NO_THROW(file.Sync());
+    EXPECT_EQ(0U, m_env.Blob->Uploads.size());
+}
+
 TEST_F(WriteableFileTests, Append_LessThanAPage_UploadPagesNotCalled) {
     auto file = MakeFile(Configuration::PageBlob::PageSize * 2);
 

@@ -10,6 +10,20 @@
 #include <boost/log/trivial.hpp>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
+namespace WriteableFileDetail {
+// A short read here would leave zeros in the page buffer that the next Sync uploads over real data, so it must fail
+// the operation rather than be caught only by an assert that release builds compile out.
+inline void RequireFullPageDownload(std::string_view name, int64_t offset, int64_t expected, int64_t actual) {
+    if (actual != expected) {
+        throw RequestFailedException(0, "ShortDownload",
+                                     "Expected " + std::to_string(expected) + " bytes at offset " +
+                                         std::to_string(offset) + " of '" + std::string(name) + "' but received " +
+                                         std::to_string(actual),
+                                     "", AzureClient::BlobStorageErrorCode::InvalidResponse);
+    }
+}
+} // namespace WriteableFileDetail
+
 template <typename TBlob>
 AVEVA::RocksDB::Plugin::Azure::Impl::BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(
     const std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
@@ -49,9 +63,9 @@ BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(
         m_lastPageOffset = lastPageOffset;
         if (lastPageBytes > 0) // There is a partially filled page
         {
-            [[maybe_unused]] const auto bytesDownloaded =
+            const auto bytesDownloaded =
                 BlobOperations::DownloadToBuffer(*m_w.H.Blob, m_buffer, m_lastPageOffset, lastPageBytes);
-            assert(bytesDownloaded == lastPageBytes);
+            WriteableFileDetail::RequireFullPageDownload(m_w.H.Name, m_lastPageOffset, lastPageBytes, bytesDownloaded);
             m_bufferOffset = lastPageBytes;
             m_flushed = false; // We have existing partial page data in buffer
         }
@@ -307,10 +321,11 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Truncate(int64_t s
     m_flushed = true; // Buffer is empty after truncate
 
     if (partialPageSize != 0) {
-        // Read the partial page into memory for further appends
-        [[maybe_unused]] const auto bytesDownloaded =
+        // Read the partial page into memory for further appends. State is only marked as holding data afterwards, so
+        // a short read leaves an empty buffer that a later Sync never uploads.
+        const auto bytesDownloaded =
             BlobOperations::DownloadToBuffer(*m_w.H.Blob, m_buffer, totalPageOffset, partialPageSize);
-        assert(bytesDownloaded == partialPageSize);
+        WriteableFileDetail::RequireFullPageDownload(m_w.H.Name, totalPageOffset, partialPageSize, bytesDownloaded);
         m_bufferOffset = partialPageSize;
         m_flushed = false; // We have data in buffer now
     }
