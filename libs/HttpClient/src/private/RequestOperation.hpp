@@ -5,6 +5,7 @@
 
 #include "CancelState.hpp"
 #include "ConnectionPool.hpp"
+#include "DiagnosticsSink.hpp"
 #include "DnsCache.hpp"
 #include "Route.hpp"
 #include "StreamTypes.hpp"
@@ -120,6 +121,12 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     void BindCancellation(const std::shared_ptr<CancelState>& cancellation);
 
     /// <summary>
+    /// Sets where this operation reports events the caller would otherwise never see. Must be called before the
+    /// operation is started; null (the default) reports nothing.
+    /// </summary>
+    void SetDiagnostics(std::shared_ptr<const DiagnosticsSink> diagnostics) { m_diagnostics = std::move(diagnostics); }
+
+    /// <summary>
     /// Fresh connection: resolve, connect, (TLS handshake), then send. Must run on the operation's strand.
     /// </summary>
     /// <param name="request">The request to send; its owned body is moved out.</param>
@@ -133,6 +140,13 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     void StartReused(HttpRequest request, const Route& route);
 
   private:
+    void Report(HttpDiagnosticKind kind, std::error_code error, std::string message) const noexcept {
+        if (m_diagnostics) {
+            DiagnosticsSink::Report(m_diagnostics, kind, m_phase, m_key.host + ':' + m_key.service, error,
+                                    std::move(message));
+        }
+    }
+
     /// <summary>
     /// Translates the request into the Beast message to be sent, failing the operation if it cannot be.
     /// Anything that still throws (for example an oversized Host authority) must complete the request
@@ -368,6 +382,8 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     bool m_receivedAnyResponse = false;
     bool m_hostIsName = false;
     bool m_resolvedFromCache = false;
+    HttpRequestPhase m_phase = HttpRequestPhase::Queued; // Where a timeout is reported to have happened.
+    std::shared_ptr<const DiagnosticsSink> m_diagnostics;
     std::atomic_bool m_cancellationRequested = false;
     std::chrono::steady_clock::time_point m_deadline; // Taken at submission, so queueing counts against the timeout.
 };

@@ -137,6 +137,8 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
                                   asio::ssl::context::no_sslv3 | asio::ssl::context::no_tlsv1 |
                                   asio::ssl::context::no_tlsv1_1);
         ConfigureTlsContext(*m_tlsContext, options);
+        m_diagnostics = DiagnosticsSink::For(options);
+        m_sweeper->SetDiagnostics(m_diagnostics);
         m_maxPerOrigin = options.GetMaxConnectionsPerHost();
     }
 
@@ -209,6 +211,11 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// </summary>
     /// <param name="cell">The cell holding the request's completion.</param>
     /// <param name="error">Why the request failed.</param>
+    void ReportHandlerThrew() const noexcept {
+        DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::SwallowedException, HttpRequestPhase::Queued, {}, {},
+                                "A completion handler threw while the client was failing a request");
+    }
+
     void FailLater(const std::shared_ptr<CompletionCell>& cell, std::error_code error) noexcept {
         try {
             asio::post(m_context, [cell, error] {
@@ -224,7 +231,8 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
                 Detail::Complete(std::move(pending), error, HttpResponse{});
             }
         } catch (...) {
-            // The handler or response construction threw; nothing remains to report it to.
+            // The handler or response construction threw; only the diagnostics receiver remains to report it to.
+            ReportHandlerThrew();
         }
     }
 
@@ -368,7 +376,8 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         try {
             start->Finish(error, HttpResponse{});
         } catch (...) {
-            // The handler threw; nothing remains to report it to.
+            // The handler threw; only the diagnostics receiver remains to report it to.
+            ReportHandlerThrew();
         }
     }
 
@@ -380,6 +389,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         try {
             Detail::Complete(std::move(pending.completion), error, HttpResponse{});
         } catch (...) {
+            ReportHandlerThrew();
         }
         try {
             m_limiter->Release(pending.origin);
@@ -451,6 +461,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         }();
         auto operation = std::make_shared<RequestOperation<Stream>>(
             m_tlsContext, std::move(stream), std::move(completion), std::move(options), pool, std::move(key), deadline);
+        operation->SetDiagnostics(m_diagnostics);
         Launch(operation, executor, cancellation, std::move(request), std::move(route), false);
     }
 
@@ -476,6 +487,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         auto operation = std::make_shared<RequestOperation<Stream>>(
             m_tlsContext, std::move(pooled.stream), std::move(completion), std::move(options), std::move(pool),
             std::move(key), deadline, std::move(pooled.buffer));
+        operation->SetDiagnostics(m_diagnostics);
         Launch(operation, executor, cancellation, std::move(request), std::move(route), true);
     }
 
@@ -503,6 +515,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     std::shared_ptr<PlainConnectionPool> m_plainPool;
     std::shared_ptr<TlsConnectionPool> m_tlsPool;
     std::size_t m_maxPerOrigin = 0;
+    std::shared_ptr<const DiagnosticsSink> m_diagnostics;
     std::shared_ptr<Limiter> m_limiter; // Null when no per-origin cap is configured.
 };
 /// <summary>

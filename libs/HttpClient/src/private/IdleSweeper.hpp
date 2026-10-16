@@ -4,6 +4,7 @@
 #pragma once
 
 #include "ConnectionPool.hpp"
+#include "DiagnosticsSink.hpp"
 #include "StreamTypes.hpp"
 #include "Timeouts.hpp"
 #include <atomic>
@@ -113,6 +114,11 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
     static bool SchedulerIsAlive() { return SweepScheduler::IsAlive(); }
 
     /// <summary>
+    /// Sets where a failed sweep is reported. Call before any connection is pooled; null reports nothing.
+    /// </summary>
+    void SetDiagnostics(std::shared_ptr<const DiagnosticsSink> diagnostics) { m_diagnostics = std::move(diagnostics); }
+
+    /// <summary>
     /// How many times the scheduler thread has gone to sleep on a deadline, process-wide. Lets a test wait for the
     /// thread to be asleep instead of guessing with a fixed delay.
     /// </summary>
@@ -120,6 +126,11 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
 
   private:
     class SweepScheduler;
+
+    void ReportSweepFailure() const noexcept {
+        DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::SwallowedException, HttpRequestPhase::Queued, {}, {},
+                                "An idle-connection sweep threw; it will be retried on the next release");
+    }
 
     IdleSweeper(std::chrono::milliseconds idleTimeout, std::chrono::milliseconds minInterval)
         : m_interval(std::clamp(idleTimeout, minInterval,
@@ -246,6 +257,7 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
                     sweeper->RunSweep();
                 } catch (...) {
                     // A failing sweep must not end the thread that serves every other client.
+                    sweeper->ReportSweepFailure();
                 }
                 // May destroy the last sweeper, and with it the scheduler, on this very thread.
                 sweeper.reset();
@@ -259,6 +271,7 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
     std::shared_ptr<PlainConnectionPool> m_plainPool;
     std::shared_ptr<TlsConnectionPool> m_tlsPool;
     std::chrono::milliseconds m_interval;
+    std::shared_ptr<const DiagnosticsSink> m_diagnostics;
     std::atomic<bool> m_scheduled{false};
     std::shared_ptr<SweepScheduler> m_scheduler = SweepScheduler::Acquire();
 };

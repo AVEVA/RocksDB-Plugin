@@ -17,10 +17,12 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -990,5 +992,95 @@ TEST(HttpClientRobustness, UnresolvableHostFailsWithResolveFailed) {
     RunBounded(context);
 
     EXPECT_EQ(result, AVEVA::make_error_code(AVEVA::HttpClientError::ResolveFailed));
+}
+TEST(HttpClientDiagnostics, TimeoutReportsThePhaseItHappenedIn) {
+    asio::io_context context;
+    std::vector<AVEVA::HttpDiagnostic> events;
+    AVEVA::HttpClientOptions clientOptions;
+    clientOptions.SetDiagnosticsCallback([&](const AVEVA::HttpDiagnostic& event) { events.push_back(event); });
+    auto client = AVEVA::HttpClient::Create(context, std::move(clientOptions));
+    ScriptedServer server(context, [](int, const http::request<http::string_body>&) -> ServerAction {
+        ServerAction action;
+        action.Hold = true;
+        return action;
+    });
+
+    AVEVA::HttpRequestOptions requestOptions;
+    requestOptions.SetTimeout(std::chrono::milliseconds(200));
+    std::error_code result;
+    client->SendAsync(MakeRequest(server.Url()), requestOptions, [&](std::error_code error, AVEVA::HttpResponse) {
+        result = error;
+        server.Stop();
+    });
+    RunBounded(context);
+
+    EXPECT_EQ(result, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
+    const auto timeouts = std::ranges::count_if(
+        events, [](const auto& event) { return event.Kind == AVEVA::HttpDiagnosticKind::Timeout; });
+    ASSERT_EQ(timeouts, 1);
+    const auto it = std::ranges::find_if(
+        events, [](const auto& event) { return event.Kind == AVEVA::HttpDiagnosticKind::Timeout; });
+    EXPECT_EQ(it->Phase, AVEVA::HttpRequestPhase::Read);
+    EXPECT_FALSE(it->Origin.empty());
+}
+
+TEST(HttpClientDiagnostics, ThrowingCallbackDoesNotDisturbTheRequest) {
+    asio::io_context context;
+    int calls = 0;
+    AVEVA::HttpClientOptions clientOptions;
+    clientOptions.SetDiagnosticsCallback([&](const AVEVA::HttpDiagnostic&) {
+        ++calls;
+        throw std::runtime_error("receiver failed");
+    });
+    auto client = AVEVA::HttpClient::Create(context, std::move(clientOptions));
+    ScriptedServer server(context, [](int, const http::request<http::string_body>&) -> ServerAction {
+        ServerAction action;
+        action.Hold = true;
+        return action;
+    });
+
+    AVEVA::HttpRequestOptions requestOptions;
+    requestOptions.SetTimeout(std::chrono::milliseconds(200));
+    std::error_code result;
+    client->SendAsync(MakeRequest(server.Url()), requestOptions, [&](std::error_code error, AVEVA::HttpResponse) {
+        result = error;
+        server.Stop();
+    });
+    RunBounded(context);
+
+    EXPECT_EQ(result, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
+    EXPECT_GE(calls, 1);
+}
+
+TEST(HttpClientDiagnostics, StaleReusedConnectionIsReportedAsARetry) {
+    asio::io_context context;
+    std::vector<AVEVA::HttpDiagnostic> events;
+    AVEVA::HttpClientOptions clientOptions;
+    clientOptions.SetDiagnosticsCallback([&](const AVEVA::HttpDiagnostic& event) { events.push_back(event); });
+    auto client = AVEVA::HttpClient::Create(context, std::move(clientOptions));
+    ScriptedServer server(context, [](int connection, const http::request<http::string_body>& request) -> ServerAction {
+        // The first connection answers its first request, then closes silently on the second.
+        if (connection == 0 && request.target() == "/second") {
+            ServerAction action;
+            action.Drop = true;
+            return action;
+        }
+        return {OkResponse};
+    });
+
+    std::error_code second;
+    client->SendAsync(MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
+                      [&](std::error_code, AVEVA::HttpResponse) {
+                          client->SendAsync(MakeRequest(server.Url("/second")), AVEVA::HttpRequestOptions{},
+                                            [&](std::error_code error, AVEVA::HttpResponse) {
+                                                second = error;
+                                                server.Stop();
+                                            });
+                      });
+    RunBounded(context);
+
+    EXPECT_FALSE(second);
+    EXPECT_TRUE(std::ranges::any_of(
+        events, [](const auto& event) { return event.Kind == AVEVA::HttpDiagnosticKind::StaleConnectionRetry; }));
 }
 } // namespace

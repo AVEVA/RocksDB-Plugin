@@ -6,6 +6,9 @@
 
 #include <AVEVA/HttpClient/HttpClientOptions.hpp>
 
+#include <boost/log/sources/severity_logger.hpp>
+#include <boost/log/trivial.hpp>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -72,11 +75,25 @@ const std::string& WindowsRootCertificatePem() {
 }
 #endif
 
+// Surfaces events the HTTP client would otherwise swallow (stale-connection retries, unpooled connections, swallowed
+// exceptions, timeouts by phase). Retries and DNS invalidations are routine, so only the rest is a warning.
+void LogHttpDiagnostic(const ::AVEVA::HttpDiagnostic& event) {
+    using Kind = ::AVEVA::HttpDiagnosticKind;
+    static boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level> logger;
+    const auto level = (event.Kind == Kind::StaleConnectionRetry || event.Kind == Kind::DnsInvalidated)
+                           ? boost::log::trivial::debug
+                           : boost::log::trivial::warning;
+    BOOST_LOG_SEV(logger, level) << "HTTP client: " << event.Message << " [origin=" << event.Origin
+                                 << ", phase=" << static_cast<int>(event.Phase)
+                                 << (event.Error ? ", error=" + event.Error.message() : std::string{}) << "]";
+}
+
 std::shared_ptr<::AVEVA::HttpClient> CreateHttpClient(boost::asio::io_context& context) {
     ::AVEVA::HttpClientOptions options;
     // MultiRead waves, directory deletes and per-file uploads run in parallel; the default of 6 idle connections
     // would close and re-handshake most of them after every burst.
     options.SetMaxIdleConnectionsPerHost(MaxIdleConnectionsPerHost);
+    options.SetDiagnosticsCallback(LogHttpDiagnostic);
 #ifdef _WIN32
     if (!HasEnvironmentVariable("SSL_CERT_FILE") && !HasEnvironmentVariable("SSL_CERT_DIR")) {
         // Passed in memory: a temporary file could be swapped by another local process between write and read.

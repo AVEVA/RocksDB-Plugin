@@ -5,7 +5,9 @@
 
 #include <chrono>
 #include <cstddef>
+#include <functional>
 #include <string>
+#include <system_error>
 
 namespace AVEVA {
 /// <summary>
@@ -19,6 +21,59 @@ enum class TlsVersion {
     /// <summary>TLS 1.3 exactly; both the minimum and maximum version are pinned.</summary>
     Tls13
 };
+
+/// <summary>
+/// The stage a request was in, reported with a timeout so it can be told whether the wait was DNS, the TCP connect, the
+/// TLS handshake, sending the request or reading the response.
+/// </summary>
+enum class HttpRequestPhase {
+    /// <summary>Not yet on the network: queued behind the per-origin cap or still being prepared.</summary>
+    Queued,
+    Resolve,
+    Connect,
+    Handshake,
+    Write,
+    Read
+};
+
+/// <summary>
+/// What a diagnostic event reports.
+/// </summary>
+enum class HttpDiagnosticKind {
+    /// <summary>A reused connection turned out to be closed by the peer, and the request was retried on a new
+    /// one.</summary>
+    StaleConnectionRetry,
+    /// <summary>A finished connection was closed instead of returned to the pool.</summary>
+    ConnectionNotPooled,
+    /// <summary>An exception was caught and deliberately not propagated; the message says where.</summary>
+    SwallowedException,
+    /// <summary>A cached DNS answer was dropped because connecting to its address failed.</summary>
+    DnsInvalidated,
+    /// <summary>A request timed out; Phase tells in which stage.</summary>
+    Timeout
+};
+
+/// <summary>
+/// One diagnostic event. The client calls <see cref="HttpClientOptions::SetDiagnosticsCallback"/>'s function with
+/// it, on whichever thread observed the event.
+/// </summary>
+struct HttpDiagnostic {
+    HttpDiagnosticKind Kind = HttpDiagnosticKind::SwallowedException;
+    /// <summary>The stage the request was in; meaningful for Timeout and retries, Queued otherwise.</summary>
+    HttpRequestPhase Phase = HttpRequestPhase::Queued;
+    /// <summary>The scheme, host and port the event concerns; empty when none applies.</summary>
+    std::string Origin;
+    /// <summary>The underlying error, when there is one.</summary>
+    std::error_code Error;
+    /// <summary>A short human-readable description.</summary>
+    std::string Message;
+};
+
+/// <summary>
+/// Receives diagnostic events. Must be cheap, thread-safe and must not call back into the client; an exception it
+/// throws is discarded.
+/// </summary>
+using HttpDiagnosticsCallback = std::function<void(const HttpDiagnostic&)>;
 
 /// <summary>
 /// Client-wide settings fixed when the client is created: how TLS is negotiated and verified, how idle
@@ -155,6 +210,19 @@ class HttpClientOptions {
     /// <param name="maxConnectionsPerHost">The per-origin cap; 0 (the default) means unlimited.</param>
     void SetMaxConnectionsPerHost(std::size_t maxConnectionsPerHost) noexcept;
 
+    /// <summary>
+    /// Reports events the client otherwise handles silently: stale-connection retries, connections not returned
+    /// to the pool, swallowed exceptions, DNS cache invalidations and the stage a timeout happened in.
+    /// </summary>
+    /// <param name="callback">The receiver; empty (the default) disables reporting.</param>
+    void SetDiagnosticsCallback(HttpDiagnosticsCallback callback);
+
+    /// <summary>
+    /// The diagnostics receiver.
+    /// </summary>
+    /// <returns>The callback; empty when none was set.</returns>
+    [[nodiscard]] const HttpDiagnosticsCallback& GetDiagnosticsCallback() const noexcept;
+
   private:
     TlsVersion m_tlsVersion = TlsVersion::Tls12OrLater;
     bool m_verifyPeer = true;
@@ -165,5 +233,6 @@ class HttpClientOptions {
     std::chrono::seconds m_idleConnectionTimeout{30};
     std::chrono::milliseconds m_idleProbeThreshold{50};
     std::size_t m_maxConnectionsPerHost = 0;
+    HttpDiagnosticsCallback m_diagnosticsCallback;
 };
 } // namespace AVEVA

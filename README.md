@@ -160,6 +160,7 @@ The Azure client is now trimmed and in-tree, which changed the public surface:
 * `BlobFilesystem`'s private members moved behind a pimpl, so its size and layout changed (an ABI change; rebuild consumers). Its header no longer includes `RequestFailedException.hpp` or `LockFile.hpp`.
 * `AzureClient` options and models trimmed to what the plugin uses: `ListBlobsOptions` keeps only `IncludeMetadata` of the `Include*` flags and lost `Delimiter`; `CreatePageBlobOptions::HttpHeaders` and `AccessTier`, `UploadPagesOptions::ContentMd5`, `UploadPagesFromUrlOptions::SourceAuthorization` and `GetPageRangesOptions::Range`/`MaxResults` were removed, as were `BlobHttpHeaders`, `AccessTier`, `BlobTags`, `ListBlobsResult::BlobPrefixes`/`Delimiter` and `BlobItem::Snapshot`/`Deleted`/`Tags`.
 * Token endpoint failures now carry the HTTP status and OAuth error code (`TokenEndpointErrorCategory()`, `GetTokenEndpointFailure()` in `AVEVA/AzureClient/TokenEndpointError.hpp`) instead of mapping to `BlobStorageErrorCode::AuthenticationFailed`.
+* `HttpClientOptions::SetDiagnosticsCallback()` (new, additive) reports stale-connection retries, connections that could not be pooled, swallowed exceptions, DNS cache invalidations and timeouts with the request phase. The plugin logs these through Boost.Log.
 ## Building
 
 1. Ensure that vcpkg is installed and in the PATH

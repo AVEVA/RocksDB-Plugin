@@ -167,6 +167,8 @@ template <typename Stream> bool RequestOperation<Stream>::MaybeRetryAfterReuseFa
     }
     m_retried = true;
     m_reused = false;
+    Report(HttpDiagnosticKind::StaleConnectionRetry, {},
+           "A reused connection was closed by the peer; retrying on a new connection");
 
     boost::system::error_code ignored;
     beast::get_lowest_layer(*m_stream).socket().close(ignored);
@@ -218,6 +220,7 @@ void RequestOperation<Stream>::OnSharedResolve(boost::system::error_code error, 
 }
 
 template <typename Stream> void RequestOperation<Stream>::Resolve() {
+    m_phase = HttpRequestPhase::Resolve;
     m_resolvedFromCache = false;
     auto& cache = DnsCache::Shared();
     if (auto cached = cache.Find(m_key.host, m_key.service)) {
@@ -275,6 +278,7 @@ void RequestOperation<Stream>::OnResolve(boost::system::error_code error, const 
     if (error) {
         return Fail(HttpClientError::ResolveFailed, error);
     }
+    m_phase = HttpRequestPhase::Connect;
     beast::get_lowest_layer(*m_stream).async_connect(
         results, [self = this->shared_from_this()](boost::system::error_code connectError, const Tcp::endpoint&) {
             self->OnConnect(connectError);
@@ -289,10 +293,13 @@ template <typename Stream> void RequestOperation<Stream>::OnConnect(boost::syste
         if (m_resolvedFromCache) {
             // The cached address may be stale; make the next request resolve again.
             DnsCache::Shared().Invalidate(m_key.host, m_key.service);
+            Report(HttpDiagnosticKind::DnsInvalidated, error,
+                   "Connecting to a cached address failed; dropped the cached DNS answer");
         }
         return Fail(HttpClientError::ConnectFailed, error);
     }
     if constexpr (std::is_same_v<Stream, TlsStream>) {
+        m_phase = HttpRequestPhase::Handshake;
         m_stream->async_handshake(asio::ssl::stream_base::client,
                                   [self = this->shared_from_this()](boost::system::error_code handshakeError) {
                                       if (self->AbortIfNeeded()) {
@@ -312,6 +319,7 @@ template <typename Stream> void RequestOperation<Stream>::Write() {
     if (AbortIfNeeded()) {
         return;
     }
+    m_phase = HttpRequestPhase::Write;
     http::async_write(*m_stream, m_request,
                       [self = this->shared_from_this()](boost::system::error_code error, std::size_t bytesWritten) {
                           if (self->AbortIfNeeded()) {
@@ -331,6 +339,7 @@ template <typename Stream> void RequestOperation<Stream>::Read() {
     if (AbortIfNeeded()) {
         return;
     }
+    m_phase = HttpRequestPhase::Read;
     http::async_read(
         *m_stream, m_buffer, *m_parser,
         [self = this->shared_from_this()](boost::system::error_code error, std::size_t) { self->OnRead(error); });
@@ -430,9 +439,15 @@ template <typename Stream> void RequestOperation<Stream>::ReleaseOrClose(bool ke
             pooled = m_pool->Release(m_key, std::move(connection));
             // Pooling is disabled, or Release threw: the connection was not taken, so it is closed below.
             m_stream = std::move(connection.stream);
-        } catch (const std::exception&) {
+        } catch (const std::exception& ex) {
             // The completion must still run; the connection is closed below if it could not be pooled.
+            Report(HttpDiagnosticKind::SwallowedException, {},
+                   std::string("Returning the connection to the pool failed: ") + ex.what());
         }
+    }
+    if (keepAlive && !pooled && m_stream) {
+        Report(HttpDiagnosticKind::ConnectionNotPooled, {},
+               "The connection was reusable but the pool did not take it; closing it");
     }
     if (!pooled && m_stream) {
         // Only clean completions reach here (error paths close immediately in Finish), so the peer is in a known
@@ -475,6 +490,9 @@ template <typename Stream> void RequestOperation<Stream>::Close() {
 }
 
 template <typename Stream> void RequestOperation<Stream>::Fail(HttpClientError error, boost::system::error_code cause) {
+    if (error == HttpClientError::TimedOut && !m_finished) {
+        Report(HttpDiagnosticKind::Timeout, static_cast<std::error_code>(cause), "The request timed out");
+    }
     HttpResponse response;
     if (cause) {
         response.SetCause(static_cast<std::error_code>(cause));

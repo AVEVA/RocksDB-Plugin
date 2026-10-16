@@ -55,4 +55,12 @@ void HttpClientOptions::SetIdleProbeThreshold(std::chrono::milliseconds idleProb
 void HttpClientOptions::SetMaxConnectionsPerHost(std::size_t maxConnectionsPerHost) noexcept {
     m_maxConnectionsPerHost = maxConnectionsPerHost;
 }
+
+void HttpClientOptions::SetDiagnosticsCallback(HttpDiagnosticsCallback callback) {
+    m_diagnosticsCallback = std::move(callback);
+}
+
+const HttpDiagnosticsCallback& HttpClientOptions::GetDiagnosticsCallback() const noexcept {
+    return m_diagnosticsCallback;
+}
 } // namespace AVEVA
