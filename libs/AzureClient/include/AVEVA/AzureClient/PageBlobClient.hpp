@@ -103,6 +103,9 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
 
     // Suppressed-error contract: if the blob already exists nothing is changed, the expected is engaged,
     // Value() is default-constructed and Response::Error() carries the suppressed service error.
+    // Replay ambiguity: when a transient failure after the request was sent causes an automatic retry, the retry can
+    // find the blob this very call created and report it as already existing. An engaged Error() therefore means
+    // "the blob exists", not "another caller created it".
     template <class CompletionToken = DefaultCompletionToken>
         requires(!std::same_as<std::remove_cvref_t<CompletionToken>, CreatePageBlobOptions>)
     [[nodiscard]] auto CreateIfNotExistsAsync(std::uint64_t contentLength, CompletionToken&& token = CompletionToken{},
