@@ -5,12 +5,17 @@
 #include "AVEVA/RocksDB/Plugin/Core/Mocks/ContainerClientMock.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Mocks/FileMock.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Mocks/FilesystemMock.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/Mocks/TempDirectory.hpp"
 
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
+#include <fstream>
 #include <future>
 #include <stdexcept>
+#include <stop_token>
+#include <thread>
 #include <unordered_set>
 using AVEVA::RocksDB::Plugin::Core::FileCache;
 using AVEVA::RocksDB::Plugin::Core::Mocks::ContainerClientMock;
@@ -828,6 +833,60 @@ TEST(FileCacheShutdownTests, DestroyingTheCacheWithQueuedDownloads_StopsWithoutH
     // Assert
     ASSERT_EQ(destruction.wait_for(std::chrono::seconds(10)), std::future_status::ready);
     destruction.get();
+}
+
+TEST(FileCacheShutdownTests, DestroyingTheCacheCancelsARunningDownloadThatHonoursTheStopToken) {
+    // Arrange - a client whose download only ends when it is asked to stop.
+    class BlockingClient final : public AVEVA::RocksDB::Plugin::Core::ContainerClient {
+      public:
+        std::promise<void> Started;
+        int64_t GetBlobSize(const std::string&) override { return 1; }
+        void DownloadBlobTo(const std::string&, const std::filesystem::path&, int64_t, int64_t) override {
+            ADD_FAILURE() << "the stop-aware overload must be used";
+        }
+        void DownloadBlobTo(const std::string&, const std::filesystem::path&, int64_t, int64_t,
+                            std::stop_token stopToken) override {
+            Started.set_value();
+            while (!stopToken.stop_requested()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            throw std::runtime_error("download stopped");
+        }
+    };
+    auto client = std::make_shared<BlockingClient>();
+    auto filesystem = std::make_shared<NiceMock<FilesystemMock>>();
+    auto logger = std::make_shared<severity_logger_mt<severity_level>>();
+    auto cache = std::make_unique<FileCache>("tmp", 1000, client, filesystem, logger);
+    (void)cache->ReadFile("1.sst", 0, 0, nullptr);
+    (void)cache->ReadFile("1.sst", 0, 0, nullptr);
+    client->Started.get_future().wait();
+
+    // Act
+    auto destruction = std::async(std::launch::async, [&cache] { cache.reset(); });
+
+    // Assert
+    ASSERT_EQ(destruction.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    destruction.get();
+}
+
+TEST(FileCacheShutdownTests, PartialDownloadsFromAnEarlierRunAreDeletedAtStartup) {
+    // Arrange
+    const AVEVA::RocksDB::Plugin::Core::Mocks::TempDirectory directory("filecache_partial");
+    std::filesystem::create_directories(directory.Path() / "db");
+    const auto partial = directory.Path() / "db" / "1.sst.partial-abc123";
+    const auto finished = directory.Path() / "db" / "2.sst";
+    std::ofstream{partial} << "truncated";
+    std::ofstream{finished} << "complete";
+    auto filesystem = std::make_shared<NiceMock<FilesystemMock>>();
+    auto containerClient = std::make_shared<ContainerClientMock>();
+    auto logger = std::make_shared<severity_logger_mt<severity_level>>();
+
+    // Act
+    const FileCache cache(directory.Path(), 1000, containerClient, filesystem, logger);
+
+    // Assert
+    EXPECT_FALSE(std::filesystem::exists(partial));
+    EXPECT_TRUE(std::filesystem::exists(finished));
 }
 
 TEST(FileCacheShutdownTests, FailedDelete_IsRetriedOnceAtShutdown) {

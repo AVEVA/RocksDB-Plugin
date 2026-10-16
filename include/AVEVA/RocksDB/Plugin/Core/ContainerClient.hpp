@@ -4,6 +4,7 @@
 #pragma once
 #include <cstdint>
 #include <filesystem>
+#include <stop_token>
 #include <string>
 namespace AVEVA::RocksDB::Plugin::Core {
 class ContainerClient {
@@ -21,5 +22,15 @@ class ContainerClient {
     /// </summary>
     virtual void DownloadBlobTo(const std::string& path, const std::filesystem::path& destinationPath, int64_t offset,
                                 int64_t length) = 0;
+
+    /// <summary>
+    /// As above, but the download should be abandoned (throwing) soon after stopToken requests a stop, so shutdown
+    /// does not wait for a large transfer. The default ignores the token and calls the overload above.
+    /// </summary>
+    virtual void DownloadBlobTo(const std::string& path, const std::filesystem::path& destinationPath, int64_t offset,
+                                int64_t length, std::stop_token stopToken) {
+        static_cast<void>(stopToken);
+        DownloadBlobTo(path, destinationPath, offset, length);
+    }
 };
 } // namespace AVEVA::RocksDB::Plugin::Core

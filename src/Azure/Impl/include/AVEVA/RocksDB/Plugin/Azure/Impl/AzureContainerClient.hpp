@@ -10,6 +10,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <stop_token>
 #include <string>
 #include <utility>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
@@ -32,8 +33,13 @@ template <typename TContainer> class BasicAzureContainerClient final : public Co
 
     void DownloadBlobTo(const std::string& path, const std::filesystem::path& destinationPath, int64_t offset,
                         int64_t length) override {
+        DownloadBlobTo(path, destinationPath, offset, length, std::stop_token{});
+    }
+
+    void DownloadBlobTo(const std::string& path, const std::filesystem::path& destinationPath, int64_t offset,
+                        int64_t length, std::stop_token stopToken) override {
         auto blob = m_client->GetPageBlobClient(path);
-        BlobOperations::DownloadToFile(blob, destinationPath, offset, length);
+        BlobOperations::DownloadToFile(blob, destinationPath, offset, length, std::move(stopToken));
     }
 };
 

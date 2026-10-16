@@ -62,6 +62,12 @@ class FileCache {
     std::jthread m_backgroundDownloader;
 
   public:
+    /// <summary>
+    /// The cache directory should be dedicated to this cache. Leftover `*.partial-*` files from an interrupted
+    /// download are deleted at construction; other files from earlier runs are neither deleted nor counted.
+    /// The destructor asks an in-flight download to stop (see ContainerClient::DownloadBlobTo) and then joins, so a
+    /// host `io_context` serving the downloads must outlive the cache.
+    /// </summary>
     FileCache(std::filesystem::path cachePath, int64_t maxCacheSize, std::shared_ptr<ContainerClient> containerClient,
               std::shared_ptr<Filesystem> filesystem,
               std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
@@ -85,6 +91,7 @@ class FileCache {
 
   private:
     void BackgroundDownload(std::stop_token stopToken);
+    void PurgePartialDownloads() noexcept;
     void RetryFailedDeletesOnShutdown();
     void EntryAccessedUnsafe(FileCacheEntry& file);
     size_t PruneUndownloadedStaleEntriesUnsafe();

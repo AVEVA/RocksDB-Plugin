@@ -9,6 +9,8 @@
 
 #include <AVEVA/AzureClient/BlockOn.hpp>
 
+#include <boost/asio/cancellation_signal.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/use_future.hpp>
 
 #include <algorithm>
@@ -25,6 +27,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -141,9 +144,11 @@ template <typename TBlob> bool CreateIfNotExists(const ClientRuntimeBase& runtim
     });
     return !response.Error().has_value();
 }
-// Downloads [offset, offset + length) to a local file; a non-positive length produces an empty file.
+// Downloads [offset, offset + length) to a local file; a non-positive length produces an empty file. A stop request
+// cancels the transfer, which then throws; the client removes its partial file, so nothing is left at `path`.
 template <typename TBlob>
-void DownloadToFile(TBlob& client, const std::filesystem::path& path, int64_t offset, int64_t length) {
+void DownloadToFile(TBlob& client, const std::filesystem::path& path, int64_t offset, int64_t length,
+                    std::stop_token stopToken = {}) {
     // An explicit zero-length range is rejected by the client, and there is nothing to fetch for an empty blob.
     if (length <= 0) {
         std::ofstream file(path, std::ios::binary | std::ios::trunc);
@@ -157,7 +162,20 @@ void DownloadToFile(TBlob& client, const std::filesystem::path& path, int64_t of
     options.Range = Detail::ToRange(offset, length);
     options.ChunkSize = Configuration::Transfer::DownloadChunkSize;
     options.Concurrency = Configuration::Transfer::DownloadConcurrency;
-    Call([&](auto token) { return client.DownloadToAsync(path, std::move(options), token); });
+
+    // The signal is emitted from the client's executor: the pipeline connects its slot there, and emitting from the
+    // stopping thread could race with that.
+    auto signal = std::make_shared<boost::asio::cancellation_signal>();
+    auto requestOptions = client.GetDefaultRequestOptions();
+    requestOptions.SetCancellationSlot(signal->slot());
+    const std::stop_callback onStop(stopToken, [&client, signal] {
+        boost::asio::post(client.get_executor(), [signal] { signal->emit(boost::asio::cancellation_type::terminal); });
+    });
+    if (stopToken.stop_requested()) {
+        throw std::system_error(std::make_error_code(std::errc::operation_canceled), "Download stopped");
+    }
+    Call(
+        [&](auto token) { return client.DownloadToAsync(path, std::move(options), token, std::move(requestOptions)); });
 }
 
 // A download into a caller-owned buffer that has been started but not finished; see StartDownload.

@@ -11,6 +11,7 @@ class ContainerClientMock : public ContainerClient {
     ContainerClientMock();
     virtual ~ContainerClientMock();
 
+    using ContainerClient::DownloadBlobTo;
     MOCK_METHOD(int64_t, GetBlobSize, (const std::string& path), (override));
     MOCK_METHOD(void, DownloadBlobTo,
                 (const std::string& path, const std::filesystem::path& destinationPath, int64_t offset, int64_t length),

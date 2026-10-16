@@ -20,6 +20,7 @@ FileCache::FileCache(
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
     : m_cachePath(std::move(cachePath)), m_maxSize(maxCacheSize), m_containerClient(std::move(containerClient)),
       m_filesystem(std::move(filesystem)), m_logger(std::move(logger)) {
+    PurgePartialDownloads();
     // Start the background thread after all members are initialized
     m_backgroundDownloader = std::jthread([this](std::stop_token stopToken) { BackgroundDownload(stopToken); });
 }
@@ -32,6 +33,25 @@ FileCache::~FileCache() {
 
     m_cv.notify_all();
     m_backgroundDownloader.join();
+}
+
+// The Azure client downloads into `<name>.partial-<id>` and renames on success, so a crash leaves only such files
+// behind. They are never read, so deleting them is always safe.
+void FileCache::PurgePartialDownloads() noexcept {
+    std::error_code error;
+    if (!std::filesystem::is_directory(m_cachePath, error)) {
+        return;
+    }
+    std::filesystem::recursive_directory_iterator it(m_cachePath, error);
+    const std::filesystem::recursive_directory_iterator end;
+    while (!error && it != end) {
+        const auto& path = it->path();
+        if (it->is_regular_file(error) && path.filename().string().find(".partial-") != std::string::npos) {
+            std::filesystem::remove(path, error);
+        }
+        error.clear();
+        it.increment(error);
+    }
 }
 
 bool FileCache::HasFile(std::string_view filePath) const {
@@ -407,7 +427,7 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
 
                 // No need to download the _whole_ blob. There could be lots of padding
                 // at the end of the file. We can just download the actual size.
-                m_containerClient->DownloadBlobTo(filePath, actualFilePath, 0, fileSize);
+                m_containerClient->DownloadBlobTo(filePath, actualFilePath, 0, fileSize, stopToken);
             } catch (std::exception& e) {
                 // NOTE: We're not putting the filePath back on the download queue because
                 // this operation could _also_ throw. Let the next read be a cache miss which
