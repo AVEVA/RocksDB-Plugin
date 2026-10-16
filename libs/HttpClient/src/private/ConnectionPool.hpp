@@ -185,10 +185,16 @@ class ConnectionPool {
     ConnectionPool& operator=(const ConnectionPool&) = delete;
 
     ~ConnectionPool() {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_origins.clear();
-        m_lru.clear_and_dispose(NodeDisposer{});
-        m_recycled.clear_and_dispose(NodeDisposer{});
+        // Idle streams are handed to their own executor like Sweep does: SSL streams must not be torn down on
+        // whichever thread happens to destroy the pool.
+        LruList retired;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_origins.clear();
+            retired.swap(m_lru);
+            m_recycled.clear_and_dispose(NodeDisposer{});
+        }
+        retired.clear_and_dispose(ExecutorDisposer{});
     }
 
     /// <summary>

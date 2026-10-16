@@ -377,6 +377,20 @@ TEST(ConnectionPool, SweepHandsExpiredSocketsToTheirExecutorInsteadOfClosingThem
     // The disposal is queued on the io_context rather than performed on the sweeping thread.
     EXPECT_EQ(context.poll(), 1U);
 }
+
+TEST(ConnectionPool, DestroyingThePoolFromAnotherThreadHandsIdleSocketsToTheirExecutor) {
+    asio::io_context context;
+    auto pool = std::make_unique<ConnectionPool<PlainStream, FakeClock>>(4, LongTimeout);
+    pool->Release({"127.0.0.1", "80"}, PooledConnection<PlainStream>{std::make_unique<PlainStream>(context), {}});
+    pool->Release({"127.0.0.2", "80"}, PooledConnection<PlainStream>{std::make_unique<PlainStream>(context), {}});
+
+    std::thread destroyer([&pool] { pool.reset(); });
+    destroyer.join();
+
+    // Teardown is queued on the io_context, one handler per idle socket, not performed on the destroying thread.
+    EXPECT_EQ(context.poll(), 2U);
+}
+
 TEST(ConnectionPool, ConcurrentAcquireReleaseAcrossThreadsStaysConsistent) {
     struct ConcurrentTrackedStream {
         explicit ConcurrentTrackedStream(int streamIdentity, std::atomic<int>& streamLiveCount)
