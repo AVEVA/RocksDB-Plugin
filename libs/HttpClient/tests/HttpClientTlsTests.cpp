@@ -63,7 +63,7 @@ TEST(HttpClientTls, UntrustedCertificateReturnsTlsError) {
                           boost::system::error_code ignored;
                           stream.next_layer().close(ignored);
                       });
-    context.run();
+    RunBounded(context);
     EXPECT_EQ(completions, 1);
 }
 
@@ -105,7 +105,7 @@ std::error_code ConnectTrustingCertificateWithAltName(const std::string& subject
         boost::system::error_code ignored;
         stream.next_layer().close(ignored);
     });
-    context.run();
+    RunBounded(context);
     return result;
 }
 
@@ -315,7 +315,7 @@ std::vector<TlsOutcome> SendSequentialRequests(asio::io_context& context, TlsTes
         });
     };
     sendNext();
-    context.run();
+    RunBounded(context);
     return outcomes;
 }
 
@@ -481,7 +481,7 @@ TEST(HttpClientTls, RequestStateIsReleasedAtCompletionNotAfterTheTlsShutdownGrac
             server.Stop();
         });
     });
-    context.run();
+    RunBounded(context);
 
     EXPECT_TRUE(completed);
     EXPECT_TRUE(releasedPromptly);

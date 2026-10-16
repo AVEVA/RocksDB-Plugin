@@ -73,7 +73,7 @@ TEST(HttpClientRobustness, EofDelimitedResponseIsNotReturnedToThePool) {
                                                 server.Stop();
                                             });
                       });
-    context.run();
+    RunBounded(context);
 
     ASSERT_EQ(errors.size(), 2u);
     EXPECT_FALSE(errors[0]);
@@ -106,7 +106,7 @@ TEST(HttpClientRobustness, ExtraBytesAfterACompleteResponseKeepTheConnectionOutO
                                                 server.Stop();
                                             });
                       });
-    context.run();
+    RunBounded(context);
 
     ASSERT_EQ(errors.size(), 2U);
     EXPECT_FALSE(errors[0]);
@@ -138,7 +138,7 @@ TEST(HttpClientRobustness, IdempotentRequestIsRetriedOnAStalePooledConnection) {
                                                 });
                           });
                       });
-    context.run();
+    RunBounded(context);
 
     ASSERT_EQ(errors.size(), 2u);
     EXPECT_FALSE(errors[0]);
@@ -168,7 +168,7 @@ TEST(HttpClientRobustness, PostLostOnAReusedConnectionIsNotSentAgain) {
                                   settle->async_wait([&, settle](boost::system::error_code) { server.Stop(); });
                               });
         });
-    context.run();
+    RunBounded(context);
 
     EXPECT_TRUE(postError);
     EXPECT_EQ(server.Requests(http::verb::post), 1);
@@ -192,7 +192,7 @@ TEST(HttpClientRobustness, GetLostOnAReusedConnectionIsRetried) {
                                                 server.Stop();
                                             });
                       });
-    context.run();
+    RunBounded(context);
 
     EXPECT_FALSE(secondError);
     EXPECT_EQ(server.Accepted(), 2);
@@ -220,7 +220,7 @@ TEST(HttpClientRobustness, GetIsNotRetriedOnceResponseBytesWereReceivedOnAReused
                                   settle->async_wait([&, settle](boost::system::error_code) { server.Stop(); });
                               });
         });
-    context.run();
+    RunBounded(context);
 
     EXPECT_TRUE(secondError);
     EXPECT_EQ(server.Accepted(), 1);
@@ -249,7 +249,7 @@ TEST(HttpClientRobustness, PlainHttpRequestTimesOut) {
         observed = error;
         server.Stop();
     });
-    context.run();
+    RunBounded(context);
 
     EXPECT_EQ(observed, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
     EXPECT_EQ(server.Accepted(), 1);
@@ -278,7 +278,7 @@ TEST(HttpClientRobustness, ReusedConnectionRequestTimesOut) {
                                                 server.Stop();
                                             });
                       });
-    context.run();
+    RunBounded(context);
 
     ASSERT_EQ(errors.size(), 2U);
     EXPECT_FALSE(errors[0]);
@@ -304,7 +304,7 @@ TEST(HttpClientRobustness, MaximumRequestTimeoutDoesNotExpireImmediately) {
                           status = response.GetStatus();
                           server.Stop();
                       });
-    context.run();
+    RunBounded(context);
 
     EXPECT_FALSE(observed);
     EXPECT_EQ(status, 200U);
@@ -332,7 +332,7 @@ TEST(HttpClientRobustness, IdleTimeoutExpiryClosesThePooledConnection) {
                                                 });
                           });
                       });
-    context.run();
+    RunBounded(context);
 
     ASSERT_EQ(errors.size(), 2U);
     EXPECT_FALSE(errors[0]);
@@ -358,7 +358,7 @@ TEST(HttpClientRobustness, MaxConnectionsPerHostQueuesExtraRequestsAndReusesTheC
                               }
                           });
     }
-    context.run();
+    RunBounded(context);
 
     ASSERT_EQ(errors.size(), 4U);
     for (const auto& error : errors) {
@@ -398,7 +398,7 @@ TEST(HttpClientRobustness, TimeSpentQueuedForASlotCountsAgainstTheRequestTimeout
                           queuedResult = error;
                           finishWhenBothDone();
                       });
-    context.run();
+    RunBounded(context);
 
     EXPECT_EQ(firstResult, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
     EXPECT_EQ(queuedResult, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
@@ -445,7 +445,7 @@ TEST(HttpClientRobustness, CancellingAQueuedRequestFailsItWithoutStartingIt) {
                           finishWhenBothDone();
                       });
     queuedCancel.emit(asio::cancellation_type::terminal);
-    context.run();
+    RunBounded(context);
 
     EXPECT_EQ(queuedResult, std::make_error_code(std::errc::operation_canceled));
     EXPECT_EQ(firstResult, std::make_error_code(std::errc::operation_canceled));
@@ -470,7 +470,7 @@ TEST(HttpClientRobustness, MaximumIdleTimeoutStillAllowsPooling) {
                                                 server.Stop();
                                             });
                       });
-    context.run();
+    RunBounded(context);
 
     ASSERT_EQ(errors.size(), 2U);
     EXPECT_FALSE(errors[0]);
@@ -540,7 +540,7 @@ TEST(HttpClientRobustness, CancellationAtVaryingStagesCompletesExactlyOnce) {
             asio::post(context, [&, hops] { emitAfter(hops - 1); });
         };
         asio::post(context, [&] { emitAfter(iteration % 5 * 3); });
-        context.run();
+        RunBounded(context);
 
         EXPECT_EQ(completions, 1);
         EXPECT_EQ(result, std::make_error_code(std::errc::operation_canceled));
@@ -578,7 +578,7 @@ TEST(HttpClientRobustness, CancellationDuringStaleConnectionRetryCompletesExactl
                     });
                 });
             });
-        context.run();
+        RunBounded(context);
 
         EXPECT_EQ(completions, 1);
         if (secondResult) {
@@ -596,7 +596,7 @@ std::error_code SendOnce(const std::string& wire, AVEVA::HttpRequestOptions opti
         result = error;
         server.Stop();
     });
-    context.run();
+    RunBounded(context);
     return result;
 }
 
@@ -624,7 +624,7 @@ TEST(HttpClientRobustness, DestroyingTheClientWithPooledIdleConnectionsClosesThe
                           auto settle = std::make_shared<asio::steady_timer>(context, std::chrono::milliseconds(100));
                           settle->async_wait([&, settle](boost::system::error_code) { server.Stop(); });
                       });
-    context.run();
+    RunBounded(context);
 
     EXPECT_FALSE(result);
     EXPECT_EQ(client, nullptr);
@@ -642,7 +642,7 @@ TEST(HttpClientRobustness, DestroyingTheClientWhileLeadingASharedLookupCompletes
                           });
     }
     client.reset();
-    context.run();
+    RunBounded(context);
 
     EXPECT_EQ(completions, 2);
 }
@@ -681,7 +681,7 @@ TEST(HttpClientRobustness, RequestTargetIsBuiltFromPathAndQuery) {
                           });
     };
     sendNext();
-    context.run();
+    RunBounded(context);
 
     EXPECT_EQ(targets, (std::vector<std::string>{"/", "/?a=1", "/p/q%20r?x=%2F&y=", "/p?"}));
 }
@@ -784,7 +784,7 @@ TEST(HttpClientRobustness, ThrowingInitiationCompletesTheHandlerExactlyOnceAndNe
                 }));
     inSubmit = false;
     EXPECT_EQ(completions, 0);
-    context.run();
+    RunBounded(context);
 
     EXPECT_EQ(completions, 1);
     EXPECT_EQ(result, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidRequest));
@@ -818,7 +818,7 @@ TEST(HttpClientRobustness, DestroyingTheClientFailsQueuedRequestsAndCompletesAct
                           });
     }
     client.reset();
-    context.run();
+    RunBounded(context);
 
     EXPECT_EQ(completions, (std::vector<int>{1, 1, 1}));
     EXPECT_EQ(results[1], std::make_error_code(std::errc::operation_canceled));
@@ -850,7 +850,7 @@ TEST(HttpClientRobustness, DestroyingTheClientWithRunningRequestsCompletesEachEx
     client.reset();
     asio::steady_timer stopper(context, std::chrono::milliseconds(100));
     stopper.async_wait([&](boost::system::error_code) { server.Stop(); });
-    context.run();
+    RunBounded(context);
 
     EXPECT_EQ(completions, 3);
 }
@@ -926,7 +926,7 @@ TEST(HttpClientRobustness, CancellingTheSharedDnsLeaderStillCompletesEveryJoined
         }
         // Queued behind the three starts, so it lands while the leader's lookup is in flight.
         asio::post(context, [&] { leaderCancel.emit(asio::cancellation_type::terminal); });
-        context.run();
+        RunBounded(context);
 
         EXPECT_EQ(completions, 3);
         EXPECT_NE(followerResult, std::make_error_code(std::errc::operation_canceled));

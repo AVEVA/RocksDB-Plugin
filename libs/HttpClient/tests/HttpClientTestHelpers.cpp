@@ -9,6 +9,8 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 
+#include <gtest/gtest.h>
+
 #include <openssl/pem.h>
 #include <openssl/x509v3.h>
 
@@ -21,6 +23,16 @@
 namespace HttpClientTests {
 namespace asio = boost::asio;
 namespace beast = boost::beast;
+
+void RunBounded(asio::io_context& context, std::chrono::milliseconds limit) {
+    context.run_for(limit);
+    if (!context.stopped()) {
+        context.stop();
+        const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
+        ADD_FAILURE() << "io_context still had work after " << limit.count() << " ms in "
+                      << (info ? info->test_suite_name() : "?") << "." << (info ? info->name() : "?");
+    }
+}
 using Tcp = asio::ip::tcp;
 
 namespace {
@@ -253,7 +265,7 @@ ExchangeResult Exchange(AVEVA::HttpRequest request, std::string wireResponse, AV
     if (completions != 0) {
         throw std::runtime_error("Completion must not run inline");
     }
-    context.run();
+    RunBounded(context);
     if (completions != 1) {
         throw std::runtime_error("Completion must run exactly once");
     }

@@ -33,6 +33,11 @@ struct ExchangeResult {
     std::string authority;
 };
 
+// Runs `context` until it has no more work. If it is still busy after `limit` (a server that never answers, a lost
+// completion), the context is stopped and the current test fails with a gtest message instead of hanging until the
+// ctest timeout kills the process.
+void RunBounded(boost::asio::io_context& context, std::chrono::milliseconds limit = std::chrono::seconds(5));
+
 // URL of a loopback port that has no listener.
 std::string ClosedLocalUrl();
 

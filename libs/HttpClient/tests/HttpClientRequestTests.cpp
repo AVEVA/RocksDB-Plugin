@@ -82,7 +82,7 @@ TEST(HttpClientRequest, InvalidRequestCompletesAsynchronously) {
     });
 
     EXPECT_EQ(completions, 0u);
-    context.run();
+    RunBounded(context);
     EXPECT_EQ(completions, invalidUrls.size() + 3);
 }
 
@@ -105,7 +105,7 @@ TEST(HttpClientRequest, OversizedHeadersFailWithInvalidRequest) {
                           });
     }
 
-    context.run();
+    RunBounded(context);
     EXPECT_EQ(completions, 2u);
 }
 
@@ -126,7 +126,7 @@ TEST(HttpClientRequest, HeaderControlCharactersFailWithInvalidRequest) {
                           });
     }
 
-    context.run();
+    RunBounded(context);
     EXPECT_EQ(completions, 3u);
 }
 
@@ -138,7 +138,7 @@ TEST(HttpClientRequest, TokenBasedSendAsyncSupportsUseFutureAndReportsErrors) {
     request.SetUrl("ftp://example.com/file");
     auto future = client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{}, asio::use_future);
 
-    context.run();
+    RunBounded(context);
 
     auto [error, response] = future.get();
     EXPECT_EQ(error, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidUrl));
@@ -160,7 +160,7 @@ TEST(HttpClientRequest, TokenBasedSendAsyncDispatchesCompletionOnTheBoundStrand)
                           completed = true;
                       }));
 
-    context.run();
+    RunBounded(context);
 
     EXPECT_TRUE(completed);
     EXPECT_TRUE(ranOnStrand);
@@ -273,7 +273,7 @@ TEST(HttpClientRequest, IPv6LiteralHostHeaderKeepsBrackets) {
     client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{},
                       [&](std::error_code error, AVEVA::HttpResponse) { result = error; });
 
-    context.run();
+    RunBounded(context);
     EXPECT_FALSE(result);
     ASSERT_TRUE(received);
     ASSERT_TRUE(received);
@@ -324,7 +324,7 @@ TEST(HttpClientRequest, SetBodyViewReadsTheBufferLazilyNotAtCallTime) {
     // would still see "AAAA".
     std::fill(mutableBuffer.begin(), mutableBuffer.end(), std::byte{'B'});
 
-    context.run();
+    RunBounded(context);
 
     EXPECT_EQ(received->body(), "BBBB");
 }
@@ -397,7 +397,7 @@ TEST(HttpClientRequest, ReusesConnectionForKeepAliveRequests) {
                           });
     });
 
-    context.run();
+    RunBounded(context);
     EXPECT_EQ(completions, 2);
     EXPECT_EQ(acceptCount, 1);
     EXPECT_EQ(requestsServed, 2u);
@@ -423,7 +423,7 @@ TEST(HttpClientRequest, CancellationBeforeStartCompletesWithOperationCanceled) {
     });
 
     cancellation.emit(asio::cancellation_type::terminal);
-    context.run();
+    RunBounded(context);
     EXPECT_EQ(completions, 1);
 }
 
@@ -464,7 +464,7 @@ TEST(HttpClientRequest, CancellationMidFlightCompletesWithOperationCanceled) {
         socket.close(ignored);
     });
 
-    context.run();
+    RunBounded(context);
     EXPECT_TRUE(requestRead);
     EXPECT_EQ(completions, 1);
 }
@@ -520,12 +520,12 @@ TEST(HttpClientRequest, CancellingAfterCompletionIsANoop) {
         socket.close(ignored);
     });
 
-    context.run();
+    RunBounded(context);
     EXPECT_EQ(completions, 1);
 
     cancellation.emit(asio::cancellation_type::terminal);
     context.restart();
-    context.run();
+    RunBounded(context);
     EXPECT_EQ(completions, 1);
 }
 
