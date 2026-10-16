@@ -129,7 +129,8 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// <param name="options">The TLS, pooling, and concurrency settings to build from.</param>
     BasicHttpClientCore(asio::io_context& runtime, const HttpClientOptions& options)
         : m_context(runtime), m_tlsContext(std::make_shared<asio::ssl::context>(asio::ssl::context::tls_client)),
-          m_sweeper(IdleSweeper::Create(options.GetMaxIdleConnectionsPerHost(), options.GetIdleConnectionTimeout())),
+          m_sweeper(IdleSweeper::Create(options.GetMaxIdleConnectionsPerHost(), options.GetIdleConnectionTimeout(),
+                                        options.GetIdleProbeThreshold())),
           m_plainPool(m_sweeper->PlainPool()), m_tlsPool(m_sweeper->TlsPool()) {
         m_tlsContext->set_options(asio::ssl::context::default_workarounds | asio::ssl::context::no_sslv2 |
                                   asio::ssl::context::no_sslv3 | asio::ssl::context::no_tlsv1 |

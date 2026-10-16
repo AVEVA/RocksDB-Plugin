@@ -141,6 +141,13 @@ class ConnectionPool {
     static constexpr std::chrono::seconds MaxIdleTimeout{EffectivelyInfinite};
 
     /// <summary>
+    /// The default for how long a connection must have been idle before it is probed for liveness on reuse.
+    /// A connection idle for less than this is handed out without a probe, since the peer has had no real
+    /// chance to close it.
+    /// </summary>
+    static constexpr std::chrono::milliseconds DefaultProbeThreshold{50};
+
+    /// <summary>
     /// Constructs a pool of idle keep-alive connections.
     /// </summary>
     /// <param name="maxIdlePerKey">How many idle connections to keep per origin; 0 disables pooling.</param>
@@ -149,11 +156,15 @@ class ConnectionPool {
     /// <param name="maxTotalIdle">How many idle connections to keep across all origins; 0 disables pooling.</param>
     /// <param name="notifier">Invoked (outside the lock) when a release makes an empty pool non-empty, so an
     /// owner can schedule Sweep().</param>
+    /// <param name="probeThreshold">Connections idle at least this long are probed for liveness when taken;
+    /// zero probes every reused connection.</param>
     ConnectionPool(std::size_t maxIdlePerKey, std::chrono::seconds idleTimeout,
-                   std::size_t maxTotalIdle = DefaultMaxTotalIdle, Notifier notifier = {})
+                   std::size_t maxTotalIdle = DefaultMaxTotalIdle, Notifier notifier = {},
+                   std::chrono::milliseconds probeThreshold = DefaultProbeThreshold)
         : m_maxIdlePerKey(maxIdlePerKey),
           m_idleTimeout(std::clamp(idleTimeout, std::chrono::seconds::zero(), MaxIdleTimeout)),
-          m_maxTotalIdle(maxTotalIdle), m_notifier(std::move(notifier)) {}
+          m_maxTotalIdle(maxTotalIdle), m_notifier(std::move(notifier)),
+          m_probeThreshold(std::max(probeThreshold, std::chrono::milliseconds::zero())) {}
 
     /// <summary>
     /// Closes connections idle past the timeout without needing a request to arrive. Runs on the sweeper's
@@ -210,7 +221,7 @@ class ConnectionPool {
         while (auto connection = AcquireAged(key, idleFor)) {
             // A connection returned moments ago has not had time to be closed by the peer; a request that does
             // hit a just-closed socket is retried by the caller where that is safe.
-            if (idleFor < SkipProbeBelow || IsAlive(*connection)) {
+            if (idleFor < m_probeThreshold || IsAlive(*connection)) {
                 return connection;
             }
         }
@@ -478,16 +489,11 @@ class ConnectionPool {
     /// </summary>
     static constexpr std::size_t MaxRecycledNodes = 32;
 
-    /// <summary>
-    /// A connection idle for less than this is handed out without a liveness probe, since the peer has had
-    /// no real chance to close it.
-    /// </summary>
-    static constexpr std::chrono::milliseconds SkipProbeBelow{50};
-
     std::size_t m_maxIdlePerKey;
     std::chrono::seconds m_idleTimeout;
     std::size_t m_maxTotalIdle;
     const Notifier m_notifier;
+    std::chrono::milliseconds m_probeThreshold;
     mutable std::mutex m_mutex;
     OriginMap m_origins;
     LruList m_lru;

@@ -21,6 +21,8 @@ std::size_t HttpClientOptions::GetMaxIdleConnectionsPerHost() const noexcept { r
 
 std::chrono::seconds HttpClientOptions::GetIdleConnectionTimeout() const noexcept { return m_idleConnectionTimeout; }
 
+std::chrono::milliseconds HttpClientOptions::GetIdleProbeThreshold() const noexcept { return m_idleProbeThreshold; }
+
 std::size_t HttpClientOptions::GetMaxConnectionsPerHost() const noexcept { return m_maxConnectionsPerHost; }
 
 void HttpClientOptions::SetTlsVersion(TlsVersion version) noexcept { m_tlsVersion = version; }
@@ -42,6 +44,13 @@ void HttpClientOptions::SetIdleConnectionTimeout(std::chrono::seconds idleConnec
         throw std::invalid_argument("The idle connection timeout must not be negative.");
     }
     m_idleConnectionTimeout = idleConnectionTimeout;
+}
+
+void HttpClientOptions::SetIdleProbeThreshold(std::chrono::milliseconds idleProbeThreshold) {
+    if (idleProbeThreshold < std::chrono::milliseconds::zero()) {
+        throw std::invalid_argument("The idle probe threshold must not be negative.");
+    }
+    m_idleProbeThreshold = idleProbeThreshold;
 }
 void HttpClientOptions::SetMaxConnectionsPerHost(std::size_t maxConnectionsPerHost) noexcept {
     m_maxConnectionsPerHost = maxConnectionsPerHost;

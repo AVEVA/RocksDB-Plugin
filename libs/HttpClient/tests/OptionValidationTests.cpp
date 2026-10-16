@@ -23,4 +23,13 @@ TEST(HttpOptionValidation, ZeroIdleTimeoutIsAccepted) {
     options.SetIdleConnectionTimeout(std::chrono::seconds{0});
     EXPECT_EQ(options.GetIdleConnectionTimeout(), std::chrono::seconds{0});
 }
+
+TEST(HttpOptionValidation, IdleProbeThresholdDefaultsToFiftyMillisecondsAndRejectsNegatives) {
+    HttpClientOptions options;
+    EXPECT_EQ(options.GetIdleProbeThreshold(), std::chrono::milliseconds{50});
+    options.SetIdleProbeThreshold(std::chrono::milliseconds{0});
+    EXPECT_EQ(options.GetIdleProbeThreshold(), std::chrono::milliseconds{0});
+    EXPECT_THROW(options.SetIdleProbeThreshold(std::chrono::milliseconds{-1}), std::invalid_argument);
+    EXPECT_EQ(options.GetIdleProbeThreshold(), std::chrono::milliseconds{0});
+}
 } // namespace

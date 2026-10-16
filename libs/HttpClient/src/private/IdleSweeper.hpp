@@ -37,14 +37,20 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
     /// <param name="maxIdlePerKey">How many idle connections each pool keeps per origin.</param>
     /// <param name="idleTimeout">How long a connection may sit idle; also how often to sweep while either pool
     /// is non-empty (clamped to at least one second).</param>
+    /// <param name="probeThreshold">How long a pooled connection must have been idle before it is probed for
+    /// liveness when reused.</param>
     /// <returns>The sweeper; its pools are available through <see cref="PlainPool"/> and
     /// <see cref="TlsPool"/>.</returns>
-    static std::shared_ptr<IdleSweeper> Create(std::size_t maxIdlePerKey, std::chrono::seconds idleTimeout) {
+    static std::shared_ptr<IdleSweeper>
+    Create(std::size_t maxIdlePerKey, std::chrono::seconds idleTimeout,
+           std::chrono::milliseconds probeThreshold = PlainConnectionPool::DefaultProbeThreshold) {
         std::shared_ptr<IdleSweeper> sweeper(new IdleSweeper(idleTimeout));
-        sweeper->m_plainPool = std::make_shared<PlainConnectionPool>(
-            maxIdlePerKey, idleTimeout, PlainConnectionPool::DefaultMaxTotalIdle, SweeperNotifier(sweeper));
-        sweeper->m_tlsPool = std::make_shared<TlsConnectionPool>(
-            maxIdlePerKey, idleTimeout, TlsConnectionPool::DefaultMaxTotalIdle, SweeperNotifier(sweeper));
+        sweeper->m_plainPool =
+            std::make_shared<PlainConnectionPool>(maxIdlePerKey, idleTimeout, PlainConnectionPool::DefaultMaxTotalIdle,
+                                                  SweeperNotifier(sweeper), probeThreshold);
+        sweeper->m_tlsPool =
+            std::make_shared<TlsConnectionPool>(maxIdlePerKey, idleTimeout, TlsConnectionPool::DefaultMaxTotalIdle,
+                                                SweeperNotifier(sweeper), probeThreshold);
         return sweeper;
     }
 

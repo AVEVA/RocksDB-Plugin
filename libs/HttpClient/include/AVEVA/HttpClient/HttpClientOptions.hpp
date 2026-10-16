@@ -76,6 +76,13 @@ class HttpClientOptions {
     [[nodiscard]] std::chrono::seconds GetIdleConnectionTimeout() const noexcept;
 
     /// <summary>
+    /// How long a pooled connection must have sat idle before it is checked for a peer-side close when it is
+    /// reused.
+    /// </summary>
+    /// <returns>The threshold; 50 milliseconds unless set otherwise.</returns>
+    [[nodiscard]] std::chrono::milliseconds GetIdleProbeThreshold() const noexcept;
+
+    /// <summary>
     /// The cap on concurrent in-flight requests per origin.
     /// </summary>
     /// <returns>The cap; 0 means unlimited.</returns>
@@ -131,6 +138,15 @@ class HttpClientOptions {
     void SetIdleConnectionTimeout(std::chrono::seconds idleConnectionTimeout);
 
     /// <summary>
+    /// Connections idle for less than this are reused without a liveness check (one cheap system call), because
+    /// the peer has had no real chance to close them; a request that still hits a closed connection is retried
+    /// where that is safe. Zero checks every reused connection.
+    /// </summary>
+    /// <param name="idleProbeThreshold">The threshold.</param>
+    /// <exception cref="std::invalid_argument">Thrown when the threshold is negative.</exception>
+    void SetIdleProbeThreshold(std::chrono::milliseconds idleProbeThreshold);
+
+    /// <summary>
     /// Caps in-flight requests per origin (scheme, host, port); further requests wait in FIFO order until one
     /// finishes, and a waiting request still honors its cancellation slot.
     /// </summary>
@@ -145,6 +161,7 @@ class HttpClientOptions {
     std::string m_caPem;
     std::size_t m_maxIdleConnectionsPerHost = 6;
     std::chrono::seconds m_idleConnectionTimeout{30};
+    std::chrono::milliseconds m_idleProbeThreshold{50};
     std::size_t m_maxConnectionsPerHost = 0;
 };
 } // namespace AVEVA
