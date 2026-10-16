@@ -18,6 +18,8 @@ class ReadWriteFile final : public rocksdb::FSRandomRWFile {
   public:
     ReadWriteFile(Impl::ReadWriteFileImpl&& file,
                   std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
+    // Close() is the only durability boundary. The destructor does not flush or retry: it logs an error if buffered
+    // data was never persisted.
     ~ReadWriteFile() override;
     virtual rocksdb::IOStatus Write(uint64_t offset, const rocksdb::Slice& data, const rocksdb::IOOptions& options,
                                     rocksdb::IODebugContext* dbg) override;

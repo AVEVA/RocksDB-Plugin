@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/CloseWithRetries.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlobWriter.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
@@ -557,31 +556,6 @@ TEST_F(ReadWriteFileImplTests, Expand_IncreasesCapacity) {
     EXPECT_FALSE(m_env.Blob->CapacityWrites.empty());
 }
 
-// Test destructor retries Close on failure
-TEST_F(ReadWriteFileImplTests, Destructor_RetriesCloseOnFailure) {
-    // Arrange - the first two attempts to record the size fail
-    int sizeWriteAttempts = 0;
-    m_env.Blob->Fault =
-        [&sizeWriteAttempts](
-            const FakeBlobServer::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
-        if (operation == FakeBlobServer::Operation::SetMetadata && ++sizeWriteAttempts <= 2) {
-            return FakeBlobServer::Error(500, "InternalError");
-        }
-        return std::nullopt;
-    };
-
-    // Act - destructor should retry
-    {
-        FakeReadWriteFileImpl file(m_testFileName, m_env.Runtime, m_env.Client, nullptr, m_logger);
-        const std::vector<char> data(100, 'R');
-        file.Write(0, data.data(), static_cast<int64_t>(data.size()));
-    } // Destructor called here
-
-    // Assert
-    EXPECT_EQ(3, sizeWriteAttempts);
-    EXPECT_EQ(1U, m_env.Blob->SizeWrites.size());
-}
-
 // Test move constructor
 TEST_F(ReadWriteFileImplTests, MoveConstructor_TransfersOwnership) {
     // Arrange
@@ -665,65 +639,34 @@ TEST_F(ReadWriteFileImplTests, Write_Overlapping_OverwritesData) {
     EXPECT_EQ('Q', readBuffer[150]);
     EXPECT_EQ('Q', readBuffer[199]);
 }
-TEST(CloseWithRetriesTests, RetriesWithBackoffUntilTheCloseSucceeds) {
-    boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level> logger;
-    int attempts = 0;
+TEST_F(ReadWriteFileImplTests, DestructorWithoutCloseDoesNotRetryOrPersistBufferedData) {
+    int sizeWriteAttempts = 0;
+    m_env.Blob->Fault =
+        [&sizeWriteAttempts](
+            const FakeBlobServer::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::SetMetadata) {
+            ++sizeWriteAttempts;
+        }
+        return std::nullopt;
+    };
+
     const auto start = std::chrono::steady_clock::now();
+    {
+        FakeReadWriteFileImpl file(m_testFileName, m_env.Runtime, m_env.Client, nullptr, m_logger);
+        file.Write(0, "data", 4);
+    }
 
-    CloseWithRetries(
-        logger, "f",
-        [&] {
-            if (++attempts < 3) {
-                throw std::runtime_error("transient");
-            }
-        },
-        [] { return false; }, std::chrono::milliseconds(40));
-
-    EXPECT_EQ(attempts, 3);
-    // 40 ms after the first failure plus 80 ms after the second.
-    EXPECT_GE(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(110));
+    EXPECT_EQ(0, sizeWriteAttempts);
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(700));
 }
 
-TEST(CloseWithRetriesTests, StopsAtOnceWhenTheFailureIsPermanent) {
-    boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level> logger;
-    int attempts = 0;
-
-    CloseWithRetries(
-        logger, "f",
-        [&] {
-            ++attempts;
-            throw std::runtime_error("fenced");
-        },
-        [] { return true; });
-
-    EXPECT_EQ(attempts, 1);
-}
-
-TEST(CloseWithRetriesTests, GivesUpAfterTheMaximumNumberOfAttempts) {
-    boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level> logger;
-    int attempts = 0;
-
-    CloseWithRetries(
-        logger, "f",
-        [&] {
-            ++attempts;
-            throw std::runtime_error("down");
-        },
-        [] { return false; }, std::chrono::milliseconds(1));
-
-    EXPECT_EQ(attempts, 5);
-}
-
-TEST_F(ReadWriteFileImplTests, DestructorDoesNotRetryTheCloseOnceWritesAreFenced) {
+TEST_F(ReadWriteFileImplTests, DestructorAfterExplicitCloseIsQuiet) {
     {
         auto file = CreateFile();
         file->Write(0, "data", 4);
-        m_env.Runtime->FenceWrites();
-        const auto start = std::chrono::steady_clock::now();
-        file.reset();
-        // Five attempts with backoff would take at least 750 ms.
-        EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(700));
+        file->Close();
     }
+    EXPECT_EQ(1U, m_env.Blob->SizeWrites.size());
 }
 
 TEST(PageBlobWriterTests, EnsureCapacityHonoursTheRequirementAndDoublesOtherwise) {

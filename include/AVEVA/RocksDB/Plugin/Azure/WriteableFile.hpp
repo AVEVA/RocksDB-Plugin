@@ -18,6 +18,8 @@ class WriteableFile final : public rocksdb::FSWritableFile {
   public:
     WriteableFile(Impl::WriteableFileImpl&& file,
                   std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
+    // Close() is the only durability boundary. The destructor does not flush or retry: it waits for uploads already
+    // in flight and logs an error if buffered data was never persisted.
     ~WriteableFile() override;
     virtual rocksdb::IOStatus Append(const rocksdb::Slice& data, const rocksdb::IOOptions& options,
                                      rocksdb::IODebugContext* dbg) override;

@@ -106,6 +106,17 @@ TEST_F(WriteableFileTests, RangeSync_PartialPageThenMoreData_UploadsNeverOverlap
     EXPECT_EQ(expected, Prefix(m_env.Blob->Data, expected.size()));
 }
 
+TEST_F(WriteableFileTests, Destructor_WithoutClose_DoesNotUploadBufferedData) {
+    auto file = std::make_unique<FakeWriteableFileImpl>("test.dat", m_env.Runtime, m_env.Client, nullptr, m_logger);
+    file->Append(std::vector<char>(100, 'a'));
+
+    const auto start = std::chrono::steady_clock::now();
+    file.reset();
+
+    EXPECT_TRUE(m_env.Blob->Uploads.empty());
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(700));
+}
+
 TEST_F(WriteableFileTests, Destructor_UploadsStillInFlightAfterFailure_WaitsForThem) {
     constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
     m_env.Blob->SetCapacity(16 * pageSize);
@@ -204,6 +215,7 @@ TEST_F(WriteableFileTests, AppendBytes_LessThanAPage_PageWritten) {
         std::string_view data = "1";
         file.Append(data);
         ASSERT_EQ(data.size(), static_cast<size_t>(file.GetFileSize()));
+        file.Close();
     }
 
     ASSERT_EQ(1U, m_env.Blob->Uploads.size());
@@ -219,6 +231,7 @@ TEST_F(WriteableFileTests, AppendBytes_EqualToAPage_PageWritten) {
         auto file = MakeFile();
         file.Append(expected);
         ASSERT_EQ(expected.size(), static_cast<size_t>(file.GetFileSize()));
+        file.Close();
     }
 
     ASSERT_EQ(1U, m_env.Blob->Uploads.size());
@@ -235,6 +248,7 @@ TEST_F(WriteableFileTests, AppendBytes_MoreThanAPage_2PagesWritten) {
         auto file = MakeFile();
         file.Append(expected);
         ASSERT_EQ(expected.size(), static_cast<size_t>(file.GetFileSize()));
+        file.Close();
     }
 
     ASSERT_EQ(1U, m_env.Blob->Uploads.size());
@@ -294,6 +308,7 @@ TEST_F(WriteableFileTests, Append_MultipleWritesLargerThanPage_UploadPagesCalled
         file.Append(dataToAppend1);
         file.Append(dataToAppend2);
         ASSERT_EQ(dataToAppend1.size() + dataToAppend2.size(), static_cast<size_t>(file.GetFileSize()));
+        file.Close();
     }
 
     ASSERT_EQ(2U, m_env.Blob->Uploads.size());

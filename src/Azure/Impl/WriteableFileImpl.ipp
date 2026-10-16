@@ -60,10 +60,13 @@ BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(
 }
 
 template <typename TBlob> BasicWriteableFileImpl<TBlob>::~BasicWriteableFileImpl() {
-    // A failed upload is sticky, and a fenced runtime refuses every write, so retrying can only fail the same way.
-    CloseWithRetries(
-        *m_w.H.Logger, m_w.H.Name, [this] { Close(); },
-        [this] { return HasUploadError() || m_w.H.Runtime->WritesFenced(); });
+    // Close() is the durability boundary. A destructor that ran sleeping retries would stall RocksDB's cleanup
+    // threads, so it only reports unpersisted data and waits for uploads that are already running.
+    if (!m_closed && m_unsyncedSize) {
+        BOOST_LOG_SEV(*m_w.H.Logger, boost::log::trivial::error)
+            << "File '" << m_w.H.Name
+            << "' was destroyed without a successful Close(); buffered data was not persisted";
+    }
 
     // Outstanding upload completions use the blob client and logger, which are released below.
     DrainUploads();

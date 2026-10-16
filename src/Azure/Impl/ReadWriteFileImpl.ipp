@@ -31,7 +31,12 @@ BasicReadWriteFileImpl<TBlob>::BasicReadWriteFileImpl(
 }
 
 template <typename TBlob> BasicReadWriteFileImpl<TBlob>::~BasicReadWriteFileImpl() {
-    CloseWithRetries(*m_w.H.Logger, m_w.H.Name, [this] { Close(); }, [this] { return m_w.H.Runtime->WritesFenced(); });
+    // Close() is the durability boundary; a destructor must not run sleeping retries on RocksDB's cleanup threads.
+    if (!m_closed && (!m_bufferStats.empty() || m_size != m_syncSize || m_dirty)) {
+        BOOST_LOG_SEV(*m_w.H.Logger, boost::log::trivial::error)
+            << "File '" << m_w.H.Name
+            << "' was destroyed without a successful Close(); buffered data was not persisted";
+    }
 }
 
 template <typename TBlob>
