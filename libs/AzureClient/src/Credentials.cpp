@@ -100,7 +100,13 @@ std::expected<AccessToken, std::error_code> ParseTokenResponse(std::error_code e
     constexpr unsigned int MinSuccess = 200;
     constexpr unsigned int MaxSuccess = 299;
     if (response.GetStatus() < MinSuccess || response.GetStatus() > MaxSuccess) {
-        return std::unexpected(make_error_code(BlobStorageErrorCode::AuthenticationFailed));
+        std::string oauthError;
+        boost::system::error_code ignored;
+        if (const auto body = boost::json::parse(std::string_view{response.GetBody()}, ignored);
+            !ignored && body.is_object()) {
+            oauthError = JsonText(body.as_object(), "error");
+        }
+        return std::unexpected(MakeTokenEndpointError(response.GetStatus(), oauthError));
     }
     const auto invalid = std::unexpected(make_error_code(BlobStorageErrorCode::InvalidResponse));
     boost::system::error_code parseError;

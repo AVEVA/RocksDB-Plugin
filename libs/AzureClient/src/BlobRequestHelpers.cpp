@@ -12,6 +12,7 @@
 #include "AVEVA/AzureClient/Models/BlobContainerModels.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
 #include "AVEVA/AzureClient/TokenCredential.hpp"
+#include "AVEVA/AzureClient/TokenEndpointError.hpp"
 #include "BlobStorageErrorCategory.hpp"
 #include "BlobXmlParser.hpp"
 
@@ -716,6 +717,11 @@ void AuthorizeRequest(const SharedKeySigner& signer, HttpRequest& request) {
     BlobStorageError details;
     details.Message = message.empty() ? error.message() : std::move(message);
     details.Code = error;
+    // A failed token acquisition has no service response, but the identity endpoint's status is the useful part.
+    if (const auto token = GetTokenEndpointFailure(error)) {
+        details.StatusCode = token->StatusCode;
+        details.ErrorCode = std::string{token->ErrorCode};
+    }
     return details;
 }
 

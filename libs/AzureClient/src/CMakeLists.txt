@@ -22,6 +22,7 @@ add_library(aveva-azure-client
     BlobResponseParsers.cpp
     Credentials.cpp
     BlobStorageErrorCategory.cpp
+    TokenEndpointError.cpp
     RequestPipeline.cpp
 )
 
@@ -60,6 +61,7 @@ target_sources(aveva-azure-client
         "${base-include-dir}/AVEVA/AzureClient/AzureRequestOptions.hpp"
         "${base-include-dir}/AVEVA/AzureClient/HttpClientLike.hpp"
         "${base-include-dir}/AVEVA/AzureClient/TokenCredential.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/TokenEndpointError.hpp"
         "${base-include-dir}/AVEVA/AzureClient/ClientForwardDeclarations.hpp"
         "${base-include-dir}/AVEVA/AzureClient/PageBlobClient.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Response.hpp"

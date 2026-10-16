@@ -9,6 +9,7 @@
 #include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
 #include <AVEVA/AzureClient/HttpClientLike.hpp>
 #include <AVEVA/AzureClient/TokenCredential.hpp>
+#include <AVEVA/AzureClient/TokenEndpointError.hpp>
 
 #include <AVEVA/AzureClient/AzureRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpClient.hpp>
@@ -47,7 +48,8 @@
 //
 // Errors: missing or invalid configuration -> std::errc::invalid_argument (no request is sent); an unreadable
 // federated token file -> std::errc::no_such_file_or_directory; a non-2xx token endpoint response ->
-// BlobStorageErrorCode::AuthenticationFailed; a 2xx response without a usable access_token/expiry ->
+// a TokenEndpointErrorCategory code carrying the HTTP status and OAuth `error` (TokenEndpointError.hpp); a 2xx
+// response without a usable access_token/expiry ->
 // BlobStorageErrorCode::InvalidResponse; transport errors are passed through.
 namespace AVEVA::AzureClient {
 inline constexpr std::string_view DefaultAuthorityHost = "https://login.microsoftonline.com/";

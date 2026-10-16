@@ -37,6 +37,8 @@ using AVEVA::AzureClient::AssertionCompletion;
 using AVEVA::AzureClient::BlobStorageErrorCode;
 using AVEVA::AzureClient::ClientAssertionCredentialOptions;
 using AVEVA::AzureClient::ClientSecretCredentialOptions;
+using AVEVA::AzureClient::GetTokenEndpointFailure;
+using AVEVA::AzureClient::MakeTokenEndpointError;
 using AVEVA::AzureClient::ManagedIdentityCredentialOptions;
 using AVEVA::AzureClient::WorkloadIdentityCredentialOptions;
 using AVEVA::AzureClient::Tests::AzurePipelinesCredential;
@@ -197,8 +199,14 @@ TEST(CredentialsTests, TokenEndpointFailuresMapToErrorCodes) {
     FakeHttpClient httpClient;
     ClientSecretCredential credential{httpClient, SecretOptions()};
 
-    httpClient.EnqueueResponse(Json(401, R"({"error":"invalid_client"})"));
-    EXPECT_EQ(GetToken(httpClient, credential).Error, std::error_code{BlobStorageErrorCode::AuthenticationFailed});
+    httpClient.EnqueueResponse(Json(401, R"({"error":"invalid_client","error_description":"secret detail"})"));
+    const auto error = GetToken(httpClient, credential).Error;
+    const auto failure = GetTokenEndpointFailure(error);
+    ASSERT_TRUE(failure.has_value());
+    EXPECT_EQ(failure->StatusCode, 401U);
+    EXPECT_EQ(failure->ErrorCode, "invalid_client");
+    EXPECT_EQ(error.message().find("secret detail"), std::string::npos);
+    EXPECT_EQ(error, std::errc::permission_denied);
 
     for (const std::string body : {"not json", R"({"expires_in":3600})", R"({"access_token":"t"})",
                                    R"({"access_token":"t","expires_in":"soon"})"}) {
@@ -437,7 +445,7 @@ TEST(CredentialsTests, BadRequestTokenFailureIsNotRetried) {
     ClientSecretCredential credential{httpClient, options};
 
     httpClient.EnqueueResponse(Json(400, R"({"error":"invalid_request"})"));
-    EXPECT_EQ(GetToken(httpClient, credential).Error, std::error_code{BlobStorageErrorCode::AuthenticationFailed});
+    EXPECT_EQ(GetToken(httpClient, credential).Error, MakeTokenEndpointError(400, "invalid_request"));
     EXPECT_EQ(httpClient.RequestCount(), 1U);
 }
 
