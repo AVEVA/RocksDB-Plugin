@@ -323,6 +323,59 @@ TEST(RetryTests, ReleaseLeaseFirstAttempt409StillFails) {
     EXPECT_FALSE(ValueOrFail(observed).has_value());
 }
 
+TEST(RetryTests, RenewLeaseReplayedAfterAnAmbiguousErrorSurfacesTheSubsequent409) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ReadFailed);
+    httpClient.EnqueueResponse(HttpResponse{409, {{"x-ms-error-code", "LeaseNotPresentWithLeaseOperation"}}, ""});
+    BlobClient client{httpClient, MakeRetryOptions(3)};
+
+    std::optional<std::expected<Response<Models::RenewBlobLeaseResult>, BlobStorageError>> observed;
+    client.RenewLeaseAsync(RenewLeaseOptions{.LeaseId = "lease"}, [&](auto result) { observed = std::move(result); });
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
+    EXPECT_EQ(httpClient.RequestCount(), 2U);
+    // Only a release may treat the 409 as success; a renew of a lease that is gone must be seen as a failure.
+    ASSERT_FALSE(observed->has_value());
+    EXPECT_EQ(observed->error().StatusCode, 409U);
+}
+
+TEST(RetryTests, AcquireLeaseReplayedAfterAnAmbiguousErrorSurfacesTheSubsequent409) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ReadFailed);
+    httpClient.EnqueueResponse(HttpResponse{409, {{"x-ms-error-code", "LeaseAlreadyPresent"}}, ""});
+    BlobClient client{httpClient, MakeRetryOptions(3)};
+
+    std::optional<std::expected<Response<Models::AcquireBlobLeaseResult>, BlobStorageError>> observed;
+    client.AcquireLeaseAsync(AcquireLeaseOptions{.ProposedLeaseId = "proposed", .Duration = std::chrono::seconds{15}},
+                             [&](auto result) { observed = std::move(result); });
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
+    ASSERT_EQ(httpClient.RequestCount(), 2U);
+    // The replay reuses the proposed lease id so that it can tell the caller's own lease apart.
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.LastRequest(), "x-ms-proposed-lease-id"), "proposed");
+    ASSERT_FALSE(observed->has_value());
+    EXPECT_EQ(observed->error().StatusCode, 409U);
+}
+
+TEST(RetryTests, ConditionalUploadPagesReplayedAfterAnAmbiguousErrorSurfacesTheSubsequent412) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ReadFailed);
+    httpClient.EnqueueResponse(HttpResponse{412, {{"x-ms-error-code", "ConditionNotMet"}}, ""});
+    PageBlobClient client{httpClient, MakeRetryOptions(3)};
+
+    UploadPagesOptions options;
+    options.Conditions.IfMatch = "\"0x1\"";
+    std::optional<std::expected<Response<Models::UploadPagesResult>, BlobStorageError>> observed;
+    client.UploadPagesAsync(0, std::string(512, 'x'), std::move(options),
+                            [&](auto result) { observed = std::move(result); });
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
+    EXPECT_EQ(httpClient.RequestCount(), 2U);
+    // A 412 after a lost If-Match write is ambiguous (our write may have changed the ETag), so it must surface.
+    ASSERT_FALSE(observed->has_value());
+    EXPECT_EQ(observed->error().StatusCode, 412U);
+}
+
 TEST(RetryTests, ConditionalCreateIsRetriedAfterFailuresThatHappenedBeforeAnythingWasSent) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ConnectFailed);
@@ -612,6 +665,28 @@ TEST(RetryTests, CancellationDuringBackoffCompletesWithOperationCanceledAndSends
     EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::operation_canceled));
     EXPECT_EQ(httpClient.RequestCount(), 1U);
     EXPECT_FALSE(signal.slot().has_handler());
+}
+
+TEST(RetryTests, PartialCancellationDoesNotAbortTheOperationButTerminalDoes) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
+    httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
+    BlobClient client{httpClient, MakeRetryOptions(3, std::chrono::minutes{1})};
+
+    boost::asio::cancellation_signal signal;
+    std::optional<DeleteResult> observed;
+    StartDeleteAsync(client, signal, observed);
+
+    httpClient.Poll(); // deliver the 503; the operation is now waiting on its backoff timer
+    ASSERT_EQ(httpClient.RequestCount(), 1U);
+
+    signal.emit(boost::asio::cancellation_type::partial);
+    EXPECT_FALSE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::milliseconds{200}));
+    EXPECT_TRUE(signal.slot().has_handler());
+
+    signal.emit(boost::asio::cancellation_type::terminal);
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}));
+    EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::operation_canceled));
 }
 
 TEST(RetryTests, CancellationFromAnotherThreadWhileRetryTimerIsPending) {
