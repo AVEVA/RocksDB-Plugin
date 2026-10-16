@@ -271,10 +271,14 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         return result;
     }
 
+    // The two mutexes are never held together: the state is detached under the cache mutex first, so no lock
+    // order exists to violate. Waiters can no longer join once it is detached, so draining it afterwards is complete.
     std::vector<Waiter> DrainAndReset(const std::shared_ptr<RefreshState>& refreshState) {
-        std::scoped_lock const lock(m_mutex);
-        if (m_inFlightRefresh == refreshState) {
-            m_inFlightRefresh.reset();
+        {
+            std::scoped_lock const lock(m_mutex);
+            if (m_inFlightRefresh == refreshState) {
+                m_inFlightRefresh.reset();
+            }
         }
         std::scoped_lock const stateLock(refreshState->Mutex);
         return std::move(refreshState->Completions);

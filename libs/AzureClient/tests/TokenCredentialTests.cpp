@@ -9,11 +9,13 @@
 #include <cstddef>
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -69,6 +71,41 @@ void RequestWaitersForSharedToken(const std::shared_ptr<TestCachingCredential>& 
 }
 } // namespace
 
+namespace {
+// A thread-safe inner credential that answers inline with a token inside the refresh window.
+class ShortLivedTokenCredential final {
+  public:
+    template <boost::asio::completion_token_for<AVEVA::AzureClient::TokenSignature> CompletionToken>
+    auto GetTokenAsync(std::vector<std::string> /*scopes*/, CompletionToken&& token) {
+        return boost::asio::async_initiate<AVEVA::AzureClient::TokenSignature>(
+            [](auto handler) {
+                std::move(handler)(std::error_code{}, MakeToken("short-lived", std::chrono::seconds(1)));
+            },
+            token);
+    }
+};
+} // namespace
+
+TEST(TokenCredentialTests, CachingTokenCredential_ConcurrentCallersDuringRefreshAllCompleteExactlyOnce) {
+    constexpr int Threads = 8;
+    constexpr int CallsPerThread = 200;
+    auto credential = CachingTokenCredential<ShortLivedTokenCredential>::Create(
+        std::make_shared<ShortLivedTokenCredential>(), std::chrono::minutes(5));
+
+    std::atomic<int> completions{0};
+    std::vector<std::thread> threads;
+    for (int t = 0; t < Threads; ++t) {
+        threads.emplace_back([&] {
+            for (int i = 0; i < CallsPerThread; ++i) {
+                credential->GetTokenAsync({"scope-a"}, [&](std::error_code, const AccessToken&) { ++completions; });
+            }
+        });
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    EXPECT_EQ(completions.load(), Threads * CallsPerThread);
+}
 TEST(TokenCredentialTests, CachingTokenCredential_NegativeRefreshWindowIsRejected) {
     auto inner = std::make_shared<ScriptedTokenCredential>();
     EXPECT_THROW(static_cast<void>(TestCachingCredential::Create(inner, std::chrono::seconds(-1))),
