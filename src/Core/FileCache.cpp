@@ -161,8 +161,12 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
                 result = bytesRead;
             }
         } catch (const std::exception& e) {
-            BOOST_LOG_SEV(*m_logger, debug) << "Cached read of '" << filePath << "' failed, falling back: " << e.what();
-            return std::nullopt;
+            // Same recovery as a short read: an Active entry that cannot be opened would otherwise fail every read
+            // and keep counting against the cache size without ever being downloaded again.
+            BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
+                << "Cached read of '" << filePath
+                << "' failed, dropping the cached file and falling back: " << e.what();
+            shortRead = true;
         }
 
         // Done after the handle lock is released so the two locks are never nested.

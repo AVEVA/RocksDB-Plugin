@@ -381,6 +381,26 @@ TEST_F(FileCacheTests, ReadFile_ShortReadFromTheCachedFile_FallsBackAndDropsTheE
     EXPECT_EQ(0U, m_cache.CacheSize());
 }
 
+TEST_F(FileCacheTests, ReadFile_CachedFileThatCannotBeOpened_DropsTheEntryAndIsDownloadedAgain) {
+    // Arrange - the entry becomes Active, but every attempt to open its file throws.
+    EXPECT_CALL(*m_containerClient, GetBlobSize("1.sst")).WillRepeatedly(Return(8));
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo("1.sst", _, _, _)).WillRepeatedly(Return());
+    EXPECT_CALL(*m_filesystem, Open(std::filesystem::path(m_folderName) / "1.sst"))
+        .WillRepeatedly(
+            [](const std::filesystem::path&) -> std::unique_ptr<FileMock> { throw std::runtime_error("cannot open"); });
+    EnsureReadFromCache("1.sst");
+    char buffer[8];
+
+    // Act
+    const auto bytesRead = m_cache.ReadFile("1.sst", 0, 8, buffer);
+    m_cache.WaitUntilIdle();
+
+    // Assert
+    EXPECT_FALSE(bytesRead.has_value());
+    EXPECT_FALSE(m_cache.HasFile("1.sst"));
+    EXPECT_EQ(0U, m_cache.CacheSize());
+}
+
 TEST_F(FileCacheTests, FileReplacedWhileItsSizeIsBeingLookedUp_IsNotActivated) {
     // Arrange - the size lookup blocks until released.
     std::promise<void> started;
