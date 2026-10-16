@@ -42,10 +42,11 @@ struct FakeBlobEnvironment {
     std::shared_ptr<BasicClientRuntime<FakeHttpClient>> Runtime =
         std::make_shared<BasicClientRuntime<FakeHttpClient>>(std::make_unique<FakeHttpClient>());
     FakeHttpClient& Http = Runtime->HttpClient();
-    std::shared_ptr<FakeBlobServer> Blob = std::make_shared<FakeBlobServer>(Http);
-    std::shared_ptr<FakeBlobServer::BlobClientType> Client = Blob->Client;
+    std::shared_ptr<FakeBlobServer> Blob;
+    std::shared_ptr<FakeBlobServer::BlobClientType> Client;
 
-    FakeBlobEnvironment() {
+    explicit FakeBlobEnvironment(const std::string& container = "files", const std::string& blob = "test.sst")
+        : Blob(std::make_shared<FakeBlobServer>(Http, container, blob)), Client(Blob->Client) {
         Http.CompleteInline() = true;
         Http.StartBackgroundPump();
         Runtime->SetMetadataClockForTesting([this] {

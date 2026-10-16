@@ -5,6 +5,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
 #include "BlobFilesystemImpl.ipp"
 #include "ClientFactory.ipp"
+#include "FakeBlobEnvironment.hpp"
 #include "FakeBlobServer.hpp"
 #include "FakeHttpClient.hpp"
 #include "LockFileImpl.ipp"
@@ -39,19 +40,13 @@ constexpr const char* Container = "testdb";
 class BlobFilesystemFakeTests : public ::testing::Test {
   protected:
     BlobFilesystemFakeTests() {
-        m_runtime->HttpClient().CompleteInline() = true;
-        m_runtime->HttpClient().StartBackgroundPump();
-        m_server = std::make_unique<FakeBlobServer>(m_runtime->HttpClient(), Container, "unused");
         m_fs = std::make_unique<FakeFilesystem>(
             m_runtime, Container, AccountUrl, AccountKey, 4096, 1024,
             std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>());
         m_prefix = StorageAccount::UniquePrefix(AccountUrl, Container);
     }
 
-    ~BlobFilesystemFakeTests() override {
-        m_fs.reset();
-        m_server.reset();
-    }
+    ~BlobFilesystemFakeTests() override { m_fs.reset(); }
 
     [[nodiscard]] std::string Path(const std::string& name) const { return m_prefix + "/" + name; }
 
@@ -75,9 +70,11 @@ class BlobFilesystemFakeTests : public ::testing::Test {
         return content;
     }
 
-    std::shared_ptr<BasicClientRuntime<FakeHttpClient>> m_runtime =
-        std::make_shared<BasicClientRuntime<FakeHttpClient>>(std::make_unique<FakeHttpClient>());
-    std::unique_ptr<FakeBlobServer> m_server;
+    // Runtime, fake transport (completing inline, with a background pump) and in-memory service, assembled once for
+    // every Impl test; declared before m_fs so the filesystem is released first.
+    FakeBlobEnvironment m_env{Container, "unused"};
+    std::shared_ptr<BasicClientRuntime<FakeHttpClient>>& m_runtime = m_env.Runtime;
+    std::shared_ptr<FakeBlobServer>& m_server = m_env.Blob;
     std::unique_ptr<FakeFilesystem> m_fs;
     std::string m_prefix;
 };
