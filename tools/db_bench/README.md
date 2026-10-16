@@ -7,8 +7,7 @@ RocksDB `ObjectLibrary`. The wrapper does this **before** it calls
 `rocksdb::db_bench_tool`. This lets `db_bench` send I/O through Azure Blob
 Storage, the same way a production consumer of the plugin does.
 
-This tool is a POC deliverable for work item **4983896**. See "Follow-up
-work" below for the planned next steps.
+This tool is a POC deliverable for work item **4983896**.
 
 ## Build
 
@@ -16,14 +15,14 @@ The wrapper is off by default. To build it, use any preset and pass the CMake op
 
 ```powershell
 cmake --preset WindowsRelease -DAVEVA_ROCKSDB_BUILD_DB_BENCH=ON
-cmake --build build/WindowsRelease --config RelWithDebInfo --target aveva_db_bench
+cmake --build build/WindowsRelease --config Release --target aveva_db_bench
 ```
 
 Setting `-DAVEVA_ROCKSDB_BUILD_DB_BENCH=ON` also turns on the `db-bench` vcpkg
 manifest feature, which builds RocksDB's `db_bench_tool` through the overlay port.
 Use a fresh build directory, or `--fresh`, when you toggle the option so that vcpkg
 reinstalls RocksDB. See the root
-[README.md](../../README.md#build) for preset details and how to configure manually.
+[README.md](../../README.md#building) for preset details and how to configure manually.
 
 This build uses an [overlay port](../../infrastructure/vcpkg-overlays/rocksdb).
 The overlay keeps `WITH_BENCHMARK_TOOLS=OFF` and instead applies
@@ -38,7 +37,7 @@ listed below and exits with status 2 when one is missing; there is no pass-throu
 baseline to compare against.
 
 ```powershell
-./build/WindowsRelease/tools/db_bench/RelWithDebInfo/db_bench.exe `
+./build/WindowsRelease/tools/db_bench/Release/db_bench.exe `
     --benchmarks=fillseq,readrandom `
     --num=100000
 ```
@@ -60,8 +59,7 @@ Notes on the items above:
   characters. Do not use dots or underscores. A name like `user.name` fails
   with `InvalidResourceName`.
 
-- The plugin creates the container if it does not exist. Do not create the
-  container yourself.
+- The plugin creates the container if it does not exist, so a single-run benchmark needs no setup.\r\n  `Compare-Backends.ps1` is the exception: it expects its two containers to exist already (see below).
 
 - Grant the service principal the **Storage Blob Data Contributor** role on
   the storage account or container. Without this role, every blob call
@@ -91,7 +89,7 @@ that `StorageAccount::UniquePrefix()` builds. The wrapper prints the exact
 string to use on startup, under "Suggested flags". Copy that string:
 
 ```powershell
-$exe = ".\build\WindowsRelease\tools\db_bench\RelWithDebInfo\db_bench.exe"
+$exe = ".\build\WindowsRelease\tools\db_bench\Release\db_bench.exe"
 
 & $exe `
     --benchmarks=fillseq,readrandom `
