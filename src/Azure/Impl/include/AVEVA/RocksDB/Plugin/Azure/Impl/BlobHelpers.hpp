@@ -46,8 +46,10 @@ void CreateContainerIfNotExists(TContainer& client, int maxRetries = 5,
         std::this_thread::sleep_for(WithJitter(baseDelay * retries));
     }
 }
-std::pair<int64_t, int64_t> RoundToEndOfNearestPage(int64_t size);
-std::pair<int64_t, int64_t> RoundToBeginningOfNearestPage(int64_t size);
+// Both return {bytes past the page boundary, rounded size}. They throw std::invalid_argument for a negative size, and
+// RoundToEndOfNearestPage also when the rounded-up size does not fit in int64_t.
+[[nodiscard]] std::pair<int64_t, int64_t> RoundToEndOfNearestPage(int64_t size);
+[[nodiscard]] std::pair<int64_t, int64_t> RoundToBeginningOfNearestPage(int64_t size);
 // Gets the container client for `name`, creating the container when it does not exist yet.
 template <typename TService> auto GetContainerClient(const TService& blobServiceClient, const std::string& name) {
     const auto blobContainerClient =

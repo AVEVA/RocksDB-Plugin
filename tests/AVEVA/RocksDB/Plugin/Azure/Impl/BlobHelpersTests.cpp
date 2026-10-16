@@ -16,8 +16,10 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <limits>
 #include <optional>
 #include <thread>
+#include <tuple>
 #include <typeinfo>
 #include <vector>
 
@@ -193,6 +195,29 @@ TEST(BlobHelpersCredentialLifetimeTests, PipelinesCredentialKeepsHttpClientAlive
 
     credential.reset();
     EXPECT_TRUE(weak.expired());
+}
+
+TEST(PageRoundingTests, ValidSizes_RoundDownAndUpToWholePages) {
+    constexpr int64_t page = 512;
+    EXPECT_EQ(std::make_pair(int64_t{0}, int64_t{0}), BlobHelpers::RoundToBeginningOfNearestPage(0));
+    EXPECT_EQ(std::make_pair(int64_t{1}, int64_t{page}), BlobHelpers::RoundToBeginningOfNearestPage(page + 1));
+    EXPECT_EQ(std::make_pair(int64_t{0}, int64_t{page}), BlobHelpers::RoundToEndOfNearestPage(page));
+    EXPECT_EQ(std::make_pair(int64_t{1}, int64_t{2 * page}), BlobHelpers::RoundToEndOfNearestPage(page + 1));
+}
+
+TEST(PageRoundingTests, NegativeSize_ThrowsInvalidArgument) {
+    EXPECT_THROW(std::ignore = BlobHelpers::RoundToBeginningOfNearestPage(-1), std::invalid_argument);
+    EXPECT_THROW(std::ignore = BlobHelpers::RoundToEndOfNearestPage(-512), std::invalid_argument);
+}
+
+TEST(PageRoundingTests, NearInt64Max_RoundDownSucceedsAndRoundUpThrowsInsteadOfOverflowing) {
+    constexpr auto max = std::numeric_limits<int64_t>::max();
+    const auto [partial, rounded] = BlobHelpers::RoundToBeginningOfNearestPage(max);
+    EXPECT_EQ(max % 512, partial);
+    EXPECT_EQ(max - partial, rounded);
+
+    EXPECT_THROW(std::ignore = BlobHelpers::RoundToEndOfNearestPage(max), std::invalid_argument);
+    EXPECT_EQ(std::make_pair(int64_t{0}, rounded), BlobHelpers::RoundToEndOfNearestPage(rounded));
 }
 
 } // namespace

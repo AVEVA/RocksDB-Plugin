@@ -12,9 +12,11 @@
 #include <charconv>
 #include <chrono>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <random>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <system_error>
 #include <thread>
@@ -51,16 +53,23 @@ int64_t BlobHelpers::FileSizeFromProperties(const AzureClient::Models::BlobPrope
 std::pair<int64_t, int64_t> BlobHelpers::RoundToEndOfNearestPage(int64_t size) {
     auto [partialPageSize, roundedSize] = RoundToBeginningOfNearestPage(size);
     if (partialPageSize != 0) {
-        roundedSize += Configuration::PageBlob::PageSize;
+        constexpr auto pageSize = static_cast<int64_t>(Configuration::PageBlob::PageSize);
+        if (roundedSize > std::numeric_limits<int64_t>::max() - pageSize) {
+            throw std::invalid_argument("Size " + std::to_string(size) + " cannot be rounded up to a whole page");
+        }
+        roundedSize += pageSize;
     }
 
     return std::make_pair(partialPageSize, roundedSize);
 }
 
 std::pair<int64_t, int64_t> BlobHelpers::RoundToBeginningOfNearestPage(int64_t size) {
-    const auto partialPageSize = size % static_cast<int64_t>(Configuration::PageBlob::PageSize);
-    auto pages = (size / static_cast<int64_t>(Configuration::PageBlob::PageSize));
-    const auto roundedSize = pages * static_cast<int64_t>(Configuration::PageBlob::PageSize);
-    return std::make_pair(partialPageSize, roundedSize);
+    if (size < 0) {
+        throw std::invalid_argument("Size must not be negative, got " + std::to_string(size));
+    }
+
+    constexpr auto pageSize = static_cast<int64_t>(Configuration::PageBlob::PageSize);
+    const auto partialPageSize = size % pageSize;
+    return std::make_pair(partialPageSize, size - partialPageSize);
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
