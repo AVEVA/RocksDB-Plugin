@@ -11,6 +11,31 @@ identifiers inline.
 The root `vcpkg.json` is the only manifest used by this repository's build, and the root `.clang-format`,
 `.clang-tidy` and `.editorconfig` apply to these libraries.
 
+## Installed packages and consuming them
+
+Both libraries are installed as static-only CMake packages (`aveva_install_library`, config files under
+`share/<package>/`). The package names, targets and the `find_package` calls a consumer needs:
+
+| Package | Imported target | Public dependencies (resolved by its config file) | Link-only dependencies (private, still required at link time) |
+|---------|-----------------|---------------------------------------------------|----------------------------------------------------------------|
+| `aveva-http-client` | `aveva::http-client` | `boost_asio` | `boost_beast`, `boost_intrusive`, `boost_unordered`, `boost_url`, OpenSSL |
+| `aveva-azure-client` | `aveva::azure-client` | `aveva-http-client`, `boost_asio` | OpenSSL, `boost_algorithm`, `boost_json`, `boost_url`, `boost_uuid`, LibXml2 (config package) |
+
+A consumer only calls `find_package(aveva-azure-client CONFIG REQUIRED)` (and `aveva-http-client` if it uses the HTTP
+client directly); the config files call `find_dependency` for everything in the table, so Boost, OpenSSL and LibXml2
+must be discoverable (for example through the same vcpkg toolchain and manifest). The plugin packages
+`aveva-rocksdb-plugin-core` and `aveva-rocksdb-plugin-azure` (and `-azure-impl`) in turn depend on both libraries.
+The `.github/workflows/build-and-test.yml` `install-consume` job builds an external consumer against an install tree to
+keep this list honest.
+
+```cmake
+find_package(aveva-azure-client CONFIG REQUIRED)
+target_link_libraries(my_app PRIVATE aveva::azure-client)
+```
+
+The `_WIN32_WINNT=0x0A00` definition is public on Windows so that consumers and both libraries agree on the Asio API
+level.
+
 ## Boost.Asio is part of the public API
 
 The public headers of both libraries expose Boost.Asio types on purpose (`executor_type`, `get_executor()`,
