@@ -146,6 +146,53 @@ TEST_F(AsyncReadTests, ReadAsync_DoesNotBlockAndPollDeliversOnCallerThread) {
     EXPECT_EQ(std::string(128, 'A'), record.Data);
 }
 
+TEST_F(AsyncReadTests, ReadAsync_CallbackThatSubmitsAnotherRead_DoesNotDeadlockAndBothComplete) {
+    auto file = CreateFile(m_deferredEnv);
+    std::vector<char> scratch1(64);
+    std::vector<char> scratch2(64);
+    auto req1 = MakeRequest(0, scratch1);
+    auto req2 = MakeRequest(512, scratch2);
+    CallbackRecord second;
+    IoHandle handle1;
+    IoHandle handle2;
+    bool resubmitted = false;
+
+    const auto reenter = [&](rocksdb::FSReadRequest&, void*) {
+        resubmitted = Submit(file, req2, second, handle2).ok();
+    };
+    ASSERT_TRUE(
+        file.ReadAsync(req1, rocksdb::IOOptions{}, reenter, nullptr, &handle1.Handle, &handle1.Deleter, nullptr).ok());
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(64, 'A'));
+    std::vector<void*> handles1{handle1.Handle};
+    ASSERT_TRUE(PollAsyncReads(handles1).ok());
+    ASSERT_TRUE(resubmitted);
+
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(64, 'B'));
+    std::vector<void*> handles2{handle2.Handle};
+    ASSERT_TRUE(PollAsyncReads(handles2).ok());
+    EXPECT_EQ(1, second.Calls.load());
+    EXPECT_EQ(std::string(64, 'B'), second.Data);
+}
+
+TEST_F(AsyncReadTests, ReadAsync_FileDestroyedWhileDownloadPending_StillDeliversTheResult) {
+    std::vector<char> scratch(64);
+    auto req = MakeRequest(0, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+    {
+        auto file = CreateFile(m_deferredEnv);
+        ASSERT_TRUE(Submit(file, req, record, handle).ok());
+        ASSERT_EQ(1U, m_deferredEnv.Blob->PendingDownloads());
+    }
+
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(64, 'Z'));
+    std::vector<void*> handles{handle.Handle};
+    ASSERT_TRUE(PollAsyncReads(handles).ok());
+    EXPECT_EQ(1, record.Calls.load());
+    EXPECT_TRUE(record.Status.ok()) << record.Status.ToString();
+    EXPECT_EQ(std::string(64, 'Z'), record.Data);
+}
+
 TEST_F(AsyncReadTests, ReadAsync_ConcurrentReadsAtCachedEnd_ShareOnePropertiesCall) {
     auto file = CreateFile(m_deferredEnv);
     const int before = m_deferredEnv.Blob->PropertiesRequests;
