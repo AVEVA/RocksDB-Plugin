@@ -9,33 +9,6 @@ using namespace boost::log::trivial;
 namespace AVEVA::RocksDB::Plugin::Core {
 namespace {
 constexpr size_t MaxUndownloadedStaleEntries = 2048;
-constexpr std::memory_order RelaxedOrder = std::memory_order_relaxed;
-}
-
-FileCacheStats::Snapshot FileCacheStats::GetSnapshot() const noexcept {
-    Snapshot snapshot;
-    snapshot.hits = hits.load(RelaxedOrder);
-    snapshot.missesNotFound = missesNotFound.load(RelaxedOrder);
-    snapshot.missesNotReady = missesNotReady.load(RelaxedOrder);
-    snapshot.bytesServedFromCache = bytesServedFromCache.load(RelaxedOrder);
-    snapshot.downloadsCompleted = downloadsCompleted.load(RelaxedOrder);
-    snapshot.downloadsFailed = downloadsFailed.load(RelaxedOrder);
-    snapshot.bytesDownloaded = bytesDownloaded.load(RelaxedOrder);
-    snapshot.evictions = evictions.load(RelaxedOrder);
-    snapshot.bytesEvicted = bytesEvicted.load(RelaxedOrder);
-    return snapshot;
-}
-
-void FileCacheStats::Reset() noexcept {
-    hits.store(0, RelaxedOrder);
-    missesNotFound.store(0, RelaxedOrder);
-    missesNotReady.store(0, RelaxedOrder);
-    bytesServedFromCache.store(0, RelaxedOrder);
-    downloadsCompleted.store(0, RelaxedOrder);
-    downloadsFailed.store(0, RelaxedOrder);
-    bytesDownloaded.store(0, RelaxedOrder);
-    evictions.store(0, RelaxedOrder);
-    bytesEvicted.store(0, RelaxedOrder);
 }
 
 FileCache::FileCache(
@@ -107,7 +80,6 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
                                              std::forward_as_tuple(filePath, 0));
         m_entryList.push_front(inserted->second);
         PruneUndownloadedStaleEntriesUnsafe();
-        m_stats.missesNotFound.fetch_add(1, RelaxedOrder);
         return std::nullopt;
     } else {
         auto& fileEntry = it->second;
@@ -125,7 +97,6 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
                 m_cv.notify_one();
             }
 
-            m_stats.missesNotReady.fetch_add(1, RelaxedOrder);
             return std::nullopt;
         }
 
@@ -135,13 +106,8 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
         auto file = m_filesystem->Open(cachedFilePath);
         if (buffer != nullptr) {
             const auto bytesRead = file->Read(buffer, offset, bytesToRead);
-            m_stats.hits.fetch_add(1, RelaxedOrder);
-            if (bytesRead > 0) {
-                m_stats.bytesServedFromCache.fetch_add(static_cast<uint64_t>(bytesRead), RelaxedOrder);
-            }
             return bytesRead;
         } else {
-            m_stats.hits.fetch_add(1, RelaxedOrder);
             return 0;
         }
     }
@@ -182,10 +148,6 @@ void FileCache::SetCacheSize(int64_t size) {
 
     m_maxSize = size;
 }
-
-FileCacheStats::Snapshot FileCache::GetStats() const noexcept { return m_stats.GetSnapshot(); }
-
-void FileCache::ResetStats() noexcept { m_stats.Reset(); }
 
 void FileCache::BackgroundDownload(std::stop_token stopToken) {
     while (true) {
@@ -300,15 +262,10 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                 BOOST_LOG_SEV(*m_logger, error)
                     << "Failed to download file '" << filePath << "'. Removing entry from cache. Error: " << e.what();
 
-                m_stats.downloadsFailed.fetch_add(1, RelaxedOrder);
-
                 std::scoped_lock lock(m_mutex);
                 RemoveFileUnsafe(filePath);
                 continue;
             }
-
-            m_stats.downloadsCompleted.fetch_add(1, RelaxedOrder);
-            m_stats.bytesDownloaded.fetch_add(static_cast<uint64_t>(fileSize), RelaxedOrder);
 
             BOOST_LOG_SEV(*m_logger, debug) << "Finished downloading file '" << filePath << "'";
 
@@ -396,9 +353,6 @@ bool FileCache::EvictAtLeast(const int64_t bytes) {
                                         << "'bytes' from file cache";
         tail = --tail;
         bytesEvicted += fileSize;
-
-        m_stats.evictions.fetch_add(1, RelaxedOrder);
-        m_stats.bytesEvicted.fetch_add(static_cast<uint64_t>(fileSize), RelaxedOrder);
 
         RemoveFileUnsafe(filePath);
     }
