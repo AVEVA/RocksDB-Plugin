@@ -258,6 +258,38 @@ TEST_F(FileCacheTests, CacheSizeExceeded) {
     ASSERT_EQ(3, m_removedFiles.size());
 }
 
+TEST_F(FileCacheTests, FreshDownload_IsNotTheFirstEntryEvicted) {
+    // Arrange
+    const auto fileSize = static_cast<int64_t>(20000);
+    EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(fileSize));
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
+        auto file = std::make_unique<FileMock>();
+        EXPECT_CALL(*file, Read(_, _, _)).WillRepeatedly([](char*, uint64_t offset, uint64_t length) {
+            return length - offset;
+        });
+        return file;
+    });
+    char buffer[1];
+    // 4.sst is first seen before the others are used, so it holds the oldest LRU position when it is queued.
+    EXPECT_FALSE(m_cache.ReadFile("4.sst", 0, 1, buffer));
+    EnsureReadFromCache("1.sst");
+    EnsureReadFromCache("2.sst");
+    EnsureReadFromCache("3.sst");
+    EXPECT_FALSE(m_cache.ReadFile("4.sst", 0, 1, buffer));
+    m_cache.WaitUntilIdle();
+    ASSERT_EQ(4 * fileSize, m_cache.CacheSize());
+
+    // Act - make room for exactly one eviction.
+    m_cache.SetCacheSize(3 * fileSize);
+
+    // Assert - the oldest previously-active file goes, not the download that just finished.
+    m_cache.WaitUntilIdle();
+    EXPECT_FALSE(m_cache.HasFile("1.sst"));
+    EXPECT_TRUE(m_cache.HasFile("4.sst"));
+    EXPECT_EQ(3 * fileSize, m_cache.CacheSize());
+}
+
 TEST_F(FileCacheTests, SetCacheSize_EvictsTheOnlyEntry) {
     // Arrange
     const auto fileSize = static_cast<int64_t>(20000);

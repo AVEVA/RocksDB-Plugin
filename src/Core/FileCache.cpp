@@ -106,6 +106,8 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
                 BOOST_LOG_SEV(*m_logger, debug) << "File is stale. Queueing for download: '" << filePath << "'";
                 m_fileDownloadQueue.emplace(filePath);
 
+                // A fresh download must not sit at its old, possibly least recent, LRU position.
+                EntryAccessedUnsafe(fileEntry);
                 // Mark as downloading now so we don't queue it again.
                 UpdateEntryUnsafe(
                     fileEntry, [](FileCacheEntry& entry) { entry.SetState(FileCacheEntry::State::QueuedForDownload); });
@@ -442,6 +444,8 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                 BOOST_LOG_SEV(*m_logger, debug) << "Marking file '" << filePath << "' as active";
                 UpdateEntryUnsafe(it->second,
                                   [](FileCacheEntry& entry) { entry.SetState(FileCacheEntry::State::Active); });
+                // The download took a while; the entry is the newest one, so a trim below must not pick it first.
+                EntryAccessedUnsafe(it->second);
 
                 // SetCacheSize may have lowered the maximum while this file was downloading, and it was not yet
                 // counted then.
