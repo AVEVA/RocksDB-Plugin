@@ -130,10 +130,13 @@ std::optional<AVEVA::RocksDB::Plugin::Core::SecondaryCacheOptions> CommonSeconda
 }
 
 // Name used both as the ObjectLibrary registration id and the
-// --secondary_cache_uri value that selects this backend.
-constexpr const char* kFileBasedSecondaryCacheName = "aveva-file-based-secondary-cache";
+// --secondary_cache_uri value that selects this backend. Includes the
+// "://" suffix because RocksDB's ObjectLibrary matches the registered id
+// against the *entire* --secondary_cache_uri string - it doesn't strip the
+// scheme separator before comparing.
+constexpr const char* kFileBasedSecondaryCacheName = "aveva-file-based-secondary-cache://";
 #if defined(AVEVA_ROCKSDB_WITH_CACHELIB)
-constexpr const char* kCacheLibSecondaryCacheName = "aveva-cachelib-secondary-cache";
+constexpr const char* kCacheLibSecondaryCacheName = "aveva-cachelib-secondary-cache://";
 #endif
 
 // Registers a factory for AVEVA's file-based secondary cache
@@ -289,9 +292,9 @@ int main(int argc, char** argv) {
               << "    --fs_uri=" << fsUri << "\n"
               << "    --db=" << dbPath << "/<your-db-name>\n"
               << "  To also attach a secondary cache, add one of:\n"
-              << "    --secondary_cache_uri=" << kFileBasedSecondaryCacheName << "://\n"
+              << "    --secondary_cache_uri=" << kFileBasedSecondaryCacheName << "\n"
 #if defined(AVEVA_ROCKSDB_WITH_CACHELIB)
-              << "    --secondary_cache_uri=" << kCacheLibSecondaryCacheName << "://\n"
+              << "    --secondary_cache_uri=" << kCacheLibSecondaryCacheName << "\n"
 #endif
               << "  with AVEVA_DB_BENCH_SECONDARY_CACHE_DIR set (and optionally\n"
               << "  AVEVA_DB_BENCH_SECONDARY_CACHE_CAPACITY_MB and, for CacheLib,\n"
