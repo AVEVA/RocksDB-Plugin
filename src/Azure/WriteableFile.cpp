@@ -78,16 +78,11 @@ rocksdb::IOStatus WriteableFile::Sync(const rocksdb::IOOptions&, rocksdb::IODebu
 }
 
 uint64_t WriteableFile::GetFileSize(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    try {
-        const auto fileSize = m_file->GetFileSize();
-
-        assert(fileSize >= 0 && "File size should not be negative");
-        assert(fileSize <= std::numeric_limits<int64_t>::max() && "File size must fit in int64_t");
-
-        return static_cast<uint64_t>(fileSize);
-    } catch (...) {
-        AzureErrorTranslator::FromCurrentException(*m_logger, "GetFileSize");
-        return 0;
-    }
+    // The writer tracks its own size, so this never needs a round-trip to Azure and cannot fail: a transient service
+    // error must not make RocksDB believe the file is empty.
+    static_assert(noexcept(std::declval<const Impl::WriteableFileImpl&>().GetFileSize()));
+    const auto fileSize = m_file->GetFileSize();
+    assert(fileSize >= 0 && "File size should not be negative");
+    return static_cast<uint64_t>(fileSize);
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure

@@ -152,6 +152,21 @@ TEST_F(WriteableFileTests, RangeSync_UploadInFlight_ReturnsWithoutWaitingAndSync
     EXPECT_NO_THROW(file.Sync());
 }
 
+TEST_F(WriteableFileTests, GetFileSize_AfterUploadFailure_StillReportsTheTrackedSize) {
+    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
+    m_env.Blob->DeferUploads = true;
+
+    auto file = MakeFile();
+    file.Append(std::vector<char>(pageSize, 'a'));
+    file.RangeSync();
+    ASSERT_EQ(1U, m_env.Blob->PendingUploads());
+    m_env.Blob->FailUpload(FakeBlobServer::Error(503, "unavailable"), 0);
+
+    EXPECT_EQ(pageSize, file.GetFileSize());
+    EXPECT_THROW(file.Sync(), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
+    EXPECT_EQ(pageSize, file.GetFileSize());
+}
+
 TEST_F(WriteableFileTests, Sync_WritesFencedWhileAnUploadWasInFlight_FailsEvenThoughTheUploadSucceeded) {
     m_env.Blob->DeferUploads = true;
 
