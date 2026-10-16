@@ -93,6 +93,15 @@ using ChunkLength = NumericLabel<std::uint64_t, ChunkLengthTag>;
 
 [[nodiscard]] BlobStorageError MakeInvalidResponse(std::string message);
 
+// A sink may throw anything; an exception must never unwind through the event loop, so it counts as a failed write.
+[[nodiscard]] inline bool TryWrite(DownloadSink& sink, std::string data) noexcept {
+    try {
+        return sink.Write(std::move(data));
+    } catch (...) {
+        return false;
+    }
+}
+
 [[nodiscard]] std::optional<BlobStorageError> ToFailure(std::error_code error, const HttpResponse& response);
 
 [[nodiscard]] std::string TakeBody(HttpResponse& response);
@@ -379,6 +388,9 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         } catch (const std::exception&) {
             Fail(MakeFailure(std::errc::not_enough_memory));
             return;
+        } catch (...) {
+            Fail(MakeFailure(std::errc::io_error, "The download sink failed to reserve space."));
+            return;
         }
 
         m_chunkConditions = m_options.Conditions;
@@ -508,11 +520,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
                             bool ok = true;
                             for (auto& chunk : batch) {
                                 const std::size_t chunkSize = chunk.size();
-                                try {
-                                    ok = self->m_sink->Write(std::move(chunk));
-                                } catch (const std::exception&) {
-                                    ok = false;
-                                }
+                                ok = TryWrite(*self->m_sink, std::move(chunk));
                                 if (!ok) {
                                     break;
                                 }
@@ -539,7 +547,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
 
     [[nodiscard]] bool WriteToSink(std::string data) {
         const std::size_t size = data.size();
-        if (!m_sink->Write(std::move(data))) {
+        if (!TryWrite(*m_sink, std::move(data))) {
             Fail(MakeFailure(std::errc::io_error, "Failed to write the downloaded data."));
             return false;
         }

@@ -10,6 +10,7 @@
 
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
+#include <AVEVA/AzureClient/Detail/BlobDownload.hpp>
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
 
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
@@ -455,6 +456,73 @@ TEST(AC_R01_DownloadRangeOverflowTests, LengthThatOverflowsTheRangeEndIsRejected
     EXPECT_EQ(result->error().Code, std::make_error_code(std::errc::invalid_argument));
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
+namespace {
+struct NonStandardThrow {};
+
+// Throws a type that does not derive from std::exception, from Reserve or Write.
+class ThrowingSink final : public AVEVA::AzureClient::Private::DownloadSink {
+  public:
+    ThrowingSink(bool inlineWrites, bool throwOnReserve)
+        : m_inlineWrites(inlineWrites), m_throwOnReserve(throwOnReserve) {}
+
+    void Reserve(std::uint64_t /*size*/) override {
+        if (m_throwOnReserve) {
+            throw NonStandardThrow{};
+        }
+    }
+
+    [[nodiscard]] bool WritesInline() const noexcept override { return m_inlineWrites; }
+
+    [[nodiscard]] bool Write(std::string /*data*/) override { throw NonStandardThrow{}; }
+
+  private:
+    bool m_inlineWrites;
+    bool m_throwOnReserve;
+};
+
+[[nodiscard]] std::optional<AVEVA::AzureClient::Private::DownloadDetail::SummaryResult>
+DownloadIntoThrowingSink(bool inlineWrites, bool throwOnReserve) {
+    using AVEVA::AzureClient::NoTokenCredential;
+    using AVEVA::AzureClient::Private::BasicBlobTarget;
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(10);
+    httpClient.DefaultResponse() =
+        HttpResponse{206, MakeCanonicalSuccessHeaders({{"Content-Range", "bytes 0-9/10"}}), content};
+    BasicBlobTarget<NoTokenCredential> target{AVEVA::AzureClient::Private::MakeBlobTarget(BuildOptions()), nullptr};
+
+    DownloadToOptions options;
+    options.WriteScheduler = [](std::move_only_function<void()> task) { task(); };
+    std::optional<AVEVA::AzureClient::Private::DownloadDetail::SummaryResult> result;
+    AVEVA::AzureClient::Private::DownloadDetail::StartDownload(
+        httpClient, target, options, std::make_shared<ThrowingSink>(inlineWrites, throwOnReserve),
+        [&](AVEVA::AzureClient::Private::DownloadDetail::SummaryResult value) { result = std::move(value); },
+        AVEVA::AzureClient::AzureRequestOptions{});
+    (void)httpClient.RunUntil([&] { return result.has_value(); });
+    return result;
+}
+} // namespace
+
+TEST(AC_R05_DownloadSinkExceptionTests, NonStandardExceptionFromAnInlineWriteIsAnIoError) {
+    const auto result = DownloadIntoThrowingSink(true, false);
+    ASSERT_TRUE(result.has_value());
+    ASSERT_FALSE(result->has_value());
+    EXPECT_EQ(result->error().Code, std::make_error_code(std::errc::io_error));
+}
+
+TEST(AC_R05_DownloadSinkExceptionTests, NonStandardExceptionFromAScheduledWriteIsAnIoError) {
+    const auto result = DownloadIntoThrowingSink(false, false);
+    ASSERT_TRUE(result.has_value());
+    ASSERT_FALSE(result->has_value());
+    EXPECT_EQ(result->error().Code, std::make_error_code(std::errc::io_error));
+}
+
+TEST(AC_R05_DownloadSinkExceptionTests, NonStandardExceptionFromReserveIsAnIoError) {
+    const auto result = DownloadIntoThrowingSink(true, true);
+    ASSERT_TRUE(result.has_value());
+    ASSERT_FALSE(result->has_value());
+    EXPECT_EQ(result->error().Code, std::make_error_code(std::errc::io_error));
+}
+
 TEST(B05_DownloadIgnoredRangeTests, OffsetRangeAnswered200IsInvalidResponse) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(20);
