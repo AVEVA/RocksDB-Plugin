@@ -105,7 +105,9 @@ int main(int argc, char** argv) {
                                    /* backup */ std::nullopt, logger);
     if (!status.ok()) {
         std::cerr << "aveva_db_bench: Plugin::Register failed: " << status.ToString() << "\n";
-        return 3;
+        // Not `return`: that runs static destructors while the detached threads are still inside run().
+        std::fflush(nullptr);
+        std::_Exit(3);
     }
 
     const auto fsUri = Plugin::NameFor(primary);
