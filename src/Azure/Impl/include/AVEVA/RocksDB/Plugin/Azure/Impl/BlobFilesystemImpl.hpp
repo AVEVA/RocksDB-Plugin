@@ -122,7 +122,6 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     boost::intrusive::list<LockFileType, boost::intrusive::constant_time_size<false>> m_locks;
     // Parallel to m_locks; lets the renewal loop keep locks alive while it renews outside m_lockFilesMutex.
     std::vector<std::weak_ptr<LockFileType>> m_renewableLocks;
-    // Declared last: Stop()ped first thing in the destructor, before anything its callbacks use is released.
     // Concrete callables for the lease renewal loop; defined in the .cpp where they can reach the private state.
     struct RenewableLocksSnapshot {
         BasicBlobFilesystemImpl* Owner;
@@ -134,6 +133,7 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     };
     using LeaseRenewal = BasicLeaseRenewalLoop<RenewableLocksSnapshot, FenceWritesOnFatal, LockFileType>;
 
+    // Declared last: Stop()ped first thing in the destructor, before anything its callbacks use is released.
     std::shared_ptr<LeaseRenewal> m_leaseRenewal;
     [[nodiscard]] std::optional<std::chrono::steady_clock::duration> EarliestRenewalTimeRemaining() const;
 

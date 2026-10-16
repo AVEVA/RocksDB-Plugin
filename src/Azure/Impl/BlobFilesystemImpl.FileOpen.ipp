@@ -81,7 +81,7 @@ BasicBlobFilesystemImpl<THttp>::ReopenWriteableFile(const std::string& filePath)
                              std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)),
                              BlobFilesystemDetail::FindCache(m_fileCaches, prefix),
                              m_logger,
-                             static_cast<int64_t>(bufferSize)};
+                             bufferSize};
 }
 
 template <typename THttp>
@@ -100,7 +100,7 @@ BasicBlobFilesystemImpl<THttp>::ReuseWritableFile(const std::string& filePath) {
                              std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)),
                              BlobFilesystemDetail::FindCache(m_fileCaches, prefix),
                              m_logger,
-                             static_cast<int64_t>(bufferSize),
+                             bufferSize,
                              typename WriteableFileType::BlobState{0, initialSize}};
 }
 
