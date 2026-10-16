@@ -150,9 +150,10 @@ jobs:
         run: ctest --test-dir build/LinuxDebug --output-on-failure --build-config Debug --parallel 4 -LE 'core|http-client'
 
   db-bench:
-    # Builds the patched RocksDB overlay and tools/db_bench, which no other job exercises. Runs on manual request, and
-    # on pull requests only when they touch the overlay, the tool or the manifest (the overlay build is slow).
-    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.build_db_bench) || github.event_name == 'pull_request' }}
+    # Builds the patched RocksDB overlay and tools/db_bench, which no other job exercises. Runs on manual request and on
+    # every push to main; on pull requests only when they touch something the tool is built from (the overlay build is
+    # slow).
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.build_db_bench) || github.event_name == 'pull_request' || github.event_name == 'push' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -161,7 +162,6 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-          fetch-depth: 0
 
       - name: Detect relevant changes
         id: changes
@@ -169,13 +169,18 @@ jobs:
           EVENT: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          if [ "$EVENT" != "pull_request" ] ||
-             git diff --name-only "$BASE_SHA"...HEAD |
-               grep -qE '^(infrastructure/vcpkg-overlays/|tools/db_bench/|vcpkg\.json$|CMakeLists\.txt$)'; then
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The checkout is the PR merge commit, so only the base tip is needed to list what the PR changes.
+          git fetch --quiet --depth=1 origin "$BASE_SHA"
+          if git diff --name-only "$BASE_SHA" HEAD |
+               grep -qE '^(include/|src/|libs/|infrastructure/|tools/db_bench/|\.github/actions/setup-vcpkg/|vcpkg\.json$|vcpkg-configuration\.json$|CMakeLists\.txt$|CMakePresets\.json$)'; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
           else
             echo "relevant=false" >> "$GITHUB_OUTPUT"
-            echo "No overlay or db_bench changes; skipping."
+            echo "No library, overlay or db_bench changes; skipping."
           fi
 
       - uses: ./.github/actions/setup-vcpkg
