@@ -377,9 +377,12 @@ class FakeHttpClient final {
     }
 
     // Runs handlers (including timers such as retry backoff) until `done()` holds, blocking on the
-    // io_context rather than sleeping. `timeout` is only a deadlock guard; returns false if it expires.
+    // io_context rather than spinning. Each wait is capped so the poll lock is released and `done()` is
+    // re-evaluated even when it turns true from another thread without a handler running here. `timeout` is only a
+    // deadlock watchdog; returns false if it expires.
     [[nodiscard]] bool RunUntil(const std::function<bool()>& done,
                                 std::chrono::milliseconds timeout = std::chrono::seconds{10}) {
+        constexpr std::chrono::milliseconds maxWait{100};
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         while (!done()) {
             const auto remaining = deadline - std::chrono::steady_clock::now();
@@ -388,7 +391,7 @@ class FakeHttpClient final {
             }
             std::scoped_lock lock(m_pollMutex);
             m_context.restart();
-            m_context.run_one_for(remaining);
+            m_context.run_one_for(std::min<std::chrono::steady_clock::duration>(remaining, maxWait));
         }
         return true;
     }
