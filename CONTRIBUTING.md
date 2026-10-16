@@ -11,6 +11,9 @@ This repository is currently maintained by AVEVA teams.
    (CMake, clang-format/clang-tidy, gitleaks, vcpkg) and configures the shared git
    hooks path (`core.hooksPath = .github/hooks`) so the pre-commit hook runs locally.
 
+The CI format check pins clang-format 22.1.3 (`CLANG_FORMAT_VERSION` in `.github/workflows/build-and-test.yml`).
+Use clang-format 22.x locally; `devdoctor.ps1` warns on a different major version.
+
 ## Build and Test
 
 1. Configure: `cmake --preset WindowsDebug` or `cmake --preset LinuxDebug`
