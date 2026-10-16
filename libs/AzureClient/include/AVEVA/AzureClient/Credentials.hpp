@@ -38,7 +38,9 @@
 // Microsoft Entra ID token credentials that request tokens through an HTTP client (any HttpClientLike).
 //
 // Lifetime: each credential keeps a non-owning reference to the HTTP client, which must outlive the credential and
-// every in-flight GetTokenAsync. Completions run on the HTTP client's executor.
+// every in-flight GetTokenAsync. The credential itself must also outlive every in-flight GetTokenAsync: the
+// initiations capture `this`, so destroying a credential while a call is pending is undefined behaviour. Completions
+// run on the HTTP client's executor.
 //
 // Every GetTokenAsync sends a token request; wrap the credential in CachingTokenCredential to reuse tokens until
 // they approach expiry.
