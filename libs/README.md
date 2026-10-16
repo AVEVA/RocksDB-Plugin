@@ -11,6 +11,15 @@ identifiers inline.
 The root `vcpkg.json` is the only manifest used by this repository's build, and the root `.clang-format`,
 `.clang-tidy` and `.editorconfig` apply to these libraries.
 
+## Boost.Asio is part of the public API
+
+The public headers of both libraries expose Boost.Asio types on purpose (`executor_type`, `get_executor()`,
+`boost::asio::default_completion_token`, cancellation slots and associated executors). This is what lets callers
+choose a completion token (`use_future`, `use_awaitable`, a plain callback, ...) and supply their own `io_context`.
+Treat the Asio version as part of the API/ABI contract: consumers must build against the same Boost.Asio that these
+libraries were built with, and changing it is a breaking change. The libraries never own or run an `io_context`; the
+host injects one. Redesigning the API to hide Asio is deliberately out of scope.
+
 ## Local modifications
 
 Both libraries have diverged from the imported 0.0.1 tree. The changes are in the commit range
