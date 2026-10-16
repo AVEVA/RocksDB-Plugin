@@ -98,7 +98,7 @@ TEST_F(WriteableFileIntegrationTests, Flush_PersistsData_ToBlob) {
 
     // Act
     file.Append(testData);
-    file.Flush(); // Flush without closing
+    file.Sync(); // Flush only uploads whole pages; Sync also uploads the trailing partial page.
 
     // Assert - Data should be persisted, but size metadata may not be updated yet
     // Download the actual uploaded data (rounded to page size)

@@ -396,6 +396,9 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
             try {
                 const auto actualFilePath = m_cachePath / filePath;
 
+                // Blob paths are nested (db directory/file), and the downloader will not create the parents.
+                std::filesystem::create_directories(actualFilePath.parent_path());
+
                 // No need to download the _whole_ blob. There could be lots of padding
                 // at the end of the file. We can just download the actual size.
                 m_containerClient->DownloadBlobTo(filePath, actualFilePath, 0, fileSize);

@@ -1003,8 +1003,15 @@ TEST_F(BlobFilesystemIntegrationTests, ReopenWriteableFile_NonExistentFile_Throw
     // Arrange
     std::string nonExistentFile = m_containerPrefix + "/nonexistent-reopen-" + m_blobName;
 
-    // Act & Assert - Reopening non-existent file should throw
-    EXPECT_THROW({ auto file = m_filesystem->ReopenWriteableFile(nonExistentFile); }, std::exception);
+    // Act - RocksDB expects reopening to create a missing file, as the POSIX Env does
+    {
+        auto file = m_filesystem->ReopenWriteableFile(nonExistentFile);
+        file.Close();
+    }
+
+    // Assert
+    EXPECT_TRUE(m_filesystem->FileExists(nonExistentFile));
+    EXPECT_EQ(0, m_filesystem->GetFileSize(nonExistentFile));
 }
 
 TEST_F(BlobFilesystemIntegrationTests, DeleteDir_EmptyDirectory_ReturnsZero) {
@@ -1053,6 +1060,7 @@ TEST_F(BlobFilesystemIntegrationTests, CreateWriteableFile_VeryLongPath_HandlesC
     {
         auto file = m_filesystem->CreateWriteableFile(longPath);
         file.Append(std::vector<char>(100, 'L'));
+        file.Close();
     }
 
     // Assert
@@ -1071,6 +1079,7 @@ TEST_F(BlobFilesystemIntegrationTests, CreateWriteableFile_SpecialCharactersInNa
     {
         auto file = m_filesystem->CreateWriteableFile(specialPath);
         file.Append(std::vector<char>(50, 'X'));
+        file.Close();
     }
 
     // Assert
@@ -1440,7 +1449,7 @@ TEST_F(BlobFilesystemIntegrationTests, ReadableFile_CachedSst_IsServedFromCacheA
     {
         auto writer = filesystem.CreateWriteableFile(path);
         writer.Append(data);
-        writer.Sync();
+        writer.Close();
     }
     auto file = filesystem.CreateReadableFile(path);
 
