@@ -407,10 +407,10 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                     << "Failed to download file '" << filePath << "'. Removing entry from cache. Error: " << e.what();
 
                 std::scoped_lock lock(m_mutex);
-                // Only the entry this thread set to Downloading is ours to drop. If it was marked stale or queued
-                // again meanwhile, that newer state must survive: a queued entry is downloaded afresh when popped.
+                // A newer queued request (the entry was marked stale during the download and read again) must
+                // survive: it is downloaded afresh when popped. Anything else is the failed attempt's to drop.
                 if (const auto failed = m_cache.find(filePath);
-                    failed != m_cache.end() && failed->second.GetState() == FileCacheEntry::State::Downloading) {
+                    failed != m_cache.end() && failed->second.GetState() != FileCacheEntry::State::QueuedForDownload) {
                     RemoveFileUnsafe(filePath);
                 }
                 continue;
