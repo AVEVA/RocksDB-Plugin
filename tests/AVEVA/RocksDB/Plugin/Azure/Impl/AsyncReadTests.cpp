@@ -724,6 +724,48 @@ TEST_F(AsyncReadTests, AbortIO_AfterDownloadFailed_ReportsTheRealError) {
     EXPECT_FALSE(record.Status.IsAborted()) << record.Status.ToString();
 }
 
+TEST(AsyncReadRequestTests, Abort_NotifiesTheSharedSignalSoWaitersWakeUp) {
+    auto signal = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::AsyncReadSignal>();
+    std::vector<char> scratch(16);
+    rocksdb::FSReadRequest fsRequest;
+    fsRequest.offset = 0;
+    fsRequest.len = scratch.size();
+    fsRequest.scratch = scratch.data();
+    AVEVA::RocksDB::Plugin::Azure::Impl::AsyncReadRequest request(fsRequest, RecordCallback, nullptr, signal);
+
+    const auto seen = signal->Count();
+    request.Abort();
+
+    EXPECT_GT(signal->Count(), seen);
+    signal->WaitPast(seen);
+    EXPECT_TRUE(request.Finished());
+}
+
+TEST(AsyncReadRequestTests, DeliverCallback_NullCallback_DoesNotCrash) {
+    std::vector<char> scratch(16);
+    rocksdb::FSReadRequest fsRequest;
+    fsRequest.offset = 0;
+    fsRequest.len = scratch.size();
+    fsRequest.scratch = scratch.data();
+    AVEVA::RocksDB::Plugin::Azure::Impl::AsyncReadRequest request(fsRequest, nullptr, nullptr);
+    request.Abort();
+
+    EXPECT_NO_THROW(request.DeliverCallback());
+}
+
+TEST_F(AsyncReadTests, ReadAsync_NullCallback_ReturnsInvalidArgument) {
+    auto file = CreateFile(m_deferredEnv);
+    std::vector<char> scratch(16);
+    auto req = MakeRequest(0, scratch);
+    IoHandle handle;
+
+    const auto status =
+        file.ReadAsync(req, rocksdb::IOOptions{}, nullptr, nullptr, &handle.Handle, &handle.Deleter, nullptr);
+
+    EXPECT_TRUE(status.IsInvalidArgument()) << status.ToString();
+    EXPECT_EQ(0U, m_deferredEnv.Blob->PendingDownloads());
+}
+
 TEST_F(AsyncReadTests, ReadAsync_PreconditionFailedEveryTime_StopsAfterTheRetryLimitAndReportsAnError) {
     auto file = CreateFile(m_deferredEnv);
     std::vector<char> scratch(16);

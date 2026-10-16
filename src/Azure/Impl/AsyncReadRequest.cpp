@@ -75,6 +75,9 @@ void AsyncReadRequest::Abort() {
         m_bytesRead = 0;
     }
     m_finished.notify_all();
+    if (m_signal) {
+        m_signal->Notify();
+    }
 }
 
 void AsyncReadRequest::DeliverCallback() {
@@ -94,7 +97,9 @@ void AsyncReadRequest::DeliverCallback() {
     }
 
     // Invoked without holding the lock: the callback may re-enter the filesystem (e.g. issue another read).
-    m_callback(request, m_callbackArg);
+    if (m_callback) {
+        m_callback(request, m_callbackArg);
+    }
 }
 
 void DeleteAsyncReadHandle(void* handle) {

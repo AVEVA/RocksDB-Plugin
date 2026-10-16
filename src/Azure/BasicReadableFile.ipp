@@ -74,6 +74,9 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& re
            "offset exceeds int64_t max value");
     assert(req.len <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) &&
            "size_t value exceeds int64_t max value");
+    if (!cb) {
+        return rocksdb::IOStatus::InvalidArgument("ReadAsync requires a callback");
+    }
     try {
         auto request = std::make_shared<AsyncReadRequest>(req, std::move(cb), cb_arg, std::move(signal));
         auto handle = std::make_unique<AsyncReadHandle>(AsyncReadHandle{request});
