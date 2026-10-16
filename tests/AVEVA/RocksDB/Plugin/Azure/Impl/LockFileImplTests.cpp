@@ -597,6 +597,30 @@ TEST(LeaseRenewalLoopBackoffTests, RetryDelayNeverOutlastsTheRenewalDeadline) {
         EXPECT_LT(gap.count(), 200);
     }
 }
+TEST(LeaseRenewalLoopBackoffTests, WakeUpAfterRetriesRunOutNeverOutlastsTheRenewalDeadline) {
+    using Loop = BasicLeaseRenewalLoop<FailingSnapshot, ScriptedFatal, FailingLock>;
+    boost::asio::io_context context;
+    auto guard = boost::asio::make_work_guard(context);
+    std::jthread thread([&context] { context.run(); });
+    auto logger = std::make_shared<Loop::Logger>();
+    auto state = std::make_shared<FailingLock::Shared>();
+    FatalCounter fatal;
+    FailingSnapshot snapshot{{std::make_shared<FailingLock>(FailingLock{state, std::chrono::milliseconds(20)})}};
+
+    // Five attempts per round, then a regular wake-up that must be pulled in to the 20 ms deadline, not 5 s.
+    auto loop = Loop::Start(context.get_executor(), logger, snapshot, ScriptedFatal{&fatal},
+                            std::chrono::milliseconds(1500), std::chrono::milliseconds(1), 5);
+    {
+        std::unique_lock lock(state->Mutex);
+        EXPECT_TRUE(state->Attempted.wait_for(lock, std::chrono::seconds(8), [&] { return state->Calls.size() >= 6; }));
+    }
+    loop->Stop();
+    guard.reset();
+    thread.join();
+    ASSERT_GE(state->Calls.size(), 6u);
+    EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(state->Calls[5] - state->Calls[4]).count(), 700);
+}
+
 TEST(LeaseRenewalLoopThrowTests, StopGivesUpOnARoundThatNeverCompletes) {
     boost::asio::io_context context;
     auto guard = boost::asio::make_work_guard(context);

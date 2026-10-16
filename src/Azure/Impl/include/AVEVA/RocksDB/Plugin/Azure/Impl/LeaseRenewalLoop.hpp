@@ -315,8 +315,22 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
             }
         }
 
+        // Out of retries but not yet overdue: the next regular wake-up must not land after the renewal deadline, or
+        // the lease could lapse while writes continue.
         finish();
-        ScheduleWakeUp(m_interval);
+        ScheduleWakeUp(ClampToEarliestDeadline(m_interval, stillPending));
+    }
+
+    // Shortens `delay` so a wake-up never fires after the earliest renewal deadline of `pending`.
+    static std::chrono::milliseconds ClampToEarliestDeadline(std::chrono::milliseconds delay,
+                                                             const std::vector<std::shared_ptr<TLock>>& pending) {
+        for (const auto& lock : pending) {
+            if (const auto remaining = lock->RenewalTimeRemaining()) {
+                delay = std::min(delay, std::max(std::chrono::milliseconds{0},
+                                                 std::chrono::duration_cast<std::chrono::milliseconds>(*remaining)));
+            }
+        }
+        return delay;
     }
 
     // Exponential backoff with jitter (half to full of the step, so concurrent filesystems do not retry in
