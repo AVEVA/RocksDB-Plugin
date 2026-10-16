@@ -266,13 +266,23 @@ template <typename Stream> void RequestOperation<Stream>::Resolve() {
 
 template <typename Stream> const void* RequestOperation<Stream>::LookupScope() const { return m_lookupScope; }
 
-template <typename Stream>
-void RequestOperation<Stream>::OnResolve(boost::system::error_code error, const Tcp::resolver::results_type& results) {
+// Every asynchronous callback starts here: a finished request has nothing left to do, and a requested
+// cancellation is carried out on the request's own executor.
+template <typename Stream> bool RequestOperation<Stream>::AbortIfNeeded() {
     if (m_finished) {
-        return;
+        return true;
     }
     if (IsCancellationRequested()) {
-        return Cancel();
+        Cancel();
+        return true;
+    }
+    return false;
+}
+
+template <typename Stream>
+void RequestOperation<Stream>::OnResolve(boost::system::error_code error, const Tcp::resolver::results_type& results) {
+    if (AbortIfNeeded()) {
+        return;
     }
     if (error) {
         return Fail(HttpClientError::ResolveFailed, error);
@@ -284,11 +294,8 @@ void RequestOperation<Stream>::OnResolve(boost::system::error_code error, const 
 }
 
 template <typename Stream> void RequestOperation<Stream>::OnConnect(boost::system::error_code error) {
-    if (m_finished) {
+    if (AbortIfNeeded()) {
         return;
-    }
-    if (IsCancellationRequested()) {
-        return Cancel();
     }
     if (error) {
         if (m_resolvedFromCache) {
@@ -300,11 +307,8 @@ template <typename Stream> void RequestOperation<Stream>::OnConnect(boost::syste
     if constexpr (std::is_same_v<Stream, TlsStream>) {
         m_stream->async_handshake(asio::ssl::stream_base::client,
                                   [self = this->shared_from_this()](boost::system::error_code handshakeError) {
-                                      if (self->m_finished) {
+                                      if (self->AbortIfNeeded()) {
                                           return;
-                                      }
-                                      if (self->IsCancellationRequested()) {
-                                          return self->Cancel();
                                       }
                                       if (handshakeError) {
                                           return self->Fail(HttpClientError::TlsFailed, handshakeError);
@@ -317,19 +321,13 @@ template <typename Stream> void RequestOperation<Stream>::OnConnect(boost::syste
 }
 
 template <typename Stream> void RequestOperation<Stream>::Write() {
-    if (m_finished) {
+    if (AbortIfNeeded()) {
         return;
-    }
-    if (IsCancellationRequested()) {
-        return Cancel();
     }
     http::async_write(*m_stream, m_request,
                       [self = this->shared_from_this()](boost::system::error_code error, std::size_t bytesWritten) {
-                          if (self->m_finished) {
+                          if (self->AbortIfNeeded()) {
                               return;
-                          }
-                          if (self->IsCancellationRequested()) {
-                              return self->Cancel();
                           }
                           if (error) {
                               if (self->MaybeRetryAfterReuseFailure(bytesWritten != 0)) {
@@ -342,11 +340,8 @@ template <typename Stream> void RequestOperation<Stream>::Write() {
 }
 
 template <typename Stream> void RequestOperation<Stream>::Read() {
-    if (m_finished) {
+    if (AbortIfNeeded()) {
         return;
-    }
-    if (IsCancellationRequested()) {
-        return Cancel();
     }
     http::async_read(
         *m_stream, m_buffer, *m_parser,
@@ -354,11 +349,8 @@ template <typename Stream> void RequestOperation<Stream>::Read() {
 }
 
 template <typename Stream> void RequestOperation<Stream>::OnRead(boost::system::error_code error) {
-    if (m_finished) {
+    if (AbortIfNeeded()) {
         return;
-    }
-    if (IsCancellationRequested()) {
-        return Cancel();
     }
     if (error) {
         error = AcceptTruncatedTlsBody(error);

@@ -312,6 +312,13 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     void Cancel() { Finish(std::make_error_code(std::errc::operation_canceled), {}); }
 
     /// <summary>
+    /// Called first in every asynchronous callback.
+    /// </summary>
+    /// <returns>True when the request is already finished or has just been cancelled, so the callback must
+    /// do nothing further.</returns>
+    bool AbortIfNeeded();
+
+    /// <summary>
     /// Stops the timer and the resolver, closes the connection, and invokes the completion handler. Only the
     /// first call has an effect, so a failure that races the deadline is reported once.
     /// </summary>
