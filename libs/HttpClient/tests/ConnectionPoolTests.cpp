@@ -391,6 +391,19 @@ TEST(ConnectionPool, DestroyingThePoolFromAnotherThreadHandsIdleSocketsToTheirEx
     EXPECT_EQ(context.poll(), 2U);
 }
 
+TEST(ConnectionPool, IdleBuffersAboveTheRetentionCapAreReleasedAndSmallOnesKept) {
+    namespace beast = boost::beast;
+    beast::flat_buffer small;
+    small.prepare(AVEVA::Private::MaxRetainedBufferCapacity);
+    AVEVA::Private::TrimIdleBuffer(small);
+    EXPECT_GE(small.capacity(), AVEVA::Private::MaxRetainedBufferCapacity);
+
+    beast::flat_buffer large;
+    large.prepare(AVEVA::Private::MaxRetainedBufferCapacity * 4);
+    AVEVA::Private::TrimIdleBuffer(large);
+    EXPECT_LE(large.capacity(), AVEVA::Private::MaxRetainedBufferCapacity);
+}
+
 TEST(ConnectionPool, ConcurrentAcquireReleaseAcrossThreadsStaysConsistent) {
     struct ConcurrentTrackedStream {
         explicit ConcurrentTrackedStream(int streamIdentity, std::atomic<int>& streamLiveCount)

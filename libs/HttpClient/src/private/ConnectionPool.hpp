@@ -67,8 +67,9 @@ template <typename Stream> struct ConnectionKeyEqual {
 /// <summary>
 /// Buffers up to this capacity are kept as-is when a connection is pooled so the next response on it does
 /// not have to reallocate; larger ones are released so an idle connection does not pin a big response.
+/// Kept small because up to maxTotalIdle connections may each hold one.
 /// </summary>
-inline constexpr std::size_t MaxRetainedBufferCapacity = 64 * 1024;
+inline constexpr std::size_t MaxRetainedBufferCapacity = 16 * 1024;
 
 /// <summary>
 /// Releases a buffer's memory if it grew past <see cref="MaxRetainedBufferCapacity"/>.
