@@ -441,12 +441,12 @@ TEST(RetryTests, UnauthorizedResponseAfterTheDeadlineDoesNotRefreshTheToken) {
     BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{httpClient, std::move(options), credential};
 
     AVEVA::AzureClient::AzureRequestOptions requestOptions;
-    requestOptions.SetTotalDeadline(std::chrono::milliseconds{50});
+    requestOptions.SetTotalDeadline(std::chrono::milliseconds{15});
     std::optional<DeleteResult> observed;
     client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) { observed = std::move(result); }));
     ASSERT_TRUE(PollUntil(httpClient, [&] { return httpClient.PendingCount() == 1U; }, std::chrono::seconds{2}));
     // The 401 arrives after the deadline but before its timer has been serviced.
-    std::this_thread::sleep_for(std::chrono::milliseconds{120});
+    std::this_thread::sleep_for(std::chrono::milliseconds{40});
     ASSERT_TRUE(httpClient.CompleteNext());
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}));
 
