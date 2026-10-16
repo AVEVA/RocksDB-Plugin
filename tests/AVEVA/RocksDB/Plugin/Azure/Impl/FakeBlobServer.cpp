@@ -157,7 +157,7 @@ std::optional<Result> FakeBlobServer::Respond(const FakeHttpClient::RequestRecor
         return GetPageRanges(request, blob);
     }
     if (method == HttpMethod::Delete) {
-        return DeleteBlob(blob);
+        return DeleteBlob(request, blob);
     }
     if (method == HttpMethod::Put && comp == "lease") {
         return Lease(request, blob);
@@ -184,6 +184,11 @@ Result FakeBlobServer::Create(const HttpRequest& request, const std::string& pat
     const auto existing = m_blobs.find(path);
     if (existing != m_blobs.end() && existing->second.Exists && Header(request, "If-None-Match") == "*") {
         return Failure(409U, "BlobAlreadyExists");
+    }
+    if (existing != m_blobs.end() && existing->second.Exists) {
+        if (const auto conflict = LeaseConflict(request, existing->second)) {
+            return *conflict;
+        }
     }
     // Put Page Blob overwrites an existing blob outright.
     StoredBlob& blob = m_blobs[path];
@@ -215,9 +220,26 @@ void FakeBlobServer::ApplyMetadata(const HttpRequest& request, StoredBlob& blob)
     }
 }
 
-Result FakeBlobServer::DeleteBlob(StoredBlob& blob) {
+std::optional<Result> FakeBlobServer::LeaseConflict(const HttpRequest& request, const StoredBlob& blob) const {
+    if (blob.LeaseId.empty() || blob.LeaseExpiry <= m_clock()) {
+        return std::nullopt;
+    }
+    const auto supplied = Header(request, "x-ms-lease-id");
+    if (supplied.empty()) {
+        return Failure(412U, "LeaseIdMissing");
+    }
+    if (supplied != blob.LeaseId) {
+        return Failure(412U, "LeaseIdMismatchWithBlobOperation");
+    }
+    return std::nullopt;
+}
+
+Result FakeBlobServer::DeleteBlob(const HttpRequest& request, StoredBlob& blob) {
     if (const auto fault = FaultFor(Operation::DeleteBlob)) {
         return FailureResult(*fault);
+    }
+    if (const auto conflict = LeaseConflict(request, blob)) {
+        return *conflict;
     }
     blob.Exists = false;
     blob.Data.clear();
@@ -230,7 +252,7 @@ Result FakeBlobServer::DeleteBlob(StoredBlob& blob) {
 
 Result FakeBlobServer::Lease(const HttpRequest& request, StoredBlob& blob) {
     const auto action = Header(request, "x-ms-lease-action");
-    const auto now = std::chrono::steady_clock::now();
+    const auto now = m_clock();
     const bool held = !blob.LeaseId.empty() && blob.LeaseExpiry > now;
     if (action == "acquire") {
         if (const auto fault = FaultFor(Operation::AcquireLease)) {
@@ -289,9 +311,8 @@ void FakeBlobServer::ExtendLease(const HttpRequest& request, StoredBlob& blob) {
         std::from_chars(duration.data(), duration.data() + duration.size(), seconds).ec == std::errc{}) {
         blob.LeaseSeconds = seconds;
     }
-    blob.LeaseExpiry = blob.LeaseSeconds < 0
-                           ? std::chrono::steady_clock::time_point::max()
-                           : std::chrono::steady_clock::now() + std::chrono::seconds(blob.LeaseSeconds);
+    blob.LeaseExpiry = blob.LeaseSeconds < 0 ? std::chrono::steady_clock::time_point::max()
+                                             : m_clock() + std::chrono::seconds(blob.LeaseSeconds);
 }
 
 std::string FakeBlobServer::XmlEscape(std::string_view text) {
@@ -455,6 +476,9 @@ Result FakeBlobServer::SetMetadata(const HttpRequest& request, StoredBlob& blob)
 Result FakeBlobServer::Resize(const HttpRequest& request, StoredBlob& blob) {
     if (const auto fault = FaultFor(Operation::Resize)) {
         return FailureResult(*fault);
+    }
+    if (const auto conflict = LeaseConflict(request, blob)) {
+        return *conflict;
     }
     if (IfMatchFails(request, blob)) {
         return Failure(412U, "ConditionNotMet");

@@ -156,6 +156,7 @@ class FakeBlobServer {
 
     FakeHttpClient* m_http;
     std::mutex m_mutex;
+    std::function<std::chrono::steady_clock::time_point()> m_clock = [] { return std::chrono::steady_clock::now(); };
     // Keyed by "container/blob". Nodes are never relocated, so the public members below can refer into the primary.
     std::map<std::string, StoredBlob> m_blobs;
     std::string m_primaryPath;
@@ -362,7 +363,17 @@ class FakeBlobServer {
     // Replaces the blob's metadata with the request's x-ms-meta-* headers; "filesize" is the plugin's logical size.
     static void ApplyMetadata(const HttpRequest& request, StoredBlob& blob);
 
-    Result DeleteBlob(StoredBlob& blob);
+  public:
+    // Lease expiry reads this clock, so a test can lapse a lease deterministically instead of sleeping.
+    void SetClock(std::function<std::chrono::steady_clock::time_point()> clock) {
+        std::scoped_lock lock(m_mutex);
+        m_clock = std::move(clock);
+    }
+
+  private:
+    Result DeleteBlob(const HttpRequest& request, StoredBlob& blob);
+    // A held lease makes writes without its id fail the way the service does (412), so fencing is testable.
+    std::optional<Result> LeaseConflict(const HttpRequest& request, const StoredBlob& blob) const;
 
     // Lease Blob: one lease per blob, held until released or its duration passes. A lease that has lapsed can be
     // taken by anyone, as on the service.

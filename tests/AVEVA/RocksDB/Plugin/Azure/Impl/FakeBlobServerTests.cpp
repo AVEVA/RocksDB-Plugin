@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <memory>
@@ -102,4 +103,32 @@ TEST_F(FakeBlobServerTests, ReleasedLease_CannotBeRenewedWithTheOldIdAfterANewAc
 
     renew.LeaseId = "second";
     EXPECT_EQ(Ok, Start([&](auto h) { m_env.Client->RenewLeaseAsync(renew, std::move(h)); }).get());
+}
+
+TEST_F(FakeBlobServerTests, LeasedBlob_RejectsDeleteAndResizeWithoutTheLeaseId) {
+    AVEVA::AzureClient::AcquireLeaseOptions acquire;
+    acquire.ProposedLeaseId = "held";
+    acquire.Duration = std::chrono::seconds(60);
+    ASSERT_EQ(Ok, Start([&](auto h) { m_env.Client->AcquireLeaseAsync(acquire, std::move(h)); }).get());
+
+    EXPECT_EQ(412U, Start([&](auto h) { m_env.Client->DeleteAsync(std::move(h)); }).get());
+    EXPECT_EQ(412U, Start([&](auto h) { m_env.Client->ResizeAsync(2 * Page, std::move(h)); }).get());
+
+    AVEVA::AzureClient::DeleteBlobOptions withLease;
+    withLease.Conditions.LeaseId = "held";
+    EXPECT_EQ(Ok, Start([&](auto h) { m_env.Client->DeleteAsync(withLease, std::move(h)); }).get());
+}
+
+TEST_F(FakeBlobServerTests, LeaseLapsedByTheInjectedClock_NoLongerFencesWrites) {
+    auto now = std::make_shared<std::atomic<std::chrono::steady_clock::time_point>>(std::chrono::steady_clock::now());
+    m_env.Blob->SetClock([now] { return now->load(); });
+    AVEVA::AzureClient::AcquireLeaseOptions acquire;
+    acquire.ProposedLeaseId = "held";
+    acquire.Duration = std::chrono::seconds(15);
+    ASSERT_EQ(Ok, Start([&](auto h) { m_env.Client->AcquireLeaseAsync(acquire, std::move(h)); }).get());
+    ASSERT_EQ(412U, Start([&](auto h) { m_env.Client->ResizeAsync(2 * Page, std::move(h)); }).get());
+
+    now->store(now->load() + std::chrono::seconds(16));
+
+    EXPECT_EQ(Ok, Start([&](auto h) { m_env.Client->ResizeAsync(2 * Page, std::move(h)); }).get());
 }
