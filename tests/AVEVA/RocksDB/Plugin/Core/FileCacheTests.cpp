@@ -704,6 +704,29 @@ TEST_F(FileCacheTests, RunningTotals_StayConsistentThroughEvictionAndRefresh) {
     // Assert
     EXPECT_LE(m_cache.CacheSize(), 20U);
 }
+TEST_F(FileCacheTests, SetCacheSize_ShrinkingBelowTheCurrentSizeEvictsAgainstTheNewMaximum) {
+    // Arrange
+    EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(20));
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
+        auto file = std::make_unique<FileMock>();
+        EXPECT_CALL(*file, Read(_, _, _)).WillRepeatedly([](char*, uint64_t, uint64_t length) { return length; });
+        return file;
+    });
+    m_cache.SetCacheSize(100);
+    for (int i = 0; i < 3; ++i) {
+        EnsureReadFromCache(std::to_string(i) + ".sst", static_cast<int64_t>(20 * (i + 1)));
+    }
+    ASSERT_EQ(60U, m_cache.CacheSize());
+
+    // Act: evicting 50 bytes is more than the new maximum of 10, which must not be mistaken for an oversized file.
+    m_cache.SetCacheSize(10);
+    m_cache.WaitUntilIdle();
+
+    // Assert
+    EXPECT_LE(m_cache.CacheSize(), 10U);
+}
+
 TEST_F(FileCacheTests, EvictedFiles_AreDeletedBeforeTheNextFileIsDownloaded) {
     // Arrange
     const auto fileSize = static_cast<int64_t>(100);

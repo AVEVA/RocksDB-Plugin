@@ -95,7 +95,12 @@ class FileCache {
     void RetryFailedDeletesOnShutdown();
     void EntryAccessedUnsafe(FileCacheEntry& file);
     size_t PruneUndownloadedStaleEntriesUnsafe();
-    bool EvictAtLeast(int64_t bytes);
+    // Makes room for an incoming file by evicting `bytes`; refuses when that is more than the whole cache could hold.
+    bool EvictToFit(int64_t bytes);
+    // Evicts least recently used files until the active size is within the current maximum. Returns false (after
+    // logging) when downloads in progress keep it above the maximum.
+    bool ShrinkToMaxUnsafe();
+    bool EvictBytesUnsafe(int64_t bytes);
     void RemoveFileUnsafe(std::string_view filePath);
     // Applies `mutate` to the entry and keeps the running totals consistent with its new state and size.
     template <typename F> void UpdateEntryUnsafe(FileCacheEntry& entry, F&& mutate, bool removing = false);

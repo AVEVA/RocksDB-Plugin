@@ -216,14 +216,9 @@ void FileCache::SetCacheSize(int64_t size) {
     }
 
     std::scoped_lock lock(m_mutex);
-    const auto currentSize = GetCurrentSizeUnsafe();
-    if (currentSize > size) {
-        // Evict files until we are under the new size.
-        const auto bytesToEvict = currentSize - size;
-        EvictAtLeast(bytesToEvict);
-    }
-
+    // The new maximum is set first so eviction is measured against it, not against the size being replaced.
     m_maxSize = size;
+    ShrinkToMaxUnsafe();
 }
 
 bool FileCache::WaitUntilIdle(const std::optional<std::chrono::milliseconds> timeout) {
@@ -396,7 +391,7 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                                                         << filePath << "' of size " << fileSize << " (bytes)";
 
                         const auto bytesToEvict = (currentSize + fileSize) - m_maxSize;
-                        if (!EvictAtLeast(bytesToEvict)) {
+                        if (!EvictToFit(bytesToEvict)) {
                             BOOST_LOG_SEV(*m_logger, error)
                                 << "Couldn't evict enough space to fit new file '" << filePath << "'";
                             RemoveFileUnsafe(filePath);
@@ -469,11 +464,8 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
 
                 // SetCacheSize may have lowered the maximum while this file was downloading, and it was not yet
                 // counted then.
-                if (const auto size = GetCurrentSizeUnsafe(); size > m_maxSize) {
-                    EvictAtLeast(size - m_maxSize);
-                    if (GetCurrentSizeUnsafe() > m_maxSize) {
-                        RemoveFileUnsafe(filePath);
-                    }
+                if (!ShrinkToMaxUnsafe()) {
+                    RemoveFileUnsafe(filePath);
                 }
             } else {
                 // The file was likely deleted. We should clean up after ourselves; the delete runs on the next pass
@@ -508,14 +500,33 @@ size_t FileCache::PruneUndownloadedStaleEntriesUnsafe() {
     return pruned;
 }
 
-bool FileCache::EvictAtLeast(const int64_t bytes) {
+bool FileCache::EvictToFit(const int64_t bytes) {
     if (bytes > m_maxSize) {
         // No point in evicting everything from the cache if we can't fit the new file.
         BOOST_LOG_SEV(*m_logger, debug) << "Skipping eviction from file cache because " << bytes
                                         << " bytes is greater than the maximum of " << m_maxSize;
         return false;
     }
+    return EvictBytesUnsafe(bytes);
+}
 
+bool FileCache::ShrinkToMaxUnsafe() {
+    const auto size = GetCurrentSizeUnsafe();
+    if (size <= m_maxSize) {
+        return true;
+    }
+    EvictBytesUnsafe(size - m_maxSize);
+    const auto remaining = GetCurrentSizeUnsafe();
+    if (remaining > m_maxSize) {
+        BOOST_LOG_SEV(*m_logger, warning)
+            << "File cache is still " << remaining << " bytes after shrinking to the maximum of " << m_maxSize
+            << " bytes; the rest is not evictable yet";
+        return false;
+    }
+    return true;
+}
+
+bool FileCache::EvictBytesUnsafe(const int64_t bytes) {
     BOOST_LOG_SEV(*m_logger, debug) << "Attempting to evict " << bytes << " (bytes) from the file cache.";
     int64_t bytesEvicted = 0;
     if (m_entryList.empty()) {
