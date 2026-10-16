@@ -91,7 +91,11 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
         // A new entry is stale with no size yet.
         m_metadataOnlyList.push_front(inserted->second);
         ++m_undownloadedStaleCount;
-        PruneUndownloadedStaleEntriesUnsafe();
+        const auto pruned = PruneUndownloadedStaleEntriesUnsafe();
+        lock.unlock();
+        if (pruned != 0) {
+            BOOST_LOG_SEV(*m_logger, debug) << "Pruned " << pruned << " stale metadata-only entries";
+        }
         return std::nullopt;
     } else {
         auto& fileEntry = it->second;
@@ -457,18 +461,20 @@ void FileCache::EntryAccessedUnsafe(FileCacheEntry& file) {
     m_entryList.push_front(file);
 }
 
-void FileCache::PruneUndownloadedStaleEntriesUnsafe() {
+size_t FileCache::PruneUndownloadedStaleEntriesUnsafe() {
     ValidateCountersUnsafe();
     if (m_undownloadedStaleCount <= MaxUndownloadedStaleEntries) {
-        return;
+        return 0;
     }
 
     // Oldest first. Removing an entry unlinks it from m_metadataOnlyList, so the list shrinks on every iteration.
+    size_t pruned = 0;
     while (m_undownloadedStaleCount > MaxUndownloadedStaleEntries && !m_metadataOnlyList.empty()) {
         const std::string staleEntry = m_metadataOnlyList.back().GetFilePath();
-        BOOST_LOG_SEV(*m_logger, debug) << "Pruning stale metadata-only entry '" << staleEntry << "'";
         RemoveFileUnsafe(staleEntry);
+        ++pruned;
     }
+    return pruned;
 }
 
 bool FileCache::EvictAtLeast(const int64_t bytes) {

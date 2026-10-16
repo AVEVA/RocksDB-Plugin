@@ -87,7 +87,7 @@ class FileCache {
     void BackgroundDownload(std::stop_token stopToken);
     void RetryFailedDeletesOnShutdown();
     void EntryAccessedUnsafe(FileCacheEntry& file);
-    void PruneUndownloadedStaleEntriesUnsafe();
+    size_t PruneUndownloadedStaleEntriesUnsafe();
     bool EvictAtLeast(int64_t bytes);
     void RemoveFileUnsafe(std::string_view filePath);
     // Applies `mutate` to the entry and keeps the running totals consistent with its new state and size.
