@@ -16,6 +16,7 @@ add_library(aveva-rocksdb-plugin-azure STATIC
     ReadWriteFile.cpp
     BlobFilesystem.cpp
     Plugin.cpp
+    PluginRegistry.cpp
 )
 add_library(aveva::rocksdb-plugin-azure ALIAS aveva-rocksdb-plugin-azure)
 set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../../include")
