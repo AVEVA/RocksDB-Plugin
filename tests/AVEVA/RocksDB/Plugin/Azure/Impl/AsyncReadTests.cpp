@@ -1022,3 +1022,27 @@ TEST_F(AsyncReadTests, ReadAsync_TrackedReadEndsAfterCompletionAndPoll) {
     tracker->Drain();
     EXPECT_EQ(0U, tracker->InFlight());
 }
+
+// A responder records a held request before the transport registers it as pending. Counting the held requests in
+// that window must not forget the request: doing so made the 32-wide MultiRead window tests wait for a download that
+// the test had silently dropped.
+TEST(HeldRequestsTests, CountingBeforeTheTransportRegistersTheRequestKeepsIt) {
+    AVEVA::AzureClient::Tests::FakeHttpClient http;
+    AVEVA::AzureClient::Tests::HeldRequests<> held;
+    size_t countedWhileUnregistered = 0;
+    http.SetResponder([&](const AVEVA::AzureClient::Tests::FakeHttpClient::RequestRecord& record) {
+        AVEVA::AzureClient::Tests::FakeHttpClient::ScriptedResult result;
+        result.Deferred = true;
+        held.Add(record.Index);
+        countedWhileUnregistered = held.Count(http);
+        return result;
+    });
+
+    http.SendAsyncErased(
+        AVEVA::HttpRequest{}, [](std::error_code, AVEVA::HttpResponse) {}, AVEVA::HttpRequestOptions{});
+
+    EXPECT_EQ(1U, countedWhileUnregistered);
+    EXPECT_EQ(1U, held.Count(http));
+    EXPECT_TRUE(http.CompleteRequest(0));
+    EXPECT_EQ(0U, held.Count(http));
+}

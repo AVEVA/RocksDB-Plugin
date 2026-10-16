@@ -35,6 +35,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -125,7 +126,7 @@ template <typename TMeta = std::monostate> class HeldRequests {
 
   private:
     template <class Http> void Prune(const Http& http) {
-        std::erase_if(m_entries, [&](const Entry& entry) { return !http.IsPending(entry.RequestIndex); });
+        std::erase_if(m_entries, [&](const Entry& entry) { return http.HasLeftPending(entry.RequestIndex); });
     }
 
     std::deque<Entry> m_entries;
@@ -452,6 +453,7 @@ class FakeHttpClient final {
                                                       .Completion = std::move(completion),
                                                       .RequestIndex = requestIndex,
                                                       .OnComplete = std::move(scripted.OnComplete)});
+                m_registeredDeferred.insert(requestIndex);
             }
 
             // Honour the HttpClient cancellation contract: if the caller attached a
@@ -537,6 +539,15 @@ class FakeHttpClient final {
     [[nodiscard]] bool IsPending(std::size_t requestIndex) const {
         SettleWriters();
         return FindPending(requestIndex).has_value();
+    }
+
+    // True once a deferred request was completed, failed or cancelled. A responder that holds a request records it
+    // before SendAsyncErased registers it as pending, so "not pending yet" must not be mistaken for "not pending
+    // any more": a hold list pruned in that window would lose the request for good.
+    [[nodiscard]] bool HasLeftPending(std::size_t requestIndex) const {
+        SettleWriters();
+        std::scoped_lock lock(m_mutex);
+        return m_registeredDeferred.contains(requestIndex) && !FindPendingLocked(requestIndex).has_value();
     }
 
     [[nodiscard]] bool CompleteRequest(std::size_t requestIndex) {
@@ -715,6 +726,10 @@ class FakeHttpClient final {
 
     [[nodiscard]] std::optional<std::size_t> FindPending(std::size_t requestIndex) const {
         std::scoped_lock lock(m_mutex);
+        return FindPendingLocked(requestIndex);
+    }
+
+    [[nodiscard]] std::optional<std::size_t> FindPendingLocked(std::size_t requestIndex) const {
         for (std::size_t index = 0; index < m_pending.size(); ++index) {
             if (m_pending.at(index).RequestIndex == requestIndex) {
                 return index;
@@ -763,6 +778,7 @@ class FakeHttpClient final {
     std::deque<ScriptedResult> m_scriptedResults;
     std::deque<PendingCompletion> m_pending;
     std::deque<RequestRecord> m_requests;
+    std::set<std::size_t> m_registeredDeferred;
 
     // Track live instances so test helpers can Poll() all clients automatically when needed.
     static inline std::vector<FakeHttpClient*> s_instances;
