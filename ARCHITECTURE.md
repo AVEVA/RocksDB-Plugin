@@ -20,7 +20,8 @@ The AVEVA RocksDB Plugin provides filesystem and caching extensions so RocksDB c
 ## Client Libraries
 
 - `libs/HttpClient` (`aveva-http-client`): asio/Beast HTTP client with DNS cache, connection pool, TLS session cache and
-  an idempotency-aware retry policy. Plain `http://` endpoints are rejected unless `AllowInsecureHttp` is set.
+  an idempotency-aware retry policy. The transport does not enforce a scheme policy; `AllowInsecureHttp` is enforced by
+  `libs/AzureClient`.
 - `libs/AzureClient` (`aveva-azure-client`): Blob Storage REST client built on HttpClient. Transport failures are mapped
   to `BlobStorageErrorCode`, with the transport cause kept in the error details.
 
@@ -53,7 +54,7 @@ container by passing `cachePath` and `maxCacheSize` to `Plugin::Register`.
   download that raced with the change is discarded rather than activated.
 - **Background deletes.** Evicted or removed entries leave the accounting immediately, but their read handles are
   closed and files deleted on the background thread, outside the cache mutex (an open file cannot be deleted on
-  Windows). A failed delete is retried once at shutdown and then logged.
+  Windows). A failed delete is logged, retried on every background wake-up, and tried once more at shutdown.
 - **Stale-entry cap.** Metadata-only stale entries are capped at 2048; beyond that the oldest are pruned in O(1) from a
   dedicated list so the index cannot grow without bound.
 
