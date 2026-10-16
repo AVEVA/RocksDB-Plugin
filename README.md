@@ -152,11 +152,11 @@ and the list of [known plugins](https://github.com/facebook/rocksdb/blob/main/PL
 The Azure client is now trimmed and in-tree, which changed the public surface:
 
 * **`Core/BlobClient.hpp` and `Impl/PageBlob.hpp` are gone.** Code that included `AVEVA/RocksDB/Plugin/Core/BlobClient.hpp` should use `Core::ContainerClient` (`Core/ContainerClient.hpp`) for container-level operations, and the in-tree AzureClient types for blob I/O: `AVEVA::AzureClient::BlobContainerClient`, `PageBlobClient` and `BlobClient` (headers under `AVEVA/AzureClient/`, package `aveva-azure-client`, see [libs/README.md](libs/README.md)). Calls return Asio-aware async operations; pass a completion token such as `use_future` and never block on the host `io_context` thread.
-* The constructors of `BlobFilesystem`, `ReadableFile`, `WriteableFile`, `ReadWriteFile`, `LockFile`, `Directory`, `Logger` and the `Plugin` registration now take the injected `io_context`/client types; update call sites accordingly.
+* The Azure implementation classes (`BlobFilesystem` and the file, lock and directory types behind it) now take the injected `io_context` and client types. Consumers should not construct them directly: register the filesystem through `Plugin::Register` and let RocksDB create it from its `azblobfs...` URI.
 * The old `Plugin::Register` overloads without an `io_context` remain as `[[deprecated]]` shims: they run the plugin on a process-wide, plugin-owned `io_context` thread. Migrate to the `io_context` overloads. The filesystem is registered under both the new `Plugin::NameFor` name and the legacy `Plugin::Name + db + backupDb` name so existing `azblobfs...` URIs keep resolving.
 * `http:` endpoints are rejected unless `AllowInsecureHttp = true` is set on the client options (credentials are still refused over non-loopback `http`).
 * Ranged downloads now require a valid `Content-Range` on every `206` response.
-* `HttpRequestOptions::SetMaxRetries` and `HttpClientOptions::SetIdleConnectionTimeout` throw `std::invalid_argument` for negative values.
+* `AzureClient::AzureRequestOptions::SetMaxRetries` and `HttpClientOptions::SetIdleConnectionTimeout` throw `std::invalid_argument` for negative values.
 
 ## Building
 
