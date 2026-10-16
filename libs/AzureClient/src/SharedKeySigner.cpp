@@ -193,6 +193,18 @@ void AppendCollapsedWhitespace(std::string& out, std::string_view value) {
         out.push_back(space ? ' ' : character);
     }
 }
+
+[[nodiscard]] char ToLowerAsciiChar(char character) noexcept {
+    return character >= 'A' && character <= 'Z' ? static_cast<char>(character - 'A' + 'a') : character;
+}
+
+[[nodiscard]] bool IsSignableHeader(const HttpHeader& header) noexcept {
+    const std::string_view name = header.GetName();
+    const auto clean = [](std::string_view text) {
+        return text.find_first_of(std::string_view{"\r\n\0", 3}) == std::string_view::npos;
+    };
+    return !name.empty() && name.find(':') == std::string_view::npos && clean(name) && clean(header.GetValue());
+}
 } // namespace
 
 std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpRequest& request) {
@@ -218,12 +230,26 @@ std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpR
     std::array<bool, 11> fieldFound{};
     const std::vector<HttpHeader>& headers = request.GetHeaders();
     // Names are lowercased before comparing because the culture-aware tables only rank lowercase letters.
-    std::vector<std::pair<std::string, std::size_t>> canonicalizedHeaders;
-    canonicalizedHeaders.reserve(headers.size());
+    // All lowercase names share one buffer (one allocation instead of one per header); entries index into it.
+    struct CanonicalizedHeader {
+        std::size_t Offset;
+        std::size_t Length;
+        std::size_t Index;
+    };
+    std::string lowercaseNames;
+    std::vector<CanonicalizedHeader> entries;
+    entries.reserve(headers.size());
     for (std::size_t index = 0; index < headers.size(); ++index) {
         const HttpHeader& header = headers.at(index);
         if (IStartsWith(header.GetName(), "x-ms-")) {
-            canonicalizedHeaders.emplace_back(ToLowerAscii(header.GetName()), index);
+            // Sign only what will be sent: a CR, LF or NUL here could make the signed text differ from the wire form.
+            if (!IsSignableHeader(header)) {
+                throw std::invalid_argument("Cannot sign a request with a malformed x-ms-* header.");
+            }
+            entries.push_back({lowercaseNames.size(), header.GetName().size(), index});
+            for (const char character : header.GetName()) {
+                lowercaseNames.push_back(ToLowerAsciiChar(character));
+            }
             continue;
         }
         for (std::size_t slot = 0; slot < fieldHeaderNames.size(); ++slot) {
@@ -234,6 +260,12 @@ std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpR
                 break;
             }
         }
+    }
+    std::vector<std::pair<std::string_view, std::size_t>> canonicalizedHeaders;
+    canonicalizedHeaders.reserve(entries.size());
+    for (const CanonicalizedHeader& entry : entries) {
+        canonicalizedHeaders.emplace_back(std::string_view{lowercaseNames}.substr(entry.Offset, entry.Length),
+                                          entry.Index);
     }
     std::ranges::stable_sort(canonicalizedHeaders,
                              [](const auto& lhs, const auto& rhs) { return CultureAwareLess(lhs.first, rhs.first); });

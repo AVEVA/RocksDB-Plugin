@@ -766,6 +766,34 @@ TEST(SharedKeyCanonicalizationTests, RepeatedHeadersAndQueryParametersAreGrouped
     EXPECT_NE(toSign.find("/account/container/blob\na:y,z\nb:2\ncomp:list"), std::string::npos) << toSign;
 }
 
+TEST(AS_R12_SharedKeyGoldenTests, EncodedPathPutWithEmptyBodyAndRepeatedHeaders) {
+    AVEVA::HttpRequest request;
+    request.SetMethod(HttpMethod::Put);
+    request.SetUrl("https://account.blob.core.windows.net/cont/my%20dir%2Fblob?comp=metadata&Z=2&z=1");
+    request.AddHeader(AVEVA::HttpHeader{"x-ms-version", "2024-11-04"});
+    request.AddHeader(AVEVA::HttpHeader{"x-ms-date", "Sun, 06 Nov 1994 08:49:37 GMT"});
+    request.AddHeader(AVEVA::HttpHeader{"x-ms-meta-a", "1"});
+    request.AddHeader(AVEVA::HttpHeader{"x-ms-meta-a", "2"});
+
+    // The path is signed in its encoded form; an empty body yields an empty Content-Length field.
+    EXPECT_EQ(AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request),
+              "PUT\n\n\n\n\n\n\n\n\n\n\n\n"
+              "x-ms-date:Sun, 06 Nov 1994 08:49:37 GMT\nx-ms-meta-a:1,2\nx-ms-version:2024-11-04\n"
+              "/account/cont/my%20dir%2Fblob\ncomp:metadata\nz:1,2");
+}
+
+TEST(AS_R06_SharedKeySignerValidationTests, RejectsXMsHeadersThatCouldBeSignedDifferentlyFromTheirWireForm) {
+    for (const auto& [name, value] : std::vector<std::pair<std::string, std::string>>{
+             {"x-ms-a", "v\r\nx-ms-b: 1"}, {"x-ms-a\n", "v"}, {"x-ms-a:b", "v"}, {"x-ms-a", std::string("v\0w", 3)}}) {
+        AVEVA::HttpRequest request;
+        request.SetMethod(HttpMethod::Get);
+        request.SetUrl("https://account.blob.core.windows.net/container/blob");
+        request.AddHeader(AVEVA::HttpHeader{name, value});
+        EXPECT_THROW(static_cast<void>(AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request)),
+                     std::invalid_argument);
+    }
+}
+
 TEST(SharedKeyCanonicalizationTests, UnparseableUrlIsRejectedInsteadOfSigningTheRootPath) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Get);
