@@ -31,9 +31,6 @@ target_sources(aveva-rocksdb-plugin-core
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/LocalFile.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
 )
-install(TARGETS aveva-rocksdb-plugin-core
-    EXPORT
-)
 find_package(boost_algorithm CONFIG REQUIRED)
 find_package(boost_container CONFIG REQUIRED)
 find_package(boost_scope CONFIG REQUIRED)
