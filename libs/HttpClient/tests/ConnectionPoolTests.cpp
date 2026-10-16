@@ -378,6 +378,39 @@ TEST(ConnectionPool, SweepHandsExpiredSocketsToTheirExecutorInsteadOfClosingThem
     EXPECT_EQ(context.poll(), 1U);
 }
 
+TEST(ConnectionPool, AcquireDropsExpiredSocketsThroughTheirExecutorToo) {
+    asio::io_context context;
+    ConnectionPool<PlainStream, FakeClock> pool(4, ShortTimeout);
+    const ConnectionKey<PlainStream> key{"127.0.0.1", "80"};
+    pool.Release(key, PooledConnection<PlainStream>{std::make_unique<PlainStream>(context), {}});
+    FakeClock::Advance(ShortTimeout * 2);
+
+    EXPECT_FALSE(pool.Acquire(key).has_value());
+    EXPECT_EQ(context.poll(), 1U);
+}
+
+TEST(ConnectionPool, EvictionOnReleaseHandsTheEvictedSocketToItsExecutor) {
+    asio::io_context context;
+    ConnectionPool<PlainStream, FakeClock> pool(1, LongTimeout);
+    const ConnectionKey<PlainStream> key{"127.0.0.1", "80"};
+    EXPECT_TRUE(pool.Release(key, PooledConnection<PlainStream>{std::make_unique<PlainStream>(context), {}}));
+    EXPECT_EQ(context.poll(), 0U);
+    context.restart(); // poll() with no work leaves the context stopped.
+
+    // The per-origin cap of one evicts the first connection.
+    EXPECT_TRUE(pool.Release(key, PooledConnection<PlainStream>{std::make_unique<PlainStream>(context), {}}));
+    EXPECT_EQ(context.poll(), 1U);
+}
+
+TEST(ConnectionPool, ReleaseLeavesAConnectionItDidNotTakeWithTheCaller) {
+    asio::io_context context;
+    ConnectionPool<PlainStream, FakeClock> disabled(0, LongTimeout);
+    PooledConnection<PlainStream> connection{std::make_unique<PlainStream>(context), {}};
+
+    EXPECT_FALSE(disabled.Release({"127.0.0.1", "80"}, std::move(connection)));
+    EXPECT_NE(connection.stream, nullptr);
+}
+
 TEST(ConnectionPool, DestroyingThePoolFromAnotherThreadHandsIdleSocketsToTheirExecutor) {
     asio::io_context context;
     auto pool = std::make_unique<ConnectionPool<PlainStream, FakeClock>>(4, LongTimeout);

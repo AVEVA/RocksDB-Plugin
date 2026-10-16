@@ -455,6 +455,21 @@ TEST(HttpClientTls, ConnectionCloseSendsTlsCloseNotify) {
     EXPECT_EQ(server.CloseObservations()[0], asio::error::eof) << server.CloseObservations()[0].message();
 }
 
+TEST(HttpClientTls, ConnectionThatIsNotPooledIsClosedWithCloseNotify) {
+    asio::io_context context;
+    TlsTestServer server(context, "IP:127.0.0.1", TlsTestServer::AfterResponse::KeepOpen);
+    server.SetOnClose([&server]() { server.Stop(); });
+    AVEVA::HttpClientOptions options;
+    options.SetMaxIdleConnectionsPerHost(0);
+    const auto outcomes = SendSequentialRequests(context, server, options, "127.0.0.1", 1, false);
+
+    ASSERT_EQ(outcomes.size(), 1U);
+    EXPECT_FALSE(outcomes[0].Error) << outcomes[0].Error.message();
+    ASSERT_EQ(server.CloseObservations().size(), 1U);
+    // Dropping the stream without a TLS shutdown would be seen as stream_truncated instead of a clean EOF.
+    EXPECT_EQ(server.CloseObservations()[0], asio::error::eof) << server.CloseObservations()[0].message();
+}
+
 TEST(HttpClientTls, RequestStateIsReleasedAtCompletionNotAfterTheTlsShutdownGracePeriod) {
     asio::io_context context;
     // The server never answers the client's close_notify, so the shutdown only ends at the grace timeout.

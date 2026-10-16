@@ -123,7 +123,8 @@ using LruHook = intrusive::list_base_hook<intrusive::tag<LruTag>, intrusive::lin
 /// costs a few pointer writes and never allocates, and retired nodes are recycled rather than
 /// freed so a steady request stream performs no node allocation at all.
 ///
-/// All public operations are thread-safe. Retired sockets are always destroyed outside the lock.
+/// All public operations are thread-safe. Retired sockets are always destroyed outside the lock,
+/// on their own executors.
 /// </summary>
 template <typename Stream, typename Clock = std::chrono::steady_clock, typename Notifier = SweeperNotifier>
 class ConnectionPool {
@@ -237,6 +238,7 @@ class ConnectionPool {
             if (idleFor < m_probeThreshold || IsAlive(*connection)) {
                 return connection;
             }
+            DisposeConnection(std::move(*connection));
         }
         return std::nullopt;
     }
@@ -273,8 +275,8 @@ class ConnectionPool {
                 }
             }
         }
-        // Closing the retired sockets runs outside the lock.
-        retired.clear_and_dispose(NodeDisposer{});
+        // Closing the retired sockets runs outside the lock, on their own executors.
+        retired.clear_and_dispose(ExecutorDisposer{});
         return connection;
     }
 
@@ -285,16 +287,18 @@ class ConnectionPool {
     /// the pool is left unchanged and the connection stays with the caller.
     /// </summary>
     /// <param name="key">The origin the connection belongs to.</param>
-    /// <param name="connection">The connection and its read buffer, taken over on success.</param>
-    void Release(const ConnectionKey<Stream>& key, PooledConnection<Stream> connection) {
+    /// <param name="connection">The connection and its read buffer; moved from only when the pool takes it, so
+    /// otherwise the caller still owns it and can close it gracefully.</param>
+    /// <returns>True when the pool took ownership of the connection.</returns>
+    bool Release(const ConnectionKey<Stream>& key, PooledConnection<Stream>&& connection) {
         if (m_maxIdlePerKey == 0 || m_maxTotalIdle == 0 || !connection.stream) {
-            return;
+            return false;
         }
         LruList retired;
         // Closes retired sockets after the lock is released on every path, including a throwing allocation.
         struct DisposeOnExit {
             LruList& list;
-            ~DisposeOnExit() { list.clear_and_dispose(NodeDisposer{}); }
+            ~DisposeOnExit() { list.clear_and_dispose(ExecutorDisposer{}); }
         } disposeRetired{retired};
         bool notify = false;
         {
@@ -348,9 +352,30 @@ class ConnectionPool {
         if (notify) {
             m_notifier();
         }
+        return true;
     }
 
   private:
+    /// <summary>
+    /// Destroys a connection on its stream's own executor when the stream has one, so an I/O object is never torn
+    /// down on whichever thread happened to call into the pool. Falls back to destroying it in place if posting
+    /// fails.
+    /// </summary>
+    /// <param name="connection">The connection to destroy.</param>
+    static void DisposeConnection(PooledConnection<Stream>&& connection) noexcept {
+        if constexpr (requires { connection.stream->get_executor(); }) {
+            if (connection.stream) {
+                auto executor = connection.stream->get_executor();
+                try {
+                    boost::asio::post(
+                        executor, [moved = std::move(connection)]() mutable { moved = PooledConnection<Stream>{}; });
+                } catch (...) {
+                    // The handler (and the connection in it) is destroyed right here instead.
+                }
+            }
+        }
+    }
+
     /// <summary>
     /// An idle socket must have nothing to read: pending data or EOF both mean the peer closed or
     /// misbehaved. Stream types without a real socket cannot be probed and are assumed alive.
@@ -431,18 +456,7 @@ class ConnectionPool {
     /// </summary>
     struct ExecutorDisposer {
         void operator()(Node* node) const noexcept {
-            if constexpr (requires { node->connection.stream->get_executor(); }) {
-                if (node->connection.stream) {
-                    auto executor = node->connection.stream->get_executor();
-                    try {
-                        boost::asio::post(executor, [connection = std::move(node->connection)]() mutable {
-                            connection = PooledConnection<Stream>{};
-                        });
-                    } catch (...) {
-                        // The handler (and the connection in it) is destroyed right here instead.
-                    }
-                }
-            }
+            DisposeConnection(std::move(node->connection));
             delete node;
         }
     };

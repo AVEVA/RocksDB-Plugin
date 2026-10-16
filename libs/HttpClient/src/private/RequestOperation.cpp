@@ -432,10 +432,12 @@ template <typename Stream> void RequestOperation<Stream>::ReleaseOrClose(bool ke
         try {
             // A pooled connection is idle for a long time; don't let it pin the last response's buffer.
             TrimIdleBuffer(m_buffer);
-            m_pool->Release(m_key, PooledConnection<Stream>{std::move(m_stream), std::move(m_buffer)});
-            pooled = true;
+            PooledConnection<Stream> connection{std::move(m_stream), std::move(m_buffer)};
+            pooled = m_pool->Release(m_key, std::move(connection));
+            // Pooling is disabled, or Release threw: the connection was not taken, so it is closed below.
+            m_stream = std::move(connection.stream);
         } catch (const std::exception&) {
-            // The completion must still run; drop the connection if it could not be pooled.
+            // The completion must still run; the connection is closed below if it could not be pooled.
         }
     }
     if (!pooled && m_stream) {
