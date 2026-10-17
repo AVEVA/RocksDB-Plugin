@@ -89,18 +89,28 @@ class ScriptedServer {
   public:
     using Behavior = std::function<ServerAction(int, const http::request<http::string_body>&)>;
 
-    ScriptedServer(boost::asio::io_context& context, Behavior behavior);
+    // `bindAddress` is the loopback address to listen on, "127.0.0.1" or "::1".
+    ScriptedServer(boost::asio::io_context& context, Behavior behavior, const std::string& bindAddress = "127.0.0.1");
 
     std::string Url(const std::string& path = "/") const;
+    // "host:port" as it appears in the Host header.
+    std::string Authority() const;
     void Stop();
     int Accepted() const { return m_accepted; }
     int Requests(http::verb method) const;
-    int TotalRequests() const { return static_cast<int>(m_methods.size()); }
+    int TotalRequests() const { return static_cast<int>(m_requests.size()); }
+    // The requests the server read, in arrival order. Valid once the io_context is no longer running.
+    const std::vector<http::request<http::string_body>>& Received() const { return m_requests; }
+    // Unexpected server-side errors (a request that failed to parse, a response that failed to write). A client
+    // closing or aborting a connection is expected and not recorded. A test that must notice a misbehaving
+    // exchange asserts this is empty, because ASSERT_* inside a server handler cannot fail the test.
+    const std::vector<std::string>& Failures() const { return m_failures; }
 
   private:
     struct Connection;
 
     void Accept();
+    void RecordFailure(const std::string& what, boost::system::error_code error);
     void ReadNext(const std::shared_ptr<Connection>& connection);
 
     boost::asio::io_context& m_context;
@@ -108,6 +118,8 @@ class ScriptedServer {
     Behavior m_behavior;
     int m_accepted = 0;
     std::vector<std::shared_ptr<Connection>> m_connections;
-    std::vector<http::verb> m_methods;
+    std::string m_host;
+    std::vector<http::request<http::string_body>> m_requests;
+    std::vector<std::string> m_failures;
 };
 } // namespace HttpClientTests

@@ -37,6 +37,10 @@ namespace asio = boost::asio;
 using HttpClientTests::RunBounded;
 using Tcp = asio::ip::tcp;
 
+// The raw acceptors below (and TlsTestServer) are a documented exception to using ScriptedServer: these tests drive
+// the server side of the TLS handshake itself (failing it, or stopping after it), which a request/response script
+// cannot express.
+
 TEST(HttpClientTls, UntrustedCertificateReturnsTlsError) {
     asio::io_context context;
     asio::ssl::context serverContext(asio::ssl::context::tls_server);

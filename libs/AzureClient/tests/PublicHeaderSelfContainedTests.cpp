@@ -86,6 +86,8 @@ boost::asio::awaitable<void> Serve(tcp::socket socket, int* requests) {
     }
 }
 
+// This target has no include path into the HttpClient tests, so it cannot share ScriptedServer; the loopback server
+// here is the only one it needs.
 boost::asio::awaitable<void> Accept(tcp::acceptor* acceptor, int* requests) {
     for (;;) {
         auto [error, socket] = co_await acceptor->async_accept(boost::asio::as_tuple(boost::asio::use_awaitable));

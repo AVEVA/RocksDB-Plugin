@@ -33,7 +33,12 @@ namespace beast = boost::beast;
 namespace http = boost::beast::http;
 using HttpClientTests::Exchange;
 using HttpClientTests::RunBounded;
+using HttpClientTests::ScriptedServer;
+using HttpClientTests::ServerAction;
 using Tcp = asio::ip::tcp;
+
+constexpr const char* const OkNoBody = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+constexpr const char* const OkResponse = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
 
 TEST(HttpClientRequest, InvalidRequestCompletesAsynchronously) {
     boost::asio::io_context context;
@@ -241,44 +246,27 @@ TEST(HttpClientRequest, IPv6LiteralHostHeaderKeepsBrackets) {
     auto client = AVEVA::HttpClient::Create(context);
 
     boost::system::error_code ipv6Error;
-    const auto loopback = asio::ip::make_address("::1", ipv6Error);
+    (void)asio::ip::make_address("::1", ipv6Error);
     if (ipv6Error) {
         GTEST_SKIP() << "IPv6 loopback is unavailable: " << ipv6Error.message();
     }
 
-    Tcp::acceptor acceptor(context, {loopback.to_v6(), 0});
-    const auto port = acceptor.local_endpoint().port();
-    Tcp::socket socket(context);
-    beast::flat_buffer buffer;
-    auto received = std::make_shared<http::request<http::string_body>>();
-
-    acceptor.async_accept(socket, [&](boost::system::error_code error) {
-        ASSERT_FALSE(error);
-        http::async_read(socket, buffer, *received, [&](boost::system::error_code readError, std::size_t) {
-            ASSERT_FALSE(readError);
-            auto response = std::make_shared<std::string>("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
-            asio::async_write(socket, asio::buffer(*response),
-                              [&, response](boost::system::error_code writeError, std::size_t) {
-                                  ASSERT_FALSE(writeError);
-                                  boost::system::error_code ignored;
-                                  socket.shutdown(Tcp::socket::shutdown_both, ignored);
-                                  socket.close(ignored);
-                                  acceptor.close(ignored);
-                              });
-        });
-    });
+    ScriptedServer server(
+        context, [](int, const http::request<http::string_body>&) { return ServerAction{OkNoBody, true}; }, "::1");
 
     AVEVA::HttpRequest request;
-    request.SetUrl("http://[::1]:" + std::to_string(port) + "/ipv6");
+    const auto authority = server.Authority(); // the acceptor is closed by the time the test checks
+    request.SetUrl(server.Url("/ipv6"));
     std::error_code result;
-    client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{},
-                      [&](std::error_code error, AVEVA::HttpResponse) { result = error; });
+    client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{}, [&](std::error_code error, AVEVA::HttpResponse) {
+        result = error;
+        server.Stop();
+    });
 
     RunBounded(context);
     EXPECT_FALSE(result);
-    ASSERT_TRUE(received);
-    ASSERT_TRUE(received);
-    EXPECT_EQ(received->base()[http::field::host], "[::1]:" + std::to_string(port));
+    ASSERT_EQ(server.Received().size(), 1u);
+    EXPECT_EQ(server.Received().front().base()[http::field::host], authority);
 }
 
 // Proves SetBodyView() is genuinely non-owning (unlike SetBody(), which copies
@@ -290,32 +278,24 @@ TEST(HttpClientRequest, IPv6LiteralHostHeaderKeepsBrackets) {
 TEST(HttpClientRequest, SetBodyViewReadsTheBufferLazilyNotAtCallTime) {
     asio::io_context context;
     auto client = AVEVA::HttpClient::Create(context);
-    Tcp::acceptor acceptor(context, {asio::ip::make_address("127.0.0.1"), 0});
-    Tcp::socket socket(context);
-    beast::flat_buffer buffer;
-    auto received = std::make_shared<http::request<http::string_body>>();
-
-    acceptor.async_accept(socket, [&](boost::system::error_code error) {
-        ASSERT_FALSE(error);
-        http::async_read(socket, buffer, *received, [&](boost::system::error_code readError, std::size_t) {
-            ASSERT_FALSE(readError);
-            boost::system::error_code ignored;
-            socket.shutdown(Tcp::socket::shutdown_both, ignored);
-            socket.close(ignored);
-            acceptor.close(ignored);
-        });
+    ScriptedServer server(context, [](int, const http::request<http::string_body>&) {
+        ServerAction action;
+        action.Drop = true;
+        return action;
     });
 
     std::vector<std::byte> mutableBuffer{std::byte{'A'}, std::byte{'A'}, std::byte{'A'}, std::byte{'A'}};
 
     AVEVA::HttpRequest request;
     request.SetMethod(AVEVA::HttpMethod::Post);
-    request.SetUrl("http://127.0.0.1:" + std::to_string(acceptor.local_endpoint().port()) + "/");
+    request.SetUrl(server.Url());
     request.SetBodyView(mutableBuffer);
 
     bool completed = false;
-    client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{},
-                      [&](std::error_code, AVEVA::HttpResponse) { completed = true; });
+    client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{}, [&](std::error_code, AVEVA::HttpResponse) {
+        completed = true;
+        server.Stop();
+    });
 
     // Not yet run: proves the send is asynchronous and nothing has been read/copied yet.
     EXPECT_FALSE(completed);
@@ -327,7 +307,8 @@ TEST(HttpClientRequest, SetBodyViewReadsTheBufferLazilyNotAtCallTime) {
 
     RunBounded(context);
 
-    EXPECT_EQ(received->body(), "BBBB");
+    ASSERT_EQ(server.Received().size(), 1u);
+    EXPECT_EQ(server.Received().front().body(), "BBBB");
 }
 
 TEST(HttpClientRequest, HeadDoesNotReadBody) {
@@ -343,38 +324,11 @@ TEST(HttpClientRequest, HeadDoesNotReadBody) {
 
 TEST(HttpClientRequest, ReusesConnectionForKeepAliveRequests) {
     asio::io_context context;
-    Tcp::acceptor acceptor(context, {asio::ip::make_address("127.0.0.1"), 0});
-    Tcp::socket socket(context);
-    beast::flat_buffer buffer;
-    int acceptCount = 0;
-    std::size_t requestsServed = 0;
-
-    std::function<void()> serveNext;
-    serveNext = [&]() {
-        auto request = std::make_shared<http::request<http::string_body>>();
-        http::async_read(socket, buffer, *request, [&, request](boost::system::error_code error, std::size_t) {
-            if (error) {
-                return;
-            }
-            ++requestsServed;
-            auto payload = std::make_shared<std::string>("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
-            asio::async_write(socket, asio::buffer(*payload), [&, payload](boost::system::error_code, std::size_t) {
-                if (requestsServed < 2) {
-                    serveNext();
-                }
-            });
-        });
-    };
-    acceptor.async_accept(socket, [&](boost::system::error_code error) {
-        if (error) {
-            return;
-        }
-        ++acceptCount;
-        serveNext();
-    });
+    ScriptedServer server(context,
+                          [](int, const http::request<http::string_body>&) { return ServerAction{OkResponse}; });
 
     auto client = AVEVA::HttpClient::Create(context);
-    const std::string authority = "127.0.0.1:" + std::to_string(acceptor.local_endpoint().port());
+    const std::string authority = server.Authority();
     int completions = 0;
 
     AVEVA::HttpRequest request1;
@@ -391,17 +345,14 @@ TEST(HttpClientRequest, ReusesConnectionForKeepAliveRequests) {
                               ++completions;
                               EXPECT_FALSE(error2);
                               EXPECT_EQ(response2.GetStatus(), 200u);
-                              boost::system::error_code ignored;
-                              acceptor.close(ignored);
-                              socket.shutdown(Tcp::socket::shutdown_both, ignored);
-                              socket.close(ignored);
+                              server.Stop();
                           });
     });
 
     RunBounded(context);
     EXPECT_EQ(completions, 2);
-    EXPECT_EQ(acceptCount, 1);
-    EXPECT_EQ(requestsServed, 2u);
+    EXPECT_EQ(server.Accepted(), 1);
+    EXPECT_EQ(server.TotalRequests(), 2);
 }
 
 TEST(HttpClientRequest, CancellationBeforeStartCompletesWithOperationCanceled) {
@@ -431,21 +382,15 @@ TEST(HttpClientRequest, CancellationBeforeStartCompletesWithOperationCanceled) {
 TEST(HttpClientRequest, CancellationMidFlightCompletesWithOperationCanceled) {
     asio::io_context context;
     auto client = AVEVA::HttpClient::Create(context);
-    Tcp::acceptor acceptor(context, {asio::ip::make_address("127.0.0.1"), 0});
-    Tcp::socket socket(context);
-    beast::flat_buffer buffer;
     bool requestRead = false;
     asio::cancellation_signal cancellation;
-
-    acceptor.async_accept(socket, [&](boost::system::error_code error) {
-        ASSERT_FALSE(error);
-        auto received = std::make_shared<http::request<http::string_body>>();
-        http::async_read(socket, buffer, *received, [&, received](boost::system::error_code readError, std::size_t) {
-            ASSERT_FALSE(readError);
-            requestRead = true;
-            // The server has the request and never answers: cancel now rather than after a fixed delay.
-            cancellation.emit(asio::cancellation_type::terminal);
-        });
+    ScriptedServer server(context, [&](int, const http::request<http::string_body>&) {
+        requestRead = true;
+        // The server has the request and never answers: cancel now rather than after a fixed delay.
+        cancellation.emit(asio::cancellation_type::terminal);
+        ServerAction action;
+        action.Hold = true;
+        return action;
     });
 
     AVEVA::HttpRequestOptions options;
@@ -453,16 +398,14 @@ TEST(HttpClientRequest, CancellationMidFlightCompletesWithOperationCanceled) {
     options.SetTimeout(std::chrono::seconds(5));
 
     AVEVA::HttpRequest request;
-    request.SetUrl("http://127.0.0.1:" + std::to_string(acceptor.local_endpoint().port()) + "/");
+    request.SetUrl(server.Url());
 
     int completions = 0;
     client->SendAsync(request, options, [&](std::error_code error, AVEVA::HttpResponse response) {
         ++completions;
         EXPECT_EQ(error, std::make_error_code(std::errc::operation_canceled));
         EXPECT_EQ(response.GetStatus(), 0u);
-        boost::system::error_code ignored;
-        acceptor.close(ignored);
-        socket.close(ignored);
+        server.Stop();
     });
 
     RunBounded(context);
@@ -485,40 +428,22 @@ TEST(HttpClientRequest, ConnectedCancellationSlotDoesNotAffectNormalCompletion) 
 TEST(HttpClientRequest, CancellingAfterCompletionIsANoop) {
     asio::io_context context;
     auto client = AVEVA::HttpClient::Create(context);
-    Tcp::acceptor acceptor(context, {asio::ip::make_address("127.0.0.1"), 0});
-    Tcp::socket socket(context);
-    beast::flat_buffer buffer;
-    auto payload = std::make_shared<std::string>("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
-
-    acceptor.async_accept(socket, [&](boost::system::error_code error) {
-        ASSERT_FALSE(error);
-        auto received = std::make_shared<http::request<http::string_body>>();
-        http::async_read(socket, buffer, *received,
-                         [&, received, payload](boost::system::error_code readError, std::size_t) {
-                             ASSERT_FALSE(readError);
-                             asio::async_write(socket, asio::buffer(*payload),
-                                               [&, payload](boost::system::error_code writeError, std::size_t) {
-                                                   ASSERT_FALSE(writeError);
-                                               });
-                         });
-    });
+    ScriptedServer server(context,
+                          [](int, const http::request<http::string_body>&) { return ServerAction{OkResponse}; });
 
     asio::cancellation_signal cancellation;
     AVEVA::HttpRequestOptions options;
     options.SetCancellationSlot(cancellation.slot());
 
     AVEVA::HttpRequest request;
-    request.SetUrl("http://127.0.0.1:" + std::to_string(acceptor.local_endpoint().port()) + "/");
+    request.SetUrl(server.Url());
 
     int completions = 0;
     client->SendAsync(request, options, [&](std::error_code error, AVEVA::HttpResponse response) {
         ++completions;
         EXPECT_FALSE(error);
         EXPECT_EQ(response.GetStatus(), 200u);
-        boost::system::error_code ignored;
-        acceptor.close(ignored);
-        socket.shutdown(Tcp::socket::shutdown_both, ignored);
-        socket.close(ignored);
+        server.Stop();
     });
 
     RunBounded(context);

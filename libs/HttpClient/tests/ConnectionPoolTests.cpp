@@ -345,6 +345,8 @@ INSTANTIATE_TEST_SUITE_P(Allocations, ConnectionPoolAllocationFailure, ::testing
 
 TEST(ConnectionPool, RealSocketLivenessCheckDiscardsPeerClosedConnection) {
     asio::io_context context;
+    // A raw synchronous accept is used on purpose: the test needs the peer socket itself, to close it and make the
+    // pooled client socket observe a FIN, which ScriptedServer does not expose.
     Tcp::acceptor acceptor(context, {asio::ip::make_address("127.0.0.1"), 0});
     Tcp::socket server(context);
     PlainStream stream(context);

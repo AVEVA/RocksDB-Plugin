@@ -35,46 +35,6 @@ void RunBounded(asio::io_context& context, std::chrono::milliseconds limit) {
 }
 using Tcp = asio::ip::tcp;
 
-namespace {
-class TestServer {
-  public:
-    TestServer(asio::io_context& context, std::string response, bool holdResponse)
-        : acceptor_(context, {asio::ip::make_address("127.0.0.1"), 0}), socket_(context),
-          response_(std::move(response)), holdResponse_(holdResponse) {
-        acceptor_.async_accept(socket_, [this](boost::system::error_code error) {
-            if (error) {
-                return;
-            }
-            http::async_read(socket_, m_buffer, received, [this](boost::system::error_code readError, std::size_t) {
-                if (readError || holdResponse_) {
-                    return;
-                }
-                asio::async_write(socket_, asio::buffer(response_),
-                                  [this](boost::system::error_code, std::size_t) { Stop(); });
-            });
-        });
-    }
-
-    std::string Authority() const { return "127.0.0.1:" + std::to_string(acceptor_.local_endpoint().port()); }
-
-    void Stop() {
-        boost::system::error_code ignored;
-        acceptor_.close(ignored);
-        socket_.shutdown(Tcp::socket::shutdown_both, ignored);
-        socket_.close(ignored);
-    }
-
-    http::request<http::string_body> received;
-
-  private:
-    Tcp::acceptor acceptor_;
-    Tcp::socket socket_;
-    beast::flat_buffer m_buffer;
-    std::string response_;
-    bool holdResponse_;
-};
-} // namespace
-
 TempFile::TempFile(std::string_view prefix)
     : m_path(std::filesystem::temp_directory_path() /
              (std::string(prefix) + std::to_string(std::random_device{}()) + ".pem")) {}
@@ -156,15 +116,17 @@ struct ScriptedServer::Connection {
     int Index;
 };
 
-ScriptedServer::ScriptedServer(asio::io_context& context, Behavior behavior)
-    : m_context(context), m_acceptor(context, {asio::ip::make_address("127.0.0.1"), 0}),
-      m_behavior(std::move(behavior)) {
+ScriptedServer::ScriptedServer(asio::io_context& context, Behavior behavior, const std::string& bindAddress)
+    : m_context(context), m_acceptor(context, {asio::ip::make_address(bindAddress), 0}),
+      m_behavior(std::move(behavior)), m_host(bindAddress.contains(':') ? "[" + bindAddress + "]" : bindAddress) {
     Accept();
 }
 
-std::string ScriptedServer::Url(const std::string& path) const {
-    return "http://127.0.0.1:" + std::to_string(m_acceptor.local_endpoint().port()) + path;
+std::string ScriptedServer::Authority() const {
+    return m_host + ":" + std::to_string(m_acceptor.local_endpoint().port());
 }
+
+std::string ScriptedServer::Url(const std::string& path) const { return "http://" + Authority() + path; }
 
 void ScriptedServer::Stop() {
     boost::system::error_code ignored;
@@ -178,10 +140,14 @@ void ScriptedServer::Stop() {
 
 int ScriptedServer::Requests(http::verb method) const {
     int count = 0;
-    for (const auto verb : m_methods) {
-        count += verb == method ? 1 : 0;
+    for (const auto& request : m_requests) {
+        count += request.method() == method ? 1 : 0;
     }
     return count;
+}
+
+void ScriptedServer::RecordFailure(const std::string& what, boost::system::error_code error) {
+    m_failures.push_back(what + ": " + error.message());
 }
 
 void ScriptedServer::Accept() {
@@ -203,9 +169,14 @@ void ScriptedServer::ReadNext(const std::shared_ptr<Connection>& connection) {
         connection->Socket, connection->Buffer, connection->Request,
         [this, connection](boost::system::error_code error, std::size_t) {
             if (error) {
+                // A peer that closes between requests is normal for keep-alive; anything else is malformed input.
+                if (error != http::error::end_of_stream && error != asio::error::operation_aborted &&
+                    error != asio::error::connection_reset && error != asio::error::connection_aborted) {
+                    RecordFailure("read", error);
+                }
                 return;
             }
-            m_methods.push_back(connection->Request.method());
+            m_requests.push_back(connection->Request);
             auto action = std::make_shared<ServerAction>(m_behavior(connection->Index, connection->Request));
             if (action->Hold) {
                 return;
@@ -224,6 +195,12 @@ void ScriptedServer::ReadNext(const std::shared_ptr<Connection>& connection) {
                 asio::async_write(connection->Socket, asio::buffer(action->Wire),
                                   [this, connection, action](boost::system::error_code writeError, std::size_t) {
                                       if (writeError) {
+                                          if (writeError != asio::error::operation_aborted &&
+                                              writeError != asio::error::connection_reset &&
+                                              writeError != asio::error::connection_aborted &&
+                                              writeError != asio::error::broken_pipe) {
+                                              RecordFailure("write", writeError);
+                                          }
                                           return;
                                       }
                                       if (action->CloseAfterWrite) {
@@ -251,7 +228,18 @@ ExchangeResult Exchange(AVEVA::HttpRequest request, std::string wireResponse, AV
                         bool holdResponse) {
     asio::io_context context;
     auto client = AVEVA::HttpClient::Create(context);
-    TestServer server(context, std::move(wireResponse), holdResponse);
+    // Most callers are not about timeouts, so a stuck exchange should fail in seconds rather than at the 30 s default.
+    constexpr std::chrono::seconds ExchangeTimeout{2};
+    if (options.GetTimeout() == AVEVA::HttpRequestOptions{}.GetTimeout()) {
+        options.SetTimeout(ExchangeTimeout);
+    }
+    ScriptedServer server(context, [&](int, const http::request<http::string_body>&) {
+        ServerAction action;
+        action.Wire = std::move(wireResponse);
+        action.CloseAfterWrite = true;
+        action.Hold = holdResponse;
+        return action;
+    });
     ExchangeResult result;
     result.authority = server.Authority();
     request.SetUrl("http://" + result.authority + request.GetUrl());
@@ -269,7 +257,12 @@ ExchangeResult Exchange(AVEVA::HttpRequest request, std::string wireResponse, AV
     if (completions != 1) {
         throw std::runtime_error("Completion must run exactly once");
     }
-    result.received = std::move(server.received);
+    if (!server.Failures().empty()) {
+        throw std::runtime_error("The server saw an unexpected failure: " + server.Failures().front());
+    }
+    if (!server.Received().empty()) {
+        result.received = server.Received().front();
+    }
     return result;
 }
 } // namespace HttpClientTests
