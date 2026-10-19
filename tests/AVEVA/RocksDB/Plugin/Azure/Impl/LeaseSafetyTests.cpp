@@ -153,6 +153,33 @@ TEST(WriteDeadlineTests, RequestTimeoutIsCappedAtTheTimeLeft) {
     EXPECT_EQ(1s, AVEVA::RocksDB::Plugin::Azure::Impl::BoundByWriteDeadline(runtime, options).GetTimeout());
 }
 
+TEST_F(LeaseDeadlineTests, DeleteIssuedAfterTheRenewalDeadlineIsRejectedWithoutSendingARequest) {
+    AVEVA::AzureClient::Tests::PageBlobClient blob(m_httpClient, MakeBlobClientOptions("data", "000001.sst"));
+    m_runtime->SetWriteDeadlineSource([] { return std::optional<std::chrono::steady_clock::duration>{0s}; });
+
+    EXPECT_THROW(AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations::Delete(*m_runtime, blob),
+                 AVEVA::RocksDB::Plugin::Azure::WritesFencedException);
+    EXPECT_EQ(0U, m_httpClient.RequestCount());
+
+    m_runtime->FenceWrites();
+    m_runtime->SetWriteDeadlineSource({});
+    EXPECT_THROW(AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations::Delete(*m_runtime, blob),
+                 AVEVA::RocksDB::Plugin::Azure::WritesFencedException);
+    EXPECT_EQ(0U, m_httpClient.RequestCount());
+}
+
+TEST_F(LeaseDeadlineTests, DeleteIsBoundedByTheTimeLeftOnTheWriteDeadline) {
+    AVEVA::AzureClient::Tests::PageBlobClient blob(m_httpClient, MakeBlobClientOptions("data", "000001.sst"));
+    m_runtime->SetWriteDeadlineSource([] { return std::optional<std::chrono::steady_clock::duration>{2s}; });
+    m_httpClient.EnqueueResponse(HttpResponse{202, MakeCanonicalSuccessHeaders({}), ""});
+
+    EXPECT_TRUE(AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations::Delete(*m_runtime, blob));
+
+    const auto requests = m_httpClient.Requests();
+    ASSERT_EQ(1U, requests.size());
+    EXPECT_LE(requests.front().Options.GetTimeout(), 2s);
+}
+
 TEST_F(LeaseDeadlineTests, AppendIssuedAfterTheRenewalDeadlineIsRejectedWithoutSendingARequest) {
     auto client = std::make_unique<AVEVA::AzureClient::Tests::PageBlobClient>(m_httpClient,
                                                                               MakeBlobClientOptions("locks", "LOCK"));

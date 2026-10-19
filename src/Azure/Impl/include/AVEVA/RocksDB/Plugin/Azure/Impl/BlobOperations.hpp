@@ -145,6 +145,30 @@ template <typename TBlob> bool CreateIfNotExists(const ClientRuntimeBase& runtim
     });
     return !response.Error().has_value();
 }
+
+// Deletes the blob if it exists, fenced and bounded by the write deadline like every other mutation so a stale lease
+// holder cannot delete after losing the lease. Returns true if the blob existed.
+template <typename TBlob> bool Delete(const ClientRuntimeBase& runtime, TBlob& client) {
+    runtime.ThrowIfWritesFenced();
+    const SizeInvalidation<TBlob> invalidate(runtime, client);
+    const auto response = CallResponse([&](auto token) {
+        return client.DeleteIfExistsAsync(token, BoundByWriteDeadline(runtime, client.GetDefaultRequestOptions()));
+    });
+    return !response.Error().has_value();
+}
+
+// Batched Delete: fenced, and every chunk is bounded by the remaining write deadline. The caller inspects the
+// per-blob errors of the result.
+template <typename TContainer>
+[[nodiscard]] auto DeleteBatch(const ClientRuntimeBase& runtime, TContainer& container, std::vector<std::string> names,
+                               AzureClient::DeleteBlobsOptions options) {
+    runtime.ThrowIfWritesFenced();
+    return Call([&](auto token) {
+        return container.DeleteBlobsAsync(std::move(names), std::move(options), token,
+                                          BoundByWriteDeadline(runtime, container.GetDefaultRequestOptions()));
+    });
+}
+
 // Downloads [offset, offset + length) to a local file; a non-positive length produces an empty file. A stop request
 // cancels the transfer, which then throws; the client removes its partial file, so nothing is left at `path`.
 template <typename TBlob>

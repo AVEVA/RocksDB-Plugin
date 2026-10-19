@@ -10,8 +10,7 @@ template <typename THttp> bool BasicBlobFilesystemImpl<THttp>::DeleteFile(const 
     EnsureLiveness();
 
     auto [prefix, realPath, client] = ResolveBlob(filePath);
-    const BlobOperations::SizeInvalidation<decltype(client)> invalidateSize(*m_runtime, client);
-    const auto res = CallResponse([&](auto token) { return client.DeleteIfExistsAsync(token); });
+    const auto existed = BlobOperations::Delete(*m_runtime, client);
 
     auto cache = m_fileCaches.find(prefix);
     if (cache != m_fileCaches.end()) {
@@ -19,7 +18,7 @@ template <typename THttp> bool BasicBlobFilesystemImpl<THttp>::DeleteFile(const 
     }
 
     // A suppressed (not found) error means there was nothing to delete.
-    return !res.Error().has_value();
+    return existed;
 }
 
 // Removes every blob under the directory prefix. Object storage has no real directories, so the blobs are listed
@@ -53,7 +52,7 @@ template <typename THttp> size_t BasicBlobFilesystemImpl<THttp>::DeleteDir(const
         // any) is thrown so callers never mistake a partial delete for success.
         AzureClient::DeleteBlobsOptions deleteOptions;
         deleteOptions.MaxConcurrentRequests = Configuration::Transfer::MaxConcurrentDeleteBatches;
-        const auto result = Call([&](auto token) { return container->DeleteBlobsAsync(blobs, deleteOptions, token); });
+        const auto result = BlobOperations::DeleteBatch(*m_runtime, *container, blobs, deleteOptions);
 
         std::optional<AzureClient::BlobStorageError> firstFailure;
         for (const auto& item : result.Items) {

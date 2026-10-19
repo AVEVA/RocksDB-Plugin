@@ -197,7 +197,7 @@ void BasicBlobFilesystemImpl<THttp>::PurgeOrphanedRenameTemps(const std::string_
                                           });
         for (const auto& name : orphans) {
             auto blob = container->GetPageBlobClient(name);
-            CallResponse([&](auto token) { return blob.DeleteIfExistsAsync(token); });
+            BlobOperations::Delete(*m_runtime, blob);
             BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::info)
                 << "Deleted the orphaned rename temporary blob '" << name << "'";
         }

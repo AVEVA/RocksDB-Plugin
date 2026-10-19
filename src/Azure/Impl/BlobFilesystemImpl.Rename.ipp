@@ -71,7 +71,7 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
     // Best-effort cleanup that never masks the failure being unwound.
     const auto deleteQuietly = [this](auto& blob, const std::string_view name) {
         try {
-            CallResponse([&](auto token) { return blob.DeleteIfExistsAsync(token); });
+            BlobOperations::Delete(*m_runtime, blob);
         } catch (const std::exception& e) {
             BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
                 << "Could not delete '" << name << "' while rolling back a rename: " << e.what();
@@ -128,6 +128,6 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
         deleteQuietly(tempClient, tempName);
     }
 
-    CallResponse([&](auto token) { return srcClient.DeleteIfExistsAsync(token); });
+    BlobOperations::Delete(*m_runtime, srcClient);
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
