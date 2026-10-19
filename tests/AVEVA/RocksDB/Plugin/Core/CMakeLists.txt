@@ -3,6 +3,7 @@ add_executable(aveva-rocksdb-plugin-core-tests
     CoreTests.cpp
     FileCacheTests.cpp
     LocalFileTests.cpp
+    LruFileIndexTests.cpp
     FileBasedCompressedSecondaryCacheRoundTripTests.cpp
     FileBasedCompressedSecondaryCacheCapacityTests.cpp
     FileBasedCompressedSecondaryCacheCompressionTests.cpp
@@ -19,3 +20,4 @@ if(MSVC)
 endif()
 include(GoogleTest)
 gtest_discover_tests(aveva-rocksdb-plugin-core-tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 300 LABELS "unit;core")
+target_include_directories(aveva-rocksdb-plugin-core-tests PRIVATE ${PROJECT_SOURCE_DIR}/src/Core)

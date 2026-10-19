@@ -67,19 +67,20 @@ class LruFileIndex {
         ScopedPin() = default;
         ~ScopedPin() noexcept {
             if (m_owner)
-                m_owner->Unpin(m_filename);
+                m_owner->Unpin(m_filename, m_id);
         }
 
         ScopedPin(const ScopedPin&) = delete;
         ScopedPin& operator=(const ScopedPin&) = delete;
 
         ScopedPin(ScopedPin&& o) noexcept
-            : m_owner(std::exchange(o.m_owner, nullptr)), m_filename(std::move(o.m_filename)) {}
+            : m_owner(std::exchange(o.m_owner, nullptr)), m_id(o.m_id), m_filename(std::move(o.m_filename)) {}
         ScopedPin& operator=(ScopedPin&& o) noexcept {
             if (this != &o) {
                 if (m_owner)
-                    m_owner->Unpin(m_filename);
+                    m_owner->Unpin(m_filename, m_id);
                 m_owner = std::exchange(o.m_owner, nullptr);
+                m_id = o.m_id;
                 m_filename = std::move(o.m_filename);
             }
             return *this;
@@ -87,10 +88,12 @@ class LruFileIndex {
 
       private:
         friend class LruFileIndex;
-        ScopedPin(LruFileIndex* owner, std::string_view filename) : m_owner(owner) {
+        ScopedPin(LruFileIndex* owner, std::string_view filename, uint64_t id) : m_owner(owner), m_id(id) {
             m_filename.assign(filename.data(), filename.size());
         }
         LruFileIndex* m_owner{nullptr};
+        // Identifies the entry that was pinned, so a pin on a replaced entry never touches its successor.
+        uint64_t m_id{0};
         boost::static_string<kMaxFilenameLen> m_filename{};
     };
 
@@ -178,6 +181,7 @@ class LruFileIndex {
         boost::static_string<kMaxFilenameLen> filename{};
         size_t size{0};
         uint32_t pinCount{0};
+        uint64_t id{0};
     };
 
     using LruList = std::list<Entry>;
@@ -217,11 +221,12 @@ class LruFileIndex {
     std::string m_cacheDirStr;
     size_t m_capacity;
     size_t m_currentSize{0};
+    uint64_t m_nextEntryId{1};
 
     /// <summary>
     /// Decrements the pin count of the named entry.  Called by ScopedPin on destruction.
     /// </summary>
-    void Unpin(std::string_view filename) noexcept;
+    void Unpin(std::string_view filename, uint64_t id) noexcept;
 
     // shared_mutex used as a two-level reader-writer lock:
     //   shared_lock  — concurrent readers: GetCapacity, GetUsage.

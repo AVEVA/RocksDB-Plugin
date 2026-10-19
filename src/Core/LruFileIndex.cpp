@@ -23,14 +23,14 @@ std::optional<LruFileIndex::ScopedPin> LruFileIndex::TryPin(std::string_view fil
     if (it == m_index.end())
         return std::nullopt;
     ++(*it)->pinCount;
-    return ScopedPin(this, filename);
+    return ScopedPin(this, filename, (*it)->id);
 }
 
-void LruFileIndex::Unpin(std::string_view filename) noexcept {
+void LruFileIndex::Unpin(std::string_view filename, const uint64_t id) noexcept {
     try {
         std::lock_guard lock(m_mutex);
         const auto it = m_index.find(filename);
-        if (it != m_index.end())
+        if (it != m_index.end() && (*it)->id == id && (*it)->pinCount > 0)
             --(*it)->pinCount;
     } catch (...) {
     }
@@ -101,6 +101,7 @@ LruFileIndex::EvictList LruFileIndex::RegisterEntry(std::string_view filename, s
     Entry newEntry{};
     newEntry.filename.assign(filename.data(), filename.size());
     newEntry.size = storedSize;
+    newEntry.id = m_nextEntryId++;
     m_lruList.push_front(std::move(newEntry));
     m_index.insert(m_lruList.begin());
     m_currentSize += storedSize;
