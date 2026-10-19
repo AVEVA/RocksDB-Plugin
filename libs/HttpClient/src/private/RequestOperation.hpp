@@ -108,8 +108,8 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
         : m_tlsContext(std::move(tlsContext)), m_executor(stream->get_executor()),
           m_lookupScope(static_cast<const void*>(&asio::query(m_executor, asio::execution::context))),
           m_stream(std::move(stream)), m_resolver(m_executor), m_timer(m_executor), m_completion(std::move(completion)),
-          m_options(std::move(options)), m_pool(std::move(pool)), m_key(std::move(key)), m_deadline(deadline),
-          m_buffer(std::move(buffer)) {}
+          m_options(std::move(options)), m_pool(std::move(pool)), m_key(std::move(key)), m_buffer(std::move(buffer)),
+          m_deadline(deadline) {}
 
     /// <summary>
     /// Makes this operation the target of the request's cancellation state, so a cancel (including one that
