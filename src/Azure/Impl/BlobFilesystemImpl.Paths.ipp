@@ -11,7 +11,9 @@ BasicBlobFilesystemImpl<THttp>::CreateDirectory(const std::string& directoryPath
     EnsureLiveness();
 
     const auto [prefix, realPath] = StorageAccount::StripPrefix(directoryPath);
-    return DirectoryType{m_runtime, GetContainer(prefix), realPath};
+    // Directories are virtual, but an unknown prefix must still fail here rather than on first use.
+    static_cast<void>(GetContainer(prefix));
+    return DirectoryType{realPath};
 }
 
 template <typename THttp> bool BasicBlobFilesystemImpl<THttp>::FileExists(const std::string& name) {

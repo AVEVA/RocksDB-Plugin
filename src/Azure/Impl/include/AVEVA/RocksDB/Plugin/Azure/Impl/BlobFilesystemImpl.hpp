@@ -75,7 +75,7 @@ template <typename THttp> struct FilesystemTypes {
     using Sequential = BasicSequentialFileImpl<Blob>;
     using Writeable = BasicWriteableFileImpl<Blob>;
     using ReadWrite = BasicReadWriteFileImpl<Blob>;
-    using Directory = BasicDirectoryImpl<BlobContainerClientOn<THttp>>;
+    using Directory = DirectoryImpl;
     using Lock = BasicLockFileImpl<Blob>;
 };
 template <> struct FilesystemTypes<::AVEVA::HttpClient> {
