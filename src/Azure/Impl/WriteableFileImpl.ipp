@@ -75,7 +75,10 @@ BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(
 template <typename TBlob> BasicWriteableFileImpl<TBlob>::~BasicWriteableFileImpl() {
     // Close() is the durability boundary. A destructor that ran sleeping retries would stall RocksDB's cleanup
     // threads, so it only reports unpersisted data and waits for uploads that are already running.
-    m_close.LogIfUnclosed(*m_w.H.Logger, m_w.H.Name, m_unsyncedSize);
+    // A moved-from file is closed and has lost its logger, which must not be dereferenced.
+    if (!m_close.IsClosed()) {
+        m_close.LogIfUnclosed(*m_w.H.Logger, m_w.H.Name, m_unsyncedSize);
+    }
 
     // Outstanding upload completions use the blob client and logger, which are released below.
     DrainUploads();

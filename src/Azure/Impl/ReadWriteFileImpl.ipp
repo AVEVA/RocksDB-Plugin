@@ -32,7 +32,10 @@ BasicReadWriteFileImpl<TBlob>::BasicReadWriteFileImpl(
 
 template <typename TBlob> BasicReadWriteFileImpl<TBlob>::~BasicReadWriteFileImpl() {
     // Close() is the durability boundary; a destructor must not run sleeping retries on RocksDB's cleanup threads.
-    m_close.LogIfUnclosed(*m_w.H.Logger, m_w.H.Name, !m_bufferStats.empty() || m_size != m_syncSize || m_dirty);
+    // A moved-from file is closed and has lost its logger, which must not be dereferenced.
+    if (!m_close.IsClosed()) {
+        m_close.LogIfUnclosed(*m_w.H.Logger, m_w.H.Name, !m_bufferStats.empty() || m_size != m_syncSize || m_dirty);
+    }
 }
 
 template <typename TBlob>
