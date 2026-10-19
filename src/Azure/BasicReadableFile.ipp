@@ -104,12 +104,19 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& re
             // already consulted above and reading it again would put blocking disk I/O on that thread.
             // The prefetch lands in a private buffer, never in scratch: RocksDB may free scratch as soon as the handle
             // is deleted, and only Complete (which checks the request state under its lock) may copy into it.
-            std::move_only_function<void()> resume = [file = m_file, offset, length, request, download] {
-                std::string bytes(static_cast<size_t>(length), '\0');
-                if (const auto prefetched = file->TryReadFromCompletedPrefetch(offset, length, bytes.data())) {
-                    request->Complete(rocksdb::IOStatus::OK(), std::string_view(bytes.data(), *prefetched));
-                } else {
-                    download();
+            // A throw here would escape the prefetch completion into the host io_context and strand the request, so
+            // it is turned into the request's error status instead.
+            std::move_only_function<void()> resume = [file = m_file, offset, length, request, download,
+                                                      logger = m_logger] {
+                try {
+                    std::string bytes(static_cast<size_t>(length), '\0');
+                    if (const auto prefetched = file->TryReadFromCompletedPrefetch(offset, length, bytes.data())) {
+                        request->Complete(rocksdb::IOStatus::OK(), std::string_view(bytes.data(), *prefetched));
+                    } else {
+                        download();
+                    }
+                } catch (...) {
+                    request->Complete(AzureErrorTranslator::FromCurrentException(*logger, "ReadAsync"), {});
                 }
             };
             if (!m_file->ChainOntoPendingPrefetch(offset, length, resume)) {

@@ -322,6 +322,23 @@ TEST_F(AsyncReadTests, GetSize_RefreshThatFindsANewEtag_DropsThePrefetchedBytes)
     std::vector<char> buffer(256);
     EXPECT_FALSE(file->TryReadFromCache(0, 256, buffer.data()).has_value());
 }
+TEST_F(AsyncReadTests, PrefetchCompletion_ThrowingWaiter_DoesNotEscapeOrSkipTheOtherWaiters) {
+    auto file = std::make_shared<FakeReadableFileImpl>("test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
+                                                       m_logger);
+    ASSERT_TRUE(FakeReadableFileImpl::Prefetch(file, 1024, 2048));
+    std::move_only_function<void()> throwing = [] { throw std::bad_alloc(); };
+    bool secondRan = false;
+    std::move_only_function<void()> second = [&secondRan] { secondRan = true; };
+    ASSERT_TRUE(file->ChainOntoPendingPrefetch(1100, 64, throwing));
+    ASSERT_TRUE(file->ChainOntoPendingPrefetch(1100, 64, second));
+
+    EXPECT_NO_THROW({
+        m_deferredEnv.Blob->TakeDownload().Succeed(std::string(2048, 'P'));
+        EXPECT_TRUE(m_deferredEnv.Http.RunUntil([&] { return secondRan; }));
+    });
+
+    EXPECT_TRUE(secondRan);
+}
 TEST_F(AsyncReadTests, ReadAsync_ChainedOntoFailedPrefetch_FallsBackToOwnDownload) {
     auto file = CreateFile(m_deferredEnv);
     ASSERT_TRUE(file.Prefetch(1024, 2048, rocksdb::IOOptions{}, nullptr).ok());

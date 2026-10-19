@@ -10,7 +10,9 @@
 #include <boost/log/trivial.hpp>
 #include <cassert>
 #include <chrono>
+#include <functional>
 #include <utility>
+#include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 // In a named namespace (not an anonymous one) so every TU that includes this header shares one definition of these.
@@ -41,6 +43,21 @@ void FinishRead(std::shared_ptr<const BasicReadableFileImpl<TBlob>>& self, ReadC
     auto done = std::exchange(callback, nullptr);
     self.reset();
     done(std::move(error), data);
+}
+
+// Runs completion waiters, each isolated: one that throws must neither skip the rest (their reads would never
+// complete) nor escape into the host io_context's run().
+template <typename TLogger>
+void RunWaiters(std::vector<std::move_only_function<void()>>& waiters, TLogger& logger) noexcept {
+    for (auto& waiter : waiters) {
+        try {
+            waiter();
+        } catch (const std::exception& e) {
+            BOOST_LOG_SEV(logger, boost::log::trivial::error) << "Prefetch waiter failed: " << e.what();
+        } catch (...) {
+            BOOST_LOG_SEV(logger, boost::log::trivial::error) << "Prefetch waiter failed";
+        }
+    }
 }
 } // namespace ReadableFileDetail
 
@@ -208,7 +225,7 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
     auto name = self->m_h.Name;
     try {
         ReadAsync(std::move(self), offset, n,
-                  [state, id, logger = std::move(logger), name = std::move(name)](std::exception_ptr error,
+                  [state, id, logger, name = std::move(name)](std::exception_ptr error,
                                                                                   std::string_view data) {
                       // Copied before taking the lock so readers are not blocked behind an n-byte memcpy; the slot is
                       // filled by a move.
@@ -239,9 +256,7 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
                       }
                       state->Done.notify_all();
                       // Waiters retry their read, which now finds the data or falls back to a download.
-                      for (auto& waiter : waiters) {
-                          waiter();
-                      }
+                      ReadableFileDetail::RunWaiters(waiters, *logger);
                       if (error) {
                           try {
                               std::rethrow_exception(error);
@@ -261,7 +276,21 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
                 state->Drop(slot);
             }
         }
+        std::vector<std::move_only_function<void()>> waiters;
+        {
+            std::scoped_lock lock(state->Mutex);
+            for (auto it = state->Waiters.begin(); it != state->Waiters.end();) {
+                if (it->first == id) {
+                    waiters.push_back(std::move(it->second));
+                    it = state->Waiters.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
         state->Done.notify_all();
+        // The slot is gone, so each waiter falls back to its own download rather than waiting forever.
+        ReadableFileDetail::RunWaiters(waiters, *logger);
         throw;
     }
     return true;
