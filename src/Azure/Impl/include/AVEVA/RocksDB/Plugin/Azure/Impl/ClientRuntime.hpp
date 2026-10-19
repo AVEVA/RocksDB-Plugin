@@ -12,6 +12,8 @@
 #include <AVEVA/HttpClient/HttpClient.hpp>
 
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/asio/thread_pool.hpp>
 #include <boost/asio/use_future.hpp>
 
 #include <atomic>
@@ -51,14 +53,22 @@ class ClientRuntimeBase {
     std::atomic<bool> m_writesFenced{false};
     mutable std::mutex m_deadlineMutex;
     WriteDeadlineSource m_deadlineSource;
+    mutable std::once_flag m_writerOnce;
+    mutable std::unique_ptr<boost::asio::thread_pool> m_writerPool;
 
   public:
     ClientRuntimeBase() = default;
-    virtual ~ClientRuntimeBase() = default;
+    virtual ~ClientRuntimeBase();
     ClientRuntimeBase(const ClientRuntimeBase&) = delete;
     ClientRuntimeBase& operator=(const ClientRuntimeBase&) = delete;
     ClientRuntimeBase(ClientRuntimeBase&&) = delete;
     ClientRuntimeBase& operator=(ClientRuntimeBase&&) = delete;
+
+    /// <summary>
+    /// A scheduler for the blocking disk writes of file downloads, backed by a small pool created on first use and
+    /// owned by this runtime, so a download never starts a thread per write batch. Valid while the runtime lives.
+    /// </summary>
+    [[nodiscard]] std::function<void(std::move_only_function<void()>)> DownloadWriter() const;
 
     /// <summary>
     /// Makes every later mutation through this runtime's blobs fail. Called once the filesystem can no longer

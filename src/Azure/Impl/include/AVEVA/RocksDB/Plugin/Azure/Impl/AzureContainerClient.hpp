@@ -41,7 +41,8 @@ template <typename TContainer> class BasicAzureContainerClient final : public Co
     void DownloadBlobTo(const std::string& path, const std::filesystem::path& destinationPath, int64_t offset,
                         int64_t length, std::stop_token stopToken) override {
         auto blob = m_client->GetPageBlobClient(path);
-        BlobOperations::DownloadToFile(blob, destinationPath, offset, length, std::move(stopToken));
+        BlobOperations::DownloadToFile(blob, destinationPath, offset, length, std::move(stopToken),
+                                       m_runtime->DownloadWriter());
     }
 };
 

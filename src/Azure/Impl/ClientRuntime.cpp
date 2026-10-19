@@ -110,6 +110,22 @@ std::shared_ptr<::AVEVA::HttpClient> HttpClientFactory<::AVEVA::HttpClient>::Cre
     return CreateHttpClient(context);
 }
 
+ClientRuntimeBase::~ClientRuntimeBase() {
+    if (m_writerPool) {
+        m_writerPool->join();
+    }
+}
+
+std::function<void(std::move_only_function<void()>)> ClientRuntimeBase::DownloadWriter() const {
+    std::call_once(m_writerOnce, [this] {
+        constexpr std::size_t WriterThreads = 2;
+        m_writerPool = std::make_unique<boost::asio::thread_pool>(WriterThreads);
+    });
+    return [pool = m_writerPool.get()](std::move_only_function<void()> task) {
+        boost::asio::post(*pool, [task = std::move(task)]() mutable { task(); });
+    };
+}
+
 void ClientRuntimeBase::FenceWrites() noexcept { m_writesFenced.store(true); }
 
 bool ClientRuntimeBase::WritesFenced() const noexcept { return m_writesFenced.load(); }
