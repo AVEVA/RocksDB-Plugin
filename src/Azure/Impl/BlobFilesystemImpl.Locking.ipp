@@ -19,7 +19,6 @@ BasicBlobFilesystemImpl<THttp>::LockFile(const std::string& filePath) {
     // Lock() can retry for the full lease length. The mutex must not be held across it, or the renewal thread
     // would stall and the leases this Env already holds would expire.
     if (lockFile->Lock()) {
-        PurgeOrphanedRenameTemps(prefix);
         // The lease is held from here on, so a failure while registering it must not leave it orphaned until it
         // expires: nobody else holds a reference that could release it.
         boost::scope::scope_fail releaseLease{[&] {
@@ -41,10 +40,14 @@ BasicBlobFilesystemImpl<THttp>::LockFile(const std::string& filePath) {
                     << "Could not release the lease on '" << realPath << "' after registering it failed";
             }
         }};
-        std::scoped_lock _(m_lockFilesMutex);
-        m_renewableLocks.push_back(lockFile);
-        m_locks.push_back(*lockFile);
-        assert(lockFile->is_linked());
+        {
+            std::scoped_lock _(m_lockFilesMutex);
+            m_renewableLocks.push_back(lockFile);
+            m_locks.push_back(*lockFile);
+            assert(lockFile->is_linked());
+        }
+        // Purged only once the lease is registered for renewal, since the listing can outlast the lease.
+        PurgeOrphanedRenameTemps(prefix, realPath);
         return lockFile;
     } else {
         const auto message =

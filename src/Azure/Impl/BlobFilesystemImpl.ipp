@@ -81,6 +81,15 @@ inline bool IsRenameTempName(std::string_view blobName) {
            blobName.substr(blobName.size() - suffixLength, RenameTempMarker.size()) == RenameTempMarker;
 }
 
+
+
+
+// The directory holding a file, as a list prefix; empty when the file sits at the container root.
+inline std::string DirectoryPrefixOfFile(std::string_view filePath) {
+    const auto slash = filePath.rfind('/');
+    return slash == std::string_view::npos ? std::string() : std::string(filePath.substr(0, slash + 1));
+}
+
 } // namespace BlobFilesystemDetail
 
 template <typename THttp>
@@ -183,30 +192,45 @@ void BasicBlobFilesystemImpl<THttp>::AddContainer(const BlobServiceClientOn<THtt
 // purging at construction would let a second (read-only or standby) process delete the writer's in-flight temp.
 // Failures only cost some storage, so they are logged rather than allowed to fail the lock.
 template <typename THttp>
-void BasicBlobFilesystemImpl<THttp>::PurgeOrphanedRenameTemps(const std::string_view prefix) const {
+void BasicBlobFilesystemImpl<THttp>::PurgeOrphanedRenameTemps(const std::string_view prefix,
+                                                              const std::string_view lockPath) const {
     try {
         const auto& container = GetContainer(prefix);
         std::vector<std::string> orphans;
+        // Only this database's directory: temp blobs of other directories in the container may belong to renames that
+        // are still in flight under their own lease.
         AzureClient::ListBlobsOptions options;
+        options.Prefix = BlobFilesystemDetail::DirectoryPrefixOfFile(lockPath);
         options.MaxResults = static_cast<uint32_t>(Configuration::Transfer::MaxListPageSize);
-        BlobFilesystemDetail::ForEachBlob(*container, std::move(options),
-                                          [&](const AzureClient::Models::BlobItem& blob) {
-                                              if (BlobFilesystemDetail::IsRenameTempName(blob.Name)) {
-                                                  orphans.push_back(blob.Name);
-                                              }
-                                          });
-        for (const auto& name : orphans) {
-            auto blob = container->GetPageBlobClient(name);
-            BlobOperations::Delete(*m_runtime, blob);
-            BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::info)
-                << "Deleted the orphaned rename temporary blob '" << name << "'";
+        BlobFilesystemDetail::ForEachBlob(*container, std::move(options), [&](const AzureClient::Models::BlobItem& blob) {
+            if (BlobFilesystemDetail::IsRenameTempName(blob.Name)) {
+                orphans.push_back(blob.Name);
+            }
+        });
+        if (orphans.empty()) {
+            return;
+        }
+        AzureClient::DeleteBlobsOptions deleteOptions;
+        deleteOptions.MaxConcurrentRequests = Configuration::Transfer::MaxConcurrentDeleteBatches;
+        const auto result = BlobOperations::DeleteBatch(*m_runtime, *container, orphans, deleteOptions);
+        for (const auto& item : result.Items) {
+            if (item.Error) {
+                BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
+                    << "Could not delete the orphaned rename temporary blob '" << item.Name
+                    << "': " << item.Error->Message;
+            } else {
+                BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::info)
+                    << "Deleted the orphaned rename temporary blob '" << item.Name << "'";
+            }
         }
     } catch (const std::exception& e) {
         BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
             << "Could not clean up orphaned rename temporary blobs: " << e.what();
+    } catch (...) {
+        BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
+            << "Could not clean up orphaned rename temporary blobs: unknown error";
     }
 }
-
 namespace BlobFilesystemDetail {
 struct FileSizing {
     int64_t InitialSize;
@@ -243,6 +267,9 @@ inline std::string_view ChildName(std::string_view blobName, std::string_view di
     return blobName.size() > dirPrefix.size() && blobName.starts_with(dirPrefix) ? blobName.substr(dirPrefix.size())
                                                                                  : std::string_view{};
 }
+
+
+
 } // namespace BlobFilesystemDetail
 
 template <typename THttp> int64_t BasicBlobFilesystemImpl<THttp>::GetFileSize(const std::string& filePath) const {

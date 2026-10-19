@@ -231,7 +231,7 @@ template <typename THttp> class BasicBlobFilesystemImpl {
                       const std::string& name, std::optional<std::string_view> cachePath, size_t maxCacheSize);
     // Deletes the temporary blobs a rename left behind when it crashed or could not clean up after itself. Only safe
     // while holding the container's DB lock, since the lock holder is the only process that renames.
-    void PurgeOrphanedRenameTemps(std::string_view prefix) const;
+    void PurgeOrphanedRenameTemps(std::string_view prefix, std::string_view lockPath) const;
     template <class TInfo>
     void AddContainers(const TInfo& primary, const std::optional<TInfo>& backup,
                        std::optional<std::string_view> cachePath, size_t maxCacheSize);
