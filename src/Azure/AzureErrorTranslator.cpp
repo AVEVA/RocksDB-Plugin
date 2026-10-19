@@ -68,7 +68,8 @@ rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const RequestFailedExc
     // Another writer may own the blob now, so retrying could corrupt data; IOFenced is non-retryable.
     if (code == AzureClient::BlobStorageErrorCode::LeaseLost ||
         code == AzureClient::BlobStorageErrorCode::LeaseIdMismatchWithBlobOperation ||
-        code == AzureClient::BlobStorageErrorCode::LeaseNotPresentWithBlobOperation) {
+        code == AzureClient::BlobStorageErrorCode::LeaseNotPresentWithBlobOperation ||
+        code == AzureClient::BlobStorageErrorCode::LeaseIdMissing) {
         return IOStatus::IOFenced("Lease lost: " + text);
     }
 

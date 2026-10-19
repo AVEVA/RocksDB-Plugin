@@ -205,6 +205,10 @@ TEST(AzureErrorTranslatorTests, LeaseMismatchAndMissingLeaseAreIOFenced) {
             Failure(409, "LeaseNotPresentWithBlobOperation",
                     ::AVEVA::AzureClient::make_error_code(BlobStorageErrorCode::LeaseNotPresentWithBlobOperation)))
             .IsIOFenced());
+    EXPECT_TRUE(
+        AzureErrorTranslator::IOStatusFromError(
+            Failure(400, "LeaseIdMissing", ::AVEVA::AzureClient::make_error_code(BlobStorageErrorCode::LeaseIdMissing)))
+            .IsIOFenced());
 }
 
 TEST(AzureErrorTranslatorTests, WritesFencedExceptionIsIOFenced) {
