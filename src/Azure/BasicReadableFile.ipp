@@ -139,7 +139,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& re
 // reported in each request's status, as RocksDB expects; the returned status only covers batch-level problems.
 template <class TImpl>
 rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* reqs, const size_t num_reqs,
-                                                      const rocksdb::IOOptions& opts, rocksdb::IODebugContext*) {
+                                                      const rocksdb::IOOptions& opts, rocksdb::IODebugContext*) try {
     // One merged download: the member requests it serves (indexes into reqs, ordered by offset) and, when it serves
     // more than one, the buffer the merged range is fetched into.
     struct Group {
@@ -278,6 +278,9 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
     }
 
     return batchStatus;
+} catch (...) {
+    // RocksDB does not expect exceptions from a file. Locals (and so the in-flight handles) are already released here.
+    return AzureErrorTranslator::FromCurrentException(*m_logger, "MultiRead");
 }
 
 // A hint: starts a background download into a per-file buffer that later reads of that range are served from.
