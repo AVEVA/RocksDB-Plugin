@@ -204,6 +204,27 @@ TEST_F(BlobOperationsFakeBlobTests, CopyPagesTransfersOnlyThePopulatedRanges) {
     EXPECT_EQ(2U, m_env.Blob->Downloads.size());
 }
 
+TEST_F(BlobOperationsFakeBlobTests, CopyPagesKeepsMoreThanOneUploadInFlight) {
+    m_env.Fill(4096, '\0');
+    std::fill_n(m_env.Blob->Data.begin(), 512, 'a');
+    std::fill_n(m_env.Blob->Data.begin() + 2048, 1024, 'b');
+    const auto destinationBlob = MakeDestination(4096);
+    auto& destination = *destinationBlob;
+    destination.Blob->DeferUploads = true;
+
+    auto copy = std::async(std::launch::async, [&] {
+        BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, 4096, m_env.Blob->ETag);
+    });
+
+    // Both uploads are held at once: the second started before the first finished.
+    ASSERT_TRUE(destination.Blob->WaitForPendingUploads(2));
+    destination.Blob->CompleteUpload();
+    destination.Blob->CompleteUpload();
+    copy.get();
+
+    EXPECT_EQ(m_env.Blob->Data, destination.Blob->Data);
+}
+
 TEST_F(BlobOperationsFakeBlobTests, CopyPagesOfAnEmptyBlobTransfersNothing) {
     m_env.Fill(2048, '\0');
     const auto destinationBlob = MakeDestination(2048);

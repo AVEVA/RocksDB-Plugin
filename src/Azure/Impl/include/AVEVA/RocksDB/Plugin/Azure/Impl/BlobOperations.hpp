@@ -350,9 +350,9 @@ template <typename TBlob>
 }
 
 // Copies the populated pages of `source` into `destination`, which must already exist with enough capacity. The next
-// chunk is downloaded while the current one uploads. Every request is guarded by `etag` (ignored when empty), so a
-// write to the source mid-copy fails instead of producing a torn destination. A final chunk that is not page sized
-// is padded with zeros; the logical size is carried separately by SetSize.
+// chunk is downloaded while earlier ones upload (up to MaxConcurrentPageCopies in flight). Every request is guarded by
+// `etag` (ignored when empty), so a write to the source mid-copy fails instead of producing a torn destination. A final
+// chunk that is not page sized is padded with zeros; the logical size is carried separately by SetSize.
 template <typename TBlob>
 void CopyPages(const ClientRuntimeBase& runtime, TBlob& source, TBlob& destination, int64_t size,
                const std::string& etag) {
@@ -365,20 +365,25 @@ void CopyPages(const ClientRuntimeBase& runtime, TBlob& source, TBlob& destinati
     const auto paddedLength = [](int64_t length) {
         return static_cast<size_t>((length + PageSize - 1) / PageSize * PageSize);
     };
-    // Two buffers sized for the largest chunk are reused for the whole copy rather than allocated per chunk.
-    size_t largest = 0;
-    for (const auto& chunk : chunks) {
-        largest = std::max(largest, paddedLength(chunk.Length));
-    }
-    std::vector<char> current(largest);
-    std::vector<char> next(chunks.size() > 1 ? largest : 0);
-    // Zeroes the padding after a chunk's data, which would otherwise hold the previous chunk's bytes.
-    const auto zeroPadding = [&](std::vector<char>& buffer, int64_t length) {
-        std::fill(buffer.begin() + length, buffer.begin() + static_cast<std::ptrdiff_t>(paddedLength(length)), '\0');
+
+    using Buffer = std::shared_ptr<std::vector<char>>;
+    // Every buffer ever made. One that only this list references is idle; uploads and the download in progress hold
+    // their own copy. Reusing idle ones avoids allocating a chunk-sized buffer per chunk.
+    std::vector<Buffer> buffers;
+    const auto acquire = [&buffers](size_t size) {
+        for (auto& buffer : buffers) {
+            if (buffer.use_count() == 1) {
+                buffer->resize(size);
+                return buffer;
+            }
+        }
+        return buffers.emplace_back(std::make_shared<std::vector<char>>(size));
     };
+
+    // Declared after the buffers so that it is destroyed first. A download still in flight writes into `downloading`,
+    // so on failure wait for it before the buffer is released.
+    Buffer downloading;
     std::optional<PendingDownload<TBlob>> pending;
-    // A download still in flight writes into `current`/`next`, so on failure wait for it before they are destroyed.
-    // Declared after the buffers so that it runs first.
     struct WaitForPending {
         std::optional<PendingDownload<TBlob>>& Pending;
         ~WaitForPending() {
@@ -387,26 +392,53 @@ void CopyPages(const ClientRuntimeBase& runtime, TBlob& source, TBlob& destinati
             }
         }
     } waitForPending{pending};
-    pending.emplace(StartDownload(source, std::span<char>(current).first(static_cast<size_t>(chunks.front().Length)),
-                                  chunks.front().Offset, chunks.front().Length, etag));
-    for (size_t index = 0; index < chunks.size(); ++index) {
-        const auto& chunk = chunks[index];
-        if (FinishDownload(*pending) != chunk.Length) {
-            throw std::runtime_error("Unexpected end of blob while copying pages at offset " +
-                                     std::to_string(chunk.Offset));
+
+    const auto startDownload = [&](const PageChunk& chunk) {
+        downloading = acquire(paddedLength(chunk.Length));
+        pending.emplace(StartDownload(source, std::span<char>(*downloading).first(static_cast<size_t>(chunk.Length)),
+                                      chunk.Offset, chunk.Length, etag));
+    };
+
+    // Uploads run concurrently so a large copy costs one upload latency in total rather than per chunk. They are
+    // finished in order and, on failure, all waited for because they use the destination client.
+    using Upload = decltype(StartUploadPages(runtime, destination, Buffer{}, 0));
+    std::deque<Upload> uploads;
+    const auto drainUploads = [&uploads] {
+        for (auto& upload : uploads) {
+            if (upload.Result.valid()) {
+                upload.Result.wait();
+            }
         }
-        if (index + 1 < chunks.size()) {
-            const auto& following = chunks[index + 1];
-            pending.emplace(StartDownload(source, std::span<char>(next).first(static_cast<size_t>(following.Length)),
-                                          following.Offset, following.Length, etag));
+    };
+    try {
+        startDownload(chunks.front());
+        for (size_t index = 0; index < chunks.size(); ++index) {
+            const auto& chunk = chunks[index];
+            if (FinishDownload(*pending) != chunk.Length) {
+                throw std::runtime_error("Unexpected end of blob while copying pages at offset " +
+                                         std::to_string(chunk.Offset));
+            }
+            const Buffer filled = std::move(downloading);
+            if (index + 1 < chunks.size()) {
+                startDownload(chunks[index + 1]);
+            }
+            // Zeroes the padding after the data, which would otherwise hold a previous chunk's bytes.
+            std::fill(filled->begin() + chunk.Length, filled->end(), '\0');
+            if (uploads.size() >= Configuration::Transfer::MaxConcurrentPageCopies) {
+                FinishUploadPages(uploads.front());
+                uploads.pop_front();
+            }
+            uploads.push_back(StartUploadPages(runtime, destination, filled, chunk.Offset));
         }
-        zeroPadding(current, chunk.Length);
-        UploadPages(runtime, destination, std::span<const char>(current).first(paddedLength(chunk.Length)),
-                    chunk.Offset);
-        current.swap(next);
+        while (!uploads.empty()) {
+            FinishUploadPages(uploads.front());
+            uploads.pop_front();
+        }
+    } catch (...) {
+        drainUploads();
+        throw;
     }
-}
-// True when the service refused to read the copy source for lack of authorization, which says nothing about the
+} // True when the service refused to read the copy source for lack of authorization, which says nothing about the
 // destination: the caller may still copy the bytes through the client.
 [[nodiscard]] inline bool IsCopySourceUnauthorized(const AzureClient::BlobStorageError& error) {
     return error.StatusCode == 401U || error.StatusCode == 403U || error.ErrorCode == "CannotVerifyCopySource";
