@@ -432,17 +432,21 @@ template <typename Stream> std::expected<HttpResponse, std::error_code> RequestO
 template <typename Stream> void RequestOperation<Stream>::ReleaseOrClose(bool keepAlive) {
     bool pooled = false;
     if (keepAlive) {
+        // Declared outside the try so a throw from Release leaves the stream here, to be closed gracefully below.
+        std::optional<PooledConnection<Stream>> connection;
         try {
             // A pooled connection is idle for a long time; don't let it pin the last response's buffer.
             TrimIdleBuffer(m_buffer);
-            PooledConnection<Stream> connection{std::move(m_stream), std::move(m_buffer)};
-            pooled = m_pool->Release(m_key, std::move(connection));
-            // Pooling is disabled, or Release threw: the connection was not taken, so it is closed below.
-            m_stream = std::move(connection.stream);
+            connection.emplace(PooledConnection<Stream>{std::move(m_stream), std::move(m_buffer)});
+            pooled = m_pool->Release(m_key, std::move(*connection));
         } catch (const std::exception& ex) {
             // The completion must still run; the connection is closed below if it could not be pooled.
-            Report(HttpDiagnosticKind::SwallowedException, {},
-                   std::string("Returning the connection to the pool failed: ") + ex.what());
+            Report(HttpDiagnosticKind::SwallowedException, {}, "Returning the connection to the pool failed");
+            static_cast<void>(ex);
+        }
+        // Pooling is disabled, or Release threw: the connection was not taken, so it is closed below.
+        if (!pooled && connection && connection->stream) {
+            m_stream = std::move(connection->stream);
         }
     }
     if (keepAlive && !pooled && m_stream) {

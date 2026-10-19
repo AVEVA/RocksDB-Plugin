@@ -342,6 +342,9 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
             }
             m_end = body.size();
             m_summary.FirstResponse = std::move(response);
+            if (ExceedsMaxSize(body.size())) {
+                return;
+            }
             Deliver(0U, std::move(body));
             return;
         }

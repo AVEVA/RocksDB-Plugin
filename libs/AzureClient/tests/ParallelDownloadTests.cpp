@@ -593,6 +593,23 @@ TEST(B05_DownloadIgnoredRangeTests, LengthRangeAnswered200IsTruncatedToTheReques
     EXPECT_EQ(ReadFile(out.Path), content.substr(0, 5U));
 }
 
+TEST(B05_DownloadIgnoredRangeTests, FullBodyAnswered200IsRejectedWhenOverMaxSize) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(20);
+    httpClient.DefaultResponse() = HttpResponse{200, MakeCanonicalSuccessHeaders(), content};
+    BlobClient client{httpClient, BuildOptions()};
+
+    DownloadToOptions options;
+    options.MaxSize = 10U;
+    TempFile out;
+    std::optional<DownloadToResult> result;
+    client.DownloadToAsync(out.Path, options, [&](DownloadToResult value) { result = std::move(value); });
+    ASSERT_TRUE(httpClient.RunUntil([&] { return result.has_value(); }));
+
+    ASSERT_FALSE(result->has_value());
+    EXPECT_EQ(result->error().Code, std::make_error_code(std::errc::file_too_large));
+}
+
 TEST(A3_DownloadIntoSpanTests, FullAndPartialRangesAreWrittenByteForByte) {
     const std::string content = MakeContent(18);
     for (const auto [offset, length] : {std::pair{0U, 18U}, std::pair{4U, 7U}}) {
