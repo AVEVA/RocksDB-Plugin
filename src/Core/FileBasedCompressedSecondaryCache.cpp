@@ -29,30 +29,41 @@
 namespace AVEVA::RocksDB::Plugin::Core {
 using namespace boost::log::trivial;
 
+using Logger = boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>;
+
 /// <summary>Filesystem path helpers and best-effort file deletion.</summary>
 struct FileUtil {
     /// <summary>
     /// Renames origPath to graveyardPath then deletes the graveyard file.
-    /// Both operations are best-effort; errors are silently ignored.
+    /// Both operations are best-effort; a failed rename falls back to deleting the file directly.
     /// See RemoveEntryLocked for the TOCTOU trade-off: a concurrent insert for the
     /// same key may have replaced origPath between the in-memory removal (under lock)
     /// and this rename.  In that case the rename moves the new file to the graveyard,
     /// causing one cache miss on its next Lookup; Lookup's corruption-cleanup code
     /// then removes the phantom index entry.  This is acceptable for a best-effort cache.
     /// </summary>
-    static void CommitEviction(Filesystem& fs, const std::pair<std::string, std::string>& p) noexcept {
+    static void CommitEviction(Filesystem& fs, Logger& logger, const std::pair<std::string, std::string>& p) noexcept {
         if (p.first.empty())
             return;
         if (fs.RenameFile(p.first, p.second)) {
             fs.DeleteFile(p.second);
+            return;
+        }
+        // On Windows the rename fails while a reader still has the file open. The entry has already left the index,
+        // so a file left behind would stay on disk uncounted; delete it directly instead.
+        if (!fs.DeleteFile(p.first)) {
+            try {
+                BOOST_LOG_SEV(logger, warning) << "Could not evict '" << p.first << "'; the file was left on disk";
+            } catch (...) {
+            }
         }
     }
 
     /// <summary>Commits all rename+delete pairs produced by EvictUntilSizeLocked.</summary>
-    static void CommitEvictions(Filesystem& fs,
+    static void CommitEvictions(Filesystem& fs, Logger& logger,
                                 const std::vector<std::pair<std::string, std::string>>& pairs) noexcept {
         for (const auto& p : pairs) {
-            CommitEviction(fs, p);
+            CommitEviction(fs, logger, p);
         }
     }
 };
@@ -202,7 +213,7 @@ class FileBasedCompressedSecondaryCache::Impl {
             // rename/delete failures on Windows while the file is still mapped.
             auto evictionCleanup = boost::scope::make_scope_exit([&] noexcept {
                 if (!deferredEviction.first.empty()) {
-                    FileUtil::CommitEviction(*m_fs, deferredEviction);
+                    FileUtil::CommitEviction(*m_fs, *m_logger, deferredEviction);
                 }
             });
 
@@ -261,7 +272,7 @@ class FileBasedCompressedSecondaryCache::Impl {
             }
 
             const auto filename = KeyToFilename(key);
-            FileUtil::CommitEviction(*m_fs, m_lruIndex.Remove(filename));
+            FileUtil::CommitEviction(*m_fs, *m_logger, m_lruIndex.Remove(filename));
         } catch (...) {
             BOOST_LOG_SEV(*m_logger, error)
                 << Name() << "::" << __func__ << ": " << StatusUtil::CurrentExceptionToStatus().ToString();
@@ -272,7 +283,7 @@ class FileBasedCompressedSecondaryCache::Impl {
 
     rocksdb::Status SetCapacity(size_t capacity) noexcept {
         try {
-            FileUtil::CommitEvictions(*m_fs, m_lruIndex.SetCapacity(capacity));
+            FileUtil::CommitEvictions(*m_fs, *m_logger, m_lruIndex.SetCapacity(capacity));
             return rocksdb::Status::OK();
         } catch (...) {
             const auto s = StatusUtil::CurrentExceptionToStatus();
@@ -294,7 +305,7 @@ class FileBasedCompressedSecondaryCache::Impl {
 
     rocksdb::Status Deflate(const size_t decrease) noexcept {
         try {
-            FileUtil::CommitEvictions(*m_fs, m_lruIndex.Deflate(decrease));
+            FileUtil::CommitEvictions(*m_fs, *m_logger, m_lruIndex.Deflate(decrease));
             return rocksdb::Status::OK();
         } catch (...) {
             const auto s = StatusUtil::CurrentExceptionToStatus();
@@ -374,7 +385,7 @@ class FileBasedCompressedSecondaryCache::Impl {
             auto reserved = m_lruIndex.ReserveCapacity(filename, storedSize, forceInsert);
             if (!reserved)
                 return rocksdb::Status::OK(); // admission control: over capacity, skip write
-            FileUtil::CommitEvictions(*m_fs, *reserved);
+            FileUtil::CommitEvictions(*m_fs, *m_logger, *reserved);
 
             // Phase 2: write the file — no lock held.
             if (auto s = WriteToDisk(filename, type, data, dataSize, storedSize); !s.ok())
@@ -383,7 +394,7 @@ class FileBasedCompressedSecondaryCache::Impl {
             // Phase 3: lock, register the new entry, correct concurrent overshoot.
             //          Commit I/O (rename + delete) only after releasing the lock.
             const auto evictList = m_lruIndex.RegisterEntry(filename, storedSize);
-            FileUtil::CommitEvictions(*m_fs, evictList);
+            FileUtil::CommitEvictions(*m_fs, *m_logger, evictList);
 
             return rocksdb::Status::OK();
         } catch (...) {
@@ -441,7 +452,7 @@ class FileBasedCompressedSecondaryCache::Impl {
     /// Best-effort; never throws.</summary>
     void CleanupCorruptEntry(std::string_view filename) noexcept {
         try {
-            FileUtil::CommitEviction(*m_fs, m_lruIndex.Remove(filename));
+            FileUtil::CommitEviction(*m_fs, *m_logger, m_lruIndex.Remove(filename));
         } catch (...) {
             BOOST_LOG_SEV(*m_logger, error)
                 << Name() << "::" << __func__ << ": " << StatusUtil::CurrentExceptionToStatus().ToString();

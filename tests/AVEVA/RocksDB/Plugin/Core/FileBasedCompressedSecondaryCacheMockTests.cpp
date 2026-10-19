@@ -87,3 +87,28 @@ TEST_F(FileBasedCompressedSecondaryCacheMockTests, InsertSaved_CallsWriteFileAto
 
     EXPECT_TRUE(status.ok()) << status.ToString();
 }
+
+// --------------------------------------------------------------------------
+// [Mock I/O] An eviction whose rename fails (Windows: a reader holds the file open) falls back to deleting the
+// original file, so it does not stay on disk uncounted
+// --------------------------------------------------------------------------
+TEST_F(FileBasedCompressedSecondaryCacheMockTests, EvictionRenameFailure_DeletesTheOriginalFile) {
+    ON_CALL(*m_mockFs, WriteFileAtomic(_, _, _)).WillByDefault(Return(true));
+    ON_CALL(*m_mockFs, RenameFile(_, _)).WillByDefault(Return(false));
+    ON_CALL(*m_mockFs, DeleteFile(_)).WillByDefault(Return(true));
+    std::vector<std::filesystem::path> deleted;
+    EXPECT_CALL(*m_mockFs, DeleteFile(_)).WillRepeatedly([&deleted](const std::filesystem::path& path) {
+        deleted.push_back(path);
+        return true;
+    });
+
+    auto cache = std::make_unique<FileBasedCompressedSecondaryCache>(
+        m_cacheDir, m_mockFs, FileBasedCompressedSecondaryCache::kDefaultCapacity, MakeNullLogger());
+    TestPayload payload{"data"};
+    ASSERT_TRUE(cache->Insert(MakeKey("evicted_key"), &payload, &m_helper, /*force_insert=*/true).ok());
+
+    cache->Erase(MakeKey("evicted_key"));
+
+    ASSERT_EQ(deleted.size(), 1U);
+    EXPECT_NE(deleted.front().extension(), ".del");
+}
