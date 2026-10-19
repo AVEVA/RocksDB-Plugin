@@ -31,6 +31,9 @@ template <typename TBlob> class BasicReadWriteFileImpl {
     bool m_dirty = false;
     std::vector<char> m_buffer;
     std::vector<BufferChunkInfo> m_bufferStats; // to track where page info is to be inserted
+    // Extent buffers kept between flushes; one referenced only by this list is idle and can be reused.
+    std::vector<std::shared_ptr<std::vector<char>>> m_extentPool;
+
   public:
     BasicReadWriteFileImpl(
         std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
@@ -45,6 +48,8 @@ template <typename TBlob> class BasicReadWriteFileImpl {
     void Close();
     void Sync();
     void Flush();
+    [[nodiscard]] std::shared_ptr<std::vector<char>> AcquireExtentBuffer(size_t size);
+    void TrimExtentPool();
     void Write(int64_t offset, const char* data, int64_t size);
     /// Reads only data made durable by <see cref="Sync"/> (bounded by the size at open or at the last Sync). Bytes
     /// passed to Write, or flushed with Flush, are not visible to Read until Sync is called. RocksDB uses

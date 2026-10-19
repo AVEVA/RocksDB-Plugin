@@ -123,7 +123,8 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
     // Fills the bytes of an extent that no chunk supplies with what the blob already holds. Reads past the file's old
     // end are skipped: that region holds no data yet and stays zero.
     const auto prepare = [&](Extent& extent, std::vector<PendingRead>& reads) {
-        extent.Data = std::make_shared<std::vector<char>>(static_cast<size_t>(extent.End - extent.Start), '\0');
+        // A reused buffer holds an earlier flush's bytes, so everything not copied or downloaded below is zeroed.
+        extent.Data = AcquireExtentBuffer(static_cast<size_t>(extent.End - extent.Start));
         std::vector<std::pair<int64_t, int64_t>> covered;
         for (const auto index : extent.Chunks) {
             const auto& chunk = m_bufferStats[index];
@@ -135,6 +136,12 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
 
         auto cursor = extent.Start;
         const auto readGap = [&](int64_t gapStart, int64_t gapEnd) {
+            // Past the file's old end nothing is downloaded, so those bytes must read as zero.
+            const auto zeroFrom = std::max(gapStart, sizeBefore);
+            if (gapEnd > zeroFrom) {
+                std::fill(extent.Data->begin() + (zeroFrom - extent.Start),
+                          extent.Data->begin() + (gapEnd - extent.Start), '\0');
+            }
             gapEnd = std::min(gapEnd, sizeBefore);
             if (gapEnd > gapStart) {
                 std::span<char> target(extent.Data->data() + (gapStart - extent.Start),
@@ -214,6 +221,7 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
         }
     }
     m_bufferStats.clear();
+    TrimExtentPool();
 
 #if _DEBUG
     // NOTE: This is to ensure predictable output in tests.
@@ -221,6 +229,26 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
 #endif // _DEBUG
 }
 
+// Hands out an idle pooled buffer resized to `size`, or a new one. A buffer an upload's request still references is
+// not idle, so it is never rewritten while in use. The contents are unspecified: callers set every byte.
+template <typename TBlob>
+std::shared_ptr<std::vector<char>> BasicReadWriteFileImpl<TBlob>::AcquireExtentBuffer(size_t size) {
+    for (auto& buffer : m_extentPool) {
+        if (buffer.use_count() == 1) {
+            buffer->resize(size);
+            return buffer;
+        }
+    }
+    return m_extentPool.emplace_back(std::make_shared<std::vector<char>>(size));
+}
+
+// Keeps the pool from growing past one wave of extents, so a burst of large flushes does not pin memory.
+template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::TrimExtentPool() {
+    for (auto it = m_extentPool.begin();
+         it != m_extentPool.end() && m_extentPool.size() > Configuration::Transfer::MaxConcurrentPageCopies;) {
+        it = it->use_count() == 1 ? m_extentPool.erase(it) : it + 1;
+    }
+}
 // Buffers a write at its page-aligned slot with room around it, so Flush can merge the existing bytes of partially
 // covered pages and upload whole pages. Flushes early when the buffer is nearly full.
 template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Write(int64_t offset, const char* data, int64_t size) {

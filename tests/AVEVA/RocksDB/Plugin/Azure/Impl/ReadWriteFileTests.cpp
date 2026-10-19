@@ -265,6 +265,28 @@ TEST_F(ReadWriteFileImplTests, Flush_WritesSharingAPage_AreMergedIntoOneUploadAn
     EXPECT_EQ(expected, actual);
 }
 
+TEST_F(ReadWriteFileImplTests, Flush_ReusedBufferDoesNotLeakEarlierBytesIntoUnwrittenGaps) {
+    // Arrange
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    auto file = CreateFile();
+    const std::string first(static_cast<size_t>(page), 'A');
+    file->Write(0, first.data(), page);
+    file->Sync();
+
+    // Act - a later flush past the old end leaves gaps that must read as zero, not as the first flush's 'A's
+    const std::string payload(10, 'B');
+    file->Write(2 * page + 10, payload.data(), static_cast<int64_t>(payload.size()));
+    file->Sync();
+
+    // Assert
+    const auto length = page + 10 + static_cast<int64_t>(payload.size());
+    std::vector<char> actual(static_cast<size_t>(length));
+    ASSERT_EQ(length, file->Read(page, length, actual.data()));
+    std::vector<char> expected(static_cast<size_t>(length), '\0');
+    std::fill_n(expected.begin() + page + 10, payload.size(), 'B');
+    EXPECT_EQ(expected, actual);
+}
+
 TEST_F(ReadWriteFileImplTests, Flush_OverlappingWritesToOnePage_LastWriteWins) {
     // Arrange
     constexpr int64_t page = Configuration::PageBlob::PageSize;
