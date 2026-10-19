@@ -21,6 +21,7 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <future>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -368,6 +369,41 @@ TEST(HttpClientRobustness, MaxConnectionsPerHostQueuesExtraRequestsAndReusesTheC
         EXPECT_FALSE(error);
     }
     EXPECT_EQ(server.Accepted(), 1);
+}
+
+TEST(HttpClientRobustness, QueuedRequestStartsWhileThePreviousHandlerIsStillRunning) {
+    asio::io_context context;
+    AVEVA::HttpClientOptions options;
+    options.SetMaxConnectionsPerHost(1);
+    // A pooled connection would put the queued request on the blocked handler's strand.
+    options.SetMaxIdleConnectionsPerHost(0);
+    auto client = AVEVA::HttpClient::Create(context, options);
+    ScriptedServer server(context,
+                          [](int, const http::request<http::string_body>&) -> ServerAction { return {OkResponse}; });
+
+    std::promise<void> secondDone;
+    auto secondFuture = secondDone.get_future();
+    std::atomic<bool> startedWhileBlocked = false;
+    std::atomic<int> completed = 0;
+    auto guard = asio::make_work_guard(context);
+    client->SendAsync(
+        MakeRequest(server.Url("/a")), AVEVA::HttpRequestOptions{}, [&](std::error_code, AVEVA::HttpResponse) {
+            // The slot must already be free here, so the queued request can finish on another thread
+            // while this handler is still blocked.
+            startedWhileBlocked = secondFuture.wait_for(std::chrono::seconds(4)) == std::future_status::ready;
+            ++completed;
+            guard.reset();
+        });
+    client->SendAsync(MakeRequest(server.Url("/b")), AVEVA::HttpRequestOptions{},
+                      [&](std::error_code, AVEVA::HttpResponse) {
+                          secondDone.set_value();
+                          server.Stop();
+                      });
+    std::thread helper([&context] { context.run_for(std::chrono::seconds(8)); });
+    context.run_for(std::chrono::seconds(8));
+    helper.join();
+
+    EXPECT_TRUE(startedWhileBlocked);
 }
 
 TEST(HttpClientRobustness, TimeSpentQueuedForASlotCountsAgainstTheRequestTimeout) {

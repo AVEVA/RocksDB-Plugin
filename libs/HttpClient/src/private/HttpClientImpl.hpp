@@ -312,7 +312,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     void StartLimited(PendingRequest&& pending) noexcept {
         std::shared_ptr<LimitedStart> start;
         try {
-            start = std::make_shared<LimitedStart>(m_limiter, pending.origin, std::move(pending.completion));
+            start = std::make_shared<LimitedStart>(m_limiter, std::move(pending.origin), std::move(pending.completion));
         } catch (...) {
             // Nothing could be allocated to track the request, so the handler is still in `pending`. The slot is
             // returned and the handler failed without allocating, from this call as a last resort.
@@ -352,14 +352,13 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         }
 
         void Finish(std::error_code error, HttpResponse response) {
-            // The slot is returned even if the handler throws, so one bad handler cannot hang the origin.
-            try {
-                if (auto inner = cell.Take()) {
-                    Detail::Complete(std::move(inner), error, std::move(response));
-                }
-            } catch (...) {
+            // The slot goes back before the handler runs, so a slow or blocked handler cannot hold up queued
+            // requests, and a throwing handler cannot hang the origin.
+            auto inner = cell.Take();
+            if (inner) {
                 ReleaseSlot();
-                throw;
+                Detail::Complete(std::move(inner), error, std::move(response));
+                return;
             }
             ReleaseSlot();
         }
