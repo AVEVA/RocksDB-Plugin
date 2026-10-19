@@ -69,9 +69,10 @@ class ClientRuntimeBase {
     /// <summary>
     /// Throws std::runtime_error when writes are fenced or the earliest lease renewal deadline has passed. The
     /// deadline check closes the window before the renewal loop gives up, in which another writer may already own
-    /// the lease.
+    /// the lease. Returns the time left (empty when no deadline applies) so the caller can bound its request without
+    /// querying the deadline source a second time.
     /// </summary>
-    void ThrowIfWritesFenced() const;
+    std::optional<std::chrono::steady_clock::duration> ThrowIfWritesFenced() const;
 
     /// <summary>
     /// Installs the source of the time left until the earliest lease renewal deadline (empty result: no lease is
@@ -119,6 +120,11 @@ class ClientRuntimeBase {
 /// </summary>
 [[nodiscard]] AVEVA::AzureClient::AzureRequestOptions
 BoundByWriteDeadline(const ClientRuntimeBase& runtime, AVEVA::AzureClient::AzureRequestOptions options);
+
+/// <summary>Same, using a remaining time already obtained from ThrowIfWritesFenced.</summary>
+[[nodiscard]] AVEVA::AzureClient::AzureRequestOptions
+BoundByWriteDeadline(std::optional<std::chrono::steady_clock::duration> remaining,
+                     AVEVA::AzureClient::AzureRequestOptions options);
 
 /// <summary>
 /// How a transport is created on the host's io_context. Any transport constructible from an io_context works as is;

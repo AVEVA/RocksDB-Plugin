@@ -121,46 +121,46 @@ template <typename TBlob> [[nodiscard]] int64_t GetCachedSize(const ClientRuntim
 }
 
 template <typename TBlob> void SetSize(const ClientRuntimeBase& runtime, TBlob& client, int64_t size) {
-    runtime.ThrowIfWritesFenced();
+    const auto writeBudget = runtime.ThrowIfWritesFenced();
     const SizeInvalidation<TBlob> invalidate(runtime, client);
     AzureClient::SetBlobMetadataOptions options;
     options.Metadata.emplace(std::string(BlobHelpers::SizeMetadataKey), std::to_string(size));
     Call([&](auto token) {
         return client.SetMetadataAsync(std::move(options), token,
-                                       BoundByWriteDeadline(runtime, client.GetDefaultRequestOptions()));
+                                       BoundByWriteDeadline(writeBudget, client.GetDefaultRequestOptions()));
     });
 }
 
 template <typename TBlob> void SetCapacity(const ClientRuntimeBase& runtime, TBlob& client, int64_t capacity) {
-    runtime.ThrowIfWritesFenced();
+    const auto writeBudget = runtime.ThrowIfWritesFenced();
     const SizeInvalidation<TBlob> invalidate(runtime, client);
     Call([&](auto token) {
         return client.ResizeAsync(static_cast<uint64_t>(capacity), AzureClient::ResizePageBlobOptions{}, token,
-                                  BoundByWriteDeadline(runtime, client.GetDefaultRequestOptions()));
+                                  BoundByWriteDeadline(writeBudget, client.GetDefaultRequestOptions()));
     });
 }
 
 // Creates the page blob with the given capacity and a zero logical size, replacing any existing blob: Put Page
 // Blob without If-None-Match overwrites, so this is one request for both the new and the existing case.
 template <typename TBlob> void CreateOrReplace(const ClientRuntimeBase& runtime, TBlob& client, int64_t capacity) {
-    runtime.ThrowIfWritesFenced();
+    const auto writeBudget = runtime.ThrowIfWritesFenced();
     const SizeInvalidation<TBlob> invalidate(runtime, client);
     AzureClient::CreatePageBlobOptions options;
     options.Metadata.emplace(std::string(BlobHelpers::SizeMetadataKey), "0");
     Call([&](auto token) {
         return client.CreateAsync(static_cast<uint64_t>(capacity), std::move(options), token,
-                                  BoundByWriteDeadline(runtime, client.GetDefaultRequestOptions()));
+                                  BoundByWriteDeadline(writeBudget, client.GetDefaultRequestOptions()));
     });
 }
 
 // Creates the page blob with the given capacity unless it already exists. Returns true if it was created.
 template <typename TBlob> bool CreateIfNotExists(const ClientRuntimeBase& runtime, TBlob& client, int64_t capacity) {
-    runtime.ThrowIfWritesFenced();
+    const auto writeBudget = runtime.ThrowIfWritesFenced();
     const SizeInvalidation<TBlob> invalidate(runtime, client);
     // The client suppresses BlobAlreadyExists and reports it through Response::Error() instead of failing.
     const auto response = CallResponse([&](auto token) {
         return client.CreateIfNotExistsAsync(static_cast<uint64_t>(capacity), token,
-                                             BoundByWriteDeadline(runtime, client.GetDefaultRequestOptions()));
+                                             BoundByWriteDeadline(writeBudget, client.GetDefaultRequestOptions()));
     });
     return !response.Error().has_value();
 }
@@ -168,10 +168,10 @@ template <typename TBlob> bool CreateIfNotExists(const ClientRuntimeBase& runtim
 // Deletes the blob if it exists, fenced and bounded by the write deadline like every other mutation so a stale lease
 // holder cannot delete after losing the lease. Returns true if the blob existed.
 template <typename TBlob> bool Delete(const ClientRuntimeBase& runtime, TBlob& client) {
-    runtime.ThrowIfWritesFenced();
+    const auto writeBudget = runtime.ThrowIfWritesFenced();
     const SizeInvalidation<TBlob> invalidate(runtime, client);
     const auto response = CallResponse([&](auto token) {
-        return client.DeleteIfExistsAsync(token, BoundByWriteDeadline(runtime, client.GetDefaultRequestOptions()));
+        return client.DeleteIfExistsAsync(token, BoundByWriteDeadline(writeBudget, client.GetDefaultRequestOptions()));
     });
     return !response.Error().has_value();
 }
@@ -181,10 +181,10 @@ template <typename TBlob> bool Delete(const ClientRuntimeBase& runtime, TBlob& c
 template <typename TContainer>
 [[nodiscard]] auto DeleteBatch(const ClientRuntimeBase& runtime, TContainer& container, std::vector<std::string> names,
                                AzureClient::DeleteBlobsOptions options) {
-    runtime.ThrowIfWritesFenced();
+    const auto writeBudget = runtime.ThrowIfWritesFenced();
     return Call([&](auto token) {
         return container.DeleteBlobsAsync(std::move(names), std::move(options), token,
-                                          BoundByWriteDeadline(runtime, container.GetDefaultRequestOptions()));
+                                          BoundByWriteDeadline(writeBudget, container.GetDefaultRequestOptions()));
     });
 }
 
@@ -277,10 +277,10 @@ template <typename TBlob>
 // Copies `buffer` into the request body; prefer the shared-buffer overload when the caller can hand over ownership.
 template <typename TBlob>
 void UploadPages(const ClientRuntimeBase& runtime, TBlob& client, std::span<const char> buffer, int64_t blobOffset) {
-    runtime.ThrowIfWritesFenced();
+    const auto writeBudget = runtime.ThrowIfWritesFenced();
     Call([&](auto token) {
         return client.UploadPagesAsync(static_cast<uint64_t>(blobOffset), std::as_bytes(buffer), token,
-                                       BoundByWriteDeadline(runtime, TransferOptions(client, buffer.size())));
+                                       BoundByWriteDeadline(writeBudget, TransferOptions(client, buffer.size())));
     });
 }
 
@@ -288,11 +288,11 @@ void UploadPages(const ClientRuntimeBase& runtime, TBlob& client, std::span<cons
 template <typename TBlob>
 void UploadPages(const ClientRuntimeBase& runtime, TBlob& client, std::shared_ptr<const std::vector<char>> data,
                  int64_t blobOffset) {
-    runtime.ThrowIfWritesFenced();
+    const auto writeBudget = runtime.ThrowIfWritesFenced();
     const auto size = data->size();
     Call([&](auto token) {
         return client.UploadPagesAsync(static_cast<uint64_t>(blobOffset), data, token,
-                                       BoundByWriteDeadline(runtime, TransferOptions(client, size)));
+                                       BoundByWriteDeadline(writeBudget, TransferOptions(client, size)));
     });
 }
 
@@ -306,11 +306,11 @@ template <typename TFuture> struct PendingUpload {
 template <typename TBlob>
 [[nodiscard]] auto StartUploadPages(const ClientRuntimeBase& runtime, TBlob& client,
                                     std::shared_ptr<const std::vector<char>> buffer, int64_t blobOffset) {
-    runtime.ThrowIfWritesFenced();
+    const auto writeBudget = runtime.ThrowIfWritesFenced();
     AzureClient::ThrowIfRunningOn(client.get_executor());
     const auto size = buffer->size();
     auto result = client.UploadPagesAsync(static_cast<uint64_t>(blobOffset), std::move(buffer), boost::asio::use_future,
-                                          BoundByWriteDeadline(runtime, TransferOptions(client, size)));
+                                          BoundByWriteDeadline(writeBudget, TransferOptions(client, size)));
     return PendingUpload<decltype(result)>{std::move(result)};
 }
 
@@ -456,7 +456,7 @@ void CopyPages(const ClientRuntimeBase& runtime, TBlob& source, TBlob& destinati
 template <typename TBlob>
 [[nodiscard]] bool CopyPagesServerSide(const ClientRuntimeBase& runtime, TBlob& source, TBlob& destination,
                                        int64_t size, const std::string& etag) {
-    runtime.ThrowIfWritesFenced();
+    const auto writeBudget = runtime.ThrowIfWritesFenced();
     // A destination that cannot forward a bearer token cannot authorize a SAS-less source either; the service would
     // refuse the copy, so skip the doomed request and let the caller copy the bytes through the client.
     if (!destination.CanForwardCredential() && !source.HasSasToken()) {
@@ -478,7 +478,7 @@ template <typename TBlob>
         return destination.UploadPagesFromUrlAsync(
             static_cast<uint64_t>(chunk.Offset), sourceUrl, static_cast<uint64_t>(chunk.Offset),
             static_cast<uint64_t>(length), std::move(options), token,
-            BoundByWriteDeadline(runtime, destination.GetDefaultRequestOptions()));
+            BoundByWriteDeadline(writeBudget, destination.GetDefaultRequestOptions()));
     };
 
     auto first = start(chunks.front(), AzureClient::block_on);
@@ -525,8 +525,9 @@ template <typename TBlob>
 template <typename TBlob, typename TCallback>
 void UploadPagesAsync(const ClientRuntimeBase& runtime, TBlob& client, std::shared_ptr<const std::vector<char>> data,
                       int64_t blobOffset, TCallback callback) {
+    std::optional<std::chrono::steady_clock::duration> writeBudget;
     try {
-        runtime.ThrowIfWritesFenced();
+        writeBudget = runtime.ThrowIfWritesFenced();
     } catch (...) {
         callback(std::current_exception());
         return;
@@ -545,7 +546,7 @@ void UploadPagesAsync(const ClientRuntimeBase& runtime, TBlob& client, std::shar
             }
             callback(error);
         },
-        BoundByWriteDeadline(runtime, TransferOptions(client, size)));
+        BoundByWriteDeadline(writeBudget, TransferOptions(client, size)));
 }
 
 /// <summary>

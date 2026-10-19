@@ -114,15 +114,16 @@ void ClientRuntimeBase::FenceWrites() noexcept { m_writesFenced.store(true); }
 
 bool ClientRuntimeBase::WritesFenced() const noexcept { return m_writesFenced.load(); }
 
-void ClientRuntimeBase::ThrowIfWritesFenced() const {
+std::optional<std::chrono::steady_clock::duration> ClientRuntimeBase::ThrowIfWritesFenced() const {
     if (WritesFenced()) {
         throw WritesFencedException("Writes are disabled because the filesystem can no longer guarantee it holds its "
                                     "locks");
     }
-    if (const auto remaining = WriteTimeRemaining();
-        remaining && *remaining <= std::chrono::steady_clock::duration::zero()) {
+    const auto remaining = WriteTimeRemaining();
+    if (remaining && *remaining <= std::chrono::steady_clock::duration::zero()) {
         throw WritesFencedException("Writes are disabled because the lease renewal deadline has passed");
     }
+    return remaining;
 }
 
 std::optional<int64_t> ClientRuntimeBase::CachedBlobSize(const std::string& blobUrl) const {
@@ -191,7 +192,12 @@ std::optional<std::chrono::steady_clock::duration> ClientRuntimeBase::WriteTimeR
 
 AVEVA::AzureClient::AzureRequestOptions BoundByWriteDeadline(const ClientRuntimeBase& runtime,
                                                              AVEVA::AzureClient::AzureRequestOptions options) {
-    const auto remaining = runtime.WriteTimeRemaining();
+    return BoundByWriteDeadline(runtime.WriteTimeRemaining(), std::move(options));
+}
+
+AVEVA::AzureClient::AzureRequestOptions
+BoundByWriteDeadline(const std::optional<std::chrono::steady_clock::duration> remaining,
+                     AVEVA::AzureClient::AzureRequestOptions options) {
     if (!remaining) {
         return options;
     }
