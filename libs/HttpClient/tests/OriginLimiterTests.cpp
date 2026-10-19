@@ -120,6 +120,23 @@ TEST(OriginLimiterTests, CancelRemovesOnlyTheQueuedTicketAndTheRestKeepTheirOrde
     EXPECT_EQ(recorder->Aborted, std::vector<int>{3});
 }
 
+TEST(OriginLimiterTests, CancelFindsWaitersThatWereQueuedOutOfTicketOrder) {
+    auto recorder = std::make_shared<Recorder>();
+    Limiter limiter{1, RecordingSink{recorder}};
+
+    limiter.Run("origin", limiter.NextTicket(), 1);
+    const auto earlier = limiter.NextTicket();
+    const auto later = limiter.NextTicket();
+    // Racing submitters can reach the queue in the opposite order to their tickets.
+    limiter.Run("origin", later, 3);
+    limiter.Run("origin", earlier, 2);
+
+    limiter.Cancel("origin", earlier);
+    limiter.Cancel("origin", later);
+
+    EXPECT_EQ(recorder->Aborted, (std::vector<int>{2, 3}));
+}
+
 namespace {
 struct StressState {
     std::atomic<int> Active{0};

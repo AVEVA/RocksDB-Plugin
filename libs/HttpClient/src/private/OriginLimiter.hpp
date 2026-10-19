@@ -66,7 +66,11 @@ template <typename Pending, typename Sink> class OriginLimiter {
             m_sink.Start(std::move(pending));
             return;
         }
-        state.waiters.push_back(Waiter{ticket, std::move(pending)});
+        // Tickets are issued outside the lock, so two racing submitters can arrive out of order. Keeping the queue
+        // sorted by ticket (an insertion that is almost always at the back) lets Cancel binary-search it.
+        auto& waiters = state.waiters;
+        const auto position = std::ranges::upper_bound(waiters, ticket, {}, &Waiter::ticket);
+        waiters.insert(position, Waiter{ticket, std::move(pending)});
     }
 
     /// <summary>
@@ -120,8 +124,8 @@ template <typename Pending, typename Sink> class OriginLimiter {
                 return;
             }
             auto& waiters = it->second.waiters;
-            const auto waiter = std::ranges::find(waiters, ticket, &Waiter::ticket);
-            if (waiter == waiters.end()) {
+            const auto waiter = std::ranges::lower_bound(waiters, ticket, {}, &Waiter::ticket);
+            if (waiter == waiters.end() || waiter->ticket != ticket) {
                 return;
             }
             aborted.emplace(std::move(waiter->pending));
