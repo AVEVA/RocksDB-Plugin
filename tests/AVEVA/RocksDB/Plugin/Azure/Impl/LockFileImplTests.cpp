@@ -431,6 +431,22 @@ TEST_F(LeaseRenewalLoopTests, ForbiddenRenewalFencesOnTheFirstRoundWithoutRetryi
     EXPECT_EQ(m_httpClient.RequestCount(), before + 1);
 }
 
+TEST_F(LeaseRenewalLoopTests, NotImplementedRenewalFencesOnTheFirstRoundWithoutRetrying) {
+    auto lock = AcquireLock();
+    const auto before = m_httpClient.RequestCount();
+    // 501 is a 5xx the client's retry policy treats as permanent.
+    m_httpClient.EnqueueResponse(MakeAzureErrorResponse(501, "NotImplemented", "nope", "r2"));
+    for (int i = 0; i < 5; ++i) {
+        m_httpClient.EnqueueResponse(Renewed());
+    }
+    StartLoop(lock);
+
+    EXPECT_TRUE(m_fatalCount.WaitForAtLeast(1));
+    m_loop->Stop();
+
+    EXPECT_EQ(m_fatalCount.Count(), 1);
+    EXPECT_EQ(m_httpClient.RequestCount(), before + 1);
+}
 TEST_F(LeaseRenewalLoopTests, TransientFailureIsRetriedWithoutBeingFatal) {
     auto lock = AcquireLock();
     m_httpClient.EnqueueResponse(MakeAzureErrorResponse(500, "InternalError", "boom", "r2"));

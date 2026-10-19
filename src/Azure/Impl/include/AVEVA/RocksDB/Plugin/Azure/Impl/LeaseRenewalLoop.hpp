@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #pragma once
+#include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
@@ -127,13 +128,10 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
         return false;
     }
 
-    // Only these can plausibly succeed on retry: transport-level failures (no HTTP status), request timeouts,
-    // throttling and server-side errors. Anything else (400, 401, 403, 404, ...) is permanent for a renewal, and
-    // retrying it would only delay fencing until the lease is overdue.
-    static bool IsTransient(const RequestFailedException& e) {
-        return e.StatusCode == 0 || e.StatusCode == HttpStatus::RequestTimeout ||
-               e.StatusCode == HttpStatus::TooManyRequests || e.StatusCode >= HttpStatus::InternalServerError;
-    }
+    // Only what the client's own retry policy would retry can plausibly succeed. Anything else (400, 401, 403, 404,
+    // 501, permanent transport errors, ...) is permanent for a renewal, and retrying it would only delay fencing until
+    // the lease is overdue.
+    static bool IsTransient(const RequestFailedException& e) { return AzureErrorTranslator::IsTransient(e); }
 
     struct Round {
         std::mutex Mutex;
