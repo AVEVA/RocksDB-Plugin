@@ -47,6 +47,11 @@ struct Plugin {
     ///
     /// `maxPrefetchBytes` caps the memory held by RocksDB prefetch buffers across all files of a filesystem; a
     /// prefetch that would exceed it is declined (reads then simply go to the blob). Zero disables prefetching.
+    ///
+    /// cachePath enables a local file cache of blobs under that directory, holding at most maxCacheSize bytes
+    /// (values above INT64_MAX are rejected with InvalidArgument). A cache with maxCacheSize of zero can never hold
+    /// a file, so it only adds a size lookup to every read: a warning is logged and nothing is cached. Without
+    /// cachePath no cache is used and maxCacheSize is ignored.
     /// </summary>
     static rocksdb::Status
     Register(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env, std::shared_ptr<rocksdb::Env>* guard,

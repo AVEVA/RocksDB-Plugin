@@ -8,7 +8,9 @@
 #include <rocksdb/file_system.h>
 
 #include <boost/asio/io_context.hpp>
+#include <boost/log/trivial.hpp>
 
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -54,6 +56,13 @@ rocksdb::Status RegisterImpl(rocksdb::ConfigOptions& configOptions, rocksdb::Env
     if (const auto problem = Impl::InvalidDataFileSizes(options.DataFileInitialSize, options.DataFileBufferSize);
         !problem.empty()) {
         return rocksdb::Status::InvalidArgument(std::string(problem));
+    }
+    if (options.MaxCacheSize > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+        return rocksdb::Status::InvalidArgument("maxCacheSize cannot exceed INT64_MAX");
+    }
+    if (options.CachePath && options.MaxCacheSize == 0 && options.Log) {
+        BOOST_LOG_SEV(*options.Log, boost::log::trivial::warning)
+            << "cachePath is set but maxCacheSize is 0: nothing will ever be cached";
     }
     auto pluginName = PluginNameFor(options.Primary, options.Backup);
     auto legacyName = LegacyPluginNameFor(options.Primary, options.Backup);

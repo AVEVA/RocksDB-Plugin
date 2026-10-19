@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <boost/log/trivial.hpp>
 #include <cassert>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 using namespace boost::log::trivial;
@@ -20,6 +21,9 @@ FileCache::FileCache(
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
     : m_cachePath(std::move(cachePath)), m_maxSize(maxCacheSize), m_containerClient(std::move(containerClient)),
       m_filesystem(std::move(filesystem)), m_logger(std::move(logger)) {
+    if (maxCacheSize < 0) {
+        throw std::invalid_argument("Cache size cannot be negative");
+    }
     PurgePartialDownloads();
     // Start the background thread after all members are initialized
     m_backgroundDownloader = std::jthread([this](std::stop_token stopToken) { BackgroundDownload(stopToken); });

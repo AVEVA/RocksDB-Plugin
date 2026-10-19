@@ -16,6 +16,7 @@
 #include <cctype>
 #include <chrono>
 #include <future>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
@@ -51,6 +52,20 @@ TEST(PluginTests, NameFor_StartsWithPluginNameAndIsHexEncoded) {
     for (const char ch : name.substr(Plugin::Name.size() + 1)) {
         EXPECT_TRUE(std::isxdigit(static_cast<unsigned char>(ch))) << ch;
     }
+}
+
+TEST(PluginTests, Register_WithCacheSizeAboveInt64Max_IsRejected) {
+    const auto logger =
+        std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
+    rocksdb::ConfigOptions configOptions;
+    rocksdb::Env* env = nullptr;
+    std::shared_ptr<rocksdb::Env> guard;
+    boost::asio::io_context context;
+
+    const auto status = Plugin::Register(configOptions, &env, &guard, context, BadInfo(), std::nullopt, logger, 4096,
+                                         4096, "cache", static_cast<size_t>(std::numeric_limits<int64_t>::max()) + 1);
+
+    EXPECT_TRUE(status.IsInvalidArgument()) << status.ToString();
 }
 
 TEST(PluginTests, NameFor_DistinguishesAccountsDatabasesAndBackup) {
