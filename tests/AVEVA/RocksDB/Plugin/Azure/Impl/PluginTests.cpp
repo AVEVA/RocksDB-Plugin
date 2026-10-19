@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Plugin.hpp"
+#include "PluginRegistry.hpp"
 
 #include <gtest/gtest.h>
 #include <rocksdb/convenience.h>
@@ -13,6 +14,8 @@
 #include <boost/log/sources/severity_logger.hpp>
 
 #include <cctype>
+#include <chrono>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -137,4 +140,37 @@ TEST(PluginTests, Register_WithNullSharedIoContext_IsRejected) {
     EXPECT_TRUE(Plugin::Register(configOptions, &env, &guard, std::shared_ptr<boost::asio::io_context>{},
                                  MakeInfo("db"), std::nullopt, logger)
                     .IsInvalidArgument());
+}
+namespace {
+// Reports, from its own destructor, whether the registration lock was free: a helper thread clears the same
+// registration and can only finish if nobody is holding the lock while the destructor runs.
+struct LockProbe {
+    std::string Name;
+    std::shared_ptr<bool> LockWasFree;
+    LockProbe(std::string name, std::shared_ptr<bool> result) : Name(std::move(name)), LockWasFree(std::move(result)) {}
+    LockProbe(LockProbe&&) noexcept = default;
+    LockProbe(const LockProbe&) = default;
+    ~LockProbe() {
+        if (LockWasFree) {
+            auto cleared = std::async(std::launch::async, [name = Name] {
+                AVEVA::RocksDB::Plugin::Azure::Registry::ClearRegistration(name);
+            });
+            *LockWasFree = cleared.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+        }
+    }
+};
+} // namespace
+
+TEST(PluginRegistryTests, SetFactory_ReplacingAFactory_DestroysTheOldOneOutsideTheRegistrationLock) {
+    using AVEVA::RocksDB::Plugin::Azure::Registry::ClearRegistration;
+    using AVEVA::RocksDB::Plugin::Azure::Registry::FileSystemFactory;
+    using AVEVA::RocksDB::Plugin::Azure::Registry::SetFactory;
+    const std::string name = "registry-lock-test";
+    auto lockWasFree = std::make_shared<bool>(false);
+    SetFactory(name, [probe = LockProbe(name, lockWasFree)] { return std::unique_ptr<rocksdb::FileSystem>(); });
+
+    SetFactory(name, FileSystemFactory{});
+
+    EXPECT_TRUE(*lockWasFree);
+    ClearRegistration(name);
 }

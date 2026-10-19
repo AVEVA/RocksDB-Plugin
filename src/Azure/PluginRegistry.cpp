@@ -8,6 +8,7 @@
 
 #include <mutex>
 #include <unordered_map>
+#include <utility>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Registry {
 namespace {
@@ -79,8 +80,11 @@ std::shared_ptr<Registration> GetOrAddRegistration(const std::string& pluginName
 
 void SetFactory(const std::string& pluginName, FileSystemFactory create) {
     auto registration = GetOrAddRegistration(pluginName);
+    // Declared before the lock so the old factory is destroyed after unlocking: it may own an io_context whose
+    // destructor joins a thread.
+    FileSystemFactory replaced;
     std::scoped_lock lock(registration->Mutex);
-    registration->Create = std::move(create);
+    replaced = std::exchange(registration->Create, std::move(create));
 }
 
 void ClearRegistration(const std::string& pluginName) {
