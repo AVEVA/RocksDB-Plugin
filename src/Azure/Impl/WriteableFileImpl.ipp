@@ -66,8 +66,9 @@ BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(
             const auto bytesDownloaded =
                 BlobOperations::DownloadToBuffer(*m_w.H.Blob, m_buffer, m_lastPageOffset, lastPageBytes);
             WriteableFileDetail::RequireFullPageDownload(m_w.H.Name, m_lastPageOffset, lastPageBytes, bytesDownloaded);
+            // The tail already matches the blob, so it stays "flushed" until Append changes it; otherwise a
+            // reopen and close would upload an identical page, change the ETag and invalidate readers.
             m_bufferOffset = lastPageBytes;
-            m_flushed = false; // We have existing partial page data in buffer
         }
     }
 }

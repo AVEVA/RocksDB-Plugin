@@ -572,6 +572,41 @@ TEST_F(BlobFilesystemFakeTests, ReopenWriteableFile_OfAMissingFile_CreatesItAndA
     EXPECT_EQ(Read("missing.log"), data);
 }
 
+TEST_F(BlobFilesystemFakeTests, ReopenWriteableFile_OfAMissingFile_DoesNotLookUpTheBlobItJustCreated) {
+    const auto before = m_server->PropertiesRequests;
+
+    const auto file = m_fs->ReopenWriteableFile(Path("missing.log"));
+
+    EXPECT_EQ(0, file.GetFileSize());
+    EXPECT_EQ(m_server->PropertiesRequests, before);
+}
+
+TEST_F(BlobFilesystemFakeTests, ReopenWriteableFile_ThenCloseWithoutAppending_WritesNothing) {
+    const std::string data(700, 'x');
+    {
+        auto file = m_fs->CreateWriteableFile(Path("p.log"));
+        file.Append(std::span<const char>(data.data(), data.size()));
+        file.Close();
+    }
+    std::vector<FakeBlobServer::Operation> operations;
+    m_server->Fault = [&operations](const auto operation) -> std::optional<AzureClient::BlobStorageError> {
+        operations.push_back(operation);
+        return std::nullopt;
+    };
+    const auto uploadsBefore = m_server->Uploads.size();
+
+    {
+        auto file = m_fs->ReopenWriteableFile(Path("p.log"));
+        file.Close();
+    }
+    m_server->Fault = nullptr;
+
+    EXPECT_EQ(m_server->Uploads.size(), uploadsBefore);
+    EXPECT_EQ(0, std::ranges::count(operations, FakeBlobServer::Operation::UploadPages));
+    EXPECT_EQ(0, std::ranges::count(operations, FakeBlobServer::Operation::SetMetadata));
+    EXPECT_EQ(Read("p.log"), data);
+}
+
 // Rename failures: whichever step fails, the source survives and an existing destination keeps its content.
 class RenameFailureTests : public BlobFilesystemFakeTests,
                            public ::testing::WithParamInterface<FakeBlobServer::Operation> {
