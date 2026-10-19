@@ -101,10 +101,28 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
     /// sweep schedules itself instead of being lost.
     /// </summary>
     void RunSweep() {
+        std::lock_guard<std::mutex> sweepLock(m_sweepMutex);
+        if (m_stopped) {
+            return;
+        }
         m_scheduled = false;
         if (m_plainPool->Sweep() + m_tlsPool->Sweep() > 0 && !m_scheduled.exchange(true)) {
             m_scheduler->Schedule(weak_from_this(), m_interval);
         }
+    }
+
+    /// <summary>
+    /// Waits for any sweep in flight, prevents later ones, and disposes the idle connections on the calling
+    /// thread. The owner calls this before its io_context may go away, so the scheduler thread can never be the
+    /// one that posts a disposal to an executor that no longer exists.
+    /// </summary>
+    void Stop() {
+        {
+            std::lock_guard<std::mutex> sweepLock(m_sweepMutex);
+            m_stopped = true;
+        }
+        m_plainPool->Clear();
+        m_tlsPool->Clear();
     }
 
     /// <summary>
@@ -273,6 +291,8 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
     std::chrono::milliseconds m_interval;
     std::shared_ptr<const DiagnosticsSink> m_diagnostics;
     std::atomic<bool> m_scheduled{false};
+    std::mutex m_sweepMutex;
+    bool m_stopped = false;
     std::shared_ptr<SweepScheduler> m_scheduler = SweepScheduler::Acquire();
 };
 } // namespace AVEVA::Private

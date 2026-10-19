@@ -100,3 +100,20 @@ TEST(IdleSweeper, SchedulerStopsWhenTheLastSweeperIsDestroyed) {
     EXPECT_TRUE(IdleSweeper::SchedulerIsAlive());
     EXPECT_TRUE(WaitUntil([&] { return again.plain->IdleCount() == 0; }));
 }
+
+// The scheduler thread may hold the last reference to the sweeper; Stop must have drained the pools on the caller's
+// thread by then, so no disposal is posted to an io_context that has already been destroyed.
+TEST(IdleSweeper, StopDrainsThePoolsBeforeTheIoContextGoesAway) {
+    for (int i = 0; i < 50; ++i) {
+        auto context = std::make_unique<asio::io_context>();
+        auto fixture = std::make_unique<SweeperFixture>(*context, std::chrono::milliseconds(1));
+        fixture->AddIdleConnection();
+        auto sweeper = fixture->sweeper;
+
+        sweeper->Stop();
+        EXPECT_EQ(fixture->plain->IdleCount(), 0U);
+        fixture.reset();
+        context.reset();
+        sweeper.reset();
+    }
+}

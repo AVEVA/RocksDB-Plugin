@@ -162,7 +162,10 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         }
     }
 
-    ~BasicHttpClientCore() { Close(); }
+    ~BasicHttpClientCore() {
+        Close();
+        m_sweeper->Stop();
+    }
 
     /// <summary>
     /// Sends a request, routing it through the per-origin limiter when one is configured.
