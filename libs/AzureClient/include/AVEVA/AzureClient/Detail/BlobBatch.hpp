@@ -18,13 +18,16 @@
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 
+#include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/post.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <exception>
 #include <expected>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -64,12 +67,27 @@ class BatchDeleteOperation final
                          AzureRequestOptions requestOptions)
         : m_httpClient(httpClient), m_target(std::move(target)), m_names(std::move(names)),
           m_maxConcurrent(std::max<std::size_t>(1U, maxConcurrentRequests)), m_completion(std::move(completion)),
-          m_requestOptions(requestOptions),
+          m_requestOptions(requestOptions), m_parentSlot(requestOptions.GetCancellationSlot()),
           m_auth(MakeRequestAuth(*m_target->Connection, m_target->Credential != nullptr)) {
         m_items.resize(m_names.size());
     }
 
-    void Start() { Pump(); }
+    void Start() {
+        if (m_parentSlot.is_connected()) {
+            // The parent slot is assigned once here; every chunk gets its own signal so no chunk replaces the
+            // handler of another, and a cancel reaches all of them.
+            std::weak_ptr<BatchDeleteOperation> const weak = this->weak_from_this();
+            THttp const* httpClient = &m_httpClient;
+            m_parentSlot.assign([weak, httpClient](boost::asio::cancellation_type_t) {
+                boost::asio::post(httpClient->get_executor(), [weak]() {
+                    if (auto self = weak.lock()) {
+                        self->OnCancel();
+                    }
+                });
+            });
+        }
+        Pump();
+    }
 
   private:
     [[nodiscard]] std::size_t ChunkCount() const noexcept {
@@ -82,19 +100,22 @@ class BatchDeleteOperation final
         const auto keepAlive = this->shared_from_this();
         for (;;) {
             std::optional<std::size_t> chunk;
+            std::shared_ptr<boost::asio::cancellation_signal> signal;
             bool finish = false;
             {
                 const std::scoped_lock lock(m_mutex);
                 if (!m_failure && m_nextChunk < ChunkCount() && m_inFlight < m_maxConcurrent) {
                     chunk = m_nextChunk++;
                     ++m_inFlight;
+                    signal = std::make_shared<boost::asio::cancellation_signal>();
+                    m_signals.emplace(*chunk, signal);
                 } else if (m_inFlight == 0 && !m_finished && (m_failure || m_nextChunk >= ChunkCount())) {
                     m_finished = true;
                     finish = true;
                 }
             }
             if (chunk) {
-                StartChunk(*chunk);
+                StartChunk(*chunk, signal);
                 continue;
             }
             if (finish) {
@@ -106,7 +127,37 @@ class BatchDeleteOperation final
 
     // The bearer token for each attempt comes from the request pipeline's rebuild hook, so a retry never replays
     // stale sub-request dates, signatures or tokens.
-    void StartChunk(std::size_t chunk) { SendChunk(chunk); }
+    void StartChunk(std::size_t chunk, const std::shared_ptr<boost::asio::cancellation_signal>& signal) {
+        SendChunk(chunk, signal);
+        // A cancel that raced the chunk start may have emitted before the pipeline attached its handler.
+        if (m_cancelled.load(std::memory_order_acquire)) {
+            signal->emit(boost::asio::cancellation_type::terminal);
+        }
+    }
+
+    // Aborts every chunk in flight and stops new ones from starting. Each chunk reports operation_canceled through
+    // its own completion, so the result is delivered once the in-flight chunks have wound down.
+    void OnCancel() {
+        std::vector<std::shared_ptr<boost::asio::cancellation_signal>> signals;
+        {
+            const std::scoped_lock lock(m_mutex);
+            if (m_finished) {
+                return;
+            }
+            m_cancelled.store(true, std::memory_order_release);
+            if (!m_failure) {
+                m_failure =
+                    MakeClientError(std::make_error_code(std::errc::operation_canceled), "The operation was canceled.");
+            }
+            for (const auto& entry : m_signals) {
+                signals.push_back(entry.second);
+            }
+        }
+        for (const auto& signal : signals) {
+            signal->emit(boost::asio::cancellation_type::terminal);
+        }
+        Pump();
+    }
 
     void AuthorizeSubrequest(HttpRequest& subrequest, std::string_view token) const {
         switch (m_auth.Type) {
@@ -141,7 +192,7 @@ class BatchDeleteOperation final
         return body;
     }
 
-    void SendChunk(std::size_t chunk) {
+    void SendChunk(std::size_t chunk, const std::shared_ptr<boost::asio::cancellation_signal>& signal) {
         const std::size_t begin = chunk * MaxBatchSubrequests;
         const std::size_t end = std::min(begin + MaxBatchSubrequests, m_names.size());
 
@@ -152,17 +203,19 @@ class BatchDeleteOperation final
             request = BuildContainerRequest(*m_target, HttpMethod::Post, "comp=batch");
             AddHeader(request, ContentTypeHeaderName, "multipart/mixed; boundary=" + boundary);
         } catch (...) {
-            FailChunk(MakeFailureFromCurrentException());
+            FailChunk(chunk, MakeFailureFromCurrentException());
             return;
         }
 
+        AzureRequestOptions chunkOptions = m_requestOptions;
+        chunkOptions.SetCancellationSlot(signal->slot());
         SendAuthorizedRequestAsync(
             m_httpClient, *m_target, std::move(request),
             [self = this->shared_from_this(), chunk, begin, end](std::error_code error, HttpResponse response) {
                 self->OnChunkResponse(chunk, std::span{self->m_names}.subspan(begin, end - begin), error,
                                       std::move(response));
             },
-            m_requestOptions,
+            chunkOptions,
             [self = this->shared_from_this(), begin, end, boundary = std::move(boundary)](HttpRequest& attempt,
                                                                                           std::string_view token) {
                 attempt.SetBody(self->BuildChunkBody(begin, end, boundary, token));
@@ -184,7 +237,7 @@ class BatchDeleteOperation final
             BlobStorageError details =
                 failure.Details.has_value() ? std::move(*failure.Details) : MakeClientError(failure.Error);
             details.Code = failure.Error;
-            RecordFailure(std::move(details));
+            RecordFailure(chunk, std::move(details));
             return;
         }
 
@@ -194,22 +247,24 @@ class BatchDeleteOperation final
             if (!m_rawResponse.has_value()) {
                 m_rawResponse = std::move(response);
             }
+            m_signals.erase(chunk);
             --m_inFlight;
         }
         Pump();
     }
 
     // Never completes inline: the failure may be found while still inside the initiating call.
-    void FailChunk(BlobStorageError error) {
+    void FailChunk(std::size_t chunk, BlobStorageError error) {
         boost::asio::post(m_httpClient.get_executor(),
-                          [self = this->shared_from_this(), error = std::move(error)]() mutable {
-                              self->RecordFailure(std::move(error));
+                          [self = this->shared_from_this(), chunk, error = std::move(error)]() mutable {
+                              self->RecordFailure(chunk, std::move(error));
                           });
     }
 
-    void RecordFailure(BlobStorageError error) {
+    void RecordFailure(std::size_t chunk, BlobStorageError error) {
         {
             const std::scoped_lock lock(m_mutex);
+            m_signals.erase(chunk);
             if (!m_failure) {
                 m_failure = std::move(error);
             }
@@ -236,6 +291,7 @@ class BatchDeleteOperation final
     std::size_t m_maxConcurrent;
     TCompletion m_completion;
     AzureRequestOptions m_requestOptions;
+    boost::asio::cancellation_slot m_parentSlot;
     RequestAuth m_auth;
 
     std::mutex m_mutex;
@@ -245,6 +301,8 @@ class BatchDeleteOperation final
     std::size_t m_nextChunk = 0;
     std::size_t m_inFlight = 0;
     bool m_finished = false;
+    std::atomic<bool> m_cancelled{false};
+    std::map<std::size_t, std::shared_ptr<boost::asio::cancellation_signal>> m_signals;
 };
 
 // Deletes `names` from the container with Blob Batch requests. Invalid names fail the whole call before anything is

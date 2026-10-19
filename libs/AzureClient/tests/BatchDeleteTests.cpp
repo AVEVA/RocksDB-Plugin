@@ -16,6 +16,8 @@
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 
+#include <boost/asio/bind_cancellation_slot.hpp>
+#include <boost/asio/cancellation_signal.hpp>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -304,6 +306,36 @@ TEST(BatchDeleteTests, LimitsRequestsInFlight) {
     ASSERT_TRUE(http.RunUntil([&] { return outcome.has_value(); }));
     ASSERT_TRUE(outcome->has_value());
     EXPECT_EQ(outcome->value().Value().Items.size(), 768U);
+}
+
+TEST(BatchDeleteTests, CancelAbortsEveryChunkInFlightAndStartsNoMore) {
+    FakeHttpClient http;
+    http.SetResponder([](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
+        FakeHttpClient::ScriptedResult result =
+            BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
+        result.Deferred = true;
+        return result;
+    });
+    BlobContainerClient client{http, MakeBlobContainerClientOptions()};
+
+    boost::asio::cancellation_signal signal;
+    std::optional<BatchOutcome> outcome;
+    client.DeleteBlobsAsync(MakeNames(256U * 5U), DeleteBlobsOptions{.MaxConcurrentRequests = 2},
+                            boost::asio::bind_cancellation_slot(
+                                signal.slot(), [&outcome](BatchOutcome result) { outcome = std::move(result); }));
+    ASSERT_EQ(http.PendingCount(), 2U);
+
+    ASSERT_TRUE(http.CompleteNext());
+    ASSERT_EQ(http.RequestCount(), 3U);
+    ASSERT_EQ(http.PendingCount(), 2U);
+
+    signal.emit(boost::asio::cancellation_type::terminal);
+    ASSERT_TRUE(http.RunUntil([&] { return outcome.has_value(); }));
+
+    ASSERT_FALSE(outcome->has_value());
+    EXPECT_EQ(outcome->error().Code, std::make_error_code(std::errc::operation_canceled));
+    EXPECT_EQ(http.PendingCount(), 0U);
+    EXPECT_EQ(http.RequestCount(), 3U);
 }
 
 TEST(BatchDeleteTests, EmptyListSucceedsWithoutSendingAnything) {
