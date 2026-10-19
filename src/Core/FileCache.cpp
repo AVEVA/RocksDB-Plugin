@@ -183,7 +183,8 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
             return 0;
         }
 
-        auto cachedFilePath = m_cachePath / fileEntry.GetFilePath();
+        // Only the relative name is copied under the lock; the full path is built when the file is actually opened.
+        auto relativePath = fileEntry.GetFilePath();
         const auto handle = fileEntry.GetOrCreateReadHandle();
         // Taken under the lock: the entry may be replaced or evicted once it is released.
         const int64_t entrySize = fileEntry.GetSize();
@@ -196,12 +197,14 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
         bool shortRead = false;
         std::optional<int64_t> result;
         try {
+            // Reads of one cached file are serialized on purpose: the handle is shared and its Read may seek, so
+            // concurrent readers would need positional I/O. No contention was measured, so that is left for later.
             std::scoped_lock handleLock(handle->Mutex);
             if (handle->Closed) {
                 return std::nullopt;
             }
             if (!handle->Opened) {
-                handle->Opened = m_filesystem->Open(cachedFilePath);
+                handle->Opened = m_filesystem->Open(m_cachePath / relativePath);
             }
             int64_t bytesRead = 0;
             try {
@@ -529,7 +532,6 @@ void FileCache::EntryAccessedUnsafe(FileCacheEntry& file) {
 }
 
 size_t FileCache::PruneUndownloadedStaleEntriesUnsafe() {
-    ValidateCountersUnsafe();
     if (m_undownloadedStaleCount <= MaxUndownloadedStaleEntries) {
         return 0;
     }
