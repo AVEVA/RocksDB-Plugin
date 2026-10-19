@@ -549,10 +549,12 @@ void UploadPagesAsync(const ClientRuntimeBase& runtime, TBlob& client, std::shar
 }
 
 /// <summary>
-/// `callback(std::exception_ptr error, unsigned int httpStatus, std::string_view data)`: an exception (null on
+/// `callback(std::exception_ptr error, unsigned int httpStatus, std::string_view data, std::shared_ptr<const void>
+/// owner)`: an exception (null on
 /// success), the HTTP status carried by a RequestFailedException (0 on success or when no response was received) so
 /// callers can classify failures without rethrowing, and the downloaded bytes.
-/// The bytes live in a pooled buffer and are only valid until the callback returns; copy anything that must outlive it.
+/// The bytes live in a pooled buffer that is valid until the callback returns, or for as long as `owner` is held;
+/// keep `owner` to retain the bytes without copying.
 /// A non-zero `timeout` caps how long the request may take; it only ever shortens the transfer-scaled default.
 /// </summary>
 template <typename TBlob, typename TCallback>
@@ -583,7 +585,8 @@ void DownloadAsync(TBlob& client, int64_t blobOffset, int64_t readLength, const 
             } catch (...) {
                 error = std::current_exception();
             }
-            callback(error, status, std::string_view(buffer->Data(), std::min(written, buffer->Size())));
+            const std::string_view data(buffer->Data(), std::min(written, buffer->Size()));
+            callback(error, status, data, std::shared_ptr<const void>(std::move(buffer)));
         },
         std::move(requestOptions));
 }

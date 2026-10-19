@@ -26,8 +26,12 @@
 #include <utility>
 #include <vector>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-/// <summary>Completion of an async read: an exception (null on success) and the bytes read.</summary>
-using ReadCallback = std::function<void(std::exception_ptr error, std::string_view data)>;
+/// <summary>
+/// Completion of an async read: an exception (null on success) and the bytes read. `data` is valid while `owner`
+/// (when non-null) or, failing that, until the callback returns; keep `owner` to retain the bytes without copying.
+/// </summary>
+using ReadCallback =
+    std::function<void(std::exception_ptr error, std::string_view data, std::shared_ptr<const void> owner)>;
 
 template <typename TBlob> class BasicReadableFileImpl {
     BlobFileHandles<TBlob> m_h;
@@ -50,7 +54,8 @@ template <typename TBlob> class BasicReadableFileImpl {
         int64_t Offset = 0;
         int64_t Length = 0; // Also the number of bytes reserved from the shared budget.
         bool Pending = false;
-        std::string Data;
+        std::shared_ptr<const void> Owner; // keeps the pooled download buffer behind Data alive
+        std::string_view Data;
     };
     struct PrefetchState {
         std::mutex Mutex;

@@ -91,7 +91,8 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& re
             auto download = [file = m_file, offset, length, timeout, request, logger = m_logger] {
                 TImpl::ReadAsync(
                     file, offset, length,
-                    [request, logger](std::exception_ptr error, std::string_view data) {
+                    [request, logger](std::exception_ptr error, std::string_view data,
+                                      const std::shared_ptr<const void>&) {
                         request->Complete(error ? AzureErrorTranslator::FromException(*logger, error, "ReadAsync")
                                                 : rocksdb::IOStatus::OK(),
                                           data);

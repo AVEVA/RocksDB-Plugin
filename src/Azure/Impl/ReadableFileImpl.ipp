@@ -39,10 +39,10 @@ inline bool TrySpendRefresh(int& left) { return left-- > 0; }
 // holds references into it.
 template <typename TBlob>
 void FinishRead(std::shared_ptr<const BasicReadableFileImpl<TBlob>>& self, ReadCallback& callback,
-                std::exception_ptr error, std::string_view data) {
+                std::exception_ptr error, std::string_view data, std::shared_ptr<const void> owner = {}) {
     auto done = std::exchange(callback, nullptr);
     self.reset();
-    done(std::move(error), data);
+    done(std::move(error), data, std::move(owner));
 }
 
 // Runs completion waiters, each isolated: one that throws must neither skip the rest (their reads would never
@@ -217,7 +217,8 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
         }
 
         id = ++state->NextId;
-        state->Slots.push_back(PrefetchSlot{.Id = id, .Offset = offset, .Length = n, .Pending = true, .Data = {}});
+        state->Slots.push_back(
+            PrefetchSlot{.Id = id, .Offset = offset, .Length = n, .Pending = true, .Owner = {}, .Data = {}});
     }
 
     // A superseded or cleared prefetch (its slot is gone) must not publish its bytes.
@@ -225,14 +226,8 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
     auto name = self->m_h.Name;
     try {
         ReadAsync(std::move(self), offset, n,
-                  [state, id, logger, name = std::move(name)](std::exception_ptr error,
-                                                                                  std::string_view data) {
-                      // Copied before taking the lock so readers are not blocked behind an n-byte memcpy; the slot is
-                      // filled by a move.
-                      std::string copied;
-                      if (!error) {
-                          copied.assign(data);
-                      }
+                  [state, id, logger, name = std::move(name)](std::exception_ptr error, std::string_view data,
+                                                              std::shared_ptr<const void> owner) {
                       std::vector<std::move_only_function<void()>> waiters;
                       {
                           std::scoped_lock lock(state->Mutex);
@@ -242,7 +237,9 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
                                   state->Drop(slot);
                               } else {
                                   slot->Pending = false;
-                                  slot->Data = std::move(copied);
+                                  // The slot keeps the pooled download buffer instead of copying up to 8 MiB out of it.
+                                  slot->Owner = std::move(owner);
+                                  slot->Data = data;
                               }
                           }
                           for (auto it = state->Waiters.begin(); it != state->Waiters.end();) {
@@ -406,7 +403,9 @@ void BasicReadableFileImpl<TBlob>::ReadAsync(std::shared_ptr<const BasicReadable
                                              const int attemptsLeft, const std::chrono::milliseconds timeout) {
     if (self->m_asyncReads) {
         callback = [callback = std::move(callback), token = self->m_asyncReads->Begin()](
-                       std::exception_ptr error, std::string_view data) { callback(std::move(error), data); };
+                       std::exception_ptr error, std::string_view data, std::shared_ptr<const void> owner) {
+            callback(std::move(error), data, std::move(owner));
+        };
     }
     ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(callback), attemptsLeft, timeout);
 }
@@ -456,7 +455,8 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
     BlobOperations::DownloadAsync(
         blob, offset, toRead, etag, timeout,
         [self = std::move(self), offset, bytesToRead, remaining, callback = std::move(callback), attemptsLeft,
-         timeout](std::exception_ptr error, unsigned int status, std::string_view data) mutable {
+         timeout](std::exception_ptr error, unsigned int status, std::string_view data,
+                  std::shared_ptr<const void> owner) mutable {
             if (error) {
                 if (status == HttpStatus::PreconditionFailed) {
                     auto left = attemptsLeft;
@@ -475,7 +475,7 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
             if (static_cast<int64_t>(data.size()) > remaining) {
                 data = data.substr(0, static_cast<size_t>(remaining));
             }
-            ReadableFileDetail::FinishRead(self, callback, nullptr, data);
+            ReadableFileDetail::FinishRead(self, callback, nullptr, data, std::move(owner));
         });
 }
 
