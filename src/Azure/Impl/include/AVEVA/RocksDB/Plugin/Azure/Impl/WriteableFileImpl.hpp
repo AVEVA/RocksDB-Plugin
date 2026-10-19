@@ -78,7 +78,6 @@ template <typename TBlob> class BasicWriteableFileImpl {
     // Starts uploading the buffered pages without waiting for them (see WriteableFile::RangeSync).
     void RangeSync();
     void Sync();
-    void Truncate(int64_t size);
     [[nodiscard]] int64_t GetFileSize() const noexcept;
     [[nodiscard]] int64_t GetUniqueId(char* id, int64_t maxIdSize) const noexcept;
 

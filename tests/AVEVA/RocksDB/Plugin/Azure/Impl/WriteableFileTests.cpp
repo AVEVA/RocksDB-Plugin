@@ -297,19 +297,6 @@ TEST_F(WriteableFileTests, Constructor_ShortDownloadOfThePartialPage_ThrowsAndUp
     EXPECT_EQ(0U, m_env.Blob->Uploads.size());
 }
 
-TEST_F(WriteableFileTests, Truncate_ShortDownloadOfThePartialPage_ThrowsAndUploadsNothing) {
-    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
-    m_env.Blob->SetCapacity(pageSize * 2);
-    m_env.Blob->Size = pageSize * 2;
-    auto file = MakeFile();
-    m_env.Blob->DownloadOverride = [](const auto&) { return std::string(10, 'p'); };
-
-    EXPECT_THROW(file.Truncate(pageSize + 100), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
-    // The failed reload must not leave zeros in the buffer for a later Sync to upload over the real data.
-    EXPECT_NO_THROW(file.Sync());
-    EXPECT_EQ(0U, m_env.Blob->Uploads.size());
-}
-
 TEST_F(WriteableFileTests, Append_LessThanAPage_UploadPagesNotCalled) {
     auto file = MakeFile(Configuration::PageBlob::PageSize * 2);
 
@@ -358,21 +345,6 @@ TEST_F(WriteableFileTests, Append_ExceedsCapacity_SetCapacityCalled) {
 
     ASSERT_EQ(1U, m_env.Blob->CapacityWrites.size());
     EXPECT_GT(m_env.Blob->CapacityWrites.back(), initialCapacity);
-}
-
-TEST_F(WriteableFileTests, Append_AfterTruncateToZero_CapacityCoversPendingWrite) {
-    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
-    m_env.Blob->SetCapacity(pageSize);
-    m_env.Blob->Size = pageSize;
-
-    auto file = MakeFile();
-    file.Truncate(0);
-    file.Append(std::vector<char>(pageSize * 3, 'x'));
-    file.Sync();
-
-    EXPECT_EQ(pageSize * 3, file.GetFileSize());
-    EXPECT_GE(m_env.Blob->Data.size(), static_cast<size_t>(pageSize * 3));
-    EXPECT_GE(m_env.Blob->CapacityWrites.back(), pageSize * 3);
 }
 
 TEST_F(WriteableFileTests, Append_LargerThanTwiceCapacity_CapacityCoversPendingWrite) {
@@ -571,69 +543,6 @@ TEST_F(WriteableFileTests, Flush_AfterAnEarlierUploadFailed_ReportsTheFailure) {
     EXPECT_THROW(file.Flush(), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
 }
 
-TEST_F(WriteableFileTests, Truncate_ToZero_FileEmptied) {
-    constexpr size_t initialDataSize = 1000;
-    m_env.Blob->SetCapacity(Configuration::PageBlob::PageSize * 2);
-    const std::vector<char> initialData(initialDataSize, 'a');
-
-    auto file = MakeFile();
-    file.Append(initialData);
-    file.Truncate(0);
-
-    EXPECT_EQ(0, file.GetFileSize());
-    EXPECT_EQ((std::vector<int64_t>{static_cast<int64_t>(initialDataSize), 0}), m_env.Blob->SizeWrites);
-    EXPECT_EQ(0, m_env.Blob->CapacityWrites.back());
-}
-
-TEST_F(WriteableFileTests, Truncate_ToSmallerSize_DataReducedCorrectly) {
-    constexpr int64_t initialDataSize = 1000;
-    constexpr int64_t truncatedSize = 500;
-    constexpr int64_t truncatedSizeRoundedUp = Configuration::PageBlob::PageSize;
-    m_env.Blob->SetCapacity(Configuration::PageBlob::PageSize * 2);
-    std::vector<char> initialData(initialDataSize, 'b');
-
-    auto file = MakeFile();
-    file.Append(initialData);
-    file.Truncate(truncatedSize);
-
-    EXPECT_EQ(truncatedSize, file.GetFileSize());
-    EXPECT_EQ(truncatedSizeRoundedUp, m_env.Blob->CapacityWrites.back());
-    ASSERT_FALSE(m_env.Blob->Downloads.empty());
-    EXPECT_EQ(0, m_env.Blob->Downloads.back().Offset);
-    EXPECT_EQ(truncatedSize, m_env.Blob->Downloads.back().Length);
-}
-
-TEST_F(WriteableFileTests, Truncate_ToLargerSize_ThrowsException) {
-    constexpr int64_t expandedSize = 2000;
-
-    auto file = MakeFile();
-    file.Append(std::vector<char>(100, 'c'));
-
-    EXPECT_THROW(file.Truncate(expandedSize), std::invalid_argument);
-}
-
-TEST_F(WriteableFileTests, Truncate_ToPartialPage_BufferOffsetSetCorrectly) {
-    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
-    constexpr int64_t partialPageOffset = 123;
-    constexpr int64_t initialSize = pageSize * 2;
-    constexpr int64_t truncateSize = pageSize + partialPageOffset;
-    m_env.Blob->SetCapacity(Configuration::PageBlob::PageSize * 4);
-    std::vector<char> initialData(initialSize, 'd');
-
-    auto file = MakeFile();
-    file.Append(initialData);
-    file.Truncate(truncateSize);
-
-    EXPECT_EQ(truncateSize, file.GetFileSize());
-    ASSERT_FALSE(m_env.Blob->Downloads.empty());
-    EXPECT_EQ(pageSize, m_env.Blob->Downloads.back().Offset);
-    EXPECT_EQ(partialPageOffset, m_env.Blob->Downloads.back().Length);
-
-    std::vector<char> appendData(10, 'e');
-    EXPECT_NO_THROW(file.Append(appendData));
-    EXPECT_EQ(truncateSize + static_cast<int64_t>(appendData.size()), file.GetFileSize());
-}
-
 TEST_F(WriteableFileTests, GetUniqueId_BufferLargerThanName_ReturnsFullName) {
     const FakeWriteableFileImpl file{
         "test.dat", m_env.Runtime, m_env.Client, nullptr, m_logger, Configuration::PageBlob::DefaultBufferSize, {0, 0}};
@@ -682,58 +591,4 @@ TEST_F(WriteableFileTests, MoveConstructor_TransfersState_Correctly) {
 TEST_F(WriteableFileTests, MoveAssignment_IsDeleted) {
     static_assert(!std::is_move_assignable_v<FakeWriteableFileImpl>);
     static_assert(!std::is_copy_assignable_v<FakeWriteableFileImpl>);
-}
-
-TEST_F(WriteableFileTests, Truncate_ResizesTheBlobBeforeRecordingTheNewSize) {
-    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
-    m_env.Blob->SetCapacity(4 * pageSize);
-
-    auto file = MakeFile();
-    file.Append(std::vector<char>(2 * pageSize, 'a'));
-    file.Sync();
-
-    std::vector<FakeBlobServer::Operation> order;
-    m_env.Blob->Fault = [&order](const FakeBlobServer::Operation operation) {
-        if (operation == FakeBlobServer::Operation::Resize || operation == FakeBlobServer::Operation::SetMetadata) {
-            order.push_back(operation);
-        }
-        return std::optional<AVEVA::AzureClient::BlobStorageError>{};
-    };
-    file.Truncate(pageSize);
-
-    EXPECT_EQ((std::vector{FakeBlobServer::Operation::Resize, FakeBlobServer::Operation::SetMetadata}), order);
-}
-
-TEST_F(WriteableFileTests, Truncate_MarksTheCachedCopyStale) {
-    using namespace AVEVA::RocksDB::Plugin::Core;
-    auto filesystem = std::make_shared<Mocks::FilesystemMock>();
-    auto container = std::make_shared<Mocks::ContainerClientMock>();
-    EXPECT_CALL(*container, GetBlobSize(::testing::_)).WillRepeatedly(::testing::Return(1000));
-    EXPECT_CALL(*filesystem, Open(::testing::_)).WillRepeatedly([](const std::filesystem::path&) {
-        auto cached = std::make_unique<Mocks::FileMock>();
-        EXPECT_CALL(*cached, Read(::testing::_, ::testing::_, ::testing::_))
-            .WillRepeatedly([](char*, uint64_t, uint64_t length) { return length; });
-        return cached;
-    });
-    auto cache = std::make_shared<FileCache>("tmp", 1 << 30, container, filesystem, m_logger);
-
-    char byte = 0;
-    bool cached = false;
-    // The first access only records interest and the second queues the download.
-    for (int attempt = 0; attempt < 4 && !cached; ++attempt) {
-        cached = cache->ReadFile("test.sst", 0, 1, &byte).has_value();
-        cache->WaitUntilIdle();
-    }
-    ASSERT_TRUE(cached);
-
-    m_env.Blob->SetCapacity(2 * Configuration::PageBlob::PageSize);
-    FakeWriteableFileImpl file{"test.sst", m_env.Runtime, m_env.Client, nullptr, m_logger};
-    file.Append(std::vector<char>(100, 'a'));
-    file.Sync();
-    // Nothing is left unsynced, so only Truncate itself can mark the cached copy stale.
-    FakeWriteableFileImpl reopened{"test.sst", m_env.Runtime, m_env.Client, cache, m_logger};
-    ASSERT_TRUE(cache->ReadFile("test.sst", 0, 1, &byte).has_value());
-    reopened.Truncate(10);
-
-    EXPECT_FALSE(cache->ReadFile("test.sst", 0, 1, &byte).has_value());
 }

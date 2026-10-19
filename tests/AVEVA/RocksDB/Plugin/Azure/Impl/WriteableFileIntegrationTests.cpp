@@ -143,23 +143,6 @@ TEST_F(WriteableFileIntegrationTests, Sync_PersistsDataAndSize_ToBlob) {
     EXPECT_EQ(testData, downloadedData);
 }
 
-TEST_F(WriteableFileIntegrationTests, Truncate_ReducesFileSize) {
-    // Arrange
-    std::vector<char> initialData(1000, 'Z');
-    auto blobClient = CreateBlobWithData(initialData);
-    WriteableFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
-
-    // Act
-    file.Truncate(500);
-    file.Close();
-
-    // Assert
-    auto pageBlobClient = m_containerClient->GetPageBlobClient(BlobPath());
-    const auto actualSize = BlobOperations::GetInfo(pageBlobClient).Size;
-    EXPECT_EQ(500, actualSize);
-    EXPECT_EQ(500, file.GetFileSize());
-}
-
 TEST_F(WriteableFileIntegrationTests, AppendToExistingFile_PreservesExistingData) {
     // Arrange - Create file with initial data
     const std::vector<char> initialData(Configuration::PageBlob::PageSize - 100, 'I');

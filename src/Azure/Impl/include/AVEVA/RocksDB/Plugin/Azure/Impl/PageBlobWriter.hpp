@@ -33,7 +33,7 @@ template <typename TBlob> class PageBlobWriter {
 
     /// <summary>
     /// Grows the blob so that `requiredCapacity` fits. Doubling alone under-sizes the blob when the capacity is zero
-    /// (after Truncate(0)) or smaller than the pending write, so the required size is always honoured; the doubling
+    /// (an empty blob) or smaller than the pending write, so the required size is always honoured; the doubling
     /// keeps repeated writes past the end from each paying for a resize request.
     /// </summary>
     void EnsureCapacity(const int64_t requiredCapacity) {
@@ -60,7 +60,7 @@ template <typename TBlob> class PageBlobWriter {
     /// <summary>Records a capacity already known from the service (no request is made).</summary>
     void AdoptCapacity(const int64_t capacity) noexcept { m_capacity = capacity; }
 
-    /// <summary>Sets the blob's capacity exactly (Truncate shrinks it), and tracks it.</summary>
+    /// <summary>Sets the blob's capacity exactly and tracks it.</summary>
     void Resize(const int64_t capacity) {
         BlobOperations::SetCapacity(*H.Runtime, *H.Blob, capacity);
         m_capacity = capacity;

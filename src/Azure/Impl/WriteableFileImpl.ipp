@@ -303,46 +303,6 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::WaitForUploads(con
     m_w.H.Runtime->ThrowIfWritesFenced();
 }
 
-// Shrinks the file. The trailing partial page is reloaded into the buffer because appends continue inside it and
-// pages are only ever uploaded whole.
-template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Truncate(int64_t size) {
-    // Truncate only allows shrinking, not expanding
-    if (size > m_size) {
-        throw std::invalid_argument("Truncate can only shrink the file. Cannot expand from " + std::to_string(m_size) +
-                                    " to " + std::to_string(size) + " bytes.");
-    }
-
-    // Ensure all data is written to blob before modifications are made
-    Sync();
-
-    // The cached copy would otherwise keep serving bytes past the new end, whatever happens next.
-    m_w.MarkStale();
-
-    const auto [partialPageSize, totalPageOffset] = BlobHelpers::RoundToBeginningOfNearestPage(size);
-    m_bufferOffset = 0;
-    m_lastPageOffset = totalPageOffset;
-    m_flushed = true; // Buffer is empty after truncate
-
-    if (partialPageSize != 0) {
-        // Read the partial page into memory for further appends. State is only marked as holding data afterwards, so
-        // a short read leaves an empty buffer that a later Sync never uploads.
-        const auto bytesDownloaded =
-            BlobOperations::DownloadToBuffer(*m_w.H.Blob, m_buffer, totalPageOffset, partialPageSize);
-        WriteableFileDetail::RequireFullPageDownload(m_w.H.Name, totalPageOffset, partialPageSize, bytesDownloaded);
-        m_bufferOffset = partialPageSize;
-        m_flushed = false; // We have data in buffer now
-    }
-
-    // Resize before recording the new logical size, like BlobFilesystemImpl::Truncate: if the resize fails the
-    // metadata still matches the blob. The capacity never drops below the buffered tail.
-    const auto [_, newCapacity] =
-        BlobHelpers::RoundToEndOfNearestPage(std::max(size, m_lastPageOffset + m_bufferOffset));
-    m_w.Resize(newCapacity);
-
-    m_size = size;
-    m_w.PublishSize(m_size);
-}
-
 template <typename TBlob> int64_t BasicWriteableFileImpl<TBlob>::GetFileSize() const noexcept { return m_size; }
 
 template <typename TBlob>
