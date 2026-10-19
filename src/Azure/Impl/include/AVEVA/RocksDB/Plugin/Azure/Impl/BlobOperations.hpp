@@ -69,6 +69,25 @@ template <typename TBlob> [[nodiscard]] BlobInfo GetInfo(TBlob& client) {
             std::move(properties.ETag), std::chrono::time_point_cast<std::chrono::seconds>(properties.LastModified)};
 }
 
+// As GetInfo, but a stop request cancels the call, which then throws. Lets a shutdown that is waiting for the caller's
+// thread return promptly instead of waiting out a slow or hung request.
+template <typename TBlob> [[nodiscard]] BlobInfo GetInfo(TBlob& client, std::stop_token stopToken) {
+    // The signal is emitted from the client's executor: the pipeline connects its slot there, and emitting from the
+    // stopping thread could race with that.
+    auto signal = std::make_shared<boost::asio::cancellation_signal>();
+    auto requestOptions = client.GetDefaultRequestOptions();
+    requestOptions.SetCancellationSlot(signal->slot());
+    const std::stop_callback onStop(stopToken, [&client, signal] {
+        boost::asio::post(client.get_executor(), [signal] { signal->emit(boost::asio::cancellation_type::terminal); });
+    });
+    if (stopToken.stop_requested()) {
+        throw std::system_error(std::make_error_code(std::errc::operation_canceled), "Request stopped");
+    }
+    auto properties = Call([&](auto token) { return client.GetPropertiesAsync(token, std::move(requestOptions)); });
+    return {BlobHelpers::FileSizeFromProperties(properties), static_cast<int64_t>(properties.ContentLength),
+            std::move(properties.ETag), std::chrono::time_point_cast<std::chrono::seconds>(properties.LastModified)};
+}
+
 // Drops the blob's cached logical size when the enclosing mutation ends, whether or not it succeeded: a failure part
 // way through may still have changed the blob.
 template <typename TBlob> class SizeInvalidation {

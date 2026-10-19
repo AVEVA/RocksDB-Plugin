@@ -917,6 +917,39 @@ TEST(FileCacheShutdownTests, DestroyingTheCacheCancelsARunningDownloadThatHonour
     destruction.get();
 }
 
+TEST(FileCacheShutdownTests, DestroyingTheCacheCancelsASizeLookupThatHonoursTheStopToken) {
+    // Arrange - a client whose size lookup only ends when it is asked to stop.
+    class BlockingClient final : public AVEVA::RocksDB::Plugin::Core::ContainerClient {
+      public:
+        std::promise<void> Started;
+        int64_t GetBlobSize(const std::string&) override {
+            ADD_FAILURE() << "the stop-aware overload must be used";
+            return 0;
+        }
+        int64_t GetBlobSize(const std::string&, std::stop_token stopToken) override {
+            Started.set_value();
+            while (!stopToken.stop_requested()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            throw std::runtime_error("size lookup stopped");
+        }
+        void DownloadBlobTo(const std::string&, const std::filesystem::path&, int64_t, int64_t) override {}
+    };
+    auto client = std::make_shared<BlockingClient>();
+    auto filesystem = std::make_shared<NiceMock<FilesystemMock>>();
+    auto logger = std::make_shared<severity_logger_mt<severity_level>>();
+    auto cache = std::make_unique<FileCache>("tmp", 1000, client, filesystem, logger);
+    (void)cache->ReadFile("1.sst", 0, 0, nullptr);
+    (void)cache->ReadFile("1.sst", 0, 0, nullptr);
+    client->Started.get_future().wait();
+
+    // Act
+    auto destruction = std::async(std::launch::async, [&cache] { cache.reset(); });
+
+    // Assert
+    ASSERT_EQ(destruction.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    destruction.get();
+}
 TEST(FileCacheShutdownTests, PartialDownloadsFromAnEarlierRunAreDeletedAtStartup) {
     // Arrange
     const AVEVA::RocksDB::Plugin::Core::Mocks::TempDirectory directory("filecache_partial");

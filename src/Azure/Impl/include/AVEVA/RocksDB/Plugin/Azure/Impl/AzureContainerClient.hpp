@@ -26,9 +26,11 @@ template <typename TContainer> class BasicAzureContainerClient final : public Co
     BasicAzureContainerClient(std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TContainer> client)
         : m_runtime(std::move(runtime)), m_client(std::move(client)) {}
 
-    int64_t GetBlobSize(const std::string& path) override {
+    int64_t GetBlobSize(const std::string& path) override { return GetBlobSize(path, std::stop_token{}); }
+
+    int64_t GetBlobSize(const std::string& path, std::stop_token stopToken) override {
         auto blob = m_client->GetPageBlobClient(path);
-        return BlobOperations::GetInfo(blob).Size;
+        return BlobOperations::GetInfo(blob, std::move(stopToken)).Size;
     }
 
     void DownloadBlobTo(const std::string& path, const std::filesystem::path& destinationPath, int64_t offset,

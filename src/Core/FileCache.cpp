@@ -346,7 +346,7 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
 
             int64_t fileSize = 0;
             try {
-                fileSize = m_containerClient->GetBlobSize(filePath);
+                fileSize = m_containerClient->GetBlobSize(filePath, stopToken);
             } catch (std::exception& e) {
                 BOOST_LOG_SEV(*m_logger, error)
                     << "Failed to get file size for '" << filePath << "'. Error: " << e.what();

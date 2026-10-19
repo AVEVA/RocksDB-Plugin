@@ -18,6 +18,14 @@ class ContainerClient {
     virtual int64_t GetBlobSize(const std::string& path) = 0;
 
     /// <summary>
+    /// As above, but the lookup should be abandoned (throwing) soon after stopToken requests a stop, so shutdown does
+    /// not wait for a slow request. The default ignores the token and calls the overload above.
+    /// </summary>
+    virtual int64_t GetBlobSize(const std::string& path, std::stop_token stopToken) {
+        static_cast<void>(stopToken);
+        return GetBlobSize(path);
+    }
+    /// <summary>
     /// Downloads [offset, offset + length) of the blob to the local file at destinationPath.
     /// </summary>
     virtual void DownloadBlobTo(const std::string& path, const std::filesystem::path& destinationPath, int64_t offset,
