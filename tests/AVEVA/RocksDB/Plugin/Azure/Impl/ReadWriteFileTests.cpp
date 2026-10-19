@@ -63,6 +63,16 @@ TEST_F(ReadWriteFileImplTests, WriteAndRead_RangeOverflowingInt64_ThrowInvalidAr
                  std::invalid_argument);
 }
 
+TEST_F(ReadWriteFileImplTests, Flush_EndNearInt64Max_ThrowsInvalidArgumentWithoutResizing) {
+    const auto file = CreateFile();
+    char byte = 'x';
+    const auto capacityWritesBefore = m_env.Blob->CapacityWrites.size();
+
+    file->Write(std::numeric_limits<int64_t>::max() - 1, &byte, 1);
+
+    EXPECT_THROW(file->Sync(), std::invalid_argument);
+    EXPECT_EQ(capacityWritesBefore, m_env.Blob->CapacityWrites.size());
+}
 TEST_F(ReadWriteFileImplTests, Constructor_InitializesFromEmptyBlob) {
     // Arrange - simulator starts with fileSize = 0
 

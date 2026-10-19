@@ -78,6 +78,10 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
     for (const auto& chunk : m_bufferStats) {
         maxSizeNeeded = std::max(maxSizeNeeded, chunk.targetOffset + chunk.dataLength);
     }
+    // RangeCheck admits ends up to INT64_MAX, so the page of headroom below must not overflow.
+    if (maxSizeNeeded > RangeCheck::MaxOffset - pageSize) {
+        throw std::invalid_argument("Write extends past the maximum supported file size");
+    }
     m_w.EnsureCapacity(maxSizeNeeded + pageSize);
 
     struct Extent {
