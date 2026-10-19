@@ -67,7 +67,9 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
     BasicBlobClient(THttp& httpClient, const BlobClientOptions& options, std::shared_ptr<TCred> credential = nullptr)
         : m_httpClient(&httpClient), m_target(std::make_shared<const Private::BasicBlobTarget<TCred>>(
                                          Private::MakeBlobTarget(options, std::move(credential)))) {}
-    // Shares ownership of the HTTP client, so this client (and clients made from it) keep it alive.
+    // Shares ownership of the HTTP client for as long as this client or any client made from it exists. Operations
+    // already in flight borrow the HTTP client without owning it, so keep a client (or the shared_ptr) alive until they
+    // complete.
     BasicBlobClient(std::shared_ptr<THttp> httpClient, const BlobClientOptions& options,
                     std::shared_ptr<TCred> credential = nullptr)
         : BasicBlobClient(Private::RequireHttpClient(httpClient), options, std::move(credential)) {
