@@ -13,7 +13,28 @@ using namespace boost::log::trivial;
 namespace AVEVA::RocksDB::Plugin::Core {
 namespace {
 constexpr size_t MaxUndownloadedStaleEntries = 2048;
+
+// The id is a lowercase UUID (8-4-4-4-12 hex digits), as produced by CreateClientRequestId.
+bool IsPartialDownloadName(const std::string& name) {
+    constexpr std::string_view marker = ".partial-";
+    constexpr size_t idLength = 36;
+    if (name.size() <= marker.size() + idLength) {
+        return false;
+    }
+    const auto idStart = name.size() - idLength;
+    if (name.compare(idStart - marker.size(), marker.size(), marker) != 0) {
+        return false;
+    }
+    for (size_t i = 0; i < idLength; ++i) {
+        const char ch = name[idStart + i];
+        const bool dash = i == 8 || i == 13 || i == 18 || i == 23;
+        if (dash ? ch != '-' : !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) {
+            return false;
+        }
+    }
+    return true;
 }
+} // namespace
 
 FileCache::FileCache(
     std::filesystem::path cachePath, int64_t maxCacheSize, std::shared_ptr<ContainerClient> containerClient,
@@ -40,24 +61,34 @@ FileCache::~FileCache() {
 }
 
 // The Azure client downloads into `<name>.partial-<id>` and renames on success, so a crash leaves only such files
-// behind. They are never read, so deleting them is always safe.
+// behind. They are never read, so deleting them is always safe. Only the exact staging name is matched, so a user
+// file such as `report.partial-backup.txt` is left alone.
 void FileCache::PurgePartialDownloads() noexcept {
     std::error_code error;
     if (!std::filesystem::is_directory(m_cachePath, error)) {
         return;
     }
-    std::filesystem::recursive_directory_iterator it(m_cachePath, error);
+    std::filesystem::recursive_directory_iterator it(m_cachePath,
+                                                     std::filesystem::directory_options::skip_permission_denied, error);
     const std::filesystem::recursive_directory_iterator end;
     while (!error && it != end) {
         const auto& path = it->path();
-        if (it->is_regular_file(error) && path.filename().string().find(".partial-") != std::string::npos) {
-            std::filesystem::remove(path, error);
+        std::error_code entryError;
+        if (it->is_regular_file(entryError) && IsPartialDownloadName(path.filename().string())) {
+            std::filesystem::remove(path, entryError);
+            if (entryError) {
+                BOOST_LOG_SEV(*m_logger, warning)
+                    << "Could not delete partial download '" << path.string() << "': " << entryError.message();
+            }
         }
-        error.clear();
+        // An iteration error ends the walk, but the files already handled stay deleted.
         it.increment(error);
     }
+    if (error) {
+        BOOST_LOG_SEV(*m_logger, warning)
+            << "Scanning '" << m_cachePath.string() << "' for partial downloads stopped early: " << error.message();
+    }
 }
-
 bool FileCache::HasFile(std::string_view filePath) const {
     std::scoped_lock lock(m_mutex);
     auto it = m_cache.find(filePath);
@@ -96,6 +127,9 @@ void FileCache::MarkFileAsStaleIfExists(const std::string& filePath) {
 
 std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int64_t offset, int64_t bytesToRead,
                                            char* buffer) {
+    if (offset < 0 || bytesToRead < 0) {
+        return std::nullopt;
+    }
     // If there are extensions that should be filtered on then we need to process that first.
     const auto fileType = RocksDBHelpers::GetFileType(filePath);
     if (fileType != RocksDBHelpers::FileClass::SST) {

@@ -213,6 +213,13 @@ TEST_F(FileCacheTests, ReadFileFromCache) {
     ASSERT_EQ(std::string_view(buffer.begin(), buffer.end()), fileData);
 }
 
+TEST_F(FileCacheTests, ReadFile_NegativeOffsetOrLength_IsNotServedFromCache) {
+    char buffer[1];
+
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", -1, 1, buffer));
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", 0, -1, buffer));
+}
+
 TEST_F(FileCacheTests, EmptyBlobIsDownloadedWithZeroLength) {
     // Arrange
     std::atomic<int64_t> lastLength{-1};
@@ -954,9 +961,11 @@ TEST(FileCacheShutdownTests, PartialDownloadsFromAnEarlierRunAreDeletedAtStartup
     // Arrange
     const AVEVA::RocksDB::Plugin::Core::Mocks::TempDirectory directory("filecache_partial");
     std::filesystem::create_directories(directory.Path() / "db");
-    const auto partial = directory.Path() / "db" / "1.sst.partial-abc123";
+    const auto partial = directory.Path() / "db" / "1.sst.partial-0f8fad5b-d9cb-469f-a165-70867728950e";
+    const auto lookAlike = directory.Path() / "db" / "report.partial-backup.txt";
     const auto finished = directory.Path() / "db" / "2.sst";
     std::ofstream{partial} << "truncated";
+    std::ofstream{lookAlike} << "keep";
     std::ofstream{finished} << "complete";
     auto filesystem = std::make_shared<NiceMock<FilesystemMock>>();
     auto containerClient = std::make_shared<ContainerClientMock>();
@@ -967,6 +976,7 @@ TEST(FileCacheShutdownTests, PartialDownloadsFromAnEarlierRunAreDeletedAtStartup
 
     // Assert
     EXPECT_FALSE(std::filesystem::exists(partial));
+    EXPECT_TRUE(std::filesystem::exists(lookAlike));
     EXPECT_TRUE(std::filesystem::exists(finished));
 }
 
