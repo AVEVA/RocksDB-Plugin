@@ -57,10 +57,11 @@ std::optional<LruFileIndex::EvictList> LruFileIndex::ReserveCapacity(const std::
         return std::nullopt;
     }
 
-    // Pin the existing entry at MRU so EvictUntilSizeLocked cannot evict it,
-    // and so the temporary m_currentSize adjustment below avoids double-counting.
+    // Move the existing entry to MRU and pin it for the eviction below: its size is discounted from
+    // m_currentSize, so evicting it would subtract that size a second time.
     if (indexIt != m_index.end()) {
         m_lruList.splice(m_lruList.begin(), m_lruList, *indexIt);
+        ++(*indexIt)->pinCount;
     }
 
     // Temporarily discount the existing entry so eviction is sized against the
@@ -71,6 +72,9 @@ std::optional<LruFileIndex::EvictList> LruFileIndex::ReserveCapacity(const std::
     // If a single entry is larger than the entire capacity it can never fit,
     // even after evicting everything.  Restore the size accounting and bail.
     if (storedSize > m_capacity) {
+        if (indexIt != m_index.end()) {
+            --(*indexIt)->pinCount;
+        }
         m_currentSize += existingSize;
         return std::nullopt;
     }
@@ -79,6 +83,9 @@ std::optional<LruFileIndex::EvictList> LruFileIndex::ReserveCapacity(const std::
         EvictUntilSizeLocked(m_capacity - storedSize, evictPairs);
     }
 
+    if (indexIt != m_index.end()) {
+        --(*indexIt)->pinCount;
+    }
     m_currentSize += existingSize;
     return evictPairs;
 }
