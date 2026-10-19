@@ -275,6 +275,24 @@ TEST_F(AsyncReadTests, ReadAsync_RangeCoveredByPendingPrefetch_WaitsForItWithout
     EXPECT_EQ(0U, m_deferredEnv.Blob->PendingDownloads());
 }
 
+TEST_F(AsyncReadTests, ReadAsync_ChainedOntoPrefetchThenHandleDeleted_NeverWritesScratch) {
+    auto file = CreateFile(m_deferredEnv);
+    ASSERT_TRUE(file.Prefetch(1024, 2048, rocksdb::IOOptions{}, nullptr).ok());
+
+    std::vector<char> scratch(64, 'x');
+    auto req = MakeRequest(1100, scratch);
+    CallbackRecord record;
+    {
+        IoHandle handle;
+        ASSERT_TRUE(Submit(file, req, record, handle).ok());
+    }
+
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(2048, 'P'));
+
+    EXPECT_EQ(0, record.Calls.load());
+    EXPECT_EQ(std::string(64, 'x'), std::string(scratch.begin(), scratch.end()));
+}
+
 TEST_F(AsyncReadTests, GetSize_RefreshThatFindsTheSameEtag_KeepsThePrefetchedBytes) {
     auto file = std::make_shared<FakeReadableFileImpl>("test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
                                                        m_logger);

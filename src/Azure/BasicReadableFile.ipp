@@ -102,10 +102,12 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& re
             // A prefetch of this range may still be downloading; waiting for it beats downloading it twice. The
             // waiter runs on the host io_context, so it only looks at the in-memory prefetch: the file cache was
             // already consulted above and reading it again would put blocking disk I/O on that thread.
-            std::move_only_function<void()> resume = [file = m_file, offset, length, scratch = req.scratch, request,
-                                                      download] {
-                if (const auto prefetched = file->TryReadFromCompletedPrefetch(offset, length, scratch)) {
-                    request->Complete(rocksdb::IOStatus::OK(), std::string_view(scratch, *prefetched));
+            // The prefetch lands in a private buffer, never in scratch: RocksDB may free scratch as soon as the handle
+            // is deleted, and only Complete (which checks the request state under its lock) may copy into it.
+            std::move_only_function<void()> resume = [file = m_file, offset, length, request, download] {
+                std::string bytes(static_cast<size_t>(length), '\0');
+                if (const auto prefetched = file->TryReadFromCompletedPrefetch(offset, length, bytes.data())) {
+                    request->Complete(rocksdb::IOStatus::OK(), std::string_view(bytes.data(), *prefetched));
                 } else {
                     download();
                 }
