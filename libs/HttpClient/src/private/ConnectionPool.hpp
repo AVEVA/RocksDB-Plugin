@@ -284,6 +284,9 @@ class ConnectionPool {
         return connection;
     }
 
+    /// <summary>True unless pooling is disabled, in which case Release never takes a connection.</summary>
+    [[nodiscard]] bool Enabled() const noexcept { return m_maxIdlePerKey != 0 && m_maxTotalIdle != 0; }
+
     /// <summary>
     /// Returns a finished connection to the pool for reuse, evicting the oldest idle connection of the
     /// origin, and then of the pool, if either cap is exceeded. Does nothing when pooling is disabled or

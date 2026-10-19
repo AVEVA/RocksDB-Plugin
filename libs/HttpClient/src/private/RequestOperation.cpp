@@ -449,7 +449,9 @@ template <typename Stream> void RequestOperation<Stream>::ReleaseOrClose(bool ke
             m_stream = std::move(connection->stream);
         }
     }
-    if (keepAlive && !pooled && m_stream) {
+    // Only a pool that is enabled but declined the connection (or threw) is worth reporting; with pooling off this
+    // is the normal path and would fire on every request.
+    if (keepAlive && !pooled && m_stream && m_pool->Enabled()) {
         Report(HttpDiagnosticKind::ConnectionNotPooled, {},
                "The connection was reusable but the pool did not take it; closing it");
     }

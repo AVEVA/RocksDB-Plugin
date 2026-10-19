@@ -1029,6 +1029,30 @@ TEST(HttpClientRobustness, UnresolvableHostFailsWithResolveFailed) {
 
     EXPECT_EQ(result, AVEVA::make_error_code(AVEVA::HttpClientError::ResolveFailed));
 }
+
+TEST(HttpClientDiagnostics, DisabledPoolingDoesNotReportConnectionNotPooled) {
+    asio::io_context context;
+    std::vector<AVEVA::HttpDiagnostic> events;
+    AVEVA::HttpClientOptions clientOptions;
+    clientOptions.SetMaxIdleConnectionsPerHost(0);
+    clientOptions.SetDiagnosticsCallback([&](const AVEVA::HttpDiagnostic& event) { events.push_back(event); });
+    auto client = AVEVA::HttpClient::Create(context, std::move(clientOptions));
+    ScriptedServer server(context,
+                          [](int, const http::request<http::string_body>&) -> ServerAction { return {OkResponse}; });
+
+    std::error_code result = AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut);
+    client->SendAsync(MakeRequest(server.Url()), AVEVA::HttpRequestOptions{},
+                      [&](std::error_code error, AVEVA::HttpResponse) {
+                          result = error;
+                          server.Stop();
+                      });
+    RunBounded(context);
+
+    EXPECT_FALSE(result);
+    EXPECT_TRUE(std::ranges::none_of(
+        events, [](const auto& event) { return event.Kind == AVEVA::HttpDiagnosticKind::ConnectionNotPooled; }));
+}
+
 TEST(HttpClientDiagnostics, TimeoutReportsThePhaseItHappenedIn) {
     asio::io_context context;
     std::vector<AVEVA::HttpDiagnostic> events;
