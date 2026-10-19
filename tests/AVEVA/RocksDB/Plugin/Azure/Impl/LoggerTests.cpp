@@ -106,3 +106,26 @@ TEST(LoggerTests, Logger_SinkThrows_DoesNotEscape) {
     logv("message %d", 1);
     EXPECT_NO_THROW(logger.Flush());
 }
+
+TEST(LoggerTests, Logv_SeparatesTheTimestampAndTerminatesTheLine) {
+    auto sink = std::make_unique<RecordingSink>();
+    auto* rawSink = sink.get();
+    LoggerImpl logger(std::move(sink), 3);
+
+    logger.Logv(1, "msg %d", 1);
+    logger.Logv(1, "already terminated\n");
+
+    ASSERT_EQ(2U, rawSink->lines.size());
+    EXPECT_EQ(" msg 1\n", rawSink->lines[0].substr(20));
+    EXPECT_EQ(" already terminated\n", rawSink->lines[1].substr(20));
+}
+
+TEST(LoggerTests, Logv_DoesNotFilterByItsOwnLevel) {
+    auto sink = std::make_unique<RecordingSink>();
+    auto* rawSink = sink.get();
+    LoggerImpl logger(std::move(sink), 3);
+
+    logger.Logv(0, "debug message");
+
+    EXPECT_EQ(1U, rawSink->lines.size());
+}

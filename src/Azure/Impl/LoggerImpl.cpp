@@ -25,10 +25,9 @@ void LoggerImpl::Logv(const int logLevel, const char* format, ...) {
 }
 
 void LoggerImpl::Logv(const int logLevel, const char* format, va_list ap) {
-    if (logLevel < m_logLevel) {
-        return;
-    }
-
+    // RocksDB has already filtered by the info log level it was configured with, so filtering again here would only
+    // drop messages the user asked for.
+    (void)logLevel;
     std::scoped_lock lock(*m_mutex);
     if (m_rateLimiter) {
         const auto result = m_rateLimiter->CheckAndRecord(format);
@@ -55,7 +54,8 @@ void LoggerImpl::Logv(const int logLevel, const char* format, va_list ap) {
     gmtime_r(&now, &tm);
 #endif
 
-    const auto offset = strftime(m_buffer.data(), m_buffer.size(), "%Y-%m-%dT%H:%M:%SZ", &tm);
+    auto offset = strftime(m_buffer.data(), m_buffer.size(), "%Y-%m-%dT%H:%M:%SZ", &tm);
+    m_buffer[offset++] = ' ';
 
     // Copy va_list because vsnprintf may consume it
     va_list apCopy;
@@ -67,15 +67,20 @@ void LoggerImpl::Logv(const int logLevel, const char* format, va_list ap) {
         throw std::runtime_error("Unable to format log message");
     }
 
-    const auto totalBufferOffset = static_cast<size_t>(result) + offset;
-    if (totalBufferOffset + 1 > m_buffer.size()) {
+    auto totalBufferOffset = static_cast<size_t>(result) + offset;
+    // Room for the NUL terminator and the newline appended below.
+    if (totalBufferOffset + 2 > m_buffer.size()) {
         // vsnprintf truncates unless the buffer can also hold the trailing NUL terminator,
         // so size it for totalBufferOffset characters plus one NUL byte.
-        m_buffer.resize(totalBufferOffset + 1);
+        m_buffer.resize(totalBufferOffset + 2);
         const int newResult = vsnprintf(m_buffer.data() + offset, m_buffer.size() - offset, format, ap);
         if (newResult < 0) {
             throw std::runtime_error("Unable to format log message");
         }
+    }
+
+    if (totalBufferOffset == offset || m_buffer[totalBufferOffset - 1] != '\n') {
+        m_buffer[totalBufferOffset++] = '\n';
     }
 
     m_file->Append(std::span(m_buffer.data(), m_buffer.data() + totalBufferOffset));
