@@ -24,6 +24,7 @@ add_library(aveva-azure-client
     BlobStorageErrorCategory.cpp
     TokenEndpointError.cpp
     RequestPipeline.cpp
+    ClientInstantiations.cpp
 )
 
 set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../include")

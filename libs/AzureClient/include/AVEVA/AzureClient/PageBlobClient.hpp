@@ -483,4 +483,5 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
 
 // The production client type.
 using PageBlobClient = BasicPageBlobClient<HttpClient>;
+extern template class BasicPageBlobClient<HttpClient>;
 } // namespace AVEVA::AzureClient

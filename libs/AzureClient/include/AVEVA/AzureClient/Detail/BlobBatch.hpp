@@ -174,15 +174,23 @@ class BatchDeleteOperation final
     }
 
     // Builds the multipart body of one chunk. Called once per HTTP attempt: every sub-request carries its own date and
-    // authorization, and those expire or are single-use, so they must be regenerated on a retry.
+    // authorization, and those expire or are single-use, so they must be regenerated on a retry. The sub-request URLs
+    // never change, so they are encoded on the first attempt and reused by every retry through `urls`.
     [[nodiscard]] std::string BuildChunkBody(std::size_t begin, std::size_t end, const std::string& boundary,
-                                             std::string_view token) const {
+                                             std::string_view token, std::vector<std::string>& urls) const {
+        if (urls.size() != end - begin) {
+            urls.clear();
+            urls.reserve(end - begin);
+            for (std::size_t index = begin; index < end; ++index) {
+                urls.push_back(
+                    BuildBlobUrl(MakeBlobTarget(m_target->Connection, m_target->ContainerName, m_names.at(index))));
+            }
+        }
         std::string body;
         for (std::size_t index = begin; index < end; ++index) {
-            const BlobTarget blob = MakeBlobTarget(m_target->Connection, m_target->ContainerName, m_names.at(index));
             HttpRequest subrequest;
             subrequest.SetMethod(HttpMethod::Delete);
-            subrequest.SetUrl(BuildBlobUrl(blob));
+            subrequest.SetUrl(urls[index - begin]);
             AddHeader(subrequest, XMsDateHeaderName, BuildDateHeaderValue(std::chrono::system_clock::now()));
             AuthorizeSubrequest(subrequest, token);
             AddHeader(subrequest, ContentLengthHeaderName, "0");
@@ -216,9 +224,9 @@ class BatchDeleteOperation final
                                       std::move(response));
             },
             chunkOptions,
-            [self = this->shared_from_this(), begin, end, boundary = std::move(boundary)](HttpRequest& attempt,
-                                                                                          std::string_view token) {
-                attempt.SetBody(self->BuildChunkBody(begin, end, boundary, token));
+            [self = this->shared_from_this(), begin, end, boundary = std::move(boundary),
+             urls = std::make_shared<std::vector<std::string>>()](HttpRequest& attempt, std::string_view token) {
+                attempt.SetBody(self->BuildChunkBody(begin, end, boundary, token, *urls));
             });
     }
     void OnChunkResponse(std::size_t chunk, std::span<const std::string> names, std::error_code error,

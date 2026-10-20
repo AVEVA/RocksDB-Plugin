@@ -488,7 +488,8 @@ DownloadIntoThrowingSink(bool inlineWrites, bool throwOnReserve) {
     const std::string content = MakeContent(10);
     httpClient.DefaultResponse() =
         HttpResponse{206, MakeCanonicalSuccessHeaders({{"Content-Range", "bytes 0-9/10"}}), content};
-    BasicBlobTarget<NoTokenCredential> target{AVEVA::AzureClient::Private::MakeBlobTarget(BuildOptions()), nullptr};
+    const auto target = std::make_shared<const BasicBlobTarget<NoTokenCredential>>(
+        BasicBlobTarget<NoTokenCredential>{AVEVA::AzureClient::Private::MakeBlobTarget(BuildOptions()), nullptr});
 
     DownloadToOptions options;
     options.WriteScheduler = [](std::move_only_function<void()> task) { task(); };
@@ -515,7 +516,8 @@ TEST(AC_R15_DownloadBufferCapTests, ChunksInFlightAreCappedByBytesNotJustByCount
     constexpr std::size_t ChunkSize = std::size_t{64} * 1024U * 1024U;
 
     FakeHttpClient httpClient;
-    BasicBlobTarget<NoTokenCredential> target{AVEVA::AzureClient::Private::MakeBlobTarget(BuildOptions()), nullptr};
+    const auto target = std::make_shared<const BasicBlobTarget<NoTokenCredential>>(
+        BasicBlobTarget<NoTokenCredential>{AVEVA::AzureClient::Private::MakeBlobTarget(BuildOptions()), nullptr});
     DownloadToOptions options;
     options.ChunkSize = ChunkSize;
     options.Concurrency = 16;

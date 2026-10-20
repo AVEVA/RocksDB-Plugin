@@ -91,4 +91,5 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobServic
 
 // The production client type.
 using BlobServiceClient = BasicBlobServiceClient<HttpClient>;
+extern template class BasicBlobServiceClient<HttpClient>;
 } // namespace AVEVA::AzureClient

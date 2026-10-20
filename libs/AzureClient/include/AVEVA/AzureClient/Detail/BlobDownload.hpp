@@ -128,8 +128,9 @@ using SummaryResult = std::expected<DownloadSummary, BlobStorageError>;
 template <HttpClientLike THttp, class TCred, class TDone>
 class DownloadOperation final : public std::enable_shared_from_this<DownloadOperation<THttp, TCred, TDone>> {
   public:
-    DownloadOperation(THttp& httpClient, BasicBlobTarget<TCred> clientOptions, DownloadToOptions options,
-                      AzureRequestOptions requestOptions, std::shared_ptr<DownloadSink> sink, TDone completion)
+    DownloadOperation(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> clientOptions,
+                      DownloadToOptions options, AzureRequestOptions requestOptions, std::shared_ptr<DownloadSink> sink,
+                      TDone completion)
         : m_httpClient(httpClient), m_clientOptions(std::move(clientOptions)), m_options(std::move(options)),
           m_requestOptions(requestOptions), m_sink(std::move(sink)), m_completion(std::move(completion)),
           m_parentSlot(m_requestOptions.GetCancellationSlot()),
@@ -227,7 +228,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         HttpRequest request;
         AzureRequestOptions requestOptions = m_requestOptions;
         try {
-            request = BuildBlobRequest(m_clientOptions, HttpMethod::Get);
+            request = BuildBlobRequest(*m_clientOptions, HttpMethod::Get);
             if (kind != RequestKind::Full) {
                 AddHeader(request, RangeHeaderName,
                           BuildRangeHeaderValue(Models::BlobByteRange{.Offset = offset, .Length = length}));
@@ -252,7 +253,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         }
 
         SendAuthorizedRequestAsync(
-            m_httpClient, m_clientOptions, std::move(request),
+            m_httpClient, *m_clientOptions, std::move(request),
             [self = this->shared_from_this(), id](std::error_code error, HttpResponse response) mutable {
                 self->Enqueue(Event{.RequestId = id, .Error = error, .Response = std::move(response)});
             },
@@ -618,7 +619,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
     }
 
     THttp& m_httpClient;
-    BasicBlobTarget<TCred> m_clientOptions;
+    std::shared_ptr<const BasicBlobTarget<TCred>> m_clientOptions;
     DownloadToOptions m_options;
     AzureRequestOptions m_requestOptions;
     std::shared_ptr<DownloadSink> m_sink;
@@ -655,10 +656,12 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
 [[nodiscard]] Response<Models::DownloadBlobToResult> ToDownloadToResponse(DownloadSummary summary);
 
 template <HttpClientLike THttp, class TCred, class TDone>
-void StartDownload(THttp& httpClient, const BasicBlobTarget<TCred>& options, DownloadToOptions operationOptions,
-                   std::shared_ptr<DownloadSink> sink, TDone completion, AzureRequestOptions requestOptions) {
-    std::make_shared<DownloadOperation<THttp, TCred, TDone>>(httpClient, options, std::move(operationOptions),
-                                                             requestOptions, std::move(sink), std::move(completion))
+void StartDownload(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
+                   DownloadToOptions operationOptions, std::shared_ptr<DownloadSink> sink, TDone completion,
+                   AzureRequestOptions requestOptions) {
+    std::make_shared<DownloadOperation<THttp, TCred, TDone>>(httpClient, std::move(options),
+                                                             std::move(operationOptions), requestOptions,
+                                                             std::move(sink), std::move(completion))
         ->Start();
 }
 // Closes the temporary file and, on success, renames it over `target`; any failure removes the temporary file.
@@ -668,11 +671,12 @@ FinalizeFileDownload(std::ofstream& file, const std::filesystem::path& tempPath,
 } // namespace DownloadDetail
 
 template <HttpClientLike THttp, class TCred, class TCompletion>
-void DownloadBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, DownloadBlobOptions operationOptions,
-                       TCompletion completion, AzureRequestOptions requestOptions) {
+void DownloadBlobAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
+                       DownloadBlobOptions operationOptions, TCompletion completion,
+                       AzureRequestOptions requestOptions) {
     auto sink = std::make_shared<StringSink>();
     DownloadDetail::StartDownload(
-        httpClient, options, ToDownloadToOptions(std::move(operationOptions)), sink,
+        httpClient, std::move(options), ToDownloadToOptions(std::move(operationOptions)), sink,
         [sink, completion = std::move(completion)](DownloadDetail::SummaryResult result) mutable {
             if (!result.has_value()) {
                 completion(std::unexpected(std::move(result).error()));
@@ -689,11 +693,11 @@ void DownloadBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
 }
 
 template <HttpClientLike THttp, class TCred, class TCompletion>
-void DownloadBlobToSpanAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
+void DownloadBlobToSpanAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
                              DownloadToOptions operationOptions, std::span<char> destination, TCompletion completion,
                              AzureRequestOptions requestOptions) {
     DownloadDetail::StartDownload(
-        httpClient, options, std::move(operationOptions), std::make_shared<SpanSink>(destination),
+        httpClient, std::move(options), std::move(operationOptions), std::make_shared<SpanSink>(destination),
         [completion = std::move(completion)](DownloadDetail::SummaryResult result) mutable {
             if (!result.has_value()) {
                 completion(std::unexpected(std::move(result).error()));
@@ -708,7 +712,7 @@ void DownloadBlobToSpanAsync(THttp& httpClient, const BasicBlobTarget<TCred>& op
 // RunOnWriter), never on the thread that initiates the download or on the transport thread that completes it. The
 // handler then completes on its associated executor.
 template <HttpClientLike THttp, class TCred, class TCompletion>
-void DownloadBlobToFileAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
+void DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
                              DownloadToOptions operationOptions, const std::filesystem::path& path,
                              TCompletion completion, AzureRequestOptions requestOptions) {
     using FileResult = std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>;
@@ -747,7 +751,7 @@ void DownloadBlobToFileAsync(THttp& httpClient, const BasicBlobTarget<TCred>& op
                  operationOptions = std::move(operationOptions), file, tempPath = std::move(tempPath),
                  target = std::move(path), completion = std::move(completion), requestOptions]() mutable {
                     DownloadDetail::StartDownload(
-                        httpClient, options, std::move(operationOptions), std::make_shared<FileSink>(file),
+                        httpClient, std::move(options), std::move(operationOptions), std::make_shared<FileSink>(file),
                         [&httpClient, scheduler = std::move(scheduler), file, tempPath = std::move(tempPath),
                          target = std::move(target),
                          completion = std::move(completion)](DownloadDetail::SummaryResult result) mutable {
