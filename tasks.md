@@ -229,7 +229,7 @@ against the code unless it says **Verify first**.
     actually happens (measure; retries are rare).
 - **Note:** The single-attempt case already moves the request, so it does not need changing.
 
-### [ ] T20 – SharedKey signing allocations
+### [x] T20 – SharedKey signing allocations
 - **File:** `libs\AzureClient\src\SharedKeySigner.cpp` (~210-385).
 - **Problems:**
   - `std::format_to` is used for trivial concatenations (`/{}{}`, `,{}`, `\n{}:{}`, Content-Length).

@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cstddef>
 #include <format>
 #include <iterator>
@@ -294,14 +295,18 @@ std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpR
     std::string canonicalizedResource;
     canonicalizedResource.reserve(accountName.size() + parsedUrl.Path.size() +
                                   (parsedUrl.Query.size() * EstimatedCanonicalizedQueryLength) + 1U);
-    std::format_to(std::back_inserter(canonicalizedResource), "/{}{}", accountName, parsedUrl.Path);
+    canonicalizedResource.push_back('/');
+    canonicalizedResource.append(accountName).append(parsedUrl.Path);
     // Repeated query parameters are combined into one `name:v1,v2` line with sorted values.
     for (std::size_t position = 0; position < parsedUrl.Query.size(); ++position) {
         const auto& [name, value] = parsedUrl.Query.at(position);
         if (position != 0 && parsedUrl.Query.at(position - 1).first == name) {
-            std::format_to(std::back_inserter(canonicalizedResource), ",{}", value);
+            canonicalizedResource.push_back(',');
+            canonicalizedResource.append(value);
         } else {
-            std::format_to(std::back_inserter(canonicalizedResource), "\n{}:{}", name, value);
+            canonicalizedResource.push_back('\n');
+            canonicalizedResource.append(name).push_back(':');
+            canonicalizedResource.append(value);
         }
     }
 
@@ -321,7 +326,9 @@ std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpR
     for (std::size_t index = 0; index < fields.size(); ++index) {
         if (index == ContentLengthField) {
             if (bodySize != 0) {
-                std::format_to(std::back_inserter(stringToSign), "{}", bodySize);
+                std::array<char, 20> digits{};
+                const auto converted = std::to_chars(digits.data(), digits.data() + digits.size(), bodySize);
+                stringToSign.append(digits.data(), converted.ptr);
             }
         } else {
             stringToSign.append(fields[index]);
@@ -381,6 +388,12 @@ std::string SharedKeySigner::Sign(std::string_view stringToSign) const {
 }
 
 std::string SharedKeySigner::Authorize(const HttpRequest& request) const {
-    return "SharedKey " + m_accountName + ':' + Sign(BuildSharedKeyStringToSign(m_accountName, request));
+    const std::string signature = Sign(BuildSharedKeyStringToSign(m_accountName, request));
+    constexpr std::string_view Scheme = "SharedKey ";
+    std::string authorization;
+    authorization.reserve(Scheme.size() + m_accountName.size() + 1U + signature.size());
+    authorization.append(Scheme).append(m_accountName).push_back(':');
+    authorization.append(signature);
+    return authorization;
 }
 } // namespace AVEVA::AzureClient::Private
