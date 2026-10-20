@@ -17,13 +17,6 @@ bool IsTransportTimeout(const std::error_code& code) {
     return code == std::errc::timed_out || code == HttpClientError::TimedOut;
 }
 
-// These fail identically on every attempt, so retrying (or reporting them as retryable) only delays the error.
-bool IsPermanentHttpClientError(const std::error_code& code) {
-    return code == HttpClientError::InvalidUrl || code == HttpClientError::InvalidRequest ||
-           code == HttpClientError::TlsFailed || code == HttpClientError::ResponseTooLarge ||
-           code == HttpClientError::ProtocolError;
-}
-
 // The Azure error code, message and request id are always part of the text so that logs identify the failure.
 std::string DescribeFailure(const RequestFailedException& error) {
     return error.StatusCode != 0 ? "HTTP " + error.Describe() : error.Describe();
@@ -115,6 +108,13 @@ rocksdb::IOStatus AzureErrorTranslator::FromException(const std::exception_ptr& 
         return IOStatusFromError(ex);
     } catch (const WritesFencedException& ex) {
         return rocksdb::IOStatus::IOFenced(ex.what());
+    } catch (const std::invalid_argument& ex) {
+        return rocksdb::IOStatus::InvalidArgument(ex.what());
+    } catch (const std::system_error& ex) {
+        if (ex.code() == std::errc::operation_canceled) {
+            return rocksdb::IOStatus::Aborted(ex.what());
+        }
+        return rocksdb::IOStatus::IOError(ex.what());
     } catch (const std::exception& ex) {
         return rocksdb::IOStatus::IOError(ex.what());
     } catch (...) {
@@ -135,6 +135,16 @@ rocksdb::IOStatus AzureErrorTranslator::FromCurrentException(
     } catch (const WritesFencedException& ex) {
         BOOST_LOG_SEV(logger, error) << operation << " failed: " << ex.what();
         return rocksdb::IOStatus::IOFenced(ex.what());
+    } catch (const std::invalid_argument& ex) {
+        BOOST_LOG_SEV(logger, error) << operation << " rejected: " << ex.what();
+        return rocksdb::IOStatus::InvalidArgument(ex.what());
+    } catch (const std::system_error& ex) {
+        BOOST_LOG_SEV(logger, error) << operation << " failed: " << ex.what();
+        // Cancellation comes from AbortIO or shutdown, so it is not a storage failure.
+        if (ex.code() == std::errc::operation_canceled) {
+            return rocksdb::IOStatus::Aborted(ex.what());
+        }
+        return rocksdb::IOStatus::IOError(ex.what());
     } catch (const std::exception& ex) {
         BOOST_LOG_SEV(logger, error) << operation << " failed: " << ex.what();
         return rocksdb::IOStatus::IOError(ex.what());

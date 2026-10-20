@@ -7,6 +7,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/DownloadBufferPool.hpp"
 
+#include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 #include <AVEVA/AzureClient/BlockOn.hpp>
 
 #include <boost/asio/cancellation_signal.hpp>
@@ -271,8 +272,12 @@ template <typename TBlob> [[nodiscard]] int64_t FinishDownload(PendingDownload<T
     const auto result = Unwrap(pending.Result.get());
     if (result.ContentRange.has_value() && result.ContentRange->Length.has_value() &&
         *result.ContentRange->Length != result.BytesWritten) {
-        throw std::runtime_error("Downloaded " + std::to_string(result.BytesWritten) +
-                                 " bytes but the server reported " + std::to_string(*result.ContentRange->Length));
+        // InvalidResponse translates to Corruption, like the short-download path.
+        throw RequestFailedException(
+            200, "",
+            "Downloaded " + std::to_string(result.BytesWritten) + " bytes but the server reported " +
+                std::to_string(*result.ContentRange->Length),
+            "", AzureClient::make_error_code(AzureClient::BlobStorageErrorCode::InvalidResponse));
     }
     return static_cast<int64_t>(result.BytesWritten);
 }

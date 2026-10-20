@@ -230,6 +230,30 @@ TEST(AzureErrorTranslatorTests, FencedExceptionRaisedFromAFilesystemOperationIsI
     EXPECT_TRUE(status.IsIOFenced());
 }
 
+TEST(AzureErrorTranslatorTests, InvalidArgumentExceptionIsInvalidArgument) {
+    boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level> logger;
+    const auto status = [&] {
+        try {
+            throw std::invalid_argument("range is out of bounds");
+        } catch (...) {
+            return AzureErrorTranslator::FromCurrentException(logger, "Read");
+        }
+    }();
+    EXPECT_TRUE(status.IsInvalidArgument());
+    EXPECT_TRUE(
+        AzureErrorTranslator::FromException(std::make_exception_ptr(std::invalid_argument("x"))).IsInvalidArgument());
+}
+
+TEST(AzureErrorTranslatorTests, SystemErrorCancellationIsAborted) {
+    boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level> logger;
+    const auto cancelled =
+        std::make_exception_ptr(std::system_error(std::make_error_code(std::errc::operation_canceled)));
+    EXPECT_TRUE(AzureErrorTranslator::FromException(logger, cancelled, "Read").IsAborted());
+    EXPECT_TRUE(AzureErrorTranslator::FromException(cancelled).IsAborted());
+    const auto other = std::make_exception_ptr(std::system_error(std::make_error_code(std::errc::io_error)));
+    EXPECT_TRUE(AzureErrorTranslator::FromException(logger, other, "Read").IsIOError());
+}
+
 TEST(AzureErrorTranslatorTests, CapturedExceptionIsLoggedWithTheRequestIdAndTranslated) {
     namespace sinks = boost::log::sinks;
     auto stream = std::make_shared<std::ostringstream>();

@@ -120,7 +120,7 @@ are medium confidence: confirm them against the code, or measure, before changin
 
 ## P2: correctness / improvements
 
-### [ ] T33 – File wrappers translate `invalid_argument` / cancellation / size mismatch to generic IOError
+### [x] T33 – File wrappers translate `invalid_argument` / cancellation / size mismatch to generic IOError
 - **Files:**
   - `src\Azure\AzureErrorTranslator.cpp:21-25, 111-153` (`FromCurrentException`/`FromException`,
     `IsPermanentHttpClientError`)
