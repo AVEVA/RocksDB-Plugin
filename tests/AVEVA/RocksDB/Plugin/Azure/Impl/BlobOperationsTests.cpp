@@ -94,6 +94,20 @@ TEST_F(BlobOperationsTests, DownloadToBufferAcceptsPartialContentWithMatchingCon
     EXPECT_EQ(4, BlobOperations::DownloadToBuffer(*m_blob, std::span<char>(buffer), 0, 4));
 }
 
+TEST_F(BlobOperationsTests, DownloadAsyncRejectsBodyShorterThanContentRange) {
+    m_httpClient.EnqueueResponse(
+        HttpResponse{206, MakeCanonicalSuccessHeaders({{"Content-Range", "bytes 0-7/8"}}), std::string(4, 'y')});
+
+    std::promise<std::exception_ptr> done;
+    BlobOperations::DownloadAsync(*m_blob, 0, 8, std::string(), std::chrono::milliseconds(0),
+                                  [&](std::exception_ptr error, unsigned int, std::string_view,
+                                      const std::shared_ptr<const void>&) { done.set_value(error); });
+
+    auto result = done.get_future();
+    ASSERT_EQ(std::future_status::ready, result.wait_for(std::chrono::seconds(10)));
+    EXPECT_TRUE(result.get() != nullptr);
+}
+
 TEST_F(BlobOperationsTests, BlockingFromTheIoContextThreadThrowsInsteadOfDeadlocking) {
     std::promise<bool> threw;
     boost::asio::post(m_httpClient.get_executor(), [&] {

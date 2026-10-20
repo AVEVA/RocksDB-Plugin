@@ -49,6 +49,19 @@ namespace Detail {
 inline AzureClient::Models::BlobByteRange ToRange(int64_t offset, int64_t length) {
     return AzureClient::Models::BlobByteRange{static_cast<uint64_t>(offset), static_cast<uint64_t>(length)};
 }
+
+// A body that disagrees with the server's Content-Range would otherwise surface as a silent short read.
+// InvalidResponse translates to Corruption.
+template <typename TResult> void CheckDownloadLength(const TResult& result) {
+    if (result.ContentRange.has_value() && result.ContentRange->Length.has_value() &&
+        *result.ContentRange->Length != result.BytesWritten) {
+        throw RequestFailedException(
+            200, "",
+            "Downloaded " + std::to_string(result.BytesWritten) + " bytes but the server reported " +
+                std::to_string(*result.ContentRange->Length),
+            "", AzureClient::make_error_code(AzureClient::BlobStorageErrorCode::InvalidResponse));
+    }
+}
 } // namespace Detail
 
 // The synchronous operations block on the calling thread, which must never be one running the host io_context.
@@ -270,15 +283,7 @@ template <typename TBlob> [[nodiscard]] int64_t FinishDownload(PendingDownload<T
     // Re-checked at the blocking site, not only at Start, so a Pending handed across threads cannot deadlock.
     AzureClient::ThrowIfRunningOn(pending.Executor);
     const auto result = Unwrap(pending.Result.get());
-    if (result.ContentRange.has_value() && result.ContentRange->Length.has_value() &&
-        *result.ContentRange->Length != result.BytesWritten) {
-        // InvalidResponse translates to Corruption, like the short-download path.
-        throw RequestFailedException(
-            200, "",
-            "Downloaded " + std::to_string(result.BytesWritten) + " bytes but the server reported " +
-                std::to_string(*result.ContentRange->Length),
-            "", AzureClient::make_error_code(AzureClient::BlobStorageErrorCode::InvalidResponse));
-    }
+    Detail::CheckDownloadLength(result);
     return static_cast<int64_t>(result.BytesWritten);
 }
 
@@ -609,7 +614,9 @@ void DownloadAsync(TBlob& client, int64_t blobOffset, int64_t readLength, const 
             unsigned int status = 0;
             size_t written = 0;
             try {
-                written = static_cast<size_t>(Unwrap(std::move(result)).BytesWritten);
+                const auto downloaded = Unwrap(std::move(result));
+                Detail::CheckDownloadLength(downloaded);
+                written = static_cast<size_t>(downloaded.BytesWritten);
             } catch (const RequestFailedException& e) {
                 status = e.StatusCode;
                 error = std::current_exception();

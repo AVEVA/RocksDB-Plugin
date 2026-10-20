@@ -219,7 +219,7 @@ are medium confidence: confirm them against the code, or measure, before changin
 - **Validation:** `AsyncReadTests`, `ReadableFileTests`. New test: after a 412 refresh,
   `runtime.CachedBlobMetadata(url)` holds the new ETag.
 
-### [ ] T40 – Async download skips the Content-Range length check (**Verify first**)
+### [x] T40 – Async download skips the Content-Range length check (**Verify first**)
 - **File:** `src\Azure\Impl\include\AVEVA\RocksDB\Plugin\Azure\Impl\BlobOperations.hpp` 268-277 (`FinishDownload`),
   587-617 (`DownloadAsync`).
 - **Problem:** The sync path throws when `ContentRange->Length != BytesWritten`. `DownloadAsync` does not check, so
