@@ -318,7 +318,7 @@ are medium confidence: confirm them against the code, or measure, before changin
   - In Lookup, use `resize_and_overwrite` to read without the zero-fill.
 - **Validation:** `ctest -L core` (the secondary-cache round-trip tests). Measure the Insert cost.
 
-### [ ] T47 – `FileCache::ReadFile` copies the relative path under `m_mutex` on every hit
+### [x] T47 – `FileCache::ReadFile` copies the relative path under `m_mutex` on every hit
 - **File:** `src\Core\FileCache.cpp` ~196 (`auto relativePath = fileEntry.GetFilePath();`).
 - **Change:** use the `filePath` parameter (it equals the map key), and build `m_cachePath / filePath` only when
   `!handle->Opened`.

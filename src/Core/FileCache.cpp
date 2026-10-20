@@ -182,8 +182,6 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
             return 0;
         }
 
-        // Only the relative name is copied under the lock; the full path is built when the file is actually opened.
-        auto relativePath = fileEntry.GetFilePath();
         const auto handle = fileEntry.GetOrCreateReadHandle();
         // Taken under the lock: the entry may be replaced or evicted once it is released.
         const int64_t entrySize = fileEntry.GetSize();
@@ -203,7 +201,7 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
                 return std::nullopt;
             }
             if (!handle->Opened) {
-                handle->Opened = m_filesystem->Open(m_cachePath / relativePath);
+                handle->Opened = m_filesystem->Open(m_cachePath / filePath);
             }
             int64_t bytesRead = 0;
             try {
