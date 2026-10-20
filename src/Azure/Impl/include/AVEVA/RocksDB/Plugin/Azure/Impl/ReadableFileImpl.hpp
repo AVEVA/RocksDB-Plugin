@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <concepts>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -27,17 +28,18 @@
 #include <vector>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// <summary>
-/// Completion of an async read: an exception (null on success) and the bytes read. `data` is valid while `owner`
-/// (when non-null) or, failing that, until the callback returns; keep `owner` to retain the bytes without copying.
+/// An async read completion is any callable taking an exception (null on success) and the bytes read. `data` is valid
+/// while `owner` (when non-null) or, failing that, until the callback returns; keep `owner` to retain the bytes
+/// without copying.
 /// </summary>
-using ReadCallback =
-    std::function<void(std::exception_ptr error, std::string_view data, std::shared_ptr<const void> owner)>;
+template <typename TCallback>
+concept ReadCompletion = std::invocable<TCallback&, std::exception_ptr, std::string_view, std::shared_ptr<const void>>;
 
+// Neither copyable nor movable: it is built once, in place, by make_shared, and in-flight reads hold it by shared_ptr.
 template <typename TBlob> class BasicReadableFileImpl {
     BlobFileHandles<TBlob> m_h;
     // Random (and async) reads may run concurrently on one file, so the cached blob metadata is guarded.
-    // Held by pointer to keep the type movable.
-    std::unique_ptr<std::mutex> m_metadataMutex;
+    mutable std::mutex m_metadataMutex;
     mutable int64_t m_size;
     mutable std::string m_etag;
     // Cap on the shared prefetch budget; a Prefetch that would push the budget past it is declined.
@@ -47,8 +49,8 @@ template <typename TBlob> class BasicReadableFileImpl {
     // Optional; when set, every ReadAsync is registered with it until its callback has been released.
     std::shared_ptr<AsyncReadTracker> m_asyncReads;
 
-    // One range requested through FSRandomAccessFile::Prefetch. Shared with the download's completion, which runs on
-    // the host io_context and may outlive a move of this file.
+    // One range requested through FSRandomAccessFile::Prefetch. The download's completion runs on the host io_context
+    // and holds the file, so this state lives as long as that read.
     struct PrefetchSlot {
         uint64_t Id = 0;
         int64_t Offset = 0;
@@ -72,7 +74,7 @@ template <typename TBlob> class BasicReadableFileImpl {
         void Drop(std::vector<PrefetchSlot>::iterator slot);
         void DropAll();
     };
-    std::shared_ptr<PrefetchState> m_prefetch = std::make_shared<PrefetchState>();
+    mutable PrefetchState m_prefetch;
 
     // Concurrent async reads that need fresh blob metadata (at the cached end, or after a precondition failure) share
     // one in-flight properties call instead of each issuing their own.
@@ -82,8 +84,9 @@ template <typename TBlob> class BasicReadableFileImpl {
         bool InFlight = false;
         std::vector<MetadataCallback> Waiters;
     };
-    std::shared_ptr<MetadataRefreshState> m_metadataRefresh = std::make_shared<MetadataRefreshState>();
-    static void CoalescedMetadataAsync(const BasicReadableFileImpl& file, MetadataCallback callback);
+    mutable MetadataRefreshState m_metadataRefresh;
+    static void CoalescedMetadataAsync(const std::shared_ptr<const BasicReadableFileImpl>& file,
+                                       MetadataCallback callback);
 
     // Serves from a completed prefetch only. With `wait`, first waits (bounded) for a covering pending prefetch.
     // With `allowPartial`, a range that only starts inside a slot is served up to the slot's end and the caller
@@ -94,15 +97,19 @@ template <typename TBlob> class BasicReadableFileImpl {
     int64_t DownloadWithRetry(const int64_t offset, const int64_t bytesToRead, char* buffer) const;
     [[nodiscard]] std::pair<int64_t, std::string> GetMetadata() const;
     void SetMetadata(int64_t size, std::string etag) const;
+    template <ReadCompletion TCallback>
     static void ReadAsyncAttempt(std::shared_ptr<const BasicReadableFileImpl> self, int64_t offset, int64_t bytesToRead,
-                                 ReadCallback callback, int attemptsLeft, std::chrono::milliseconds timeout);
+                                 TCallback callback, int attemptsLeft, std::chrono::milliseconds timeout);
+    template <ReadCompletion TCallback>
     static void RefreshMetadataAndReadAsync(std::shared_ptr<const BasicReadableFileImpl> self, int64_t offset,
-                                            int64_t bytesToRead, ReadCallback callback, int attemptsLeft,
+                                            int64_t bytesToRead, TCallback callback, int attemptsLeft,
                                             std::chrono::milliseconds timeout);
 
   public:
     // A blob that keeps changing underneath the reader fails with an IOError after this many metadata refreshes.
     static constexpr int kMaxStaleReadRetries = 5;
+    BasicReadableFileImpl(const BasicReadableFileImpl&) = delete;
+    BasicReadableFileImpl& operator=(const BasicReadableFileImpl&) = delete;
     BasicReadableFileImpl(
         std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
         std::shared_ptr<Core::FileCache> fileCache,
@@ -133,8 +140,9 @@ template <typename TBlob> class BasicReadableFileImpl {
     // io_context thread or inline, so it must not block on blob I/O. The file is released before `callback` runs,
     // and the read stays registered with the AsyncReadTracker (if any) until `callback` itself is released.
     // A non-zero `timeout` caps each blob download of the read (see BlobOperations::DownloadAsync).
+    template <ReadCompletion TCallback>
     static void ReadAsync(std::shared_ptr<const BasicReadableFileImpl> self, int64_t offset, int64_t bytesToRead,
-                          ReadCallback callback, int attemptsLeft = kMaxStaleReadRetries,
+                          TCallback callback, int attemptsLeft = kMaxStaleReadRetries,
                           std::chrono::milliseconds timeout = std::chrono::milliseconds::zero());
 
     // Upper bound of a single prefetched range, to keep per-file memory bounded.

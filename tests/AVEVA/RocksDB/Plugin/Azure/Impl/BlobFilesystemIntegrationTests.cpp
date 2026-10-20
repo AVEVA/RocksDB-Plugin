@@ -70,7 +70,7 @@ TEST_F(BlobFilesystemIntegrationTests, CreateReadableFile_FromExistingBlob_Succe
     auto file = m_filesystem->CreateReadableFile(path);
 
     // Assert
-    EXPECT_EQ(testData.size(), file.GetSize());
+    EXPECT_EQ(testData.size(), file->GetSize());
 }
 
 TEST_F(BlobFilesystemIntegrationTests, CreateReadWriteFile_CreatesNewFile) {
@@ -590,7 +590,7 @@ TEST_F(BlobFilesystemIntegrationTests, RenameFile_MovesDataCorrectly) {
     {
         auto readFile = m_filesystem->CreateReadableFile(newName);
         std::vector<char> readBuffer(testData.size());
-        const auto bytesRead = readFile.RandomRead(0, static_cast<int64_t>(testData.size()), readBuffer.data());
+        const auto bytesRead = readFile->RandomRead(0, static_cast<int64_t>(testData.size()), readBuffer.data());
         EXPECT_EQ(testData, readBuffer);
         EXPECT_EQ(bytesRead, testData.size());
     }
@@ -875,7 +875,7 @@ TEST_F(BlobFilesystemIntegrationTests, RenameFile_DestinationExists_OverwritesFi
     {
         auto readFile = m_filesystem->CreateReadableFile(destPath);
         std::vector<char> readBuffer(sourceData.size());
-        const auto bytesRead = readFile.RandomRead(0, static_cast<int64_t>(sourceData.size()), readBuffer.data());
+        const auto bytesRead = readFile->RandomRead(0, static_cast<int64_t>(sourceData.size()), readBuffer.data());
         EXPECT_EQ(sourceData, readBuffer);
         EXPECT_EQ(bytesRead, sourceData.size());
     }
@@ -1141,7 +1141,7 @@ TEST_F(BlobFilesystemIntegrationTests, RenameFile_SameSourceAndDestination_Handl
     {
         auto readFile = m_filesystem->CreateReadableFile(filePath);
         std::vector<char> readBuffer(testData.size());
-        const auto bytesRead = readFile.RandomRead(0, static_cast<int64_t>(testData.size()), readBuffer.data());
+        const auto bytesRead = readFile->RandomRead(0, static_cast<int64_t>(testData.size()), readBuffer.data());
         EXPECT_EQ(testData, readBuffer);
         EXPECT_EQ(bytesRead, testData.size());
     }
@@ -1221,9 +1221,9 @@ TEST_F(BlobFilesystemIntegrationTests, RandomRead_ETagMismatch_RefreshesAndRetri
 
     auto readFile = m_filesystem->CreateReadableFile(blobName);
     std::vector<char> readBuffer(512);
-    auto bytesRead = readFile.RandomRead(0, static_cast<int64_t>(512), readBuffer.data());
+    auto bytesRead = readFile->RandomRead(0, static_cast<int64_t>(512), readBuffer.data());
     EXPECT_EQ(512, bytesRead);
-    EXPECT_EQ(512, readFile.GetSize());
+    EXPECT_EQ(512, readFile->GetSize());
     EXPECT_TRUE(std::all_of(readBuffer.begin(), readBuffer.end(), [](char c) { return c == 'a'; }));
 
     // Act
@@ -1233,9 +1233,9 @@ TEST_F(BlobFilesystemIntegrationTests, RandomRead_ETagMismatch_RefreshesAndRetri
 
     // Assert
     std::vector<char> readAppendedBuffer(1024);
-    bytesRead = readFile.RandomRead(0, static_cast<int64_t>(1024), readAppendedBuffer.data());
+    bytesRead = readFile->RandomRead(0, static_cast<int64_t>(1024), readAppendedBuffer.data());
     EXPECT_EQ(1024, bytesRead);
-    EXPECT_EQ(1024, readFile.GetSize());
+    EXPECT_EQ(1024, readFile->GetSize());
     EXPECT_EQ(512, std::count(readAppendedBuffer.begin(), readAppendedBuffer.begin() + 512, 'a'));
     EXPECT_EQ(512, std::count(readAppendedBuffer.begin() + 512, readAppendedBuffer.end(), 'b'));
 
@@ -1252,7 +1252,7 @@ TEST_F(BlobFilesystemIntegrationTests, RandomRead_AfterBlobGrows_UpdatesSize) {
     writeFile.Sync();
 
     auto readFile = m_filesystem->CreateReadableFile(blobName);
-    EXPECT_EQ(256, readFile.GetSize());
+    EXPECT_EQ(256, readFile->GetSize());
 
     // Act
     std::vector<char> appendData(512, 'Y');
@@ -1261,13 +1261,13 @@ TEST_F(BlobFilesystemIntegrationTests, RandomRead_AfterBlobGrows_UpdatesSize) {
     reopenFile.Sync();
 
     // Assert
-    EXPECT_EQ(768, readFile.GetSize());
+    EXPECT_EQ(768, readFile->GetSize());
 
     std::vector<char> buffer(100);
-    int64_t bytesRead = readFile.RandomRead(300, 100, buffer.data());
+    int64_t bytesRead = readFile->RandomRead(300, 100, buffer.data());
     EXPECT_EQ(100, bytesRead);
     EXPECT_TRUE(std::all_of(buffer.begin(), buffer.end(), [](char c) { return c == 'Y'; }));
-    EXPECT_EQ(768, readFile.GetSize());
+    EXPECT_EQ(768, readFile->GetSize());
 
     // Cleanup
     EXPECT_TRUE(m_filesystem->DeleteFile(blobName));
@@ -1457,7 +1457,7 @@ TEST_F(BlobFilesystemIntegrationTests, ReadableFile_CachedSst_IsServedFromCacheA
     std::vector<char> buffer(data.size());
     std::optional<size_t> hit;
     for (int attempt = 0; attempt < 3 && !hit; ++attempt) {
-        hit = file.TryReadFromCache(0, static_cast<int64_t>(buffer.size()), buffer.data());
+        hit = file->TryReadFromCache(0, static_cast<int64_t>(buffer.size()), buffer.data());
         if (!hit) {
             ASSERT_TRUE(filesystem.WaitForFileCachesIdleForTesting(std::chrono::seconds(60)))
                 << "Background download did not finish";
@@ -1473,7 +1473,7 @@ TEST_F(BlobFilesystemIntegrationTests, ReadableFile_CachedSst_IsServedFromCacheA
     AVEVA::RocksDB::Plugin::Azure::Impl::Unwrap(
         m_containerClient->GetPageBlobClient(m_root + "/" + blobName).DeleteAsync(boost::asio::use_future).get());
     std::fill(buffer.begin(), buffer.end(), '\0');
-    const auto again = file.TryReadFromCache(0, static_cast<int64_t>(buffer.size()), buffer.data());
+    const auto again = file->TryReadFromCache(0, static_cast<int64_t>(buffer.size()), buffer.data());
     ASSERT_TRUE(again.has_value());
     EXPECT_EQ(data, buffer);
 }

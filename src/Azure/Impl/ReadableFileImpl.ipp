@@ -37,10 +37,10 @@ inline bool TrySpendRefresh(int& left) { return left-- > 0; }
 // Ends an async read. The file is released before the callback runs and the callback (which may hold the read's
 // AsyncReadTracker token) is released last, so the filesystem cannot finish draining while this completion still
 // holds references into it.
-template <typename TBlob>
-void FinishRead(std::shared_ptr<const BasicReadableFileImpl<TBlob>>& self, ReadCallback& callback,
+template <typename TBlob, typename TCallback>
+void FinishRead(std::shared_ptr<const BasicReadableFileImpl<TBlob>>& self, TCallback& callback,
                 std::exception_ptr error, std::string_view data, std::shared_ptr<const void> owner = {}) {
-    auto done = std::exchange(callback, nullptr);
+    auto done = std::move(callback);
     self.reset();
     done(std::move(error), data, std::move(owner));
 }
@@ -68,10 +68,9 @@ BasicReadableFileImpl<TBlob>::BasicReadableFileImpl(
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     std::shared_ptr<AsyncReadTracker> asyncReads, std::shared_ptr<std::atomic<int64_t>> prefetchBudget,
     int64_t maxPrefetchBytes)
-    : m_h(name, std::move(runtime), std::move(blob), std::move(fileCache), std::move(logger)),
-      m_metadataMutex(std::make_unique<std::mutex>()), m_size(0), m_maxPrefetchBytes(maxPrefetchBytes),
-      m_asyncReads(std::move(asyncReads)) {
-    m_prefetch->Budget = std::move(prefetchBudget);
+    : m_h(name, std::move(runtime), std::move(blob), std::move(fileCache), std::move(logger)), m_size(0),
+      m_maxPrefetchBytes(maxPrefetchBytes), m_asyncReads(std::move(asyncReads)) {
+    m_prefetch.Budget = std::move(prefetchBudget);
     if (m_h.Runtime) {
         auto metadata = BlobOperations::GetCachedMetadata(*m_h.Runtime, *m_h.Blob);
         m_size = metadata.Size;
@@ -120,13 +119,13 @@ int64_t BasicReadableFileImpl<TBlob>::RandomRead(const int64_t offset, int64_t b
 template <typename TBlob> std::string BasicReadableFileImpl<TBlob>::GetETag() const { return GetMetadata().second; }
 
 template <typename TBlob> bool BasicReadableFileImpl<TBlob>::HasETag(const std::string_view etag) const {
-    std::scoped_lock lock(*m_metadataMutex);
+    std::scoped_lock lock(m_metadataMutex);
     return m_etag == etag;
 }
 
 template <typename TBlob> int64_t BasicReadableFileImpl<TBlob>::GetSize() const {
     {
-        std::scoped_lock lock(*m_metadataMutex);
+        std::scoped_lock lock(m_metadataMutex);
         const auto now = m_h.Runtime ? m_h.Runtime->MetadataNow() : std::chrono::steady_clock::now();
         if (now - m_metadataFetchedAt < Configuration::MetadataCacheTtl) {
             return m_size;
@@ -138,7 +137,7 @@ template <typename TBlob> int64_t BasicReadableFileImpl<TBlob>::GetSize() const 
 }
 
 template <typename TBlob> std::pair<int64_t, std::string> BasicReadableFileImpl<TBlob>::GetMetadata() const {
-    std::scoped_lock lock(*m_metadataMutex);
+    std::scoped_lock lock(m_metadataMutex);
     return {m_size, m_etag};
 }
 
@@ -149,7 +148,7 @@ template <typename TBlob> void BasicReadableFileImpl<TBlob>::SetMetadata(const i
         << "Blob metadata refreshed for file '" << m_h.Name << "' :size = " << size << " bytes, etag = " << etag;
     bool changed = false;
     {
-        std::scoped_lock lock(*m_metadataMutex);
+        std::scoped_lock lock(m_metadataMutex);
         changed = m_etag != etag;
         m_size = size;
         m_etag = std::move(etag);
@@ -178,10 +177,10 @@ template <typename TBlob> void BasicReadableFileImpl<TBlob>::PrefetchState::Drop
 
 template <typename TBlob> void BasicReadableFileImpl<TBlob>::ClearPrefetch() const {
     {
-        std::scoped_lock lock(m_prefetch->Mutex);
-        m_prefetch->DropAll();
+        std::scoped_lock lock(m_prefetch.Mutex);
+        m_prefetch.DropAll();
     }
-    m_prefetch->Done.notify_all();
+    m_prefetch.Done.notify_all();
 }
 
 template <typename TBlob>
@@ -192,7 +191,7 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
     }
 
     n = std::min(n, kMaxPrefetchBytes);
-    auto state = self->m_prefetch;
+    auto* const state = &self->m_prefetch;
     uint64_t id = 0;
     {
         std::scoped_lock lock(state->Mutex);
@@ -231,10 +230,13 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
     // A superseded or cleared prefetch (its slot is gone) must not publish its bytes.
     auto logger = self->m_h.Logger;
     auto name = self->m_h.Name;
+    // The completion needs the prefetch state, which is part of the file, so it keeps the file alive. The pointer is
+    // taken before `self` moves into the read.
+    auto keepAlive = self;
     try {
         ReadAsync(std::move(self), offset, n,
-                  [state, id, logger, name = std::move(name)](std::exception_ptr error, std::string_view data,
-                                                              std::shared_ptr<const void> owner) {
+                  [state, id, logger, name = std::move(name),
+                   keepAlive](std::exception_ptr error, std::string_view data, std::shared_ptr<const void> owner) {
                       std::vector<std::move_only_function<void()>> waiters;
                       {
                           std::scoped_lock lock(state->Mutex);
@@ -311,7 +313,7 @@ std::optional<size_t> BasicReadableFileImpl<TBlob>::TryReadFromPrefetch(const in
         return std::nullopt;
     }
 
-    auto& state = *m_prefetch;
+    auto& state = m_prefetch;
     std::unique_lock lock(state.Mutex);
     const auto find = [&] {
         return std::ranges::find_if(state.Slots, [&](const PrefetchSlot& slot) {
@@ -371,8 +373,8 @@ bool BasicReadableFileImpl<TBlob>::HasPendingPrefetch(const int64_t offset, cons
         return false;
     }
 
-    std::scoped_lock lock(m_prefetch->Mutex);
-    return std::ranges::any_of(m_prefetch->Slots, [&](const PrefetchSlot& candidate) {
+    std::scoped_lock lock(m_prefetch.Mutex);
+    return std::ranges::any_of(m_prefetch.Slots, [&](const PrefetchSlot& candidate) {
         return candidate.Pending && offset >= candidate.Offset &&
                offset + bytesToRead <= candidate.Offset + candidate.Length;
     });
@@ -385,15 +387,15 @@ bool BasicReadableFileImpl<TBlob>::ChainOntoPendingPrefetch(const int64_t offset
         return false;
     }
 
-    std::scoped_lock lock(m_prefetch->Mutex);
-    const auto slot = std::ranges::find_if(m_prefetch->Slots, [&](const PrefetchSlot& candidate) {
+    std::scoped_lock lock(m_prefetch.Mutex);
+    const auto slot = std::ranges::find_if(m_prefetch.Slots, [&](const PrefetchSlot& candidate) {
         return candidate.Pending && offset >= candidate.Offset &&
                offset + bytesToRead <= candidate.Offset + candidate.Length;
     });
-    if (slot == m_prefetch->Slots.end()) {
+    if (slot == m_prefetch.Slots.end()) {
         return false;
     }
-    m_prefetch->Waiters.emplace_back(slot->Id, std::move(resume));
+    m_prefetch.Waiters.emplace_back(slot->Id, std::move(resume));
     return true;
 }
 
@@ -418,14 +420,18 @@ std::optional<size_t> BasicReadableFileImpl<TBlob>::TryReadFromCompletedPrefetch
 }
 
 template <typename TBlob>
+template <ReadCompletion TCallback>
 void BasicReadableFileImpl<TBlob>::ReadAsync(std::shared_ptr<const BasicReadableFileImpl<TBlob>> self,
-                                             const int64_t offset, const int64_t bytesToRead, ReadCallback callback,
+                                             const int64_t offset, const int64_t bytesToRead, TCallback callback,
                                              const int attemptsLeft, const std::chrono::milliseconds timeout) {
     if (self->m_asyncReads) {
-        callback = [callback = std::move(callback), token = self->m_asyncReads->Begin()](
-                       std::exception_ptr error, std::string_view data, std::shared_ptr<const void> owner) {
+        // The token is declared first so it is released after the callback (and anything the callback holds).
+        auto tracked = [token = self->m_asyncReads->Begin(), callback = std::move(callback)](
+                           std::exception_ptr error, std::string_view data, std::shared_ptr<const void> owner) mutable {
             callback(std::move(error), data, std::move(owner));
         };
+        ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(tracked), attemptsLeft, timeout);
+        return;
     }
     ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(callback), attemptsLeft, timeout);
 }
@@ -433,10 +439,10 @@ void BasicReadableFileImpl<TBlob>::ReadAsync(std::shared_ptr<const BasicReadable
 // Async counterpart of DownloadWithRetry: every step (ETag check, conditional download, metadata refresh) is chained
 // through completion callbacks so no thread ever blocks on the io_context.
 template <typename TBlob>
+template <ReadCompletion TCallback>
 void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicReadableFileImpl<TBlob>> self,
-                                                    const int64_t offset, const int64_t bytesToRead,
-                                                    ReadCallback callback, const int attemptsLeft,
-                                                    const std::chrono::milliseconds timeout) {
+                                                    const int64_t offset, const int64_t bytesToRead, TCallback callback,
+                                                    const int attemptsLeft, const std::chrono::milliseconds timeout) {
     if (offset < 0 || bytesToRead <= 0) {
         ReadableFileDetail::FinishRead(self, callback, nullptr, {});
         return;
@@ -446,7 +452,7 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
     const auto remaining = std::max<int64_t>(0, size - offset);
     if (remaining == 0) {
         // At the cached end of the blob: only re-read if another writer moved the blob on.
-        const auto& file = *self;
+        const auto file = self;
         CoalescedMetadataAsync(
             file, [self = std::move(self), offset, bytesToRead, callback = std::move(callback), etag, attemptsLeft,
                    timeout](std::exception_ptr error, int64_t latestSize, std::string latestEtag) mutable {
@@ -500,11 +506,12 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
 }
 
 template <typename TBlob>
+template <ReadCompletion TCallback>
 void BasicReadableFileImpl<TBlob>::RefreshMetadataAndReadAsync(std::shared_ptr<const BasicReadableFileImpl<TBlob>> self,
                                                                const int64_t offset, const int64_t bytesToRead,
-                                                               ReadCallback callback, const int attemptsLeft,
+                                                               TCallback callback, const int attemptsLeft,
                                                                const std::chrono::milliseconds timeout) {
-    const auto& file = *self;
+    const auto file = self;
     CoalescedMetadataAsync(file, [self = std::move(self), offset, bytesToRead, callback = std::move(callback),
                                   attemptsLeft,
                                   timeout](std::exception_ptr error, int64_t size, std::string etag) mutable {
@@ -523,27 +530,32 @@ void BasicReadableFileImpl<TBlob>::RefreshMetadataAndReadAsync(std::shared_ptr<c
 // condition again and is retried against its own refresh budget.
 template <typename TBlob>
 void BasicReadableFileImpl<TBlob>::CoalescedMetadataAsync(
-    const BasicReadableFileImpl& file, typename BasicReadableFileImpl<TBlob>::MetadataCallback callback) {
-    auto state = file.m_metadataRefresh;
+    const std::shared_ptr<const BasicReadableFileImpl>& file,
+    typename BasicReadableFileImpl<TBlob>::MetadataCallback callback) {
+    auto& state = file->m_metadataRefresh;
     {
-        std::scoped_lock lock(state->Mutex);
-        state->Waiters.push_back(std::move(callback));
-        if (state->InFlight) {
+        std::scoped_lock lock(state.Mutex);
+        state.Waiters.push_back(std::move(callback));
+        if (state.InFlight) {
             return;
         }
-        state->InFlight = true;
+        state.InFlight = true;
     }
     // Initiation can throw (allocation, client construction, fenced runtime). Without this, InFlight would stay set
     // forever and every later caller would queue behind a request that never completes.
     try {
+        // The completion needs the state, which is part of the file, so it holds the file until the waiters are taken;
+        // it lets go before running them so the file is not kept alive past the reads that wait on it.
         BlobOperations::GetMetadataAsync(
-            *file.m_h.Blob, [state](std::exception_ptr error, int64_t size, std::string etag) {
+            *file->m_h.Blob, [file = file](std::exception_ptr error, int64_t size, std::string etag) mutable {
                 std::vector<typename BasicReadableFileImpl<TBlob>::MetadataCallback> waiters;
                 {
-                    std::scoped_lock lock(state->Mutex);
-                    waiters.swap(state->Waiters);
-                    state->InFlight = false;
+                    auto& refresh = file->m_metadataRefresh;
+                    std::scoped_lock lock(refresh.Mutex);
+                    waiters.swap(refresh.Waiters);
+                    refresh.InFlight = false;
                 }
+                file.reset();
                 for (auto& waiter : waiters) {
                     waiter(error, size, etag);
                 }
@@ -552,9 +564,9 @@ void BasicReadableFileImpl<TBlob>::CoalescedMetadataAsync(
         const auto error = std::current_exception();
         std::vector<typename BasicReadableFileImpl<TBlob>::MetadataCallback> waiters;
         {
-            std::scoped_lock lock(state->Mutex);
-            waiters.swap(state->Waiters);
-            state->InFlight = false;
+            std::scoped_lock lock(state.Mutex);
+            waiters.swap(state.Waiters);
+            state.InFlight = false;
         }
         for (auto& waiter : waiters) {
             waiter(error, 0, std::string());

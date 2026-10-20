@@ -27,8 +27,9 @@ using Impl::DeleteAsyncReadHandle;
 
 template <class TImpl>
 BasicReadableFile<TImpl>::BasicReadableFile(
-    TImpl&& file, std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
-    : m_file(std::make_shared<TImpl>(std::move(file))),
+    std::shared_ptr<TImpl> file,
+    std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
+    : m_file(std::move(file)),
       m_logger(logger
                    ? std::move(logger)
                    : std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>()) {

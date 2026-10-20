@@ -365,7 +365,7 @@ TEST_F(BlobFilesystemFakeTests, TruncateDropsTheCachedCopyOfTheFile) {
     // The cache downloads a file in the background once it is accessed; wait for that download instead of polling.
     std::optional<size_t> hit;
     for (int attempt = 0; attempt < 3 && !hit; ++attempt) {
-        hit = file.TryReadFromCache(0, static_cast<int64_t>(buffer.size()), buffer.data());
+        hit = file->TryReadFromCache(0, static_cast<int64_t>(buffer.size()), buffer.data());
         if (!hit) {
             ASSERT_TRUE(cached.WaitForFileCachesIdleForTesting(std::chrono::seconds(30)))
                 << "Background download did not finish";
@@ -375,7 +375,7 @@ TEST_F(BlobFilesystemFakeTests, TruncateDropsTheCachedCopyOfTheFile) {
 
     cached.Truncate(Path("t.sst"), 512);
 
-    EXPECT_FALSE(file.TryReadFromCache(0, 512, buffer.data()).has_value());
+    EXPECT_FALSE(file->TryReadFromCache(0, 512, buffer.data()).has_value());
 }
 TEST_F(BlobFilesystemFakeTests, DeleteDirDropsTheCachedCopiesOfItsFiles) {
     const TempDirectory tempDir("deletedir_cache");
@@ -394,7 +394,7 @@ TEST_F(BlobFilesystemFakeTests, DeleteDirDropsTheCachedCopiesOfItsFiles) {
     std::vector<char> buffer(1024);
     std::optional<size_t> hit;
     for (int attempt = 0; attempt < 3 && !hit; ++attempt) {
-        hit = file.TryReadFromCache(0, static_cast<int64_t>(buffer.size()), buffer.data());
+        hit = file->TryReadFromCache(0, static_cast<int64_t>(buffer.size()), buffer.data());
         if (!hit) {
             ASSERT_TRUE(cached.WaitForFileCachesIdleForTesting(std::chrono::seconds(30)))
                 << "Background download did not finish";
@@ -403,7 +403,7 @@ TEST_F(BlobFilesystemFakeTests, DeleteDirDropsTheCachedCopiesOfItsFiles) {
     ASSERT_TRUE(hit.has_value()) << "File was not cached after the background download finished";
 
     ASSERT_EQ(cached.DeleteDir(Path("dir")), 0U);
-    EXPECT_FALSE(file.TryReadFromCache(0, static_cast<int64_t>(buffer.size()), buffer.data()).has_value());
+    EXPECT_FALSE(file->TryReadFromCache(0, static_cast<int64_t>(buffer.size()), buffer.data()).has_value());
     {
         auto writer = cached.CreateWriteableFile(Path("dir/d.sst"));
         const std::string content(1024, 'N');
@@ -414,7 +414,7 @@ TEST_F(BlobFilesystemFakeTests, DeleteDirDropsTheCachedCopiesOfItsFiles) {
 
     // Whatever the cache serves for the recreated blob must be the new content, never the deleted one.
     std::vector<char> after(1024);
-    if (recreated.TryReadFromCache(0, static_cast<int64_t>(after.size()), after.data())) {
+    if (recreated->TryReadFromCache(0, static_cast<int64_t>(after.size()), after.data())) {
         EXPECT_EQ(std::string(after.begin(), after.end()), std::string(1024, 'N'));
     }
 }
@@ -457,7 +457,7 @@ class CachedFailureTests : public BlobFilesystemFakeTests {
     template <typename TFile> bool WarmCache(TFile& file, const size_t size) {
         std::vector<char> buffer(size);
         for (int attempt = 0; attempt < 3; ++attempt) {
-            if (file.TryReadFromCache(0, static_cast<int64_t>(size), buffer.data())) {
+            if (file->TryReadFromCache(0, static_cast<int64_t>(size), buffer.data())) {
                 return true;
             }
             if (!m_cached->WaitForFileCachesIdleForTesting(std::chrono::seconds(30))) {
@@ -486,7 +486,7 @@ TEST_F(CachedFailureTests, TruncateThatFailsAfterShrinkingStillDropsTheCachedCop
     EXPECT_ANY_THROW(m_cached->Truncate(Path("t.sst"), 512));
 
     std::vector<char> buffer(512);
-    EXPECT_FALSE(file.TryReadFromCache(0, 512, buffer.data()).has_value());
+    EXPECT_FALSE(file->TryReadFromCache(0, 512, buffer.data()).has_value());
 }
 
 TEST_F(CachedFailureTests, RenameThatFailsMidCommitStillDropsTheDestinationsCachedCopy) {
@@ -505,7 +505,7 @@ TEST_F(CachedFailureTests, RenameThatFailsMidCommitStillDropsTheDestinationsCach
     EXPECT_ANY_THROW(m_cached->RenameFile(Path("old.sst"), Path("new.sst")));
 
     std::vector<char> buffer(1024);
-    EXPECT_FALSE(file.TryReadFromCache(0, 1024, buffer.data()).has_value());
+    EXPECT_FALSE(file->TryReadFromCache(0, 1024, buffer.data()).has_value());
 }
 // Page blobs are 512-byte aligned, so sizes straddling a page boundary exercise the padding/partial-page paths.
 class PageBoundaryTests : public BlobFilesystemFakeTests, public ::testing::WithParamInterface<size_t> {

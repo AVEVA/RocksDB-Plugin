@@ -35,7 +35,7 @@ template <class TImpl> class BasicReadableFile final : public rocksdb::FSRandomA
     // Upper bound of one merged GET, so coalescing cannot build an arbitrarily large buffer.
     static constexpr uint64_t kMultiReadMaxMergedBytes = 8 * 1024 * 1024;
     explicit BasicReadableFile(
-        TImpl&& file,
+        std::shared_ptr<TImpl> file,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger = nullptr);
     ~BasicReadableFile() override;
 

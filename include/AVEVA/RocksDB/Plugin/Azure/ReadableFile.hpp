@@ -25,7 +25,7 @@ class ReadableFile final : public rocksdb::FSRandomAccessFile {
     std::unique_ptr<rocksdb::FSRandomAccessFile> m_delegate;
 
     explicit ReadableFile(
-        Impl::ReadableFileImpl&& file,
+        std::shared_ptr<Impl::ReadableFileImpl> file,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger = nullptr);
 
   public:

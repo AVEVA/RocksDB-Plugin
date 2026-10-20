@@ -188,7 +188,7 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     BasicBlobFilesystemImpl(BasicBlobFilesystemImpl&&) = delete;
     BasicBlobFilesystemImpl& operator=(BasicBlobFilesystemImpl&&) = delete;
 
-    [[nodiscard]] ReadableFileType CreateReadableFile(const std::string& filePath);
+    [[nodiscard]] std::shared_ptr<ReadableFileType> CreateReadableFile(const std::string& filePath);
     // Caps the bytes held by prefetch buffers across all files opened afterwards; 0 declines every prefetch.
     void SetMaxPrefetchBytes(int64_t maxPrefetchBytes) { m_maxPrefetchBytes = maxPrefetchBytes; }
     [[nodiscard]] SequentialFileType CreateSequentialFile(const std::string& filePath);

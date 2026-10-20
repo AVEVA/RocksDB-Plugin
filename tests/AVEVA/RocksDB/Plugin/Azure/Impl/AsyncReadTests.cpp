@@ -109,8 +109,8 @@ class AsyncReadTests : public ::testing::Test {
 
     FakeReadableFile CreateFile(const FakeBlobEnvironment& env, std::shared_ptr<AsyncReadTracker> tracker = nullptr,
                                 std::shared_ptr<std::atomic<int64_t>> budget = nullptr) {
-        return FakeReadableFile{FakeReadableFileImpl{"test.sst", env.Runtime, env.Client, nullptr, m_logger,
-                                                     std::move(tracker), std::move(budget)}};
+        return FakeReadableFile{std::make_shared<FakeReadableFileImpl>(
+            "test.sst", env.Runtime, env.Client, nullptr, m_logger, std::move(tracker), std::move(budget))};
     }
 
     static rocksdb::IOStatus Submit(FakeReadableFile& file, rocksdb::FSReadRequest& req, CallbackRecord& record,
@@ -386,8 +386,8 @@ TEST_F(AsyncReadTests, Read_PartiallyOverlappingPrefetch_DownloadsOnlyTheRemaind
 
 TEST_F(AsyncReadTests, Read_PastTheEndOfPrefetchedRange_ReleasesItsBudget) {
     auto budget = std::make_shared<std::atomic<int64_t>>(0);
-    FakeReadableFile file{FakeReadableFileImpl{"test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
-                                               m_logger, nullptr, budget}};
+    FakeReadableFile file{std::make_shared<FakeReadableFileImpl>(
+        "test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr, m_logger, nullptr, budget)};
     ASSERT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
     m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'P'));
     ASSERT_EQ(512, budget->load());
@@ -404,8 +404,8 @@ TEST_F(AsyncReadTests, Read_PastTheEndOfPrefetchedRange_ReleasesItsBudget) {
 
 TEST_F(AsyncReadTests, Prefetch_DeclinedForBudget_DoesNotEvictFinishedRange) {
     auto budget = std::make_shared<std::atomic<int64_t>>(0);
-    FakeReadableFile file{FakeReadableFileImpl{"test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
-                                               m_logger, nullptr, budget}};
+    FakeReadableFile file{std::make_shared<FakeReadableFileImpl>(
+        "test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr, m_logger, nullptr, budget)};
     ASSERT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
     ASSERT_TRUE(file.Prefetch(1024, 512, rocksdb::IOOptions{}, nullptr).ok());
     m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'A'));
@@ -433,8 +433,8 @@ TEST_F(AsyncReadTests, Prefetch_AllSlotsStillDownloading_DeclinedReturnsOk) {
 
 TEST_F(AsyncReadTests, Prefetch_OverSharedBudget_DeclinedReturnsOkAndFailedPrefetchReleasesBytes) {
     auto budget = std::make_shared<std::atomic<int64_t>>(0);
-    FakeReadableFile file{FakeReadableFileImpl{"test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
-                                               m_logger, nullptr, budget}};
+    FakeReadableFile file{std::make_shared<FakeReadableFileImpl>(
+        "test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr, m_logger, nullptr, budget)};
 
     ASSERT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
     EXPECT_EQ(512, budget->load());
@@ -448,8 +448,8 @@ TEST_F(AsyncReadTests, Prefetch_OverSharedBudget_DeclinedReturnsOkAndFailedPrefe
 
 TEST_F(AsyncReadTests, Prefetch_ConfiguredBudget_CapsPrefetchedBytes) {
     auto budget = std::make_shared<std::atomic<int64_t>>(0);
-    FakeReadableFile file{FakeReadableFileImpl{"test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
-                                               m_logger, nullptr, budget, 1024}};
+    FakeReadableFile file{std::make_shared<FakeReadableFileImpl>(
+        "test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr, m_logger, nullptr, budget, 1024)};
 
     ASSERT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
     EXPECT_EQ(1U, m_deferredEnv.Blob->PendingDownloads());
@@ -461,8 +461,8 @@ TEST_F(AsyncReadTests, Prefetch_ConfiguredBudget_CapsPrefetchedBytes) {
 
 TEST_F(AsyncReadTests, Prefetch_ZeroBudget_NeverStartsADownload) {
     auto budget = std::make_shared<std::atomic<int64_t>>(0);
-    FakeReadableFile file{FakeReadableFileImpl{"test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
-                                               m_logger, nullptr, budget, 0}};
+    FakeReadableFile file{std::make_shared<FakeReadableFileImpl>(
+        "test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr, m_logger, nullptr, budget, 0)};
 
     EXPECT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
     EXPECT_EQ(0U, m_deferredEnv.Blob->PendingDownloads());
@@ -1035,7 +1035,8 @@ TEST_F(AsyncReadTests, ReadAsync_HandleAndFilesystemDroppedMidRead_DrainWaitsUnt
     auto req = MakeRequest(0, scratch);
     CallbackRecord record;
     {
-        FakeReadableFile file{FakeReadableFileImpl{"test.sst", standalone.Runtime, client, nullptr, m_logger, tracker}};
+        FakeReadableFile file{
+            std::make_shared<FakeReadableFileImpl>("test.sst", standalone.Runtime, client, nullptr, m_logger, tracker)};
         IoHandle handle;
         ASSERT_TRUE(Submit(file, req, record, handle).ok());
     }
@@ -1065,8 +1066,8 @@ TEST_F(AsyncReadTests, ReadAsync_HandleAndFilesystemDroppedMidRead_DrainWaitsUnt
 TEST_F(AsyncReadTests, ReadAsync_TrackedReadEndsAfterCompletionAndPoll) {
     HostIoContext host;
     auto tracker = std::make_shared<AsyncReadTracker>(host.Context().get_executor());
-    FakeReadableFile file{
-        FakeReadableFileImpl{"test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr, m_logger, tracker}};
+    FakeReadableFile file{std::make_shared<FakeReadableFileImpl>("test.sst", m_deferredEnv.Runtime,
+                                                                 m_deferredEnv.Client, nullptr, m_logger, tracker)};
     std::vector<char> scratch(16);
     auto req = MakeRequest(0, scratch);
     CallbackRecord record;

@@ -33,7 +33,7 @@ TEST_F(ReadableFileIntegrationTests, SequentialRead_SmallFile_ReadsCorrectly) {
     }
 
     auto blobClient = CreateBlobWithData(testData);
-    SequentialFileImpl file{ReadableFileImpl{m_blobName, m_runtime, blobClient, nullptr, m_logger}};
+    SequentialFileImpl file{std::make_shared<ReadableFileImpl>(m_blobName, m_runtime, blobClient, nullptr, m_logger)};
 
     // Act
     std::vector<char> readBuffer(testData.size());
@@ -53,7 +53,7 @@ TEST_F(ReadableFileIntegrationTests, SequentialRead_MultipleChunks_ReadsInOrder)
     }
 
     auto blobClient = CreateBlobWithData(testData);
-    SequentialFileImpl file{ReadableFileImpl{m_blobName, m_runtime, blobClient, nullptr, m_logger}};
+    SequentialFileImpl file{std::make_shared<ReadableFileImpl>(m_blobName, m_runtime, blobClient, nullptr, m_logger)};
 
     // Act - Read in chunks
     std::vector<char> chunk1(512);
@@ -116,7 +116,7 @@ TEST_F(ReadableFileIntegrationTests, Skip_AdvancesOffset_WithoutReading) {
     }
 
     auto blobClient = CreateBlobWithData(testData);
-    SequentialFileImpl file{ReadableFileImpl{m_blobName, m_runtime, blobClient, nullptr, m_logger}};
+    SequentialFileImpl file{std::make_shared<ReadableFileImpl>(m_blobName, m_runtime, blobClient, nullptr, m_logger)};
 
     // Act
     file.Skip(100);
@@ -150,7 +150,7 @@ TEST_F(ReadableFileIntegrationTests, SequentialRead_BeyondFileSize_ReturnsAvaila
     }
 
     auto blobClient = CreateBlobWithData(testData);
-    SequentialFileImpl file{ReadableFileImpl{m_blobName, m_runtime, blobClient, nullptr, m_logger}};
+    SequentialFileImpl file{std::make_shared<ReadableFileImpl>(m_blobName, m_runtime, blobClient, nullptr, m_logger)};
 
     // Act - Try to read more than available
     std::vector<char> buffer(1000, 0);
@@ -165,7 +165,7 @@ TEST_F(ReadableFileIntegrationTests, ReadEmptyFile_ReturnsZero) {
     // Arrange - Create empty blob
     std::vector<char> emptyData;
     auto blobClient = CreateBlobWithData(emptyData);
-    SequentialFileImpl file{ReadableFileImpl{m_blobName, m_runtime, blobClient, nullptr, m_logger}};
+    SequentialFileImpl file{std::make_shared<ReadableFileImpl>(m_blobName, m_runtime, blobClient, nullptr, m_logger)};
 
     // Act
     std::vector<char> buffer(100);

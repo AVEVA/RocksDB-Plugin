@@ -6,19 +6,15 @@
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 template <typename THttp>
-typename BasicBlobFilesystemImpl<THttp>::ReadableFileType
+std::shared_ptr<typename BasicBlobFilesystemImpl<THttp>::ReadableFileType>
 BasicBlobFilesystemImpl<THttp>::CreateReadableFile(const std::string& filePath) {
     EnsureLiveness();
 
     auto [prefix, realPath, blob] = ResolveBlob(filePath);
-    return ReadableFileType{realPath,
-                            m_runtime,
-                            std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)),
-                            BlobFilesystemDetail::FindCache(m_fileCaches, prefix),
-                            m_logger,
-                            m_asyncReads,
-                            m_prefetchBytes,
-                            m_maxPrefetchBytes};
+    return std::make_shared<ReadableFileType>(realPath, m_runtime,
+                                              std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)),
+                                              BlobFilesystemDetail::FindCache(m_fileCaches, prefix), m_logger,
+                                              m_asyncReads, m_prefetchBytes, m_maxPrefetchBytes);
 }
 
 template <typename THttp>

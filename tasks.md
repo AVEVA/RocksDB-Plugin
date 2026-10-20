@@ -135,7 +135,7 @@ against the code unless it says **Verify first**.
 
 ## P2: improvements / cleanups
 
-### [ ] T09 – `ReadableFileImpl` in-place construction
+### [x] T09 – `ReadableFileImpl` in-place construction
 - **Files:**
   - `src\Azure\Impl\include\...\ReadableFileImpl.hpp`
   - `BasicReadableFile` (`std::make_shared<TImpl>(std::move(file))`)

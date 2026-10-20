@@ -17,7 +17,7 @@ template <typename TBlob> class BasicSequentialFileImpl {
     // The block is dropped when the blob's ETag changes.
     static constexpr int64_t kReadaheadBytes = 1024 * 1024;
 
-    BasicReadableFileImpl<TBlob> m_file;
+    std::shared_ptr<BasicReadableFileImpl<TBlob>> m_file;
     int64_t m_offset = 0;
     std::unique_ptr<char[]> m_readahead;
     int64_t m_readaheadLength = 0;
@@ -27,7 +27,7 @@ template <typename TBlob> class BasicSequentialFileImpl {
     int64_t ReadThroughReadahead(int64_t bytesToRead, char* buffer);
 
   public:
-    explicit BasicSequentialFileImpl(BasicReadableFileImpl<TBlob>&& file);
+    explicit BasicSequentialFileImpl(std::shared_ptr<BasicReadableFileImpl<TBlob>> file);
 
     // NOTE: Increments the offset
     [[nodiscard]] int64_t SequentialRead(int64_t bytesToRead, char* buffer);

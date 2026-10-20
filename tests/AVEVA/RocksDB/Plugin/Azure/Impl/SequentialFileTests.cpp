@@ -35,7 +35,10 @@ class SequentialFileTests : public ::testing::Test {
     FakeReadableFileImpl MakeReadable() {
         return FakeReadableFileImpl{"test.sst", m_env.Runtime, m_env.Client, nullptr, m_logger};
     }
-    FakeSequentialFileImpl MakeFile() { return FakeSequentialFileImpl{MakeReadable()}; }
+    FakeSequentialFileImpl MakeFile() {
+        return FakeSequentialFileImpl{
+            std::make_shared<FakeReadableFileImpl>("test.sst", m_env.Runtime, m_env.Client, nullptr, m_logger)};
+    }
 };
 
 TEST_F(SequentialFileTests, SequentialRead_WithoutCache_ReadsFromBlob) {

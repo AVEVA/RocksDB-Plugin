@@ -4,12 +4,13 @@
 #include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include "BasicReadableFile.ipp"
+#include "Impl/ReadableFileImpl.ipp" // ReadAsync/Prefetch are templates on the completion, so they instantiate here
 
 namespace AVEVA::RocksDB::Plugin::Azure {
 template class BasicReadableFile<Impl::ReadableFileImpl>;
 
 ReadableFile::ReadableFile(
-    Impl::ReadableFileImpl&& file,
+    std::shared_ptr<Impl::ReadableFileImpl> file,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
     : m_delegate(std::make_unique<BasicReadableFile<Impl::ReadableFileImpl>>(std::move(file), std::move(logger))) {}
 

@@ -9,7 +9,7 @@
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 template <typename TBlob>
-BasicSequentialFileImpl<TBlob>::BasicSequentialFileImpl(BasicReadableFileImpl<TBlob>&& file)
+BasicSequentialFileImpl<TBlob>::BasicSequentialFileImpl(std::shared_ptr<BasicReadableFileImpl<TBlob>> file)
     : m_file(std::move(file)) {}
 
 template <typename TBlob>
@@ -20,7 +20,7 @@ int64_t BasicSequentialFileImpl<TBlob>::SequentialRead(const int64_t bytesToRead
 
     int64_t bytesRead = 0;
     if (bytesToRead >= kReadaheadBytes) {
-        bytesRead = m_file.RandomRead(m_offset, bytesToRead, buffer);
+        bytesRead = m_file->RandomRead(m_offset, bytesToRead, buffer);
     } else {
         bytesRead = ReadThroughReadahead(bytesToRead, buffer);
     }
@@ -34,7 +34,7 @@ template <typename TBlob>
 int64_t BasicSequentialFileImpl<TBlob>::ReadThroughReadahead(const int64_t bytesToRead, char* buffer) {
     const auto copyFromReadahead = [&]() -> int64_t {
         const auto available = m_readaheadStart + m_readaheadLength - m_offset;
-        if (m_offset < m_readaheadStart || available <= 0 || !m_file.HasETag(m_readaheadEtag)) {
+        if (m_offset < m_readaheadStart || available <= 0 || !m_file->HasETag(m_readaheadEtag)) {
             return 0;
         }
         const auto n = std::min(bytesToRead, available);
@@ -56,8 +56,9 @@ int64_t BasicSequentialFileImpl<TBlob>::ReadThroughReadahead(const int64_t bytes
     // Captured before the read: if the read refreshes the metadata, the buffer is tagged with the older ETag and
     // simply refetched next time, whereas tagging it afterwards could vouch for bytes downloaded under an older
     // ETag.
-    const auto etagBeforeRead = m_file.GetETag();
-    const auto fetched = std::max<int64_t>(m_file.RandomRead(m_offset + served, kReadaheadBytes, m_readahead.get()), 0);
+    const auto etagBeforeRead = m_file->GetETag();
+    const auto fetched =
+        std::max<int64_t>(m_file->RandomRead(m_offset + served, kReadaheadBytes, m_readahead.get()), 0);
     m_readaheadLength = fetched;
     m_readaheadStart = m_offset + served;
     m_readaheadEtag = etagBeforeRead;
@@ -74,5 +75,5 @@ template <typename TBlob> void BasicSequentialFileImpl<TBlob>::Skip(const int64_
     m_offset = n > RangeCheck::MaxOffset - m_offset ? RangeCheck::MaxOffset : m_offset + std::max<int64_t>(n, 0);
 }
 
-template <typename TBlob> int64_t BasicSequentialFileImpl<TBlob>::GetSize() const { return m_file.GetSize(); }
+template <typename TBlob> int64_t BasicSequentialFileImpl<TBlob>::GetSize() const { return m_file->GetSize(); }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
