@@ -254,6 +254,10 @@ are medium confidence: confirm them against the code, or measure, before changin
 - **Validation:** `AsyncReadTests`, `ReadableFileTests`, `BlobOperationsTests`, and an allocation count per read.
 
 ### [ ] T43 – MultiRead merged groups: temporary buffer and double copy (**Verify first**: measure)
+- **Verified – SKIPPED (no measurable gain):** a worst-case 8 MiB memcpy costs ~0.22 ms and the 8 MiB buffer
+  allocation ~0.02 ms, against tens to hundreds of ms for the Azure download of that range (<1%). The scatter-span
+  change would add lifetime coupling (group/handle ownership, cache-hit fallback) to `AsyncReadRequest` for no gain,
+  so no code was changed.
 - **Files:** `src\Azure\BasicReadableFile.ipp` 169-275 (`Group::Buffer` ~233, `applyOutcome` memcpy ~267);
   `AsyncReadRequest.hpp/.cpp` (`Complete`).
 - **Problem:** Each merged group allocates up to 8 MiB (`make_unique_for_overwrite`). Data goes from the pooled
