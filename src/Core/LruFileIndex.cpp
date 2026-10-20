@@ -184,13 +184,18 @@ void LruFileIndex::EvictUntilSizeLocked(const size_t targetSize, EvictList& evic
         evictPairs.reserve(evictPairs.size() + maxEvictions);
     }
 
+    // The cursor only moves towards the front, so entries found pinned are skipped once per pass instead of once
+    // per eviction. Erasing the entry just before the cursor leaves the cursor valid.
+    auto cursor = m_lruList.end();
     while (m_currentSize > targetSize) {
-        // Find the LRU-most unpinned entry (scanning from the back of the list).
-        const auto rit =
-            std::find_if(m_lruList.rbegin(), m_lruList.rend(), [](const Entry& e) { return e.pinCount == 0; });
-        if (rit == m_lruList.rend())
-            break; // all remaining entries are pinned; cannot evict further
-        evictPairs.push_back(RemoveEntryLocked(std::prev(rit.base())));
+        auto candidate = cursor;
+        do {
+            if (candidate == m_lruList.begin())
+                return; // all remaining entries are pinned; cannot evict further
+            cursor = candidate;
+            --candidate;
+        } while (candidate->pinCount != 0);
+        evictPairs.push_back(RemoveEntryLocked(candidate));
     }
 }
 

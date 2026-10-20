@@ -177,7 +177,7 @@ against the code unless it says **Verify first**.
 - **Problem:** The inline path (≤ `MaxInlineRenameSize`) allocates a zero-initialised `make_shared<vector<char>>`.
 - **Change:** Use a pooled buffer or `make_shared_for_overwrite<char[]>`.
 
-### [ ] T15 – `LruFileIndex` eviction scan
+### [x] T15 – `LruFileIndex` eviction scan
 - **File:** `src\Core\LruFileIndex.cpp` (`EvictUntilSizeLocked`).
 - **Problem:** Each eviction runs a `find_if` from the tail. With pinned entries at the tail this is O(n·k).
 - **Change:** Either keep a cursor past known-pinned entries for the duration of one eviction pass, or move pinned
