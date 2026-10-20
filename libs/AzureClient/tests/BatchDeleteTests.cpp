@@ -338,6 +338,30 @@ TEST(BatchDeleteTests, CancelAbortsEveryChunkInFlightAndStartsNoMore) {
     EXPECT_EQ(http.RequestCount(), 3U);
 }
 
+TEST(BatchDeleteTests, CancelRightAfterInitiationOfManyChunksAlwaysCompletesCanceled) {
+    for (int iteration = 0; iteration < 200; ++iteration) {
+        FakeHttpClient http;
+        http.SetResponder(
+            [](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
+                FakeHttpClient::ScriptedResult result =
+                    BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
+                result.Deferred = true;
+                return result;
+            });
+        BlobContainerClient client{http, MakeBlobContainerClientOptions()};
+
+        boost::asio::cancellation_signal signal;
+        std::optional<BatchOutcome> outcome;
+        client.DeleteBlobsAsync(MakeNames(256U * 5U), DeleteBlobsOptions{.MaxConcurrentRequests = 4},
+                                boost::asio::bind_cancellation_slot(
+                                    signal.slot(), [&outcome](BatchOutcome result) { outcome = std::move(result); }));
+        signal.emit(boost::asio::cancellation_type::terminal);
+        ASSERT_TRUE(http.RunUntil([&] { return outcome.has_value(); }));
+        ASSERT_FALSE(outcome->has_value());
+        EXPECT_EQ(outcome->error().Code, std::make_error_code(std::errc::operation_canceled));
+    }
+}
+
 TEST(BatchDeleteTests, EmptyListSucceedsWithoutSendingAnything) {
     FakeHttpClient http;
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};

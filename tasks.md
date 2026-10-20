@@ -52,7 +52,7 @@ are medium confidence: confirm them against the code, or measure, before changin
 - **Validation:** new `WriteableFileTests` case: buffer = `PageSize`, append 100 B twice, Sync, verify the content.
   It hangs today, so use a test timeout.
 
-### [ ] T29 – Batch delete: data race on `cancellation_signal` between chunk start and cancel
+### [x] T29 – Batch delete: data race on `cancellation_signal` between chunk start and cancel
 - **File:** `libs\AzureClient\include\AVEVA\AzureClient\Detail\BlobBatch.hpp` (`Pump` ~100-127, `StartChunk`
   ~131-137, `OnCancel` ~141-161, `SendChunk` ~204).
 - **Problem:** `Pump` publishes the chunk's signal into `m_signals` under `m_mutex`, then calls `SendChunk` outside

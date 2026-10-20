@@ -129,6 +129,9 @@ class BatchDeleteOperation final
     // The bearer token for each attempt comes from the request pipeline's rebuild hook, so a retry never replays
     // stale sub-request dates, signatures or tokens.
     void StartChunk(std::size_t chunk, const std::shared_ptr<boost::asio::cancellation_signal>& signal) {
+        // Slot assignment (inside SendChunk) and every emit on the signal are serialized by m_emitMutex because
+        // cancellation_signal is not thread-safe. Recursive: a failure path may re-enter Pump on this thread.
+        const std::scoped_lock emitLock(m_emitMutex);
         SendChunk(chunk, signal);
         // A cancel that raced the chunk start may have emitted before the pipeline attached its handler.
         if (m_cancelled.load(std::memory_order_acquire)) {
@@ -154,8 +157,11 @@ class BatchDeleteOperation final
                 signals.push_back(entry.second);
             }
         }
-        for (const auto& signal : signals) {
-            signal->emit(boost::asio::cancellation_type::terminal);
+        {
+            const std::scoped_lock emitLock(m_emitMutex);
+            for (const auto& signal : signals) {
+                signal->emit(boost::asio::cancellation_type::terminal);
+            }
         }
         Pump();
     }
@@ -304,6 +310,7 @@ class BatchDeleteOperation final
     RequestAuth m_auth;
 
     std::mutex m_mutex;
+    std::recursive_mutex m_emitMutex;
     std::vector<Models::DeleteBlobItemResult> m_items;
     std::optional<BlobStorageError> m_failure;
     std::optional<HttpResponse> m_rawResponse;
