@@ -385,7 +385,10 @@ BasicBlobFilesystemImpl<THttp>::ResolveBlob(const std::string& path) const {
 template <typename THttp>
 void BasicBlobFilesystemImpl<THttp>::EnsureLiveness(const std::source_location location) const {
     if (m_runtime->WritesFenced()) {
-        BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::fatal)
+        // Fatal once; every later rejected call is an expected consequence, so keep it out of the error stream.
+        const auto severity = m_fencedLogged.exchange(true) ? boost::log::trivial::severity_level::debug
+                                                            : boost::log::trivial::severity_level::fatal;
+        BOOST_LOG_SEV(*m_logger, severity)
             << "Unable to ensure safe database access when attempting to call " << location.function_name();
         throw WritesFencedException("Unable to ensure safe database access");
     }

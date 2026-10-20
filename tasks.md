@@ -512,7 +512,11 @@ are medium confidence: confirm them against the code, or measure, before changin
   I/O.
 - **Validation:** `AsyncReadTests`, `SequentialFileTests`, and the DownloadBufferPool tests.
 
-### [ ] T60 – Write/filesystem smaller items
+### [x] T60 – Write/filesystem smaller items
+- **Done:** `NextRetryDelay` now calls `ClampToEarliestDeadline`; `EnsureLiveness` logs fatal once then debug; `Plugin.cpp`
+  Register overloads forward to one `RegisterWith` helper.
+- **Skipped (risk/needs measurement, not clearly worthwhile in a bundled change):** duplicated Writeable/ReadWrite
+  lifecycle refactor, Logger `CloseImpl`, extra round trips, `OwnedIoContext` self-join.
 - **Duplicated lifecycle:** `WriteableFileImpl.ipp` and `ReadWriteFileImpl.ipp` both repeat the GetInfo probe,
   Close/dtor/`LogIfUnclosed`, and Sync's mark-stale → flush → publish-size. Move these into `PageBlobWriter.hpp`
   as non-virtual template helpers.

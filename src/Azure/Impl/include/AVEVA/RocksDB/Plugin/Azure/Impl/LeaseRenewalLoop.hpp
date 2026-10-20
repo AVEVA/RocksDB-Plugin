@@ -344,15 +344,7 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
         const auto low = step.count() / 2;
         auto delay = std::chrono::milliseconds(
             std::uniform_int_distribution<std::chrono::milliseconds::rep>(low, std::max(low, step.count()))(m_random));
-        delay = std::max(delay, serverHint);
-
-        for (const auto& lock : pending) {
-            if (const auto remaining = lock->RenewalTimeRemaining()) {
-                delay = std::min(delay, std::max(std::chrono::milliseconds{0},
-                                                 std::chrono::duration_cast<std::chrono::milliseconds>(*remaining)));
-            }
-        }
-        return delay;
+        return ClampToEarliestDeadline(std::max(delay, serverHint), pending);
     }
 
     void Fail(const std::string& reason) {
