@@ -117,7 +117,7 @@ sec.cacheDir = "/mnt/nvme/rocksdb-cache";
 sec.capacity = 64ULL << 30;                 // SSD bytes
 sec.logger = std::make_shared<SecondaryCacheOptions::Logger>();
 // sec.backend = SecondaryCacheBackend::FileBased;  // force the file based cache
-// sec.cachelib.regionSizeBytes = 16 << 20;         // CacheLib tuning, see SecondaryCacheOptions.hpp
+// sec.cachelib.regionSizeBytes = 4 << 20;          // CacheLib tuning, see SecondaryCacheOptions.hpp
 
 rocksdb::LRUCacheOptions primary;
 primary.capacity = 1ULL << 30;
@@ -137,7 +137,7 @@ RAM ≈ ~16 bytes × (capacity / average stored block size)   (BlockCache index)
 ```
 
 For example, 256 GiB of 4 KiB blocks is ~64 M entries, or ~1 GiB of index, plus ~70 MiB with the default
-settings (16 MiB regions, 32 MiB parcel memory, 4+4 threads). Larger RocksDB `block_size` values reduce
+settings (4 MiB regions, 32 MiB parcel memory, 4+4 threads). Larger RocksDB `block_size` values reduce
 the index proportionally. The CacheLib backend is built from source through the `cachelib-navy`
 [overlay port](infrastructure/vcpkg/ports/cachelib-navy/README.md) and can be disabled with
 `-DAVEVA_ROCKSDB_WITH_CACHELIB=OFF`.

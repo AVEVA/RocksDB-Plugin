@@ -45,7 +45,7 @@ struct CacheLibSecondaryCacheOptions {
     };
 
     /// <summary>Size of a Navy region; also the upper bound for a single entry.</summary>
-    uint32_t regionSizeBytes = 16U * 1024 * 1024;
+    uint32_t regionSizeBytes = 4U * 1024 * 1024;
 
     /// <summary>Number of clean regions kept ready for writes.</summary>
     uint32_t cleanRegions = 1;

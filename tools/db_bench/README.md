@@ -197,7 +197,7 @@ On CacheLib builds, swap the URI for `aveva-cachelib-secondary-cache://` and
 optionally tune Navy through its own env vars (all optional; defaults shown):
 
 ```
-AVEVA_DB_BENCH_CACHELIB_REGION_SIZE_BYTES                   (16777216)
+AVEVA_DB_BENCH_CACHELIB_REGION_SIZE_BYTES                   (4194304)
 AVEVA_DB_BENCH_CACHELIB_CLEAN_REGIONS                       (1)
 AVEVA_DB_BENCH_CACHELIB_BLOCK_SIZE                          (4096)
 AVEVA_DB_BENCH_CACHELIB_READER_THREADS                      (4)
