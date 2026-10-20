@@ -409,7 +409,7 @@ rocksdb::IOStatus BlobFilesystem::NewLogger(const std::string& fname, const rock
                                             std::shared_ptr<rocksdb::Logger>* result, rocksdb::IODebugContext*) {
     return Guard("NewLogger", fname, [&]() -> rocksdb::IOStatus {
         auto impl = m_filesystem->CreateLogger(fname, rocksdb::Logger::kDefaultLogLevel);
-        *result = std::shared_ptr<rocksdb::Logger>(new Plugin::Azure::Logger(std::move(impl)));
+        *result = std::shared_ptr<rocksdb::Logger>(new Plugin::Azure::Logger(std::move(impl), m_logger));
         return rocksdb::IOStatus::OK();
     });
 }
