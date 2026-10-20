@@ -42,17 +42,18 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
 
     const auto& container = GetContainer(prefixAccountTo);
 
+    auto srcClient = container->GetPageBlobClient(std::string(realPathFrom));
+    auto destClient = container->GetPageBlobClient(std::string(realPathTo));
     // Whatever happens below, a cached copy of either name may no longer match its blob: a failed commit can leave
     // the destination emptied or partly written, and a failed source delete leaves both names holding data.
     boost::scope::scope_exit dropCached{[&] {
-        m_runtime->InvalidateAllBlobSizes();
+        m_runtime->InvalidateBlobSize(srcClient.ResourceUrl());
+        m_runtime->InvalidateBlobSize(destClient.ResourceUrl());
         if (const auto cache = m_fileCaches.find(prefixAccountTo); cache != m_fileCaches.end()) {
             cache->second->RemoveFile(std::string(realPathFrom));
             cache->second->RemoveFile(std::string(realPathTo));
         }
     }};
-    auto srcClient = container->GetPageBlobClient(std::string(realPathFrom));
-    auto destClient = container->GetPageBlobClient(std::string(realPathTo));
 
     const auto [size, cap, etag, modified] = BlobOperations::GetInfo(srcClient);
 

@@ -26,6 +26,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -103,10 +104,10 @@ class ClientRuntimeBase {
     /// when it finishes, and a fetch that overlapped any invalidation is never stored (see BlobSizeEpoch), so only
     /// another process's writes can be missed, and only for Configuration::MetadataCacheTtl.
     /// </summary>
-    [[nodiscard]] std::optional<int64_t> CachedBlobSize(const std::string& blobUrl) const;
+    [[nodiscard]] std::optional<int64_t> CachedBlobSize(std::string_view blobUrl) const;
     /// <summary>Read before fetching a size; pass it to CacheBlobSize so a racing invalidation wins.</summary>
     [[nodiscard]] uint64_t BlobSizeEpoch() const noexcept;
-    void CacheBlobSize(const std::string& blobUrl, int64_t size, uint64_t epoch) const;
+    void CacheBlobSize(std::string_view blobUrl, int64_t size, uint64_t epoch) const;
     /// <summary>A cached (size, ETag) pair and when it was fetched.</summary>
     struct CachedMetadata {
         int64_t Size = 0;
@@ -117,9 +118,9 @@ class ClientRuntimeBase {
     /// Lets opening a file skip its properties round trip. The entry shares the size cache's lifetime and
     /// invalidation; a stale ETag is harmless because ETag-conditioned reads refresh on a 412.
     /// </summary>
-    [[nodiscard]] std::optional<CachedMetadata> CachedBlobMetadata(const std::string& blobUrl) const;
-    void CacheBlobMetadata(const std::string& blobUrl, int64_t size, std::string etag, uint64_t epoch) const;
-    void InvalidateBlobSize(const std::string& blobUrl) const;
+    [[nodiscard]] std::optional<CachedMetadata> CachedBlobMetadata(std::string_view blobUrl) const;
+    void CacheBlobMetadata(std::string_view blobUrl, int64_t size, std::string etag, uint64_t epoch) const;
+    void InvalidateBlobSize(std::string_view blobUrl) const;
     /// <summary>For operations that touch many blobs at once (directory delete, rename).</summary>
     void InvalidateAllBlobSizes() const;
     /// <summary>
@@ -131,14 +132,19 @@ class ClientRuntimeBase {
     void SetMetadataClockForTesting(const std::atomic<int64_t>* manualClockNanos) noexcept;
 
   private:
-    void StoreBlobSize(const std::string& blobUrl, int64_t size, std::optional<std::string> etag, uint64_t epoch) const;
+    void StoreBlobSize(std::string_view blobUrl, int64_t size, std::optional<std::string> etag, uint64_t epoch) const;
     struct CachedSize {
         int64_t Size = 0;
         std::optional<std::string> ETag;
         std::chrono::steady_clock::time_point FetchedAt;
     };
     mutable std::mutex m_sizeMutex;
-    mutable std::unordered_map<std::string, CachedSize> m_sizes;
+    // Transparent hashing lets string_view lookups avoid building a std::string.
+    struct UrlHash {
+        using is_transparent = void;
+        std::size_t operator()(const std::string_view url) const noexcept { return std::hash<std::string_view>{}(url); }
+    };
+    mutable std::unordered_map<std::string, CachedSize, UrlHash, std::equal_to<>> m_sizes;
     mutable std::atomic<uint64_t> m_sizeEpoch{0};
     const std::atomic<int64_t>* m_manualMetadataClock = nullptr;
 };

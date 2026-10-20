@@ -159,7 +159,7 @@ against the code unless it says **Verify first**.
   - Collect evicted buffers into a local and free them after unlock.
 - **Validation:** Benchmark multi-threaded random reads.
 
-### [ ] T11 – Blob-size cache: targeted invalidation, heterogeneous lookup, smarter bound
+### [x] T11 – Blob-size cache: targeted invalidation, heterogeneous lookup, smarter bound
 - **Files:**
   - `ClientRuntime.cpp/.hpp` (`m_sizes`, `CacheBlobSize`, `CachedBlobSize(const std::string&)`)
   - `BlobFilesystemImpl.Rename.ipp`
