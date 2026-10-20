@@ -90,12 +90,12 @@ struct RetryTimerFor<THttp> {
     using type = typename THttp::retry_timer_type;
 };
 
-template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
-class RetryOperation final : public std::enable_shared_from_this<RetryOperation<THttp, TCred, THandler>> {
+template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler, class TRebuild>
+class RetryOperation final : public std::enable_shared_from_this<RetryOperation<THttp, TCred, THandler, TRebuild>> {
   public:
     RetryOperation(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
                    HttpRequest request, THandler completion, AzureRequestOptions requestOptions,
-                   bool retryNotFoundAndGone, AttemptRebuilder rebuild, bool callerAbsorbsReplay = false)
+                   bool retryNotFoundAndGone, TRebuild rebuild, bool callerAbsorbsReplay = false)
         : m_httpClient(httpClient), m_auth(std::move(auth)), m_credential(std::move(credential)), m_retry(retry),
           m_request(std::move(request)), m_completion(std::move(completion)), m_requestOptions(requestOptions),
           m_retryNotFoundAndGone(retryNotFoundAndGone), m_rebuild(std::move(rebuild)),
@@ -270,11 +270,22 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         return attempt;
     }
 
-    static void StampDate(HttpRequest& request, const std::string& now) {
-        for (HttpHeader& header : request.GetHeaders()) {
-            if (IEquals(header.GetName(), XMsDateHeaderName)) {
-                header.SetValue(now);
-                return;
+    // Every attempt copies the same header list, so the date header's position (or its absence) is learned once
+    // and later attempts skip the rescan. A hit is re-validated, so a stale index only costs the scan.
+    void StampDate(HttpRequest& request, const std::string& now) {
+        auto& headers = request.GetHeaders();
+        if (m_dateHeaderIndex < headers.size() && IEquals(headers[m_dateHeaderIndex].GetName(), XMsDateHeaderName)) {
+            headers[m_dateHeaderIndex].SetValue(now);
+            return;
+        }
+        if (!m_dateHeaderScanned) {
+            m_dateHeaderScanned = true;
+            for (std::size_t index = 0; index < headers.size(); ++index) {
+                if (IEquals(headers[index].GetName(), XMsDateHeaderName)) {
+                    m_dateHeaderIndex = index;
+                    headers[index].SetValue(now);
+                    return;
+                }
             }
         }
         request.AddHeader(HttpHeader{std::string{XMsDateHeaderName}, now});
@@ -397,22 +408,23 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     // Runs the caller's per-attempt rebuild, if any. A failure ends the request rather than escaping onto a
     // transport thread.
     [[nodiscard]] bool RebuildAttempt(HttpRequest& attempt, std::string_view bearerToken) {
-        if (!m_rebuild) {
+        if constexpr (std::is_same_v<TRebuild, NoRebuild>) {
+            return true;
+        } else {
+            try {
+                m_rebuild(attempt, bearerToken);
+            } catch (const std::bad_alloc&) {
+                PostFinish(std::make_error_code(std::errc::not_enough_memory));
+                return false;
+            } catch (const std::system_error& e) {
+                PostFinish(e.code());
+                return false;
+            } catch (const std::exception&) {
+                PostFinish(std::make_error_code(std::errc::invalid_argument));
+                return false;
+            }
             return true;
         }
-        try {
-            m_rebuild(attempt, bearerToken);
-        } catch (const std::bad_alloc&) {
-            PostFinish(std::make_error_code(std::errc::not_enough_memory));
-            return false;
-        } catch (const std::system_error& e) {
-            PostFinish(e.code());
-            return false;
-        } catch (const std::exception&) {
-            PostFinish(std::make_error_code(std::errc::invalid_argument));
-            return false;
-        }
-        return true;
     }
 
     void Send(HttpRequest attempt) {
@@ -563,7 +575,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     THandler m_completion;
     AzureRequestOptions m_requestOptions;
     bool m_retryNotFoundAndGone;
-    AttemptRebuilder m_rebuild;
+    [[no_unique_address]] TRebuild m_rebuild;
     bool m_replaySafe;
     boost::asio::cancellation_slot m_parentSlot;
     boost::asio::cancellation_signal m_attemptSignal;
@@ -582,23 +594,25 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     std::atomic<bool> m_finished{false};
     bool m_timedOut = false;
     bool m_tokenRefreshed = false;
+    std::size_t m_dateHeaderIndex = std::numeric_limits<std::size_t>::max();
+    bool m_dateHeaderScanned = false;
 };
 } // namespace RetryDetail
 
-template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
+template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler, class TRebuild>
 void SendWithRetryAsync(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
                         HttpRequest request, THandler completion, AzureRequestOptions requestOptions,
-                        bool retryNotFoundAndGone, AttemptRebuilder rebuild, bool replaySafe) {
-    auto operation = std::make_shared<RetryDetail::RetryOperation<THttp, TCred, THandler>>(
+                        bool retryNotFoundAndGone, TRebuild rebuild, bool replaySafe) {
+    auto operation = std::make_shared<RetryDetail::RetryOperation<THttp, TCred, THandler, TRebuild>>(
         httpClient, std::move(auth), std::move(credential), retry, std::move(request), std::move(completion),
         requestOptions, retryNotFoundAndGone, std::move(rebuild), replaySafe);
     operation->Start();
 }
 
-template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
+template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler, class TRebuild>
 void SendAuthorizedRequestAsync(THttp& httpClient, const ConnectionState& connection, std::shared_ptr<TCred> credential,
                                 HttpRequest request, THandler completion, AzureRequestOptions requestOptions,
-                                AttemptRebuilder rebuild, bool replaySafe) {
+                                TRebuild rebuild, bool replaySafe) {
     // Checked here rather than per operation so every request carrying metadata, including the
     // internal commits issued by multi-part uploads, is rejected before reaching the service.
     for (const HttpHeader& header : request.GetHeaders()) {

@@ -215,7 +215,7 @@ against the code unless it says **Verify first**.
     with a `std::variant` of concrete target structs and `std::visit`.
   - Capture a `shared_ptr`/key instead of copying the origin string.
 
-### [ ] T19 – Retry pipeline per-attempt copies
+### [x] T19 – Retry pipeline per-attempt copies
 - **File:** `libs\AzureClient\include\AVEVA\AzureClient\Detail\RequestPipeline.hpp` (~265-310, 418-445).
 - **Problems:**
   - Every non-final attempt copies the URL and all headers.

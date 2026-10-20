@@ -515,8 +515,9 @@ struct RequestAuth {
 
 // Rebuilds the body (and anything derived from it, such as a nested signature) of each attempt just before it is
 // authorized and sent, so a retry never replays a stale date, signature or token. `bearerToken` is the token the
-// attempt will carry (empty when it is not bearer-authorized). Throwing fails the request.
-using AttemptRebuilder = std::function<void(HttpRequest& attempt, std::string_view bearerToken)>;
+// attempt will carry (empty when it is not bearer-authorized). Throwing fails the request. Any callable taking
+// (HttpRequest&, std::string_view) is accepted; the pipeline is templated on its type, so nothing is type-erased.
+struct NoRebuild {};
 
 // Sends `request` with per-attempt authorization and retry/backoff according to `retry`.
 // All state is owned by the operation (no references to the caller's options are retained);
@@ -525,21 +526,21 @@ using AttemptRebuilder = std::function<void(HttpRequest& attempt, std::string_vi
 // `retryNotFoundAndGone` additionally retries HTTP 404/410 (managed identity endpoints answer these while
 // starting). Defined in RequestPipeline.hpp.
 // `completion` is invoked as completion(std::error_code, HttpResponse).
-template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
+template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler, class TRebuild = NoRebuild>
 void SendWithRetryAsync(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
                         HttpRequest request, THandler completion, AzureRequestOptions requestOptions,
-                        bool retryNotFoundAndGone = false, AttemptRebuilder rebuild = {}, bool replaySafe = false);
+                        bool retryNotFoundAndGone = false, TRebuild rebuild = {}, bool replaySafe = false);
 
 // Defined in RequestPipeline.hpp. `replaySafe` marks a request whose caller absorbs the outcome of a replay (the
 // *IfExists/*IfNotExists operations), so it may be retried even after an ambiguous transport error.
-template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler>
+template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler, class TRebuild = NoRebuild>
 void SendAuthorizedRequestAsync(THttp& httpClient, const ConnectionState& connection, std::shared_ptr<TCred> credential,
                                 HttpRequest request, THandler completion, AzureRequestOptions requestOptions,
-                                AttemptRebuilder rebuild = {}, bool replaySafe = false);
+                                TRebuild rebuild = {}, bool replaySafe = false);
 
-template <HttpClientLike THttp, class TCred, class THandler>
+template <HttpClientLike THttp, class TCred, class THandler, class TRebuild = NoRebuild>
 void SendAuthorizedRequestAsync(THttp& httpClient, const BasicContainerTarget<TCred>& target, HttpRequest request,
-                                THandler completion, AzureRequestOptions requestOptions, AttemptRebuilder rebuild = {},
+                                THandler completion, AzureRequestOptions requestOptions, TRebuild rebuild = {},
                                 bool replaySafe = false) {
     SendAuthorizedRequestAsync(httpClient, *target.Connection, target.Credential, std::move(request),
                                std::move(completion), requestOptions, std::move(rebuild), replaySafe);
@@ -549,7 +550,7 @@ template <HttpClientLike THttp, class TCred, class THandler>
 void SendAuthorizedRequestAsync(THttp& httpClient, const BasicBlobTarget<TCred>& target, HttpRequest request,
                                 THandler completion, AzureRequestOptions requestOptions, bool replaySafe = false) {
     SendAuthorizedRequestAsync(httpClient, *target.Connection, target.Credential, std::move(request),
-                               std::move(completion), requestOptions, {}, replaySafe);
+                               std::move(completion), requestOptions, NoRebuild{}, replaySafe);
 }
 
 // Maps the single-request download options onto the chunked engine's options (default chunk
