@@ -93,7 +93,7 @@ if(WIN32)
 endif()
 gtest_discover_tests(aveva-azure-client-public-api-tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 30 LABELS "${aveva_azure_client_unit_test_labels}")
 
-# Engines driven by a multi-threaded executor (T30). Label `concurrency`; run under LinuxDebugTSan.
+# Engines driven by a multi-threaded executor (T30). Label `concurrency`; run with AVEVA_AZURE_CLIENT_ENABLE_TSAN=ON.
 add_executable(aveva-azure-client-concurrency-tests MultiThreadedExecutorTests.cpp)
 target_include_directories(aveva-azure-client-concurrency-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_link_libraries(aveva-azure-client-concurrency-tests PRIVATE aveva::azure-client GTest::gtest_main)

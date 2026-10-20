@@ -32,9 +32,6 @@ target_sources(aveva-rocksdb-plugin-azure-impl
 target_include_directories(aveva-rocksdb-plugin-azure-impl PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
-install(TARGETS aveva-rocksdb-plugin-azure-impl
-    EXPORT
-)
 find_package(boost_asio CONFIG REQUIRED)
 find_package(boost_log CONFIG REQUIRED)
 find_package(boost_json CONFIG REQUIRED)
@@ -46,9 +43,9 @@ target_link_libraries(aveva-rocksdb-plugin-azure-impl PUBLIC
     aveva::http-client
     Boost::asio
     Boost::log
+    Boost::json
 )
 target_link_libraries(aveva-rocksdb-plugin-azure-impl PRIVATE
-    Boost::json
     $<$<PLATFORM_ID:Windows>:crypt32>
 )
 if(MSVC)

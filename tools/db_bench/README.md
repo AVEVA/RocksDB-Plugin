@@ -59,7 +59,8 @@ Notes on the items above:
   characters. Do not use dots or underscores. A name like `user.name` fails
   with `InvalidResourceName`.
 
-- The plugin creates the container if it does not exist, so a single-run benchmark needs no setup.\r\n  `Compare-Backends.ps1` is the exception: it expects its two containers to exist already (see below).
+- The plugin creates the container if it does not exist, so a single-run benchmark needs no setup.
+  Compare-Backends.ps1` is the exception: it expects its two containers to exist already (see below).
 
 - Grant the service principal the **Storage Blob Data Contributor** role on
   the storage account or container. Without this role, every blob call

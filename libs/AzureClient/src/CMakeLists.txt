@@ -4,7 +4,6 @@
 find_package(aveva-http-client CONFIG REQUIRED)
 find_package(aveva-install-library CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
-find_package(boost_algorithm CONFIG REQUIRED)
 find_package(boost_asio CONFIG REQUIRED)
 find_package(boost_json CONFIG REQUIRED)
 find_package(boost_url CONFIG REQUIRED)
@@ -98,7 +97,6 @@ target_link_libraries(aveva-azure-client
         Boost::json
         Boost::url
         OpenSSL::Crypto
-        Boost::algorithm
         Boost::uuid
         LibXml2::LibXml2
 )

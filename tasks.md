@@ -632,7 +632,9 @@ are medium confidence: confirm them against the code, or measure, before changin
     member templates. Measure, then drop them or move the non-template members into `src`.
 - **Validation:** the AzureClient test suite.
 
-### [ ] T64 – Build/CMake smaller items
+### [x] T64 – Build/CMake smaller items
+
+- **T64 outcome:** done: removed unused boost-algorithm (AzureClient) and Boost.Thread (Core) links/config entries (Core still uses boost/algorithm/hex.hpp, kept); Boost::json now PUBLIC on Impl; deleted bare install(TARGETS); removed dead variables; fixed TSan comment; fixed README newline. Skipped (not safe/clearly worthwhile in one pass): vcpkg dep pruning, shared warnings helper, test-CMake restructuring (discover-once, label derivation, sanitizer scaling, TempDirectory listing).
 - **Unused Boost links:**
   - `boost/algorithm` in `libs\AzureClient\src\CMakeLists.txt:7,101` and
     `aveva-azure-client-config.cmake.in:13`.

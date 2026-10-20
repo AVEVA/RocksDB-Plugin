@@ -25,8 +25,6 @@ endif()
 set(aveva-http-client_DIR "${_aveva_http_client_shim_dir}" CACHE INTERNAL "In-tree aveva-http-client package shim")
 
 set(AVEVA_AZURE_CLIENT_TESTS ${AVEVA_ROCKSDB_TESTS})
-set(AVEVA_AZURE_CLIENT_EXAMPLES OFF)
-set(AVEVA_AZURE_CLIENT_INSTALL_TEST OFF)
 set(AVEVA_AZURE_CLIENT_INSTALL_CONFIG_FILE_PACKAGE ON)
 add_subdirectory("${PROJECT_SOURCE_DIR}/libs/AzureClient" "${PROJECT_BINARY_DIR}/libs/AzureClient")
 

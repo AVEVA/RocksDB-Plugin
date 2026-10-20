@@ -37,7 +37,6 @@ find_package(boost_container CONFIG REQUIRED)
 find_package(boost_scope CONFIG REQUIRED)
 find_package(boost_log CONFIG REQUIRED)
 find_package(boost_intrusive CONFIG REQUIRED)
-find_package(boost_thread CONFIG REQUIRED)
 find_package(boost_unordered CONFIG REQUIRED)
 find_package(boost_static_string CONFIG REQUIRED)
 
@@ -57,7 +56,6 @@ target_link_libraries(aveva-rocksdb-plugin-core
         Boost::container
         Boost::unordered
         Boost::scope
-        Boost::thread
 )
 if(MSVC)
     target_compile_options(aveva-rocksdb-plugin-core PRIVATE /bigobj)
