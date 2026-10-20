@@ -397,6 +397,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
             return;
         }
 
+        m_attemptToken = token.Token;
         if (!RebuildAttempt(attempt, token.Token)) {
             return;
         }
@@ -500,7 +501,11 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
                     return;
                 }
                 m_tokenRefreshed = true;
-                m_credential->Invalidate(m_auth.TokenScopes);
+                if constexpr (requires { m_credential->Invalidate(m_auth.TokenScopes, std::string_view{}); }) {
+                    m_credential->Invalidate(m_auth.TokenScopes, m_attemptToken);
+                } else {
+                    m_credential->Invalidate(m_auth.TokenScopes);
+                }
                 StartAttempt(false);
                 return;
             }
@@ -594,6 +599,8 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     std::atomic<bool> m_finished{false};
     bool m_timedOut = false;
     bool m_tokenRefreshed = false;
+    // Token the latest attempt was sent with; a 401 invalidates the cache only if it still holds this one.
+    std::string m_attemptToken;
     std::size_t m_dateHeaderIndex = std::numeric_limits<std::size_t>::max();
     bool m_dateHeaderScanned = false;
 };

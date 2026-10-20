@@ -337,7 +337,7 @@ are medium confidence: confirm them against the code, or measure, before changin
 - **Validation:** `HttpClientTls.*`, `HttpClientRobustness.*`. Add a fault-injection test (use the existing
   `AllocationFailure` counters) asserting the handler runs exactly once.
 
-### [ ] T49 – Concurrent 401s each invalidate a freshly refreshed token (refresh herd)
+### [x] T49 – Concurrent 401s each invalidate a freshly refreshed token (refresh herd)
 - **Files:** `libs\AzureClient\include\AVEVA\AzureClient\TokenCredential.hpp` (`Invalidate` ~169-185);
   `Detail\RequestPipeline.hpp` (401 path in `OnAttemptCompleteOnStrand` ~430-445).
 - **Problem:** Every 401'd request calls `Invalidate(scopes)` unconditionally, so a late 401 carrying the *old*

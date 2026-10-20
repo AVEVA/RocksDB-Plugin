@@ -134,6 +134,27 @@ TEST(TokenCredentialTests, CachingTokenCredential_InvalidateForcesANewInnerReque
     EXPECT_EQ(inner->CallCount(), 2);
 }
 
+TEST(TokenCredentialTests, CachingTokenCredential_InvalidateWithRejectedTokenKeepsAFresherToken) {
+    auto inner = std::make_shared<ScriptedTokenCredential>();
+    inner->EnqueueImmediate({}, MakeToken("first", std::chrono::hours(1)));
+    inner->EnqueueImmediate({}, MakeToken("second", std::chrono::hours(1)));
+    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+    const auto scopes = std::make_shared<const std::vector<std::string>>(std::vector<std::string>{"scope-a"});
+
+    std::string received;
+    RequestTokenCapturingValue(credential, {"scope-a"}, received);
+    EXPECT_EQ(received, "first");
+
+    // Two requests were rejected with "first": only the first invalidation may drop the cache.
+    credential->Invalidate(scopes, "first");
+    RequestTokenCapturingValue(credential, {"scope-a"}, received);
+    EXPECT_EQ(received, "second");
+    credential->Invalidate(scopes, "first");
+    RequestTokenCapturingValue(credential, {"scope-a"}, received);
+    EXPECT_EQ(received, "second");
+    EXPECT_EQ(inner->CallCount(), 2);
+}
+
 TEST(TokenCredentialTests, CachingTokenCredential_ReusesCachedTokenOutsideRefreshWindow) {
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate({}, MakeToken("cached-token", std::chrono::hours(1)));

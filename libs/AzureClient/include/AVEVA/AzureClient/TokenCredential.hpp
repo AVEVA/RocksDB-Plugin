@@ -164,11 +164,19 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
 
     // Drops the cached token (and any remembered failure) for `scopes`, so the next request asks the inner
     // credential again. Used after the service rejected the token with a 401.
-    void Invalidate(const ScopeList& scopes) {
+    void Invalidate(const ScopeList& scopes) { InvalidateIf(scopes, nullptr); }
+
+    // As above, but the cached token is dropped only while it still is `rejectedToken`. Concurrent requests that
+    // were all rejected with the same token then cause a single refresh instead of discarding each other's result.
+    void Invalidate(const ScopeList& scopes, std::string_view rejectedToken) { InvalidateIf(scopes, &rejectedToken); }
+
+  private:
+    void InvalidateIf(const ScopeList& scopes, const std::string_view* rejectedToken) {
         std::scoped_lock const lock(m_mutex);
         const std::vector<std::string> empty;
         const auto& requested = scopes ? *scopes : empty;
-        if (m_hasToken && m_cachedScopes == requested) {
+        if (m_hasToken && m_cachedScopes == requested &&
+            (rejectedToken == nullptr || m_cachedToken.Token == *rejectedToken)) {
             m_hasToken = false;
             m_cachedToken = {};
             m_nextRefreshRetryAfter.reset();
