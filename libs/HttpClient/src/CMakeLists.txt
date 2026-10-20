@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
-add_library(aveva-http-client
+add_library(aveva-http-client STATIC
     HttpHeader.cpp
     HttpClient.cpp
     HttpClientOptions.cpp
@@ -16,6 +16,7 @@ add_library(aveva-http-client
     private/TlsContextConfigurator.cpp
 )
 add_library(aveva::http-client ALIAS aveva-http-client)
+set_target_properties(aveva-http-client PROPERTIES POSITION_INDEPENDENT_CODE ON)
 set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../include")
 target_sources(aveva-http-client
     PUBLIC

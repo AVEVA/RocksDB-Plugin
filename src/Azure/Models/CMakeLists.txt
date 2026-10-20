@@ -1,4 +1,4 @@
-add_library(aveva-rocksdb-plugin-azure-models
+add_library(aveva-rocksdb-plugin-azure-models STATIC
     ChainedCredentialInfo.cpp
     ServicePrincipalStorageInfo.cpp
 )
@@ -19,5 +19,5 @@ find_package(aveva-install-library CONFIG REQUIRED)
 aveva_install_library(aveva-rocksdb-plugin-azure-models)
 target_compile_features(aveva-rocksdb-plugin-azure-models PUBLIC cxx_std_23)
 set_target_properties(aveva-rocksdb-plugin-azure-models PROPERTIES
-    WINDOWS_EXPORT_ALL_SYMBOLS ON
+    POSITION_INDEPENDENT_CODE ON
 )

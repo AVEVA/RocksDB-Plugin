@@ -1,4 +1,4 @@
-add_library(aveva-rocksdb-plugin-azure-impl
+add_library(aveva-rocksdb-plugin-azure-impl STATIC
     AsyncReadRequest.cpp
     AsyncReadTracker.cpp
     BlobHelpers.cpp
@@ -57,5 +57,5 @@ endif()
 aveva_install_library(aveva-rocksdb-plugin-azure-impl)
 target_compile_features(aveva-rocksdb-plugin-azure-impl PUBLIC cxx_std_23)
 set_target_properties(aveva-rocksdb-plugin-azure-impl PROPERTIES
-    WINDOWS_EXPORT_ALL_SYMBOLS ON
+    POSITION_INDEPENDENT_CODE ON
 )

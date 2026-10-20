@@ -1,4 +1,4 @@
-add_library(aveva-rocksdb-plugin-core
+add_library(aveva-rocksdb-plugin-core STATIC
     FileCache.cpp
     FileCacheMaintenance.cpp
     FileCacheEntry.cpp
@@ -65,5 +65,5 @@ endif()
 aveva_install_library(aveva-rocksdb-plugin-core)
 target_compile_features(aveva-rocksdb-plugin-core PUBLIC cxx_std_23)
 set_target_properties(aveva-rocksdb-plugin-core PROPERTIES
-    WINDOWS_EXPORT_ALL_SYMBOLS ON
+    POSITION_INDEPENDENT_CODE ON
 )

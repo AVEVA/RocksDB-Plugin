@@ -413,7 +413,7 @@ are medium confidence: confirm them against the code, or measure, before changin
     `if (argc > 100) Plugin::Register(...)`).
 - **Validation:** CI runs. Removing a `find_dependency` should now make install-consume fail.
 
-### [ ] T54 – Library types / PIC consistency
+### [x] T54 – Library types / PIC consistency
 - **Files:** `src\Core\CMakeLists.txt`, `src\Azure\Impl\CMakeLists.txt`, `src\Azure\Models\CMakeLists.txt`,
   `libs\HttpClient\src\CMakeLists.txt`.
 - **Problem:**
