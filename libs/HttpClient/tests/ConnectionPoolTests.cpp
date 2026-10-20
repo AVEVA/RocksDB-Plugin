@@ -25,9 +25,15 @@
 // only way to reach the pool's allocation failures without changing the pool itself.
 namespace AllocationFailure {
 thread_local int allocationsUntilFailure = -1;
-}
+// Allocation counting for HttpClientAllocationTests.cpp, which cannot replace operator new a second time.
+thread_local bool counting = false;
+thread_local std::size_t allocationCount = 0;
+} // namespace AllocationFailure
 
 void* operator new(std::size_t size) {
+    if (AllocationFailure::counting) {
+        ++AllocationFailure::allocationCount;
+    }
     if (AllocationFailure::allocationsUntilFailure >= 0 && AllocationFailure::allocationsUntilFailure-- == 0) {
         throw std::bad_alloc();
     }
