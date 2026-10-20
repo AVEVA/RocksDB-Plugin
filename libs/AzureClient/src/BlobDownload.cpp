@@ -31,13 +31,11 @@ namespace AVEVA::AzureClient::Private::DownloadDetail {
 }
 
 [[nodiscard]] std::optional<BlobStorageError> ToFailure(std::error_code error, const HttpResponse& response) {
-    RequestFailure const failure = DetermineBlobStorageFailure(error, response);
+    RequestFailure failure = DetermineBlobStorageFailure(error, response);
     if (!failure.Error) {
         return std::nullopt;
     }
-    BlobStorageError details = failure.Details.value_or(MakeClientError(failure.Error));
-    details.Code = failure.Error;
-    return details;
+    return ToDetails(std::move(failure));
 }
 
 [[nodiscard]] std::string TakeBody(HttpResponse& response) {

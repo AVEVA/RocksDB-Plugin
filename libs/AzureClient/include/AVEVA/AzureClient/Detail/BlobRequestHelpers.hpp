@@ -392,6 +392,14 @@ void AuthorizeRequest(const SharedKeySigner& signer, HttpRequest& request);
 // A BlobStorageError carrying only `error` and `message` (defaulting to error.message()).
 [[nodiscard]] BlobStorageError MakeClientError(std::error_code error, std::string message = {});
 
+// The failure's service details (or a client error built lazily) with Code set to the failure's error.
+[[nodiscard]] inline BlobStorageError ToDetails(RequestFailure&& failure) {
+    BlobStorageError details =
+        failure.Details.has_value() ? std::move(*failure.Details) : MakeClientError(failure.Error);
+    details.Code = failure.Error;
+    return details;
+}
+
 // Folds a transport/service std::error_code into the single std::expected error channel. Success
 // is governed solely by `error`: Exists*/*IfExists* clear it while leaving the suppressed
 // diagnostics (e.g. the 404's request id) available via Response<T>::Error().

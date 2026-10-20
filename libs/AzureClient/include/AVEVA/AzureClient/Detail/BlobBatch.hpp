@@ -249,10 +249,7 @@ class BatchDeleteOperation final
         }
 
         if (failure.Error) {
-            BlobStorageError details =
-                failure.Details.has_value() ? std::move(*failure.Details) : MakeClientError(failure.Error);
-            details.Code = failure.Error;
-            RecordFailure(chunk, std::move(details));
+            RecordFailure(chunk, ToDetails(std::move(failure)));
             return;
         }
 

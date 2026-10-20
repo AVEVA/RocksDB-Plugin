@@ -936,7 +936,8 @@ Models::GetPageRangesResult ParseGetPageRangesResult(const HttpResponse& respons
     for (const XmlNode* range : GetChildrenByLocalName(*root, "PageRange")) {
         const auto start = ParseUnsigned(GetChildTextOrEmpty(*range, "Start"));
         const auto end = ParseUnsigned(GetChildTextOrEmpty(*range, "End"));
-        if (!start.has_value() || !end.has_value() || *end < *start) {
+        if (!start.has_value() || !end.has_value() || *end < *start ||
+            *end - *start == std::numeric_limits<std::uint64_t>::max()) {
             throw std::invalid_argument("PageRange must have unsigned Start and End with End >= Start.");
         }
         result.Ranges.push_back({.Offset = *start, .Length = *end - *start + 1U});

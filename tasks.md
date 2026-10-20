@@ -588,7 +588,12 @@ are medium confidence: confirm them against the code, or measure, before changin
   - `m_maxPerOrigin` is stored only for `Initialize`; pass it as an argument instead.
 - **Validation:** `ConnectionPool.*`, `DnsCacheTests.*`, `HttpClientTls.*`, `HttpClientRobustness.*`, and T56.
 
-### [ ] T63 – AzureClient smaller items
+### [x] T63 – AzureClient smaller items
+- **Done:** `ToDetails(RequestFailure&&)` helper (3 call sites); `ParseGetPageRangesResult` rejects `End - Start == UINT64_MAX`
+  (+ test). **Skipped (not safe/clearly worthwhile in one bundle, left for dedicated work):** ReleaseLease 409 retry
+  counting (needs Verify first + design), shared `ParseDecimal`, List Blobs single-pass XML (needs benchmark), key
+  hygiene, loopback predicate unification, `ApplyLeaseRequestConditions` const& (it mutates a copy, so by-value is
+  correct), include cleanup, `RunOnWriter` fallback, misc items, extern template measurement.
 - **`ReleaseLeaseAsync` can report a real 409 `LeaseNotPresentWithLeaseOperation` as success** (**Verify first**;
   `BlobRequestHelpers.hpp` ~690-715).
   - The retried-attempt counter is also bumped by 401 refresh repeats and by unambiguous failures.

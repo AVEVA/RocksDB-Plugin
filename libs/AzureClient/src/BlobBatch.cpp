@@ -184,10 +184,7 @@ struct BatchPart {
         item.AlreadyAbsent = true;
         return item;
     }
-    BlobStorageError details =
-        failure.Details.has_value() ? std::move(*failure.Details) : MakeClientError(failure.Error);
-    details.Code = failure.Error;
-    item.Error = std::move(details);
+    item.Error = ToDetails(std::move(failure));
     return item;
 }
 } // namespace

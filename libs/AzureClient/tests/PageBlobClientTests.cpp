@@ -534,6 +534,23 @@ TEST(PageBlobClientTests, GetPageRangesAsync_MalformedRangeIsInvalidResponse) {
     EXPECT_TRUE(invoked);
 }
 
+TEST(PageBlobClientTests, GetPageRangesAsync_RangeLengthOverflowIsInvalidResponse) {
+    FakeHttpClient httpClient;
+    httpClient.DefaultResponse() = HttpResponse{
+        200, {}, "<PageList><PageRange><Start>0</Start><End>18446744073709551615</End></PageRange></PageList>"};
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    bool invoked = false;
+    client.GetPageRangesAsync(
+        [&](std::expected<Response<AVEVA::AzureClient::Models::GetPageRangesResult>, BlobStorageError> result) {
+            ASSERT_FALSE(result.has_value());
+            EXPECT_EQ(result.error().Code, BlobStorageErrorCode::InvalidResponse);
+            invoked = true;
+        });
+    httpClient.Poll();
+    EXPECT_TRUE(invoked);
+}
+
 TEST(PageBlobClientTests, ResizeAsync_SetsContentLengthHeader) {
     FakeHttpClient httpClient;
     PageBlobClient client{httpClient, BuildOptions()};
