@@ -11,6 +11,7 @@
 #include "AVEVA/AzureClient/Detail/AsyncInitiation.hpp"
 #include "AVEVA/AzureClient/Models/BlobContainerModels.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
+#include "AVEVA/AzureClient/PageBlobClient.hpp"
 #include "AVEVA/AzureClient/TokenCredential.hpp"
 #include "AVEVA/AzureClient/TokenEndpointError.hpp"
 #include "BlobStorageErrorCategory.hpp"
@@ -714,6 +715,40 @@ void AuthorizeRequest(const SharedKeySigner& signer, HttpRequest& request) {
         details.ErrorCode = std::string{token->ErrorCode};
     }
     return details;
+}
+
+std::string MakeBearerValue(std::string_view token) {
+    constexpr std::string_view Scheme = "Bearer ";
+    std::string value;
+    value.reserve(Scheme.size() + token.size());
+    value.append(Scheme).append(token);
+    return value;
+}
+
+HttpRequest BuildCreateContainerRequest(const ContainerTarget& target, const CreateBlobContainerOptions& options) {
+    HttpRequest request = BuildContainerRequest(target, HttpMethod::Put);
+    ApplyMetadata(request, options.Metadata);
+    ApplyBlobRequestConditions(request, options.Conditions);
+    return request;
+}
+
+std::optional<std::string> ValidatePageAligned(std::uint64_t value, const char* fieldName) {
+    if ((value % PageBlobPageSize) != 0U) {
+        return std::string(fieldName) + " must be a multiple of 512 bytes.";
+    }
+
+    return std::nullopt;
+}
+
+std::expected<std::string, std::string> BuildPageWriteRangeHeaderValue(std::uint64_t offset, std::uint64_t length) {
+    if (length == 0U) {
+        return std::unexpected("length must be greater than zero.");
+    }
+    if ((length - 1U) > (std::numeric_limits<std::uint64_t>::max() - offset)) {
+        return std::unexpected("offset + length exceeds the maximum representable page range.");
+    }
+
+    return "bytes=" + std::to_string(offset) + "-" + std::to_string(offset + length - 1U);
 }
 
 void ApplyLeaseRequestConditions(HttpRequest& request, Models::BlobRequestConditions conditions) {

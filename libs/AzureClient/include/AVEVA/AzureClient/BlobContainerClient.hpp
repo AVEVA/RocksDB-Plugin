@@ -45,13 +45,8 @@ namespace AVEVA::AzureClient {
 namespace Private {
 struct ConnectionState;
 
-[[nodiscard]] inline HttpRequest BuildCreateContainerRequest(const ContainerTarget& target,
-                                                             const CreateBlobContainerOptions& options) {
-    HttpRequest request = BuildContainerRequest(target, HttpMethod::Put);
-    ApplyMetadata(request, options.Metadata);
-    ApplyBlobRequestConditions(request, options.Conditions);
-    return request;
-}
+[[nodiscard]] HttpRequest BuildCreateContainerRequest(const ContainerTarget& target,
+                                                      const CreateBlobContainerOptions& options);
 } // namespace Private
 
 // Container operations, and the factory for clients of the blobs it contains.

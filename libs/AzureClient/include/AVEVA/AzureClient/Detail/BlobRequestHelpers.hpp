@@ -233,13 +233,7 @@ inline constexpr std::string_view XMsDeleteTypePermanentHeaderName = "x-ms-delet
 inline constexpr std::string_view AuthorizationHeaderName = "Authorization";
 
 // "Bearer <token>" built with a single allocation, without first copying the token into a temporary string.
-[[nodiscard]] inline std::string MakeBearerValue(std::string_view token) {
-    constexpr std::string_view Scheme = "Bearer ";
-    std::string value;
-    value.reserve(Scheme.size() + token.size());
-    value.append(Scheme).append(token);
-    return value;
-}
+[[nodiscard]] std::string MakeBearerValue(std::string_view token);
 inline constexpr std::string_view XMsMetaHeaderPrefix = "x-ms-meta-";
 inline constexpr std::string_view XMsBlobTypeHeaderName = "x-ms-blob-type";
 inline constexpr std::string_view XMsBlobContentLengthHeaderName = "x-ms-blob-content-length";

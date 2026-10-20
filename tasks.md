@@ -308,7 +308,7 @@ against the code unless it says **Verify first**.
 - `src\Azure\Impl\include\...\BlobOperations.hpp` (~235-251, 308-319, 399-435): `FinishDownload`/`FinishUploadPages`
   call `.get()` and rely on the Start-time guard. Add a debug assert / `ThrowIfRunningOn` at the `.get()` site too.
 
-### [ ] T27 – Build hygiene
+### [x] T27 – Build hygiene
 - `libs\AzureClient\src\CMakeLists.txt`: set `POSITION_INDEPENDENT_CODE ON` on the static lib so it can be linked
   into shared plugins on Linux.
 - The header-only footprint is large. Move non-dependent helpers out of the `Detail\*.hpp` headers into `.cpp`

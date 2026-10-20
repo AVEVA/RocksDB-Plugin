@@ -33,6 +33,8 @@ add_library(aveva::azure-client ALIAS aveva-azure-client)
 if(BUILD_SHARED_LIBS)
     message(FATAL_ERROR "aveva-azure-client supports static linking only.")
 endif()
+# Lets the static library link into shared plugins on Linux.
+set_target_properties(aveva-azure-client PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(AVEVA_AZURE_CLIENT_TESTS)
     target_compile_definitions(aveva-azure-client PRIVATE AVEVA_AZURE_CLIENT_TESTING)
 endif()

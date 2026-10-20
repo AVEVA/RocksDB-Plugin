@@ -44,6 +44,37 @@ jobs:
             | grep -zE '\.(c|cc|cpp|cxx|h|hh|hpp|hxx)$' \
             | xargs -0 pipx run "clang-format==$CLANG_FORMAT_VERSION" --dry-run --Werror --style=file
 
+  overlay-patches:
+    # Fails fast (without the slow overlay build) when the RocksDB overlay patches no longer apply to the pinned
+    # source archive, e.g. after a version or SHA512 bump.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Check RocksDB overlay patches apply
+        run: |
+          overlay=infrastructure/vcpkg-overlays/rocksdb
+          version=$(jq -r .version "$overlay/vcpkg.json")
+          sha512=$(sed -n 's/^ *SHA512 \([0-9a-f]\{128\}\).*/\1/p' "$overlay/portfile.cmake")
+          patches=$(sed -n '/^ *PATCHES/,/^)/p' "$overlay/portfile.cmake" | grep -E '\.patch$' | tr -d ' ')
+          [ -n "$sha512" ] && [ -n "$patches" ] || { echo "Could not read SHA512 or PATCHES from the portfile"; exit 1; }
+          archive="$RUNNER_TEMP/rocksdb.tar.gz"
+          src="$RUNNER_TEMP/rocksdb-src"
+          curl -fsSL -o "$archive" "https://github.com/facebook/rocksdb/archive/refs/tags/v${version}.tar.gz"
+          echo "$sha512  $archive" | sha512sum --check
+          mkdir "$src"
+          tar -xzf "$archive" -C "$src" --strip-components=1
+          # Outside a repository, git apply fails on any hunk that no longer matches.
+          for p in $patches; do
+            echo "Applying $p"
+            git -C "$src" apply --verbose "$GITHUB_WORKSPACE/$overlay/$p"
+          done
+
   build:
     strategy:
       fail-fast: false

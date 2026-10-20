@@ -42,26 +42,11 @@ namespace Private {
 constexpr std::string_view PageBlobTypeValue = "PageBlob";
 constexpr std::string_view PageWriteUpdateValue = "update";
 
-[[nodiscard]] inline std::optional<std::string> ValidatePageAligned(std::uint64_t value, const char* fieldName) {
-    if ((value % PageBlobPageSize) != 0U) {
-        return std::string(fieldName) + " must be a multiple of 512 bytes.";
-    }
-
-    return std::nullopt;
-}
+[[nodiscard]] std::optional<std::string> ValidatePageAligned(std::uint64_t value, const char* fieldName);
 
 // The x-ms-range value for a page write, or a validation message.
-[[nodiscard]] inline std::expected<std::string, std::string> BuildPageWriteRangeHeaderValue(std::uint64_t offset,
-                                                                                            std::uint64_t length) {
-    if (length == 0U) {
-        return std::unexpected("length must be greater than zero.");
-    }
-    if ((length - 1U) > (std::numeric_limits<std::uint64_t>::max() - offset)) {
-        return std::unexpected("offset + length exceeds the maximum representable page range.");
-    }
-
-    return "bytes=" + std::to_string(offset) + "-" + std::to_string(offset + length - 1U);
-}
+[[nodiscard]] std::expected<std::string, std::string> BuildPageWriteRangeHeaderValue(std::uint64_t offset,
+                                                                                     std::uint64_t length);
 } // namespace Private
 
 // Page blob operations; the common blob operations, lifetime, cancellation and completion-token
