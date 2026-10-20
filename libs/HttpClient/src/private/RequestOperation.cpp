@@ -441,10 +441,9 @@ template <typename Stream> void RequestOperation<Stream>::ReleaseOrClose(bool ke
             TrimIdleBuffer(m_buffer);
             connection.emplace(PooledConnection<Stream>{std::move(m_stream), std::move(m_buffer)});
             pooled = m_pool->Release(m_key, std::move(*connection));
-        } catch (const std::exception& ex) {
+        } catch (...) {
             // The completion must still run; the connection is closed below if it could not be pooled.
             Report(HttpDiagnosticKind::SwallowedException, {}, "Returning the connection to the pool failed");
-            static_cast<void>(ex);
         }
         // Pooling is disabled, or Release threw: the connection was not taken, so it is closed below.
         if (!pooled && connection && connection->stream) {
@@ -483,7 +482,14 @@ template <typename Stream> void RequestOperation<Stream>::CompleteSuccess(HttpRe
     m_resolver.cancel();
     m_finished = true;
     auto completion = std::move(m_completion);
-    ReleaseOrClose(keepAlive);
+    // The completion was already moved out, so nothing thrown while releasing the connection (for example an
+    // allocation failure in the TLS shutdown setup) may stop it from running.
+    try {
+        ReleaseOrClose(keepAlive);
+    } catch (...) {
+        Report(HttpDiagnosticKind::SwallowedException, {}, "Releasing the connection failed; closing it");
+        Close();
+    }
     Detail::Complete(std::move(completion), {}, std::move(response));
 }
 

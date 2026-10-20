@@ -324,7 +324,7 @@ are medium confidence: confirm them against the code, or measure, before changin
   `!handle->Opened`.
 - **Validation:** `ctest -L core`, plus an optional micro-benchmark of hot `ReadFile` calls.
 
-### [ ] T48 – HttpClient `CompleteSuccess` can drop the completion handler on exception
+### [x] T48 – HttpClient `CompleteSuccess` can drop the completion handler on exception
 - **File:** `libs\HttpClient\src\private\RequestOperation.cpp:430-484`.
 - **Problem:** `m_completion` is moved into a local before `ReleaseOrClose`. In the TLS shutdown branch,
   `make_shared`, `expires_after` and `async_shutdown` run outside any `try`. If one throws, the exception escapes

@@ -32,6 +32,9 @@
 #include <string>
 #include <vector>
 
+namespace AllocationFailure {
+extern thread_local int allocationsUntilFailure; // Defined in ConnectionPoolTests.cpp.
+}
 namespace {
 namespace asio = boost::asio;
 using HttpClientTests::RunBounded;
@@ -505,5 +508,41 @@ TEST(HttpClientTls, RequestStateIsReleasedAtCompletionNotAfterTheTlsShutdownGrac
 
     EXPECT_TRUE(completed);
     EXPECT_TRUE(releasedPromptly);
+}
+
+TEST(HttpClientTls, CompletionRunsOnceWhenTheTlsShutdownSetupThrows) {
+    asio::io_context context;
+    TlsTestServer server(context, "IP:127.0.0.1", TlsTestServer::AfterResponse::KeepOpen);
+    AVEVA::HttpClientOptions options;
+    options.SetCaPem(server.CertificatePem());
+    options.SetMaxIdleConnectionsPerHost(1);
+    // The second connection is declined by the full pool; the diagnostic fires just before the shutdown setup,
+    // so the next allocation (the shared stream holder) fails.
+    options.SetDiagnosticsCallback([](const AVEVA::HttpDiagnostic& event) {
+        if (event.Kind == AVEVA::HttpDiagnosticKind::ConnectionNotPooled) {
+            AllocationFailure::allocationsUntilFailure = 0;
+        }
+    });
+    auto client = AVEVA::HttpClient::Create(context, options);
+
+    int completions = 0;
+    int failures = 0;
+    for (int i = 0; i < 2; ++i) {
+        AVEVA::HttpRequest request;
+        request.SetUrl("https://127.0.0.1:" + std::to_string(server.Port()) + "/");
+        client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{},
+                          [&](std::error_code error, AVEVA::HttpResponse) {
+                              ++completions;
+                              failures += error ? 1 : 0;
+                              if (completions == 2) {
+                                  server.Stop();
+                              }
+                          });
+    }
+    RunBounded(context);
+    AllocationFailure::allocationsUntilFailure = -1;
+
+    EXPECT_EQ(completions, 2);
+    EXPECT_EQ(failures, 0);
 }
 } // namespace
