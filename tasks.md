@@ -484,7 +484,10 @@ are medium confidence: confirm them against the code, or measure, before changin
   - Check whether `virtual ~ClientRuntimeBase()` is needed. Do T44 first.
 - **Validation:** full build plus all Azure tests. Measure build time.
 
-### [ ] T59 – Read-path smaller items
+### [x] T59 – Read-path smaller items
+- **Done:** short-prefetch budget return (+ test `Prefetch_ShortAtEof_ReturnsUnusedBudget`); `DownloadBufferPool::Return`
+  noexcept. **Skipped (riskier, need measurement or a larger refactor; left for follow-up):** 412 prefetch slot,
+  `AsyncReadTracker` atomics, duplicated prefetch helpers, async metadata timeout, `SequentialFileImpl` read-ahead.
 - **Short prefetch at EOF keeps its full budget:** `ReadableFileImpl.ipp` 187-270, 362-366. On success, if
   `data.size() < slot->Length`, `Budget->fetch_sub(slot->Length - data.size())` and shrink `Length`. Add a test
   that the budget returns to 0.

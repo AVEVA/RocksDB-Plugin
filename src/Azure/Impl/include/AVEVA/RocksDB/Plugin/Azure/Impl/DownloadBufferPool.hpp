@@ -115,7 +115,8 @@ class DownloadBufferPool : public std::enable_shared_from_this<DownloadBufferPoo
         return static_cast<std::size_t>(std::countr_zero(capacity / MinBufferBytes));
     }
 
-    void Return(std::unique_ptr<char[]> buffer, const std::size_t capacity) {
+    // Called from ~Lease, so it must not throw: if the free list cannot grow the buffer is simply freed.
+    void Return(std::unique_ptr<char[]> buffer, const std::size_t capacity) noexcept {
         if (capacity > MaxPooledBufferBytes) {
             return;
         }
@@ -125,10 +126,18 @@ class DownloadBufferPool : public std::enable_shared_from_this<DownloadBufferPoo
             if (sizeClass.Free.size() >= MaxPooledBuffersPerClass) {
                 return;
             }
-            sizeClass.Free.push_back(std::move(buffer));
+            try {
+                sizeClass.Free.push_back(std::move(buffer));
+            } catch (const std::bad_alloc&) {
+                return;
+            }
         }
         if (m_pooledBytes.fetch_add(capacity, std::memory_order_relaxed) + capacity > MaxPooledTotalBytes) {
-            EvictLargestWhileOverCap();
+            try {
+                EvictLargestWhileOverCap();
+            } catch (const std::bad_alloc&) {
+                // Eviction is best effort; the pool just stays over its cap until the next return.
+            }
         }
     }
 

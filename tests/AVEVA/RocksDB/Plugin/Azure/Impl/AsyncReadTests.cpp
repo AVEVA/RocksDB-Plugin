@@ -419,6 +419,17 @@ TEST_F(AsyncReadTests, Read_PastTheEndOfPrefetchedRange_ReleasesItsBudget) {
     EXPECT_EQ(0, budget->load());
 }
 
+TEST_F(AsyncReadTests, Prefetch_ShortAtEof_ReturnsUnusedBudget) {
+    auto budget = std::make_shared<std::atomic<int64_t>>(0);
+    FakeReadableFile file{std::make_shared<FakeReadableFileImpl>(
+        "test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr, m_logger, nullptr, budget)};
+    ASSERT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
+    ASSERT_EQ(512, budget->load());
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(300, 'P'));
+
+    EXPECT_EQ(300, budget->load());
+}
+
 TEST_F(AsyncReadTests, Read_ConcurrentReadersOfPrefetchedRange_AllGetDataAndBudgetIsReleased) {
     auto budget = std::make_shared<std::atomic<int64_t>>(0);
     FakeReadableFile file{std::make_shared<FakeReadableFileImpl>(

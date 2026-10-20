@@ -246,6 +246,13 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
                                   state->Drop(slot);
                               } else {
                                   slot->Pending = false;
+                                  // A short read at EOF returns the part of the budget it never used.
+                                  if (const auto got = static_cast<int64_t>(data.size()); got < slot->Length) {
+                                      if (state->Budget) {
+                                          state->Budget->fetch_sub(slot->Length - got);
+                                      }
+                                      slot->Length = got;
+                                  }
                                   // The slot keeps the pooled download buffer instead of copying up to 8 MiB out of it.
                                   slot->Owner = std::move(owner);
                                   slot->Data = data;
