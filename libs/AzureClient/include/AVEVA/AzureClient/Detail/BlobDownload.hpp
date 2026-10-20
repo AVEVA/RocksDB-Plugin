@@ -93,7 +93,7 @@ using ChunkLength = NumericLabel<std::uint64_t, ChunkLengthTag>;
 [[nodiscard]] BlobStorageError MakeInvalidResponse(std::string message);
 
 // A sink may throw anything; an exception must never unwind through the event loop, so it counts as a failed write.
-[[nodiscard]] inline bool TryWrite(DownloadSink& sink, std::string data) noexcept {
+[[nodiscard]] inline bool TryWrite(DownloadSinkLike auto& sink, std::string data) noexcept {
     try {
         return sink.Write(std::move(data));
     } catch (...) {
@@ -123,12 +123,11 @@ using SummaryResult = std::expected<DownloadSummary, BlobStorageError>;
 // events and processed one at a time by whichever thread queued first (a trampoline), so
 // handlers never run re-entrantly inside SendAsync or a cancellation emit, and completions
 // that the transport delivers inline are processed inline (no extra executor hop).
-template <HttpClientLike THttp, class TCred, class TDone>
-class DownloadOperation final : public std::enable_shared_from_this<DownloadOperation<THttp, TCred, TDone>> {
+template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink, class TDone>
+class DownloadOperation final : public std::enable_shared_from_this<DownloadOperation<THttp, TCred, TSink, TDone>> {
   public:
     DownloadOperation(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> clientOptions,
-                      DownloadToOptions options, AzureRequestOptions requestOptions, std::shared_ptr<DownloadSink> sink,
-                      TDone completion)
+                      DownloadToOptions options, AzureRequestOptions requestOptions, TSink sink, TDone completion)
         : m_httpClient(httpClient), m_clientOptions(std::move(clientOptions)), m_options(std::move(options)),
           m_requestOptions(requestOptions), m_sink(std::move(sink)), m_completion(std::move(completion)),
           m_parentSlot(m_requestOptions.GetCancellationSlot()),
@@ -388,7 +387,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
             return;
         }
         try {
-            m_sink->Reserve(*m_end - m_begin);
+            m_sink.Reserve(*m_end - m_begin);
         } catch (const std::exception&) {
             Fail(MakeFailure(std::errc::not_enough_memory));
             return;
@@ -489,53 +488,53 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
             std::string data = std::move(it->second);
             m_ready.erase(it);
 
-            if (m_sink->WritesInline()) {
+            if constexpr (TSink::WritesInline) {
                 if (!WriteToSink(std::move(data))) {
                     return;
                 }
                 continue;
-            }
-
-            // Take every chunk that is already contiguous so one writer task (and one hop back to the
-            // I/O executor) covers the whole run instead of one pair of hops per chunk.
-            std::vector<std::string> batch;
-            batch.reserve(m_ready.size() + 1U);
-            batch.push_back(std::move(data));
-            std::uint64_t next = *cursor;
-            while (true) {
-                const auto advanced = CheckedAdd(next, batch.back().size());
-                if (!advanced.has_value()) {
-                    Fail(MakeInvalidResponse("The download write offset overflows."));
-                    return;
+            } else {
+                // Take every chunk that is already contiguous so one writer task (and one hop back to the
+                // I/O executor) covers the whole run instead of one pair of hops per chunk.
+                std::vector<std::string> batch;
+                batch.reserve(m_ready.size() + 1U);
+                batch.push_back(std::move(data));
+                std::uint64_t next = *cursor;
+                while (true) {
+                    const auto advanced = CheckedAdd(next, batch.back().size());
+                    if (!advanced.has_value()) {
+                        Fail(MakeInvalidResponse("The download write offset overflows."));
+                        return;
+                    }
+                    next = *advanced;
+                    const auto following = m_ready.find(next);
+                    if (following == m_ready.end()) {
+                        break;
+                    }
+                    batch.push_back(std::move(following->second));
+                    m_ready.erase(following);
                 }
-                next = *advanced;
-                const auto following = m_ready.find(next);
-                if (following == m_ready.end()) {
-                    break;
-                }
-                batch.push_back(std::move(following->second));
-                m_ready.erase(following);
-            }
 
-            m_writing = true;
-            m_writingChunks = batch.size();
-            RunOnWriter(m_httpClient, m_options.WriteScheduler,
-                        [self = this->shared_from_this(), batch = std::move(batch)]() mutable {
-                            std::size_t size = 0U;
-                            bool ok = true;
-                            for (auto& chunk : batch) {
-                                const std::size_t chunkSize = chunk.size();
-                                ok = TryWrite(*self->m_sink, std::move(chunk));
-                                if (!ok) {
-                                    break;
+                m_writing = true;
+                m_writingChunks = batch.size();
+                RunOnWriter(m_httpClient, m_options.WriteScheduler,
+                            [self = this->shared_from_this(), batch = std::move(batch)]() mutable {
+                                std::size_t size = 0U;
+                                bool ok = true;
+                                for (auto& chunk : batch) {
+                                    const std::size_t chunkSize = chunk.size();
+                                    ok = TryWrite(self->m_sink, std::move(chunk));
+                                    if (!ok) {
+                                        break;
+                                    }
+                                    size += chunkSize;
                                 }
-                                size += chunkSize;
-                            }
-                            boost::asio::post(self->m_httpClient.get_executor(), [self, ok, size]() {
-                                self->Enqueue(Event{.WriteDone = true, .WriteOk = ok, .WriteSize = size});
+                                boost::asio::post(self->m_httpClient.get_executor(), [self, ok, size]() {
+                                    self->Enqueue(Event{.WriteDone = true, .WriteOk = ok, .WriteSize = size});
+                                });
                             });
-                        });
-            return;
+                return;
+            }
         }
     }
 
@@ -552,7 +551,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
 
     [[nodiscard]] bool WriteToSink(std::string data) {
         const std::size_t size = data.size();
-        if (!TryWrite(*m_sink, std::move(data))) {
+        if (!TryWrite(m_sink, std::move(data))) {
             Fail(MakeFailure(std::errc::io_error, "Failed to write the downloaded data."));
             return false;
         }
@@ -608,7 +607,17 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
 
     void Finish(SummaryResult result) {
         m_done = true;
-        TDone completion = std::move(m_completion);
+        // A completion that takes the sink gets it moved in, so it can outlive the operation (file finalization,
+        // string result).
+        auto completion = [&]() {
+            if constexpr (std::invocable<TDone&, SummaryResult, TSink>) {
+                return [done = std::move(m_completion), sink = std::move(m_sink)](SummaryResult value) mutable {
+                    done(std::move(value), std::move(sink));
+                };
+            } else {
+                return std::move(m_completion);
+            }
+        }();
         if (m_initiating) {
             PostCompletion(m_httpClient, std::move(completion), std::move(result));
         } else {
@@ -620,7 +629,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
     std::shared_ptr<const BasicBlobTarget<TCred>> m_clientOptions;
     DownloadToOptions m_options;
     AzureRequestOptions m_requestOptions;
-    std::shared_ptr<DownloadSink> m_sink;
+    TSink m_sink;
     TDone m_completion;
     boost::asio::cancellation_slot m_parentSlot;
     std::size_t m_chunkSize;
@@ -653,13 +662,13 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
 
 [[nodiscard]] Response<Models::DownloadBlobToResult> ToDownloadToResponse(DownloadSummary summary);
 
-template <HttpClientLike THttp, class TCred, class TDone>
+template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink, class TDone>
 void StartDownload(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
-                   DownloadToOptions operationOptions, std::shared_ptr<DownloadSink> sink, TDone completion,
+                   DownloadToOptions operationOptions, TSink sink, TDone completion,
                    AzureRequestOptions requestOptions) {
-    std::make_shared<DownloadOperation<THttp, TCred, TDone>>(httpClient, std::move(options),
-                                                             std::move(operationOptions), requestOptions,
-                                                             std::move(sink), std::move(completion))
+    std::make_shared<DownloadOperation<THttp, TCred, TSink, TDone>>(httpClient, std::move(options),
+                                                                    std::move(operationOptions), requestOptions,
+                                                                    std::move(sink), std::move(completion))
         ->Start();
 }
 // Closes the temporary file and, on success, renames it over `target`; any failure removes the temporary file.
@@ -672,16 +681,15 @@ template <HttpClientLike THttp, class TCred, class TCompletion>
 void DownloadBlobAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
                        DownloadBlobOptions operationOptions, TCompletion completion,
                        AzureRequestOptions requestOptions) {
-    auto sink = std::make_shared<StringSink>();
     DownloadDetail::StartDownload(
-        httpClient, std::move(options), ToDownloadToOptions(std::move(operationOptions)), sink,
-        [sink, completion = std::move(completion)](DownloadDetail::SummaryResult result) mutable {
+        httpClient, std::move(options), ToDownloadToOptions(std::move(operationOptions)), StringSink{},
+        [completion = std::move(completion)](DownloadDetail::SummaryResult result, StringSink sink) mutable {
             if (!result.has_value()) {
                 completion(std::unexpected(std::move(result).error()));
                 return;
             }
             Models::DownloadBlobResult value;
-            value.Content = sink->Take();
+            value.Content = sink.Take();
             value.Properties = std::move(result->Properties);
             value.ContentRange = result->ContentRange;
             completion(
@@ -695,7 +703,7 @@ void DownloadBlobToSpanAsync(THttp& httpClient, std::shared_ptr<const BasicBlobT
                              DownloadToOptions operationOptions, std::span<char> destination, TCompletion completion,
                              AzureRequestOptions requestOptions) {
     DownloadDetail::StartDownload(
-        httpClient, std::move(options), std::move(operationOptions), std::make_shared<SpanSink>(destination),
+        httpClient, std::move(options), std::move(operationOptions), SpanSink{destination},
         [completion = std::move(completion)](DownloadDetail::SummaryResult result) mutable {
             if (!result.has_value()) {
                 completion(std::unexpected(std::move(result).error()));
@@ -733,8 +741,8 @@ void DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobT
             std::filesystem::path tempPath = path;
             tempPath += ".partial-" + CreateClientRequestId();
             errno = 0;
-            auto file = std::make_shared<std::ofstream>(tempPath, std::ios::binary | std::ios::trunc);
-            if (!*file) {
+            std::ofstream file(tempPath, std::ios::binary | std::ios::trunc);
+            if (!file) {
                 PostCompletion(
                     httpClient, std::move(completion),
                     FileResult{std::unexpect, DownloadDetail::MakeFailure(DownloadDetail::LastOpenError(),
@@ -746,19 +754,20 @@ void DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobT
             boost::asio::post(
                 httpClient.get_executor(),
                 [&httpClient, scheduler = std::move(scheduler), options = std::move(options),
-                 operationOptions = std::move(operationOptions), file, tempPath = std::move(tempPath),
+                 operationOptions = std::move(operationOptions), file = std::move(file), tempPath = std::move(tempPath),
                  target = std::move(path), completion = std::move(completion), requestOptions]() mutable {
                     DownloadDetail::StartDownload(
-                        httpClient, std::move(options), std::move(operationOptions), std::make_shared<FileSink>(file),
-                        [&httpClient, scheduler = std::move(scheduler), file, tempPath = std::move(tempPath),
-                         target = std::move(target),
-                         completion = std::move(completion)](DownloadDetail::SummaryResult result) mutable {
+                        httpClient, std::move(options), std::move(operationOptions), FileSink{std::move(file)},
+                        [&httpClient, scheduler = std::move(scheduler), tempPath = std::move(tempPath),
+                         target = std::move(target), completion = std::move(completion)](
+                            DownloadDetail::SummaryResult result, FileSink sink) mutable {
                             DownloadDetail::RunOnWriter(
                                 httpClient, scheduler,
-                                [&httpClient, file, tempPath = std::move(tempPath), target = std::move(target),
-                                 completion = std::move(completion), result = std::move(result)]() mutable {
+                                [&httpClient, sink = std::move(sink), tempPath = std::move(tempPath),
+                                 target = std::move(target), completion = std::move(completion),
+                                 result = std::move(result)]() mutable {
                                     PostCompletion(httpClient, std::move(completion),
-                                                   DownloadDetail::FinalizeFileDownload(*file, tempPath, target,
+                                                   DownloadDetail::FinalizeFileDownload(sink.File(), tempPath, target,
                                                                                         std::move(result)));
                                 });
                         },

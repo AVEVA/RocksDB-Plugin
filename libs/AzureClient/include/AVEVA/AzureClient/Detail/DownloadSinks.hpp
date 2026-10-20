@@ -4,65 +4,62 @@
 #pragma once
 
 #include <algorithm>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <ios>
-#include <memory>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
 
 namespace AVEVA::AzureClient::Private {
-// Destination of the downloaded bytes, always written in offset order.
-class DownloadSink {
-  public:
-    DownloadSink() = default;
-    DownloadSink(const DownloadSink&) = delete;
-    DownloadSink& operator=(const DownloadSink&) = delete;
-    DownloadSink(DownloadSink&&) = delete;
-    DownloadSink& operator=(DownloadSink&&) = delete;
-    virtual ~DownloadSink() = default;
-
-    virtual void Reserve(std::uint64_t /*size*/) {}
-
-    // True when Write is cheap and never blocks, so it can run on the I/O thread.
-    [[nodiscard]] virtual bool WritesInline() const noexcept { return false; }
-
-    [[nodiscard]] virtual bool Write(std::string data) = 0;
+// A download destination, always written in offset order. Sinks are stored by value in the operation, so they must be
+// movable. `WritesInline` is true when Write is cheap and never blocks, so it can run on the I/O thread.
+template <class T>
+concept DownloadSinkLike = std::movable<T> && requires(T& sink, std::uint64_t size, std::string data) {
+    sink.Reserve(size);
+    { sink.Write(std::move(data)) } -> std::same_as<bool>;
+    { T::WritesInline } -> std::convertible_to<bool>;
 };
 
-class FileSink final : public DownloadSink {
+class FileSink final {
   public:
-    explicit FileSink(std::shared_ptr<std::ofstream> file) : m_file(std::move(file)) {}
+    explicit FileSink(std::ofstream file) : m_file(std::move(file)) {}
 
-    [[nodiscard]] bool Write(std::string data) override {
-        m_file->write(data.data(), static_cast<std::streamsize>(data.size()));
-        return m_file->good();
+    static constexpr bool WritesInline = false;
+
+    void Reserve(std::uint64_t /*size*/) {}
+
+    [[nodiscard]] bool Write(std::string data) {
+        m_file.write(data.data(), static_cast<std::streamsize>(data.size()));
+        return m_file.good();
     }
 
+    [[nodiscard]] std::ofstream& File() noexcept { return m_file; }
+
   private:
-    std::shared_ptr<std::ofstream> m_file;
+    std::ofstream m_file;
 };
 
 // Copies each received body string into caller-owned memory (one copy; the HTTP client has no body-sink hook
 // to read straight into the span). A blob range larger than the buffer fails the download instead of writing
 // past the end.
-class SpanSink final : public DownloadSink {
+class SpanSink final {
   public:
     explicit SpanSink(std::span<char> destination) : m_destination(destination) {}
 
-    void Reserve(std::uint64_t size) override {
+    void Reserve(std::uint64_t size) {
         if (size > m_destination.size()) {
             throw std::length_error("The download is larger than the destination buffer.");
         }
     }
 
-    [[nodiscard]] bool WritesInline() const noexcept override { return true; }
+    static constexpr bool WritesInline = true;
 
-    [[nodiscard]] bool Write(std::string data) override {
+    [[nodiscard]] bool Write(std::string data) {
         if (data.size() > m_destination.size() - m_position) {
             return false;
         }
@@ -76,22 +73,22 @@ class SpanSink final : public DownloadSink {
     std::size_t m_position = 0;
 };
 
-class StringSink final : public DownloadSink {
+class StringSink final {
   public:
     // Upper bound for the up-front reservation. The size comes from the service's response, so it is not trusted to
     // size an allocation; the string grows geometrically past this as data actually arrives.
     static constexpr std::uint64_t MaxReserve = std::uint64_t{64} * 1024U * 1024U;
 
-    void Reserve(std::uint64_t size) override {
+    void Reserve(std::uint64_t size) {
         if (size > m_data.max_size()) {
             throw std::length_error("Blob is too large to download into memory.");
         }
         m_data.reserve(static_cast<std::size_t>(std::min(size, MaxReserve)));
     }
 
-    [[nodiscard]] bool WritesInline() const noexcept override { return true; }
+    static constexpr bool WritesInline = true;
 
-    [[nodiscard]] bool Write(std::string data) override {
+    [[nodiscard]] bool Write(std::string data) {
         if (m_data.empty() && m_data.capacity() < data.size()) {
             m_data = std::move(data);
         } else {

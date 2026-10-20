@@ -463,28 +463,27 @@ namespace {
 struct NonStandardThrow {};
 
 // Throws a type that does not derive from std::exception, from Reserve or Write.
-class ThrowingSink final : public AVEVA::AzureClient::Private::DownloadSink {
+template <bool InlineWrites> class ThrowingSink final {
   public:
-    ThrowingSink(bool inlineWrites, bool throwOnReserve)
-        : m_inlineWrites(inlineWrites), m_throwOnReserve(throwOnReserve) {}
+    explicit ThrowingSink(bool throwOnReserve) : m_throwOnReserve(throwOnReserve) {}
 
-    void Reserve(std::uint64_t /*size*/) override {
+    void Reserve(std::uint64_t /*size*/) {
         if (m_throwOnReserve) {
             throw NonStandardThrow{};
         }
     }
 
-    [[nodiscard]] bool WritesInline() const noexcept override { return m_inlineWrites; }
+    static constexpr bool WritesInline = InlineWrites;
 
-    [[nodiscard]] bool Write(std::string /*data*/) override { throw NonStandardThrow{}; }
+    [[nodiscard]] bool Write(std::string /*data*/) { throw NonStandardThrow{}; }
 
   private:
-    bool m_inlineWrites;
     bool m_throwOnReserve;
 };
 
+template <bool InlineWrites>
 [[nodiscard]] std::optional<AVEVA::AzureClient::Private::DownloadDetail::SummaryResult>
-DownloadIntoThrowingSink(bool inlineWrites, bool throwOnReserve) {
+DownloadIntoThrowingSink(bool throwOnReserve) {
     using AVEVA::AzureClient::NoTokenCredential;
     using AVEVA::AzureClient::Private::BasicBlobTarget;
     FakeHttpClient httpClient;
@@ -497,7 +496,7 @@ DownloadIntoThrowingSink(bool inlineWrites, bool throwOnReserve) {
     DownloadToOptions options;
     std::optional<AVEVA::AzureClient::Private::DownloadDetail::SummaryResult> result;
     AVEVA::AzureClient::Private::DownloadDetail::StartDownload(
-        httpClient, target, options, std::make_shared<ThrowingSink>(inlineWrites, throwOnReserve),
+        httpClient, target, options, ThrowingSink<InlineWrites>{throwOnReserve},
         [&](AVEVA::AzureClient::Private::DownloadDetail::SummaryResult value) { result = std::move(value); },
         AVEVA::AzureClient::AzureRequestOptions{});
     (void)httpClient.RunUntil([&] { return result.has_value(); });
@@ -505,11 +504,13 @@ DownloadIntoThrowingSink(bool inlineWrites, bool throwOnReserve) {
 }
 } // namespace
 
-class DiscardingSink final : public AVEVA::AzureClient::Private::DownloadSink {
+class DiscardingSink final {
   public:
-    [[nodiscard]] bool WritesInline() const noexcept override { return true; }
+    static constexpr bool WritesInline = true;
 
-    [[nodiscard]] bool Write(std::string /*data*/) override { return true; }
+    void Reserve(std::uint64_t /*size*/) {}
+
+    [[nodiscard]] bool Write(std::string /*data*/) { return true; }
 };
 
 TEST(AC_R15_DownloadBufferCapTests, ChunksInFlightAreCappedByBytesNotJustByCount) {
@@ -531,7 +532,7 @@ TEST(AC_R15_DownloadBufferCapTests, ChunksInFlightAreCappedByBytesNotJustByCount
             HttpResponse{206, MakeCanonicalSuccessHeaders({{"Content-Range", "bytes 0-0/1073741824"}}), "x"});
     }
     AVEVA::AzureClient::Private::DownloadDetail::StartDownload(
-        httpClient, target, options, std::make_shared<DiscardingSink>(),
+        httpClient, target, options, DiscardingSink{},
         [](AVEVA::AzureClient::Private::DownloadDetail::SummaryResult) {}, AVEVA::AzureClient::AzureRequestOptions{});
     ASSERT_TRUE(httpClient.RunUntil([&] { return httpClient.PendingCount() == 1U; }));
     ASSERT_TRUE(httpClient.CompleteNext());
@@ -541,21 +542,21 @@ TEST(AC_R15_DownloadBufferCapTests, ChunksInFlightAreCappedByBytesNotJustByCount
 }
 
 TEST(AC_R05_DownloadSinkExceptionTests, NonStandardExceptionFromAnInlineWriteIsAnIoError) {
-    const auto result = DownloadIntoThrowingSink(true, false);
+    const auto result = DownloadIntoThrowingSink<true>(false);
     ASSERT_TRUE(result.has_value());
     ASSERT_FALSE(result->has_value());
     EXPECT_EQ(result->error().Code, std::make_error_code(std::errc::io_error));
 }
 
 TEST(AC_R05_DownloadSinkExceptionTests, NonStandardExceptionFromAScheduledWriteIsAnIoError) {
-    const auto result = DownloadIntoThrowingSink(false, false);
+    const auto result = DownloadIntoThrowingSink<false>(false);
     ASSERT_TRUE(result.has_value());
     ASSERT_FALSE(result->has_value());
     EXPECT_EQ(result->error().Code, std::make_error_code(std::errc::io_error));
 }
 
 TEST(AC_R05_DownloadSinkExceptionTests, NonStandardExceptionFromReserveIsAnIoError) {
-    const auto result = DownloadIntoThrowingSink(true, true);
+    const auto result = DownloadIntoThrowingSink<true>(true);
     ASSERT_TRUE(result.has_value());
     ASSERT_FALSE(result->has_value());
     EXPECT_EQ(result->error().Code, std::make_error_code(std::errc::io_error));

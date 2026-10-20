@@ -108,7 +108,7 @@ against the code unless it says **Verify first**.
   - Keep the fallback "no scheduler → HTTP client writer → detached thread" ordering via `if constexpr`.
 - **Validation:** BlobDownload file/stream tests and plugin download tests.
 
-### [ ] T07 – Make `DownloadSink` static
+### [x] T07 – Make `DownloadSink` static
 - **Files:**
   - `libs\AzureClient\include\AVEVA\AzureClient\Detail\DownloadSinks.hpp`
   - `Detail\BlobDownload.hpp` (`DownloadOperation` ctor takes `std::shared_ptr<DownloadSink>`)
