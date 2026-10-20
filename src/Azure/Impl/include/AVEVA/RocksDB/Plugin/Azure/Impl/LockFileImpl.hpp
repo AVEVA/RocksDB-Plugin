@@ -43,16 +43,15 @@ class BasicLockFileImpl
     void PublishDeadlineLocked() const;
     // Throws when the lease has expired or its renewal deadline has passed; otherwise returns the time left to renew.
     [[nodiscard]] std::chrono::steady_clock::duration RenewalBudget() const;
-    // Defaults to steady_clock; replaced only by tests so lease expiry can be simulated without waiting.
-    using Clock = std::function<std::chrono::steady_clock::time_point()>;
-    Clock m_clock;
+    // Added to steady_clock; non-zero only in tests so lease expiry can be simulated without waiting.
+    std::atomic<std::chrono::steady_clock::duration> m_clockOffset{std::chrono::steady_clock::duration::zero()};
     [[nodiscard]] std::chrono::steady_clock::time_point Now() const {
-        return m_clock ? m_clock() : std::chrono::steady_clock::now();
+        return std::chrono::steady_clock::now() + m_clockOffset.load();
     }
 
   public:
-    // Not thread-safe: call before the lock is shared. Also restarts the lease age at the new clock's current time.
-    void SetClockForTesting(Clock clock);
+    // Shifts the lease clock by `offset` from real time. Safe to call at any time.
+    void SetClockOffsetForTesting(std::chrono::steady_clock::duration offset) { m_clockOffset = offset; }
     BasicLockFileImpl(
         std::shared_ptr<ClientRuntimeBase> runtime, std::unique_ptr<TBlob> file, std::chrono::seconds leaseLength,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,

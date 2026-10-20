@@ -213,18 +213,15 @@ TEST_F(LockFileImplTests, RenewThatOutlastsTheLeaseIsCancelledAtTheDeadlineAndTh
         std::min<std::chrono::milliseconds>(AVEVA::RocksDB::Plugin::Azure::Impl::Configuration::LeaseSafetyMargin,
                                             std::chrono::milliseconds(leaseLength) / 10);
     auto lock = CreateLock(leaseLength);
-    auto offset =
-        std::make_shared<std::atomic<std::chrono::steady_clock::duration>>(std::chrono::steady_clock::duration::zero());
-    lock->SetClockForTesting([offset] { return std::chrono::steady_clock::now() + offset->load(); });
     ASSERT_TRUE(lock->Lock());
 
-    *offset = std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::milliseconds(leaseLength) -
-                                                                              margin - std::chrono::milliseconds(200));
+    lock->SetClockOffsetForTesting(std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::milliseconds(leaseLength) - margin - std::chrono::milliseconds(200)));
     ASSERT_FALSE(lock->HasExceededLeaseLength());
 
     // The caller must find out at the renewal deadline, not hang until the lease has run out.
     EXPECT_ANY_THROW(lock->Renew());
-    *offset = leaseLength;
+    lock->SetClockOffsetForTesting(leaseLength);
     EXPECT_TRUE(lock->HasExceededLeaseLength());
     EXPECT_THROW(lock->Renew(), std::runtime_error);
     EXPECT_EQ(m_httpClient.RequestCount(), 2U);
@@ -237,12 +234,9 @@ TEST_F(LockFileImplTests, UnlockThatOutlastsTheLeaseIsCancelledAtTheLeaseEnd) {
 
     const auto leaseLength = std::chrono::seconds(15);
     auto lock = CreateLock(leaseLength);
-    auto offset =
-        std::make_shared<std::atomic<std::chrono::steady_clock::duration>>(std::chrono::steady_clock::duration::zero());
-    lock->SetClockForTesting([offset] { return std::chrono::steady_clock::now() + offset->load(); });
     ASSERT_TRUE(lock->Lock());
-    *offset =
-        std::chrono::duration_cast<std::chrono::steady_clock::duration>(leaseLength - std::chrono::milliseconds(200));
+    lock->SetClockOffsetForTesting(
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(leaseLength - std::chrono::milliseconds(200)));
 
     const auto start = std::chrono::steady_clock::now();
     EXPECT_ANY_THROW(lock->Unlock());

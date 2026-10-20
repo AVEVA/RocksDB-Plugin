@@ -460,7 +460,7 @@ are medium confidence: confirm them against the code, or measure, before changin
 
 ## P3: cleanups / simplifications / nice-to-have
 
-### [ ] T57 – Remove `std::function` clock from `LockFileImpl` (removes erasure)
+### [x] T57 – Remove `std::function` clock from `LockFileImpl` (removes erasure)
 - **File:** `src\Azure\Impl\include\AVEVA\RocksDB\Plugin\Azure\Impl\LockFileImpl.hpp:46-55`
   (`using Clock = std::function<...>`).
 - **Change:** make the clock a template parameter, defaulting to `steady_clock`, or use the atomic clock-pointer

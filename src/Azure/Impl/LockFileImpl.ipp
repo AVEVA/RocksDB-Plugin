@@ -362,11 +362,6 @@ template <typename TBlob> bool BasicLockFileImpl<TBlob>::IsRenewalOverdue() cons
     return m_held.load() && Now() >= RenewalDeadline();
 }
 
-template <typename TBlob> void BasicLockFileImpl<TBlob>::SetClockForTesting(Clock clock) {
-    m_clock = std::move(clock);
-    m_lastRenewalTime = Now();
-}
-
 template <typename TBlob> void BasicLockFileImpl<TBlob>::unlink() {
     boost::intrusive::list_base_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>>::unlink();
 }
