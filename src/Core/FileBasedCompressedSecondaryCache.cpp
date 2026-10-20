@@ -139,13 +139,16 @@ class FileBasedCompressedSecondaryCache::Impl {
                 return rocksdb::Status::OK();
             }
 
-            boost::container::small_vector<char, 4096> buf(dataSize);
-            auto s = helper->saveto_cb(obj, 0, dataSize, buf.data());
+            // One buffer in the on-disk layout: [type byte][payload]; saveto_cb writes straight into it.
+            boost::container::small_vector<char, 1 + 4096> buf(dataSize + kFileHeaderSize,
+                                                               boost::container::default_init);
+            buf[0] = static_cast<char>(static_cast<uint8_t>(rocksdb::CompressionType::kNoCompression));
+            auto s = helper->saveto_cb(obj, 0, dataSize, buf.data() + kFileHeaderSize);
             if (!s.ok()) {
                 return s;
             }
 
-            return WriteEntry(key, rocksdb::CompressionType::kNoCompression, buf.data(), dataSize, forceInsert);
+            return WriteEntry(key, buf.data(), buf.size(), forceInsert);
         } catch (...) {
             const auto s = StatusUtil::CurrentExceptionToStatus();
             BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
@@ -164,7 +167,11 @@ class FileBasedCompressedSecondaryCache::Impl {
                 return rocksdb::Status::InvalidArgument("cache key hex exceeds maximum inline buffer");
             }
 
-            return WriteEntry(key, type, saved.data(), saved.size());
+            boost::container::small_vector<char, 1 + 4096> buf(saved.size() + kFileHeaderSize,
+                                                               boost::container::default_init);
+            buf[0] = static_cast<char>(static_cast<uint8_t>(type));
+            std::memcpy(buf.data() + kFileHeaderSize, saved.data(), saved.size());
+            return WriteEntry(key, buf.data(), buf.size());
         } catch (...) {
             const auto s = StatusUtil::CurrentExceptionToStatus();
             BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
@@ -364,21 +371,18 @@ class FileBasedCompressedSecondaryCache::Impl {
     /// Writes bytes to disk and updates the in-memory index.
     /// </summary>
     /// <param name="key">The key identifying the cache entry to write.</param>
-    /// <param name="type">The compression type of the data to store.</param>
-    /// <param name="data">Pointer to the bytes to write to disk.</param>
-    /// <param name="dataSize">Size in bytes of the data pointed to by <paramref name="data"/>.</param>
+    /// <param name="stored">Complete file image: the 1-byte compression type followed by the payload.</param>
+    /// <param name="storedSize">Size in bytes of <paramref name="stored"/>.</param>
     /// <param name="force_insert">When false, the write is skipped rather than evicting an existing entry to make
     /// room.</param>
-    rocksdb::Status WriteEntry(const rocksdb::Slice& key, const rocksdb::CompressionType type, const char* data,
-                               const size_t dataSize, const bool forceInsert = true) noexcept {
+    rocksdb::Status WriteEntry(const rocksdb::Slice& key, const char* stored, const size_t storedSize,
+                               const bool forceInsert = true) noexcept {
         try {
             if (IsKeyTooLong(key)) {
                 return rocksdb::Status::InvalidArgument("cache key hex exceeds maximum inline buffer");
             }
 
             const auto filename = KeyToFilename(key);
-            // storedSize includes the 1-byte compression type prefix
-            const size_t storedSize = dataSize + FileBasedCompressedSecondaryCache::kFileHeaderSize;
 
             // Phase 1: lock, gate capacity, pin existing entry, schedule evictions.
             //          Commit I/O (rename + delete) only after releasing the lock.
@@ -388,7 +392,7 @@ class FileBasedCompressedSecondaryCache::Impl {
             FileUtil::CommitEvictions(*m_fs, *m_logger, *reserved);
 
             // Phase 2: write the file — no lock held.
-            if (auto s = WriteToDisk(filename, type, data, dataSize, storedSize); !s.ok())
+            if (auto s = WriteToDisk(filename, stored, storedSize); !s.ok())
                 return s;
 
             // Phase 3: lock, register the new entry, correct concurrent overshoot.
@@ -406,19 +410,14 @@ class FileBasedCompressedSecondaryCache::Impl {
 
     /// <summary>
     /// Phase 2 of WriteEntry — called with no lock held.
-    /// Writes a 1-byte compression type prefix followed by the raw payload in a single
+    /// Writes the prepared file image ([1-byte compression type][payload bytes]) in a single
     /// atomic write call.
     /// </summary>
-    [[nodiscard]] rocksdb::Status WriteToDisk(const std::string_view filename, const rocksdb::CompressionType type,
-                                              const char* data, const size_t dataSize, const size_t storedSize) {
+    [[nodiscard]] rocksdb::Status WriteToDisk(const std::string_view filename, const char* stored,
+                                              const size_t storedSize) {
         const std::string pathStr = m_lruIndex.MakePath(filename);
 
-        // File format: [1-byte compression type][payload bytes]
-        boost::container::small_vector<char, 1 + 4096> writeBuf(storedSize);
-        writeBuf[0] = static_cast<char>(static_cast<uint8_t>(type));
-        std::memcpy(writeBuf.data() + 1, data, dataSize);
-
-        if (!m_fs->WriteFileAtomic(pathStr, writeBuf.data(), writeBuf.size())) {
+        if (!m_fs->WriteFileAtomic(pathStr, stored, storedSize)) {
             BOOST_LOG_SEV(*m_logger, warning)
                 << "FileBasedCompressedSecondaryCache: failed to write cache entry '" << pathStr << "'";
             return rocksdb::Status::IOError("Failed to write cache entry file", pathStr);

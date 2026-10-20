@@ -67,10 +67,15 @@ std::optional<std::string> LocalFilesystem::ReadFileContents(const std::filesyst
         const auto size = f.tellg();
         if (size < 0)
             return std::nullopt;
-        std::string contents(static_cast<size_t>(size), '\0');
+        std::string contents;
+        bool readOk = true;
         f.seekg(0);
-        f.read(contents.data(), size);
-        if (!f)
+        contents.resize_and_overwrite(static_cast<size_t>(size), [&](char* p, size_t n) {
+            f.read(p, static_cast<std::streamsize>(n));
+            readOk = static_cast<bool>(f);
+            return readOk ? n : size_t{0};
+        });
+        if (!readOk)
             return std::nullopt;
         return contents;
     } catch (...) {

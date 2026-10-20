@@ -307,7 +307,7 @@ are medium confidence: confirm them against the code, or measure, before changin
 - **Validation:** new `FileCacheTests` case where `ContainerClientMock::GetBlobSize` calls `RemoveFile` then
   `ReadFile` on the same path mid-call. Run `ctest -L core`.
 
-### [ ] T46 – Secondary cache: two zero-filled buffers and two payload copies per Insert
+### [x] T46 – Secondary cache: two zero-filled buffers and two payload copies per Insert
 - **Files:** `src\Core\FileBasedCompressedSecondaryCache.cpp` (Insert ~125 `small_vector buf(dataSize)`;
   WriteToDisk ~400-410 `writeBuf(storedSize)` + memcpy). Also `src\Core\LocalFilesystem.cpp` ~64
   (`std::string contents(size, '\0')` in Lookup).
