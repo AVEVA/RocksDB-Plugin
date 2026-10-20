@@ -30,26 +30,13 @@ if(AVEVA_ROCKSDB_SANITIZER)
     list(JOIN AVEVA_ROCKSDB_SANITIZER "," _aveva_sanitizer_list)
     add_compile_options(-fsanitize=${_aveva_sanitizer_list} -fno-omit-frame-pointer)
     add_link_options(-fsanitize=${_aveva_sanitizer_list})
-    # Keep the AzureClient test-suite sanitizer handling in step with the global flags.
-    if("address" IN_LIST AVEVA_ROCKSDB_SANITIZER)
-        set(AVEVA_AZURE_CLIENT_ENABLE_ASAN ON CACHE BOOL "" FORCE)
-    else()
-        set(AVEVA_AZURE_CLIENT_ENABLE_ASAN OFF CACHE BOOL "" FORCE)
-    endif()
-    set(AVEVA_AZURE_CLIENT_ENABLE_UBSAN OFF CACHE BOOL "" FORCE)
-    set(AVEVA_AZURE_CLIENT_ENABLE_TSAN OFF CACHE BOOL "" FORCE)
-    if("undefined" IN_LIST AVEVA_ROCKSDB_SANITIZER)
-        set(AVEVA_AZURE_CLIENT_ENABLE_UBSAN ON CACHE BOOL "" FORCE)
-    endif()
-    if("thread" IN_LIST AVEVA_ROCKSDB_SANITIZER)
-        set(AVEVA_AZURE_CLIENT_ENABLE_TSAN ON CACHE BOOL "" FORCE)
-    endif()
-else()
-    # A cache variable forced ON by an earlier configure would otherwise survive clearing AVEVA_ROCKSDB_SANITIZER.
-    set(AVEVA_AZURE_CLIENT_ENABLE_ASAN OFF CACHE BOOL "" FORCE)
-    set(AVEVA_AZURE_CLIENT_ENABLE_UBSAN OFF CACHE BOOL "" FORCE)
-    set(AVEVA_AZURE_CLIENT_ENABLE_TSAN OFF CACHE BOOL "" FORCE)
 endif()
+
+# The global flags above already instrument the in-tree AzureClient targets; forcing its own switches off (also clearing
+# values cached by earlier configures) keeps each -fsanitize= on the command line once.
+set(AVEVA_AZURE_CLIENT_ENABLE_ASAN OFF CACHE BOOL "" FORCE)
+set(AVEVA_AZURE_CLIENT_ENABLE_UBSAN OFF CACHE BOOL "" FORCE)
+set(AVEVA_AZURE_CLIENT_ENABLE_TSAN OFF CACHE BOOL "" FORCE)
 
 # In-tree Azure Blob Storage client libraries (libs/). Their own tests are built together with the plugin
 # tests (AVEVA_ROCKSDB_TESTS); examples and benchmarks never are.
