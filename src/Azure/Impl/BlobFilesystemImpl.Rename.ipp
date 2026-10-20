@@ -84,15 +84,19 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
         // goes through an emptied blob (there is no atomic replace), but that window is one upload wide instead of a
         // multi-request copy, and a failure leaves the source intact for a retry.
         constexpr auto PageSize = Configuration::PageBlob::PageSize;
-        auto data =
-            std::make_shared<std::vector<char>>(static_cast<size_t>((size + PageSize - 1) / PageSize * PageSize));
-        if (size > 0 && BlobOperations::Download(srcClient, std::span<char>(*data).first(static_cast<size_t>(size)), 0,
-                                                 size, etag) != size) {
+        const auto paddedSize = static_cast<size_t>((size + PageSize - 1) / PageSize * PageSize);
+        // The download overwrites [0, size); only the page-alignment tail needs zeroing. The upload below is
+        // synchronous, so the buffer can be owned by this scope instead of shared.
+        const auto data = std::make_unique_for_overwrite<char[]>(paddedSize);
+        const std::span<char> buffer(data.get(), paddedSize);
+        if (size > 0 &&
+            BlobOperations::Download(srcClient, buffer.first(static_cast<size_t>(size)), 0, size, etag) != size) {
             throw std::runtime_error("Unexpected end of blob while renaming '" + std::string(realPathFrom) + "'");
         }
+        std::ranges::fill(buffer.subspan(static_cast<size_t>(size)), '\0');
         const auto writeInto = [&](auto& target) {
-            if (!data->empty()) {
-                BlobOperations::UploadPages(*m_runtime, target, data, 0);
+            if (paddedSize != 0) {
+                BlobOperations::UploadPages(*m_runtime, target, std::span<const char>(buffer), 0);
             }
             BlobOperations::SetSize(*m_runtime, target, size);
         };

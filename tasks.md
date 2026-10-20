@@ -172,7 +172,7 @@ against the code unless it says **Verify first**.
   - Add a transparent hash/equal and take `std::string_view`.
   - Evict one entry (or use a small LRU/random eviction) instead of clearing the whole map.
 
-### [ ] T12 – Rename small-file path zero-fill
+### [x] T12 – Rename small-file path zero-fill
 - **File:** `src\Azure\Impl\BlobFilesystemImpl.Rename.ipp`.
 - **Problem:** The inline path (≤ `MaxInlineRenameSize`) allocates a zero-initialised `make_shared<vector<char>>`.
 - **Change:** Use a pooled buffer or `make_shared_for_overwrite<char[]>`.
