@@ -39,7 +39,8 @@ bool IsValidRequestUrl(const boost::urls::url_view& url);
 
 /// <summary>
 /// The single definition of what may be sent: the URL, method, per-request timeout and every header. Used both to
-/// decide pool eligibility and to build the wire request, so the two can never disagree.
+/// decide pool eligibility and to build the wire request, so the two can never disagree. Called from Route::Of, which
+/// is where validation actually happens.
 /// </summary>
 /// <param name="request">The request to check.</param>
 /// <param name="options">The options it would be sent with.</param>

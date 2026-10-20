@@ -206,6 +206,11 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     }
 
   private:
+    void ReportHandlerThrew() const noexcept {
+        DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::SwallowedException, HttpRequestPhase::Queued, {}, {},
+                                "A completion handler threw while the client was failing a request");
+    }
+
     /// <summary>
     /// Fails the request still parked in the cell, posted so the handler never runs inside the submitting
     /// call. The cell stays populated until the posted function runs, so if the post itself throws the handler
@@ -213,11 +218,6 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// </summary>
     /// <param name="cell">The cell holding the request's completion.</param>
     /// <param name="error">Why the request failed.</param>
-    void ReportHandlerThrew() const noexcept {
-        DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::SwallowedException, HttpRequestPhase::Queued, {}, {},
-                                "A completion handler threw while the client was failing a request");
-    }
-
     void FailLater(const std::shared_ptr<CompletionCell>& cell, std::error_code error) noexcept {
         try {
             asio::post(m_context, [cell, error] {

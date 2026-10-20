@@ -13,7 +13,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 ///
 /// Overwriting a small destination empties it and then writes it, so a crash in that short window leaves an empty
 /// destination while the source is intact (BlobFilesystem rejects an empty CURRENT explicitly) and the rename can be
-/// retried. Temporary blobs left by a crashed large rename are removed when the filesystem is created.
+/// retried. Temporary blobs left by a crashed large rename are removed when this process next acquires the DB lock.
 ///
 /// For a large file the storage service has no atomic blob replace, so an existing destination is only overwritten
 /// after the

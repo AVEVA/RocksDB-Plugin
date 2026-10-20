@@ -56,8 +56,7 @@ struct ConnectionState;
 
 // Container operations, and the factory for clients of the blobs it contains.
 //
-// Thread safety: concurrent ...Async calls on one instance are supported. Stream and span arguments are
-// not synchronized by the library and must not be touched until the operation completes. Completion
+// Thread safety: concurrent ...Async calls on one instance are supported. Completion
 // handlers are not serialized with each other and may run inline, before the initiating call returns.
 //
 // Lifetime: stores a non-owning reference to the HTTP client, which must outlive this client and every

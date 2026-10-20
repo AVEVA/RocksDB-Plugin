@@ -311,11 +311,10 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Write(int64_t offs
 // Includes the file's own unsynced writes: buffered chunks are flushed first so the blob holds them, and the limit is
 // m_size rather than the published m_syncSize.
 template <typename TBlob>
-int64_t BasicReadWriteFileImpl<TBlob>::Read(int64_t offset, int64_t bytesRequested, char* buffer) const {
+int64_t BasicReadWriteFileImpl<TBlob>::Read(int64_t offset, int64_t bytesRequested, char* buffer) {
     RangeCheck::ThrowIfInvalid(offset, bytesRequested, "Read");
     if (!m_bufferStats.empty()) {
-        // Read is logically const; flushing only moves buffered bytes to the blob.
-        const_cast<BasicReadWriteFileImpl*>(this)->Flush();
+        Flush();
     }
 
     if (offset >= m_size) {

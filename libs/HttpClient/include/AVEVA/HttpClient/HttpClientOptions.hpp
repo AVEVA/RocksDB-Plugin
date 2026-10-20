@@ -61,7 +61,7 @@ struct HttpDiagnostic {
     HttpDiagnosticKind Kind = HttpDiagnosticKind::SwallowedException;
     /// <summary>The stage the request was in; meaningful for Timeout and retries, Queued otherwise.</summary>
     HttpRequestPhase Phase = HttpRequestPhase::Queued;
-    /// <summary>The scheme, host and port the event concerns; empty when none applies.</summary>
+    /// <summary>The "host:port" (no IPv6 brackets) the event concerns; empty when none applies.</summary>
     std::string Origin;
     /// <summary>The underlying error, when there is one.</summary>
     std::error_code Error;
@@ -181,7 +181,8 @@ class HttpClientOptions {
     /// <summary>
     /// Caps how many idle keep-alive connections are kept per origin.
     /// </summary>
-    /// <param name="maxIdleConnectionsPerHost">The per-origin idle cap; 0 disables pooling entirely.</param>
+    /// <param name="maxIdleConnectionsPerHost">The per-origin idle cap; 0 disables pooling entirely.
+    /// Independently of this, at most 256 idle connections are kept across all origins.</param>
     void SetMaxIdleConnectionsPerHost(std::size_t maxIdleConnectionsPerHost) noexcept;
 
     /// <summary>

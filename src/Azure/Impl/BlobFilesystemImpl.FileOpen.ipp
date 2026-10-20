@@ -122,7 +122,7 @@ LoggerImpl BasicBlobFilesystemImpl<THttp>::CreateLogger(const std::string& fileP
 
     auto impl = std::make_unique<FileLogSink<WriteableFileType>>(std::make_unique<WriteableFileType>(
         realPath, m_runtime, std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)), nullptr, m_logger,
-        Configuration::PageBlob::DefaultSize));
+        Configuration::PageBlob::DefaultBufferSize));
     return LoggerImpl{
         std::move(impl), logLevel,
         std::make_unique<LogRateLimiter>(

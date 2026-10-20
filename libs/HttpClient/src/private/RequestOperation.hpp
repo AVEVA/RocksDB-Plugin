@@ -158,7 +158,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     bool BuildRequest(HttpRequest& request, const Route& route);
 
     /// <summary>
-    /// Fills in the Beast request from an already validated request: target, Host, keep-alive, body and
+    /// Fills in the Beast request from a request that Route::Of already validated: target, Host, keep-alive, body and
     /// Content-Length. May throw, which is why callers go through <see cref="BuildRequest"/>.
     /// </summary>
     /// <param name="request">The request to translate; its owned body is moved out.</param>
