@@ -538,7 +538,11 @@ are medium confidence: confirm them against the code, or measure, before changin
   must run before exit.
 - **Validation:** the respective unit tests. Count requests with the fake client for the round-trip item.
 
-### [ ] T61 – Core smaller items
+### [x] T61 – Core smaller items
+- **Done:** duplicate release push removed, stop-requested logged at debug, `LruFileIndex` path strings
+  moved out, `CreateDir` result checked (throws), `IsFile` uses `string_view`.
+  **Skipped:** `RemoveEntryUnsafe(extract)` refactor and `RemoveFromDisk=false` for never-downloaded entries
+  (invasive in the locked eviction paths; delete of a nonexistent file is harmless and gain unmeasured).
 - `src\Core\FileCacheMaintenance.cpp` (`PruneUndownloadedStaleEntriesUnsafe`, `EvictBytesUnsafe`) and
   `FileCache.cpp` (`RemoveFileUnsafe`):
   - Add `RemoveEntryUnsafe(iterator)` using `m_cache.extract(it)` and move `node.key()` into `PendingRelease`, to

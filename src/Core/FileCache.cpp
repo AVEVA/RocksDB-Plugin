@@ -517,13 +517,12 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                     RemoveFileUnsafe(filePath);
                 }
             } else {
-                // The file was likely deleted. We should clean up after ourselves; the delete runs on the next pass
-                // of this loop, outside the mutex.
+                // RemoveFileUnsafe already queued the on-disk delete when the entry was removed.
                 BOOST_LOG_SEV(*m_logger, debug) << "File '" << filePath << "' was deleted. Removing file from cache";
-                m_pendingReleases.push_back({filePath, nullptr, true});
             }
         } catch (const std::exception& e) {
-            BOOST_LOG_SEV(*m_logger, error) << "Error in file cache background downloader thread: '" << e.what() << "'";
+            BOOST_LOG_SEV(*m_logger, stopToken.stop_requested() ? debug : error)
+                << "Error in file cache background downloader thread: '" << e.what() << "'";
         }
     }
 }

@@ -115,7 +115,11 @@ class FileBasedCompressedSecondaryCache::Impl {
         }
 
         m_fs->DeleteDir(m_cacheDir);
-        m_fs->CreateDir(m_cacheDir);
+        if (!m_fs->CreateDir(m_cacheDir)) {
+            BOOST_LOG_SEV(*m_logger, error)
+                << "FileBasedCompressedSecondaryCache: failed to create dir '" << m_cacheDir.string() << "'";
+            throw std::runtime_error("FileBasedCompressedSecondaryCache: failed to create cache directory");
+        }
 
         BOOST_LOG_SEV(*m_logger, info) << "FileBasedCompressedSecondaryCache: initialized dir='" << m_cacheDir.string()
                                        << "', capacity=" << capacity << " bytes";

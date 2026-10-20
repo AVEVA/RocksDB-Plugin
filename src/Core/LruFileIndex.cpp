@@ -208,11 +208,16 @@ std::pair<std::string, std::string> LruFileIndex::RemoveEntryLocked(LruIterator 
     // the graveyard (causing one cache miss; the phantom index entry is then cleaned
     // up by Lookup).
     constexpr char kSep = static_cast<char>(std::filesystem::path::preferred_separator);
-    const std::string origPathStr = m_cacheDirStr + kSep + std::string(it->filename.data(), it->filename.size());
-    const std::string graveyardPathStr = origPathStr + ".del";
+    std::string origPathStr;
+    origPathStr.reserve(m_cacheDirStr.size() + 1 + it->filename.size());
+    origPathStr.append(m_cacheDirStr).push_back(kSep);
+    origPathStr.append(it->filename.data(), it->filename.size());
+    std::string graveyardPathStr;
+    graveyardPathStr.reserve(origPathStr.size() + 4);
+    graveyardPathStr.append(origPathStr).append(".del");
     m_currentSize -= it->size;
     m_index.erase(it);
     m_lruList.erase(it);
-    return {origPathStr, graveyardPathStr};
+    return {std::move(origPathStr), std::move(graveyardPathStr)};
 }
 } // namespace AVEVA::RocksDB::Plugin::Core

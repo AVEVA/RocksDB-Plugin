@@ -7,17 +7,11 @@ static bool IsFile(const std::string_view pathname, const std::string_view file)
     static const constexpr std::string_view pathsep{"/"};
 
     // extract last component of the path
-    std::string fname;
-    size_t offset = pathname.find_last_of(pathsep);
-    if (offset != std::string::npos) {
-        fname = pathname.substr(offset + 1, pathname.size());
-    } else {
-        fname = pathname;
+    std::string_view fname = pathname;
+    if (const size_t offset = pathname.find_last_of(pathsep); offset != std::string_view::npos) {
+        fname = pathname.substr(offset + 1);
     }
-    if (fname.find(file) == 0) {
-        return true;
-    }
-    return false;
+    return fname.starts_with(file);
 }
 
 bool RocksDBHelpers::IsManifestFile(const std::string_view pathname) { return IsFile(pathname, "MANIFEST"); }

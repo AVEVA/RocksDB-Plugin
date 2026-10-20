@@ -154,9 +154,8 @@ class FileBasedCompressedSecondaryCacheMockTests : public ::testing::Test {
     void SetUp() override {
         m_cacheDir = m_tempDir.Path();
         m_mockFs = std::make_shared<NiceMock<FilesystemMock>>();
-        // The FileBasedCompressedSecondaryCache constructor calls DeleteDir and
-        // CreateDir (×257) but ignores their return values, so the NiceMock
-        // default of false is harmless.
+        // The constructor now requires CreateDir to succeed.
+        ON_CALL(*m_mockFs, CreateDir(::testing::_)).WillByDefault(::testing::Return(true));
     }
 
     static rocksdb::Slice MakeKey(const std::string& s) { return rocksdb::Slice(s); }
