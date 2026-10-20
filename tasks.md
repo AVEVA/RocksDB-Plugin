@@ -287,7 +287,7 @@ against the code unless it says **Verify first**.
   - `TlsContextConfigurator.cpp` (~150-190): the TLS session cache is per client. Check that resumption works
     across the plugin's clients.
 
-### [ ] T25 – `BlockOn` / `ThrowIfRunningOn` allocations
+### [x] T25 – `BlockOn` / `ThrowIfRunningOn` allocations (no code change: kept shared_ptr, see below)
 - **File:** `libs\AzureClient\include\AVEVA\AzureClient\BlockOn.hpp`.
 - **Problem:** `block_on` allocates a `shared_ptr<promise>` per call. The erased-executor probe allocates a
   `shared_ptr<atomic>` and dispatches.
@@ -296,6 +296,7 @@ against the code unless it says **Verify first**.
     safe *only if* every initiation guarantees exactly one completion before abandonment. Otherwise keep the
     shared_ptr.
   - The probe path is only hit for erased executors; leave it as-is unless the plugin uses one.
+- **Outcome:** Dropped. A stack promise is not safe: an io_context destroyed with queued work destroys the handler without invoking it. The shared_ptr makes `future.get()` throw `broken_promise` there, whereas a raw pointer would hang. The gain is one small allocation per blocking call, negligible next to the network round trip.
 
 ### [ ] T26 – Misc correctness nits
 - `libs\AzureClient\include\AVEVA\AzureClient\Detail\AsyncInitiation.hpp` ~143-148: `PostCompletion` doesn't bind
