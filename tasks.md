@@ -267,7 +267,7 @@ against the code unless it says **Verify first**.
   - Ranged reads would then parse straight into the pooled buffer, removing one full copy of every byte read.
 - **Do not** add a callback `std::function`.
 
-### [ ] T23 – Small per-request formatting costs (Verify first)
+### [x] T23 – Small per-request formatting costs (Verify first) — DROPPED: no measurable gain (date header 288 -> 270 ns/call, ~18 ns vs ms-scale network requests; BuildQueryString is list-only, Route::Of struct fields would need reshaping); adds complexity
 - **Files:**
   - `libs\AzureClient\src\BlobRequestHelpers.cpp` ~401-420: the RFC1123 date is built via `std::format` per
     request. Use a fixed `char[29]` buffer and cache it per second.
