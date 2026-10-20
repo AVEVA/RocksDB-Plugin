@@ -493,8 +493,11 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
             if (it != m_cache.end()) {
                 // Only the state this thread set may become Active. Anything else means the entry was marked stale
                 // while we were downloading, and possibly queued again by a read since: the bytes just written may
-                // predate the replacement, and a queued entry will be downloaded afresh when it is popped.
-                if (it->second.GetState() != FileCacheEntry::State::Downloading) {
+                // predate the replacement, and a queued entry will be downloaded afresh when it is popped. The
+                // generation check is redundant while a single thread downloads, but keeps this correct if that ever
+                // changes.
+                if (it->second.GetState() != FileCacheEntry::State::Downloading ||
+                    it->second.GetGeneration() != generation) {
                     BOOST_LOG_SEV(*m_logger, debug)
                         << "File '" << filePath
                         << "' was marked as stale while we were downloading it. Will not mark as active.";
