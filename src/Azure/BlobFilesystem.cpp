@@ -74,6 +74,10 @@ std::string FormatRequestFailedLogMessage(const RequestFailedException& ex, cons
     }
 
     formattedMessage << ex.Message;
+    // The request id is what Azure support asks for, so it belongs in the filesystem-level log too.
+    if (!ex.RequestId.empty()) {
+        formattedMessage << " (request id: " << ex.RequestId << ")";
+    }
     return formattedMessage.str();
 }
 } // namespace
