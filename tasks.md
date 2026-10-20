@@ -468,6 +468,7 @@ are medium confidence: confirm them against the code, or measure, before changin
 - **Validation:** `LockFileImplTests`.
 
 ### [ ] T58 – Split `ClientRuntimeBase` into concrete components
+- **Partial (done):** Unwrap/UnwrapResponse/Call/CallResponse/ThrowRequestFailed/TransferOptions moved to RequestHelpers.hpp (still included by ClientRuntime.hpp). **Remaining:** extract WriteFence, BlobMetadataCache, DownloadWriterPool; migrate callers to include RequestHelpers.hpp directly and drop BlockOn/HttpClient from the read path; decide on the virtual dtor after T44.
 - **Files:** `src\Azure\Impl\include\AVEVA\RocksDB\Plugin\Azure\Impl\ClientRuntime.hpp`,
   `src\Azure\Impl\ClientRuntime.cpp`.
 - **Problem:** One class owns several unrelated concerns: the write fence, lease deadlines, the lazy download-writer
