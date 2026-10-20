@@ -41,7 +41,8 @@ template <typename TBlob> BasicReadWriteFileImpl<TBlob>::~BasicReadWriteFileImpl
 template <typename TBlob>
 BasicReadWriteFileImpl<TBlob>::BasicReadWriteFileImpl(BasicReadWriteFileImpl<TBlob>&& other) noexcept
     : m_w(std::move(other.m_w)), m_size(other.m_size), m_syncSize(other.m_syncSize), m_close(std::move(other.m_close)),
-      m_dirty(other.m_dirty), m_buffer(std::move(other.m_buffer)), m_bufferStats(std::move(other.m_bufferStats)) {}
+      m_dirty(other.m_dirty), m_buffer(std::move(other.m_buffer)), m_bufferStats(std::move(other.m_bufferStats)),
+      m_extentPool(std::move(other.m_extentPool)) {}
 
 template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Close() {
     m_close.Close([this] { Sync(); });
@@ -65,35 +66,10 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Sync() {
         << "Synced read/writeable file '" << m_w.H.Name << "' to " << m_size << " bytes";
 }
 
-// Writes the buffered chunks to the blob. Chunks that touch the same page (or sit next to each other) are merged into
-// one page-aligned extent so each page is written once with the last write winning, and bytes of partially covered
-// pages that no chunk supplies are read from the blob first. Extents never share a page, so their reads and uploads
-// are independent and run concurrently, in bounded waves.
-template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
-    if (m_bufferStats.empty()) {
-        return;
-    }
-
-    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
-
-    // The capacity is tracked locally (set on open and by EnsureCapacity), so no round trip is needed here.
-    auto maxSizeNeeded = m_size;
-    for (const auto& chunk : m_bufferStats) {
-        maxSizeNeeded = std::max(maxSizeNeeded, chunk.targetOffset + chunk.dataLength);
-    }
-    // RangeCheck admits ends up to INT64_MAX, so the page of headroom below must not overflow.
-    if (maxSizeNeeded > RangeCheck::MaxOffset - pageSize) {
-        throw std::invalid_argument("Write extends past the maximum supported file size");
-    }
-    m_w.EnsureCapacity(maxSizeNeeded + pageSize);
-
-    struct Extent {
-        int64_t Start = 0;
-        int64_t End = 0;
-        std::vector<size_t> Chunks;              // indices into m_bufferStats, in write order
-        std::shared_ptr<std::vector<char>> Data; // shared so each upload's request views it without a copy
-    };
-
+// Merges the buffered chunks into page-aligned extents. Chunks that touch the same page (or sit next to each other)
+// share an extent so each page is written once with the last write winning. Extents never share a page, so their
+// reads and uploads are independent.
+template <typename TBlob> auto BasicReadWriteFileImpl<TBlob>::BuildExtents() const -> std::vector<Extent> {
     std::vector<size_t> order(m_bufferStats.size());
     std::iota(order.begin(), order.end(), size_t{0});
     const auto rangeStart = [&](size_t i) { return m_bufferStats[i].targetOffset - m_bufferStats[i].prePadding; };
@@ -114,52 +90,54 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
     for (auto& extent : extents) {
         std::ranges::sort(extent.Chunks); // later writes must overwrite earlier ones
     }
+    return extents;
+}
 
-    const auto sizeBefore = m_size;
-    m_size = maxSizeNeeded;
+// Fills the bytes of an extent that no chunk supplies with what the blob already holds. Reads past the file's old
+// end (`sizeBefore`) are skipped: that region holds no data yet and stays zero.
+template <typename TBlob>
+void BasicReadWriteFileImpl<TBlob>::PrepareExtent(Extent& extent, int64_t sizeBefore,
+                                                  std::vector<BlobOperations::PendingDownload<TBlob>>& reads) {
+    // A reused buffer holds an earlier flush's bytes, so everything not copied or downloaded below is zeroed.
+    extent.Data = AcquireExtentBuffer(static_cast<size_t>(extent.End - extent.Start));
+    std::vector<std::pair<int64_t, int64_t>> covered;
+    for (const auto index : extent.Chunks) {
+        const auto& chunk = m_bufferStats[index];
+        const auto* source = m_buffer.data() + chunk.bufferOffset + chunk.prePadding;
+        std::copy(source, source + chunk.dataLength, extent.Data->begin() + (chunk.targetOffset - extent.Start));
+        covered.emplace_back(chunk.targetOffset, chunk.targetOffset + chunk.dataLength);
+    }
+    std::ranges::sort(covered);
 
-    using PendingRead = BlobOperations::PendingDownload<TBlob>;
-
-    // Fills the bytes of an extent that no chunk supplies with what the blob already holds. Reads past the file's old
-    // end are skipped: that region holds no data yet and stays zero.
-    const auto prepare = [&](Extent& extent, std::vector<PendingRead>& reads) {
-        // A reused buffer holds an earlier flush's bytes, so everything not copied or downloaded below is zeroed.
-        extent.Data = AcquireExtentBuffer(static_cast<size_t>(extent.End - extent.Start));
-        std::vector<std::pair<int64_t, int64_t>> covered;
-        for (const auto index : extent.Chunks) {
-            const auto& chunk = m_bufferStats[index];
-            const auto* source = m_buffer.data() + chunk.bufferOffset + chunk.prePadding;
-            std::copy(source, source + chunk.dataLength, extent.Data->begin() + (chunk.targetOffset - extent.Start));
-            covered.emplace_back(chunk.targetOffset, chunk.targetOffset + chunk.dataLength);
+    auto cursor = extent.Start;
+    const auto readGap = [&](int64_t gapStart, int64_t gapEnd) {
+        const auto zeroFrom = std::max(gapStart, sizeBefore);
+        if (gapEnd > zeroFrom) {
+            std::fill(extent.Data->begin() + (zeroFrom - extent.Start), extent.Data->begin() + (gapEnd - extent.Start),
+                      '\0');
         }
-        std::ranges::sort(covered);
-
-        auto cursor = extent.Start;
-        const auto readGap = [&](int64_t gapStart, int64_t gapEnd) {
-            // Past the file's old end nothing is downloaded, so those bytes must read as zero.
-            const auto zeroFrom = std::max(gapStart, sizeBefore);
-            if (gapEnd > zeroFrom) {
-                std::fill(extent.Data->begin() + (zeroFrom - extent.Start),
-                          extent.Data->begin() + (gapEnd - extent.Start), '\0');
-            }
-            gapEnd = std::min(gapEnd, sizeBefore);
-            if (gapEnd > gapStart) {
-                std::span<char> target(extent.Data->data() + (gapStart - extent.Start),
-                                       static_cast<size_t>(gapEnd - gapStart));
-                reads.push_back(BlobOperations::StartDownload(*m_w.H.Blob, target, gapStart, gapEnd - gapStart));
-            }
-        };
-        for (const auto& [start, end] : covered) {
-            if (start > cursor) {
-                readGap(cursor, start);
-            }
-            cursor = std::max(cursor, end);
+        gapEnd = std::min(gapEnd, sizeBefore);
+        if (gapEnd > gapStart) {
+            std::span<char> target(extent.Data->data() + (gapStart - extent.Start),
+                                   static_cast<size_t>(gapEnd - gapStart));
+            reads.push_back(BlobOperations::StartDownload(*m_w.H.Blob, target, gapStart, gapEnd - gapStart));
         }
-        readGap(cursor, extent.End);
     };
+    for (const auto& [start, end] : covered) {
+        if (start > cursor) {
+            readGap(cursor, start);
+        }
+        cursor = std::max(cursor, end);
+    }
+    readGap(cursor, extent.End);
+}
 
-    // Waits for everything before reporting the first failure: the operations write into / read from the extents'
-    // buffers, which must not be released while any of them is still in flight.
+// Reads the gaps of, then uploads, extents [begin, end). Waits for everything before reporting the first failure: the
+// operations write into / read from the extents' buffers, which must not be released while any is still in flight.
+template <typename TBlob>
+void BasicReadWriteFileImpl<TBlob>::RunWave(std::vector<Extent>& extents, size_t begin, size_t end,
+                                            int64_t sizeBefore) {
+    using PendingRead = BlobOperations::PendingDownload<TBlob>;
     const auto finishAll = [](auto& pending, auto&& finish) {
         std::exception_ptr failure;
         for (auto& item : pending) {
@@ -181,54 +159,75 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
     };
     const auto finishUpload = [](auto& upload) { BlobOperations::FinishUploadPages(upload); };
 
-    for (size_t begin = 0; begin < extents.size(); begin += Configuration::Transfer::MaxConcurrentPageCopies) {
-        const auto end = std::min(extents.size(), begin + Configuration::Transfer::MaxConcurrentPageCopies);
-
-        std::vector<PendingRead> reads;
-        try {
-            for (auto i = begin; i < end; ++i) {
-                prepare(extents[i], reads);
-            }
-        } catch (...) {
-            try {
-                finishAll(reads, finishRead);
-            } catch (...) {
-            }
-            throw;
-        }
-        finishAll(reads, finishRead);
-
-        using PendingUploadT = decltype(BlobOperations::StartUploadPages(
-            *m_w.H.Runtime, *m_w.H.Blob, std::shared_ptr<const std::vector<char>>{}, int64_t{0}));
-        std::vector<PendingUploadT> uploads;
-        try {
-            for (auto i = begin; i < end; ++i) {
-                uploads.push_back(
-                    BlobOperations::StartUploadPages(*m_w.H.Runtime, *m_w.H.Blob, extents[i].Data, extents[i].Start));
-            }
-        } catch (...) {
-            try {
-                finishAll(uploads, finishUpload);
-            } catch (...) {
-            }
-            throw;
-        }
-        finishAll(uploads, finishUpload);
-
+    std::vector<PendingRead> reads;
+    try {
         for (auto i = begin; i < end; ++i) {
-            BOOST_LOG_SEV(*m_w.H.Logger, boost::log::trivial::debug)
-                << "Flushed " << extents[i].Data->size() << " bytes to read/writeable file '" << m_w.H.Name << "'";
+            PrepareExtent(extents[i], sizeBefore, reads);
         }
+    } catch (...) {
+        try {
+            finishAll(reads, finishRead);
+        } catch (...) {
+        }
+        throw;
     }
-    m_bufferStats.clear();
-    TrimExtentPool();
+    finishAll(reads, finishRead);
 
-#if _DEBUG
-    // NOTE: This is to ensure predictable output in tests.
-    std::fill(m_buffer.begin(), m_buffer.end(), '\0');
-#endif // _DEBUG
+    using PendingUploadT = decltype(BlobOperations::StartUploadPages(
+        *m_w.H.Runtime, *m_w.H.Blob, std::shared_ptr<const std::vector<char>>{}, int64_t{0}));
+    std::vector<PendingUploadT> uploads;
+    try {
+        for (auto i = begin; i < end; ++i) {
+            uploads.push_back(
+                BlobOperations::StartUploadPages(*m_w.H.Runtime, *m_w.H.Blob, extents[i].Data, extents[i].Start));
+        }
+    } catch (...) {
+        try {
+            finishAll(uploads, finishUpload);
+        } catch (...) {
+        }
+        throw;
+    }
+    finishAll(uploads, finishUpload);
+
+    for (auto i = begin; i < end; ++i) {
+        BOOST_LOG_SEV(*m_w.H.Logger, boost::log::trivial::debug)
+            << "Flushed " << extents[i].Data->size() << " bytes to read/writeable file '" << m_w.H.Name << "'";
+    }
 }
 
+// Writes the buffered chunks to the blob in bounded waves of concurrent extents. m_size and the buffered chunks are
+// only committed once every wave has succeeded, so a failed Flush can be retried from the same state.
+template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
+    if (m_bufferStats.empty()) {
+        return;
+    }
+
+    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
+
+    // The capacity is tracked locally (set on open and by EnsureCapacity), so no round trip is needed here.
+    auto maxSizeNeeded = m_size;
+    for (const auto& chunk : m_bufferStats) {
+        maxSizeNeeded = std::max(maxSizeNeeded, chunk.targetOffset + chunk.dataLength);
+    }
+    // RangeCheck admits ends up to INT64_MAX, so the page of headroom below must not overflow.
+    if (maxSizeNeeded > RangeCheck::MaxOffset - pageSize) {
+        throw std::invalid_argument("Write extends past the maximum supported file size");
+    }
+    m_w.EnsureCapacity(maxSizeNeeded + pageSize);
+
+    auto extents = BuildExtents();
+    for (size_t begin = 0; begin < extents.size(); begin += Configuration::Transfer::MaxConcurrentPageCopies) {
+        const auto end = std::min(extents.size(), begin + Configuration::Transfer::MaxConcurrentPageCopies);
+        RunWave(extents, begin, end, m_size);
+    }
+    // Writes that landed after the lease lapsed must not be reported as flushed.
+    m_w.H.Runtime->ThrowIfWritesFenced();
+
+    m_size = maxSizeNeeded;
+    m_bufferStats.clear();
+    TrimExtentPool();
+}
 // Hands out an idle pooled buffer resized to `size`, or a new one. A buffer an upload's request still references is
 // not idle, so it is never rewritten while in use. The contents are unspecified: callers set every byte.
 template <typename TBlob>
@@ -301,7 +300,7 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Write(int64_t offs
         dataPos += numBytes;
         bufferOffset += info.ChunkSize();
 
-        if (bufferOffset >= (Configuration::PageBlob::DefaultBufferSize - Configuration::PageBlob::PageSize)) {
+        if (bufferOffset >= static_cast<int64_t>(m_buffer.size()) - Configuration::PageBlob::PageSize) {
             Flush();
             bufferOffset = 0;
         }

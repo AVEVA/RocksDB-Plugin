@@ -176,7 +176,7 @@ are medium confidence: confirm them against the code, or measure, before changin
   which makes RocksDB fall back to creating a new file. Document the choice.
 - **Validation:** with `recycle_log_file_num > 0`, the container does not accumulate orphan logs.
 
-### [ ] T37 – `ReadWriteFileImpl::Flush` commits `m_size` before uploads succeed; split the function
+### [x] T37 – `ReadWriteFileImpl::Flush` commits `m_size` before uploads succeed; split the function
 - **File:** `src\Azure\Impl\ReadWriteFileImpl.ipp:72-230` (Flush, ~155 lines), `:119` (`m_size = maxSizeNeeded`),
   `:226` (`#if _DEBUG` zero-fill), `:304` (Write threshold), move ctor.
 - **Problems:**

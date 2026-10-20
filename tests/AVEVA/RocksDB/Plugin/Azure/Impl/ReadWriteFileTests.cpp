@@ -11,6 +11,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <optional>
@@ -72,6 +73,26 @@ TEST_F(ReadWriteFileImplTests, Flush_EndNearInt64Max_ThrowsInvalidArgumentWithou
 
     EXPECT_THROW(file->Sync(), std::invalid_argument);
     EXPECT_EQ(capacityWritesBefore, m_env.Blob->CapacityWrites.size());
+}
+TEST_F(ReadWriteFileImplTests, Flush_UploadFails_RetryKeepsSizeAndPersistsContent) {
+    auto file = CreateFile();
+    const std::vector<char> data(100, 'Z');
+    file->Write(0, data.data(), 100);
+    auto failures = std::make_shared<std::atomic<int>>(1);
+    m_env.Blob->Fault = [failures](const auto operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::UploadPages && failures->fetch_sub(1) > 0) {
+            return FakeBlobServer::Error(500, "boom");
+        }
+        return std::nullopt;
+    };
+
+    EXPECT_ANY_THROW(file->Sync());
+    std::vector<char> readBuffer(100, '\0');
+    EXPECT_NO_THROW(file->Sync());
+
+    EXPECT_EQ(100, file->Read(0, 100, readBuffer.data()));
+    EXPECT_EQ(data, readBuffer);
+    EXPECT_EQ(100, m_env.Blob->Size);
 }
 TEST_F(ReadWriteFileImplTests, Constructor_InitializesFromEmptyBlob) {
     // Arrange - simulator starts with fileSize = 0

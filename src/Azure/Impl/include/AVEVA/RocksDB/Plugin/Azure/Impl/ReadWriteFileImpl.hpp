@@ -34,6 +34,16 @@ template <typename TBlob> class BasicReadWriteFileImpl {
     // Extent buffers kept between flushes; one referenced only by this list is idle and can be reused.
     std::vector<std::shared_ptr<std::vector<char>>> m_extentPool;
 
+    struct Extent {
+        int64_t Start = 0;
+        int64_t End = 0;
+        std::vector<size_t> Chunks;              // indices into m_bufferStats, in write order
+        std::shared_ptr<std::vector<char>> Data; // shared so each upload's request views it without a copy
+    };
+    [[nodiscard]] std::vector<Extent> BuildExtents() const;
+    void PrepareExtent(Extent& extent, int64_t sizeBefore, std::vector<BlobOperations::PendingDownload<TBlob>>& reads);
+    void RunWave(std::vector<Extent>& extents, size_t begin, size_t end, int64_t sizeBefore);
+
   public:
     BasicReadWriteFileImpl(
         std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
