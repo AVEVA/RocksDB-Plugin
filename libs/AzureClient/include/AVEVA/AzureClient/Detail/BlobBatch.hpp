@@ -91,7 +91,8 @@ class BatchDeleteOperation final
 
   private:
     [[nodiscard]] std::size_t ChunkCount() const noexcept {
-        return (m_names.size() + MaxBatchSubrequests - 1U) / MaxBatchSubrequests;
+        // Ceiling division without the addition that could wrap for sizes near SIZE_MAX.
+        return (m_names.size() / MaxBatchSubrequests) + (m_names.size() % MaxBatchSubrequests != 0U ? 1U : 0U);
     }
 
     // Starts chunks while there is room and finishes once nothing is left in flight. Completions may arrive inline,

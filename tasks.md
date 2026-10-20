@@ -298,7 +298,7 @@ against the code unless it says **Verify first**.
   - The probe path is only hit for erased executors; leave it as-is unless the plugin uses one.
 - **Outcome:** Dropped. A stack promise is not safe: an io_context destroyed with queued work destroys the handler without invoking it. The shared_ptr makes `future.get()` throw `broken_promise` there, whereas a raw pointer would hang. The gain is one small allocation per blocking call, negligible next to the network round trip.
 
-### [ ] T26 – Misc correctness nits
+### [x] T26 – Misc correctness nits (PostCompletion: verified, no change — `asio::post(ex, append(handler,...))` already uses the handler's associated executor, and `append` forwards the handler's associated allocator/executor)
 - `libs\AzureClient\include\AVEVA\AzureClient\Detail\AsyncInitiation.hpp` ~143-148: `PostCompletion` doesn't bind
   the handler's associated allocator/executor. Use `boost::asio::bind_executor` /
   `get_associated_allocator`-aware posting. **Verify first.**

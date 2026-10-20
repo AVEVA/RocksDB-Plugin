@@ -243,6 +243,7 @@ void DownloadToFile(TBlob& client, const std::filesystem::path& path, int64_t of
 template <typename TBlob> struct PendingDownload {
     decltype(std::declval<TBlob&>().DownloadToAsync(std::span<char>{}, AzureClient::DownloadBlobOptions{},
                                                     boost::asio::use_future)) Result;
+    decltype(std::declval<TBlob&>().get_executor()) Executor;
 };
 
 // Starts the download without waiting, so several can be in flight at once. The buffer and client must stay alive
@@ -259,11 +260,14 @@ template <typename TBlob>
     // The body is copied once, straight into the caller's buffer; a range larger than the buffer fails instead of
     // being truncated or overflowing.
     return {client.DownloadToAsync(buffer, std::move(options), boost::asio::use_future,
-                                   TransferOptions(client, static_cast<uint64_t>(length)))};
+                                   TransferOptions(client, static_cast<uint64_t>(length))),
+            client.get_executor()};
 }
 
 // Waits for the download and returns the number of bytes written to the buffer.
 template <typename TBlob> [[nodiscard]] int64_t FinishDownload(PendingDownload<TBlob>& pending) {
+    // Re-checked at the blocking site, not only at Start, so a Pending handed across threads cannot deadlock.
+    AzureClient::ThrowIfRunningOn(pending.Executor);
     const auto result = Unwrap(pending.Result.get());
     if (result.ContentRange.has_value() && result.ContentRange->Length.has_value() &&
         *result.ContentRange->Length != result.BytesWritten) {
@@ -314,8 +318,9 @@ void UploadPages(const ClientRuntimeBase& runtime, TBlob& client, std::shared_pt
 }
 
 // An upload that has been started but not finished; see StartUploadPages.
-template <typename TFuture> struct PendingUpload {
+template <typename TFuture, typename TExecutor> struct PendingUpload {
     TFuture Result;
+    TExecutor Executor;
 };
 
 // Starts the upload without waiting, so several can be in flight at once. The request views the shared buffer (no
@@ -328,11 +333,14 @@ template <typename TBlob>
     const auto size = buffer->size();
     auto result = client.UploadPagesAsync(static_cast<uint64_t>(blobOffset), std::move(buffer), boost::asio::use_future,
                                           BoundByWriteDeadline(writeBudget, TransferOptions(client, size)));
-    return PendingUpload<decltype(result)>{std::move(result)};
+    return PendingUpload<decltype(result), decltype(client.get_executor())>{std::move(result), client.get_executor()};
 }
 
 // Waits for the upload, throwing RequestFailedException on failure.
-template <typename TFuture> void FinishUploadPages(PendingUpload<TFuture>& pending) { Unwrap(pending.Result.get()); }
+template <typename TFuture, typename TExecutor> void FinishUploadPages(PendingUpload<TFuture, TExecutor>& pending) {
+    AzureClient::ThrowIfRunningOn(pending.Executor);
+    Unwrap(pending.Result.get());
+}
 
 /// <summary>A run of populated bytes in a page blob.</summary>
 struct PageChunk {
