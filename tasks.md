@@ -394,7 +394,7 @@ are medium confidence: confirm them against the code, or measure, before changin
 - **Validation:** test that the single-chunk result's `data()` is the transport buffer (or count allocations), plus
   the download tests.
 
-### [ ] T53 – CI: vcpkg cache poisoning, db-bench job never caches, duplicate builds, link-less consume test
+### [x] T53 – CI: vcpkg cache poisoning, db-bench job never caches, duplicate builds, link-less consume test
 - **Files:** `.github\workflows\build-and-test.yml` (save at ~132-134; matrix ~92-98; db-bench ~193-234;
   install-consume ~235-284), `.github\actions\setup-vcpkg\action.yml:42-53`.
 - **Problems:**

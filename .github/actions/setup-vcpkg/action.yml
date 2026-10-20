@@ -4,6 +4,11 @@
 name: Set up vcpkg
 description: Checks out vcpkg at the builtin-baseline commit, bootstraps it as VCPKG_ROOT and restores the binary cache.
 
+inputs:
+  cache-suffix:
+    description: Appended to the cache key and restore prefix, for jobs whose vcpkg ABI differs from the shared one.
+    default: ""
+
 outputs:
   cache-hit:
     description: "true when the binary cache was restored from an exact key match."
@@ -44,10 +49,11 @@ runs:
     - name: Compute vcpkg binary cache key
       id: key
       shell: bash
-      run: echo "key=vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'infrastructure/vcpkg-overlays/**') }}" >> "$GITHUB_OUTPUT"
+      run: echo "key=vcpkg-${{ runner.os }}${{ inputs.cache-suffix }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'infrastructure/vcpkg-overlays/**') }}" >> "$GITHUB_OUTPUT"
     - name: Restore vcpkg binary cache
       id: cache
       uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: ${{ runner.temp }}/vcpkg-binary-cache
         key: ${{ steps.key.outputs.key }}
+        restore-keys: vcpkg-${{ runner.os }}${{ inputs.cache-suffix }}-

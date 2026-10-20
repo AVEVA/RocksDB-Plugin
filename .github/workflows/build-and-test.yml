@@ -92,10 +92,6 @@ jobs:
             preset: LinuxRelease
             config: Release
             tests: true
-          # Release/packaging-style configure: tests off, so GTest (vcpkg "testing" feature) must not be needed.
-          - os: ubuntu-latest
-            preset: LinuxDebug
-            tests: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     permissions:
@@ -109,28 +105,20 @@ jobs:
         id: vcpkg
 
       # Plugin tests and the vendored AzureClient/HttpClient test suites.
+      # The tests-off configure (no vcpkg testing feature) is covered by the install-consume job.
       - name: Configure
-        if: matrix.tests
         run: cmake --preset ${{ matrix.preset }}
-
-      - name: Configure (tests off, no vcpkg testing feature)
-        if: ${{ !matrix.tests }}
-        run: >
-          cmake --preset ${{ matrix.preset }}
-          -DAVEVA_ROCKSDB_TESTS=OFF
-          -DVCPKG_MANIFEST_FEATURES=
 
       - name: Build
         run: cmake --build build/${{ matrix.preset }} --config ${{ matrix.config || 'Debug' }}
 
       # Live Azure tests are opt-in (AVEVA_RUN_AZURE_INTEGRATION_TESTS=1) and never run here.
       - name: Test
-        if: matrix.tests
         run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure --build-config ${{ matrix.config || 'Debug' }} --parallel 4
 
       # One writer per OS, on main only; an exact hit means the entry already exists.
       - name: Save vcpkg binary cache
-        if: ${{ always() && matrix.save-cache && github.ref == 'refs/heads/main' && steps.vcpkg.outputs.cache-hit != 'true' }}
+        if: ${{ success() && matrix.save-cache && github.ref == 'refs/heads/main' && steps.vcpkg.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
@@ -226,14 +214,26 @@ jobs:
             echo "No library, overlay or db_bench changes; skipping."
           fi
 
+      # Own cache key: this job's RocksDB ABI differs from the build matrix, so it must not share their entry.
       - uses: ./.github/actions/setup-vcpkg
+        id: vcpkg
         if: steps.changes.outputs.relevant == 'true'
+        with:
+          cache-suffix: -db-bench
 
       - name: Configure and build with db_bench
         if: steps.changes.outputs.relevant == 'true'
         run: |
           cmake --preset LinuxRelease -DAVEVA_ROCKSDB_TESTS=OFF -DAVEVA_ROCKSDB_BUILD_DB_BENCH=ON
           cmake --build build/LinuxRelease --config Release
+
+      - name: Save vcpkg binary cache
+        if: ${{ success() && steps.changes.outputs.relevant == 'true' && github.ref == 'refs/heads/main' && steps.vcpkg.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/vcpkg-binary-cache
+          key: ${{ steps.vcpkg.outputs.cache-key }}
+
   install-consume:
     # Installs the libraries, then configures and builds a minimal external consumer that includes the public headers
     # and links the plugin, to validate the package configs and that the installed headers are self-sufficient.
@@ -283,7 +283,14 @@ jobs:
           #include <AVEVA/RocksDB/Plugin/Azure/Plugin.hpp>
           #include <AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp>
 
-          int main() { return 0; }
+          // The runtime guard keeps the call from executing but still forces the linker to resolve the symbol and
+          // its transitive dependencies.
+          int main(int argc, char**) {
+              if (argc > 100) {
+                  AVEVA::RocksDB::Plugin::Azure::Plugin::Unregister(std::string("unused"));
+              }
+              return 0;
+          }
           EOF
           cmake -S . -B out -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/stage" \
             -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
