@@ -184,7 +184,7 @@ against the code unless it says **Verify first**.
   entries out of the list while pinned. Separately, consider building the path strings outside the lock
   (`RemoveEntryLocked`/`MakePath`); this is a documented tradeoff, so measure first.
 
-### [ ] T16 – `OriginLimiter` ticketing and keys
+### [x] T16 – `OriginLimiter` ticketing and keys (dropped: no measurable gain; allocations per limited Submit rose 119 → 120, and the cancel path needed extra ticket plumbing)
 - **File:** `libs\HttpClient\src\private\OriginLimiter.hpp`.
 - **Problems:**
   - The ticket is an atomic issued outside the lock, which forces a sorted insert (`upper_bound`) into a deque.
