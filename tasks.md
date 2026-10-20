@@ -424,7 +424,7 @@ are medium confidence: confirm them against the code, or measure, before changin
   them (or `CMAKE_POSITION_INDEPENDENT_CODE ON` in the presets).
 - **Validation:** on Linux, build a tiny shared library that links `aveva::rocksdb-plugin-azure`.
 
-### [ ] T55 – Flaky wall-clock test assertions and busy-polling fake pump
+### [x] T55 – Flaky wall-clock test assertions and busy-polling fake pump
 - **Files:**
   - Upper-bound timing assertions:
     - `tests\AVEVA\RocksDB\Plugin\Azure\Impl\LockFileImplTests.cpp:638` (`EXPECT_LT(gap, 200)`) and `:662`

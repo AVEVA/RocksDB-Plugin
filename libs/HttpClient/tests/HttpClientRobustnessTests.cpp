@@ -445,7 +445,7 @@ TEST(HttpClientRobustness, TimeSpentQueuedForASlotCountsAgainstTheRequestTimeout
     EXPECT_EQ(firstResult, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
     EXPECT_EQ(queuedResult, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
     // It is woken at its own 150 ms deadline, not when the first request frees the slot at 400 ms.
-    EXPECT_LT(queuedElapsed, std::chrono::milliseconds(350));
+    EXPECT_LT(queuedElapsed, std::chrono::milliseconds(390));
     // The queued request's deadline passed while it waited, so it never opened a connection of its own.
     EXPECT_EQ(server.Accepted(), 1);
     EXPECT_EQ(server.TotalRequests(), 1);

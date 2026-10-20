@@ -404,7 +404,10 @@ class FakeHttpClient final {
 
     std::size_t PollRaw() {
         // restart() must not race a poll()/run() on another thread, so every thread that drives the context
-        // (including the background pump) takes this lock.
+        // (including the background pump) takes this lock. The pump holds it for its whole life, so skip then.
+        if (m_pumpActive.load()) {
+            return 0U;
+        }
         std::scoped_lock lock(m_pollMutex);
         // poll() leaves the context stopped once it runs out of work; restart so repeated
         // Poll() calls keep observing newly posted handlers.
@@ -418,14 +421,17 @@ class FakeHttpClient final {
         if (m_pump.joinable()) {
             return;
         }
+        m_pumpActive.store(true);
         m_pump = std::jthread([this](const std::stop_token& stop) {
-            // The guard keeps run_for() waiting for work instead of returning at once when the context is idle.
+            // The guard keeps run() blocked on the context instead of returning when it is idle; the stop callback
+            // wakes it. While the pump owns the context, Poll()/RunUntil() must not drive it from another thread.
             auto guard = boost::asio::make_work_guard(m_context);
-            while (!stop.stop_requested()) {
-                std::scoped_lock lock(m_pollMutex);
-                m_context.restart();
-                m_context.run_for(std::chrono::milliseconds{1});
-            }
+            std::scoped_lock lock(m_pollMutex);
+            // Restart before arming the callback, or a stop requested earlier would be undone.
+            m_context.restart();
+            std::stop_callback onStop(stop, [this] { m_context.stop(); });
+            m_context.run();
+            m_pumpActive.store(false);
         });
     }
 
@@ -441,6 +447,10 @@ class FakeHttpClient final {
             const auto remaining = deadline - std::chrono::steady_clock::now();
             if (remaining <= std::chrono::steady_clock::duration::zero()) {
                 return false;
+            }
+            if (m_pumpActive.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+                continue;
             }
             std::scoped_lock lock(m_pollMutex);
             m_context.restart();
@@ -888,6 +898,7 @@ class FakeHttpClient final {
     }
 
     // Last member, so the pump thread is joined before anything it touches is destroyed.
+    std::atomic<bool> m_pumpActive{false};
     std::jthread m_pump;
 };
 

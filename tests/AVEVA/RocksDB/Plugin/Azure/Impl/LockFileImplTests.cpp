@@ -657,7 +657,7 @@ TEST(LeaseRenewalLoopBackoffTests, RetryDelayNeverOutlastsTheRenewalDeadline) {
 
     ASSERT_GE(gaps.size(), 4u);
     for (const auto& gap : gaps) {
-        EXPECT_LT(gap.count(), 200);
+        EXPECT_LT(gap.count(), 450); // loose bound: only the 500 ms deadline must cap an otherwise longer delay
     }
 }
 TEST(LeaseRenewalLoopBackoffTests, WakeUpAfterRetriesRunOutNeverOutlastsTheRenewalDeadline) {
