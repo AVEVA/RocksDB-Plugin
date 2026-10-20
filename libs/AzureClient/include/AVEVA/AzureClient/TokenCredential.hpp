@@ -158,9 +158,7 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
     template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
     auto GetTokenForScopesAsync(ScopeList scopes, CompletionToken&& token) {
         return boost::asio::async_initiate<TokenSignature>(
-            [this](auto handler, ScopeList requestedScopes) {
-                Start(std::move(requestedScopes), Waiter{std::move(handler)});
-            },
+            [this](auto handler, ScopeList requestedScopes) { Start(std::move(requestedScopes), std::move(handler)); },
             token, std::move(scopes));
     }
 
@@ -197,8 +195,6 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         // Set when a recent acquisition failed and there is no valid token to fall back to.
         std::optional<std::error_code> CachedFailure;
         std::shared_ptr<RefreshState> RefreshToStart;
-        // Empty when the lookup took ownership of the caller's completion by queuing it onto a refresh.
-        Waiter PendingCompletion;
     };
 
     // Hands `token` to the last pending completion by move and copies it to the others, without the
@@ -217,7 +213,9 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         Private::CompleteOnExecutorIfSet(executor, std::move(last), error, std::move(token));
     }
 
-    LookupResult LookUpCachedTokenOrStartRefresh(const std::vector<std::string>& scopes, Waiter completion) {
+    // `completion` is only erased into a Waiter when it has to queue behind a refresh; otherwise the caller keeps it.
+    template <class THandler>
+    LookupResult LookUpCachedTokenOrStartRefresh(const std::vector<std::string>& scopes, THandler& completion) {
         std::scoped_lock const lock(m_mutex);
         const auto now = m_clock();
         const bool hasMatchingToken = m_hasToken && m_cachedScopes == scopes;
@@ -229,7 +227,6 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         if (outsideRefreshWindow || refreshBackoffActive) {
             LookupResult result;
             result.CachedToken = m_cachedToken;
-            result.PendingCompletion = std::move(completion);
             return result;
         }
 
@@ -237,7 +234,6 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
             m_failedScopes == scopes) {
             LookupResult result;
             result.CachedFailure = m_lastFailure;
-            result.PendingCompletion = std::move(completion);
             return result;
         }
 
@@ -252,13 +248,12 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
                 result.RefreshToStart->Executor = m_executor;
                 m_inFlightRefresh = result.RefreshToStart;
             }
-            result.PendingCompletion = std::move(completion);
             return result;
         }
 
         if (m_inFlightRefresh && m_inFlightRefresh->Scopes == scopes) {
             std::scoped_lock const stateLock(m_inFlightRefresh->Mutex);
-            m_inFlightRefresh->Completions.push_back(std::move(completion));
+            m_inFlightRefresh->Completions.push_back(Waiter{std::move(completion)});
             return {};
         }
 
@@ -266,7 +261,7 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         result.RefreshToStart = std::make_shared<RefreshState>();
         result.RefreshToStart->Scopes = scopes;
         result.RefreshToStart->Executor = m_executor;
-        result.RefreshToStart->Completions.push_back(std::move(completion));
+        result.RefreshToStart->Completions.push_back(Waiter{std::move(completion)});
         m_inFlightRefresh = result.RefreshToStart;
         return result;
     }
@@ -317,15 +312,15 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         CompleteAll(refreshState->Executor, std::move(completions), error, std::move(token));
     }
 
-    void Start(ScopeList scopes, Waiter completion) {
+    template <class THandler> void Start(ScopeList scopes, THandler completion) {
         if (!scopes) {
             scopes = std::make_shared<const std::vector<std::string>>();
         }
         const std::optional<boost::asio::io_context::executor_type> completionExecutor = m_executor;
-        LookupResult lookup = LookUpCachedTokenOrStartRefresh(*scopes, std::move(completion));
+        LookupResult lookup = LookUpCachedTokenOrStartRefresh(*scopes, completion);
         if (lookup.CachedFailure.has_value()) {
-            Private::CompleteOnExecutorIfSet(completionExecutor, std::move(lookup.PendingCompletion),
-                                             *lookup.CachedFailure, AccessToken{});
+            Private::CompleteOnExecutorIfSet(completionExecutor, std::move(completion), *lookup.CachedFailure,
+                                             AccessToken{});
             return;
         }
         if (!lookup.RefreshToStart && !lookup.CachedToken.has_value()) {
@@ -334,7 +329,7 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         }
 
         if (lookup.CachedToken.has_value() && !lookup.RefreshToStart) {
-            Private::CompleteOnExecutorIfSet(completionExecutor, std::move(lookup.PendingCompletion), std::error_code{},
+            Private::CompleteOnExecutorIfSet(completionExecutor, std::move(completion), std::error_code{},
                                              std::move(*lookup.CachedToken));
             return;
         }
@@ -362,7 +357,7 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
 
         // The background refresh is started first, so a re-entrant call from this completion joins it.
         if (lookup.CachedToken.has_value()) {
-            Private::CompleteOnExecutorIfSet(completionExecutor, std::move(lookup.PendingCompletion), std::error_code{},
+            Private::CompleteOnExecutorIfSet(completionExecutor, std::move(completion), std::error_code{},
                                              std::move(*lookup.CachedToken));
         }
     }

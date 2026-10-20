@@ -157,6 +157,49 @@ TEST(TokenCredentialTests, CachingTokenCredential_ReusesCachedTokenOutsideRefres
     EXPECT_EQ(receivedTokens, (std::vector<std::string>{"cached-token", "cached-token"}));
 }
 
+namespace {
+template <class T> struct CountingAllocator {
+    using value_type = T;
+    std::atomic<int>* Count;
+    explicit CountingAllocator(std::atomic<int>* count) : Count(count) {}
+    template <class U> CountingAllocator(const CountingAllocator<U>& other) : Count(other.Count) {}
+    T* allocate(std::size_t n) {
+        ++*Count;
+        return std::allocator<T>{}.allocate(n);
+    }
+    void deallocate(T* p, std::size_t n) { std::allocator<T>{}.deallocate(p, n); }
+    template <class U> bool operator==(const CountingAllocator<U>& other) const { return Count == other.Count; }
+};
+
+// Erasing this handler into an any_completion_handler allocates through its associated allocator.
+struct CountingHandler {
+    using allocator_type = CountingAllocator<char>;
+    std::atomic<int>* Count;
+    int* Invoked;
+    allocator_type get_allocator() const noexcept { return allocator_type{Count}; }
+    void operator()(std::error_code error, AVEVA::AzureClient::AccessToken) const {
+        EXPECT_FALSE(error);
+        ++*Invoked;
+    }
+};
+} // namespace
+
+TEST(TokenCredentialTests, CachingTokenCredential_CacheHitDoesNotEraseTheHandler) {
+    auto inner = std::make_shared<ScriptedTokenCredential>();
+    inner->EnqueueImmediate({}, MakeToken("cached-token", std::chrono::hours(1)));
+    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+    std::atomic<int> allocations{0};
+    int invoked = 0;
+
+    credential->GetTokenAsync({"scope-a"}, CountingHandler{&allocations, &invoked});
+    const int afterColdPath = allocations.load();
+    credential->GetTokenAsync({"scope-a"}, CountingHandler{&allocations, &invoked});
+
+    EXPECT_EQ(invoked, 2);
+    EXPECT_GT(afterColdPath, 0);
+    EXPECT_EQ(allocations.load(), afterColdPath);
+}
+
 TEST(TokenCredentialTests, CachingTokenCredential_SharedScopeListIsServedFromTheCacheAndMatchesVectorCalls) {
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate({}, MakeToken("cached-token", std::chrono::hours(1)));

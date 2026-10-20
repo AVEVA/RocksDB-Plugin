@@ -69,7 +69,7 @@ are medium confidence: confirm them against the code, or measure, before changin
 - **Validation:** new TSan-run test: a batch delete with more than 256 blobs (several chunks) cancelled right after
   initiation, looped 200×. Run the existing `BatchDeleteTests`.
 
-### [ ] T30 – Token cache hit erases and heap-allocates the handler on every authorized request
+### [x] T30 – Token cache hit erases and heap-allocates the handler on every authorized request
 - **File:** `libs\AzureClient\include\AVEVA\AzureClient\TokenCredential.hpp` (`GetTokenForScopesAsync` ~160-165:
   `Start(..., Waiter{std::move(handler)})`; `Start` ~320; `LookUpCachedTokenOrStartRefresh` ~220).
 - **Problem:** The handler is converted to `Waiter` (`any_completion_handler`) *before* the cache is checked. On
