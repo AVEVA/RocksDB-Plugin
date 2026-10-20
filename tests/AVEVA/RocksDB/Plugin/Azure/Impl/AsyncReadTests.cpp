@@ -221,6 +221,23 @@ TEST_F(AsyncReadTests, ReadAsync_ConcurrentReadsAtCachedEnd_ShareOnePropertiesCa
     EXPECT_EQ(before + 1, m_deferredEnv.Blob->PropertiesRequests);
 }
 
+TEST_F(AsyncReadTests, ReadAsync_AtCachedEndWithMovedEtag_PublishesTheRefreshToTheRuntimeCache) {
+    auto file = CreateFile(m_deferredEnv);
+    m_deferredEnv.Blob->ETag = "etag2";
+
+    std::vector<char> scratch(64);
+    auto req = MakeRequest(BlobSize, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+    ASSERT_TRUE(Submit(file, req, record, handle).ok());
+    std::vector<void*> handles{handle.Handle};
+    ASSERT_TRUE(PollAsyncReads(handles).ok());
+
+    const auto cached = m_deferredEnv.Runtime->CachedBlobMetadata(m_deferredEnv.Client->ResourceUrl());
+    ASSERT_TRUE(cached.has_value());
+    EXPECT_EQ("etag2", cached->ETag);
+}
+
 TEST_F(AsyncReadTests, ReadAsync_MetadataInitiationThrows_CompletesTheReadWithTheErrorAndLaterCallsStartFresh) {
     auto file = CreateFile(m_deferredEnv);
     m_deferredEnv.Http.FailNextInitiation(std::make_exception_ptr(std::runtime_error("cannot start")));

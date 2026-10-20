@@ -453,26 +453,27 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
     if (remaining == 0) {
         // At the cached end of the blob: only re-read if another writer moved the blob on.
         const auto file = self;
-        CoalescedMetadataAsync(
-            file, [self = std::move(self), offset, bytesToRead, callback = std::move(callback), etag, attemptsLeft,
-                   timeout](std::exception_ptr error, int64_t latestSize, std::string latestEtag) mutable {
-                if (error) {
-                    ReadableFileDetail::FinishRead(self, callback, error, {});
-                    return;
-                }
-                if (latestEtag == etag) {
-                    ReadableFileDetail::FinishRead(self, callback, nullptr, {});
-                    return;
-                }
+        CoalescedMetadataAsync(file, [self = std::move(self), offset, bytesToRead, callback = std::move(callback), etag,
+                                      attemptsLeft, timeout](std::exception_ptr error, int64_t latestSize,
+                                                             std::string latestEtag, uint64_t epoch) mutable {
+            if (error) {
+                ReadableFileDetail::FinishRead(self, callback, error, {});
+                return;
+            }
+            if (latestEtag == etag) {
+                self->ApplyRefreshedMetadata(latestSize, std::move(latestEtag), epoch);
+                ReadableFileDetail::FinishRead(self, callback, nullptr, {});
+                return;
+            }
 
-                auto left = attemptsLeft;
-                if (!ReadableFileDetail::StaleReadPolicy::TrySpendRefresh(left)) {
-                    ReadableFileDetail::FinishRead(self, callback, ReadableFileDetail::StaleReadError(), {});
-                    return;
-                }
-                self->SetMetadata(latestSize, std::move(latestEtag));
-                ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(callback), left, timeout);
-            });
+            auto left = attemptsLeft;
+            if (!ReadableFileDetail::StaleReadPolicy::TrySpendRefresh(left)) {
+                ReadableFileDetail::FinishRead(self, callback, ReadableFileDetail::StaleReadError(), {});
+                return;
+            }
+            self->ApplyRefreshedMetadata(latestSize, std::move(latestEtag), epoch);
+            ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(callback), left, timeout);
+        });
         return;
     }
 
@@ -512,17 +513,17 @@ void BasicReadableFileImpl<TBlob>::RefreshMetadataAndReadAsync(std::shared_ptr<c
                                                                TCallback callback, const int attemptsLeft,
                                                                const std::chrono::milliseconds timeout) {
     const auto file = self;
-    CoalescedMetadataAsync(file, [self = std::move(self), offset, bytesToRead, callback = std::move(callback),
-                                  attemptsLeft,
-                                  timeout](std::exception_ptr error, int64_t size, std::string etag) mutable {
-        if (error) {
-            ReadableFileDetail::FinishRead(self, callback, error, {});
-            return;
-        }
+    CoalescedMetadataAsync(
+        file, [self = std::move(self), offset, bytesToRead, callback = std::move(callback), attemptsLeft,
+               timeout](std::exception_ptr error, int64_t size, std::string etag, uint64_t epoch) mutable {
+            if (error) {
+                ReadableFileDetail::FinishRead(self, callback, error, {});
+                return;
+            }
 
-        self->SetMetadata(size, std::move(etag));
-        ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(callback), attemptsLeft, timeout);
-    });
+            self->ApplyRefreshedMetadata(size, std::move(etag), epoch);
+            ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(callback), attemptsLeft, timeout);
+        });
 }
 
 // The first caller starts the properties call; callers arriving while it is in flight just queue behind it. A joiner
@@ -546,8 +547,9 @@ void BasicReadableFileImpl<TBlob>::CoalescedMetadataAsync(
     try {
         // The completion needs the state, which is part of the file, so it holds the file until the waiters are taken;
         // it lets go before running them so the file is not kept alive past the reads that wait on it.
+        const auto epoch = file->m_h.Runtime ? file->m_h.Runtime->BlobSizeEpoch() : 0;
         BlobOperations::GetMetadataAsync(
-            *file->m_h.Blob, [file = file](std::exception_ptr error, int64_t size, std::string etag) mutable {
+            *file->m_h.Blob, [file = file, epoch](std::exception_ptr error, int64_t size, std::string etag) mutable {
                 std::vector<typename BasicReadableFileImpl<TBlob>::MetadataCallback> waiters;
                 {
                     auto& refresh = file->m_metadataRefresh;
@@ -557,7 +559,7 @@ void BasicReadableFileImpl<TBlob>::CoalescedMetadataAsync(
                 }
                 file.reset();
                 for (auto& waiter : waiters) {
-                    waiter(error, size, etag);
+                    waiter(error, size, etag, epoch);
                 }
             });
     } catch (...) {
@@ -569,7 +571,7 @@ void BasicReadableFileImpl<TBlob>::CoalescedMetadataAsync(
             state.InFlight = false;
         }
         for (auto& waiter : waiters) {
-            waiter(error, 0, std::string());
+            waiter(error, 0, std::string(), 0);
         }
     }
 }
@@ -590,14 +592,16 @@ int64_t BasicReadableFileImpl<TBlob>::DownloadWithRetry(const int64_t offset, co
         if (remaining == 0) {
             // One properties call serves both the ETag check and the refresh, so a stale end-of-blob read costs a
             // single round trip.
+            const auto epoch = m_h.Runtime ? m_h.Runtime->BlobSizeEpoch() : 0;
             auto latest = BlobOperations::GetMetadata(*m_h.Blob);
             if (latest.ETag != etag) {
                 if (!ReadableFileDetail::StaleReadPolicy::TrySpendRefresh(refreshesLeft)) {
                     throw ReadableFileDetail::StaleReadException();
                 }
-                SetMetadata(latest.Size, std::move(latest.ETag));
+                ApplyRefreshedMetadata(latest.Size, std::move(latest.ETag), epoch);
                 continue;
             }
+            ApplyRefreshedMetadata(latest.Size, std::move(latest.ETag), epoch);
 
             return 0;
         }
@@ -628,9 +632,15 @@ template <typename TBlob> void BasicReadableFileImpl<TBlob>::RefreshBlobMetadata
     // cached entry was stale, so it is replaced for the next open too.
     const auto epoch = m_h.Runtime ? m_h.Runtime->BlobSizeEpoch() : 0;
     auto metadata = BlobOperations::GetMetadata(*m_h.Blob);
+    ApplyRefreshedMetadata(metadata.Size, std::move(metadata.ETag), epoch);
+}
+
+template <typename TBlob>
+void BasicReadableFileImpl<TBlob>::ApplyRefreshedMetadata(const int64_t size, std::string etag,
+                                                          const uint64_t epoch) const {
     if (m_h.Runtime) {
-        m_h.Runtime->CacheBlobMetadata(m_h.Blob->ResourceUrl(), metadata.Size, metadata.ETag, epoch);
+        m_h.Runtime->CacheBlobMetadata(m_h.Blob->ResourceUrl(), size, etag, epoch);
     }
-    SetMetadata(metadata.Size, std::move(metadata.ETag));
+    SetMetadata(size, std::move(etag));
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

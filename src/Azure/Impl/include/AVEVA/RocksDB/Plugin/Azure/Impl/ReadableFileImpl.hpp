@@ -78,7 +78,7 @@ template <typename TBlob> class BasicReadableFileImpl {
 
     // Concurrent async reads that need fresh blob metadata (at the cached end, or after a precondition failure) share
     // one in-flight properties call instead of each issuing their own.
-    using MetadataCallback = std::move_only_function<void(std::exception_ptr, int64_t, std::string)>;
+    using MetadataCallback = std::move_only_function<void(std::exception_ptr, int64_t, std::string, uint64_t)>;
     struct MetadataRefreshState {
         std::mutex Mutex;
         bool InFlight = false;
@@ -97,6 +97,9 @@ template <typename TBlob> class BasicReadableFileImpl {
     int64_t DownloadWithRetry(const int64_t offset, const int64_t bytesToRead, char* buffer) const;
     [[nodiscard]] std::pair<int64_t, std::string> GetMetadata() const;
     void SetMetadata(int64_t size, std::string etag) const;
+    // Publishes a refreshed (size, ETag) to the runtime cache for later opens, then to this file. `epoch` is the
+    // runtime BlobSizeEpoch captured before the fetch started.
+    void ApplyRefreshedMetadata(int64_t size, std::string etag, uint64_t epoch) const;
     template <ReadCompletion TCallback>
     static void ReadAsyncAttempt(std::shared_ptr<const BasicReadableFileImpl> self, int64_t offset, int64_t bytesToRead,
                                  TCallback callback, int attemptsLeft, std::chrono::milliseconds timeout);

@@ -203,7 +203,7 @@ are medium confidence: confirm them against the code, or measure, before changin
   a warning on timeout. Local state is already cleared by the scope exit.
 - **Validation:** with a fake ReleaseLease that never completes, Unlock returns within the bound.
 
-### [ ] T39 – Async/inline metadata refreshes don't update the runtime (size, ETag) cache
+### [x] T39 – Async/inline metadata refreshes don't update the runtime (size, ETag) cache
 - **File:** `src\Azure\Impl\ReadableFileImpl.ipp` 451-475 (`ReadAsyncAttempt` EOF), 510-527
   (`RefreshMetadataAndReadAsync`), 588-603 (`DownloadWithRetry` EOF), 626-635 (`RefreshBlobMetadata`).
 - **Problem:** Only `RefreshBlobMetadata` calls `ClientRuntimeBase::CacheBlobMetadata`; the other three sites only
