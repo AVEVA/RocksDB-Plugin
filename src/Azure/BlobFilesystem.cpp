@@ -184,15 +184,12 @@ rocksdb::IOStatus BlobFilesystem::ReopenWritableFile(const std::string& fname, c
     });
 }
 
-rocksdb::IOStatus BlobFilesystem::ReuseWritableFile(const std::string& fname, const std::string&,
-                                                    const rocksdb::FileOptions&,
-                                                    std::unique_ptr<rocksdb::FSWritableFile>* r,
+// Blobs cannot be recycled in place. Creating a fresh fname would orphan old_fname in the container, so report
+// NotSupported and let RocksDB fall back to NewWritableFile and delete the old log itself.
+rocksdb::IOStatus BlobFilesystem::ReuseWritableFile(const std::string&, const std::string&, const rocksdb::FileOptions&,
+                                                    std::unique_ptr<rocksdb::FSWritableFile>*,
                                                     rocksdb::IODebugContext*) {
-    return Guard("ReuseWritableFile", fname, [&]() -> rocksdb::IOStatus {
-        *r = std::unique_ptr<rocksdb::FSWritableFile>(
-            new WriteableFile(m_filesystem->ReuseWritableFile(fname), m_logger));
-        return rocksdb::IOStatus::OK();
-    });
+    return rocksdb::IOStatus::NotSupported("ReuseWritableFile");
 }
 
 rocksdb::IOStatus BlobFilesystem::NewRandomRWFile(const std::string& fname, const rocksdb::FileOptions&,

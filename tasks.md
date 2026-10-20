@@ -168,7 +168,7 @@ are medium confidence: confirm them against the code, or measure, before changin
 - **Change:** after `CreateOrReplace`, call `FindCache(path)->RemoveFile(realPath)`, as `DeleteFile` does.
 - **Validation:** cache file A, recreate A, Close it without writing, read A, and expect empty content or NotFound.
 
-### [ ] T36 – `ReuseWritableFile` ignores `old_fname` (pre-existing on `main`)
+### [x] T36 – `ReuseWritableFile` ignores `old_fname` (pre-existing on `main`)
 - **File:** `src\Azure\BlobFilesystem.cpp:190-196`.
 - **Problem:** RocksDB expects `old_fname` to be recycled into `fname`. The plugin creates a new `fname` instead,
   so old WAL blobs are left behind in the container.
