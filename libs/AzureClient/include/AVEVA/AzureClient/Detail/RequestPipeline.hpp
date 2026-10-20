@@ -101,8 +101,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
           m_retryNotFoundAndGone(retryNotFoundAndGone), m_rebuild(std::move(rebuild)),
           m_replaySafe(callerAbsorbsReplay || IsReplaySafe(m_request)),
           m_parentSlot(m_requestOptions.GetCancellationSlot()), m_timer(httpClient.get_executor()),
-          m_deadlineTimer(httpClient.get_executor()), m_totalDeadline(m_requestOptions.GetTotalDeadline()),
-          m_start(std::chrono::steady_clock::now()),
+          m_totalDeadline(m_requestOptions.GetTotalDeadline()), m_start(std::chrono::steady_clock::now()),
           m_maxAttempts(ComputeMaxAttempts(m_requestOptions.GetMaxRetries().value_or(retry.MaxRetries))) {}
 
     void Start() {
@@ -123,8 +122,10 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
 
         if (m_totalDeadline) {
             // Bounds retries and backoff together; the per-attempt timeout only bounds one send.
-            m_deadlineTimer.expires_after(*m_totalDeadline);
-            m_deadlineTimer.async_wait([weak = this->weak_from_this()](const boost::system::error_code& waitError) {
+            // Created only when a deadline is set: construction takes the executor's service-registry mutex.
+            m_deadlineTimer.emplace(m_httpClient.get_executor());
+            m_deadlineTimer->expires_after(*m_totalDeadline);
+            m_deadlineTimer->async_wait([weak = this->weak_from_this()](const boost::system::error_code& waitError) {
                 if (auto self = weak.lock(); self && !waitError) {
                     self->Run(DeadlineEvent{});
                 }
@@ -566,7 +567,9 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         // The parent slot is deliberately not cleared here: clearing on the transport thread would race with
         // the caller emitting on its own executor. Its handler only holds a weak_ptr and is inert once
         // finished; the caller's slot is cleared on its executor when the completion is dispatched.
-        m_deadlineTimer.cancel();
+        if (m_deadlineTimer) {
+            m_deadlineTimer->cancel();
+        }
         THandler completion = std::move(m_completion);
         completion(error, std::move(response));
     }
@@ -585,7 +588,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     boost::asio::cancellation_slot m_parentSlot;
     boost::asio::cancellation_signal m_attemptSignal;
     typename RetryTimerFor<THttp>::type m_timer;
-    boost::asio::steady_timer m_deadlineTimer;
+    std::optional<boost::asio::steady_timer> m_deadlineTimer;
     std::optional<std::chrono::milliseconds> m_totalDeadline;
     std::chrono::steady_clock::time_point m_start;
     std::mutex m_queueMutex;

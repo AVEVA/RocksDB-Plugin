@@ -368,7 +368,10 @@ are medium confidence: confirm them against the code, or measure, before changin
   outside `Poll()`, and handlers now deferred are never run. Needs a separate test-infrastructure change (drive
   `Poll()` after `CompleteNext`, or run completions on the executor) before the production change can land.
 
-### [ ] T51 – Per-request deque/timer allocations in `RetryOperation` / `DownloadOperation` (**Verify first**)
+### [x] T51 – Per-request deque/timer allocations in `RetryOperation` / `DownloadOperation` (**Verify first**)
+- **Done (partial):** `m_deadlineTimer` is now a `std::optional` emplaced only when a total deadline is set. The deque
+  change was skipped: the eager allocation is libstdc++-specific, can't be measured on this Windows host, and a custom
+  FIFO would add complexity for no verified gain. 1043/1043 non-integration tests pass.
 - **Files:** `libs\AzureClient\include\AVEVA\AzureClient\Detail\RequestPipeline.hpp` (`m_queue`, `m_deadlineTimer`
   ~555-590); `Detail\BlobDownload.hpp` (`m_events`).
 - **Problem:** A default-constructed `std::deque` allocates its map plus a node eagerly on libstdc++, so every
