@@ -147,7 +147,7 @@ against the code unless it says **Verify first**.
   - Make those members direct and the type non-movable.
   - Template the internal read callback.
 
-### [ ] T10 – `DownloadBufferPool` contention and allocation
+### [x] T10 – `DownloadBufferPool` contention and allocation
 - **File:** `src\Azure\Impl\include\...\DownloadBufferPool.hpp`.
 - **Problems:**
   - One process-wide pool behind one mutex.

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cstddef>
 #include <memory>
@@ -66,12 +67,12 @@ class DownloadBufferPool : public std::enable_shared_from_this<DownloadBufferPoo
         const std::size_t capacity = size > MaxPooledBufferBytes ? size : std::bit_ceil(std::max(size, MinBufferBytes));
         std::unique_ptr<char[]> buffer;
         if (capacity <= MaxPooledBufferBytes) {
-            std::scoped_lock lock(m_mutex);
-            auto& free = m_free[ClassOf(capacity)];
-            if (!free.empty()) {
-                buffer = std::move(free.back());
-                free.pop_back();
-                m_pooledBytes -= capacity;
+            auto& sizeClass = m_classes[ClassOf(capacity)];
+            std::scoped_lock lock(sizeClass.Mutex);
+            if (!sizeClass.Free.empty()) {
+                buffer = std::move(sizeClass.Free.back());
+                sizeClass.Free.pop_back();
+                m_pooledBytes.fetch_sub(capacity, std::memory_order_relaxed);
             }
         }
         if (!buffer) {
@@ -81,23 +82,33 @@ class DownloadBufferPool : public std::enable_shared_from_this<DownloadBufferPoo
     }
 
     /// <summary>Bytes currently held for reuse (for tests and diagnostics).</summary>
-    [[nodiscard]] std::size_t PooledBytes() const {
-        std::scoped_lock lock(m_mutex);
-        return m_pooledBytes;
-    }
+    [[nodiscard]] std::size_t PooledBytes() const { return m_pooledBytes.load(std::memory_order_relaxed); }
 
     /// <summary>Buffers currently held for reuse (for tests and diagnostics).</summary>
     [[nodiscard]] std::size_t PooledCount() const {
-        std::scoped_lock lock(m_mutex);
         std::size_t count = 0;
-        for (const auto& free : m_free) {
-            count += free.size();
+        for (const auto& sizeClass : m_classes) {
+            std::scoped_lock lock(sizeClass.Mutex);
+            count += sizeClass.Free.size();
         }
         return count;
     }
 
   private:
     static constexpr std::size_t ClassCount = std::bit_width(MaxPooledBufferBytes / MinBufferBytes);
+
+// One lock per size class, on its own cache line, so threads reading different sizes never contend or false-share.
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4324) // padding is the point
+#endif
+    struct alignas(64) SizeClass {
+        mutable std::mutex Mutex;
+        std::vector<std::unique_ptr<char[]>> Free;
+    };
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
     // Index of the power-of-two capacity within [MinBufferBytes, MaxPooledBufferBytes].
     static constexpr std::size_t ClassOf(const std::size_t capacity) {
@@ -108,30 +119,38 @@ class DownloadBufferPool : public std::enable_shared_from_this<DownloadBufferPoo
         if (capacity > MaxPooledBufferBytes) {
             return;
         }
-        std::scoped_lock lock(m_mutex);
-        auto& free = m_free[ClassOf(capacity)];
-        if (free.size() >= MaxPooledBuffersPerClass) {
-            return;
+        {
+            auto& sizeClass = m_classes[ClassOf(capacity)];
+            std::scoped_lock lock(sizeClass.Mutex);
+            if (sizeClass.Free.size() >= MaxPooledBuffersPerClass) {
+                return;
+            }
+            sizeClass.Free.push_back(std::move(buffer));
         }
-        free.push_back(std::move(buffer));
-        m_pooledBytes += capacity;
-        EvictLargestWhileOverCap();
+        if (m_pooledBytes.fetch_add(capacity, std::memory_order_relaxed) + capacity > MaxPooledTotalBytes) {
+            EvictLargestWhileOverCap();
+        }
     }
 
-    // Caller holds m_mutex. Largest buffers go first: they free the most memory per eviction and are the costliest
-    // to keep for the rare big read.
+    // Largest buffers go first: they free the most memory per eviction and are the costliest to keep for the rare big
+    // read. Evicted buffers are collected under each class lock and freed after it is released, so a free never
+    // stalls other threads.
     void EvictLargestWhileOverCap() {
-        for (std::size_t sizeClass = ClassCount; sizeClass-- > 0 && m_pooledBytes > MaxPooledTotalBytes;) {
-            auto& free = m_free[sizeClass];
-            while (!free.empty() && m_pooledBytes > MaxPooledTotalBytes) {
-                free.pop_back();
-                m_pooledBytes -= MinBufferBytes << sizeClass;
+        std::vector<std::unique_ptr<char[]>> evicted;
+        for (std::size_t index = ClassCount;
+             index-- > 0 && m_pooledBytes.load(std::memory_order_relaxed) > MaxPooledTotalBytes;) {
+            auto& sizeClass = m_classes[index];
+            const std::size_t bytes = MinBufferBytes << index;
+            std::scoped_lock lock(sizeClass.Mutex);
+            while (!sizeClass.Free.empty() && m_pooledBytes.load(std::memory_order_relaxed) > MaxPooledTotalBytes) {
+                evicted.push_back(std::move(sizeClass.Free.back()));
+                sizeClass.Free.pop_back();
+                m_pooledBytes.fetch_sub(bytes, std::memory_order_relaxed);
             }
         }
     }
 
-    mutable std::mutex m_mutex;
-    std::size_t m_pooledBytes = 0;
-    std::array<std::vector<std::unique_ptr<char[]>>, ClassCount> m_free;
+    std::atomic<std::size_t> m_pooledBytes = 0;
+    std::array<SizeClass, ClassCount> m_classes;
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
