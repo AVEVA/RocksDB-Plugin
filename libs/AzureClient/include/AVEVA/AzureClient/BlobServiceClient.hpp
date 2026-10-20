@@ -8,14 +8,11 @@
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
-#include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
 #include <AVEVA/AzureClient/HttpClientLike.hpp>
 #include <AVEVA/AzureClient/Models/BlobContainerModels.hpp>
 #include <AVEVA/AzureClient/Response.hpp>
 #include <AVEVA/AzureClient/TokenCredential.hpp>
 #include <AVEVA/HttpClient/HttpClient.hpp>
-
-#include <boost/asio/async_result.hpp>
 
 #include <concepts>
 #include <expected>
@@ -27,8 +24,6 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
-
-#include <AVEVA/AzureClient/Detail/AsyncInitiation.hpp>
 
 namespace AVEVA::AzureClient {
 namespace Private {
@@ -48,11 +43,8 @@ struct ConnectionState;
 // (completing with an operation_aborted-flavored BlobStorageError); a slot associated with the
 // completion token is adopted when AzureRequestOptions has none.
 //
-// Completion tokens: every ...Async operation accepts any Boost.Asio CompletionToken (callback,
-// use_future, use_awaitable, ...) and completes with std::expected<Response<T>, BlobStorageError>.
-// Omitting the token yields a deferred, directly co_await-able operation, e.g. `co_await
-// client.GetBlobContainerClient(...);`. Overloads that also take an options struct exclude it from the defaulted
-// token via `requires`.
+// Operations: GetBlobContainerClient is synchronous and cheap; it only builds a client that shares this one's
+// connection state. Asynchronous operations live on the container and blob clients.
 template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobServiceClient {
   public:
     using ContainerClientType = BasicBlobContainerClient<THttp, TCred>;
@@ -82,16 +74,6 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobServic
     using executor_type = typename THttp::executor_type;
 
     [[nodiscard]] executor_type get_executor() const { return m_httpClient->get_executor(); }
-
-    // Request options (timeout, response body limit, cancellation slot) applied to every operation
-    // that is not given its own via WithRequestOptions(...) or the trailing requestOptions argument.
-    [[nodiscard]] const AzureRequestOptions& GetDefaultRequestOptions() const noexcept {
-        return m_connection->DefaultRequestOptions;
-    }
-
-    // The default completion token used when a ...Async call omits an explicit token
-    // (matching this client's executor_type, per boost::asio::default_completion_token).
-    using DefaultCompletionToken = boost::asio::default_completion_token<executor_type>::type;
 
     // Returned by value; wrap it in a shared_ptr when shared ownership is needed.
     [[nodiscard]] ContainerClientType GetBlobContainerClient(std::string containerName) const {
