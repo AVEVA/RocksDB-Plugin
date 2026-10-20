@@ -69,6 +69,7 @@ struct PendingRequest {
     Detail::CompletionPointer completion;
     std::shared_ptr<CancelState> cancellation;
     std::chrono::steady_clock::time_point deadline;
+    std::shared_ptr<void> state; // The request's RequestState, kept so a failed start can return its slot.
 };
 
 /// <summary>
@@ -120,6 +121,42 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     };
 
     using Limiter = OriginLimiter<PendingRequest, LimiterSink>;
+
+    /// <summary>
+    /// A request's handler and, once it has started under a per-origin cap, its slot. Whichever of the normal
+    /// completion and a failure path runs first completes the handler; the slot is returned exactly once. One
+    /// allocation per request serves both the unlimited and the limited path.
+    /// </summary>
+    struct RequestState {
+        explicit RequestState(Detail::CompletionPointer completion) noexcept : cell(std::move(completion)) {}
+
+        CompletionCell cell;
+        std::shared_ptr<Limiter> limiter;
+        std::string origin;
+        std::atomic<bool> holdsSlot{false};
+
+        void HoldSlot(std::shared_ptr<Limiter> limiterIn, std::string originIn) noexcept {
+            limiter = std::move(limiterIn);
+            origin = std::move(originIn);
+            holdsSlot.store(true);
+        }
+
+        void ReleaseSlot() {
+            if (holdsSlot.exchange(false)) {
+                limiter->Release(origin);
+            }
+        }
+
+        void Finish(std::error_code error, HttpResponse response) {
+            // The slot goes back before the handler runs, so a slow or blocked handler cannot hold up queued
+            // requests, and a throwing handler cannot hang the origin.
+            auto inner = cell.Take();
+            ReleaseSlot();
+            if (inner) {
+                Detail::Complete(std::move(inner), error, std::move(response));
+            }
+        }
+    };
 
     /// <summary>
     /// Builds the TLS context and the pools and wires the pools to the sweeper. Throws if the requested
@@ -177,7 +214,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         // Initiation must never throw into the caller with the handler lost: the handler is parked in a cell
         // so that, if anything throws (in practice std::bad_alloc), it is failed exactly once and, as always,
         // never from inside this call.
-        auto cell = std::make_shared<CompletionCell>(std::move(completion));
+        auto cell = std::make_shared<RequestState>(std::move(completion));
         try {
             FaultPolicy::OnSubmit();
             auto route = Route::Of(request, options);
@@ -185,18 +222,15 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
             if (!route.Sendable()) {
                 return FailLater(cell, route.Parsed ? route.Error : make_error_code(HttpClientError::InvalidUrl));
             }
-            auto guarded = Detail::MakeCompletion([cell](std::error_code error, HttpResponse response) {
-                if (auto pending = cell->Take()) {
-                    Detail::Complete(std::move(pending), error, std::move(response));
-                }
-            });
+            auto guarded = Detail::MakeCompletion(
+                [cell](std::error_code error, HttpResponse response) { cell->Finish(error, std::move(response)); });
             auto cancellation = BindCallerSlot(options);
             // The deadline covers time spent queued behind the per-origin cap, not just the network exchange.
             const auto deadline = DeadlineFor(options);
             if (m_limiter) {
                 auto origin = route.Origin();
                 return SendLimited(std::move(origin), std::move(route), std::move(request), std::move(guarded),
-                                   std::move(options), std::move(cancellation), deadline);
+                                   std::move(options), std::move(cancellation), deadline, std::move(cell));
             }
             SendUnlimited(std::move(route), std::move(request), std::move(guarded), std::move(options),
                           std::move(cancellation), deadline);
@@ -218,20 +252,14 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// </summary>
     /// <param name="cell">The cell holding the request's completion.</param>
     /// <param name="error">Why the request failed.</param>
-    void FailLater(const std::shared_ptr<CompletionCell>& cell, std::error_code error) noexcept {
+    void FailLater(const std::shared_ptr<RequestState>& cell, std::error_code error) noexcept {
         try {
-            asio::post(m_context, [cell, error] {
-                if (auto pending = cell->Take()) {
-                    Detail::Complete(std::move(pending), error, HttpResponse{});
-                }
-            });
+            asio::post(m_context, [cell, error] { cell->Finish(error, HttpResponse{}); });
             return;
         } catch (...) {
         }
         try {
-            if (auto pending = cell->Take()) {
-                Detail::Complete(std::move(pending), error, HttpResponse{});
-            }
+            cell->Finish(error, HttpResponse{});
         } catch (...) {
             // The handler or response construction threw; only the diagnostics receiver remains to report it to.
             ReportHandlerThrew();
@@ -283,7 +311,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// <param name="options">The timeout, response limits, and cancellation slot for this request.</param>
     void SendLimited(std::string origin, Route route, HttpRequest request, Detail::CompletionPointer completion,
                      HttpRequestOptions options, std::shared_ptr<CancelState> cancellation,
-                     std::chrono::steady_clock::time_point deadline) {
+                     std::chrono::steady_clock::time_point deadline, std::shared_ptr<RequestState> state) {
         const auto ticket = m_limiter->NextTicket();
         // Set before queueing so a cancellation cannot slip in between; a started request retargets it.
         if (cancellation) {
@@ -293,9 +321,8 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
                 }
             });
         }
-        PendingRequest pending{
-            std::move(origin), std::move(route), std::move(request), std::move(options), std::move(completion),
-            cancellation,      deadline};
+        PendingRequest pending{std::move(origin),     std::move(route), std::move(request), std::move(options),
+                               std::move(completion), cancellation,     deadline,           std::move(state)};
         // Run reads the origin from the request before it consumes it.
         m_limiter->Run(pending.origin, ticket, std::move(pending));
         // A cancel that fired before the request was queued found nothing to remove; deliver it again to
@@ -309,92 +336,18 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// </summary>
     /// <param name="pending">The request to send.</param>
     void StartLimited(PendingRequest&& pending) noexcept {
-        std::shared_ptr<LimitedStart> start;
-        try {
-            start = std::make_shared<LimitedStart>(m_limiter, std::move(pending.origin), std::move(pending.completion));
-        } catch (...) {
-            // Nothing could be allocated to track the request, so the handler is still in `pending`. The slot is
-            // returned and the handler failed without allocating, from this call as a last resort.
-            FailUntracked(std::move(pending), ClassifyBuildFailure(std::current_exception()));
-            return;
-        }
+        // The state was allocated at submission, so starting cannot fail for lack of tracking memory: the slot
+        // is handed to it first, and from here its Finish returns the slot whichever path completes the request.
+        auto state = std::static_pointer_cast<RequestState>(std::move(pending.state));
+        state->HoldSlot(m_limiter, std::move(pending.origin));
         try {
             FaultPolicy::OnStartLimited();
-            auto wrapped = Detail::MakeCompletion(
-                [start](std::error_code error, HttpResponse response) { start->Finish(error, std::move(response)); });
-            SendUnlimited(std::move(pending.route), std::move(pending.request), std::move(wrapped),
+            SendUnlimited(std::move(pending.route), std::move(pending.request), std::move(pending.completion),
                           std::move(pending.options), std::move(pending.cancellation), pending.deadline);
         } catch (...) {
-            // Whatever threw, the slot must come back and the handler must be completed exactly once. `start`
+            // Whatever threw, the slot must come back and the handler must be completed exactly once. `state`
             // decides which of this path and the (possibly already queued) normal completion gets there first.
-            FailLimitedLater(start, ClassifyBuildFailure(std::current_exception()));
-        }
-    }
-
-    /// <summary>
-    /// A started request's handler and its origin slot. Whichever of the normal completion and the failure path
-    /// runs first completes the handler and returns the slot; the other finds both already done.
-    /// </summary>
-    struct LimitedStart {
-        LimitedStart(std::shared_ptr<Limiter> limiterIn, std::string originIn, Detail::CompletionPointer completion)
-            : cell(std::move(completion)), limiter(std::move(limiterIn)), origin(std::move(originIn)) {}
-
-        CompletionCell cell;
-        std::shared_ptr<Limiter> limiter;
-        std::string origin;
-        std::atomic<bool> released{false};
-
-        void ReleaseSlot() {
-            if (!released.exchange(true)) {
-                limiter->Release(origin);
-            }
-        }
-
-        void Finish(std::error_code error, HttpResponse response) {
-            // The slot goes back before the handler runs, so a slow or blocked handler cannot hold up queued
-            // requests, and a throwing handler cannot hang the origin.
-            auto inner = cell.Take();
-            if (inner) {
-                ReleaseSlot();
-                Detail::Complete(std::move(inner), error, std::move(response));
-                return;
-            }
-            ReleaseSlot();
-        }
-    };
-
-    /// <summary>
-    /// Fails a started request whose initiation threw, posted so the handler never runs inside the call that
-    /// triggered it (which may be another request's completion). Falls back to completing inline if the post
-    /// throws, rather than dropping the handler or leaking the slot.
-    /// </summary>
-    void FailLimitedLater(const std::shared_ptr<LimitedStart>& start, std::error_code error) noexcept {
-        try {
-            asio::post(m_context, [start, error] { start->Finish(error, HttpResponse{}); });
-            return;
-        } catch (...) {
-        }
-        try {
-            start->Finish(error, HttpResponse{});
-        } catch (...) {
-            // The handler threw; only the diagnostics receiver remains to report it to.
-            ReportHandlerThrew();
-        }
-    }
-
-    /// <summary>
-    /// Last resort when even the tracking state could not be allocated: fail the handler inline and return the
-    /// slot, so the origin is never left permanently one request short.
-    /// </summary>
-    void FailUntracked(PendingRequest&& pending, std::error_code error) noexcept {
-        try {
-            Detail::Complete(std::move(pending.completion), error, HttpResponse{});
-        } catch (...) {
-            ReportHandlerThrew();
-        }
-        try {
-            m_limiter->Release(pending.origin);
-        } catch (...) {
+            FailLater(state, ClassifyBuildFailure(std::current_exception()));
         }
     }
 
