@@ -232,9 +232,18 @@ class FileBasedCompressedSecondaryCache::Impl {
                     cacheItemHelper->del_cb(outObj, /*allocator=*/nullptr);
             });
 
-            auto s = cacheItemHelper->create_cb(dataSlice, compressionType, rocksdb::CacheTier::kNonVolatileBlockTier,
-                                                createContext,
-                                                /*allocator=*/nullptr, &outObj, &outCharge);
+            // RocksDB's block-type CacheItemHelper::Create() (cache/typed_cache.h) rejects any
+            // CacheTier other than kVolatileTier with Status::InvalidArgument(), so entries read
+            // back from the secondary cache must still be reported as kVolatileTier here or every
+            // Lookup() silently fails (always a "miss"), even though the entry was found on disk.
+            // kNonVolatileBlockTier is the value CacheTier's own doc comment (advanced_options.h)
+            // says identifies the secondary cache, which directly contradicts the private
+            // enforcement in typed_cache.h -- this looks like a genuine RocksDB inconsistency/bug.
+            // TODO: raise an issue with upstream RocksDB about this create_cb/CacheTier
+            // doc-vs-enforcement mismatch.
+            auto s =
+                cacheItemHelper->create_cb(dataSlice, compressionType, rocksdb::CacheTier::kVolatileTier, createContext,
+                                           /*allocator=*/nullptr, &outObj, &outCharge);
             if (!s.ok() || outObj == nullptr) {
                 return nullptr;
             }

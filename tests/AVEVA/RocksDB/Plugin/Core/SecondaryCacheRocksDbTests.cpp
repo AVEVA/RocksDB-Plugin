@@ -119,12 +119,6 @@ class SecondaryCacheRocksDbTests
 };
 
 TEST_P(SecondaryCacheRocksDbTests, ReadsAreCorrectAndServedFromSecondaryCache) {
-    if (std::get<0>(GetParam()) == SecondaryCacheBackend::FileBased) {
-        // FileBasedCompressedSecondaryCache::Lookup passes kNonVolatileBlockTier to create_cb, which RocksDB's
-        // block helpers reject (typed_cache.h), so it never produces a hit. Tracked as a follow-up issue.
-        ReadAll();
-        GTEST_SKIP() << "FileBased backend never produces RocksDB block hits (known issue)";
-    }
     ReadAll();
     Settle(*m_secondary);
     const auto hitsAfterFirstPass = Ticker(rocksdb::SECONDARY_CACHE_HITS);
