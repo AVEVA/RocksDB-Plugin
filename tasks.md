@@ -446,7 +446,7 @@ are medium confidence: confirm them against the code, or measure, before changin
 - **Validation:** `ctest --repeat until-fail:50 -R <names>` on an ASan build. Time the test binaries before and
   after.
 
-### [ ] T56 – HttpClient allocation test measures setup, not per-request cost
+### [x] T56 – HttpClient allocation test measures setup, not per-request cost
 - **File:** `libs\HttpClient\tests\HttpClientAllocationTests.cpp:25-58`.
 - **Problem:** Each measurement uses a fresh `io_context` and client, so the ~119 allocations counted are mostly
   one-time Asio service setup. Only `limited` is asserted. The pooled-connection path is never measured.
