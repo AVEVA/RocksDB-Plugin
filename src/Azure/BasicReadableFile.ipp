@@ -65,6 +65,12 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::ReadAsync(rocksdb::FSReadRequest& re
     if (io_handle == nullptr || del_fn == nullptr) {
         return FSRandomAccessFile::ReadAsync(req, opts, std::move(cb), cb_arg, io_handle, del_fn, dbg);
     }
+    if (!Impl::RangeCheck::IsValid(req.offset, req.len)) {
+        return rocksdb::IOStatus::InvalidArgument("ReadAsync offset or size is out of range");
+    }
+    if (!cb) {
+        return rocksdb::IOStatus::InvalidArgument("ReadAsync requires a callback");
+    }
     return StartRead(req, opts, std::move(cb), cb_arg, io_handle, del_fn, nullptr);
 }
 
@@ -75,9 +81,6 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& re
                                                       std::shared_ptr<Impl::AsyncReadSignal> signal) {
     if (!Impl::RangeCheck::IsValid(req.offset, req.len)) {
         return rocksdb::IOStatus::InvalidArgument("ReadAsync offset or size is out of range");
-    }
-    if (!cb) {
-        return rocksdb::IOStatus::InvalidArgument("ReadAsync requires a callback");
     }
     try {
         auto request =
@@ -92,40 +95,47 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& re
             // The cache wrote straight into scratch; Complete only records the length.
             request->Complete(rocksdb::IOStatus::OK(), std::string_view(req.scratch, *cached));
         } else {
-            auto download = [file = m_file, offset, length, timeout, request, logger = m_logger] {
-                TImpl::ReadAsync(
-                    file, offset, length,
-                    [request, logger](std::exception_ptr error, std::string_view data,
-                                      const std::shared_ptr<const void>&) {
-                        request->Complete(error ? AzureErrorTranslator::FromException(*logger, error, "ReadAsync")
-                                                : rocksdb::IOStatus::OK(),
-                                          data);
-                    },
-                    TImpl::kMaxStaleReadRetries, timeout);
+            auto makeDownload = [&] {
+                return [file = m_file, offset, length, timeout, request, logger = m_logger] {
+                    TImpl::ReadAsync(
+                        file, offset, length,
+                        [request, logger](std::exception_ptr error, std::string_view data,
+                                          const std::shared_ptr<const void>&) {
+                            request->Complete(error ? AzureErrorTranslator::FromException(*logger, error, "ReadAsync")
+                                                    : rocksdb::IOStatus::OK(),
+                                              data);
+                        },
+                        TImpl::kMaxStaleReadRetries, timeout);
+                };
             };
 
             // A prefetch of this range may still be downloading; waiting for it beats downloading it twice. The
             // waiter runs on the host io_context, so it only looks at the in-memory prefetch: the file cache was
             // already consulted above and reading it again would put blocking disk I/O on that thread.
-            // The prefetch lands in a private buffer, never in scratch: RocksDB may free scratch as soon as the handle
-            // is deleted, and only Complete (which checks the request state under its lock) may copy into it.
-            // A throw here would escape the prefetch completion into the host io_context and strand the request, so
-            // it is turned into the request's error status instead.
-            std::move_only_function<void()> resume = [file = m_file, offset, length, request, download,
-                                                      logger = m_logger] {
-                try {
-                    std::string bytes(static_cast<size_t>(length), '\0');
-                    if (const auto prefetched = file->TryReadFromCompletedPrefetch(offset, length, bytes.data())) {
-                        request->Complete(rocksdb::IOStatus::OK(), std::string_view(bytes.data(), *prefetched));
-                    } else {
-                        download();
+            // The prefetch is copied into scratch only through TryCompleteInline, which does so under the request
+            // lock: RocksDB may free scratch as soon as the handle is deleted, and an aborted request must not
+            // touch it. A throw here would escape the prefetch completion into the host io_context and strand the
+            // request, so it is turned into the request's error status instead.
+            // The pending check is advisory, so the common case builds no waiter; if the prefetch settles in
+            // between, ChainOntoPendingPrefetch declines and the download starts directly.
+            bool chained = false;
+            if (m_file->HasPendingPrefetch(offset, length)) {
+                std::move_only_function<void()> resume = [file = m_file, offset, length, request,
+                                                          download = makeDownload(), logger = m_logger]() mutable {
+                    try {
+                        if (!request->TryCompleteInline([&](char* scratch) {
+                                return file->TryReadFromCompletedPrefetch(offset, length, scratch);
+                            })) {
+                            download();
+                        }
+                    } catch (...) {
+                        request->Complete(AzureErrorTranslator::FromCurrentException(*logger, "ReadAsync"), {});
                     }
-                } catch (...) {
-                    request->Complete(AzureErrorTranslator::FromCurrentException(*logger, "ReadAsync"), {});
-                }
-            };
-            if (!m_file->ChainOntoPendingPrefetch(offset, length, resume)) {
-                download();
+                };
+                chained = m_file->ChainOntoPendingPrefetch(offset, length, resume);
+            }
+            if (!chained) {
+                makeDownload()();
             }
         }
 
@@ -194,6 +204,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
 
     struct Active {
         void* Handle;
+        const Group* Owner;
     };
     std::vector<Active> active;
     // Deleting a handle aborts a request still in flight, so the handles are released even on an early exit. Declared
@@ -208,7 +219,6 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
     } cleanup{active};
 
     auto signal = std::make_shared<Impl::AsyncReadSignal>();
-    rocksdb::IOStatus batchStatus = rocksdb::IOStatus::OK();
     size_t nextGroup = 0;
 
     auto start = [&](Group& group) {
@@ -224,34 +234,10 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
             target = &merged;
         }
 
-        std::function<void(rocksdb::FSReadRequest&, void*)> done;
-        if (single) {
-            done = [target](rocksdb::FSReadRequest& finished, void*) {
-                target->status = finished.status;
-                target->result = finished.result;
-            };
-        } else {
-            done = [reqs, &order, &group](rocksdb::FSReadRequest& finished, void*) {
-                for (size_t position = group.FirstMember; position < group.EndMember; ++position) {
-                    const auto index = order[position];
-                    auto& member = reqs[index];
-                    const uint64_t relative = member.offset - group.Start;
-                    size_t available = 0;
-                    if (finished.status.ok() && finished.result.size() > relative) {
-                        available = std::min<size_t>(member.len, finished.result.size() - relative);
-                        if (available > 0) {
-                            std::memcpy(member.scratch, finished.result.data() + relative, available);
-                        }
-                    }
-                    member.status = finished.status;
-                    member.result = rocksdb::Slice(member.scratch, available);
-                }
-            };
-        }
-
         void* handle = nullptr;
         rocksdb::IOHandleDeleter deleter = nullptr;
-        auto started = StartRead(*target, opts, std::move(done), nullptr, &handle, &deleter, signal);
+        // No callback: MultiRead reads the outcome straight from the finished request.
+        auto started = StartRead(*target, opts, nullptr, nullptr, &handle, &deleter, signal);
         if (!started.ok()) {
             for (size_t position = group.FirstMember; position < group.EndMember; ++position) {
                 reqs[order[position]].status = started;
@@ -259,7 +245,30 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
             }
             return;
         }
-        active.push_back(Active{handle});
+        active.push_back(Active{handle, &group});
+    };
+
+    // A single-member group read straight into its request's scratch; a merged one is split back out of its buffer.
+    auto applyOutcome = [&](const Group& group, const rocksdb::FSReadRequest& finished) {
+        if (group.EndMember - group.FirstMember == 1) {
+            auto& target = reqs[order[group.FirstMember]];
+            target.status = finished.status;
+            target.result = finished.result;
+            return;
+        }
+        for (size_t position = group.FirstMember; position < group.EndMember; ++position) {
+            auto& member = reqs[order[position]];
+            const uint64_t relative = member.offset - group.Start;
+            size_t available = 0;
+            if (finished.status.ok() && finished.result.size() > relative) {
+                available = std::min<size_t>(member.len, finished.result.size() - relative);
+                if (available > 0) {
+                    std::memcpy(member.scratch, finished.result.data() + relative, available);
+                }
+            }
+            member.status = finished.status;
+            member.result = rocksdb::Slice(member.scratch, available);
+        }
     };
 
     while (true) {
@@ -279,9 +288,10 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
                 ++it;
                 continue;
             }
-            // Finished, so this delivers the callback without blocking.
-            if (auto delivered = Impl::PollAsyncReads({it->Handle}); !delivered.ok() && batchStatus.ok()) {
-                batchStatus = delivered;
+            // Finished, so reading the outcome does not block.
+            rocksdb::FSReadRequest finished;
+            if (handle->Request->TryGetOutcome(finished)) {
+                applyOutcome(*it->Owner, finished);
             }
             DeleteAsyncReadHandle(it->Handle);
             it = active.erase(it);
@@ -292,7 +302,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
         }
     }
 
-    return batchStatus;
+    return rocksdb::IOStatus::OK();
 } catch (...) {
     // RocksDB does not expect exceptions from a file. Locals (and so the in-flight handles) are already released here.
     return AzureErrorTranslator::FromCurrentException(*m_logger, "MultiRead");

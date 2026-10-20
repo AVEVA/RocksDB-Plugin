@@ -5,6 +5,7 @@
 #include <boost/asio/io_context.hpp>
 #include <rocksdb/file_system.h>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
@@ -72,9 +73,38 @@ class AsyncReadRequest {
     void Complete(rocksdb::IOStatus status, std::string_view data);
 
     /// <summary>
+    /// Fills the scratch buffer through `fill(char* scratch) -> std::optional<size_t>` while holding the request lock,
+    /// so an aborted request never has its (possibly released) scratch touched. Returns true when the request is
+    /// settled (completed here, or already finished/aborted) and false when `fill` produced nothing and the request is
+    /// still in flight. Exceptions from `fill` propagate and leave the request untouched.
+    /// </summary>
+    template <class TFill> [[nodiscard]] bool TryCompleteInline(TFill&& fill) {
+        {
+            std::scoped_lock lock(m_mutex);
+            if (m_state.load(std::memory_order_relaxed) != State::InFlight) {
+                return true;
+            }
+            const std::optional<size_t> filled = fill(m_scratch);
+            if (!filled) {
+                return false;
+            }
+            m_bytesRead = std::min(*filled, m_length);
+            m_status = rocksdb::IOStatus::OK();
+            m_state.store(State::Completed, std::memory_order_release);
+        }
+        NotifyFinished();
+        return true;
+    }
+
+    /// <summary>
     /// Blocks until the request completed or was aborted.
     /// </summary>
     void Wait();
+
+    /// <summary>
+    /// Describes a finished request the way RocksDB's callback would see it. Returns false while still in flight.
+    /// </summary>
+    [[nodiscard]] bool TryGetOutcome(rocksdb::FSReadRequest& outcome);
 
     /// <summary>
     /// Stops the request from touching the scratch buffer. Does not block: an in-flight download is left to finish
@@ -90,6 +120,9 @@ class AsyncReadRequest {
   private:
     enum class State { InFlight, Completed, Aborted };
 
+    void NotifyFinished();
+    void FillOutcomeLocked(rocksdb::FSReadRequest& outcome) const;
+
     const uint64_t m_offset;
     const size_t m_length;
     char* const m_scratch;
@@ -99,8 +132,7 @@ class AsyncReadRequest {
     const std::optional<Executor> m_completionExecutor;
 
     std::mutex m_mutex;
-    std::condition_variable m_finished;
-    // Written under m_mutex; atomic so MultiRead can poll Finished() without taking the lock of every request.
+    // Written under m_mutex; atomic so Finished() is lock-free and Wait() can block on the atomic itself.
     std::atomic<State> m_state{State::InFlight};
     rocksdb::IOStatus m_status;
     size_t m_bytesRead = 0;

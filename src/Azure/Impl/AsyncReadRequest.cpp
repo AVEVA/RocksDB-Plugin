@@ -59,16 +59,17 @@ void AsyncReadRequest::Complete(rocksdb::IOStatus status, const std::string_view
         m_status = std::move(status);
         m_state = State::Completed;
     }
-    m_finished.notify_all();
+    NotifyFinished();
+}
+
+void AsyncReadRequest::NotifyFinished() {
+    m_state.notify_all();
     if (m_signal) {
         m_signal->Notify();
     }
 }
 
-void AsyncReadRequest::Wait() {
-    std::unique_lock lock(m_mutex);
-    m_finished.wait(lock, [this] { return m_state != State::InFlight; });
-}
+void AsyncReadRequest::Wait() { m_state.wait(State::InFlight, std::memory_order_acquire); }
 
 void AsyncReadRequest::Abort() {
     {
@@ -81,10 +82,24 @@ void AsyncReadRequest::Abort() {
         m_status = rocksdb::IOStatus::Aborted("Async read aborted");
         m_bytesRead = 0;
     }
-    m_finished.notify_all();
-    if (m_signal) {
-        m_signal->Notify();
+    NotifyFinished();
+}
+
+bool AsyncReadRequest::TryGetOutcome(rocksdb::FSReadRequest& outcome) {
+    std::scoped_lock lock(m_mutex);
+    if (m_state == State::InFlight) {
+        return false;
     }
+    FillOutcomeLocked(outcome);
+    return true;
+}
+
+void AsyncReadRequest::FillOutcomeLocked(rocksdb::FSReadRequest& outcome) const {
+    outcome.offset = m_offset;
+    outcome.len = m_length;
+    outcome.scratch = m_scratch;
+    outcome.status = m_status;
+    outcome.result = rocksdb::Slice(m_scratch, m_status.ok() ? m_bytesRead : 0);
 }
 
 void AsyncReadRequest::DeliverCallback() {
@@ -96,11 +111,7 @@ void AsyncReadRequest::DeliverCallback() {
         }
 
         m_callbackDelivered = true;
-        request.offset = m_offset;
-        request.len = m_length;
-        request.scratch = m_scratch;
-        request.status = m_status;
-        request.result = rocksdb::Slice(m_scratch, m_status.ok() ? m_bytesRead : 0);
+        FillOutcomeLocked(request);
     }
 
     // Invoked without holding the lock: the callback may re-enter the filesystem (e.g. issue another read).

@@ -366,6 +366,19 @@ std::optional<size_t> BasicReadableFileImpl<TBlob>::TryReadFromPrefetch(const in
 }
 
 template <typename TBlob>
+bool BasicReadableFileImpl<TBlob>::HasPendingPrefetch(const int64_t offset, const int64_t bytesToRead) const {
+    if (offset < 0 || bytesToRead <= 0) {
+        return false;
+    }
+
+    std::scoped_lock lock(m_prefetch->Mutex);
+    return std::ranges::any_of(m_prefetch->Slots, [&](const PrefetchSlot& candidate) {
+        return candidate.Pending && offset >= candidate.Offset &&
+               offset + bytesToRead <= candidate.Offset + candidate.Length;
+    });
+}
+
+template <typename TBlob>
 bool BasicReadableFileImpl<TBlob>::ChainOntoPendingPrefetch(const int64_t offset, const int64_t bytesToRead,
                                                             std::move_only_function<void()>& resume) const {
     if (offset < 0 || bytesToRead <= 0) {

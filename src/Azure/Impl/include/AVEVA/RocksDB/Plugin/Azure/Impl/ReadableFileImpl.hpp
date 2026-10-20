@@ -120,6 +120,9 @@ template <typename TBlob> class BasicReadableFileImpl {
     // safe on a host io_context thread (FileCache reads are blocking disk I/O).
     [[nodiscard]] std::optional<size_t> TryReadFromCompletedPrefetch(int64_t offset, int64_t bytesToRead,
                                                                      char* buffer) const;
+    // True when a still-downloading prefetch fully covers the range. Advisory: the answer may change before the caller
+    // acts, so ChainOntoPendingPrefetch remains the authority.
+    [[nodiscard]] bool HasPendingPrefetch(int64_t offset, int64_t bytesToRead) const;
     // If a still-downloading prefetch fully covers the range, queues `resume` to run when that download settles
     // (successfully or not) and returns true; the caller must then not start its own read. Never blocks.
     [[nodiscard]] bool ChainOntoPendingPrefetch(int64_t offset, int64_t bytesToRead,

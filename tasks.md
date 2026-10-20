@@ -76,7 +76,7 @@ against the code unless it says **Verify first**.
   - Track completion with a counter or atomic that the completion decrements, instead of polling each mutex.
 - **Validation:** Existing MultiRead tests (merged, unmerged, partial failure). Allocation count drops.
 
-### [ ] T05 – Shrink per-read allocations in the async read path
+### [x] T05 – Shrink per-read allocations in the async read path
 - **Files:**
   - `src\Azure\Impl\AsyncReadRequest.cpp/.hpp`
   - `src\Azure\BasicReadableFile.ipp` (StartRead ~55-135)
