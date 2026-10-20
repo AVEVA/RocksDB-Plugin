@@ -252,7 +252,11 @@ against the code unless it says **Verify first**.
   `IEquals`), and fill all the fields.
 - **Validation:** The parser unit tests.
 
-### [ ] T22 – Response construction copies (Verify first / measure)
+### [x] T22 – Response construction copies (Verify first / measure) — DROPPED: no measurable gain
+- **Outcome:** Dropped. `BuildResponse` already builds each header name/value once from Beast's views (no double
+  copy). The remaining body copy costs ~1 µs per 64 KiB and ~30 µs per 1 MiB (memcpy ≈ 30–60 GB/s, measured), versus
+  millisecond-scale Azure round trips, so the gain is unmeasurable. A `buffer_body` sink template threaded through
+  `SendAsync` would add substantial complexity, so it is not worth it.
 - **File:** `libs\HttpClient\src\private\RequestOperation.cpp` ~415-424.
 - **Problem:** Each header becomes two `std::string`s per response. Download bodies arrive as `std::string`
   (`string_body`), and `SpanSink` then copies them into caller memory. That is a structural extra copy per ranged
