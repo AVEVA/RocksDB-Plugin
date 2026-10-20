@@ -19,6 +19,9 @@
 #include <boost/log/trivial.hpp>
 #include <boost/scope/scope_exit.hpp>
 #include <boost/scope/scope_fail.hpp>
+#include <cassert>
+#include <climits>
+#include <limits>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -273,17 +276,18 @@ rocksdb::IOStatus BlobFilesystem::Truncate(const std::string& fname, size_t size
     });
 }
 
-rocksdb::IOStatus BlobFilesystem::CreateDir(const std::string& d, const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    std::scoped_lock lock(m_state->KnownDirectoriesMutex);
-    m_state->KnownDirectories.insert(NormalizePath(d));
-    return rocksdb::IOStatus::OK();
+rocksdb::IOStatus BlobFilesystem::CreateDir(const std::string& d, const rocksdb::IOOptions& options,
+                                            rocksdb::IODebugContext* dbg) {
+    return CreateDirIfMissing(d, options, dbg);
 }
 
 rocksdb::IOStatus BlobFilesystem::CreateDirIfMissing(const std::string& d, const rocksdb::IOOptions&,
                                                      rocksdb::IODebugContext*) {
-    std::scoped_lock lock(m_state->KnownDirectoriesMutex);
-    m_state->KnownDirectories.insert(NormalizePath(d));
-    return rocksdb::IOStatus::OK();
+    return Guard("CreateDirIfMissing", d, [&]() -> rocksdb::IOStatus {
+        std::scoped_lock lock(m_state->KnownDirectoriesMutex);
+        m_state->KnownDirectories.insert(NormalizePath(d));
+        return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::DeleteDir(const std::string& d, const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
@@ -345,8 +349,10 @@ rocksdb::IOStatus BlobFilesystem::NumFileLinks(const std::string&, const rocksdb
 
 rocksdb::IOStatus BlobFilesystem::AreFilesSame(const std::string& first, const std::string& second,
                                                const rocksdb::IOOptions&, bool* res, rocksdb::IODebugContext*) {
-    *res = NormalizePath(first) == NormalizePath(second);
-    return rocksdb::IOStatus::OK();
+    return Guard("AreFilesSame", first + " vs " + second, [&]() -> rocksdb::IOStatus {
+        *res = NormalizePath(first) == NormalizePath(second);
+        return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus BlobFilesystem::LockFile(const std::string& f, const rocksdb::IOOptions&, rocksdb::FileLock** l,
@@ -410,8 +416,8 @@ rocksdb::IOStatus BlobFilesystem::NewLogger(const std::string& fname, const rock
 
 rocksdb::IOStatus BlobFilesystem::GetFreeSpace(const std::string&, const rocksdb::IOOptions&, uint64_t* diskfree,
                                                rocksdb::IODebugContext*) {
-    // TODO: Figure out if this is something we need to manage
-    *diskfree = static_cast<uint64_t>(INT_MAX) * 256; // a terrabyte
+    // The container is effectively unbounded, so report a large fixed amount rather than querying the service.
+    *diskfree = static_cast<uint64_t>(INT_MAX) * 256; // about a terabyte
     return rocksdb::IOStatus::OK();
 }
 
