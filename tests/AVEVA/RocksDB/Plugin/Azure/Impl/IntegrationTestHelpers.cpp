@@ -103,6 +103,9 @@ void AzureIntegrationTestBase::CreateContainerClient() {
         TryCreateContainer();
     } catch (const RequestFailedException& e) {
         HandleAuthenticationError(e);
+        if (HasFatalFailure()) {
+            return;
+        }
         FAIL() << "Failed to connect to Azure: " << e.what();
     } catch (const std::exception& e) {
         if (IsAuthenticationError(e)) {

@@ -106,7 +106,7 @@ class AzureIntegrationTestBase : public ::testing::Test {
     void TryCreateContainer();
 
     /// <summary>
-    /// Checks if a RequestFailedException is an authentication error and skips the test if so.
+    /// Checks if a RequestFailedException is an authentication error and fails the test if so.
     /// </summary>
     void HandleAuthenticationError(const RequestFailedException& e);
 
