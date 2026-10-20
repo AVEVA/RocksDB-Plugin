@@ -230,7 +230,7 @@ are medium confidence: confirm them against the code, or measure, before changin
 - **Validation:** `BlobOperationsTests`, `AsyncReadTests`. Add a fake-server test where Content-Range overstates the
   size.
 
-### [ ] T41 – `TryReadFromPrefetch` copies up to 8 MiB under the prefetch mutex
+### [x] T41 – `TryReadFromPrefetch` copies up to 8 MiB under the prefetch mutex
 - **File:** `src\Azure\Impl\ReadableFileImpl.ipp` 309-367 (`std::copy_n` ~362); prefetch completion ~219-250.
 - **Problem:** The copy holds `m_prefetch.Mutex`, which blocks other readers of the file and the prefetch
   completion. That completion runs on the host io_context thread.

@@ -359,10 +359,20 @@ std::optional<size_t> BasicReadableFileImpl<TBlob>::TryReadFromPrefetch(const in
         length = available;
     }
 
-    std::copy_n(slot->Data.data() + start, length, buffer);
+    // Published data is immutable, so copy it outside the lock; `owner` keeps the buffer alive meanwhile.
+    const auto id = slot->Id;
+    const auto owner = slot->Owner;
+    const auto source = slot->Data.data() + start;
+    const bool reachedEnd = offset + bytesToRead >= slot->Offset + slot->Length;
+    lock.unlock();
+
+    std::copy_n(source, length, buffer);
     // Reading up to or past the end of the range means the scan has moved on; free the memory.
-    if (offset + bytesToRead >= slot->Offset + slot->Length) {
-        state.Drop(slot);
+    if (reachedEnd) {
+        std::scoped_lock relock(state.Mutex);
+        if (const auto current = std::ranges::find(state.Slots, id, &PrefetchSlot::Id); current != state.Slots.end()) {
+            state.Drop(current);
+        }
     }
     return length;
 }

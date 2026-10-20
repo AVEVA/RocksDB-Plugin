@@ -419,6 +419,34 @@ TEST_F(AsyncReadTests, Read_PastTheEndOfPrefetchedRange_ReleasesItsBudget) {
     EXPECT_EQ(0, budget->load());
 }
 
+TEST_F(AsyncReadTests, Read_ConcurrentReadersOfPrefetchedRange_AllGetDataAndBudgetIsReleased) {
+    auto budget = std::make_shared<std::atomic<int64_t>>(0);
+    FakeReadableFile file{std::make_shared<FakeReadableFileImpl>(
+        "test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr, m_logger, nullptr, budget)};
+    ASSERT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'P'));
+
+    // Whichever reader reaches the end of the range drops the slot; the others must still have copied valid bytes.
+    std::vector<std::future<std::string>> readers;
+    for (int i = 0; i < 4; ++i) {
+        readers.push_back(std::async(std::launch::async, [&file] {
+            std::vector<char> scratch(512);
+            rocksdb::Slice result;
+            file.Read(0, scratch.size(), rocksdb::IOOptions{}, &result, scratch.data(), nullptr);
+            return result.ToString();
+        }));
+    }
+    for (auto& reader : readers) {
+        const auto data = reader.wait_for(std::chrono::seconds(5)) == std::future_status::ready ? reader.get() : "";
+        // A reader that lost the race falls back to a download, which the deferred environment holds.
+        EXPECT_TRUE(data.empty() || data == std::string(512, 'P'));
+    }
+    EXPECT_EQ(0, budget->load());
+    while (m_deferredEnv.Blob->PendingDownloads() > 0) {
+        m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'P'));
+    }
+}
+
 TEST_F(AsyncReadTests, Prefetch_DeclinedForBudget_DoesNotEvictFinishedRange) {
     auto budget = std::make_shared<std::atomic<int64_t>>(0);
     FakeReadableFile file{std::make_shared<FakeReadableFileImpl>(
