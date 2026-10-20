@@ -40,15 +40,16 @@ class CancelState {
     /// </summary>
     /// <param name="target">What to call on cancellation; it must be safe to call from any thread.</param>
     void SetTarget(Target target) {
-        bool fireNow = false;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
+            if (!m_cancelled.load()) {
+                m_target = std::move(target);
+                return;
+            }
+            // Rare: keep a copy as the current target so a repeated Cancel still reaches it.
             m_target = target;
-            fireNow = m_cancelled.load();
         }
-        if (fireNow) {
-            target();
-        }
+        target();
     }
 
     /// <summary>

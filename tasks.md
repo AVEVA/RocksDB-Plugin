@@ -201,7 +201,7 @@ against the code unless it says **Verify first**.
   Expired entries complete with `timed_out`.
 - **Validation:** A new test with limit=1, a long-running first request, and a short-deadline second request.
 
-### [ ] T18 – `CancelState::Target` erasure and copies
+### [x] T18 – `CancelState::Target` erasure and copies
 - **Files:**
   - `libs\HttpClient\src\private\CancelState.hpp`
   - `HttpClientImpl.hpp` (`SendLimited` captures `origin` by copy)
