@@ -165,7 +165,34 @@ void ClientRuntimeBase::SetMetadataClockForTesting(std::function<std::chrono::st
 
 uint64_t ClientRuntimeBase::BlobSizeEpoch() const noexcept { return m_sizeEpoch.load(); }
 
+std::optional<ClientRuntimeBase::CachedMetadata>
+ClientRuntimeBase::CachedBlobMetadata(const std::string& blobUrl) const {
+    const std::scoped_lock lock(m_sizeMutex);
+    const auto it = m_sizes.find(blobUrl);
+    if (it == m_sizes.end()) {
+        return std::nullopt;
+    }
+    if (MetadataNow() - it->second.FetchedAt >= Configuration::MetadataCacheTtl) {
+        m_sizes.erase(it);
+        return std::nullopt;
+    }
+    if (!it->second.ETag) {
+        return std::nullopt;
+    }
+    return CachedMetadata{it->second.Size, *it->second.ETag, it->second.FetchedAt};
+}
+
 void ClientRuntimeBase::CacheBlobSize(const std::string& blobUrl, const int64_t size, const uint64_t epoch) const {
+    StoreBlobSize(blobUrl, size, std::nullopt, epoch);
+}
+
+void ClientRuntimeBase::CacheBlobMetadata(const std::string& blobUrl, const int64_t size, std::string etag,
+                                          const uint64_t epoch) const {
+    StoreBlobSize(blobUrl, size, std::move(etag), epoch);
+}
+
+void ClientRuntimeBase::StoreBlobSize(const std::string& blobUrl, const int64_t size, std::optional<std::string> etag,
+                                      const uint64_t epoch) const {
     constexpr std::size_t MaxCachedSizes = 4096;
     const auto now = MetadataNow();
     const std::scoped_lock lock(m_sizeMutex);
@@ -181,7 +208,7 @@ void ClientRuntimeBase::CacheBlobSize(const std::string& blobUrl, const int64_t 
             m_sizes.clear();
         }
     }
-    m_sizes[blobUrl] = CachedSize{size, now};
+    m_sizes[blobUrl] = CachedSize{size, std::move(etag), now};
 }
 
 void ClientRuntimeBase::InvalidateBlobSize(const std::string& blobUrl) const {

@@ -103,6 +103,18 @@ class ClientRuntimeBase {
     /// <summary>Read before fetching a size; pass it to CacheBlobSize so a racing invalidation wins.</summary>
     [[nodiscard]] uint64_t BlobSizeEpoch() const noexcept;
     void CacheBlobSize(const std::string& blobUrl, int64_t size, uint64_t epoch) const;
+    /// <summary>A cached (size, ETag) pair and when it was fetched.</summary>
+    struct CachedMetadata {
+        int64_t Size = 0;
+        std::string ETag;
+        std::chrono::steady_clock::time_point FetchedAt;
+    };
+    /// <summary>
+    /// Lets opening a file skip its properties round trip. The entry shares the size cache's lifetime and
+    /// invalidation; a stale ETag is harmless because ETag-conditioned reads refresh on a 412.
+    /// </summary>
+    [[nodiscard]] std::optional<CachedMetadata> CachedBlobMetadata(const std::string& blobUrl) const;
+    void CacheBlobMetadata(const std::string& blobUrl, int64_t size, std::string etag, uint64_t epoch) const;
     void InvalidateBlobSize(const std::string& blobUrl) const;
     /// <summary>For operations that touch many blobs at once (directory delete, rename).</summary>
     void InvalidateAllBlobSizes() const;
@@ -114,8 +126,10 @@ class ClientRuntimeBase {
     void SetMetadataClockForTesting(std::function<std::chrono::steady_clock::time_point()> clock);
 
   private:
+    void StoreBlobSize(const std::string& blobUrl, int64_t size, std::optional<std::string> etag, uint64_t epoch) const;
     struct CachedSize {
         int64_t Size = 0;
+        std::optional<std::string> ETag;
         std::chrono::steady_clock::time_point FetchedAt;
     };
     mutable std::mutex m_sizeMutex;

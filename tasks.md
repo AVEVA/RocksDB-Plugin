@@ -49,7 +49,7 @@ against the code unless it says **Verify first**.
 - **Validation:** Add a unit test that calls MultiRead / Poll from inside an `io_context` handler and expects an
   error, not a hang.
 
-### [ ] T03 – Avoid synchronous GetProperties on every file open
+### [x] T03 – Avoid synchronous GetProperties on every file open
 - **Files:**
   - `src\Azure\Impl\ReadableFileImpl.ipp` (ctor ~65-79)
   - `ClientRuntime.hpp/.cpp` (`CachedBlobSize`)

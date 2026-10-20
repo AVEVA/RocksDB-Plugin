@@ -72,10 +72,17 @@ BasicReadableFileImpl<TBlob>::BasicReadableFileImpl(
       m_metadataMutex(std::make_unique<std::mutex>()), m_size(0), m_maxPrefetchBytes(maxPrefetchBytes),
       m_asyncReads(std::move(asyncReads)) {
     m_prefetch->Budget = std::move(prefetchBudget);
-    auto metadata = BlobOperations::GetMetadata(*m_h.Blob);
-    m_size = metadata.Size;
-    m_etag = std::move(metadata.ETag);
-    m_metadataFetchedAt = m_h.Runtime ? m_h.Runtime->MetadataNow() : std::chrono::steady_clock::now();
+    if (m_h.Runtime) {
+        auto metadata = BlobOperations::GetCachedMetadata(*m_h.Runtime, *m_h.Blob);
+        m_size = metadata.Size;
+        m_etag = std::move(metadata.ETag);
+        m_metadataFetchedAt = metadata.FetchedAt;
+    } else {
+        auto metadata = BlobOperations::GetMetadata(*m_h.Blob);
+        m_size = metadata.Size;
+        m_etag = std::move(metadata.ETag);
+        m_metadataFetchedAt = std::chrono::steady_clock::now();
+    }
 }
 
 template <typename TBlob>
@@ -592,8 +599,13 @@ int64_t BasicReadableFileImpl<TBlob>::DownloadWithRetry(const int64_t offset, co
 }
 
 template <typename TBlob> void BasicReadableFileImpl<TBlob>::RefreshBlobMetadata() const {
-    // Query outside the lock so concurrent readers are not serialized behind network round trips.
+    // Query outside the lock so concurrent readers are not serialized behind network round trips. A refresh means the
+    // cached entry was stale, so it is replaced for the next open too.
+    const auto epoch = m_h.Runtime ? m_h.Runtime->BlobSizeEpoch() : 0;
     auto metadata = BlobOperations::GetMetadata(*m_h.Blob);
+    if (m_h.Runtime) {
+        m_h.Runtime->CacheBlobMetadata(m_h.Blob->ResourceUrl(), metadata.Size, metadata.ETag, epoch);
+    }
     SetMetadata(metadata.Size, std::move(metadata.ETag));
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

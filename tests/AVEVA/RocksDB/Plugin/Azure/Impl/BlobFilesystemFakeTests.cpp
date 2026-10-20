@@ -101,6 +101,21 @@ TEST_F(BlobFilesystemFakeTests, RepeatedGetFileSizeIsServedFromTheShortLivedCach
     EXPECT_EQ(m_server->PropertiesRequests, before);
 }
 
+TEST_F(BlobFilesystemFakeTests, OpeningAFileRepeatedlyCostsOnePropertiesRequestAndWritesInvalidateIt) {
+    Write("a.sst", "12345");
+    const auto before = m_server->PropertiesRequests;
+
+    EXPECT_EQ(Read("a.sst"), "12345");
+    const auto afterFirstOpen = m_server->PropertiesRequests;
+    EXPECT_EQ(Read("a.sst"), "12345");
+    EXPECT_EQ(Read("a.sst"), "12345");
+    EXPECT_LE(afterFirstOpen - before, 1);
+    EXPECT_EQ(m_server->PropertiesRequests, afterFirstOpen);
+
+    Write("a.sst", "123456789");
+    EXPECT_EQ(Read("a.sst"), "123456789");
+}
+
 TEST_F(BlobFilesystemFakeTests, WritesTruncatesAndDeletesInvalidateTheCachedSize) {
     Write("a.sst", "12345");
     EXPECT_EQ(m_fs->GetFileSize(Path("a.sst")), 5);

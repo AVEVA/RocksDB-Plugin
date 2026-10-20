@@ -115,9 +115,24 @@ template <typename TBlob> [[nodiscard]] int64_t GetCachedSize(const ClientRuntim
         return *cached;
     }
     const auto epoch = runtime.BlobSizeEpoch();
-    const auto size = GetInfo(client).Size;
-    runtime.CacheBlobSize(url, size, epoch);
-    return size;
+    auto info = GetInfo(client);
+    runtime.CacheBlobMetadata(url, info.Size, std::move(info.ETag), epoch);
+    return info.Size;
+}
+
+// Size and ETag from the runtime's cache when fresh, otherwise one properties request that then fills the cache. Used
+// when a file is opened, which RocksDB does for many files.
+template <typename TBlob>
+[[nodiscard]] ClientRuntimeBase::CachedMetadata GetCachedMetadata(const ClientRuntimeBase& runtime, TBlob& client) {
+    const auto& url = client.ResourceUrl();
+    if (auto cached = runtime.CachedBlobMetadata(url)) {
+        return std::move(*cached);
+    }
+    const auto epoch = runtime.BlobSizeEpoch();
+    const auto fetchedAt = runtime.MetadataNow();
+    auto info = GetInfo(client);
+    runtime.CacheBlobMetadata(url, info.Size, info.ETag, epoch);
+    return {info.Size, std::move(info.ETag), fetchedAt};
 }
 
 template <typename TBlob> void SetSize(const ClientRuntimeBase& runtime, TBlob& client, int64_t size) {
