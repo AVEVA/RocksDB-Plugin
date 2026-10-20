@@ -242,7 +242,7 @@ against the code unless it says **Verify first**.
   - Benchmark a thread_local duplicated context, re-initialized with `EVP_MAC_init(ctx, nullptr, 0, nullptr)`, vs
     dup per call. Adopt it only if it is measurably faster, and keep thread-safety.
 
-### [ ] T21 – Response header lookups
+### [x] T21 – Response header lookups
 - **Files:**
   - `libs\AzureClient\src\BlobResponseParsers.cpp` (`ParseBlobProperties` ~689-760, `FindHeaderValue` ~474)
   - `RequestPipeline.cpp` ~76-88

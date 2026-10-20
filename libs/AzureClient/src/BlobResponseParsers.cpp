@@ -45,6 +45,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bitset>
 #include <charconv>
 #include <chrono>
 #include <cstring>
@@ -170,19 +171,31 @@ constexpr BlobPropertyNames XmlPropertyNames{.ContentEncoding = "Content-Encodin
                                              .ServerEncrypted = "ServerEncrypted",
                                              .SequenceNumber = "x-ms-blob-sequence-number"};
 
-// `get(name)` returns the raw value (empty when absent). Throws std::invalid_argument on malformed values.
-template <class Getter>
+// Raw (unparsed) values for the extended properties; empty when absent.
+struct ExtendedBlobValues {
+    std::string_view ContentEncoding;
+    std::string_view ContentLanguage;
+    std::string_view ContentDisposition;
+    std::string_view CreatedOn;
+    std::string_view LeaseStatus;
+    std::string_view LeaseState;
+    std::string_view LeaseDuration;
+    std::string_view ServerEncrypted;
+    std::string_view SequenceNumber;
+};
+
+// Throws std::invalid_argument on malformed values.
 void ParseExtendedBlobProperties(Models::BlobProperties& properties, const BlobPropertyNames& names,
-                                 const Getter& get) {
-    properties.ContentEncoding = std::string{get(names.ContentEncoding)};
-    properties.ContentLanguage = std::string{get(names.ContentLanguage)};
-    properties.ContentDisposition = std::string{get(names.ContentDisposition)};
-    properties.CreatedOn = ParseOptionalHttpDate(get(names.CreatedOn), names.CreatedOn);
-    properties.LeaseStatus = ParseLeaseStatus(get(names.LeaseStatus));
-    properties.LeaseState = ParseLeaseState(get(names.LeaseState));
-    properties.LeaseDuration = ParseLeaseDurationType(get(names.LeaseDuration));
-    properties.ServerEncrypted = ParseOptionalBool(get(names.ServerEncrypted), names.ServerEncrypted);
-    properties.SequenceNumber = ParseOptionalUnsigned(get(names.SequenceNumber), names.SequenceNumber);
+                                 const ExtendedBlobValues& values) {
+    properties.ContentEncoding = std::string{values.ContentEncoding};
+    properties.ContentLanguage = std::string{values.ContentLanguage};
+    properties.ContentDisposition = std::string{values.ContentDisposition};
+    properties.CreatedOn = ParseOptionalHttpDate(values.CreatedOn, names.CreatedOn);
+    properties.LeaseStatus = ParseLeaseStatus(values.LeaseStatus);
+    properties.LeaseState = ParseLeaseState(values.LeaseState);
+    properties.LeaseDuration = ParseLeaseDurationType(values.LeaseDuration);
+    properties.ServerEncrypted = ParseOptionalBool(values.ServerEncrypted, names.ServerEncrypted);
+    properties.SequenceNumber = ParseOptionalUnsigned(values.SequenceNumber, names.SequenceNumber);
 }
 
 [[nodiscard]] std::optional<int> ParseInt(std::string_view value) noexcept {
@@ -462,8 +475,17 @@ ParseAsctimeHttpDate(std::string_view value) noexcept {
     properties.ContentMd5 = GetChildTextOrEmpty(node, "Content-MD5");
     properties.CacheControl = GetChildTextOrEmpty(node, "Cache-Control");
     properties.Type = ParseBlobTypeValue(GetChildTextOrEmpty(node, "BlobType"));
-    ParseExtendedBlobProperties(properties, XmlPropertyNames,
-                                [&node](std::string_view name) { return GetChildTextOrEmpty(node, name); });
+    ParseExtendedBlobProperties(
+        properties, XmlPropertyNames,
+        ExtendedBlobValues{.ContentEncoding = GetChildTextOrEmpty(node, XmlPropertyNames.ContentEncoding),
+                           .ContentLanguage = GetChildTextOrEmpty(node, XmlPropertyNames.ContentLanguage),
+                           .ContentDisposition = GetChildTextOrEmpty(node, XmlPropertyNames.ContentDisposition),
+                           .CreatedOn = GetChildTextOrEmpty(node, XmlPropertyNames.CreatedOn),
+                           .LeaseStatus = GetChildTextOrEmpty(node, XmlPropertyNames.LeaseStatus),
+                           .LeaseState = GetChildTextOrEmpty(node, XmlPropertyNames.LeaseState),
+                           .LeaseDuration = GetChildTextOrEmpty(node, XmlPropertyNames.LeaseDuration),
+                           .ServerEncrypted = GetChildTextOrEmpty(node, XmlPropertyNames.ServerEncrypted),
+                           .SequenceNumber = GetChildTextOrEmpty(node, XmlPropertyNames.SequenceNumber)});
     if (const XmlNode* metadata = FindChildByLocalName(node, "Metadata"); metadata != nullptr) {
         properties.Metadata = ParseMetadataXml(*metadata);
     }
@@ -679,14 +701,158 @@ std::optional<ParsedContentRange> ParseContentRange(std::string_view header) noe
     return ParsedContentRange{.Start = start, .End = end, .Total = total};
 }
 
+namespace {
+enum class BlobHeader : std::uint8_t {
+    ETag,
+    LastModified,
+    ContentRange,
+    ContentLength,
+    ContentType,
+    ContentMd5,
+    CacheControl,
+    BlobType,
+    VersionId,
+    IsCurrentVersion,
+    ContentEncoding,
+    ContentLanguage,
+    ContentDisposition,
+    CreatedOn,
+    LeaseStatus,
+    LeaseState,
+    LeaseDuration,
+    ServerEncrypted,
+    SequenceNumber,
+    Count
+};
+
+// Dispatches on the name length first so most headers (and every header we do not care about) cost one or two
+// case-insensitive compares instead of one full scan per property.
+[[nodiscard]] BlobHeader ClassifyBlobHeader(std::string_view name) noexcept {
+    switch (name.size()) {
+    case 4:
+        if (IEquals(name, ETagHeaderName)) {
+            return BlobHeader::ETag;
+        }
+        break;
+    case 11:
+        if (IEquals(name, ContentMd5HeaderName)) {
+            return BlobHeader::ContentMd5;
+        }
+        break;
+    case 12:
+        if (IEquals(name, ContentTypeHeaderName)) {
+            return BlobHeader::ContentType;
+        }
+        break;
+    case 13:
+        if (IEquals(name, CacheControlHeaderName)) {
+            return BlobHeader::CacheControl;
+        }
+        if (IEquals(name, "Content-Range")) {
+            return BlobHeader::ContentRange;
+        }
+        if (IEquals(name, LastModifiedHeaderName)) {
+            return BlobHeader::LastModified;
+        }
+        break;
+    case 14:
+        if (IEquals(name, ContentLengthHeaderName)) {
+            return BlobHeader::ContentLength;
+        }
+        if (IEquals(name, XMsBlobTypeHeaderName)) {
+            return BlobHeader::BlobType;
+        }
+        break;
+    case 15:
+        if (IEquals(name, "x-ms-version-id")) {
+            return BlobHeader::VersionId;
+        }
+        break;
+    case 16:
+        if (IEquals(name, HeaderPropertyNames.ContentEncoding)) {
+            return BlobHeader::ContentEncoding;
+        }
+        if (IEquals(name, HeaderPropertyNames.ContentLanguage)) {
+            return BlobHeader::ContentLanguage;
+        }
+        if (IEquals(name, HeaderPropertyNames.LeaseState)) {
+            return BlobHeader::LeaseState;
+        }
+        break;
+    case 17:
+        if (IEquals(name, HeaderPropertyNames.LeaseStatus)) {
+            return BlobHeader::LeaseStatus;
+        }
+        break;
+    case 18:
+        if (IEquals(name, HeaderPropertyNames.CreatedOn)) {
+            return BlobHeader::CreatedOn;
+        }
+        break;
+    case 19:
+        if (IEquals(name, HeaderPropertyNames.LeaseDuration)) {
+            return BlobHeader::LeaseDuration;
+        }
+        if (IEquals(name, HeaderPropertyNames.ContentDisposition)) {
+            return BlobHeader::ContentDisposition;
+        }
+        break;
+    case 21:
+        if (IEquals(name, HeaderPropertyNames.ServerEncrypted)) {
+            return BlobHeader::ServerEncrypted;
+        }
+        break;
+    case 23:
+        if (IEquals(name, "x-ms-is-current-version")) {
+            return BlobHeader::IsCurrentVersion;
+        }
+        break;
+    case 25:
+        if (IEquals(name, HeaderPropertyNames.SequenceNumber)) {
+            return BlobHeader::SequenceNumber;
+        }
+        break;
+    default:
+        break;
+    }
+    return BlobHeader::Count;
+}
+} // namespace
+
 Models::BlobProperties ParseBlobProperties(const HttpResponse& response) {
     Models::BlobProperties properties;
-    ApplyETagAndLastModified(properties, response);
+
+    // One pass over the headers; as with FindHeaderValue, the first occurrence of a header wins.
+    constexpr std::size_t HeaderCount = static_cast<std::size_t>(BlobHeader::Count);
+    std::array<std::string_view, HeaderCount> values{};
+    std::bitset<HeaderCount> seen;
+    for (const auto& header : response.GetHeaders()) {
+        const std::string_view name = header.GetName();
+        if (IStartsWith(name, XMsMetaHeaderPrefix)) {
+            properties.Metadata.emplace(std::string{name.substr(XMsMetaHeaderPrefix.size())}, header.GetValue());
+            continue;
+        }
+        const BlobHeader slot = ClassifyBlobHeader(name);
+        if (slot != BlobHeader::Count && !seen.test(static_cast<std::size_t>(slot))) {
+            seen.set(static_cast<std::size_t>(slot));
+            values.at(static_cast<std::size_t>(slot)) = header.GetValue();
+        }
+    }
+    const auto value = [&values](BlobHeader slot) { return values.at(static_cast<std::size_t>(slot)); };
+
+    properties.ETag = std::string{value(BlobHeader::ETag)};
+    if (const std::string_view lastModified = value(BlobHeader::LastModified); !lastModified.empty()) {
+        const auto parsed = ParseHttpDateHeader(lastModified);
+        if (!parsed.has_value()) {
+            throw std::invalid_argument("Last-Modified header must contain a valid HTTP-date.");
+        }
+        properties.LastModified = *parsed;
+    }
 
     // Prefer the Content-Range total when present (206 responses). A header that is present but malformed is an
     // error rather than a silent fallback to Content-Length, which would describe only the partial body.
     bool contentLengthPresent = false;
-    const std::string_view contentRangeHeader = FindHeaderValue(response, "Content-Range");
+    const std::string_view contentRangeHeader = value(BlobHeader::ContentRange);
     if (!contentRangeHeader.empty()) {
         const auto parsed = ParseContentRange(contentRangeHeader);
         if (!parsed.has_value()) {
@@ -699,8 +865,7 @@ Models::BlobProperties ParseBlobProperties(const HttpResponse& response) {
     }
 
     if (!contentLengthPresent) {
-        if (const std::string_view contentLength = FindHeaderValue(response, ContentLengthHeaderName);
-            !contentLength.empty()) {
+        if (const std::string_view contentLength = value(BlobHeader::ContentLength); !contentLength.empty()) {
             const auto parsed = ParseUnsigned(contentLength);
             if (!parsed.has_value()) {
                 throw std::invalid_argument("Content-Length header must be an unsigned integer.");
@@ -709,21 +874,22 @@ Models::BlobProperties ParseBlobProperties(const HttpResponse& response) {
             properties.ContentLength = *parsed;
         }
     }
-    properties.ContentType = std::string{FindHeaderValue(response, ContentTypeHeaderName)};
-    properties.ContentMd5 = std::string{FindHeaderValue(response, ContentMd5HeaderName)};
-    properties.CacheControl = std::string{FindHeaderValue(response, CacheControlHeaderName)};
-    properties.Type = ParseBlobTypeValue(FindHeaderValue(response, XMsBlobTypeHeaderName));
+    properties.ContentType = std::string{value(BlobHeader::ContentType)};
+    properties.ContentMd5 = std::string{value(BlobHeader::ContentMd5)};
+    properties.CacheControl = std::string{value(BlobHeader::CacheControl)};
+    properties.Type = ParseBlobTypeValue(value(BlobHeader::BlobType));
     ParseExtendedBlobProperties(properties, HeaderPropertyNames,
-                                [&response](std::string_view name) { return FindHeaderValue(response, name); });
-    properties.VersionId = std::string{FindHeaderValue(response, "x-ms-version-id")};
-    properties.IsCurrentVersion =
-        ParseOptionalBool(FindHeaderValue(response, "x-ms-is-current-version"), "x-ms-is-current-version");
-    for (const auto& header : response.GetHeaders()) {
-        const std::string_view name = header.GetName();
-        if (IStartsWith(name, XMsMetaHeaderPrefix)) {
-            properties.Metadata.emplace(std::string{name.substr(XMsMetaHeaderPrefix.size())}, header.GetValue());
-        }
-    }
+                                ExtendedBlobValues{.ContentEncoding = value(BlobHeader::ContentEncoding),
+                                                   .ContentLanguage = value(BlobHeader::ContentLanguage),
+                                                   .ContentDisposition = value(BlobHeader::ContentDisposition),
+                                                   .CreatedOn = value(BlobHeader::CreatedOn),
+                                                   .LeaseStatus = value(BlobHeader::LeaseStatus),
+                                                   .LeaseState = value(BlobHeader::LeaseState),
+                                                   .LeaseDuration = value(BlobHeader::LeaseDuration),
+                                                   .ServerEncrypted = value(BlobHeader::ServerEncrypted),
+                                                   .SequenceNumber = value(BlobHeader::SequenceNumber)});
+    properties.VersionId = std::string{value(BlobHeader::VersionId)};
+    properties.IsCurrentVersion = ParseOptionalBool(value(BlobHeader::IsCurrentVersion), "x-ms-is-current-version");
     return properties;
 }
 
