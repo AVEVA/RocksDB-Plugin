@@ -85,7 +85,9 @@ are medium confidence: confirm them against the code, or measure, before changin
 - **Validation:** `TokenCredentialTests.cpp`. Add an allocation-count test showing that a cache hit makes no
   erasure allocation.
 
-### [ ] T31 – HttpClient reads response bodies in ~0.5–2 KiB chunks (**Verify first**: measure)
+### [x] T31 – HttpClient reads response bodies in ~0.5–2 KiB chunks (**Verify first**: measure)
+- **Done:** reserve 16 KiB (`ReadChunk`) before `async_read`; added `ReadsLargeBodyIntact` (4 MiB). Read count not
+  instrumented (no hook); 32/64 KiB and db_bench not tried.
 - **Files:**
   - `libs\HttpClient\src\private\RequestOperation.cpp:336-344` (`Read`)
   - `RequestOperation.hpp:107,360` (`m_buffer`)

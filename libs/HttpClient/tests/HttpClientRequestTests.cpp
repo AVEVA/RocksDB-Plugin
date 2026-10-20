@@ -355,6 +355,18 @@ TEST(HttpClientRequest, ReusesConnectionForKeepAliveRequests) {
     EXPECT_EQ(server.TotalRequests(), 2);
 }
 
+TEST(HttpClientRequest, ReadsLargeBodyIntact) {
+    const std::string body(4 * 1024 * 1024, 'x');
+    AVEVA::HttpRequest request;
+    request.SetUrl("/");
+    AVEVA::HttpRequestOptions options;
+    options.SetResponseBodyLimit(body.size() + 1);
+    auto result = Exchange(
+        request, "HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body, options);
+    EXPECT_FALSE(result.error);
+    EXPECT_EQ(result.response.GetBody().size(), body.size());
+}
+
 TEST(HttpClientRequest, CancellationBeforeStartCompletesWithOperationCanceled) {
     asio::io_context context;
     auto client = AVEVA::HttpClient::Create(context);

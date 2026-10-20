@@ -338,6 +338,10 @@ template <typename Stream> void RequestOperation<Stream>::Read() {
         return;
     }
     m_phase = HttpRequestPhase::Read;
+    // The parser consumes body bytes eagerly, so without a reserve beast reads only ~0.5-2 KiB per round trip.
+    if (m_buffer.capacity() < ReadChunk) {
+        m_buffer.reserve(ReadChunk);
+    }
     http::async_read(
         *m_stream, m_buffer, *m_parser,
         [self = this->shared_from_this()](boost::system::error_code error, std::size_t) { self->OnRead(error); });

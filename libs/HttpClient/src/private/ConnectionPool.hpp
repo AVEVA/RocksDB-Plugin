@@ -72,6 +72,13 @@ template <typename Stream> struct ConnectionKeyEqual {
 inline constexpr std::size_t MaxRetainedBufferCapacity = 16 * 1024;
 
 /// <summary>
+/// Capacity reserved before reading a response (one TLS record) so large bodies need few reads.
+/// Must not exceed <see cref="MaxRetainedBufferCapacity"/> or pooled connections would drop the buffer.
+/// </summary>
+inline constexpr std::size_t ReadChunk = 16 * 1024;
+static_assert(ReadChunk <= MaxRetainedBufferCapacity);
+
+/// <summary>
 /// Releases a buffer's memory if it grew past <see cref="MaxRetainedBufferCapacity"/>.
 /// </summary>
 /// <param name="buffer">The buffer of a connection about to be pooled.</param>
