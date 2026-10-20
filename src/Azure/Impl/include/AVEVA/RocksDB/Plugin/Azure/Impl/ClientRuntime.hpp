@@ -68,7 +68,7 @@ class ClientRuntimeBase {
     /// A scheduler for the blocking disk writes of file downloads, backed by a small pool created on first use and
     /// owned by this runtime, so a download never starts a thread per write batch. Valid while the runtime lives.
     /// </summary>
-    [[nodiscard]] std::function<void(std::move_only_function<void()>)> DownloadWriter() const;
+    [[nodiscard]] boost::asio::thread_pool::executor_type DownloadWriter() const;
 
     /// <summary>
     /// Makes every later mutation through this runtime's blobs fail. Called once the filesystem can no longer

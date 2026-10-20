@@ -221,24 +221,27 @@ TEST(T11_ParallelDownloadAcceptanceTests, FileWritesRunOnTheInjectedWriteSchedul
     EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
     BlobClient client{httpClient, BuildOptions()};
 
-    std::size_t scheduled = 0;
+    boost::asio::thread_pool pool{1U};
+    const std::size_t clientWritesBefore = AVEVA::AzureClient::Tests::DownloadWriters().Started.load();
     auto options = Parallel(3U, 3U);
-    options.WriteScheduler = [&scheduled](std::move_only_function<void()> task) {
-        ++scheduled;
-        task();
-    };
+    options.WriteScheduler = pool.get_executor();
 
     TempFile out;
     int callbackCount = 0;
     StartDownloadToAsyncAndExpectSuccess(client, out.Path, options, callbackCount, content.size());
-    httpClient.Poll();
+    // The injected pool is not observed by Poll(), so wait for its work explicitly.
+    ASSERT_TRUE(httpClient.WaitForRequest(1U));
     ASSERT_TRUE(httpClient.CompleteRequest(0U));
-    const std::size_t peakPending = CompleteNewestUntilCallback(httpClient, 3U, callbackCount);
+    for (int guard = 0; guard < 100 && callbackCount == 0; ++guard) {
+        ASSERT_TRUE(httpClient.RunUntil([&] { return httpClient.PendingCount() > 0U || callbackCount > 0; }));
+        if (callbackCount == 0) {
+            ASSERT_TRUE(CompleteNewest(httpClient));
+        }
+    }
 
     ASSERT_EQ(callbackCount, 1);
-    EXPECT_GT(peakPending, 0U);
-    // Open, at least one chunk write and the finalize all went through the injected scheduler.
-    EXPECT_GE(scheduled, 3U);
+    // The injected scheduler takes precedence over the HTTP client's own writer.
+    EXPECT_EQ(AVEVA::AzureClient::Tests::DownloadWriters().Started.load(), clientWritesBefore);
     EXPECT_EQ(ReadFile(out.Path), content);
 }
 
@@ -492,7 +495,6 @@ DownloadIntoThrowingSink(bool inlineWrites, bool throwOnReserve) {
         BasicBlobTarget<NoTokenCredential>{AVEVA::AzureClient::Private::MakeBlobTarget(BuildOptions()), nullptr});
 
     DownloadToOptions options;
-    options.WriteScheduler = [](std::move_only_function<void()> task) { task(); };
     std::optional<AVEVA::AzureClient::Private::DownloadDetail::SummaryResult> result;
     AVEVA::AzureClient::Private::DownloadDetail::StartDownload(
         httpClient, target, options, std::make_shared<ThrowingSink>(inlineWrites, throwOnReserve),

@@ -116,14 +116,12 @@ ClientRuntimeBase::~ClientRuntimeBase() {
     }
 }
 
-std::function<void(std::move_only_function<void()>)> ClientRuntimeBase::DownloadWriter() const {
+boost::asio::thread_pool::executor_type ClientRuntimeBase::DownloadWriter() const {
     std::call_once(m_writerOnce, [this] {
         constexpr std::size_t WriterThreads = 2;
         m_writerPool = std::make_unique<boost::asio::thread_pool>(WriterThreads);
     });
-    return [pool = m_writerPool.get()](std::move_only_function<void()> task) {
-        boost::asio::post(*pool, [task = std::move(task)]() mutable { task(); });
-    };
+    return m_writerPool->get_executor();
 }
 
 void ClientRuntimeBase::FenceWrites() noexcept { m_writesFenced.store(true); }

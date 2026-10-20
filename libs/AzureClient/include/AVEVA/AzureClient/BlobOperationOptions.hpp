@@ -5,6 +5,8 @@
 #include <AVEVA/AzureClient/Models/BlobContainerModels.hpp>
 #include <AVEVA/AzureClient/Models/BlobModels.hpp>
 
+#include <boost/asio/thread_pool.hpp>
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -71,8 +73,8 @@ struct GetBlobPropertiesOptions {
 };
 
 // Runs a blocking task (a disk write, file open or rename) off the I/O thread. The scheduler must eventually run
-// every task it accepts, on any thread; a thread pool's `post` is the typical implementation.
-using DownloadWriteScheduler = std::function<void(std::move_only_function<void()>)>;
+// every task posted to it, on any thread.
+using DownloadWriteScheduler = boost::asio::thread_pool::executor_type;
 
 struct DownloadBlobOptions {
     std::optional<Models::BlobByteRange> Range;
@@ -83,7 +85,7 @@ struct DownloadBlobOptions {
     // Where file downloads run their blocking filesystem calls. Unset uses the HTTP client's
     // `GetDownloadWriter()` when it has one, otherwise a short-lived thread per task. The client owns no
     // threads of its own, so supply a scheduler backed by your own pool to bound them.
-    DownloadWriteScheduler WriteScheduler;
+    std::optional<DownloadWriteScheduler> WriteScheduler;
 };
 
 // Chunked download options. The first request is a ranged GET of ChunkSize bytes that also learns
@@ -108,7 +110,7 @@ struct DownloadToOptions {
     // Where file downloads run their blocking filesystem calls. Unset uses the HTTP client's
     // `GetDownloadWriter()` when it has one, otherwise a short-lived thread per task. The client owns no
     // threads of its own, so supply a scheduler backed by your own pool to bound them.
-    DownloadWriteScheduler WriteScheduler;
+    std::optional<DownloadWriteScheduler> WriteScheduler;
 };
 
 struct SetBlobMetadataOptions {

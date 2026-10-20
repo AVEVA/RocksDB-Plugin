@@ -207,7 +207,8 @@ template <typename TContainer>
 // cancels the transfer, which then throws; the client removes its partial file, so nothing is left at `path`.
 template <typename TBlob>
 void DownloadToFile(TBlob& client, const std::filesystem::path& path, int64_t offset, int64_t length,
-                    std::stop_token stopToken = {}, AzureClient::DownloadWriteScheduler writeScheduler = {}) {
+                    std::stop_token stopToken = {},
+                    std::optional<AzureClient::DownloadWriteScheduler> writeScheduler = {}) {
     // An explicit zero-length range is rejected by the client, and there is nothing to fetch for an empty blob.
     if (length <= 0) {
         std::ofstream file(path, std::ios::binary | std::ios::trunc);

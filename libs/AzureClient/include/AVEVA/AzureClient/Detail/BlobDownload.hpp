@@ -51,14 +51,12 @@ namespace AVEVA::AzureClient::Private {
 namespace DownloadDetail {
 // Runs a blocking task off the I/O thread: on the caller's scheduler, else the HTTP client's, else a short-lived
 // thread (so no process-wide pool outlives the clients).
-template <class THttp>
-void RunOnWriter(THttp& httpClient, const DownloadWriteScheduler& scheduler, std::move_only_function<void()> task) {
+template <class THttp, class TTask>
+void RunOnWriter(THttp& httpClient, const std::optional<DownloadWriteScheduler>& scheduler, TTask task) {
     if (scheduler) {
-        scheduler(std::move(task));
-    } else if constexpr (requires {
-                             { httpClient.GetDownloadWriter() } -> std::convertible_to<DownloadWriteScheduler>;
-                         }) {
-        DownloadWriteScheduler{httpClient.GetDownloadWriter()}(std::move(task));
+        boost::asio::post(*scheduler, std::move(task));
+    } else if constexpr (requires { boost::asio::post(httpClient.GetDownloadWriter(), std::move(task)); }) {
+        boost::asio::post(httpClient.GetDownloadWriter(), std::move(task));
     } else {
         std::thread(std::move(task)).detach();
     }

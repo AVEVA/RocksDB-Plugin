@@ -95,7 +95,7 @@ against the code unless it says **Verify first**.
 - **Validation:** The async read tests, including abort-while-in-flight and poll ordering, still pass. Allocation
   count per read drops.
 
-### [ ] T06 – Remove erasure from the download-writer path
+### [x] T06 – Remove erasure from the download-writer path
 - **Files:**
   - `libs\AzureClient\include\AVEVA\AzureClient\BlobOperationOptions.hpp:75` (`DownloadWriteScheduler`)
   - `Detail\BlobDownload.hpp:55` (`RunOnWriter`)

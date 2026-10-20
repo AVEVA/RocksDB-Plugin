@@ -313,17 +313,24 @@ class FakeHttpClient final {
     executor_type get_executor() const noexcept { return m_context.get_executor(); }
 
     // Lets file downloads run their blocking writes on a test pool whose activity Poll() can observe.
-    [[nodiscard]] static DownloadWriteScheduler GetDownloadWriter() {
-        return [](std::move_only_function<void()> task) {
+    struct CountingWriterExecutor {
+        template <class F> void execute(F&& task) const {
             auto& writers = DownloadWriters();
             writers.Pending.fetch_add(1U);
             writers.Started.fetch_add(1U);
-            boost::asio::post(writers.Pool, [task = std::move(task), &writers]() mutable {
+            boost::asio::post(writers.Pool, [task = std::forward<F>(task), &writers]() mutable {
                 task();
                 writers.Pending.fetch_sub(1U);
             });
-        };
-    }
+        }
+        // Lets boost::asio::post accept this execute-only executor.
+        [[nodiscard]] CountingWriterExecutor require(boost::asio::execution::blocking_t::never_t) const noexcept {
+            return *this;
+        }
+        bool operator==(const CountingWriterExecutor&) const noexcept = default;
+    };
+
+    [[nodiscard]] static CountingWriterExecutor GetDownloadWriter() { return {}; }
 
     template <boost::asio::completion_token_for<void(std::error_code, HttpResponse)> CompletionToken>
     auto SendAsync(HttpRequest request, HttpRequestOptions options, CompletionToken&& token) {
