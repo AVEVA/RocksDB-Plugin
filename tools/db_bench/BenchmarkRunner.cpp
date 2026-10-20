@@ -43,6 +43,8 @@
 //   AVEVA_DB_BENCH_CACHELIB_ADMISSION_WRITE_RATE_BYTES_PER_SEC  (unset = admit everything)
 //   AVEVA_DB_BENCH_CACHELIB_LOG_LEVEL                  (WARN)
 //   AVEVA_DB_BENCH_CACHELIB_FILE_NAME                  (navy.cache)
+//   AVEVA_DB_BENCH_CACHELIB_LOG_COUNTERS               (0|1, default 1: log "CACHELIB_COUNTER name=value"
+//                                                       lines for every Navy counter on shutdown)
 //
 // See tools/db_bench/README.md for concrete invocation examples.
 
@@ -230,6 +232,9 @@ void RegisterCacheLibSecondaryCache() {
             if (const auto fileName = Env("AVEVA_DB_BENCH_CACHELIB_FILE_NAME")) {
                 cachelib.fileName = *fileName;
             }
+
+            // On by default for benchmarking: dumps Navy counters when db_bench closes the cache.
+            cachelib.logCountersOnShutdown = EnvFlagOr("AVEVA_DB_BENCH_CACHELIB_LOG_COUNTERS", true);
 
             options->cachelib = cachelib;
 

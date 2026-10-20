@@ -232,7 +232,8 @@ std::string Describe(const navy::NavyConfig& config) {
 
 class CacheLibSecondaryCache::Impl {
   public:
-    explicit Impl(const SecondaryCacheOptions& options) : m_logger(options.logger) {
+    explicit Impl(const SecondaryCacheOptions& options)
+        : m_logger(options.logger), m_logCountersOnShutdown(options.cachelib.logCountersOnShutdown) {
         Validate(options);
         const auto& o = options.cachelib;
 
@@ -253,8 +254,13 @@ class CacheLibSecondaryCache::Impl {
     }
 
     ~Impl() {
-        if (m_navy) {
-            m_navy->drain();
+        if (!m_navy) {
+            return;
+        }
+        // Drain first so queued inserts are reflected in the final counters.
+        m_navy->drain();
+        if (m_logCountersOnShutdown) {
+            LogCounters();
         }
     }
 
@@ -300,9 +306,10 @@ class CacheLibSecondaryCache::Impl {
         }
     }
 
-    std::unique_ptr<rocksdb::SecondaryCacheResultHandle>
-    Lookup(const rocksdb::Slice& key, const rocksdb::Cache::CacheItemHelper* helper,
-           rocksdb::Cache::CreateContext* createContext, bool wait, bool& keptInSecCache) noexcept {
+    std::unique_ptr<rocksdb::SecondaryCacheResultHandle> Lookup(const rocksdb::Slice& key,
+                                                                const rocksdb::Cache::CacheItemHelper* helper,
+                                                                rocksdb::Cache::CreateContext* createContext, bool wait,
+                                                                bool& keptInSecCache) noexcept {
         // Entries are never removed on a hit, so RocksDB must not re-insert
         // them into this cache when they are evicted from the primary again.
         keptInSecCache = false;
@@ -385,6 +392,18 @@ class CacheLibSecondaryCache::Impl {
     const std::string& PrintableOptions() const noexcept { return m_printable; }
 
   private:
+    // Greppable one-line-per-counter format so benchmark pipelines can extract the totals
+    // (e.g. navy_device_bytes_written for SSD wear) from the db_bench log. Never throws: it runs
+    // from the destructor.
+    void LogCounters() noexcept {
+        try {
+            VisitCounters([this](std::string_view name, double value) {
+                BOOST_LOG_SEV(*m_logger, info) << "CACHELIB_COUNTER " << name << "=" << std::fixed << value;
+            });
+        } catch (...) {
+        }
+    }
+
     struct Entry {
         std::unique_ptr<char[]> buffer;
         size_t keySize = 0;
@@ -394,7 +413,7 @@ class CacheLibSecondaryCache::Impl {
 
     void Open(const navy::NavyConfig& config) {
         m_navy = facebook::cachelib::createNavyCache(config, {}, {}, /*truncate*/ true, nullptr,
-                                                      /*itemDestructorEnabled*/ false);
+                                                     /*itemDestructorEnabled*/ false);
         m_printable = Describe(config);
     }
 
@@ -429,10 +448,13 @@ class CacheLibSecondaryCache::Impl {
         const auto hk = navy::makeHK(base, entry.keySize);
         const navy::BufferView value(entry.valueSize, reinterpret_cast<const uint8_t*>(base + entry.keySize));
         m_navy->insertAsync(hk, value,
-                            [buffer = std::move(entry.buffer)](navy::Status, facebook::cachelib::HashedKey) mutable { buffer.reset(); });
+                            [buffer = std::move(entry.buffer)](navy::Status, facebook::cachelib::HashedKey) mutable {
+                                buffer.reset();
+                            });
     }
 
     std::shared_ptr<SecondaryCacheOptions::Logger> m_logger;
+    bool m_logCountersOnShutdown = false;
     std::unique_ptr<navy::AbstractCache> m_navy;
     size_t m_maxEntrySize = 0;
     std::string m_printable;

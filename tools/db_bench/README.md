@@ -208,7 +208,14 @@ AVEVA_DB_BENCH_CACHELIB_DATA_CHECKSUM                       (0|1, default 1)
 AVEVA_DB_BENCH_CACHELIB_ADMISSION_WRITE_RATE_BYTES_PER_SEC  (unset = admit everything)
 AVEVA_DB_BENCH_CACHELIB_LOG_LEVEL                           (WARN)
 AVEVA_DB_BENCH_CACHELIB_FILE_NAME                           (navy.cache)
+AVEVA_DB_BENCH_CACHELIB_LOG_COUNTERS                        (0|1, default 1)
 ```
+
+With `LOG_COUNTERS` on, closing the cache prints one `CACHELIB_COUNTER name=value`
+line per Navy counter (e.g. `navy_bc_lookups`, `navy_bc_succ_lookups`, `navy_bc_inserts`,
+`navy_bc_used_size_bytes`, and `navy_device_bytes_written` for SSD wear). The cache is
+reset on every open, so the totals cover a single db_bench invocation. Counter
+names vary by Navy version; list them with `grep CACHELIB_COUNTER <log>`.
 
 The wrapper's stderr banner echoes the exact URIs and env vars available in
 your build, so you don't need to remember this list.
