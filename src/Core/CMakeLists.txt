@@ -1,5 +1,6 @@
 add_library(aveva-rocksdb-plugin-core
     FileCache.cpp
+    FileCacheMaintenance.cpp
     FileCacheEntry.cpp
     FileBasedCompressedSecondaryCache.cpp
     ResultHandle.cpp
