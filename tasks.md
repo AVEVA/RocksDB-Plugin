@@ -383,7 +383,7 @@ are medium confidence: confirm them against the code, or measure, before changin
   - Hold the timer in `std::optional` and emplace it only when there is a deadline.
 - **Validation:** an allocation count per `GetPropertiesAsync` on Linux, plus the retry and pipeline tests.
 
-### [ ] T52 – `StringSink` copies the whole body even for single-response downloads
+### [x] T52 – `StringSink` copies the whole body even for single-response downloads
 - **Files:** `libs\AzureClient\include\AVEVA\AzureClient\Detail\DownloadSinks.hpp` (`StringSink::Reserve/Write`
   ~75-100); `Detail\BlobDownload.hpp` (`OnProbe` → `m_sink.Reserve(total)` ~330).
 - **Problem:** `Reserve(total)` always runs before the first `Write`, so `Write`'s move fast path (taken when

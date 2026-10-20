@@ -3,6 +3,7 @@
 
 #include "AVEVA/AzureClient/BlobClientOptions.hpp"
 #include "AVEVA/AzureClient/BlobOperationOptions.hpp"
+#include "AVEVA/AzureClient/Detail/DownloadSinks.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
 #include "AVEVA/AzureClient/Response.hpp"
 #include "FakeHttpClient.hpp"
@@ -181,6 +182,25 @@ void StartDownloadToPathAsyncAndVerify(PageBlobClient& client, const std::filesy
 }
 
 } // namespace
+
+TEST(StringSinkTests, SingleChunkCoveringExpectedSizeIsMovedNotCopied) {
+    AVEVA::AzureClient::Private::StringSink sink;
+    std::string body(1024, 'x');
+    const char* original = body.data();
+    sink.Reserve(body.size());
+    ASSERT_TRUE(sink.Write(std::move(body)));
+    auto result = sink.Take();
+    EXPECT_EQ(result.data(), original);
+    EXPECT_EQ(result.size(), 1024U);
+}
+
+TEST(StringSinkTests, MultipleChunksAreAppended) {
+    AVEVA::AzureClient::Private::StringSink sink;
+    sink.Reserve(6);
+    ASSERT_TRUE(sink.Write("abc"));
+    ASSERT_TRUE(sink.Write("def"));
+    EXPECT_EQ(sink.Take(), "abcdef");
+}
 
 TEST(PageBlobClientTests, ResourceUrl_HasNoQueryStringWhileUrlCarriesTheSas) {
     FakeHttpClient httpClient;

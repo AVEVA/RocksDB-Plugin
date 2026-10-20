@@ -83,17 +83,21 @@ class StringSink final {
         if (size > m_data.max_size()) {
             throw std::length_error("Blob is too large to download into memory.");
         }
-        m_data.reserve(static_cast<std::size_t>(std::min(size, MaxReserve)));
+        m_expected = std::min(size, MaxReserve);
     }
 
     static constexpr bool WritesInline = true;
 
+    // Reserve only records the expected size so that a single chunk covering it is moved in without a copy.
     [[nodiscard]] bool Write(std::string data) {
-        if (m_data.empty() && m_data.capacity() < data.size()) {
+        if (m_data.empty() && data.size() >= m_expected) {
             m_data = std::move(data);
-        } else {
-            m_data.append(data);
+            return true;
         }
+        if (m_data.empty()) {
+            m_data.reserve(static_cast<std::size_t>(m_expected));
+        }
+        m_data.append(data);
         return true;
     }
 
@@ -101,5 +105,6 @@ class StringSink final {
 
   private:
     std::string m_data;
+    std::uint64_t m_expected = 0;
 };
 } // namespace AVEVA::AzureClient::Private
