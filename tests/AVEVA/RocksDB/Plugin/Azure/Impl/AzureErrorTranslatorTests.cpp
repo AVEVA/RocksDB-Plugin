@@ -211,6 +211,26 @@ TEST(AzureErrorTranslatorTests, LeaseMismatchAndMissingLeaseAreIOFenced) {
             .IsIOFenced());
 }
 
+TEST(AzureErrorTranslatorTests, NewLeaseCodesAreIOFencedAndPermissionMismatchIsNotRetryable) {
+    using ::AVEVA::AzureClient::BlobStorageErrorCode;
+    for (const auto lease :
+         {BlobStorageErrorCode::LeaseIdMismatchWithLeaseOperation,
+          BlobStorageErrorCode::LeaseIsBrokenAndCannotBeRenewed, BlobStorageErrorCode::LeaseAlreadyBroken,
+          BlobStorageErrorCode::LeaseIsBreakingAndCannotBeAcquired}) {
+        const auto status = AzureErrorTranslator::IOStatusFromError(
+            Failure(409, "Lease", ::AVEVA::AzureClient::make_error_code(lease)));
+        EXPECT_TRUE(status.IsIOFenced()) << static_cast<int>(lease);
+        EXPECT_FALSE(status.GetRetryable()) << static_cast<int>(lease);
+    }
+
+    const auto denied = AzureErrorTranslator::IOStatusFromError(
+        Failure(403, "AuthorizationPermissionMismatch",
+                ::AVEVA::AzureClient::make_error_code(BlobStorageErrorCode::AuthorizationPermissionMismatch)));
+    EXPECT_TRUE(denied.IsIOError());
+    EXPECT_FALSE(denied.GetRetryable());
+    EXPECT_NE(denied.ToString().find("Authorization failed"), std::string::npos);
+}
+
 TEST(AzureErrorTranslatorTests, WritesFencedExceptionIsIOFenced) {
     const auto status = AzureErrorTranslator::FromException(std::make_exception_ptr(WritesFencedException("fenced")));
     EXPECT_TRUE(status.IsIOFenced());

@@ -62,8 +62,15 @@ rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const RequestFailedExc
     if (code == AzureClient::BlobStorageErrorCode::LeaseLost ||
         code == AzureClient::BlobStorageErrorCode::LeaseIdMismatchWithBlobOperation ||
         code == AzureClient::BlobStorageErrorCode::LeaseNotPresentWithBlobOperation ||
-        code == AzureClient::BlobStorageErrorCode::LeaseIdMissing) {
+        code == AzureClient::BlobStorageErrorCode::LeaseIdMissing ||
+        code == AzureClient::BlobStorageErrorCode::LeaseIdMismatchWithLeaseOperation ||
+        code == AzureClient::BlobStorageErrorCode::LeaseIsBrokenAndCannotBeRenewed ||
+        code == AzureClient::BlobStorageErrorCode::LeaseAlreadyBroken ||
+        code == AzureClient::BlobStorageErrorCode::LeaseIsBreakingAndCannotBeAcquired) {
         return IOStatus::IOFenced("Lease lost: " + text);
+    }
+    if (code == AzureClient::BlobStorageErrorCode::AuthorizationPermissionMismatch) {
+        return IOStatus::IOError("Authorization failed: " + text);
     }
 
     switch (error.StatusCode) {

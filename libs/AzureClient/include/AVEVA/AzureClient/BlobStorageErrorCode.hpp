@@ -57,7 +57,15 @@ enum class BlobStorageErrorCode : std::uint8_t {
     // diagnostic is in BlobStorageError::Message.
     InvalidResponse,
     // 409 from Lease Blob: the lease being released/renewed/changed does not exist (e.g. already released).
-    LeaseNotPresentWithLeaseOperation
+    LeaseNotPresentWithLeaseOperation,
+    LeaseIdMismatchWithLeaseOperation,
+    LeaseIsBrokenAndCannotBeRenewed,
+    LeaseAlreadyBroken,
+    LeaseIsBreakingAndCannotBeAcquired,
+    SequenceNumberConditionNotMet,
+    InvalidPageRange,
+    // The identity is authenticated but lacks the RBAC permission. Maps to std::errc::permission_denied.
+    AuthorizationPermissionMismatch
 };
 
 // Found via ADL by std::error_code's constructor; do not call directly, compare

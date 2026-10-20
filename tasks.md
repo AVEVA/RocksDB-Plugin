@@ -142,7 +142,7 @@ are medium confidence: confirm them against the code, or measure, before changin
 - **Validation:** ReadWriteFile write/read past `MaxOffset` expecting `IsInvalidArgument()`. Add
   `AzureErrorTranslatorTests` cases for `system_error(operation_canceled)`.
 
-### [ ] T34 – Lease / sequence-number / permission error codes are not mapped (**Verify first**)
+### [x] T34 – Lease / sequence-number / permission error codes are not mapped (**Verify first**)
 - **Files:** `libs\AzureClient\include\AVEVA\AzureClient\BlobStorageErrorCode.hpp`,
   `libs\AzureClient\src\BlobStorageErrorCategory.cpp:22-129` (`KnownCodes`, `default_error_condition`),
   `src\Azure\AzureErrorTranslator.cpp:68-73`.

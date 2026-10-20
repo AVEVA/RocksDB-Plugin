@@ -29,6 +29,9 @@ constexpr std::array KnownCodes{
     ErrorCodeEntry{.Name = "AuthorizationFailure",
                    .Code = BlobStorageErrorCode::AuthorizationFailure,
                    .Message = "The caller is not authorized to perform this operation"},
+    ErrorCodeEntry{.Name = "AuthorizationPermissionMismatch",
+                   .Code = BlobStorageErrorCode::AuthorizationPermissionMismatch,
+                   .Message = "This request is not authorized to perform this operation using this permission"},
     ErrorCodeEntry{.Name = "BlobAlreadyExists",
                    .Code = BlobStorageErrorCode::BlobAlreadyExists,
                    .Message = "The specified blob already exists"},
@@ -74,6 +77,9 @@ constexpr std::array KnownCodes{
     ErrorCodeEntry{.Name = "InvalidMetadata",
                    .Code = BlobStorageErrorCode::InvalidMetadata,
                    .Message = "The metadata specified is invalid; names must be valid C# identifiers"},
+    ErrorCodeEntry{.Name = "InvalidPageRange",
+                   .Code = BlobStorageErrorCode::InvalidPageRange,
+                   .Message = "The page range specified is invalid"},
     ErrorCodeEntry{.Name = "InvalidQueryParameterValue",
                    .Code = BlobStorageErrorCode::InvalidQueryParameterValue,
                    .Message = "An invalid value was specified for one of the query parameters"},
@@ -83,16 +89,29 @@ constexpr std::array KnownCodes{
     ErrorCodeEntry{.Name = "InvalidResourceName",
                    .Code = BlobStorageErrorCode::InvalidResourceName,
                    .Message = "The specified resource name is invalid"},
+    ErrorCodeEntry{.Name = "LeaseAlreadyBroken",
+                   .Code = BlobStorageErrorCode::LeaseAlreadyBroken,
+                   .Message = "The lease has already been broken and cannot be broken again"},
     ErrorCodeEntry{.Name = "LeaseAlreadyPresent",
                    .Code = BlobStorageErrorCode::LeaseAlreadyPresent,
                    .Message = "There is already a lease present"},
     ErrorCodeEntry{.Name = "LeaseIdMismatchWithBlobOperation",
                    .Code = BlobStorageErrorCode::LeaseIdMismatchWithBlobOperation,
                    .Message = "The lease ID specified did not match the lease ID for the blob"},
+    ErrorCodeEntry{.Name = "LeaseIdMismatchWithLeaseOperation",
+                   .Code = BlobStorageErrorCode::LeaseIdMismatchWithLeaseOperation,
+                   .Message = "The lease ID specified did not match the lease ID for the blob"},
     ErrorCodeEntry{.Name = "LeaseIdMissing",
                    .Code = BlobStorageErrorCode::LeaseIdMissing,
                    .Message =
                        "There is currently a lease on the resource and no lease ID was specified in the request"},
+    ErrorCodeEntry{.Name = "LeaseIsBreakingAndCannotBeAcquired",
+                   .Code = BlobStorageErrorCode::LeaseIsBreakingAndCannotBeAcquired,
+                   .Message = "The lease ID matched, but the lease is currently in breaking state and cannot be "
+                              "acquired until it is broken"},
+    ErrorCodeEntry{.Name = "LeaseIsBrokenAndCannotBeRenewed",
+                   .Code = BlobStorageErrorCode::LeaseIsBrokenAndCannotBeRenewed,
+                   .Message = "The lease ID matched, but the lease has been broken explicitly and cannot be renewed"},
     ErrorCodeEntry{.Name = "LeaseLost",
                    .Code = BlobStorageErrorCode::LeaseLost,
                    .Message = "A lease ID was specified, but the lease has expired"},
@@ -118,6 +137,9 @@ constexpr std::array KnownCodes{
     ErrorCodeEntry{.Name = "ResourceNotFound",
                    .Code = BlobStorageErrorCode::ResourceNotFound,
                    .Message = "The specified resource does not exist"},
+    ErrorCodeEntry{.Name = "SequenceNumberConditionNotMet",
+                   .Code = BlobStorageErrorCode::SequenceNumberConditionNotMet,
+                   .Message = "The sequence number condition specified was not met"},
     ErrorCodeEntry{.Name = "ServerBusy",
                    .Code = BlobStorageErrorCode::ServerBusy,
                    .Message = "The server is currently unable to receive requests"},
@@ -155,6 +177,7 @@ std::error_condition BlobStorageErrorCategory::default_error_condition(int value
     case BlobStorageErrorCode::AuthenticationFailed:
     case BlobStorageErrorCode::AuthorizationFailure:
     case BlobStorageErrorCode::InvalidAuthenticationInfo:
+    case BlobStorageErrorCode::AuthorizationPermissionMismatch:
         return std::errc::permission_denied;
     case BlobStorageErrorCode::ServerBusy:
         return std::errc::resource_unavailable_try_again;

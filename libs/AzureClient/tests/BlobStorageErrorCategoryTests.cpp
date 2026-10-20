@@ -144,7 +144,7 @@ struct EnumeratorCase {
 
 // Every enumerator, in declaration order. Adding an enumerator without a row here fails
 // EveryEnumerator_IsCovered below.
-constexpr std::array<EnumeratorCase, 36> AllEnumerators{{
+constexpr std::array<EnumeratorCase, 43> AllEnumerators{{
     {.Code = BlobStorageErrorCode::ContainerAlreadyExists, .ServiceName = "ContainerAlreadyExists"},
     {.Code = BlobStorageErrorCode::ContainerNotFound, .ServiceName = "ContainerNotFound"},
     {.Code = BlobStorageErrorCode::ContainerBeingDeleted, .ServiceName = "ContainerBeingDeleted"},
@@ -183,6 +183,15 @@ constexpr std::array<EnumeratorCase, 36> AllEnumerators{{
     {.Code = BlobStorageErrorCode::InvalidResponse, .ServiceName = ""},
     {.Code = BlobStorageErrorCode::LeaseNotPresentWithLeaseOperation,
      .ServiceName = "LeaseNotPresentWithLeaseOperation"},
+    {.Code = BlobStorageErrorCode::LeaseIdMismatchWithLeaseOperation,
+     .ServiceName = "LeaseIdMismatchWithLeaseOperation"},
+    {.Code = BlobStorageErrorCode::LeaseIsBrokenAndCannotBeRenewed, .ServiceName = "LeaseIsBrokenAndCannotBeRenewed"},
+    {.Code = BlobStorageErrorCode::LeaseAlreadyBroken, .ServiceName = "LeaseAlreadyBroken"},
+    {.Code = BlobStorageErrorCode::LeaseIsBreakingAndCannotBeAcquired,
+     .ServiceName = "LeaseIsBreakingAndCannotBeAcquired"},
+    {.Code = BlobStorageErrorCode::SequenceNumberConditionNotMet, .ServiceName = "SequenceNumberConditionNotMet"},
+    {.Code = BlobStorageErrorCode::InvalidPageRange, .ServiceName = "InvalidPageRange"},
+    {.Code = BlobStorageErrorCode::AuthorizationPermissionMismatch, .ServiceName = "AuthorizationPermissionMismatch"},
 }};
 } // namespace
 
@@ -190,7 +199,7 @@ TEST(BlobStorageErrorCategoryTests, EveryEnumerator_IsCovered) {
     for (std::size_t i = 0; i < AllEnumerators.size(); ++i) {
         EXPECT_EQ(static_cast<std::size_t>(AllEnumerators.at(i).Code), i + 1U) << "row " << i;
     }
-    EXPECT_EQ(AllEnumerators.back().Code, BlobStorageErrorCode::LeaseNotPresentWithLeaseOperation)
+    EXPECT_EQ(AllEnumerators.back().Code, BlobStorageErrorCode::AuthorizationPermissionMismatch)
         << "new enumerators are appended, so this must stay the last one until another is added";
 }
 
@@ -215,6 +224,7 @@ TEST(BlobStorageErrorCategoryTests, ErrorCodes_MapToPortableConditions) {
     EXPECT_EQ(make_error_code(BlobStorageErrorCode::ContainerAlreadyExists), std::errc::file_exists);
     EXPECT_EQ(make_error_code(BlobStorageErrorCode::AuthenticationFailed), std::errc::permission_denied);
     EXPECT_EQ(make_error_code(BlobStorageErrorCode::AuthorizationFailure), std::errc::permission_denied);
+    EXPECT_EQ(make_error_code(BlobStorageErrorCode::AuthorizationPermissionMismatch), std::errc::permission_denied);
     EXPECT_EQ(make_error_code(BlobStorageErrorCode::InvalidAuthenticationInfo), std::errc::permission_denied);
     EXPECT_EQ(make_error_code(BlobStorageErrorCode::OperationTimedOut), std::errc::timed_out);
     EXPECT_EQ(make_error_code(BlobStorageErrorCode::InvalidResponse), std::errc::bad_message);
