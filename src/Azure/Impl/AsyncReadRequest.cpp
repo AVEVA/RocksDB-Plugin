@@ -41,10 +41,7 @@ void AsyncReadRequest::ThrowIfWaitWouldDeadlock() {
     }
 }
 
-bool AsyncReadRequest::Finished() {
-    std::scoped_lock lock(m_mutex);
-    return m_state != State::InFlight;
-}
+bool AsyncReadRequest::Finished() { return m_state.load(std::memory_order_acquire) != State::InFlight; }
 
 void AsyncReadRequest::Complete(rocksdb::IOStatus status, const std::string_view data) {
     {

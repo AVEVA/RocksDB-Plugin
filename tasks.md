@@ -64,7 +64,7 @@ against the code unless it says **Verify first**.
 - **Validation:** The tests asserting NotFound-on-open still pass, or are updated deliberately. Count requests
   per open in a test with the fake HTTP client.
 
-### [ ] T04 – Remove zero-fill and per-group vectors in `MultiRead`
+### [x] T04 – Remove zero-fill and per-group vectors in `MultiRead`
 - **File:** `src\Azure\BasicReadableFile.ipp` MultiRead.
 - **Problems:**
   - `group.Buffer.resize()` zero-fills up to 8 MiB (`kMultiReadMaxMergedBytes`) per merged group.

@@ -5,6 +5,7 @@
 #include <boost/asio/io_context.hpp>
 #include <rocksdb/file_system.h>
 
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -99,7 +100,8 @@ class AsyncReadRequest {
 
     std::mutex m_mutex;
     std::condition_variable m_finished;
-    State m_state = State::InFlight;
+    // Written under m_mutex; atomic so MultiRead can poll Finished() without taking the lock of every request.
+    std::atomic<State> m_state{State::InFlight};
     rocksdb::IOStatus m_status;
     size_t m_bytesRead = 0;
     bool m_callbackDelivered = false;

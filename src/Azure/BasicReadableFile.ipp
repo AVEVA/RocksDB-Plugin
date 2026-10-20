@@ -152,13 +152,15 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
         return rocksdb::IOStatus::InvalidArgument(error.what());
     }
 
-    // One merged download: the member requests it serves (indexes into reqs, ordered by offset) and, when it serves
-    // more than one, the buffer the merged range is fetched into.
+    // One merged download: the member requests it serves (the run [FirstMember, EndMember) of `order`, which is
+    // sorted by offset) and, when it serves more than one, the buffer the merged range is fetched into. The buffer is
+    // left uninitialised because the download overwrites it.
     struct Group {
-        std::vector<size_t> Members;
+        size_t FirstMember = 0;
+        size_t EndMember = 0;
         uint64_t Start = 0;
         uint64_t End = 0;
-        std::vector<char> Buffer;
+        std::unique_ptr<char[]> Buffer;
     };
 
     // A request whose range overflows cannot be merged or read; it fails on its own like any per-request error.
@@ -175,19 +177,19 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
     std::ranges::sort(order, [&](const size_t a, const size_t b) { return reqs[a].offset < reqs[b].offset; });
 
     std::vector<Group> groups;
-    for (const auto index : order) {
-        const auto& req = reqs[index];
+    for (size_t position = 0; position < order.size(); ++position) {
+        const auto& req = reqs[order[position]];
         const uint64_t end = req.offset + req.len;
         if (!groups.empty()) {
             auto& last = groups.back();
             if (req.offset <= last.End + kMultiReadMaxGap &&
                 std::max(last.End, end) - last.Start <= kMultiReadMaxMergedBytes) {
-                last.Members.push_back(index);
+                last.EndMember = position + 1;
                 last.End = std::max(last.End, end);
                 continue;
             }
         }
-        groups.push_back(Group{.Members = {index}, .Start = req.offset, .End = end, .Buffer = {}});
+        groups.push_back(Group{.FirstMember = position, .EndMember = position + 1, .Start = req.offset, .End = end});
     }
 
     struct Active {
@@ -210,15 +212,15 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
     size_t nextGroup = 0;
 
     auto start = [&](Group& group) {
-        const bool single = group.Members.size() == 1;
+        const bool single = group.EndMember - group.FirstMember == 1;
         // A merged group is fetched into its own buffer; the callback then copies each member's slice out.
         rocksdb::FSReadRequest merged;
-        rocksdb::FSReadRequest* target = &reqs[group.Members.front()];
+        rocksdb::FSReadRequest* target = &reqs[order[group.FirstMember]];
         if (!single) {
-            group.Buffer.resize(group.End - group.Start);
             merged.offset = group.Start;
-            merged.len = group.Buffer.size();
-            merged.scratch = group.Buffer.data();
+            merged.len = group.End - group.Start;
+            group.Buffer = std::make_unique_for_overwrite<char[]>(merged.len);
+            merged.scratch = group.Buffer.get();
             target = &merged;
         }
 
@@ -229,8 +231,9 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
                 target->result = finished.result;
             };
         } else {
-            done = [reqs, &group](rocksdb::FSReadRequest& finished, void*) {
-                for (const auto index : group.Members) {
+            done = [reqs, &order, &group](rocksdb::FSReadRequest& finished, void*) {
+                for (size_t position = group.FirstMember; position < group.EndMember; ++position) {
+                    const auto index = order[position];
                     auto& member = reqs[index];
                     const uint64_t relative = member.offset - group.Start;
                     size_t available = 0;
@@ -250,9 +253,9 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
         rocksdb::IOHandleDeleter deleter = nullptr;
         auto started = StartRead(*target, opts, std::move(done), nullptr, &handle, &deleter, signal);
         if (!started.ok()) {
-            for (const auto index : group.Members) {
-                reqs[index].status = started;
-                reqs[index].result = rocksdb::Slice();
+            for (size_t position = group.FirstMember; position < group.EndMember; ++position) {
+                reqs[order[position]].status = started;
+                reqs[order[position]].result = rocksdb::Slice();
             }
             return;
         }
