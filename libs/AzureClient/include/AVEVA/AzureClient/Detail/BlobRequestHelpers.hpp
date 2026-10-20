@@ -563,20 +563,21 @@ void SendAuthorizedRequestAsync(THttp& httpClient, const BasicBlobTarget<TCred>&
 // If-Match: <first ETag> unless the caller supplied If-Match, and written in order. On failure or
 // cancellation the in-flight requests are cancelled and drained before the single completion.
 template <HttpClientLike THttp, class TCred, class TCompletion>
-void DownloadBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, DownloadBlobOptions operationOptions,
-                       TCompletion completion, AzureRequestOptions requestOptions);
+void DownloadBlobAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
+                       DownloadBlobOptions operationOptions, TCompletion completion,
+                       AzureRequestOptions requestOptions);
 template <HttpClientLike THttp, class TCred, class TCompletion>
 void DownloadBlobToAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, DownloadToOptions operationOptions,
                          std::ostream& stream, TCompletion completion, AzureRequestOptions requestOptions);
 // Writes straight into `destination`, which must stay valid until the completion runs. A range larger than
 // the buffer fails the download; a shorter blob leaves the tail untouched (see BytesWritten).
 template <HttpClientLike THttp, class TCred, class TCompletion>
-void DownloadBlobToSpanAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
+void DownloadBlobToSpanAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
                              DownloadToOptions operationOptions, std::span<char> destination, TCompletion completion,
                              AzureRequestOptions requestOptions);
 // Downloads into `<path>.partial-<id>` and renames it over `path` only on success.
 template <HttpClientLike THttp, class TCred, class TCompletion>
-void DownloadBlobToFileAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
+void DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
                              DownloadToOptions operationOptions, const std::filesystem::path& path,
                              TCompletion completion, AzureRequestOptions requestOptions);
 

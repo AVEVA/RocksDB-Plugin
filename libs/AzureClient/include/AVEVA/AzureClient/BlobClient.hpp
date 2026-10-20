@@ -320,20 +320,20 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
     // Operation entry points, templated on the completion handler so it is never type-erased.
     template <class THandler>
     void DownloadAsyncImpl(DownloadBlobOptions options, THandler completion, AzureRequestOptions requestOptions) {
-        Private::DownloadBlobAsync(*m_httpClient, *m_target, std::move(options), std::move(completion), requestOptions);
+        Private::DownloadBlobAsync(*m_httpClient, m_target, std::move(options), std::move(completion), requestOptions);
     }
 
     template <class THandler>
     void DownloadToFileAsyncImpl(const std::filesystem::path& path, DownloadToOptions options, THandler completion,
                                  AzureRequestOptions requestOptions) {
-        Private::DownloadBlobToFileAsync(*m_httpClient, *m_target, std::move(options), path, std::move(completion),
+        Private::DownloadBlobToFileAsync(*m_httpClient, m_target, std::move(options), path, std::move(completion),
                                          requestOptions);
     }
 
     template <class THandler>
     void DownloadRangeToSpanAsyncImpl(std::span<char> destination, DownloadBlobOptions options, THandler completion,
                                       AzureRequestOptions requestOptions) {
-        Private::DownloadBlobToSpanAsync(*m_httpClient, *m_target, Private::ToDownloadToOptions(std::move(options)),
+        Private::DownloadBlobToSpanAsync(*m_httpClient, m_target, Private::ToDownloadToOptions(std::move(options)),
                                          destination, std::move(completion), requestOptions);
     }
 
