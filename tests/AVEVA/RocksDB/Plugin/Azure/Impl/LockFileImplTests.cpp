@@ -230,6 +230,28 @@ TEST_F(LockFileImplTests, RenewThatOutlastsTheLeaseIsCancelledAtTheDeadlineAndTh
     EXPECT_EQ(m_httpClient.RequestCount(), 2U);
 }
 
+TEST_F(LockFileImplTests, UnlockThatOutlastsTheLeaseIsCancelledAtTheLeaseEnd) {
+    m_httpClient.EnqueueResponse(Acquired());
+    // Never completed: the release hangs, but the lease lapses on its own.
+    m_httpClient.EnqueueDeferredResponse(HttpResponse{200, MakeCanonicalSuccessHeaders({}), ""});
+
+    const auto leaseLength = std::chrono::seconds(15);
+    auto lock = CreateLock(leaseLength);
+    auto offset =
+        std::make_shared<std::atomic<std::chrono::steady_clock::duration>>(std::chrono::steady_clock::duration::zero());
+    lock->SetClockForTesting([offset] { return std::chrono::steady_clock::now() + offset->load(); });
+    ASSERT_TRUE(lock->Lock());
+    *offset =
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(leaseLength - std::chrono::milliseconds(200));
+
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_ANY_THROW(lock->Unlock());
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(5));
+    // Local state is cleared even though the release did not complete.
+    EXPECT_FALSE(lock->IsRenewalOverdue());
+    EXPECT_NO_THROW(lock->Unlock());
+}
+
 TEST_F(LockFileImplTests, UnlockReleasesTheLeaseAndStopsFurtherRenewal) {
     m_httpClient.EnqueueResponse(Acquired());
     m_httpClient.EnqueueResponse(HttpResponse{200, MakeCanonicalSuccessHeaders({}), ""});

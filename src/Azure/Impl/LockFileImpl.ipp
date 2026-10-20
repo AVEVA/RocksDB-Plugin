@@ -320,7 +320,17 @@ template <typename TBlob> void BasicLockFileImpl<TBlob>::Unlock() {
             PublishDeadlineLocked();
         }
     });
-    Unwrap(m_file->ReleaseLeaseAsync(std::move(options), AzureClient::block_on));
+    // The lease lapses on its own, so waiting on the release (and its retries) beyond that only stalls shutdown.
+    auto requestOptions = m_file->GetDefaultRequestOptions();
+    requestOptions.SetTotalDeadline(LockFileDetail::TotalDeadlineFor(m_lastRenewalTime.load() + m_leaseLength - Now()));
+    try {
+        Unwrap(m_file->ReleaseLeaseAsync(
+            std::move(options), AzureClient::WithRequestOptions(std::move(requestOptions), AzureClient::block_on)));
+    } catch (const std::exception& e) {
+        BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
+            << "Failed to release blob lease for '" << m_fileName << "'; it will lapse on its own: " << e.what();
+        throw;
+    }
     BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::debug)
         << "Successfully released blob lease for '" << m_fileName << "'";
 }

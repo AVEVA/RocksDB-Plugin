@@ -194,7 +194,7 @@ are medium confidence: confirm them against the code, or measure, before changin
 - **Validation:** inject a failure into one upload, retry Flush, then check the size and content. Run the existing
   `ReadWriteFileTests`. Fence mid-Flush and expect IOFenced.
 
-### [ ] T38 – `LockFileImpl::Unlock` has no deadline
+### [x] T38 – `LockFileImpl::Unlock` has no deadline
 - **File:** `src\Azure\Impl\LockFileImpl.ipp:302-323`.
 - **Problem:** `ReleaseLeaseAsync` runs with the default options and no total deadline. `~BlobFilesystem` unlocks
   the locks one after another, so shutdown can stall for each lock's full retry budget, even though the lease
