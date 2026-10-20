@@ -3,6 +3,7 @@
 
 #include "private/OriginLimiter.hpp"
 
+#include <boost/asio/io_context.hpp>
 #include <gtest/gtest.h>
 
 #include <atomic>
@@ -118,6 +119,32 @@ TEST(OriginLimiterTests, CancelRemovesOnlyTheQueuedTicketAndTheRestKeepTheirOrde
     limiter.Release("origin");
     EXPECT_EQ(recorder->Started, (std::vector<int>{1, 2, 4}));
     EXPECT_EQ(recorder->Aborted, std::vector<int>{3});
+}
+
+TEST(OriginLimiterTests, QueuedWaitersAreAbortedAtTheirDeadlineInDeadlineOrder) {
+    using namespace std::chrono_literals;
+    boost::asio::io_context context;
+    auto recorder = std::make_shared<Recorder>();
+    auto limiter = std::make_shared<Limiter>(1, RecordingSink{recorder});
+    const auto expired = std::make_error_code(std::errc::timed_out);
+    limiter->EnableDeadlines(context, expired);
+
+    const auto now = Limiter::Clock::now();
+    limiter->Run("origin", limiter->NextTicket(), 1, now + 1h);
+    limiter->Run("origin", limiter->NextTicket(), 2, now + 120ms);
+    limiter->Run("origin", limiter->NextTicket(), 3, now + 40ms);
+    limiter->Run("origin", limiter->NextTicket(), 4, now + 1h);
+
+    context.run_for(1s);
+
+    EXPECT_EQ(recorder->Started, std::vector<int>{1});
+    EXPECT_EQ(recorder->Aborted, (std::vector<int>{3, 2}));
+    EXPECT_EQ(recorder->Errors.front(), expired);
+
+    // The survivor is still queued and still gets the slot.
+    limiter->Release("origin");
+    EXPECT_EQ(recorder->Started, (std::vector<int>{1, 4}));
+    EXPECT_EQ(recorder->Aborted, (std::vector<int>{3, 2}));
 }
 
 TEST(OriginLimiterTests, CancelFindsWaitersThatWereQueuedOutOfTicketOrder) {

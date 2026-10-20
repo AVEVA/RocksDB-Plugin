@@ -186,6 +186,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     void Initialize() {
         if (m_maxPerOrigin > 0) {
             m_limiter = std::make_shared<Limiter>(m_maxPerOrigin, LimiterSink(this->weak_from_this()));
+            m_limiter->EnableDeadlines(m_context, make_error_code(HttpClientError::TimedOut));
         }
     }
 
@@ -301,8 +302,8 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// the limiter, the state's target removes it from the queue; when it starts, the operation retargets the
     /// state to cancel itself. Nothing here ever reassigns the slot.
     ///
-    /// Timeout: the deadline is fixed at submission, so queue time counts. A queued request is not woken when
-    /// its deadline passes; it fails with TimedOut, without connecting, as soon as it is given a slot.
+    /// Timeout: the deadline is fixed at submission, so queue time counts. The limiter wakes a queued request
+    /// when its deadline passes and fails it with TimedOut without connecting.
     /// </summary>
     /// <param name="origin">The origin whose cap the request counts against.</param>
     /// <param name="route">The request's parsed destination.</param>
@@ -324,7 +325,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         PendingRequest pending{std::move(origin),     std::move(route), std::move(request), std::move(options),
                                std::move(completion), cancellation,     deadline,           std::move(state)};
         // Run reads the origin from the request before it consumes it.
-        m_limiter->Run(pending.origin, ticket, std::move(pending));
+        m_limiter->Run(pending.origin, ticket, std::move(pending), deadline);
         // A cancel that fired before the request was queued found nothing to remove; deliver it again to
         // whichever target is current (the queue entry, or the operation if it has already started).
         if (cancellation && cancellation->IsCancelled()) {

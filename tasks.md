@@ -193,7 +193,7 @@ against the code unless it says **Verify first**.
   - Issue the ticket inside `Run` under `m_mutex`, then use plain `push_back` and drop the atomic.
   - Use transparent lookup with a `string_view` origin, or cache the origin string on the `Route`.
 
-### [ ] T17 – Wake queued requests at their deadline
+### [x] T17 – Wake queued requests at their deadline
 - **Files:** `libs\HttpClient\src\private\HttpClientImpl.hpp` (`SendLimited`), `OriginLimiter.hpp`.
 - **Problem:** This is a documented limitation: a request queued behind the per-origin limit is not woken when its
   deadline passes, so it fails late.

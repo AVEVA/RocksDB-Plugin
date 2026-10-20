@@ -421,6 +421,8 @@ TEST(HttpClientRobustness, TimeSpentQueuedForASlotCountsAgainstTheRequestTimeout
 
     std::error_code firstResult;
     std::error_code queuedResult;
+    std::chrono::steady_clock::duration queuedElapsed{};
+    const auto submitted = std::chrono::steady_clock::now();
     int completions = 0;
     const auto finishWhenBothDone = [&] {
         if (++completions == 2) {
@@ -435,12 +437,15 @@ TEST(HttpClientRobustness, TimeSpentQueuedForASlotCountsAgainstTheRequestTimeout
     client->SendAsync(MakeRequest(server.Url("/queued")), queuedOptions,
                       [&](std::error_code error, AVEVA::HttpResponse) {
                           queuedResult = error;
+                          queuedElapsed = std::chrono::steady_clock::now() - submitted;
                           finishWhenBothDone();
                       });
     RunBounded(context);
 
     EXPECT_EQ(firstResult, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
     EXPECT_EQ(queuedResult, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
+    // It is woken at its own 150 ms deadline, not when the first request frees the slot at 400 ms.
+    EXPECT_LT(queuedElapsed, std::chrono::milliseconds(350));
     // The queued request's deadline passed while it waited, so it never opened a connection of its own.
     EXPECT_EQ(server.Accepted(), 1);
     EXPECT_EQ(server.TotalRequests(), 1);
@@ -466,6 +471,8 @@ TEST(HttpClientRobustness, CancellingAQueuedRequestFailsItWithoutStartingIt) {
 
     std::error_code firstResult;
     std::error_code queuedResult;
+    std::chrono::steady_clock::duration queuedElapsed{};
+    const auto submitted = std::chrono::steady_clock::now();
     int completions = 0;
     const auto finishWhenBothDone = [&] {
         if (++completions == 2) {
