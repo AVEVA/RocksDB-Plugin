@@ -69,8 +69,11 @@ std::string Require(const char* name, const std::optional<std::string>& value) {
 }
 
 // Name used both as the ObjectLibrary registration id and the
-// --secondary_cache_uri value that selects this backend.
-constexpr const char* kFileBasedSecondaryCacheName = "aveva-file-based-secondary-cache";
+// --secondary_cache_uri value that selects this backend. Includes the
+// "://" suffix because RocksDB's ObjectLibrary matches the registered id
+// against the *entire* --secondary_cache_uri string - it doesn't strip the
+// scheme separator before comparing.
+constexpr const char* kFileBasedSecondaryCacheName = "aveva-file-based-secondary-cache://";
 
 // Registers a factory for AVEVA's file-based secondary cache
 // (FileBasedCompressedSecondaryCache) so db_bench's own --secondary_cache_uri
@@ -161,7 +164,7 @@ int main(int argc, char** argv) {
               << "    --fs_uri=" << fsUri << "\n"
               << "    --db=" << dbPath << "/<your-db-name>\n"
               << "  To also attach a secondary cache, add:\n"
-              << "    --secondary_cache_uri=" << kFileBasedSecondaryCacheName << "://\n"
+              << "    --secondary_cache_uri=" << kFileBasedSecondaryCacheName << "\n"
               << "  with AVEVA_DB_BENCH_SECONDARY_CACHE_DIR set (and optionally\n"
               << "  AVEVA_DB_BENCH_SECONDARY_CACHE_CAPACITY_MB).\n";
 

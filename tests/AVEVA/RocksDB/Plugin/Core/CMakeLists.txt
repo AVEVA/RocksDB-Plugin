@@ -3,6 +3,7 @@ add_executable(aveva-rocksdb-plugin-core-tests
     CoreTests.cpp
     FileCacheTests.cpp
     FileBasedCompressedSecondaryCacheRoundTripTests.cpp
+    FileBasedCompressedSecondaryCacheRealDbTests.cpp
     FileBasedCompressedSecondaryCacheCapacityTests.cpp
     FileBasedCompressedSecondaryCacheCompressionTests.cpp
     FileBasedCompressedSecondaryCacheCorruptionTests.cpp

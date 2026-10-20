@@ -12,6 +12,7 @@
 #include <rocksdb/db.h>
 #include <rocksdb/options.h>
 #include <rocksdb/secondary_cache.h>
+#include <rocksdb/statistics.h>
 #include <rocksdb/table.h>
 
 #include <filesystem>
@@ -31,6 +32,7 @@ class PluginSecondaryCacheIntegrationTests : public AzureIntegrationTestBase {
     rocksdb::Env* m_env = nullptr;
     std::shared_ptr<rocksdb::Env> m_envGuard;
     std::string m_dbPath;
+    std::shared_ptr<rocksdb::Statistics> m_stats = rocksdb::CreateDBStatistics();
 
     std::string GetBlobNamePrefix() const override { return "plugin-sc-test"; }
 
@@ -85,6 +87,7 @@ class PluginSecondaryCacheIntegrationTests : public AzureIntegrationTestBase {
         opts.env = m_env;
         opts.create_if_missing = createIfMissing;
         opts.table_factory.reset(rocksdb::NewBlockBasedTableFactory(tableOpts));
+        opts.statistics = m_stats; // shared across opens so hits accumulate across the reopen test
 
         std::unique_ptr<rocksdb::DB> db;
         rocksdb::DB::Open(opts, m_dbPath, &db);
@@ -166,11 +169,19 @@ TEST_F(PluginSecondaryCacheIntegrationTests, DataReadable_AfterDbReopenWithSameS
         auto db = OpenDb(/*createIfMissing=*/false);
         ASSERT_NE(db, nullptr) << "Failed to reopen RocksDB after initial write";
 
+        const auto hitsBefore = m_stats->getTickerCount(rocksdb::SECONDARY_CACHE_HITS);
+
         for (int i = 0; i < 20; ++i) {
             std::string val;
             ASSERT_TRUE(db->Get({}, "reopen_key_" + std::to_string(i), &val).ok())
                 << "Key not found after reopen: reopen_key_" << i;
             EXPECT_EQ(val, expectedVal) << "Data mismatch for reopen_key_" << i;
         }
+
+        // Correctness alone isn't sufficient here: a broken Lookup() still returns correct
+        // data because RocksDB falls back to re-reading the SST on a secondary-cache miss.
+        // This assertion is what actually proves the secondary cache was exercised.
+        EXPECT_GT(m_stats->getTickerCount(rocksdb::SECONDARY_CACHE_HITS), hitsBefore)
+            << "Expected reads after reopen to be served from the secondary cache";
     }
 }
