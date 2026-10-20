@@ -687,7 +687,7 @@ are medium confidence: confirm them against the code, or measure, before changin
   `CreateContainerClient` reports the failure twice; return after the helper.
 - **Validation:** all three test trees, including `ctest -j` and a TSan run of the azure-impl tests.
 
-### [ ] T66 – Test gaps to add alongside the fixes above
+### [x] T66 – Test gaps to add alongside the fixes above
 - MultiRead merged group crossing EOF: members wholly past EOF get OK and empty; a straddling member gets a
   partial result.
 - A prefetch that completes short at EOF returns its budget (T59).

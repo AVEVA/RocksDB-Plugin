@@ -602,6 +602,27 @@ TEST_F(AsyncReadTests, MultiRead_RangesFartherApartThanTheGap_AreFetchedSeparate
     EXPECT_EQ(Expected(4197, 100), reqs[1].result.ToString());
 }
 
+TEST_F(AsyncReadTests, MultiRead_MergedGroupCrossingEof_GivesPartialAndEmptyResults) {
+    FillPattern(m_inlineEnv, 1000);
+    auto file = CreateFile(m_inlineEnv);
+    std::vector<char> scratchA(100);
+    std::vector<char> scratchB(200);
+    std::vector<char> scratchC(100);
+    std::vector<rocksdb::FSReadRequest> reqs(3);
+    SetRequest(reqs[0], 900, scratchA);
+    SetRequest(reqs[1], 900 + 100 - 50, scratchB);
+    SetRequest(reqs[2], 1100, scratchC);
+
+    ASSERT_TRUE(file.MultiRead(reqs.data(), reqs.size(), rocksdb::IOOptions{}, nullptr).ok());
+
+    EXPECT_TRUE(reqs[0].status.ok()) << reqs[0].status.ToString();
+    EXPECT_EQ(Expected(900, 100), reqs[0].result.ToString());
+    EXPECT_TRUE(reqs[1].status.ok()) << reqs[1].status.ToString();
+    EXPECT_EQ(Expected(950, 50), reqs[1].result.ToString());
+    EXPECT_TRUE(reqs[2].status.ok()) << reqs[2].status.ToString();
+    EXPECT_EQ(0U, reqs[2].result.size());
+}
+
 TEST_F(AsyncReadTests, MultiRead_MergedDownloadFails_EveryMemberReportsTheError) {
     FillPattern(m_inlineEnv, 100000);
     auto file = CreateFile(m_inlineEnv);
