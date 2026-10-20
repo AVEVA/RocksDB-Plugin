@@ -102,7 +102,7 @@ void FileCache::MarkFileAsStaleIfExists(const std::string& filePath) {
     if (it != m_cache.end()) {
         // A downloader that already popped this entry is still QueuedForDownload; the generation is how it learns
         // the blob changed under it.
-        it->second.BumpGeneration();
+        it->second.SetGeneration(++m_nextGeneration);
 
         // Mark as stale if exists. This should prevent reads from
         // accessing the file while it's being downloaded.
@@ -143,6 +143,7 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
 
         auto [inserted, _] = m_cache.emplace(std::piecewise_construct, std::forward_as_tuple(std::string(filePath)),
                                              std::forward_as_tuple(filePath, 0));
+        inserted->second.SetGeneration(++m_nextGeneration);
         m_entryList.push_front(inserted->second);
         // A new entry is stale with no size yet.
         m_metadataOnlyList.push_front(inserted->second);
@@ -235,8 +236,9 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
         // Only the entry this read used is dropped: a newer valid one may have replaced it meanwhile.
         if (shortRead) {
             std::scoped_lock relock(m_mutex);
-            if (const auto current = m_cache.find(filePath);
-                current != m_cache.end() && current->second.GetGeneration() == generation) {
+            if (const auto current = m_cache.find(filePath); current != m_cache.end() &&
+                                                             current->second.GetGeneration() == generation &&
+                                                             current->second.HasReadHandle(handle)) {
                 RemoveFileUnsafe(filePath);
             }
         }
@@ -408,7 +410,8 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                 std::unique_lock lock(m_mutex);
                 auto it = m_cache.find(filePath);
                 if (it != m_cache.end()) {
-                    if (it->second.GetGeneration() != generation) {
+                    if (it->second.GetGeneration() != generation ||
+                        it->second.GetState() != FileCacheEntry::State::QueuedForDownload) {
                         // The blob was replaced while we asked for its size, so that size and any download are stale.
                         // A later read queues the entry again.
                         BOOST_LOG_SEV(*m_logger, debug)

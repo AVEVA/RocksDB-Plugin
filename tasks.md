@@ -288,7 +288,7 @@ are medium confidence: confirm them against the code, or measure, before changin
 - **Validation:** existing runtime cache tests. New tests: invalidating A during a fetch of B still caches B, while
   invalidating A during a fetch of A does not.
 
-### [ ] T45 – FileCache generation ABA can activate a re-created entry with a stale size
+### [x] T45 – FileCache generation ABA can activate a re-created entry with a stale size
 - **Files:**
   - `src\Core\FileCache.cpp` (BackgroundDownload post-`GetBlobSize` check ~395-420; ReadFile shortRead ~240-250)
   - `include\AVEVA\RocksDB\Plugin\Core\FileCacheEntry.hpp` (`m_generation = 0`)
@@ -306,17 +306,6 @@ are medium confidence: confirm them against the code, or measure, before changin
   - In shortRead, also compare the read-handle pointer identity.
 - **Validation:** new `FileCacheTests` case where `ContainerClientMock::GetBlobSize` calls `RemoveFile` then
   `ReadFile` on the same path mid-call. Run `ctest -L core`.
-
-### [ ] T46 – Secondary cache: two zero-filled buffers and two payload copies per Insert
-- **Files:** `src\Core\FileBasedCompressedSecondaryCache.cpp` (Insert ~125 `small_vector buf(dataSize)`;
-  WriteToDisk ~400-410 `writeBuf(storedSize)` + memcpy). Also `src\Core\LocalFilesystem.cpp` ~64
-  (`std::string contents(size, '\0')` in Lookup).
-- **Change:**
-  - Allocate one `storedSize` buffer with `boost::container::default_init`.
-  - Write the header byte, then `saveto_cb` into `buf + 1`, and add a `WriteToDisk` overload that takes the
-    prepared buffer.
-  - In Lookup, use `resize_and_overwrite` to read without the zero-fill.
-- **Validation:** `ctest -L core` (the secondary-cache round-trip tests). Measure the Insert cost.
 
 ### [ ] T47 – `FileCache::ReadFile` copies the relative path under `m_mutex` on every hit
 - **File:** `src\Core\FileCache.cpp` ~196 (`auto relativePath = fileEntry.GetFilePath();`).

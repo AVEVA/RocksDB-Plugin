@@ -22,6 +22,8 @@ uint64_t FileCacheEntry::GetGeneration() const noexcept { return m_generation; }
 
 void FileCacheEntry::BumpGeneration() noexcept { ++m_generation; }
 
+void FileCacheEntry::SetGeneration(uint64_t generation) noexcept { m_generation = generation; }
+
 std::shared_ptr<detail::CachedReadHandle> FileCacheEntry::GetOrCreateReadHandle() {
     if (!m_readHandle) {
         m_readHandle = std::make_shared<detail::CachedReadHandle>();
@@ -30,6 +32,10 @@ std::shared_ptr<detail::CachedReadHandle> FileCacheEntry::GetOrCreateReadHandle(
 }
 
 std::shared_ptr<detail::CachedReadHandle> FileCacheEntry::TakeReadHandle() noexcept { return std::move(m_readHandle); }
+
+bool FileCacheEntry::HasReadHandle(const std::shared_ptr<detail::CachedReadHandle>& handle) const noexcept {
+    return m_readHandle == handle;
+}
 
 void FileCacheEntry::unlink() {
     boost::intrusive::list_base_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>>::unlink();

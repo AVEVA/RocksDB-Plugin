@@ -476,6 +476,31 @@ TEST_F(FileCacheTests, FileReplacedWhileItsSizeIsBeingLookedUp_IsNotActivated) {
     m_cache.WaitUntilIdle();
 }
 
+TEST_F(FileCacheTests, FileRemovedAndRecreatedWhileItsSizeIsBeingLookedUp_IsNotActivatedWithTheOldSize) {
+    // Arrange - the first size lookup removes and re-creates the entry, which starts out Stale.
+    std::atomic<int> sizeCalls{0};
+    EXPECT_CALL(*m_containerClient, GetBlobSize("1.sst")).WillRepeatedly([&](const std::string&) -> int64_t {
+        if (++sizeCalls == 1) {
+            m_cache.RemoveFile("1.sst");
+            EXPECT_FALSE(m_cache.ReadFile("1.sst", 0, 0, nullptr));
+        }
+        return 1;
+    });
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).Times(0);
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", 0, 0, nullptr)); // records the entry
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", 0, 0, nullptr)); // queues the download
+
+    // Act
+    m_cache.WaitUntilIdle();
+
+    // Assert - the new entry did not inherit the old size or become Active.
+    ASSERT_TRUE(::testing::Mock::VerifyAndClearExpectations(m_containerClient.get()));
+    EXPECT_EQ(0U, m_cache.CacheSize());
+    EXPECT_GE(sizeCalls, 1);
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
+    m_cache.WaitUntilIdle();
+}
+
 TEST_F(FileCacheTests, FileReplacedAndRequeuedDuringADownload_IsDownloadedAgainNotActivatedWithTheOldBytes) {
     // Arrange - the first download blocks until released; later ones return at once.
     std::promise<void> started;

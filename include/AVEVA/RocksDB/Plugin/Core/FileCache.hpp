@@ -34,6 +34,9 @@ class FileCache {
     std::condition_variable m_cv;
     std::condition_variable m_idleCv;
     bool m_downloadInFlight = false;
+    // Guarded by m_mutex. Every new entry and every bump takes a fresh value, so a removed and re-created entry never
+    // repeats the generation a downloader or reader captured earlier.
+    uint64_t m_nextGeneration = 0;
     std::unordered_map<std::string, FileCacheEntry, StringHash, StringEqual> m_cache;
     std::queue<std::string> m_fileDownloadQueue;
     boost::intrusive::list<FileCacheEntry, boost::intrusive::constant_time_size<false>> m_entryList;

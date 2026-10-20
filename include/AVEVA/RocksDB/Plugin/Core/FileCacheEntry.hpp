@@ -66,11 +66,14 @@ class FileCacheEntry
     // before the replacement can tell its bytes are out of date.
     uint64_t GetGeneration() const noexcept;
     void BumpGeneration() noexcept;
+    void SetGeneration(uint64_t generation) noexcept;
 
     // The handle readers share; created on first use. Callers must hold the owning cache's mutex.
     std::shared_ptr<detail::CachedReadHandle> GetOrCreateReadHandle();
     // Detaches the handle (null if none) so the owner can close it outside its mutex.
     std::shared_ptr<detail::CachedReadHandle> TakeReadHandle() noexcept;
+    // True if this entry still owns exactly this handle, i.e. it is the entry the caller read from.
+    bool HasReadHandle(const std::shared_ptr<detail::CachedReadHandle>& handle) const noexcept;
 
   private:
     // Intrusive-hook operations; only the owning cache, which holds its mutex, may relink an entry.
