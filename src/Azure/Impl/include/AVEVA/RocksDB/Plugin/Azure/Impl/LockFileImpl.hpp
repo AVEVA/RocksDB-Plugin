@@ -39,6 +39,8 @@ class BasicLockFileImpl
 
     [[nodiscard]] std::optional<std::string> CurrentLeaseId() const;
     void RenewLease() const;
+    // Requires m_stateMutex.
+    void PublishDeadlineLocked() const;
     // Throws when the lease has expired or its renewal deadline has passed; otherwise returns the time left to renew.
     [[nodiscard]] std::chrono::steady_clock::duration RenewalBudget() const;
     // Defaults to steady_clock; replaced only by tests so lease expiry can be simulated without waiting.
@@ -55,6 +57,7 @@ class BasicLockFileImpl
         std::shared_ptr<ClientRuntimeBase> runtime, std::unique_ptr<TBlob> file, std::chrono::seconds leaseLength,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::string fileName, std::optional<std::chrono::milliseconds> acquireTimeout = {});
+    ~BasicLockFileImpl();
     // Returns false when the lease is already held (by this object or, until the lease length elapses, another
     // owner). Any other acquire failure throws RequestFailedException.
     bool Lock();

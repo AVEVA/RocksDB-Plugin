@@ -139,6 +139,10 @@ template <typename TBlob> bool BasicLockFileImpl<TBlob>::Lock() {
 
     m_lastRenewalTime = attemptStart;
     m_held = true;
+    {
+        const std::scoped_lock lock(m_stateMutex);
+        PublishDeadlineLocked();
+    }
     BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::info)
         << "Successfully acquired blob lease for '" << m_fileName << "'";
     return true;
@@ -176,6 +180,25 @@ template <typename TBlob> std::optional<std::string> BasicLockFileImpl<TBlob>::C
         return std::nullopt;
     }
     return m_leaseId;
+}
+
+template <typename TBlob> BasicLockFileImpl<TBlob>::~BasicLockFileImpl() {
+    if (m_runtime) {
+        m_runtime->SetLeaseDeadline(this, std::nullopt);
+    }
+}
+
+// Keeps the runtime's lock-free write-deadline check in step with this lease. Needs m_stateMutex so a renewal
+// completing during Unlock cannot republish a deadline after the release withdrew it.
+template <typename TBlob> void BasicLockFileImpl<TBlob>::PublishDeadlineLocked() const {
+    if (!m_runtime) {
+        return;
+    }
+    if (m_held.load() && m_leaseId.has_value() && !m_releasing) {
+        m_runtime->SetLeaseDeadline(this, std::chrono::steady_clock::now() + (RenewalDeadline() - Now()));
+    } else {
+        m_runtime->SetLeaseDeadline(this, std::nullopt);
+    }
 }
 
 template <typename TBlob> std::chrono::steady_clock::duration BasicLockFileImpl<TBlob>::RenewalBudget() const {
@@ -232,6 +255,8 @@ template <typename TBlob> void BasicLockFileImpl<TBlob>::RenewAsync(RenewCallbac
             try {
                 Unwrap(std::move(result));
                 m_lastRenewalTime = requestStart;
+                const std::scoped_lock lock(m_stateMutex);
+                PublishDeadlineLocked();
             } catch (...) {
                 // An Unlock that raced with this renewal makes the failure expected, not an error.
                 if (CurrentLeaseId() != leaseId) {
@@ -282,6 +307,7 @@ template <typename TBlob> void BasicLockFileImpl<TBlob>::Unlock() {
     {
         const std::scoped_lock lock(m_stateMutex);
         m_releasing = true;
+        PublishDeadlineLocked();
     }
     const boost::scope::scope_exit clearState([this, &leaseId] {
         {
@@ -290,8 +316,9 @@ template <typename TBlob> void BasicLockFileImpl<TBlob>::Unlock() {
                 m_leaseId.reset();
             }
             m_releasing = false;
+            m_held = false;
+            PublishDeadlineLocked();
         }
-        m_held = false;
     });
     Unwrap(m_file->ReleaseLeaseAsync(std::move(options), AzureClient::block_on));
     BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::debug)

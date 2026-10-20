@@ -124,9 +124,9 @@ boost::asio::thread_pool::executor_type ClientRuntimeBase::DownloadWriter() cons
     return m_writerPool->get_executor();
 }
 
-void ClientRuntimeBase::FenceWrites() noexcept { m_writesFenced.store(true); }
+void ClientRuntimeBase::FenceWrites() noexcept { m_writesFenced.store(true, std::memory_order_release); }
 
-bool ClientRuntimeBase::WritesFenced() const noexcept { return m_writesFenced.load(); }
+bool ClientRuntimeBase::WritesFenced() const noexcept { return m_writesFenced.load(std::memory_order_acquire); }
 
 std::optional<std::chrono::steady_clock::duration> ClientRuntimeBase::ThrowIfWritesFenced() const {
     if (WritesFenced()) {
@@ -154,11 +154,14 @@ std::optional<int64_t> ClientRuntimeBase::CachedBlobSize(const std::string& blob
 }
 
 std::chrono::steady_clock::time_point ClientRuntimeBase::MetadataNow() const {
-    return m_metadataClock ? m_metadataClock() : std::chrono::steady_clock::now();
+    if (m_manualMetadataClock) {
+        return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(m_manualMetadataClock->load()));
+    }
+    return std::chrono::steady_clock::now();
 }
 
-void ClientRuntimeBase::SetMetadataClockForTesting(std::function<std::chrono::steady_clock::time_point()> clock) {
-    m_metadataClock = std::move(clock);
+void ClientRuntimeBase::SetMetadataClockForTesting(const std::atomic<int64_t>* manualClockNanos) noexcept {
+    m_manualMetadataClock = manualClockNanos;
 }
 
 uint64_t ClientRuntimeBase::BlobSizeEpoch() const noexcept { return m_sizeEpoch.load(); }
@@ -221,14 +224,34 @@ void ClientRuntimeBase::InvalidateAllBlobSizes() const {
     m_sizes.clear();
 }
 
-void ClientRuntimeBase::SetWriteDeadlineSource(WriteDeadlineSource source) {
-    const std::scoped_lock lock(m_deadlineMutex);
-    m_deadlineSource = std::move(source);
+void ClientRuntimeBase::SetLeaseDeadline(const void* owner,
+                                         const std::optional<std::chrono::steady_clock::time_point> deadline) {
+    const std::scoped_lock lock(m_leaseMutex);
+    const auto it =
+        std::ranges::find(m_leaseDeadlines, owner, &std::pair<const void*, std::chrono::steady_clock::rep>::first);
+    if (!deadline) {
+        if (it != m_leaseDeadlines.end()) {
+            m_leaseDeadlines.erase(it);
+        }
+    } else if (it != m_leaseDeadlines.end()) {
+        it->second = deadline->time_since_epoch().count();
+    } else {
+        m_leaseDeadlines.emplace_back(owner, deadline->time_since_epoch().count());
+    }
+    auto earliest = kNoDeadline;
+    for (const auto& entry : m_leaseDeadlines) {
+        earliest = (std::min)(earliest, entry.second);
+    }
+    m_writeDeadline.store(earliest, std::memory_order_release);
 }
 
 std::optional<std::chrono::steady_clock::duration> ClientRuntimeBase::WriteTimeRemaining() const {
-    const std::scoped_lock lock(m_deadlineMutex);
-    return m_deadlineSource ? m_deadlineSource() : std::nullopt;
+    const auto deadline = m_writeDeadline.load(std::memory_order_acquire);
+    if (deadline == kNoDeadline) {
+        return std::nullopt;
+    }
+    return std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(deadline)) -
+           std::chrono::steady_clock::now();
 }
 
 AVEVA::AzureClient::AzureRequestOptions BoundByWriteDeadline(const ClientRuntimeBase& runtime,

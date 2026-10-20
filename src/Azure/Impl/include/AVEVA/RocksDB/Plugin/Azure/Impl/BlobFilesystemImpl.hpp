@@ -135,7 +135,6 @@ template <typename THttp> class BasicBlobFilesystemImpl {
 
     // Declared last: Stop()ped first thing in the destructor, before anything its callbacks use is released.
     std::shared_ptr<LeaseRenewal> m_leaseRenewal;
-    [[nodiscard]] std::optional<std::chrono::steady_clock::duration> EarliestRenewalTimeRemaining() const;
 
   public:
     // Every io_context constructor takes the host-owned io_context that all Azure I/O runs on. The filesystem never

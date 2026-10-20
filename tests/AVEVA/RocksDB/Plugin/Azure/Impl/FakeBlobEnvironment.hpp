@@ -49,9 +49,7 @@ struct FakeBlobEnvironment {
         : Blob(std::make_shared<FakeBlobServer>(Http, container, blob)), Client(Blob->Client) {
         Http.CompleteInline() = true;
         Http.StartBackgroundPump();
-        Runtime->SetMetadataClockForTesting([this] {
-            return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(m_metadataClockNanos.load()));
-        });
+        Runtime->SetMetadataClockForTesting(&m_metadataClockNanos);
     }
 
     // The metadata and size caches read a manual clock, so their TTL expires only when a test says so.

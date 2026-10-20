@@ -121,7 +121,7 @@ against the code unless it says **Verify first**.
   - `FileSink`'s `shared_ptr<ofstream>` can become a member `std::ofstream`.
 - **Validation:** All download tests. Check the compile-time impact against `ClientInstantiations.cpp`.
 
-### [ ] T08 – Lock-free write-deadline check
+### [x] T08 – Lock-free write-deadline check
 - **File:** `src\Azure\Impl\ClientRuntime.cpp/.hpp` (`WriteTimeRemaining`, `ThrowIfWritesFenced`).
 - **Problem:** Every mutation takes the global `m_deadlineMutex` and calls the `std::function` `WriteDeadlineSource`.
 - **Change:**

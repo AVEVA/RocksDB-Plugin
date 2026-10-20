@@ -81,9 +81,6 @@ inline bool IsRenameTempName(std::string_view blobName) {
            blobName.substr(blobName.size() - suffixLength, RenameTempMarker.size()) == RenameTempMarker;
 }
 
-
-
-
 // The directory holding a file, as a list prefix; empty when the file sits at the container root.
 inline std::string DirectoryPrefixOfFile(std::string_view filePath) {
     const auto slash = filePath.rfind('/');
@@ -202,11 +199,12 @@ void BasicBlobFilesystemImpl<THttp>::PurgeOrphanedRenameTemps(const std::string_
         AzureClient::ListBlobsOptions options;
         options.Prefix = BlobFilesystemDetail::DirectoryPrefixOfFile(lockPath);
         options.MaxResults = static_cast<uint32_t>(Configuration::Transfer::MaxListPageSize);
-        BlobFilesystemDetail::ForEachBlob(*container, std::move(options), [&](const AzureClient::Models::BlobItem& blob) {
-            if (BlobFilesystemDetail::IsRenameTempName(blob.Name)) {
-                orphans.push_back(blob.Name);
-            }
-        });
+        BlobFilesystemDetail::ForEachBlob(*container, std::move(options),
+                                          [&](const AzureClient::Models::BlobItem& blob) {
+                                              if (BlobFilesystemDetail::IsRenameTempName(blob.Name)) {
+                                                  orphans.push_back(blob.Name);
+                                              }
+                                          });
         if (orphans.empty()) {
             return;
         }
@@ -268,8 +266,6 @@ inline std::string_view ChildName(std::string_view blobName, std::string_view di
                                                                                  : std::string_view{};
 }
 
-
-
 } // namespace BlobFilesystemDetail
 
 template <typename THttp> int64_t BasicBlobFilesystemImpl<THttp>::GetFileSize(const std::string& filePath) const {
@@ -319,28 +315,7 @@ BasicBlobFilesystemImpl<THttp>::BasicBlobFilesystemImpl(
       m_asyncReads(std::make_shared<AsyncReadTracker>(m_runtime->HttpClient().get_executor())),
       m_leaseRenewal{LeaseRenewal::Start(
           m_runtime->HttpClient().get_executor(), m_logger, RenewableLocksSnapshot{this}, FenceWritesOnFatal{this},
-          std::chrono::duration_cast<std::chrono::milliseconds>(Configuration::RenewalDelay))} {
-    // Reads the live lock list on every write; cleared in the destructor because files keep the runtime alive.
-    m_runtime->SetWriteDeadlineSource([this] { return EarliestRenewalTimeRemaining(); });
-}
-
-// The tightest renewal deadline among held locks. Mutations are rejected once it passes and their requests are
-// capped to it, so nothing lands after another writer may have taken over an expiring lease.
-template <typename THttp>
-std::optional<std::chrono::steady_clock::duration>
-BasicBlobFilesystemImpl<THttp>::EarliestRenewalTimeRemaining() const {
-    std::optional<std::chrono::steady_clock::duration> earliest;
-    std::scoped_lock lock(m_lockFilesMutex);
-    for (const auto& weak : m_renewableLocks) {
-        if (const auto shared = weak.lock()) {
-            if (const auto remaining = shared->RenewalTimeRemaining();
-                remaining && (!earliest || *remaining < *earliest)) {
-                earliest = remaining;
-            }
-        }
-    }
-    return earliest;
-}
+          std::chrono::duration_cast<std::chrono::milliseconds>(Configuration::RenewalDelay))} {}
 
 // Snapshot under the mutex but renew outside it, so LockFile/UnlockFile are not blocked behind network round trips
 // and their retries. The shared_ptrs keep the locks alive meanwhile.
@@ -365,7 +340,6 @@ template <typename THttp> void BasicBlobFilesystemImpl<THttp>::FenceWritesOnFata
 // Stops lease renewal and waits for in-flight async reads first: their completions use the clients and logger that
 // are destroyed right after this body.
 template <typename THttp> BasicBlobFilesystemImpl<THttp>::~BasicBlobFilesystemImpl() {
-    m_runtime->SetWriteDeadlineSource({});
     m_leaseRenewal->Stop(Configuration::ShutdownWaitTimeout);
     if (const auto inFlight = m_asyncReads->InFlight(); inFlight > 0) {
         BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::info)

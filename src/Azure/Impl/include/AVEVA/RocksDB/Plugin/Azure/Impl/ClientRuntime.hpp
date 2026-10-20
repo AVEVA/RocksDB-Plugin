@@ -21,12 +21,14 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #ifdef _WIN32
 // The target is built with _WIN32_WINNT=0x0A00 (exported publicly) and Boost.Asio's ABI depends on it.
@@ -41,9 +43,6 @@
 #undef LoadLibrary
 #endif
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-/// <summary>Returns the time left until the earliest lease renewal deadline, or empty when no lease is held.</summary>
-using WriteDeadlineSource = std::function<std::optional<std::chrono::steady_clock::duration>()>;
-
 /// <summary>
 /// What every file, lock and blob operation needs from the runtime, independent of the HTTP transport: the write
 /// fence shared by every file, lock and directory of a filesystem. Kept non-template so those classes need not know
@@ -51,8 +50,13 @@ using WriteDeadlineSource = std::function<std::optional<std::chrono::steady_cloc
 /// </summary>
 class ClientRuntimeBase {
     std::atomic<bool> m_writesFenced{false};
-    mutable std::mutex m_deadlineMutex;
-    WriteDeadlineSource m_deadlineSource;
+    // The earliest lease renewal deadline in steady_clock ticks; kNoDeadline when no lease is held. Written under
+    // m_leaseMutex (renewals are rare), read lock-free by every mutation.
+    static constexpr std::chrono::steady_clock::rep kNoDeadline =
+        (std::numeric_limits<std::chrono::steady_clock::rep>::max)();
+    std::atomic<std::chrono::steady_clock::rep> m_writeDeadline{kNoDeadline};
+    std::mutex m_leaseMutex;
+    std::vector<std::pair<const void*, std::chrono::steady_clock::rep>> m_leaseDeadlines;
     mutable std::once_flag m_writerOnce;
     mutable std::unique_ptr<boost::asio::thread_pool> m_writerPool;
 
@@ -85,11 +89,11 @@ class ClientRuntimeBase {
     std::optional<std::chrono::steady_clock::duration> ThrowIfWritesFenced() const;
 
     /// <summary>
-    /// Installs the source of the time left until the earliest lease renewal deadline (empty result: no lease is
-    /// held). Pass an empty function to remove it. The source is called under an internal lock, so removing it
-    /// guarantees it is no longer running.
+    /// Publishes the renewal deadline of one lease (`owner` identifies it; empty removes it) so ThrowIfWritesFenced
+    /// can read the earliest of them without locking. A lease must republish whenever it is acquired, renewed or
+    /// released, and remove itself before it is destroyed.
     /// </summary>
-    void SetWriteDeadlineSource(WriteDeadlineSource source);
+    void SetLeaseDeadline(const void* owner, std::optional<std::chrono::steady_clock::time_point> deadline);
     /// <summary>Time left before mutations must stop; empty when no lease deadline applies.</summary>
     [[nodiscard]] std::optional<std::chrono::steady_clock::duration> WriteTimeRemaining() const;
 
@@ -120,10 +124,11 @@ class ClientRuntimeBase {
     void InvalidateAllBlobSizes() const;
     /// <summary>
     /// The time source of the size and metadata caches (Configuration::MetadataCacheTtl). Tests replace it with a
-    /// manual clock, set before any file is created, so expiry never depends on sleeping.
+    /// manual clock (nanoseconds since the steady_clock epoch, owned by the test and outliving the runtime), set
+    /// before any file is created, so expiry never depends on sleeping.
     /// </summary>
     [[nodiscard]] std::chrono::steady_clock::time_point MetadataNow() const;
-    void SetMetadataClockForTesting(std::function<std::chrono::steady_clock::time_point()> clock);
+    void SetMetadataClockForTesting(const std::atomic<int64_t>* manualClockNanos) noexcept;
 
   private:
     void StoreBlobSize(const std::string& blobUrl, int64_t size, std::optional<std::string> etag, uint64_t epoch) const;
@@ -135,7 +140,7 @@ class ClientRuntimeBase {
     mutable std::mutex m_sizeMutex;
     mutable std::unordered_map<std::string, CachedSize> m_sizes;
     mutable std::atomic<uint64_t> m_sizeEpoch{0};
-    std::function<std::chrono::steady_clock::time_point()> m_metadataClock;
+    const std::atomic<int64_t>* m_manualMetadataClock = nullptr;
 };
 
 /// <summary>
