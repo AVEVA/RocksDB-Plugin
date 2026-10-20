@@ -38,13 +38,15 @@ BasicBlobFilesystemImpl<THttp>::CreateWriteableFile(const std::string& filePath)
     BlobOperations::CreateOrReplace(*m_runtime, blob, initialSize);
     const int64_t capacity = initialSize;
 
-    return WriteableFileType{realPath,
-                             m_runtime,
-                             std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)),
-                             BlobFilesystemDetail::FindCache(m_fileCaches, prefix),
-                             m_logger,
-                             bufferSize,
-                             typename WriteableFileType::BlobState{0, capacity}};
+    // The replaced blob's cached bytes are stale, and nothing else would drop them if the file is never synced.
+    auto cache = BlobFilesystemDetail::FindCache(m_fileCaches, prefix);
+    if (cache) {
+        cache->RemoveFile(realPath);
+    }
+
+    return WriteableFileType{
+        realPath, m_runtime,  std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)), std::move(cache),
+        m_logger, bufferSize, typename WriteableFileType::BlobState{0, capacity}};
 }
 
 template <typename THttp>
@@ -98,13 +100,14 @@ BasicBlobFilesystemImpl<THttp>::ReuseWritableFile(const std::string& filePath) {
 
     BlobOperations::CreateOrReplace(*m_runtime, blob, initialSize);
 
-    return WriteableFileType{realPath,
-                             m_runtime,
-                             std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)),
-                             BlobFilesystemDetail::FindCache(m_fileCaches, prefix),
-                             m_logger,
-                             bufferSize,
-                             typename WriteableFileType::BlobState{0, initialSize}};
+    auto cache = BlobFilesystemDetail::FindCache(m_fileCaches, prefix);
+    if (cache) {
+        cache->RemoveFile(realPath);
+    }
+
+    return WriteableFileType{
+        realPath, m_runtime,  std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)), std::move(cache),
+        m_logger, bufferSize, typename WriteableFileType::BlobState{0, initialSize}};
 }
 
 template <typename THttp>

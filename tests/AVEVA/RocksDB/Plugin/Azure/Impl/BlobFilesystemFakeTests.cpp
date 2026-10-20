@@ -377,6 +377,34 @@ TEST_F(BlobFilesystemFakeTests, TruncateDropsTheCachedCopyOfTheFile) {
 
     EXPECT_FALSE(file->TryReadFromCache(0, 512, buffer.data()).has_value());
 }
+TEST_F(BlobFilesystemFakeTests, RecreatingAFileDropsItsCachedCopy) {
+    const TempDirectory tempDir("recreate_cache");
+    const auto cacheString = tempDir.Path().string();
+    FakeFilesystem cached(
+        m_runtime, Container, AccountUrl, AccountKey, 4096, 1024,
+        std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>(),
+        std::string_view(cacheString));
+    {
+        auto writer = cached.CreateWriteableFile(Path("r.sst"));
+        const std::string content(1024, 'O');
+        writer.Append(std::span<const char>(content.data(), content.size()));
+        writer.Close();
+    }
+    auto file = cached.CreateReadableFile(Path("r.sst"));
+    std::vector<char> buffer(1024);
+    std::optional<size_t> hit;
+    for (int attempt = 0; attempt < 3 && !hit; ++attempt) {
+        hit = file->TryReadFromCache(0, static_cast<int64_t>(buffer.size()), buffer.data());
+        if (!hit) {
+            ASSERT_TRUE(cached.WaitForFileCachesIdleForTesting(std::chrono::seconds(30)))
+                << "Background download did not finish";
+        }
+    }
+    ASSERT_TRUE(hit.has_value()) << "File was not cached after the background download finished";
+
+    cached.CreateWriteableFile(Path("r.sst")).Close();
+    EXPECT_FALSE(file->TryReadFromCache(0, static_cast<int64_t>(buffer.size()), buffer.data()).has_value());
+}
 TEST_F(BlobFilesystemFakeTests, DeleteDirDropsTheCachedCopiesOfItsFiles) {
     const TempDirectory tempDir("deletedir_cache");
     const auto cacheString = tempDir.Path().string();

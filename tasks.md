@@ -159,7 +159,7 @@ are medium confidence: confirm them against the code, or measure, before changin
 - **Validation:** parameterised `BlobStorageErrorCategoryTests` and `AzureErrorTranslatorTests`, one case per code,
   checking the subcode and retryability.
 
-### [ ] T35 – Re-creating a blob doesn't invalidate the FileCache (**Verify first**)
+### [x] T35 – Re-creating a blob doesn't invalidate the FileCache (**Verify first**)
 - **File:** `src\Azure\Impl\BlobFilesystemImpl.FileOpen.ipp:28-38, 52-57, 99`.
 - **Problem:** `CreateWriteableFile`/`ReuseWritableFile` call `CreateOrReplace` but never evict the cached copy.
   The cache entry is only marked stale at a Sync that has unsynced data, and cache entries are not checked

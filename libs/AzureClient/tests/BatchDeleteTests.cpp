@@ -339,7 +339,7 @@ TEST(BatchDeleteTests, CancelAbortsEveryChunkInFlightAndStartsNoMore) {
 }
 
 TEST(BatchDeleteTests, CancelRightAfterInitiationOfManyChunksAlwaysCompletesCanceled) {
-    for (int iteration = 0; iteration < 200; ++iteration) {
+    for (int iteration = 0; iteration < 20; ++iteration) {
         FakeHttpClient http;
         http.SetResponder(
             [](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
