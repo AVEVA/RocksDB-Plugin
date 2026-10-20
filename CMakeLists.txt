@@ -30,6 +30,11 @@ if(AVEVA_ROCKSDB_SANITIZER)
     list(JOIN AVEVA_ROCKSDB_SANITIZER "," _aveva_sanitizer_list)
     add_compile_options(-fsanitize=${_aveva_sanitizer_list} -fno-omit-frame-pointer)
     add_link_options(-fsanitize=${_aveva_sanitizer_list})
+    # Without this UBSan reports and continues, so undefined behavior would leave CI green.
+    if("undefined" IN_LIST AVEVA_ROCKSDB_SANITIZER)
+        add_compile_options(-fno-sanitize-recover=undefined)
+        add_link_options(-fno-sanitize-recover=undefined)
+    endif()
 endif()
 
 # The global flags above already instrument the in-tree AzureClient targets; forcing its own switches off (also clearing

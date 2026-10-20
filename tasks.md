@@ -105,7 +105,7 @@ are medium confidence: confirm them against the code, or measure, before changin
   `HttpClientRequest.ReusesConnectionForKeepAliveRequests`. Add a test that downloads a 4 MiB body and counts
   reads; expect at least a 10× drop. Run a db_bench random-read comparison.
 
-### [ ] T32 – UBSan findings don't fail CI
+### [x] T32 – UBSan findings don't fail CI
 - **Files:** root `CMakeLists.txt:22-32` (`add_compile_options(-fsanitize=...)`), `libs\AzureClient\CMakeLists.txt`
   (`AVEVA_AZURE_CLIENT_ENABLE_UBSAN`), `.github\workflows\build-and-test.yml` (asan-ubsan Test step).
 - **Problem:** GCC/Clang UBSan reports and continues unless built with `-fno-sanitize-recover`. Neither that flag
