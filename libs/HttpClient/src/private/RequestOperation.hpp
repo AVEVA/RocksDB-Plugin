@@ -158,13 +158,11 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     bool BuildRequest(HttpRequest& request, const Route& route);
 
     /// <summary>
-    /// Validates the URL, method, headers and options, and fills in the Beast request: target, Host,
-    /// keep-alive, body and Content-Length. Fails the operation on anything invalid. May throw, which is
-    /// why callers go through <see cref="BuildRequest"/>.
+    /// Fills in the Beast request from an already validated request: target, Host, keep-alive, body and
+    /// Content-Length. May throw, which is why callers go through <see cref="BuildRequest"/>.
     /// </summary>
     /// <param name="request">The request to translate; its owned body is moved out.</param>
-    /// <returns>True if the operation may continue.</returns>
-    bool BuildRequestUnchecked(HttpRequest& request, const Route& route);
+    void BuildRequestUnchecked(HttpRequest& request, const Route& route);
 
     /// <summary>
     /// Starts the deadline covering the whole operation, failing it with TimedOut when it elapses.
@@ -220,13 +218,6 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// Completions are always posted, so the caller's handler is still never re-entered.
     /// </summary>
     void Resolve();
-
-    /// <summary>
-    /// Identifies the io_context this request runs on. Lookups are only shared between requests on the same
-    /// context: a leader whose context is stopped never finishes, and requests on other contexts must not wait
-    /// for it.
-    /// </summary>
-    const void* LookupScope() const;
 
     /// <summary>
     /// Connects to the resolved endpoints, or fails the operation if the lookup did not succeed.

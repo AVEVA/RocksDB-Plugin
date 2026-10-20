@@ -183,8 +183,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
             auto route = Route::Of(request, options);
             // A request that can never be sent fails without building a strand, stream or operation.
             if (!route.Sendable()) {
-                return FailLater(cell, route.Parsed ? make_error_code(static_cast<HttpClientError>(route.Error.value()))
-                                                    : make_error_code(HttpClientError::InvalidUrl));
+                return FailLater(cell, route.Parsed ? route.Error : make_error_code(HttpClientError::InvalidUrl));
             }
             auto guarded = Detail::MakeCompletion([cell](std::error_code error, HttpResponse response) {
                 if (auto pending = cell->Take()) {

@@ -80,7 +80,8 @@ template <typename Stream> void RequestOperation<Stream>::StartReused(HttpReques
 
 template <typename Stream> bool RequestOperation<Stream>::BuildRequest(HttpRequest& request, const Route& route) {
     try {
-        return BuildRequestUnchecked(request, route);
+        BuildRequestUnchecked(request, route);
+        return true;
     } catch (...) {
         Finish(ClassifyBuildFailure(std::current_exception()), {});
         return false;
@@ -88,7 +89,7 @@ template <typename Stream> bool RequestOperation<Stream>::BuildRequest(HttpReque
 }
 
 template <typename Stream>
-bool RequestOperation<Stream>::BuildRequestUnchecked(HttpRequest& request, const Route& route) {
+void RequestOperation<Stream>::BuildRequestUnchecked(HttpRequest& request, const Route& route) {
     // HttpClient::Submit fails unparseable or invalid requests before any operation exists.
     assert(route.Sendable());
 
@@ -133,7 +134,6 @@ bool RequestOperation<Stream>::BuildRequestUnchecked(HttpRequest& request, const
     }
     ResetParser();
     m_hostIsName = route.HostIsName;
-    return true;
 }
 
 template <typename Stream> void RequestOperation<Stream>::ArmTimer() {
@@ -227,7 +227,7 @@ template <typename Stream> void RequestOperation<Stream>::Resolve() {
         m_resolvedFromCache = true;
         return OnResolve({}, *cached);
     }
-    const void* const scope = LookupScope();
+    const void* const scope = m_lookupScope;
     if (!cache.JoinOrLead(
             m_key.host, m_key.service, [this] { return ResolveWaiter(this->shared_from_this()); }, scope)) {
         return;
@@ -254,8 +254,6 @@ template <typename Stream> void RequestOperation<Stream>::Resolve() {
             self->OnResolve(error, results);
         });
 }
-
-template <typename Stream> const void* RequestOperation<Stream>::LookupScope() const { return m_lookupScope; }
 
 // Every asynchronous callback starts here: a finished request has nothing left to do, and a requested
 // cancellation is carried out on the request's own executor.
