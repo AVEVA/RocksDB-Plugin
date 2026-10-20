@@ -148,6 +148,9 @@ template <typename TBlob> class BasicReadableFileImpl {
     // Default process-wide cap on prefetched bytes across all files sharing a budget.
     static constexpr int64_t kDefaultPrefetchBudgetBytes = Configuration::DefaultPrefetchBudgetBytes;
 
+    // The executor the blob client's completions run on; blocking waits for those completions must not run on it.
+    [[nodiscard]] typename TBlob::executor_type ClientExecutor() const { return m_h.Blob->get_executor(); }
+
     [[nodiscard]] std::string GetETag() const;
     // Compares against the cached ETag under the metadata lock without copying it.
     [[nodiscard]] bool HasETag(std::string_view etag) const;

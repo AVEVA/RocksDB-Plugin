@@ -984,6 +984,31 @@ class HostIoContext {
 };
 } // namespace
 
+TEST_F(AsyncReadTests, MultiReadAndPoll_FromClientIoContextThread_FailInsteadOfHanging) {
+    auto file = CreateFile(m_deferredEnv);
+    std::vector<char> scratch(16);
+    auto req = MakeRequest(0, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+    ASSERT_TRUE(Submit(file, req, record, handle).ok());
+
+    std::vector<char> multiScratch(16);
+    std::array<rocksdb::FSReadRequest, 1> multi{MakeRequest(64, multiScratch)};
+    rocksdb::IOStatus multiStatus;
+    rocksdb::IOStatus pollStatus;
+    std::atomic<bool> done{false};
+    boost::asio::post(m_deferredEnv.Http.get_executor(), [&] {
+        multiStatus = file.MultiRead(multi.data(), multi.size(), rocksdb::IOOptions{}, nullptr);
+        pollStatus = PollAsyncReads({handle.Handle});
+        done = true;
+    });
+    ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return done.load(); }));
+
+    EXPECT_TRUE(multiStatus.IsInvalidArgument()) << multiStatus.ToString();
+    EXPECT_TRUE(pollStatus.IsInvalidArgument()) << pollStatus.ToString();
+    EXPECT_EQ(0, record.Calls.load());
+}
+
 TEST_F(AsyncReadTests, Tracker_DrainWithNothingInFlightReturnsImmediately) {
     HostIoContext host;
     auto tracker = std::make_shared<AsyncReadTracker>(host.Context().get_executor());

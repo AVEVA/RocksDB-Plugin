@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #pragma once
+#include <boost/asio/io_context.hpp>
 #include <rocksdb/file_system.h>
 
 #include <condition_variable>
@@ -10,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -43,8 +45,18 @@ class AsyncReadRequest {
   public:
     using Callback = std::function<void(rocksdb::FSReadRequest&, void*)>;
 
+    using Executor = boost::asio::io_context::executor_type;
+
+    // `completionExecutor`, when set, is the io_context the download completes on; Wait must not block on it.
     AsyncReadRequest(const rocksdb::FSReadRequest& request, Callback callback, void* callbackArg,
-                     std::shared_ptr<AsyncReadSignal> signal = nullptr);
+                     std::shared_ptr<AsyncReadSignal> signal = nullptr,
+                     std::optional<Executor> completionExecutor = std::nullopt);
+
+    /// <summary>
+    /// Throws std::logic_error when the request is still in flight and the calling thread runs the executor that
+    /// would complete it: waiting there can never finish.
+    /// </summary>
+    void ThrowIfWaitWouldDeadlock();
 
     [[nodiscard]] uint64_t Offset() const noexcept { return m_offset; }
     [[nodiscard]] size_t Length() const noexcept { return m_length; }
@@ -83,6 +95,7 @@ class AsyncReadRequest {
     Callback m_callback;
     void* const m_callbackArg;
     std::shared_ptr<AsyncReadSignal> m_signal;
+    const std::optional<Executor> m_completionExecutor;
 
     std::mutex m_mutex;
     std::condition_variable m_finished;
@@ -103,7 +116,9 @@ struct AsyncReadHandle {
 void DeleteAsyncReadHandle(void* handle);
 
 /// <summary>
-/// Implements FileSystem::Poll: waits for every handle to complete and invokes the outstanding callbacks.
+/// Implements FileSystem::Poll: waits for every handle to complete and invokes the outstanding callbacks. Polling a
+/// read that is still in flight from a thread running the io_context it completes on returns InvalidArgument instead
+/// of deadlocking.
 /// </summary>
 rocksdb::IOStatus PollAsyncReads(const std::vector<void*>& ioHandles);
 

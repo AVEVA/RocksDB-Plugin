@@ -5,7 +5,10 @@
 
 #include <algorithm>
 #include <cstring>
+#include <stdexcept>
 #include <utility>
+
+#include "AVEVA/AzureClient/BlockOn.hpp"
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 void AsyncReadSignal::Notify() {
@@ -27,9 +30,16 @@ void AsyncReadSignal::WaitPast(const uint64_t seen) {
 }
 
 AsyncReadRequest::AsyncReadRequest(const rocksdb::FSReadRequest& request, Callback callback, void* callbackArg,
-                                   std::shared_ptr<AsyncReadSignal> signal)
+                                   std::shared_ptr<AsyncReadSignal> signal, std::optional<Executor> completionExecutor)
     : m_offset(request.offset), m_length(request.len), m_scratch(request.scratch), m_callback(std::move(callback)),
-      m_callbackArg(callbackArg), m_signal(std::move(signal)) {}
+      m_callbackArg(callbackArg), m_signal(std::move(signal)), m_completionExecutor(std::move(completionExecutor)) {}
+
+void AsyncReadRequest::ThrowIfWaitWouldDeadlock() {
+    // A finished request is never waited on, so polling it from any thread is fine.
+    if (m_completionExecutor && !Finished()) {
+        AzureClient::ThrowIfRunningOn(*m_completionExecutor);
+    }
+}
 
 bool AsyncReadRequest::Finished() {
     std::scoped_lock lock(m_mutex);
@@ -122,6 +132,11 @@ rocksdb::IOStatus PollAsyncReads(const std::vector<void*>& ioHandles) {
             continue;
         }
 
+        try {
+            asyncHandle->Request->ThrowIfWaitWouldDeadlock();
+        } catch (const std::logic_error& error) {
+            return rocksdb::IOStatus::InvalidArgument(error.what());
+        }
         asyncHandle->Request->Wait();
         asyncHandle->Request->DeliverCallback();
     }

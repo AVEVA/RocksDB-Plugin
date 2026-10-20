@@ -8,12 +8,15 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include "BasicReadableFile.hpp"
 
+#include "AVEVA/AzureClient/BlockOn.hpp"
+
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -77,7 +80,8 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& re
         return rocksdb::IOStatus::InvalidArgument("ReadAsync requires a callback");
     }
     try {
-        auto request = std::make_shared<AsyncReadRequest>(req, std::move(cb), cb_arg, std::move(signal));
+        auto request =
+            std::make_shared<AsyncReadRequest>(req, std::move(cb), cb_arg, std::move(signal), m_file->ClientExecutor());
         auto handle = std::make_unique<AsyncReadHandle>(AsyncReadHandle{request});
         const auto offset = static_cast<int64_t>(req.offset);
         const auto length = static_cast<int64_t>(req.len);
@@ -141,6 +145,13 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& re
 template <class TImpl>
 rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* reqs, const size_t num_reqs,
                                                       const rocksdb::IOOptions& opts, rocksdb::IODebugContext*) try {
+    // The waits below need completions that run on the host io_context, so they would hang on one of its threads.
+    try {
+        AzureClient::ThrowIfRunningOn(m_file->ClientExecutor());
+    } catch (const std::logic_error& error) {
+        return rocksdb::IOStatus::InvalidArgument(error.what());
+    }
+
     // One merged download: the member requests it serves (indexes into reqs, ordered by offset) and, when it serves
     // more than one, the buffer the merged range is fetched into.
     struct Group {
