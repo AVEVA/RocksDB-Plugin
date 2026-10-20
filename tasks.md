@@ -307,6 +307,8 @@ are medium confidence: confirm them against the code, or measure, before changin
 - **Validation:** new `FileCacheTests` case where `ContainerClientMock::GetBlobSize` calls `RemoveFile` then
   `ReadFile` on the same path mid-call. Run `ctest -L core`.
 
+> T46 is not defined in this backlog (numbering skips from T45 to T47); nothing to do.
+
 ### [ ] T47 – `FileCache::ReadFile` copies the relative path under `m_mutex` on every hit
 - **File:** `src\Core\FileCache.cpp` ~196 (`auto relativePath = fileEntry.GetFilePath();`).
 - **Change:** use the `filePath` parameter (it equals the map key), and build `m_cachePath / filePath` only when
