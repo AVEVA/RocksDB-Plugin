@@ -458,14 +458,15 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
         return;
     }
 
-    const auto [size, etag] = self->GetMetadata();
+    auto [size, etag] = self->GetMetadata();
     const auto remaining = std::max<int64_t>(0, size - offset);
     if (remaining == 0) {
         // At the cached end of the blob: only re-read if another writer moved the blob on.
         const auto file = self;
-        CoalescedMetadataAsync(file, [self = std::move(self), offset, bytesToRead, callback = std::move(callback), etag,
-                                      attemptsLeft, timeout](std::exception_ptr error, int64_t latestSize,
-                                                             std::string latestEtag, uint64_t epoch) mutable {
+        CoalescedMetadataAsync(file, [self = std::move(self), offset, bytesToRead, callback = std::move(callback),
+                                      etag = std::move(etag), attemptsLeft,
+                                      timeout](std::exception_ptr error, int64_t latestSize, std::string latestEtag,
+                                               uint64_t epoch) mutable {
             if (error) {
                 ReadableFileDetail::FinishRead(self, callback, error, {});
                 return;
@@ -490,7 +491,7 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
     const auto toRead = std::min(bytesToRead, remaining);
     auto& blob = *self->m_h.Blob;
     BlobOperations::DownloadAsync(
-        blob, offset, toRead, etag, timeout,
+        blob, offset, toRead, std::move(etag), timeout,
         [self = std::move(self), offset, bytesToRead, remaining, callback = std::move(callback), attemptsLeft,
          timeout](std::exception_ptr error, unsigned int status, std::string_view data,
                   std::shared_ptr<const void> owner) mutable {
@@ -597,7 +598,7 @@ int64_t BasicReadableFileImpl<TBlob>::DownloadWithRetry(const int64_t offset, co
     bool success = false;
     int refreshesLeft = kMaxStaleReadRetries;
     do {
-        const auto [size, etag] = GetMetadata();
+        auto [size, etag] = GetMetadata();
         auto remaining = std::max<int64_t>(0, size - offset);
         if (remaining == 0) {
             // One properties call serves both the ETag check and the refresh, so a stale end-of-blob read costs a
@@ -619,7 +620,7 @@ int64_t BasicReadableFileImpl<TBlob>::DownloadWithRetry(const int64_t offset, co
         auto toRead = std::min(bytesToRead, remaining);
         try {
             bytesRead = BlobOperations::Download(*m_h.Blob, std::span<char>(buffer, static_cast<size_t>(toRead)),
-                                                 offset, toRead, etag);
+                                                 offset, toRead, std::move(etag));
             bytesRead = std::min(bytesRead, remaining);
             success = true;
         } catch (const RequestFailedException& ex) {

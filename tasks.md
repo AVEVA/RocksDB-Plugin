@@ -242,7 +242,7 @@ are medium confidence: confirm them against the code, or measure, before changin
 - **Validation:** the Prefetch and ChainedOntoPrefetch tests in `AsyncReadTests`. Optionally, a concurrent
   4 MiB-read micro-benchmark.
 
-### [ ] T42 – Two ETag string copies per read
+### [x] T42 – Two ETag string copies per read
 - **Files:** `src\Azure\Impl\ReadableFileImpl.ipp` 451, 481, 588; `BlobOperations.hpp` 248-262 (`StartDownload`),
   587-591 (`DownloadAsync`).
 - **Problem:** `GetMetadata()` copies the ETag, then `DownloadAsync`/`StartDownload` copy it again into

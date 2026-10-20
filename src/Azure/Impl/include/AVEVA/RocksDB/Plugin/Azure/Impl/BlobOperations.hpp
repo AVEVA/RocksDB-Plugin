@@ -264,12 +264,12 @@ template <typename TBlob> struct PendingDownload {
 // until FinishDownload returns (or the future has been waited for).
 template <typename TBlob>
 [[nodiscard]] PendingDownload<TBlob> StartDownload(TBlob& client, std::span<char> buffer, int64_t offset,
-                                                   int64_t length, const std::string& ifMatch = {}) {
+                                                   int64_t length, std::string ifMatch = {}) {
     AzureClient::ThrowIfRunningOn(client.get_executor());
     AzureClient::DownloadBlobOptions options;
     options.Range = Detail::ToRange(offset, length);
     if (!ifMatch.empty()) {
-        options.Conditions.IfMatch = ifMatch;
+        options.Conditions.IfMatch = std::move(ifMatch);
     }
     // The body is copied once, straight into the caller's buffer; a range larger than the buffer fails instead of
     // being truncated or overflowing.
@@ -291,8 +291,8 @@ template <typename TBlob> [[nodiscard]] int64_t FinishDownload(PendingDownload<T
 // ranged response without Content-Range is accepted; the body length is the source of truth.
 template <typename TBlob>
 [[nodiscard]] int64_t Download(TBlob& client, std::span<char> buffer, int64_t offset, int64_t length,
-                               const std::string& ifMatch) {
-    auto pending = StartDownload(client, buffer, offset, length, ifMatch);
+                               std::string ifMatch) {
+    auto pending = StartDownload(client, buffer, offset, length, std::move(ifMatch));
     return FinishDownload(pending);
 }
 // Returns the number of bytes written to `buffer`; a non-positive length returns 0 without a request.
@@ -594,11 +594,11 @@ void UploadPagesAsync(const ClientRuntimeBase& runtime, TBlob& client, std::shar
 /// A non-zero `timeout` caps how long the request may take; it only ever shortens the transfer-scaled default.
 /// </summary>
 template <typename TBlob, typename TCallback>
-void DownloadAsync(TBlob& client, int64_t blobOffset, int64_t readLength, const std::string& ifMatch,
+void DownloadAsync(TBlob& client, int64_t blobOffset, int64_t readLength, std::string ifMatch,
                    std::chrono::milliseconds timeout, TCallback callback) {
     AzureClient::DownloadBlobOptions options;
     options.Range = Detail::ToRange(blobOffset, readLength);
-    options.Conditions.IfMatch = ifMatch;
+    options.Conditions.IfMatch = std::move(ifMatch);
     // The transfer-scaled default timeout can be minutes; a caller-supplied deadline only ever shortens it.
     auto requestOptions = TransferOptions(client, static_cast<uint64_t>(readLength));
     if (timeout.count() > 0 && timeout < requestOptions.GetTimeout()) {
