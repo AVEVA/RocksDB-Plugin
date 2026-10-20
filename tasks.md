@@ -349,7 +349,7 @@ are medium confidence: confirm them against the code, or measure, before changin
 - **Validation:** new test: two concurrent requests both get 401 with the same token. Assert exactly one inner
   refresh and that both retries succeed.
 
-### [ ] T50 – Direct-path `BoundHandler` may run the handler off its associated executor (**Verify first**)
+### [!] T50 – Direct-path `BoundHandler` may run the handler off its associated executor (**Verify first**)
 - **Files:** `libs\AzureClient\include\AVEVA\AzureClient\Detail\AsyncInitiation.hpp` (`BoundHandler::operator()`,
   Direct branch ~45-70); `Detail\RequestPipeline.hpp` (`Run`/`Finish` ~170, ~520).
 - **Problem:** The Direct branch calls the handler inline on the assumption that it is already on the client
@@ -361,6 +361,12 @@ are medium confidence: confirm them against the code, or measure, before changin
   `Finish` always dispatch through `m_httpClient.get_executor()`. Measure that the common path stays inline.
 - **Validation:** a test with a credential completing on a separate `io_context` thread that asserts the handler
   thread id. Run `AsyncDeferredCompletionTests`.
+- **Blocked (attempted, reverted):** guarding the Direct branch with `Executor.running_in_this_thread()` (else
+  dispatch) is correct, and a foreign-thread credential test passed. But ~12 existing tests failed (the
+  `AsyncBehaviorTests` reentrancy/move-only/download-destroy tests, `A3_DownloadIntoSpanTests`, `AsyncReadTests`,
+  `WriteableFileTests`): `FakeHttpClient`/`ScriptedTokenCredential::CompleteNext` complete from the test thread
+  outside `Poll()`, and handlers now deferred are never run. Needs a separate test-infrastructure change (drive
+  `Poll()` after `CompleteNext`, or run completions on the executor) before the production change can land.
 
 ### [ ] T51 – Per-request deque/timer allocations in `RetryOperation` / `DownloadOperation` (**Verify first**)
 - **Files:** `libs\AzureClient\include\AVEVA\AzureClient\Detail\RequestPipeline.hpp` (`m_queue`, `m_deadlineTimer`
