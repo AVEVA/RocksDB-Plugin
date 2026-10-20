@@ -59,6 +59,7 @@
 #include <AVEVA/RocksDB/Plugin/Core/CacheLibSecondaryCache.hpp>
 #endif
 
+#include <boost/log/core.hpp>
 #include <boost/log/sources/severity_logger.hpp>
 #include <boost/log/trivial.hpp>
 #include <rocksdb/convenience.h>
@@ -312,6 +313,15 @@ int main(int argc, char** argv) {
     // Skip C++ static destructors: boost.log tears down thread-local storage
     // before the plugin's background threads exit, which triggers SIGABRT
     // (exit 134) after the benchmark has already finished.
+    //
+    // boost::log's sink backends default to auto_flush(false), so any log
+    // records written right before this point (e.g. CacheLibSecondaryCache's
+    // shutdown counter dump, emitted from Benchmark's destructor above) can
+    // still be sitting in the sink's internal buffer. That buffer is normally
+    // flushed by the sink's own destructor, but std::_Exit() skips destructors
+    // entirely - so flush explicitly here first, without relying on the
+    // destructor-driven teardown we're intentionally bypassing.
+    boost::log::core::get()->flush();
     std::fflush(nullptr);
     std::cout.flush();
     std::_Exit(rc);
