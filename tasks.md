@@ -271,7 +271,7 @@ are medium confidence: confirm them against the code, or measure, before changin
   - Then remove `Group::Buffer`.
 - **Validation:** the `MultiRead_*` tests. Benchmark before and after.
 
-### [ ] T44 – Blob-size cache: a global epoch blocks unrelated stores (**Verify first**: measure hit rate)
+### [x] T44 – Blob-size cache: a global epoch blocks unrelated stores (**Verify first**: measure hit rate)
 - **File:** `src\Azure\Impl\ClientRuntime.cpp` 160-232 (`BlobSizeEpoch`, `StoreBlobSize`, `InvalidateBlobSize`);
   `BlobOperations.hpp` (`SizeInvalidation`, which runs on every `SetSize`/Sync).
 - **Problem:** `InvalidateBlobSize(url)` bumps the single `m_sizeEpoch`, so *any* fetch that overlaps a mutation of

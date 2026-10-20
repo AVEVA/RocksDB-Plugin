@@ -101,7 +101,8 @@ class ClientRuntimeBase {
     /// <summary>
     /// A short-lived cache of blobs' logical sizes (keyed by blob URL) for FileSystem::GetFileSize, which RocksDB
     /// calls repeatedly for the same files. Every operation that can change a blob's size invalidates its entry
-    /// when it finishes, and a fetch that overlapped any invalidation is never stored (see BlobSizeEpoch), so only
+    /// when it finishes, and a fetch that overlapped an invalidation of its own blob is never stored (see
+    /// BlobSizeEpoch), so only
     /// another process's writes can be missed, and only for Configuration::MetadataCacheTtl.
     /// </summary>
     [[nodiscard]] std::optional<int64_t> CachedBlobSize(std::string_view blobUrl) const;
@@ -146,6 +147,13 @@ class ClientRuntimeBase {
     };
     mutable std::unordered_map<std::string, CachedSize, UrlHash, std::equal_to<>> m_sizes;
     mutable std::atomic<uint64_t> m_sizeEpoch{0};
+    // Per-URL invalidation epochs: a fetch is rejected only if its own URL was invalidated after it started, or it
+    // started before the watermark (raised whenever tombstones are dropped wholesale).
+    mutable std::unordered_map<std::string, uint64_t, UrlHash, std::equal_to<>> m_tombstones;
+    mutable uint64_t m_tombstoneWatermark = 0;
+    mutable std::chrono::steady_clock::time_point m_nextSweep{};
+    [[nodiscard]] std::unordered_map<std::string, CachedSize, UrlHash, std::equal_to<>>::iterator
+    FindFreshLocked(std::string_view blobUrl) const;
     const std::atomic<int64_t>* m_manualMetadataClock = nullptr;
 };
 

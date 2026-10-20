@@ -15,6 +15,33 @@
 #include <thread>
 
 using AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime;
+using AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntimeBase;
+
+TEST(ClientRuntimeTests, InvalidatingAnotherBlobDuringAFetchStillCachesTheSize) {
+    ClientRuntimeBase runtime;
+    const auto epoch = runtime.BlobSizeEpoch();
+    runtime.InvalidateBlobSize("a");
+    runtime.CacheBlobSize("b", 42, epoch);
+    EXPECT_EQ(42, runtime.CachedBlobSize("b"));
+}
+
+TEST(ClientRuntimeTests, InvalidatingTheSameBlobDuringAFetchRejectsTheSize) {
+    ClientRuntimeBase runtime;
+    const auto epoch = runtime.BlobSizeEpoch();
+    runtime.InvalidateBlobSize("a");
+    runtime.CacheBlobSize("a", 42, epoch);
+    EXPECT_FALSE(runtime.CachedBlobSize("a"));
+    runtime.CacheBlobSize("a", 42, runtime.BlobSizeEpoch());
+    EXPECT_EQ(42, runtime.CachedBlobSize("a"));
+}
+
+TEST(ClientRuntimeTests, InvalidatingAllBlobsDuringAFetchRejectsTheSize) {
+    ClientRuntimeBase runtime;
+    const auto epoch = runtime.BlobSizeEpoch();
+    runtime.InvalidateAllBlobSizes();
+    runtime.CacheBlobSize("b", 42, epoch);
+    EXPECT_FALSE(runtime.CachedBlobSize("b"));
+}
 
 TEST(ClientRuntimeTests, HttpClientUsesProvidedContext) {
     boost::asio::io_context context;

@@ -142,15 +142,21 @@ std::optional<std::chrono::steady_clock::duration> ClientRuntimeBase::ThrowIfWri
 
 std::optional<int64_t> ClientRuntimeBase::CachedBlobSize(std::string_view blobUrl) const {
     const std::scoped_lock lock(m_sizeMutex);
-    const auto it = m_sizes.find(blobUrl);
+    const auto it = FindFreshLocked(blobUrl);
     if (it == m_sizes.end()) {
         return std::nullopt;
     }
-    if (MetadataNow() - it->second.FetchedAt >= Configuration::MetadataCacheTtl) {
-        m_sizes.erase(it);
-        return std::nullopt;
-    }
     return it->second.Size;
+}
+
+auto ClientRuntimeBase::FindFreshLocked(std::string_view blobUrl) const
+    -> std::unordered_map<std::string, CachedSize, UrlHash, std::equal_to<>>::iterator {
+    const auto it = m_sizes.find(blobUrl);
+    if (it != m_sizes.end() && MetadataNow() - it->second.FetchedAt >= Configuration::MetadataCacheTtl) {
+        m_sizes.erase(it);
+        return m_sizes.end();
+    }
+    return it;
 }
 
 std::chrono::steady_clock::time_point ClientRuntimeBase::MetadataNow() const {
@@ -168,12 +174,8 @@ uint64_t ClientRuntimeBase::BlobSizeEpoch() const noexcept { return m_sizeEpoch.
 
 std::optional<ClientRuntimeBase::CachedMetadata> ClientRuntimeBase::CachedBlobMetadata(std::string_view blobUrl) const {
     const std::scoped_lock lock(m_sizeMutex);
-    const auto it = m_sizes.find(blobUrl);
+    const auto it = FindFreshLocked(blobUrl);
     if (it == m_sizes.end()) {
-        return std::nullopt;
-    }
-    if (MetadataNow() - it->second.FetchedAt >= Configuration::MetadataCacheTtl) {
-        m_sizes.erase(it);
         return std::nullopt;
     }
     if (!it->second.ETag) {
@@ -196,15 +198,22 @@ void ClientRuntimeBase::StoreBlobSize(std::string_view blobUrl, const int64_t si
     constexpr std::size_t MaxCachedSizes = 4096;
     const auto now = MetadataNow();
     const std::scoped_lock lock(m_sizeMutex);
-    // Invalidations bump the epoch under this lock, so a fetch that started before one can never be stored.
-    if (m_sizeEpoch.load() != epoch) {
+    // Invalidations bump the epoch under this lock, so a fetch that started before an invalidation of its own URL
+    // (or before the watermark) can never be stored.
+    if (epoch < m_tombstoneWatermark) {
+        return;
+    }
+    if (const auto tomb = m_tombstones.find(blobUrl); tomb != m_tombstones.end() && tomb->second > epoch) {
         return;
     }
     if (m_sizes.size() >= MaxCachedSizes) {
-        std::erase_if(m_sizes, [&](const auto& entry) {
-            return now - entry.second.FetchedAt >= Configuration::MetadataCacheTtl;
-        });
-        // Still full of live entries: drop one arbitrary entry rather than the whole working set.
+        // The full sweep is O(n), so it runs at most once per TTL; otherwise a single entry is evicted.
+        if (now >= m_nextSweep) {
+            std::erase_if(m_sizes, [&](const auto& entry) {
+                return now - entry.second.FetchedAt >= Configuration::MetadataCacheTtl;
+            });
+            m_nextSweep = now + Configuration::MetadataCacheTtl;
+        }
         if (m_sizes.size() >= MaxCachedSizes && !m_sizes.contains(blobUrl)) {
             m_sizes.erase(m_sizes.begin());
         }
@@ -218,15 +227,23 @@ void ClientRuntimeBase::StoreBlobSize(std::string_view blobUrl, const int64_t si
 
 void ClientRuntimeBase::InvalidateBlobSize(std::string_view blobUrl) const {
     const std::scoped_lock lock(m_sizeMutex);
-    ++m_sizeEpoch;
+    constexpr std::size_t MaxTombstones = 4096;
+    const auto invalidatedAt = ++m_sizeEpoch;
     if (const auto it = m_sizes.find(blobUrl); it != m_sizes.end()) {
         m_sizes.erase(it);
     }
+    if (m_tombstones.size() >= MaxTombstones && !m_tombstones.contains(blobUrl)) {
+        // Dropping tombstones must not let an older in-flight fetch through, so raise the watermark past them.
+        m_tombstoneWatermark = invalidatedAt;
+        m_tombstones.clear();
+    }
+    m_tombstones.insert_or_assign(std::string(blobUrl), invalidatedAt);
 }
 
 void ClientRuntimeBase::InvalidateAllBlobSizes() const {
     const std::scoped_lock lock(m_sizeMutex);
-    ++m_sizeEpoch;
+    m_tombstoneWatermark = ++m_sizeEpoch;
+    m_tombstones.clear();
     m_sizes.clear();
 }
 
