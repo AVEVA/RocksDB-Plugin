@@ -52,6 +52,20 @@ class WriteableFileTests : public ::testing::Test {
     }
 };
 
+TEST_F(WriteableFileTests, SinglePageBuffer_IsRejectedInsteadOfSpinningInAppend) {
+    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
+    EXPECT_THROW(MakeFile(pageSize), std::invalid_argument);
+    EXPECT_THROW(MakeFile(pageSize / 2), std::invalid_argument);
+
+    m_env.Blob->SetCapacity(16 * pageSize);
+    const std::vector<char> data(100, 'x');
+    auto file = MakeFile(2 * pageSize);
+    file.Append(data);
+    file.Append(data);
+    file.Sync();
+    EXPECT_EQ(std::vector<char>(200, 'x'), Prefix(m_env.Blob->Data, 200));
+}
+
 TEST_F(WriteableFileTests, Flush_ReusesBuffersAndKeepsTheTailAcrossTheSwap) {
     constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
     m_env.Blob->SetCapacity(64 * pageSize);

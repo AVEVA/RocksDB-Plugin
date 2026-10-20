@@ -133,7 +133,7 @@ TEST(PluginTests, Register_WithInvalidDataFileSizes_IsRejected) {
     boost::asio::io_context context;
     constexpr int64_t kGoodBuffer = 4096;
 
-    for (const int64_t badBuffer : {int64_t{0}, int64_t{-512}, int64_t{1000}}) {
+    for (const int64_t badBuffer : {int64_t{0}, int64_t{-512}, int64_t{1000}, int64_t{512}}) {
         EXPECT_TRUE(Plugin::Register(configOptions, &env, &guard, context, MakeInfo("sizes-db"), std::nullopt, logger,
                                      badBuffer)
                         .IsInvalidArgument())

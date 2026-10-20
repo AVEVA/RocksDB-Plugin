@@ -48,8 +48,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// </summary>
 [[nodiscard]] constexpr std::string_view InvalidDataFileSizes(int64_t dataFileInitialSize,
                                                               int64_t dataFileBufferSize) noexcept {
-    if (dataFileBufferSize <= 0 || dataFileBufferSize % 512 != 0) {
-        return "dataFileBufferSize must be a positive multiple of 512";
+    if (dataFileBufferSize < 1024 || dataFileBufferSize % 512 != 0) {
+        return "dataFileBufferSize must be a multiple of 512 and at least 1024 (two pages)";
     }
     if (dataFileInitialSize < 0) {
         return "dataFileInitialSize cannot be negative";

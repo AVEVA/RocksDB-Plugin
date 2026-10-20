@@ -45,8 +45,9 @@ BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(
     const int64_t bufferSize, const BlobState knownState)
     : m_w(name, std::move(runtime), std::move(blob), std::move(fileCache), std::move(logger), knownState.Capacity),
       m_bufferSize(bufferSize), m_lastPageOffset(0), m_size(knownState.Size), m_bufferOffset(0), m_flushed(true) {
-    if (m_bufferSize < Configuration::PageBlob::PageSize) {
-        throw std::invalid_argument("Buffer size cannot be smaller than a page");
+    // One page is not enough: a partial page cannot be flushed, so Append could never free space.
+    if (m_bufferSize < 2 * Configuration::PageBlob::PageSize) {
+        throw std::invalid_argument("Buffer size cannot be smaller than two pages");
     }
 
     // Asynchronous flushes upload whole pages only, so a page-aligned buffer guarantees a full page is always
