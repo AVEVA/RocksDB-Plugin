@@ -559,7 +559,11 @@ are medium confidence: confirm them against the code, or measure, before changin
 - `src\Core\RocksDBHelpers.cpp` `IsFile`: work on a `string_view` instead of copying to `std::string`.
 - **Validation:** `ctest -L core`.
 
-### [ ] T62 – HttpClient smaller items
+### [x] T62 – HttpClient smaller items
+- **Done:** removed unreachable `bodyless` term, fixed both stale docs, made `DnsCache::Shared()` immortal.
+  **Skipped (risk/benefit):** `CancelState` variant (needs templating the limiter, larger refactor), and the
+  dead-code cleanups (`ConnectionKeyEqual`, `JoinOrLead` Waiter overload, double `Close()`, `m_maxPerOrigin`),
+  which touch shutdown order and many tests.
 - **Replace the `CancelState::Target` `std::function`** with a closed `std::variant` (removes erasure;
   **Verify first**: libstdc++ allocates for these captures).
   - Files: `CancelState.hpp:20-55`, `HttpClientImpl.hpp:316-324`, `RequestOperation.cpp:26-38`.

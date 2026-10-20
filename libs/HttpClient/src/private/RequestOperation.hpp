@@ -254,7 +254,8 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
 
     /// <summary>
     /// A TLS server may close TCP without close_notify. An attacker can also truncate an EOF-delimited body
-    /// that way, so it is only accepted for bodyless statuses (204/304) or when the request opted in.
+    /// that way, so it is only accepted when the request opted in. (Bodyless 204/304 responses complete at the
+    /// end of the header, so they never reach this path.)
     /// </summary>
     /// <param name="error">The failed read's error.</param>
     /// <returns>An empty error code if the message turned out to be complete; otherwise the original error.</returns>

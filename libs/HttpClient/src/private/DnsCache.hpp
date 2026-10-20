@@ -114,8 +114,10 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     /// </summary>
     /// <returns>The shared cache.</returns>
     static BasicDnsCache& Shared() {
-        static BasicDnsCache cache;
-        return cache;
+        // Intentionally leaked: a host's static io_context can outlive this and run LeaderGuard::~LeaderGuard
+        // after static destruction.
+        static auto* cache = new BasicDnsCache;
+        return *cache;
     }
 
     /// <summary>

@@ -75,7 +75,8 @@ class HttpClient {
     /// <c>use_awaitable</c>, <c>bind_executor</c>, etc. get the behavior they expect. The handler is never
     /// invoked from inside this call. If initiation itself fails, nothing is thrown: the handler completes exactly
     /// once, later, with <c>std::errc::not_enough_memory</c> for <c>std::bad_alloc</c> and
-    /// <c>HttpClientError::InvalidRequest</c> otherwise. Only building the completion handler itself (the
+    /// <c>HttpClientError::InvalidRequest</c> for rejected input, and <c>std::errc::state_not_recoverable</c> for
+    /// anything else. Only building the completion handler itself (the
     /// token's allocation) can still throw <c>std::bad_alloc</c> out of this call.
     /// </summary>
     /// <param name="request">The request to send.</param>

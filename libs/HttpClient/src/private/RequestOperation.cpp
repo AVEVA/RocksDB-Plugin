@@ -381,10 +381,8 @@ template <typename Stream> void RequestOperation<Stream>::OnRead(boost::system::
 template <typename Stream>
 boost::system::error_code RequestOperation<Stream>::AcceptTruncatedTlsBody(boost::system::error_code error) {
     if constexpr (std::is_same_v<Stream, TlsStream>) {
-        const auto status = m_parser->get().result_int();
-        const bool bodyless = status == 204 || status == 304;
         if (error == asio::ssl::error::stream_truncated && m_parser->got_some() &&
-            (m_options.GetAcceptTruncatedTlsBody() || bodyless)) {
+            m_options.GetAcceptTruncatedTlsBody()) {
             boost::system::error_code eofError;
             m_parser->put_eof(eofError);
             if (!eofError) {
