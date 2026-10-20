@@ -276,7 +276,7 @@ against the code unless it says **Verify first**.
   - `libs\HttpClient\src\private\Route.hpp` ~38-79: `Route::Of` makes several string allocations. Build the
     origin once.
 
-### [ ] T24 – HttpClient connection-path costs (Verify first)
+### [x] T24 – HttpClient connection-path costs (Verify first) — DROPPED: no measurable gain; adds complexity. Idle probe is already gated by a threshold (m_probeThreshold in Acquire); DnsCache hits copy asio results (a shared_ptr refcount bump) under a few-ns lock, dwarfed by ms-scale requests; the non-pooled TLS shutdown make_shared is one allocation on a rare path; TLS session resumption works because the plugin uses one shared HttpClient (SharedHttpClient) per runtime, so one SSL_CTX cache
 - **Files:**
   - `DnsCache.hpp` (~67-95, 154-218): one process-wide mutex, and `ResolveResults` is copied per hit. Consider a
     shared_mutex, or storing results as `shared_ptr<const>`.
