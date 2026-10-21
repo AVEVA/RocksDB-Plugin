@@ -6,12 +6,17 @@
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
+#include <boost/asio/thread_pool.hpp>
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <fstream>
+#include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 TEST(HttpClientConstruction, BadTrustSettingsFailConstructionWithAClearError) {
     boost::asio::io_context context;
@@ -73,4 +78,27 @@ TEST(HttpClientConstruction, FactoryReturnsUsableClients) {
     boost::asio::post(context, [&handlerRan] { handlerRan = true; });
     EXPECT_EQ(context.run(), 1);
     EXPECT_TRUE(handlerRan);
+}
+TEST(HttpClientConstruction, DownloadWriterRunsManyTasksOnABoundedClientOwnedPool) {
+    boost::asio::io_context context;
+    std::mutex mutex;
+    std::set<std::thread::id> threads;
+    std::atomic<int> done{0};
+    constexpr int Tasks = 200;
+    {
+        AVEVA::HttpClient client(context);
+        for (int i = 0; i < Tasks; ++i) {
+            boost::asio::post(client.GetDownloadWriter(), [&] {
+                {
+                    const std::scoped_lock lock(mutex);
+                    threads.insert(std::this_thread::get_id());
+                }
+                ++done;
+            });
+        }
+        // Destruction joins the pool, so every queued task has run by then.
+    }
+    EXPECT_EQ(done.load(), Tasks);
+    EXPECT_LE(threads.size(), 4U);
+    EXPECT_FALSE(threads.contains(std::this_thread::get_id()));
 }

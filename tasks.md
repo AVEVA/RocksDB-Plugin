@@ -241,7 +241,7 @@ code. Findings marked **Verify first** are medium confidence: confirm or measure
   not rely on it.
 - **Validation:** `DnsCacheTests`. Drop the change if no allocation difference is measurable on the join path.
 
-### [ ] T76 – `RunOnWriter` falls back to a detached thread per task
+### [x] T76 – `RunOnWriter` falls back to a detached thread per task
 - **File:** `libs\AzureClient\include\AVEVA\AzureClient\Detail\BlobDownload.hpp:52-62`; docs at
   `BlobOperationOptions.hpp:86, 111` and `BlobClient.hpp:134`.
 - **Problem:** When there is no `WriteScheduler` and the transport has no `GetDownloadWriter()`, every blocking

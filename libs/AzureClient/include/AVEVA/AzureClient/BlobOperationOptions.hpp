@@ -83,8 +83,8 @@ struct DownloadBlobOptions {
     // body is buffered. Unset applies no limit beyond available memory.
     std::optional<std::uint64_t> MaxSize;
     // Where file downloads run their blocking filesystem calls. Unset uses the HTTP client's
-    // `GetDownloadWriter()` when it has one, otherwise a short-lived thread per task. The client owns no
-    // threads of its own, so supply a scheduler backed by your own pool to bound them.
+    // `GetDownloadWriter()` when it has one (::AVEVA::HttpClient provides a bounded, client-owned pool), otherwise
+    // a short-lived thread per task. Supply a scheduler to use your own pool.
     std::optional<DownloadWriteScheduler> WriteScheduler;
 };
 
@@ -108,8 +108,8 @@ struct DownloadToOptions {
     // destination is written. Unset applies no limit.
     std::optional<std::uint64_t> MaxSize;
     // Where file downloads run their blocking filesystem calls. Unset uses the HTTP client's
-    // `GetDownloadWriter()` when it has one, otherwise a short-lived thread per task. The client owns no
-    // threads of its own, so supply a scheduler backed by your own pool to bound them.
+    // `GetDownloadWriter()` when it has one (::AVEVA::HttpClient provides a bounded, client-owned pool), otherwise
+    // a short-lived thread per task. Supply a scheduler to use your own pool.
     std::optional<DownloadWriteScheduler> WriteScheduler;
 };
 

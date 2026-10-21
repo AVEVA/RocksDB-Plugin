@@ -131,8 +131,9 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
     //   (path, DownloadBlobOptions) - honours DownloadBlobOptions::Range; goes through the same chunked engine.
     //   (span, DownloadBlobOptions) - the range straight into caller memory.
     // File writes never run on the threads completing HTTP requests: they go to DownloadToOptions::WriteScheduler,
-    // else the HTTP client's GetDownloadWriter() if it has one, else a short-lived thread per task. Pass a scheduler
-    // for production use. To cancel, emit the signal from the handler's executor/strand.
+    // else the HTTP client's     GetDownloadWriter() if it has one (::AVEVA::HttpClient's is a bounded, client-owned
+    // pool), else a short-lived thread per task for custom transports without one. To cancel, emit the signal from the
+    // handler's executor/strand.
 
     // Chunked download into `path`, via a temporary sibling file that replaces `path` only on success.
     template <class CompletionToken = DefaultCompletionToken>

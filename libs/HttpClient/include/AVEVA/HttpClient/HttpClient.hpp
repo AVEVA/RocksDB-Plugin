@@ -18,8 +18,10 @@
 #include <boost/asio/dispatch.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/thread_pool.hpp>
 
 #include <memory>
+#include <mutex>
 #include <system_error>
 #include <utility>
 
@@ -67,6 +69,14 @@ class HttpClient {
     /// </summary>
     /// <returns>The client's executor.</returns>
     executor_type get_executor() const noexcept { return m_context->get_executor(); }
+
+    /// <summary>
+    /// Executor for blocking work that must stay off the I/O thread, such as download-to-file writes. Backed by a
+    /// small thread pool that is created on first use, owned by this client and joined in its destructor, so the
+    /// thread count stays bounded. Safe to call from any thread.
+    /// </summary>
+    /// <returns>An executor that runs tasks on the pool.</returns>
+    [[nodiscard]] boost::asio::thread_pool::executor_type GetDownloadWriter();
 
     /// <summary>
     /// Sends a request. Propagates the token's associated executor, allocator, and cancellation slot
@@ -137,5 +147,8 @@ class HttpClient {
 
     boost::asio::io_context* m_context;
     std::unique_ptr<Impl> m_impl;
+    // Declared after m_impl and joined explicitly in the destructor so queued writes finish before teardown.
+    std::mutex m_writerMutex;
+    std::unique_ptr<boost::asio::thread_pool> m_writerPool;
 };
 } // namespace AVEVA
