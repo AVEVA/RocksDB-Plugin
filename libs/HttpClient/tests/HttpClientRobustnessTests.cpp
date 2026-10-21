@@ -735,6 +735,7 @@ TEST(HttpClientRobustness, RequestTargetIsBuiltFromPathAndQuery) {
 struct ThrowBadAlloc {
     static void OnSubmit() { throw std::bad_alloc(); }
     static void OnStartLimited() noexcept {}
+    static void OnFailPost() noexcept {}
 };
 
 // Throws from the Nth call to StartLimited, counted across the process; each test resets the counters.
@@ -747,7 +748,45 @@ struct ThrowOnStartLimited {
             throw std::bad_alloc();
         }
     }
+    static void OnFailPost() noexcept {}
 };
+
+struct ThrowOnFailPost {
+    static void OnSubmit() noexcept {}
+    static void OnStartLimited() noexcept {}
+    static void OnFailPost() { throw std::bad_alloc(); }
+};
+
+TEST(HttpClientRobustness, LimiterAbortWhoseFailurePostThrowsStillCompletesTheHandlerOnce) {
+    asio::io_context context;
+    AVEVA::HttpClientOptions clientOptions;
+    clientOptions.SetMaxConnectionsPerHost(1);
+    AVEVA::Private::BasicHttpClientImpl<ThrowOnFailPost> impl(context, clientOptions);
+    ScriptedServer server(context, [](int, const http::request<http::string_body>&) -> ServerAction {
+        return {.Wire = OkResponse, .Delay = std::chrono::milliseconds(400)};
+    });
+
+    std::vector<int> completions(2, 0);
+    std::vector<std::error_code> results(2);
+    AVEVA::HttpRequestOptions queuedOptions;
+    queuedOptions.SetTimeout(std::chrono::milliseconds(100));
+    // The first request holds the only slot, so the second expires in the queue and is aborted by the limiter.
+    impl.Submit(MakeRequest(server.Url("/0")), AVEVA::HttpRequestOptions{},
+                AVEVA::Detail::MakeCompletion([&](std::error_code error, AVEVA::HttpResponse) {
+                    ++completions[0];
+                    results[0] = error;
+                    server.Stop();
+                }));
+    impl.Submit(MakeRequest(server.Url("/1")), queuedOptions,
+                AVEVA::Detail::MakeCompletion([&](std::error_code error, AVEVA::HttpResponse) {
+                    ++completions[1];
+                    results[1] = error;
+                }));
+    EXPECT_NO_THROW(context.run());
+
+    EXPECT_EQ(completions, (std::vector<int>{1, 1}));
+    EXPECT_EQ(results[1], AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
+}
 
 TEST(HttpClientRobustness, ThrowingFirstStartReturnsTheOriginSlotAndFailsTheRequestOnce) {
     ThrowOnStartLimited::Calls = 0;

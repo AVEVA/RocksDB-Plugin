@@ -36,6 +36,7 @@ namespace AVEVA::Private {
 struct NoFault {
     static void OnSubmit() noexcept {}
     static void OnStartLimited() noexcept {}
+    static void OnFailPost() noexcept {}
 };
 
 /// <summary>
@@ -257,6 +258,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// <param name="error">Why the request failed.</param>
     void FailLater(const std::shared_ptr<RequestState>& cell, std::error_code error) noexcept {
         try {
+            FaultPolicy::OnFailPost();
             asio::post(m_context, [cell, error] { cell->Finish(error, HttpResponse{}); });
             return;
         } catch (...) {
@@ -352,15 +354,14 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     }
 
     /// <summary>
-    /// Fails a request that never got a slot. Posted because a completion must never run inside the call
-    /// that triggered it.
+    /// Fails a request that never got a slot. Goes through the request's state cell (see FailLater) so the
+    /// completion survives a failing post and is delivered exactly once; the guarded completion in
+    /// <c>pending.completion</c> only forwards to the cell, so it is dropped.
     /// </summary>
     /// <param name="pending">The request to fail.</param>
     /// <param name="error">Why it was dropped.</param>
-    void AbortLimited(PendingRequest&& pending, std::error_code error) {
-        asio::post(m_context, [completion = std::move(pending.completion), error]() mutable {
-            Detail::Complete(std::move(completion), error, HttpResponse{});
-        });
+    void AbortLimited(PendingRequest&& pending, std::error_code error) noexcept {
+        FailLater(std::static_pointer_cast<RequestState>(std::move(pending.state)), error);
     }
 
     /// <summary>

@@ -120,7 +120,7 @@ closed; their text is in git history at `HEAD:tasks.md` (commit `34947f4`), summ
   `FaultPolicy` pattern) that throws after the first `StartRead`, and assert that every request has a non-OK status
   and that no read is still running after return (`AsyncReadTracker::InFlight() == 0` once the context is pumped).
 
-### [ ] T82 – HttpClient: a request aborted by the limiter can lose its completion
+### [x] T82 – HttpClient: a request aborted by the limiter can lose its completion
 - **Files:** `libs\HttpClient\src\private\HttpClientImpl.hpp:360-364` (`AbortLimited`), `:113-118`
   (`LimiterSink::Abort`); callers in `libs\HttpClient\src\private\OriginLimiter.hpp:84, 167, 189, 263`.
 - **Problem:** `AbortLimited` moves `pending.completion` into an `asio::post` lambda without a fallback. If `post`
