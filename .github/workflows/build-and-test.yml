@@ -236,7 +236,8 @@ jobs:
 
   install-consume:
     # Installs the libraries, then configures and builds a minimal external consumer that includes the public headers
-    # and links the plugin, to validate the package configs and that the installed headers are self-sufficient.
+    # and links the plugin (plus one executable per separately installable package), to validate the package configs
+    # and that the installed headers are self-sufficient.
     strategy:
       fail-fast: false
       matrix:
@@ -277,6 +278,80 @@ jobs:
           add_executable(consumer main.cpp)
           target_link_libraries(consumer PRIVATE aveva::rocksdb-plugin-azure)
           target_compile_features(consumer PRIVATE cxx_std_23)
+
+          # One executable per separately installable package, so a broken find_dependency in any of their
+          # config templates fails here instead of only when a consumer picks that package on its own.
+          foreach(pkg IN ITEMS http_client azure_client core azure_impl)
+            if(pkg STREQUAL "http_client")
+              set(pkg_name aveva-http-client)
+              set(pkg_target aveva::http-client)
+            elseif(pkg STREQUAL "azure_client")
+              set(pkg_name aveva-azure-client)
+              set(pkg_target aveva::azure-client)
+            elseif(pkg STREQUAL "core")
+              set(pkg_name aveva-rocksdb-plugin-core)
+              set(pkg_target aveva::rocksdb-plugin-core)
+            else()
+              set(pkg_name aveva-rocksdb-plugin-azure-impl)
+              set(pkg_target aveva::rocksdb-plugin-azure-impl)
+            endif()
+            find_package(${pkg_name} CONFIG REQUIRED)
+            add_executable(consume_${pkg} ${pkg}.cpp)
+            target_link_libraries(consume_${pkg} PRIVATE ${pkg_target})
+            target_compile_features(consume_${pkg} PRIVATE cxx_std_23)
+          endforeach()
+          EOF
+          cat > http_client.cpp <<'EOF'
+          #include <AVEVA/HttpClient/HttpMethod.hpp>
+
+          int main(int argc, char**) {
+              if (argc > 100) {
+                  return static_cast<int>(AVEVA::ToString(AVEVA::HttpMethod::Get).size());
+              }
+              return 0;
+          }
+          EOF
+          cat > azure_client.cpp <<'EOF'
+          #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
+
+          int main(int argc, char**) {
+              if (argc > 100) {
+                  return AVEVA::AzureClient::make_error_code(AVEVA::AzureClient::BlobStorageErrorCode::BlobNotFound)
+                      .value();
+              }
+              return 0;
+          }
+          EOF
+          cat > core.cpp <<'EOF'
+          #include <AVEVA/RocksDB/Plugin/Core/Util.hpp>
+
+          int main(int argc, char**) {
+              if (argc > 100) {
+                  return static_cast<int>(AVEVA::RocksDB::Plugin::Core::StringHash{}(std::string_view("unused")));
+              }
+              return 0;
+          }
+          EOF
+          # The only installed impl header declares no functions, so the symbol is declared here to match the
+          # (uninstalled) StorageAccount.hpp; the link still has to resolve it from the installed library.
+          cat > azure_impl.cpp <<'EOF'
+          #include <AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp>
+
+          #include <string>
+
+          namespace AVEVA::RocksDB::Plugin::Azure::Impl {
+          struct StorageAccount {
+              static std::string UniquePrefix(const std::string& storageAccountUrl, const std::string& dbName);
+          };
+          } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
+
+          int main(int argc, char**) {
+              if (argc > 100) {
+                  return static_cast<int>(
+                      AVEVA::RocksDB::Plugin::Azure::Impl::StorageAccount::UniquePrefix("https://a.b/", "c").size());
+              }
+              return AVEVA::RocksDB::Plugin::Azure::Impl::Configuration::MaxClientRetries > 0 ? 0 : 1;
+          }
           EOF
           cat > main.cpp <<'EOF'
           #include <AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp>

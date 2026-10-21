@@ -192,7 +192,7 @@ code. Findings marked **Verify first** are medium confidence: confirm or measure
 - **Validation:** full build and all Azure tests. Compare clean-build time for `aveva-rocksdb-plugin-azure-impl`
   before and after.
 
-### [ ] T72 – CI install-consume only covers the aggregate plugin package
+### [x] T72 – CI install-consume only covers the aggregate plugin package
 - **File:** `.github\workflows\build-and-test.yml:258-302`.
 - **Problem:** The consumer job only uses `find_package(aveva-rocksdb-plugin-azure)`. `libs\README.md` documents
   `aveva-azure-client`, `aveva-http-client`, `aveva-rocksdb-plugin-core` and `aveva-rocksdb-plugin-azure-impl` as
