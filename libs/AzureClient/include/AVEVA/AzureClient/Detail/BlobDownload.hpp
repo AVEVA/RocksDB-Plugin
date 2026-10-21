@@ -140,7 +140,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         m_initiating = true;
         lock.unlock();
 
-        Begin();
+        Guarded([this] { Begin(); });
 
         lock.lock();
         Drain(lock);
@@ -148,6 +148,29 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
     }
 
   private:
+    // An internal throw (allocation, request setup, writer scheduling) becomes the download's failure instead of
+    // escaping onto the host event loop. Once the download has completed a throw can only come from the caller's
+    // completion, which is not a storage failure and propagates after the runner state is restored.
+    template <class TStep> void Guarded(TStep&& step) {
+        try {
+            step();
+        } catch (...) {
+            if (m_done) {
+                std::lock_guard lock(m_mutex);
+                m_processing = false;
+                throw;
+            }
+            Fail(MakeFailureFromCurrentException());
+            try {
+                MaybeFinish();
+            } catch (...) {
+                std::lock_guard lock(m_mutex);
+                m_processing = false;
+                throw;
+            }
+        }
+    }
+
     enum class RequestKind : std::uint8_t { Probe, Full, Chunk };
 
     struct InFlightRequest {
@@ -182,7 +205,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
             Event event = std::move(m_events.front());
             m_events.pop_front();
             lock.unlock();
-            Handle(std::move(event));
+            Guarded([&] { Handle(std::move(event)); });
             lock.lock();
         }
         m_processing = false;
@@ -251,12 +274,20 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
             ++m_chunksInFlight;
         }
 
-        SendAuthorizedRequestAsync(
-            m_httpClient, *m_clientOptions, std::move(request),
-            [self = this->shared_from_this(), id](std::error_code error, HttpResponse response) mutable {
-                self->Enqueue(Event{.RequestId = id, .Error = error, .Response = std::move(response)});
-            },
-            requestOptions);
+        try {
+            SendAuthorizedRequestAsync(
+                m_httpClient, *m_clientOptions, std::move(request),
+                [self = this->shared_from_this(), id](std::error_code error, HttpResponse response) mutable {
+                    self->Enqueue(Event{.RequestId = id, .Error = error, .Response = std::move(response)});
+                },
+                requestOptions);
+        } catch (...) {
+            // The request was not accepted, so no completion will ever drain this entry.
+            if (m_inFlight.erase(id) != 0U && kind == RequestKind::Chunk) {
+                --m_chunksInFlight;
+            }
+            Fail(MakeFailureFromCurrentException());
+        }
     }
 
     void Handle(Event event) {
@@ -519,22 +550,29 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
 
                 m_writing = true;
                 m_writingChunks = batch.size();
-                RunOnWriter(m_httpClient, m_options.WriteScheduler,
-                            [self = this->shared_from_this(), batch = std::move(batch)]() mutable {
-                                std::size_t size = 0U;
-                                bool ok = true;
-                                for (auto& chunk : batch) {
-                                    const std::size_t chunkSize = chunk.size();
-                                    ok = TryWrite(self->m_sink, std::move(chunk));
-                                    if (!ok) {
-                                        break;
+                try {
+                    RunOnWriter(m_httpClient, m_options.WriteScheduler,
+                                [self = this->shared_from_this(), batch = std::move(batch)]() mutable {
+                                    std::size_t size = 0U;
+                                    bool ok = true;
+                                    for (auto& chunk : batch) {
+                                        const std::size_t chunkSize = chunk.size();
+                                        ok = TryWrite(self->m_sink, std::move(chunk));
+                                        if (!ok) {
+                                            break;
+                                        }
+                                        size += chunkSize;
                                     }
-                                    size += chunkSize;
-                                }
-                                boost::asio::post(self->m_httpClient.get_executor(), [self, ok, size]() {
-                                    self->Enqueue(Event{.WriteDone = true, .WriteOk = ok, .WriteSize = size});
+                                    boost::asio::post(self->m_httpClient.get_executor(), [self, ok, size]() {
+                                        self->Enqueue(Event{.WriteDone = true, .WriteOk = ok, .WriteSize = size});
+                                    });
                                 });
-                            });
+                } catch (...) {
+                    // Scheduling failed, so no write-done event will ever clear the writing state.
+                    m_writing = false;
+                    m_writingChunks = 0U;
+                    Fail(MakeFailureFromCurrentException());
+                }
                 return;
             }
         }

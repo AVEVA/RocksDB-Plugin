@@ -428,6 +428,33 @@ TEST(RetryTests, UnauthorizedResponseIsRepeatedOnceWithAFreshToken) {
     EXPECT_TRUE(ValueOrFail(observed).has_value());
 }
 
+TEST(RetryTests, ThrowDuringSecondAttemptCompletesOnceWithAnErrorAndDoesNotEscape) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{401, {}, ""});
+    httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
+    auto credential = std::make_shared<ScriptedTokenCredential>();
+    credential->EnqueueImmediate({}, MakeToken("token", std::chrono::hours(1)));
+    credential->EnqueueThrow();
+
+    BlobClientOptions options = MakeRetryOptions(0);
+    options.SasToken.clear();
+    BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{httpClient, std::move(options), credential};
+
+    int completions = 0;
+    std::optional<DeleteResult> observed;
+    client.DeleteAsync([&](DeleteResult result) {
+        ++completions;
+        observed = std::move(result);
+    });
+
+    EXPECT_NO_THROW(EXPECT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2})));
+    EXPECT_EQ(completions, 1);
+    ASSERT_TRUE(observed.has_value());
+    ASSERT_FALSE(observed->has_value());
+    EXPECT_EQ(observed->error().Code, std::make_error_code(std::errc::not_enough_memory));
+    EXPECT_EQ(httpClient.RequestCount(), 1U);
+}
+
 TEST(RetryTests, UnauthorizedResponseAfterTheDeadlineDoesNotRefreshTheToken) {
     FakeHttpClient httpClient;
     httpClient.EnqueueDeferredResponse(HttpResponse{401, {}, ""});

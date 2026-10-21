@@ -245,6 +245,33 @@ TEST(T11_ParallelDownloadAcceptanceTests, FileWritesRunOnTheInjectedWriteSchedul
     EXPECT_EQ(ReadFile(out.Path), content);
 }
 
+TEST(T11_ParallelDownloadAcceptanceTests, ThrowWhileStartingALaterChunkFailsOnceWithoutEscaping) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(18);
+    EnqueueChunks(httpClient, content, 3U);
+    BlobClient client{httpClient, BuildOptions()};
+
+    TempFile out;
+    int callbackCount = 0;
+    client.DownloadToAsync(out.Path, Parallel(3U, 3U), [&callbackCount](DownloadToResult result) {
+        ++callbackCount;
+        EXPECT_FALSE(result.has_value());
+    });
+
+    ASSERT_EQ(httpClient.RequestCount(), 1U);
+    httpClient.FailNextInitiation(std::make_exception_ptr(std::bad_alloc{}));
+    EXPECT_NO_THROW({
+        EXPECT_TRUE(httpClient.CompleteRequest(0U));
+        httpClient.CompleteAll();
+        httpClient.Poll();
+    });
+
+    EXPECT_EQ(callbackCount, 1);
+    EXPECT_EQ(httpClient.PendingCount(), 0U);
+    EXPECT_FALSE(std::filesystem::exists(out.Path));
+    EXPECT_TRUE(httpClient.RunUntil([&] { return !HasPartialFiles(out.Path); }));
+}
+
 TEST(T11_ParallelDownloadAcceptanceTests, ReorderWindowBoundsBufferedChunksToConcurrency) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(30);

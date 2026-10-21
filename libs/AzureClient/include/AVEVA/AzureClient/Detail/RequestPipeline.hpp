@@ -202,19 +202,62 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         }
 
         const auto keepAlive = this->shared_from_this();
-        Dispatch(event);
-        for (;;) {
+        try {
+            DispatchGuarded(event);
+            for (;;) {
+                {
+                    const std::scoped_lock lock(m_queueMutex);
+                    if (m_queue.empty()) {
+                        m_draining = false;
+                        return;
+                    }
+                    event = std::move(m_queue.front());
+                    m_queue.pop_front();
+                }
+                DispatchGuarded(event);
+            }
+        } catch (...) {
+            // Only a throwing user completion reaches here; never leave the runner marked active.
             {
                 const std::scoped_lock lock(m_queueMutex);
-                if (m_queue.empty()) {
-                    m_draining = false;
-                    return;
-                }
-                event = std::move(m_queue.front());
-                m_queue.pop_front();
+                m_draining = false;
             }
-            Dispatch(event);
+            throw;
         }
+    }
+
+    // An internal throw (allocation, request building, transport initiation) after initiation must not escape onto
+    // the host event loop or strand the operation: it becomes the request's error. The very first attempt is still
+    // inside the caller's initiating function, where nothing has been accepted yet, so its throw propagates and
+    // the caller can retry. Once the request has finished, a throw can only come from the caller's completion,
+    // which is not a storage failure and is left to propagate.
+    void DispatchGuarded(Event& event) {
+        try {
+            Dispatch(event);
+        } catch (...) {
+            if (m_finished.load(std::memory_order_acquire) || std::holds_alternative<StartAttemptEvent>(event)) {
+                throw;
+            }
+            FailInternal(std::current_exception());
+        }
+    }
+
+    void FailInternal(const std::exception_ptr& failure) {
+        std::error_code error = std::make_error_code(std::errc::invalid_argument);
+        try {
+            std::rethrow_exception(failure);
+        } catch (const std::bad_alloc&) {
+            error = std::make_error_code(std::errc::not_enough_memory);
+        } catch (const std::system_error& e) {
+            error = e.code();
+        } catch (...) {
+        }
+        m_internalError = error;
+        m_cancelled.store(true, std::memory_order_release);
+        // Stops any attempt or backoff already accepted; their completions report this error, not a cancellation.
+        m_timer.cancel();
+        m_attemptSignal.emit(boost::asio::cancellation_type::terminal);
+        PostFinish(error);
     }
 
     void OnCancel(boost::asio::cancellation_type_t type) {
@@ -253,6 +296,9 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
 
     // A caller cancellation reports operation_canceled; an expired total deadline reports timed_out.
     [[nodiscard]] std::error_code CancelError() const noexcept {
+        if (m_internalError) {
+            return m_internalError;
+        }
         return m_timedOut ? std::make_error_code(std::errc::timed_out) : CanceledError();
     }
 
@@ -599,6 +645,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     std::atomic<bool> m_cancelled{false};
     std::atomic<bool> m_finished{false};
     bool m_timedOut = false;
+    std::error_code m_internalError;
     bool m_tokenRefreshed = false;
     // Token the latest attempt was sent with; a 401 invalidates the cache only if it still holds this one.
     std::string m_attemptToken;

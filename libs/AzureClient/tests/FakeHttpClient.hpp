@@ -973,6 +973,7 @@ class ScriptedTokenCredential final {
         std::error_code Error;
         AccessToken Token;
         bool Deferred = false;
+        bool Throws = false;
     };
 
     struct PendingRequest {
@@ -985,6 +986,9 @@ class ScriptedTokenCredential final {
     void EnqueueImmediate(std::error_code error, AccessToken token) {
         m_scripts.push_back(Script{.Error = error, .Token = std::move(token), .Deferred = false});
     }
+
+    // The next token request throws from inside GetTokenAsync, as an allocation failure would.
+    void EnqueueThrow() { m_scripts.push_back(Script{.Throws = true}); }
 
     void EnqueueDeferred(std::error_code error, AccessToken token) {
         m_scripts.push_back(Script{.Error = error, .Token = std::move(token), .Deferred = true});
@@ -1007,6 +1011,10 @@ class ScriptedTokenCredential final {
         if (!m_scripts.empty()) {
             script = std::move(m_scripts.front());
             m_scripts.pop_front();
+        }
+
+        if (script.Throws) {
+            throw std::bad_alloc{};
         }
 
         if (script.Deferred) {

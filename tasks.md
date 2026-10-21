@@ -202,7 +202,7 @@ carries its offset/length (`GapRead`) and a short result throws `InvalidResponse
 before any upload in the wave; reads are still drained. The reused-buffer and
 retry variants were not added. Full WindowsDebug ctest: 1171 passed.
 
-### [ ] T96 - Recover async runners when an internal continuation throws
+### [x] T96 - Recover async runners when an internal continuation throws
 
 **Evidence:** `Detail\RequestPipeline.hpp:194-218` sets `m_draining` before
 dispatch with no exception cleanup; `StartAttempt:319-323` builds/copies the
@@ -229,6 +229,21 @@ initiation for the same accepted-work invariant while making the fix.
 parallel-download suites: throw during a second attempt, a later chunk start
 and writer scheduling. Assert no exception escapes `run()`, one error completion,
 no permanently active runner, and no released buffer still used by accepted I/O.
+
+**Result:** Reproduced (both new tests failed first). `RetryOperation::Run` now
+converts a throw from any post-initiation event (401 refresh, retry/backoff,
+token) into one error completion via `FailInternal` (cancels accepted work,
+posts the finish) and always resets `m_draining`; a throw from the first
+attempt still propagates to the initiating caller (nothing accepted, so
+`WriteableFile` can retry), and a throwing user completion is rethrown, not
+converted. `DownloadOperation` guards `Begin`/`Handle`, restores
+`m_processing`, drops the in-flight entry when request initiation throws and
+clears `m_writing` when writer scheduling throws. Tests: RetryTests
+`ThrowDuringSecondAttempt...`, ParallelDownloadTests
+`ThrowWhileStartingALaterChunk...`. The writer-scheduling throw is guarded but
+has no test (a `thread_pool` executor cannot be made to throw); batch needed no
+change since its requests go through the fixed pipeline. Full WindowsDebug
+ctest passes.
 
 ### [ ] T97 - Guard condition-variable upload waits on the host executor
 
