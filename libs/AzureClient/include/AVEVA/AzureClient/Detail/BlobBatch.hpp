@@ -78,7 +78,10 @@ class BatchDeleteOperation final
             // handler of another, and a cancel reaches all of them.
             std::weak_ptr<BatchDeleteOperation> const weak = this->weak_from_this();
             THttp const* httpClient = &m_httpClient;
-            m_parentSlot.assign([weak, httpClient](boost::asio::cancellation_type_t) {
+            m_parentSlot.assign([weak, httpClient](boost::asio::cancellation_type_t type) {
+                if (!IsAbortingCancellation(type)) {
+                    return;
+                }
                 boost::asio::post(httpClient->get_executor(), [weak]() {
                     if (auto self = weak.lock()) {
                         self->OnCancel();

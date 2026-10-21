@@ -338,6 +338,64 @@ TEST(BatchDeleteTests, CancelAbortsEveryChunkInFlightAndStartsNoMore) {
     EXPECT_EQ(http.RequestCount(), 3U);
 }
 
+TEST(BatchDeleteTests, PartialCancellationDoesNotAbortTheBatchButTerminalDoes) {
+    FakeHttpClient http;
+    http.SetResponder([](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
+        FakeHttpClient::ScriptedResult result =
+            BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
+        result.Deferred = true;
+        return result;
+    });
+    BlobContainerClient client{http, MakeBlobContainerClientOptions()};
+
+    boost::asio::cancellation_signal signal;
+    std::optional<BatchOutcome> outcome;
+    client.DeleteBlobsAsync(MakeNames(256U * 3U), DeleteBlobsOptions{.MaxConcurrentRequests = 1},
+                            boost::asio::bind_cancellation_slot(
+                                signal.slot(), [&outcome](BatchOutcome result) { outcome = std::move(result); }));
+    ASSERT_EQ(http.PendingCount(), 1U);
+
+    signal.emit(boost::asio::cancellation_type::partial);
+    http.Poll();
+    ASSERT_FALSE(outcome.has_value());
+    ASSERT_EQ(http.PendingCount(), 1U);
+
+    ASSERT_TRUE(http.CompleteNext());
+    ASSERT_EQ(http.RequestCount(), 2U);
+    signal.emit(boost::asio::cancellation_type::terminal);
+    ASSERT_TRUE(http.RunUntil([&] { return outcome.has_value(); }));
+
+    ASSERT_FALSE(outcome->has_value());
+    EXPECT_EQ(outcome->error().Code, std::make_error_code(std::errc::operation_canceled));
+    EXPECT_EQ(http.RequestCount(), 2U);
+}
+
+TEST(BatchDeleteTests, PartialCancellationLetsTheBatchSucceed) {
+    FakeHttpClient http;
+    http.SetResponder([](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
+        FakeHttpClient::ScriptedResult result =
+            BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
+        result.Deferred = true;
+        return result;
+    });
+    BlobContainerClient client{http, MakeBlobContainerClientOptions()};
+
+    boost::asio::cancellation_signal signal;
+    std::optional<BatchOutcome> outcome;
+    client.DeleteBlobsAsync(MakeNames(10U), DeleteBlobsOptions{},
+                            boost::asio::bind_cancellation_slot(
+                                signal.slot(), [&outcome](BatchOutcome result) { outcome = std::move(result); }));
+    ASSERT_EQ(http.PendingCount(), 1U);
+
+    signal.emit(boost::asio::cancellation_type::partial);
+    http.Poll();
+    ASSERT_TRUE(http.CompleteNext());
+    ASSERT_TRUE(http.RunUntil([&] { return outcome.has_value(); }));
+
+    ASSERT_TRUE(outcome->has_value());
+    EXPECT_EQ(outcome->value().Value().Items.size(), 10U);
+}
+
 TEST(BatchDeleteTests, CancelRightAfterInitiationOfManyChunksAlwaysCompletesCanceled) {
     for (int iteration = 0; iteration < 20; ++iteration) {
         FakeHttpClient http;

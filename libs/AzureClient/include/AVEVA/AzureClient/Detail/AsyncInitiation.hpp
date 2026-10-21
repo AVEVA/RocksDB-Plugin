@@ -31,6 +31,13 @@
 #include <utility>
 
 namespace AVEVA::AzureClient::Private {
+// Only terminal and total cancellation abort an operation; a partial request has nothing safe to hand back
+// half-done, so every cancellation slot handler ignores it.
+[[nodiscard]] inline bool IsAbortingCancellation(boost::asio::cancellation_type_t type) noexcept {
+    return (type & (boost::asio::cancellation_type::terminal | boost::asio::cancellation_type::total)) !=
+           boost::asio::cancellation_type::none;
+}
+
 // Grants InitiateClientOperation access to a client's private MakeSnapshot().
 struct ClientSnapshotAccess {
     template <class TClient> [[nodiscard]] static TClient Make(const TClient& client) { return client.MakeSnapshot(); }

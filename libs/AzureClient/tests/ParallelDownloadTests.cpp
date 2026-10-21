@@ -342,6 +342,64 @@ TEST(T11_ParallelDownloadAcceptanceTests, ParentCancellationCancelsAllInFlightCh
     EXPECT_EQ(httpClient.RequestCount(), 5U);
 }
 
+TEST(T11_ParallelDownloadAcceptanceTests, PartialCancellationDoesNotAbortTheDownload) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(18);
+    EnqueueChunks(httpClient, content, 3U);
+    BlobClient client{httpClient, BuildOptions()};
+
+    boost::asio::cancellation_signal cancel;
+    HttpRequestOptions requestOptions;
+    requestOptions.SetCancellationSlot(cancel.slot());
+    TempFile out;
+    int callbackCount = 0;
+    client.DownloadToAsync(
+        out.Path, Parallel(3U, 3U),
+        [&](DownloadToResult result) {
+            ++callbackCount;
+            ASSERT_TRUE(result.has_value());
+            EXPECT_EQ(result->Value().BytesWritten, content.size());
+        },
+        requestOptions);
+
+    ASSERT_TRUE(httpClient.CompleteRequest(0U));
+    ASSERT_EQ(httpClient.PendingCount(), 3U);
+    cancel.emit(boost::asio::cancellation_type::partial);
+    httpClient.Poll();
+    ASSERT_EQ(callbackCount, 0);
+    ASSERT_EQ(httpClient.PendingCount(), 3U);
+
+    static_cast<void>(CompleteNewestUntilCallback(httpClient, 3U, callbackCount));
+
+    ASSERT_EQ(callbackCount, 1);
+    EXPECT_EQ(ReadFile(out.Path), content);
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, TerminalCancellationAfterPartialStillAbortsTheDownload) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(40);
+    EnqueueChunks(httpClient, content, 4U);
+    BlobClient client{httpClient, BuildOptions()};
+
+    boost::asio::cancellation_signal cancel;
+    HttpRequestOptions requestOptions;
+    requestOptions.SetCancellationSlot(cancel.slot());
+    TempFile out;
+    int callbackCount = 0;
+    StartDownloadToAsyncAndExpectCancellation(client, out.Path, Parallel(4U, 4U), callbackCount, requestOptions);
+
+    ASSERT_TRUE(httpClient.CompleteRequest(0U));
+    ASSERT_EQ(httpClient.PendingCount(), 4U);
+    cancel.emit(boost::asio::cancellation_type::partial);
+    httpClient.Poll();
+    ASSERT_EQ(callbackCount, 0);
+    cancel.emit(boost::asio::cancellation_type::terminal);
+    httpClient.Poll();
+
+    EXPECT_EQ(callbackCount, 1);
+    EXPECT_EQ(httpClient.PendingCount(), 0U);
+}
+
 TEST(T11_ParallelDownloadAcceptanceTests, ParallelFileDownloadReplacesTheTargetOnSuccess) {
     const std::filesystem::path target =
         std::filesystem::temp_directory_path() / "azure-client-t11-parallel-success.bin";

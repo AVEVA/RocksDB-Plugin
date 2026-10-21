@@ -205,7 +205,10 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         if (m_parentSlot.is_connected()) {
             std::weak_ptr<DownloadOperation> const weak = this->weak_from_this();
             THttp const* httpClient = &m_httpClient;
-            m_parentSlot.assign([weak, httpClient](boost::asio::cancellation_type_t) {
+            m_parentSlot.assign([weak, httpClient](boost::asio::cancellation_type_t type) {
+                if (!IsAbortingCancellation(type)) {
+                    return;
+                }
                 boost::asio::post(httpClient->get_executor(), [weak]() {
                     if (auto self = weak.lock()) {
                         self->Enqueue(Event{.Cancel = true, .RequestId = 0, .Error = {}, .Response = {}});
