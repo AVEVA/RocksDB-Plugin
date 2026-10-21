@@ -567,6 +567,82 @@ TEST(DownloadBufferPoolTests, RetainedBytesAreCappedAndTheLargestBuffersGoFirst)
     EXPECT_LT(pool->PooledBytes(), Pool::MaxPooledTotalBytes);
 }
 
+TEST(DownloadBufferPoolTests, ConcurrentChurnNeverWrapsTheByteCounter) {
+    using Pool = AVEVA::RocksDB::Plugin::Azure::Impl::DownloadBufferPool;
+    const auto pool = std::make_shared<Pool>();
+    std::atomic<bool> stop = false;
+    std::atomic<std::size_t> maxObserved = 0;
+    std::thread observer([&] {
+        while (!stop.load()) {
+            const std::size_t bytes = pool->PooledBytes();
+            std::size_t previous = maxObserved.load();
+            while (bytes > previous && !maxObserved.compare_exchange_weak(previous, bytes)) {
+            }
+        }
+    });
+
+    std::vector<std::thread> workers;
+    for (int worker = 0; worker < 8; ++worker) {
+        workers.emplace_back([&, worker] {
+            for (int i = 0; i < 20000; ++i) {
+                // Workers share two classes so returns and acquires of the same class keep interleaving.
+                const auto lease = pool->Acquire(((i + worker) % 2 == 0) ? 1024 : 2048);
+            }
+        });
+    }
+    for (auto& worker : workers) {
+        worker.join();
+    }
+    stop = true;
+    observer.join();
+
+    EXPECT_LE(maxObserved.load(), Pool::MaxPooledTotalBytes);
+    // Draining every retained buffer must leave the counter at exactly zero.
+    std::vector<std::shared_ptr<Pool::Lease>> held;
+    for (std::size_t n = 0; n < Pool::MaxPooledBuffersPerClass; ++n) {
+        held.push_back(pool->Acquire(1024));
+        held.push_back(pool->Acquire(2048));
+    }
+    EXPECT_EQ(0U, pool->PooledBytes());
+    EXPECT_EQ(0U, pool->PooledCount());
+}
+
+namespace {
+struct PausingPoolHooks {
+    static inline std::atomic<bool> Armed = false;
+    static inline std::promise<void> Entered;
+    static inline std::shared_future<void> Resume;
+    static void AfterPublish() noexcept {
+        if (Armed.exchange(false)) {
+            Entered.set_value();
+            Resume.wait();
+        }
+    }
+};
+} // namespace
+
+TEST(DownloadBufferPoolTests, AcquireDuringAReturnNeverSeesUnaccountedBytes) {
+    using Pool = AVEVA::RocksDB::Plugin::Azure::Impl::BasicDownloadBufferPool<PausingPoolHooks>;
+    const auto pool = std::make_shared<Pool>();
+    PausingPoolHooks::Entered = std::promise<void>();
+    std::promise<void> resume;
+    PausingPoolHooks::Resume = resume.get_future().share();
+    auto entered = PausingPoolHooks::Entered.get_future();
+
+    auto lease = pool->Acquire(1024);
+    PausingPoolHooks::Armed = true;
+    // The return pauses just after its buffer became visible to Acquire.
+    std::thread returning([&] { lease.reset(); });
+    entered.wait();
+
+    const auto reused = pool->Acquire(1024);
+    EXPECT_EQ(0U, pool->PooledBytes());
+
+    resume.set_value();
+    returning.join();
+    EXPECT_EQ(0U, pool->PooledBytes());
+}
+
 TEST(DownloadBufferPoolTests, OversizedBuffersAreNotRetained) {
     const auto pool = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::DownloadBufferPool>();
     {

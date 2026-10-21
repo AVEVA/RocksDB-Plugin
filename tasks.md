@@ -364,7 +364,7 @@ one leader/lookup and one publication, then cover leader cancellation and
 abandonment. An isolated current-header probe confirmed that a follower becomes
 a second leader immediately after the existing guard-construction expression.
 
-### [ ] T101 - Publish download-pool byte accounting with the buffer
+### [x] T101 - Publish download-pool byte accounting with the buffer
 
 **Evidence:** `src\Azure\Impl\include\AVEVA\RocksDB\Plugin\Azure\Impl\DownloadBufferPool.hpp:118-136`
 pushes a returned buffer under its size-class mutex, unlocks, then increments
@@ -386,6 +386,8 @@ ordering alone does not fix the publication order.
 test hook, plus concurrent churn across classes. Accounting must not wrap and
 settled retained bytes must match free buffers. Measure allocation/reuse under
 contention, and run the relevant tests under TSan on Linux.
+
+**Result (done):** Reproduced deterministically with a static (non-erased) test-hook template parameter on the pool (`BasicDownloadBufferPool<Hooks>`, `DownloadBufferPool` alias unchanged): the counter wrapped to 2^64-1024 before the fix. `Return` now adds bytes inside the size-class lock that publishes the buffer. Added the interleaving test plus a concurrent churn test (stress alone never reproduced the race). WindowsDebug ctest: 1179/1179 pass (integration skipped). Not done: TSan run (Linux only) and contention allocation measurements; no performance change was made.
 
 ### [ ] T102 - Make failed or unparsed benchmark runs explicitly incomplete
 

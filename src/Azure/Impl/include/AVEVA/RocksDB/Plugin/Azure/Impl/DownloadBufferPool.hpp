@@ -14,6 +14,12 @@
 #include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
+/// <summary>Production hooks: none. Tests substitute a static type to pause a return at a precise point.</summary>
+struct NoDownloadBufferPoolHooks {
+    // Runs after a returned buffer is published and its bytes are accounted, with no lock held.
+    static void AfterPublish() noexcept {}
+};
+
 /// <summary>
 /// Recycles the buffers async reads download into, so a steady stream of small reads does not allocate per read.
 ///
@@ -25,7 +31,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// while the transfer is still writing, so the bytes land in a pooled buffer that the completion owns and are copied
 /// into scratch only if the read is still live (see AsyncReadRequest::Complete). That one copy remains by design.
 /// </summary>
-class DownloadBufferPool : public std::enable_shared_from_this<DownloadBufferPool> {
+template <typename Hooks = NoDownloadBufferPoolHooks>
+class BasicDownloadBufferPool : public std::enable_shared_from_this<BasicDownloadBufferPool<Hooks>> {
   public:
     // Buffers above this size are not retained, so one large read cannot pin memory for the process lifetime.
     static constexpr std::size_t MaxPooledBufferBytes = 4U * 1024U * 1024U;
@@ -39,7 +46,7 @@ class DownloadBufferPool : public std::enable_shared_from_this<DownloadBufferPoo
     /// <summary>A buffer on loan from the pool; it returns itself when the last owner lets go.</summary>
     class Lease {
       public:
-        Lease(std::shared_ptr<DownloadBufferPool> pool, std::unique_ptr<char[]> buffer, std::size_t capacity,
+        Lease(std::shared_ptr<BasicDownloadBufferPool> pool, std::unique_ptr<char[]> buffer, std::size_t capacity,
               std::size_t size)
             : m_pool(std::move(pool)), m_buffer(std::move(buffer)), m_capacity(capacity), m_size(size) {}
         Lease(const Lease&) = delete;
@@ -50,15 +57,15 @@ class DownloadBufferPool : public std::enable_shared_from_this<DownloadBufferPoo
         [[nodiscard]] std::size_t Size() const noexcept { return m_size; }
 
       private:
-        std::shared_ptr<DownloadBufferPool> m_pool;
+        std::shared_ptr<BasicDownloadBufferPool> m_pool;
         std::unique_ptr<char[]> m_buffer;
         std::size_t m_capacity;
         std::size_t m_size;
     };
 
     /// <summary>The process-wide pool. Leases keep it alive, so they may outlive any caller.</summary>
-    static std::shared_ptr<DownloadBufferPool> Shared() {
-        static const auto pool = std::make_shared<DownloadBufferPool>();
+    static std::shared_ptr<BasicDownloadBufferPool> Shared() {
+        static const auto pool = std::make_shared<BasicDownloadBufferPool>();
         return pool;
     }
 
@@ -78,7 +85,7 @@ class DownloadBufferPool : public std::enable_shared_from_this<DownloadBufferPoo
         if (!buffer) {
             buffer = std::make_unique_for_overwrite<char[]>(capacity);
         }
-        return std::make_shared<Lease>(shared_from_this(), std::move(buffer), capacity, size);
+        return std::make_shared<Lease>(this->shared_from_this(), std::move(buffer), capacity, size);
     }
 
     /// <summary>Bytes currently held for reuse (for tests and diagnostics).</summary>
@@ -120,6 +127,7 @@ class DownloadBufferPool : public std::enable_shared_from_this<DownloadBufferPoo
         if (capacity > MaxPooledBufferBytes) {
             return;
         }
+        std::size_t total = 0;
         {
             auto& sizeClass = m_classes[ClassOf(capacity)];
             std::scoped_lock lock(sizeClass.Mutex);
@@ -131,8 +139,12 @@ class DownloadBufferPool : public std::enable_shared_from_this<DownloadBufferPoo
             } catch (const std::bad_alloc&) {
                 return;
             }
+            // Accounted in the same critical section that makes the buffer visible, so an Acquire that takes it
+            // can never subtract bytes that were not yet added.
+            total = m_pooledBytes.fetch_add(capacity, std::memory_order_relaxed) + capacity;
         }
-        if (m_pooledBytes.fetch_add(capacity, std::memory_order_relaxed) + capacity > MaxPooledTotalBytes) {
+        Hooks::AfterPublish();
+        if (total > MaxPooledTotalBytes) {
             try {
                 EvictLargestWhileOverCap();
             } catch (const std::bad_alloc&) {
@@ -162,4 +174,6 @@ class DownloadBufferPool : public std::enable_shared_from_this<DownloadBufferPoo
     std::atomic<std::size_t> m_pooledBytes = 0;
     std::array<SizeClass, ClassCount> m_classes;
 };
+
+using DownloadBufferPool = BasicDownloadBufferPool<>;
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
