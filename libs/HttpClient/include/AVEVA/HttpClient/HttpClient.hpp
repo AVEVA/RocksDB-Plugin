@@ -21,7 +21,6 @@
 #include <boost/asio/thread_pool.hpp>
 
 #include <memory>
-#include <mutex>
 #include <system_error>
 #include <utility>
 
@@ -147,8 +146,5 @@ class HttpClient {
 
     boost::asio::io_context* m_context;
     std::unique_ptr<Impl> m_impl;
-    // Declared after m_impl and joined explicitly in the destructor so queued writes finish before teardown.
-    std::mutex m_writerMutex;
-    std::unique_ptr<boost::asio::thread_pool> m_writerPool;
 };
 } // namespace AVEVA

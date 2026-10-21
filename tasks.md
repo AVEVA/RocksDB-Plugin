@@ -228,7 +228,7 @@ closed; their text is in git history at `HEAD:tasks.md` (commit `34947f4`), summ
   Do this after T85 if T85 changes `Flush`.
 - **Validation:** `WriteableFileTests` (`Flush_AfterAnEarlierUploadFailed_ReportsTheFailure`, fencing cases).
 
-### [ ] T88 – Move the download-writer pool state out of the public `HttpClient.hpp`
+### [x] T88 – Move the download-writer pool state out of the public `HttpClient.hpp`
 - **File:** `libs\HttpClient\include\AVEVA\HttpClient\HttpClient.hpp:23-25, 147-152`; `libs\HttpClient\src\HttpClient.cpp`.
 - **Problem:** T76 added `std::mutex m_writerMutex` and `std::unique_ptr<boost::asio::thread_pool> m_writerPool` as
   members of the public class, which pulls `<mutex>` into every consumer. `HttpClient` already has a private

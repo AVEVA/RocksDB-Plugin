@@ -18,6 +18,9 @@ namespace AVEVA {
 class HttpClient::Impl : public Private::BasicHttpClientImpl<Private::NoFault> {
   public:
     using BasicHttpClientImpl::BasicHttpClientImpl;
+
+    std::mutex writerMutex;
+    std::unique_ptr<boost::asio::thread_pool> writerPool;
 };
 
 HttpClient::HttpClient(boost::asio::io_context& context, HttpClientOptions options)
@@ -25,19 +28,20 @@ HttpClient::HttpClient(boost::asio::io_context& context, HttpClientOptions optio
 
 HttpClient::~HttpClient() {
     // join() lets queued sink writes finish instead of abandoning them, which would strand their downloads.
-    if (m_writerPool) {
-        m_writerPool->join();
+    // It runs before m_impl is destroyed, so the pool is joined ahead of the transport teardown.
+    if (m_impl->writerPool) {
+        m_impl->writerPool->join();
     }
 }
 
 boost::asio::thread_pool::executor_type HttpClient::GetDownloadWriter() {
-    const std::scoped_lock lock(m_writerMutex);
-    if (!m_writerPool) {
+    const std::scoped_lock lock(m_impl->writerMutex);
+    if (!m_impl->writerPool) {
         constexpr unsigned MaxWriterThreads = 4;
         const auto threads = std::clamp(std::thread::hardware_concurrency(), 1U, MaxWriterThreads);
-        m_writerPool = std::make_unique<boost::asio::thread_pool>(threads);
+        m_impl->writerPool = std::make_unique<boost::asio::thread_pool>(threads);
     }
-    return m_writerPool->get_executor();
+    return m_impl->writerPool->get_executor();
 }
 
 std::unique_ptr<HttpClient> HttpClient::Create(boost::asio::io_context& context, HttpClientOptions options) {
