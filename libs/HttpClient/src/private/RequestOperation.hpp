@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include "CancelState.hpp"
 #include "ConnectionPool.hpp"
 #include "DiagnosticsSink.hpp"
 #include "DnsCache.hpp"
@@ -118,7 +117,17 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// </summary>
     /// <param name="cancellation">The state shared with the caller's slot; null when the request has no
     /// cancellation slot.</param>
-    void BindCancellation(const std::shared_ptr<CancelState>& cancellation);
+    template <typename State> void BindCancellation(const std::shared_ptr<State>& cancellation) {
+        if (cancellation) {
+            cancellation->SetTarget(std::weak_ptr<RequestOperation>(this->weak_from_this()));
+        }
+    }
+
+    /// <summary>
+    /// Records that cancellation was asked for and posts the cancellation to the strand. Safe to call from
+    /// any thread, and only the first call has an effect.
+    /// </summary>
+    void RequestCancellation();
 
     /// <summary>
     /// Sets where this operation reports events the caller would otherwise never see. Must be called before the
@@ -327,12 +336,6 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// <param name="error">The outcome to report; empty on success.</param>
     /// <param name="response">The response to report; empty on failure.</param>
     void Finish(std::error_code error, HttpResponse response);
-
-    /// <summary>
-    /// Records that cancellation was asked for and posts the cancellation to the strand. Safe to call from
-    /// any thread, and only the first call has an effect.
-    /// </summary>
-    void RequestCancellation();
 
     /// <summary>
     /// Whether cancellation has been asked for. Checked at every step so a cancelled operation stops as

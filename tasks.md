@@ -107,7 +107,7 @@ code. Findings marked **Verify first** are medium confidence: confirm or measure
 - **Validation:** One parameterised `AzureErrorTranslatorTests` case per code, asserting the status kind and
   retryability. `LeaseSafetyTests` and `LockFileImplTests` must still pass.
 
-### [ ] T69 – `CancelState` stores a `std::function` target and copies it under the lock (removes erasure)
+### [x] T69 – `CancelState` stores a `std::function` target and copies it under the lock (removes erasure)
 - **Files:** `libs\HttpClient\src\private\CancelState.hpp:20-60`; callers `private\RequestOperation.cpp:33-37` and
   `private\HttpClientImpl.hpp:319-323`.
 - **Problem:** There are exactly two kinds of target: a running `RequestOperation`, captured as a `weak_ptr`, and a

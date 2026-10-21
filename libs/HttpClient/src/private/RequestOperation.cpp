@@ -23,20 +23,6 @@
 
 namespace AVEVA::Private {
 
-template <typename Stream>
-void RequestOperation<Stream>::BindCancellation(const std::shared_ptr<CancelState>& cancellation) {
-    if (!cancellation) {
-        return;
-    }
-    // The target runs on whichever thread emits the signal, so it only posts to the operation's strand,
-    // where Cancel() may safely use the stream.
-    cancellation->SetTarget([weak = this->weak_from_this()] {
-        if (auto self = weak.lock()) {
-            self->RequestCancellation();
-        }
-    });
-}
-
 template <typename Stream> void RequestOperation<Stream>::Start(HttpRequest request, const Route& route) {
     if (IsCancellationRequested()) {
         return Cancel();
