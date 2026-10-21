@@ -21,6 +21,40 @@ bool IsTransportTimeout(const std::error_code& code) {
 std::string DescribeFailure(const RequestFailedException& error) {
     return error.StatusCode != 0 ? "HTTP " + error.Describe() : error.Describe();
 }
+
+// The single exception-to-status ladder, so a mapping change is made once. `log(kind, detail)` is a lambda (not an
+// erased callable) that the logging overload uses to report and the plain overload leaves empty. An empty
+// `operation` selects the plain overload's wording for unknown exceptions.
+template <class TLog> rocksdb::IOStatus ClassifyCurrentException(TLog&& log, std::string_view operation) {
+    try {
+        throw;
+    } catch (const RequestFailedException& ex) {
+        // Describe() carries the status, Azure error code, message and request id. AuthenticationDetail may echo the
+        // string-to-sign, so it is deliberately never logged.
+        log("failed", ex.Describe());
+        return AzureErrorTranslator::IOStatusFromError(ex);
+    } catch (const WritesFencedException& ex) {
+        log("failed", ex.what());
+        return rocksdb::IOStatus::IOFenced(ex.what());
+    } catch (const std::invalid_argument& ex) {
+        log("rejected", ex.what());
+        return rocksdb::IOStatus::InvalidArgument(ex.what());
+    } catch (const std::system_error& ex) {
+        log("failed", ex.what());
+        // Cancellation comes from AbortIO or shutdown, so it is not a storage failure.
+        if (ex.code() == std::errc::operation_canceled) {
+            return rocksdb::IOStatus::Aborted(ex.what());
+        }
+        return rocksdb::IOStatus::IOError(ex.what());
+    } catch (const std::exception& ex) {
+        log("failed", ex.what());
+        return rocksdb::IOStatus::IOError(ex.what());
+    } catch (...) {
+        log("failed with an unknown error", std::string_view{});
+        return rocksdb::IOStatus::IOError(operation.empty() ? "Unknown error"
+                                                            : "Unknown error when calling " + std::string(operation));
+    }
+}
 } // namespace
 
 rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const std::string& context, unsigned int statusCode) {
@@ -130,54 +164,22 @@ bool AzureErrorTranslator::IsTransient(const RequestFailedException& error) {
 rocksdb::IOStatus AzureErrorTranslator::FromException(const std::exception_ptr& error) {
     try {
         std::rethrow_exception(error);
-    } catch (const RequestFailedException& ex) {
-        return IOStatusFromError(ex);
-    } catch (const WritesFencedException& ex) {
-        return rocksdb::IOStatus::IOFenced(ex.what());
-    } catch (const std::invalid_argument& ex) {
-        return rocksdb::IOStatus::InvalidArgument(ex.what());
-    } catch (const std::system_error& ex) {
-        if (ex.code() == std::errc::operation_canceled) {
-            return rocksdb::IOStatus::Aborted(ex.what());
-        }
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (const std::exception& ex) {
-        return rocksdb::IOStatus::IOError(ex.what());
     } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error");
+        return ClassifyCurrentException([](std::string_view, std::string_view) {}, {});
     }
 }
 
 rocksdb::IOStatus AzureErrorTranslator::FromCurrentException(
     boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>& logger, std::string_view operation) {
-    using boost::log::trivial::error;
-    try {
-        throw;
-    } catch (const RequestFailedException& ex) {
-        // Describe() carries the status, Azure error code, message and request id.
-        BOOST_LOG_SEV(logger, error) << operation << " failed: " << ex.Describe();
-        // AuthenticationDetail may echo the string-to-sign, so it is deliberately never logged.
-        return IOStatusFromError(ex);
-    } catch (const WritesFencedException& ex) {
-        BOOST_LOG_SEV(logger, error) << operation << " failed: " << ex.what();
-        return rocksdb::IOStatus::IOFenced(ex.what());
-    } catch (const std::invalid_argument& ex) {
-        BOOST_LOG_SEV(logger, error) << operation << " rejected: " << ex.what();
-        return rocksdb::IOStatus::InvalidArgument(ex.what());
-    } catch (const std::system_error& ex) {
-        BOOST_LOG_SEV(logger, error) << operation << " failed: " << ex.what();
-        // Cancellation comes from AbortIO or shutdown, so it is not a storage failure.
-        if (ex.code() == std::errc::operation_canceled) {
-            return rocksdb::IOStatus::Aborted(ex.what());
-        }
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(logger, error) << operation << " failed: " << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        BOOST_LOG_SEV(logger, error) << operation << " failed with an unknown error";
-        return rocksdb::IOStatus::IOError("Unknown error when calling " + std::string(operation));
-    }
+    return ClassifyCurrentException(
+        [&](std::string_view kind, std::string_view detail) {
+            if (detail.empty()) {
+                BOOST_LOG_SEV(logger, boost::log::trivial::error) << operation << ' ' << kind;
+            } else {
+                BOOST_LOG_SEV(logger, boost::log::trivial::error) << operation << ' ' << kind << ": " << detail;
+            }
+        },
+        operation);
 }
 
 rocksdb::IOStatus AzureErrorTranslator::FromException(

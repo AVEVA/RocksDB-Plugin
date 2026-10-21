@@ -209,7 +209,8 @@ code. Findings marked **Verify first** are medium confidence: confirm or measure
 
 ## P3: cleanups / simplifications / docs
 
-### [ ] T73 – `AzureErrorTranslator` keeps two copies of the exception-to-status ladder
+### [x] T73 – `AzureErrorTranslator` keeps two copies of the exception-to-status ladder
+- **Done:** one `ClassifyCurrentException(log, operation)` template (in the anonymous namespace, so the public header is untouched) holds the ladder; the plain overload passes a no-op lambda and the logging overload a `BOOST_LOG_SEV` lambda. Messages and statuses are unchanged.
 - **File:** `src\Azure\AzureErrorTranslator.cpp:111-130` (`FromException(exception_ptr)`) and `:132-162`
   (`FromCurrentException(logger, …)`).
 - **Problem:** The catch ladders (`RequestFailedException`, `WritesFencedException`, `invalid_argument`,
