@@ -138,7 +138,7 @@ closed; their text is in git history at `HEAD:tasks.md` (commit `34947f4`), summ
 - **Validation:** `OriginLimiterTests`, `HttpClientRobustnessTests` (limiter close, queued deadline, cancellation).
   Add a `FaultPolicy` hook that throws inside the abort post, and assert that the handler still runs exactly once.
 
-### [ ] T83 – Idle sweeper can stop scheduling for good after one failed `Schedule`
+### [x] T83 – Idle sweeper can stop scheduling for good after one failed `Schedule`
 - **Files:** `libs\HttpClient\src\private\IdleSweeper.hpp:92-96` (`Notify`), `:203-212`
   (`SweepScheduler::Schedule`); `libs\HttpClient\src\private\ConnectionPool.hpp:365-369` (`Release` calling
   `m_notifier()`); `libs\HttpClient\src\private\RequestOperation.cpp:420-435` (`ReleaseOrClose`).

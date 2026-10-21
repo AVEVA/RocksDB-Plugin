@@ -28,7 +28,7 @@ class SweeperNotifier {
     /// <summary>
     /// Wakes the sweeper if it still exists.
     /// </summary>
-    void operator()() const;
+    void operator()() const noexcept;
 
   private:
     std::weak_ptr<IdleSweeper> m_sweeper;

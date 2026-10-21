@@ -4,7 +4,7 @@
 #include "IdleSweeper.hpp"
 
 namespace AVEVA::Private {
-void SweeperNotifier::operator()() const {
+void SweeperNotifier::operator()() const noexcept {
     if (auto sweeper = m_sweeper.lock()) {
         sweeper->Notify();
     }

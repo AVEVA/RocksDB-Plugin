@@ -256,7 +256,7 @@ TEST(ConnectionPool, ZeroTotalIdleLimitDisablesPooling) {
 struct CountingNotifier {
     int* notifications = nullptr;
 
-    void operator()() const { ++*notifications; }
+    void operator()() const noexcept { ++*notifications; }
 };
 
 TEST(ConnectionPool, NotifiesWhenTheFirstIdleConnectionIsAdded) {

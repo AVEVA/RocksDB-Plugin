@@ -78,6 +78,24 @@ TEST(IdleSweeper, SweepersRunInDeadlineOrderNotSchedulingOrder) {
     EXPECT_TRUE(WaitUntil([&] { return later.plain->IdleCount() == 0; }));
 }
 
+// A failed Schedule must not leave the pending flag set: a later release has to schedule a sweep again.
+TEST(IdleSweeper, ReleaseSchedulesAgainAfterAFailedSchedule) {
+    asio::io_context context;
+    SweeperFixture fixture(context, std::chrono::milliseconds(20));
+
+    IdleSweeper::FailNextSchedules(1);
+    fixture.AddIdleConnection();
+    EXPECT_EQ(fixture.plain->IdleCount(), 1U);
+
+    // The pool was non-empty, so only a release into an empty pool notifies again.
+    auto taken = fixture.plain->Acquire({"127.0.0.1", "80"});
+    ASSERT_TRUE(taken.has_value());
+    EXPECT_EQ(fixture.plain->IdleCount(), 0U);
+    fixture.AddIdleConnection();
+
+    EXPECT_TRUE(WaitUntil([&] { return fixture.plain->IdleCount() == 0; }));
+}
+
 // The shared scheduler thread belongs to the live sweepers: it is stopped and joined when the last one goes,
 // and started afresh for the next.
 TEST(IdleSweeper, SchedulerStopsWhenTheLastSweeperIsDestroyed) {

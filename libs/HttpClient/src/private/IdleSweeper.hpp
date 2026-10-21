@@ -16,6 +16,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <stop_token>
 #include <thread>
 #include <utility>
@@ -89,9 +90,9 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
     /// <summary>
     /// Called when a pool gains an idle connection; schedules a sweep unless one is already pending.
     /// </summary>
-    void Notify() {
+    void Notify() noexcept {
         if (!m_scheduled.exchange(true)) {
-            m_scheduler->Schedule(weak_from_this(), m_interval);
+            ScheduleSweep();
         }
     }
 
@@ -107,7 +108,7 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
         }
         m_scheduled = false;
         if (m_plainPool->Sweep() + m_tlsPool->Sweep() > 0 && !m_scheduled.exchange(true)) {
-            m_scheduler->Schedule(weak_from_this(), m_interval);
+            ScheduleSweep();
         }
     }
 
@@ -142,8 +143,27 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
     /// </summary>
     static std::uint64_t SchedulerWaitCount() noexcept { return SweepScheduler::WaitCount().load(); }
 
+    /// <summary>
+    /// Test hook: makes the next <paramref name="count"/> attempts to schedule a sweep, process-wide, throw.
+    /// </summary>
+    static void FailNextSchedules(int count) noexcept { SweepScheduler::FailureBudget().store(count); }
+
   private:
     class SweepScheduler;
+
+    /// <summary>
+    /// Queues the next sweep; the caller has already set the pending flag. Scheduling can throw (allocation,
+    /// thread creation), and the flag must not stay set then or no later release would ever schedule again.
+    /// </summary>
+    void ScheduleSweep() noexcept {
+        try {
+            m_scheduler->Schedule(weak_from_this(), m_interval);
+        } catch (...) {
+            m_scheduled = false;
+            DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::SwallowedException, HttpRequestPhase::Queued, {},
+                                    {}, "Scheduling an idle-connection sweep failed; it will be retried on a release");
+        }
+    }
 
     void ReportSweepFailure() const noexcept {
         DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::SwallowedException, HttpRequestPhase::Queued, {}, {},
@@ -191,6 +211,11 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
             return count;
         }
 
+        static std::atomic<int>& FailureBudget() noexcept {
+            static std::atomic<int> budget{0};
+            return budget;
+        }
+
         SweepScheduler(const SweepScheduler&) = delete;
         SweepScheduler& operator=(const SweepScheduler&) = delete;
 
@@ -201,6 +226,9 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
         /// <param name="sweeper">The sweeper to run.</param>
         /// <param name="delay">How long to wait before running it.</param>
         void Schedule(const std::weak_ptr<IdleSweeper>& sweeper, std::chrono::milliseconds delay) {
+            if (FailureBudget().fetch_sub(1) > 0) {
+                throw std::bad_alloc();
+            }
             {
                 std::lock_guard<std::mutex> lock(m_state->mutex);
                 m_state->queue.emplace(Clock::now() + delay, sweeper);

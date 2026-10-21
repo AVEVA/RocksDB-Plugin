@@ -20,6 +20,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 #if !defined(_WIN32)
@@ -135,6 +136,9 @@ using LruHook = intrusive::list_base_hook<intrusive::tag<LruTag>, intrusive::lin
 /// </summary>
 template <typename Stream, typename Clock = std::chrono::steady_clock, typename Notifier = SweeperNotifier>
 class ConnectionPool {
+    // Release has taken ownership of the connection by the time it notifies, so notifying must not fail.
+    static_assert(std::is_nothrow_invocable_v<const Notifier&>, "The pool notifier must not throw");
+
   public:
     /// <summary>
     /// Bounds idle sockets across all origins, so a client that talks to many hosts cannot hold them
