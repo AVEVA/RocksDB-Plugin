@@ -110,7 +110,7 @@ buffer and copies the tail into it before touching `m_buffer`, and swaps into th
 owner only after the owner allocation succeeded, so the swap is non-allocating. No
 extra copy. Full WindowsDebug ctest: 1167 tests, 0 failed.
 
-### [ ] T93 - Make upload-buffer recycling non-throwing
+### [x] T93 - Make upload-buffer recycling non-throwing
 
 **Evidence:** `src\Azure\Impl\WriteableFileImpl.ipp:200-215` calls
 `Pool->Free.push_back(std::move(Data))` from `PooledPayload::~PooledPayload`.
@@ -132,6 +132,12 @@ useful prior art.
 payload is released. The process must survive, upload tracking must drain, and
 the upload's real result must be preserved. Check warmed steady-state allocation
 counts so the fix does not add a per-upload allocation.
+
+**Result:** Reproduced with a `WriteableFileTests` case that fails the first free-list-growth
+allocation (`operator new` hook) while a deferred upload's payload is released; it failed before
+the fix. `UploadTracker` now reserves the four-slot free list at construction, so
+`PooledPayload::~PooledPayload` never allocates. Cost is one one-time 96-byte allocation per file and
+no per-upload allocation. Full WindowsDebug ctest: 1168 tests, 0 failed.
 
 ### [ ] T94 - Do not hide ambiguous Azure mutations inside HTTP stale-socket retries
 

@@ -42,7 +42,10 @@ template <typename TBlob> class BasicWriteableFileImpl {
         size_t InFlight = 0;
         std::exception_ptr Error;
         // Buffers of finished uploads, reused so a flush does not allocate and copy a full buffer each time.
+        // Capacity is reserved up front so returning a buffer from a payload destructor can never allocate or throw.
         std::vector<std::vector<char>> Free;
+
+        UploadTracker() { Free.reserve(MaxInFlightUploads); }
     };
     std::shared_ptr<UploadTracker> m_uploads = std::make_shared<UploadTracker>();
 

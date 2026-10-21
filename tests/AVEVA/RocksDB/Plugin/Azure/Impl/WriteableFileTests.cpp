@@ -37,7 +37,15 @@ thread_local bool g_failSmallAllocation = false;
 constexpr size_t SmallAllocationMin = 40;
 constexpr size_t SmallAllocationMax = 96;
 
+// Fails the first allocation the size of one pooled buffer handle, i.e. the first growth of the free list.
+thread_local bool g_failFreeListGrowth = false;
+constexpr size_t FreeListGrowthSize = sizeof(std::vector<char>);
+
 bool ShouldFailAllocation(const size_t size) {
+    if (g_failFreeListGrowth && size == FreeListGrowthSize) {
+        g_failFreeListGrowth = false;
+        return true;
+    }
     if (g_failSmallAllocation && size >= SmallAllocationMin && size <= SmallAllocationMax) {
         g_failSmallAllocation = false;
         return true;
@@ -687,6 +695,31 @@ TEST_F(WriteableFileTests, MoveConstructor_TransfersState_Correctly) {
     const FakeWriteableFileImpl file2{std::move(file1)};
 
     EXPECT_EQ(testData.size(), static_cast<size_t>(file2.GetFileSize()));
+}
+
+TEST_F(WriteableFileTests, Release_FreeListAllocationFailure_DoesNotTerminateAndKeepsTheUploadResult) {
+    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
+    m_env.Blob->SetCapacity(16 * pageSize);
+
+    std::vector<char> expected;
+    for (int64_t i = 0; i < 2 * pageSize + 100; ++i) {
+        expected.push_back(static_cast<char>('a' + (i * 3) % 26));
+    }
+
+    auto file = MakeFile(3 * pageSize);
+    file.Append(expected);
+    m_env.Blob->DeferUploads = true;
+    file.Flush();
+    ASSERT_EQ(1U, m_env.Blob->PendingUploads());
+
+    g_failFreeListGrowth = true;
+    m_env.Blob->CompleteUpload(0);
+    g_failFreeListGrowth = false;
+    m_env.Blob->DeferUploads = false;
+    file.Sync();
+
+    EXPECT_EQ(expected, Prefix(m_env.Blob->Data, expected.size()));
+    EXPECT_EQ(static_cast<int64_t>(expected.size()), file.GetFileSize());
 }
 
 TEST_F(WriteableFileTests, MoveAssignment_IsDeleted) {
