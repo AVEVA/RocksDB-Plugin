@@ -139,7 +139,7 @@ the fix. `UploadTracker` now reserves the four-slot free list at construction, s
 `PooledPayload::~PooledPayload` never allocates. Cost is one one-time 96-byte allocation per file and
 no per-upload allocation. Full WindowsDebug ctest: 1168 tests, 0 failed.
 
-### [ ] T94 - Do not hide ambiguous Azure mutations inside HTTP stale-socket retries
+### [x] T94 - Do not hide ambiguous Azure mutations inside HTTP stale-socket retries
 
 **Evidence:** `libs\HttpClient\src\private\RequestOperation.cpp:151-191,398-400`
 allows a reused connection's failed request to be resent after it may have been
@@ -166,6 +166,11 @@ connection, accept a DELETE or conditional PUT, apply its side effect and drop
 the response. Assert the intended error and number of requests. Include plain
 DELETE versus `DeleteIfExistsAsync` and confirm safe GET stale-socket recovery
 still works.
+
+**Result:** Reproduced with real-transport loopback tests (DELETE and PUT dropped after being received on a reused
+connection were resent: 2 requests, success). `RequestOperation::IsIdempotentMethod` now allows post-send replay only
+for GET/HEAD/OPTIONS/TRACE, so PUT/DELETE failures surface to the Azure retry layer; pre-send replay and GET stale
+recovery are unchanged. Full WindowsDebug ctest: 1170 tests, 0 failed.
 
 ### [ ] T95 - Require complete gap reads before read/modify/write uploads
 

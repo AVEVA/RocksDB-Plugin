@@ -175,14 +175,14 @@ template <typename Stream> bool RequestOperation<Stream>::MaybeRetryAfterReuseFa
     return true;
 }
 
+// Only side-effect-free methods may be replayed once the request might have reached the server; PUT and DELETE
+// are idempotent in HTTP but Azure mutations are not, so the Azure retry layer decides about those.
 template <typename Stream> bool RequestOperation<Stream>::IsIdempotentMethod(http::verb method) noexcept {
     switch (method) {
     case http::verb::get:
     case http::verb::head:
     case http::verb::options:
     case http::verb::trace:
-    case http::verb::put:
-    case http::verb::delete_:
         return true;
     default:
         return false;

@@ -178,6 +178,44 @@ TEST(HttpClientRobustness, PostLostOnAReusedConnectionIsNotSentAgain) {
     EXPECT_EQ(server.Requests(http::verb::post), 1);
 }
 
+// A PUT or DELETE that reached the server may already have taken effect; replaying it here would hide that
+// from the Azure retry layer, which alone knows whether the request is safe to resend.
+void ExpectMutationLostOnAReusedConnectionIsNotSentAgain(AVEVA::HttpMethod method, http::verb verb) {
+    asio::io_context context;
+    auto client = AVEVA::HttpClient::Create(context);
+    ScriptedServer server(context,
+                          [verb](int connection, const http::request<http::string_body>& request) -> ServerAction {
+                              ServerAction action{OkResponse};
+                              action.Drop = connection == 0 && request.method() == verb;
+                              return action;
+                          });
+
+    std::error_code mutationError;
+    client->SendAsync(
+        MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{}, [&](std::error_code, AVEVA::HttpResponse) {
+            client->SendAsync(MakeRequest(server.Url("/second"), method), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  mutationError = error;
+                                  auto settle =
+                                      std::make_shared<asio::steady_timer>(context, std::chrono::milliseconds(200));
+                                  settle->async_wait([&, settle](boost::system::error_code) { server.Stop(); });
+                              });
+        });
+    RunBounded(context);
+
+    EXPECT_TRUE(mutationError);
+    EXPECT_EQ(server.Requests(verb), 1);
+    EXPECT_EQ(server.Accepted(), 1);
+}
+
+TEST(HttpClientRobustness, DeleteLostOnAReusedConnectionIsNotSentAgain) {
+    ExpectMutationLostOnAReusedConnectionIsNotSentAgain(AVEVA::HttpMethod::Delete, http::verb::delete_);
+}
+
+TEST(HttpClientRobustness, PutLostOnAReusedConnectionIsNotSentAgain) {
+    ExpectMutationLostOnAReusedConnectionIsNotSentAgain(AVEVA::HttpMethod::Put, http::verb::put);
+}
+
 TEST(HttpClientRobustness, GetLostOnAReusedConnectionIsRetried) {
     asio::io_context context;
     auto client = AVEVA::HttpClient::Create(context);
