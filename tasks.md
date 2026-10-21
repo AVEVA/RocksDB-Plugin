@@ -158,7 +158,11 @@ code. Findings marked **Verify first** are medium confidence: confirm or measure
 - **Validation:** `LockFileImplTests`, `LeaseSafetyTests`, `ReadableFileTests` (prefetch chaining),
   `BlobFilesystemFakeTests`.
 
-### [ ] T71 – One allocation fewer per `ReadAsync` (**Verify first**: measure)
+### [-] T71 – One allocation fewer per `ReadAsync` (**Verify first**: measure)
+- **Dropped:** measured with a temporary global `operator new` counter around `ReadableFile::ReadAsync` (deferred
+  download, fake blob server, Debug): about 207 allocations per call (221 on the first call). The handle is one of
+  them, so removing it saves about 0.5%, which is below noise next to a network round trip. An intrusive refcount or
+  a free-list would add complexity to the `AsyncReadRequest` lifetime for no measurable gain. No code was changed.
 - **File:** `src\Azure\BasicReadableFile.ipp:84-86`.
 - **Problem:** Every async read allocates both a `shared_ptr<AsyncReadRequest>` (`make_shared`) and a separate
   `unique_ptr<AsyncReadHandle>`, which only wraps that `shared_ptr` for RocksDB's `void*`.
