@@ -194,7 +194,7 @@ closed; their text is in git history at `HEAD:tasks.md` (commit `34947f4`), summ
   a temporary 300 B append+Flush loop of 16 MiB against the fake blob server (Debug): 32768 -> 256 uploads (2048 -> 16 per
   MB) and 5407 ms -> 84 ms. Tests that relied on an upload after a single page now use a small buffer.
 
-### [ ] T86 – Batch delete rebuilds each sub-request from scratch on every attempt
+### [-] T86 – Batch delete rebuilds each sub-request from scratch on every attempt
 - **File:** `libs\AzureClient\include\AVEVA\AzureClient\Detail\BlobBatch.hpp:189-210` (`BuildChunkBody`).
 - **Problem:** For each of up to 256 sub-requests, on every retry, the loop builds a new `HttpRequest` (header
   vector), formats the `x-ms-date` value again with `BuildDateHeaderValue(system_clock::now())`, and appends to a
@@ -210,6 +210,10 @@ closed; their text is in git history at `HEAD:tasks.md` (commit `34947f4`), summ
 - **Validation:** `BatchDeleteTests` (body shape and the retry tests). Count allocations for a 256-blob chunk before
   and after. Batch delete is not on the read/write hot path, so drop the change if it adds complexity for less than
   a 2x allocation reduction.
+- **Dropped:** Measured with a counting `operator new` on a 256-blob chunk (Debug, token auth, 1100 B token): the
+  current loop makes 11285 allocations per attempt; one date/bearer string, a reused `HttpRequest` and a reserved body
+  make 5903 (1.9x, about 44 -> 23 per part). That is under the 2x bar, the remaining cost is the per-header string
+  copies in `AddHeader`/`AppendBatchDeletePart`, and batch delete is off the hot path, so the extra state is not worth it.
 
 ---
 
