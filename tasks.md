@@ -269,7 +269,7 @@ closed; their text is in git history at `HEAD:tasks.md` (commit `34947f4`), summ
   reachable, for no gain to any client or plugin TU, so it is not worth the complexity. No code changed, so no build
   or tests were run.
 
-### [ ] T90 – Diagnose filesystem teardown on the client executor instead of waiting out the timeout
+### [x] T90 – Diagnose filesystem teardown on the client executor instead of waiting out the timeout
 - **File:** `src\Azure\Impl\BlobFilesystemImpl.ipp:343-366` (`~BasicBlobFilesystemImpl`); precondition documented in
   `include\AVEVA\RocksDB\Plugin\Azure\Plugin.hpp:40-46`.
 - **Problem:** Destroying the filesystem on a thread that runs the client `io_context` is documented as a host bug.
@@ -283,7 +283,8 @@ closed; their text is in git history at `HEAD:tasks.md` (commit `34947f4`), summ
 - **Validation:** A `BlobFilesystemFakeTests` case that destroys the filesystem from a handler posted to its own
   context while a read is outstanding, with a second context thread so it can drain, and asserts that the error is
   logged.
-
+- **Done:** The `assert` was left out: it would abort the required debug-build test, which destroys the filesystem on
+  the executor on purpose and must survive. The error log carries the diagnosis instead.
 ---
 
 ## Reviewed in pass 4 and rejected (do not redo)

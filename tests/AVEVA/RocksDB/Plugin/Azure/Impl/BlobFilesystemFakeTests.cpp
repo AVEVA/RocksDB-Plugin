@@ -4,6 +4,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Mocks/TempDirectory.hpp"
+#include "BasicReadableFile.ipp"
 #include "BlobFilesystemImpl.ipp"
 #include "ClientFactory.ipp"
 #include "FakeBlobEnvironment.hpp"
@@ -17,13 +18,20 @@
 
 #include <gtest/gtest.h>
 
+#include <boost/asio/post.hpp>
+#include <boost/log/core.hpp>
+#include <boost/log/sinks/sync_frontend.hpp>
+#include <boost/log/sinks/text_ostream_backend.hpp>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -820,6 +828,74 @@ TEST(BlobFilesystemFakeRuntimeTests, RuntimeBuiltOnAnIoContextRunsTheTransportOn
     BasicClientRuntime<FakeHttpClient> runtime(context);
 
     EXPECT_EQ(runtime.HttpClient().get_executor(), context.get_executor());
+}
+
+TEST_F(BlobFilesystemFakeTests,
+       DestroyingTheFilesystemOnTheClientExecutorWithAReadInFlightLogsThePreconditionViolation) {
+    namespace sinks = boost::log::sinks;
+    Write("a.sst", std::string(256, 'D'));
+    m_server->DeferDownloads = true;
+
+    auto stream = std::make_shared<std::ostringstream>();
+    auto backend = boost::make_shared<sinks::text_ostream_backend>();
+    backend->add_stream(boost::shared_ptr<std::ostream>(stream.get(), [](std::ostream*) {}));
+    backend->auto_flush(true);
+    auto sink = boost::make_shared<sinks::synchronous_sink<sinks::text_ostream_backend>>(backend);
+    const auto logged = [&] {
+        const auto locked = sink->locked_backend();
+        return stream->str().find("destroyed on a thread running the client io_context") != std::string::npos;
+    };
+
+    std::vector<char> scratch(64);
+    rocksdb::FSReadRequest req;
+    req.offset = 0;
+    req.len = scratch.size();
+    req.scratch = scratch.data();
+    void* handle = nullptr;
+    rocksdb::IOHandleDeleter deleter;
+    {
+        auto impl = m_fs->CreateReadableFile(Path("a.sst"));
+        BasicReadableFile<typename decltype(impl)::element_type> file{std::move(impl)};
+        ASSERT_TRUE(file.ReadAsync(
+                            req, rocksdb::IOOptions{}, [](rocksdb::FSReadRequest&, void*) {}, nullptr, &handle,
+                            &deleter, nullptr)
+                        .ok());
+    }
+    ASSERT_TRUE(m_env.Http.RunUntil([&] { return m_server->PendingDownloads() > 0; }));
+    auto download = m_server->TakeDownload();
+
+    // The pump thread is stuck in the destructor, so a second thread must run the context for the read to drain.
+    auto& context = m_env.Http.get_executor().context();
+    std::atomic<bool> stop{false};
+    std::jthread secondRunner([&] {
+        while (!stop) {
+            context.run_one_for(std::chrono::milliseconds(10));
+        }
+    });
+
+    boost::log::core::get()->add_sink(sink);
+    std::promise<void> destroyed;
+    boost::asio::post(context, [&] {
+        m_fs.reset();
+        destroyed.set_value();
+    });
+
+    bool seen = false;
+    for (auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+         !seen && std::chrono::steady_clock::now() < deadline; seen = logged()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    download.Succeed(std::string(64, 'D'));
+    const auto status = destroyed.get_future().wait_for(std::chrono::seconds(30));
+    boost::log::core::get()->remove_sink(sink);
+    stop = true;
+    secondRunner.join();
+    if (handle != nullptr && deleter) {
+        deleter(handle);
+    }
+
+    EXPECT_TRUE(seen) << stream->str();
+    EXPECT_EQ(std::future_status::ready, status);
 }
 
 TEST_F(BlobFilesystemFakeTests, UnlockFileStillReleasesTheLeaseWhenWritesAreFencedAndIsIdempotent) {

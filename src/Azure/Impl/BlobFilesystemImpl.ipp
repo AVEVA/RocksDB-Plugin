@@ -340,6 +340,14 @@ template <typename THttp> void BasicBlobFilesystemImpl<THttp>::FenceWritesOnFata
 // Stops lease renewal and waits for in-flight async reads first: their completions use the clients and logger that
 // are destroyed right after this body.
 template <typename THttp> BasicBlobFilesystemImpl<THttp>::~BasicBlobFilesystemImpl() {
+    // Reads can only end through completions on the client executor. On a single-threaded context this wait never
+    // ends, so name the violated precondition up front instead of leaving an unexplained hang. Keep waiting, since a
+    // multi-threaded context can still drain, and do not assert: the wait must stay survivable.
+    if (m_asyncReads->InFlight() > 0 && m_runtime->HttpClient().get_executor().running_in_this_thread()) {
+        BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::error)
+            << "The filesystem is being destroyed on a thread running the client io_context while async reads are "
+               "in flight; it must be destroyed from a thread that does not run it. Waiting for the reads may hang";
+    }
     m_leaseRenewal->Stop(Configuration::ShutdownWaitTimeout);
     if (const auto inFlight = m_asyncReads->InFlight(); inFlight > 0) {
         BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::info)
