@@ -59,7 +59,8 @@ code. Findings marked **Verify first** are medium confidence: confirm or measure
   `operation_canceled`. `RetryTests.cpp:683` already does this for the pipeline and can serve as the template.
 
 ### [!] T50 – Direct-path `BoundHandler` may run the handler off its associated executor (carried over, still blocked)
-- Unchanged from pass 2: still open, still blocked on test infrastructure. Re-confirmed in this pass:
+- **Done:** FakeHttpClient now completes on its executor (infra commit), then the Direct branch invokes inline only when unning_in_this_thread() (executors without it, e.g. use_future's, stay inline) and dispatches otherwise. Test: CredentialCompletingOnForeignThreadRunsTheHandlerOnTheClientExecutor (fails without the change). Inline path adds no allocation: it is a thread-local check only.
+- Previously: still open, still blocked on test infrastructure. Re-confirmed in this pass:
   `AsyncInitiation.hpp:45-70` invokes inline, and `RetryOperation::Run` can be entered from a credential's
   completion thread.
 - **Unblocking plan (do this first, as its own commit):**
@@ -292,7 +293,7 @@ code. Findings marked **Verify first** are medium confidence: confirm or measure
 
 **Pass 2 (T28–T66):** everything is done except:
 - **T43:** skipped after measurement. The merged-group copy is under 1% of download time.
-- **T50:** blocked; carried over above with an unblocking plan.
+- **T50:** done in pass 3.
 - **T58:** partial; carried over above with a refined plan.
 
 The full pass-2 text is in git history at `HEAD:tasks.md` (commit `b292244`).

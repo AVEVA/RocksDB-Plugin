@@ -61,9 +61,20 @@ template <class TArg, class THandler, class TExecutor, class TAllocator, class T
     bool Direct;
     std::optional<boost::asio::executor_work_guard<TExecutor>> Work;
 
+    // Executors without running_in_this_thread() (e.g. use_future's) are thread-agnostic sinks, so inline is safe.
+    [[nodiscard]] bool OnExecutorThread() const noexcept {
+        if constexpr (requires { Executor.running_in_this_thread(); }) {
+            return Executor.running_in_this_thread();
+        } else {
+            return true;
+        }
+    }
+
     // The fixed parameter type lets producers pass anything convertible (e.g. std::unexpected).
     void operator()(TArg result) {
-        if (Direct) {
+        // A completion can arrive on a foreign thread (e.g. a credential on another io_context); only a call that is
+        // already on the client executor may skip the dispatch.
+        if (Direct && OnExecutorThread()) {
             std::move(Handler)(std::move(result));
             return;
         }

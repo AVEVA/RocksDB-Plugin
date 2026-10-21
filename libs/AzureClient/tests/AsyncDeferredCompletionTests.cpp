@@ -318,6 +318,36 @@ TEST(AsyncBehaviorTests, TokenCredentialSynchronousCompletionIsDeferredRatherTha
     EXPECT_TRUE(callbackInvoked);
 }
 
+// T50: a credential that finishes on a foreign thread (here with a failure, so the operation ends on that thread)
+// must not run the handler there; it is dispatched to the client's executor.
+TEST(AsyncBehaviorTests, CredentialCompletingOnForeignThreadRunsTheHandlerOnTheClientExecutor) {
+    FakeHttpClient httpClient;
+
+    auto tokenCredential = std::make_shared<ScriptedTokenCredential>();
+    tokenCredential->EnqueueDeferred(std::make_error_code(std::errc::permission_denied),
+                                     AVEVA::AzureClient::AccessToken{});
+
+    BlobClientOptions options = MakeBlobClientOptions();
+    options.SasToken.clear();
+    ScriptedBlobClient client{httpClient, options, tokenCredential};
+
+    std::atomic<bool> invoked{false};
+    std::atomic<bool> onClientExecutor{false};
+    client.DeleteAsync([&](auto&&) {
+        onClientExecutor = httpClient.get_executor().running_in_this_thread();
+        invoked = true;
+    });
+    ASSERT_EQ(tokenCredential->PendingCount(), 1U);
+
+    std::thread foreign{[&] { EXPECT_TRUE(tokenCredential->CompleteNext()); }};
+    foreign.join();
+    EXPECT_FALSE(invoked) << "the handler ran on the credential's thread";
+
+    EXPECT_GE(httpClient.Poll(), 1U);
+    EXPECT_TRUE(invoked);
+    EXPECT_TRUE(onClientExecutor);
+}
+
 // Task 8 verification: an early-exit validation failure must not invoke the completion before
 // the initiating call returns; it must run only once the executor it was posted to is driven.
 TEST(AsyncBehaviorTests, EarlyExitValidationFailurePostsRatherThanInvokingSynchronously) {
