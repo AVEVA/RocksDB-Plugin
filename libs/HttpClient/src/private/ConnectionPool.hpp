@@ -338,9 +338,9 @@ class ConnectionPool {
             auto [it, inserted] = emplaced;
             Origin& origin = it->second;
             if (inserted) {
-                // unordered_node_map keeps elements at stable addresses, so the origin can remember its
-                // own entry and be erased in O(1) during expiry.
-                origin.entry = it;
+                // unordered_node_map keeps elements at stable addresses (but not iterators), so the origin
+                // remembers its own key for a fresh lookup when it is erased.
+                origin.key = &it->first;
             } else if (origin.idle.size() >= m_maxIdlePerKey) {
                 Node& oldest = origin.idle.front();
                 origin.idle.pop_front();
@@ -361,7 +361,7 @@ class ConnectionPool {
                 Origin& oldestOrigin = *oldest.origin;
                 oldestOrigin.idle.erase(oldestOrigin.idle.iterator_to(oldest));
                 if (oldestOrigin.idle.empty()) {
-                    m_origins.erase(oldestOrigin.entry);
+                    EraseOrigin(oldestOrigin);
                 }
                 retired.push_back(oldest);
             }
@@ -458,13 +458,23 @@ class ConnectionPool {
                                            boost::intrusive::constant_time_size<true>>;
 
     /// <summary>
-    /// One origin's idle connections, oldest first, plus its own map entry so a node can erase its origin
-    /// in O(1) without looking the key up (the key lives inside the element being erased).
+    /// One origin's idle connections, oldest first, plus a pointer to its own map key so a node can find
+    /// and erase its origin (the key lives inside the element, whose address is stable).
     /// </summary>
     struct Origin {
         IdleList idle;
-        typename OriginMap::iterator entry;
+        const ConnectionKey<Stream>* key = nullptr;
     };
+
+    /// <summary>
+    /// Erases an origin's map entry. Map iterators do not survive a rehash, so the entry is looked up afresh;
+    /// the origin's key pointer stays valid because the map keeps elements at stable addresses.
+    /// </summary>
+    /// <param name="origin">The origin, still in the map, to erase.</param>
+    void EraseOrigin(const Origin& origin) {
+        const auto it = m_origins.find(*origin.key);
+        m_origins.erase(it);
+    }
 
     /// <summary>
     /// Destroys a node (and with it its socket) when an intrusive list is cleared.
@@ -501,7 +511,7 @@ class ConnectionPool {
             Origin& origin = *node.origin;
             origin.idle.erase(origin.idle.iterator_to(node));
             if (origin.idle.empty()) {
-                m_origins.erase(origin.entry);
+                EraseOrigin(origin);
             }
             retired.push_back(node);
         }

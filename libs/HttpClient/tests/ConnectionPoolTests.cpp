@@ -242,6 +242,49 @@ TEST(ConnectionPool, TotalIdleCapEvictsTheOldestAcrossOrigins) {
     EXPECT_TRUE(pool.Acquire(MakeKey("c.com")).has_value());
 }
 
+// Enough distinct origins to force the origin map to rehash several times, which invalidates iterators.
+constexpr int ManyOrigins = 512;
+
+TEST(ConnectionPool, SweepAfterOriginMapRehashClosesEveryExpiredConnection) {
+    int live = 0;
+    FakePool pool(4, ShortTimeout, ManyOrigins * 2);
+    for (int i = 0; i < ManyOrigins; ++i) {
+        pool.Release(MakeKey("host" + std::to_string(i)), MakeConnection(i, live));
+    }
+    ASSERT_EQ(live, ManyOrigins);
+
+    FakeClock::Advance(ShortTimeout * 2);
+
+    EXPECT_EQ(pool.Sweep(), 0U);
+    EXPECT_EQ(live, 0);
+    EXPECT_EQ(pool.IdleCount(), 0U);
+
+    pool.Release(MakeKey("host0"), MakeConnection(1, live));
+    auto reused = pool.Acquire(MakeKey("host0"));
+    ASSERT_TRUE(reused.has_value());
+    EXPECT_EQ(reused->stream->identity, 1);
+}
+
+TEST(ConnectionPool, GlobalCapEvictionAfterOriginMapRehashKeepsAccountingExact) {
+    int live = 0;
+    constexpr std::size_t cap = 4;
+    Pool pool(4, LongTimeout, cap);
+    for (int i = 0; i < ManyOrigins; ++i) {
+        pool.Release(MakeKey("host" + std::to_string(i)), MakeConnection(i, live));
+        ASSERT_LE(live, static_cast<int>(cap));
+    }
+
+    EXPECT_EQ(live, static_cast<int>(cap));
+    EXPECT_EQ(pool.IdleCount(), cap);
+    EXPECT_FALSE(pool.Acquire(MakeKey("host0")).has_value());
+    for (int i = ManyOrigins - static_cast<int>(cap); i < ManyOrigins; ++i) {
+        auto connection = pool.Acquire(MakeKey("host" + std::to_string(i)));
+        ASSERT_TRUE(connection.has_value());
+        EXPECT_EQ(connection->stream->identity, i);
+    }
+    EXPECT_EQ(pool.IdleCount(), 0U);
+}
+
 TEST(ConnectionPool, ZeroTotalIdleLimitDisablesPooling) {
     int live = 0;
     Pool pool(4, LongTimeout, 0);
