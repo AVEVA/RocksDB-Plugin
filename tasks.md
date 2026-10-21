@@ -267,7 +267,7 @@ code. Findings marked **Verify first** are medium confidence: confirm or measure
   `std::hash`/`std::equal_to`. Keep it, but recheck after T58.
 - **Validation:** builds on both presets. Optionally run clang-tidy `misc-include-cleaner` on the touched headers.
 
-### [ ] T78 – Docs: `libs\README.md` lists a dependency the Azure client no longer has
+### [x] T78 – Docs: `libs\README.md` lists a dependency the Azure client no longer has
 - **File:** `libs\README.md:22`, and the consumer guidance around line 36.
 - **Problem:** The table lists `boost_algorithm` as a private dependency of `aveva-azure-client`, but only
   `src\Core\CMakeLists.txt:35,55` links `Boost::algorithm`. `libs\AzureClient\src\CMakeLists.txt` no longer does.

@@ -19,7 +19,7 @@ Both libraries are installed as static-only CMake packages (`aveva_install_libra
 | Package | Imported target | Public dependencies (resolved by its config file) | Link-only dependencies (private, still required at link time) |
 |---------|-----------------|---------------------------------------------------|----------------------------------------------------------------|
 | `aveva-http-client` | `aveva::http-client` | `boost_asio` | `boost_beast`, `boost_intrusive`, `boost_unordered`, `boost_url`, OpenSSL |
-| `aveva-azure-client` | `aveva::azure-client` | `aveva-http-client`, `boost_asio` | OpenSSL, `boost_algorithm`, `boost_json`, `boost_url`, `boost_uuid`, LibXml2 (config package) |
+| `aveva-azure-client` | `aveva::azure-client` | `aveva-http-client`, `boost_asio` | OpenSSL, `boost_json`, `boost_url`, `boost_uuid`, LibXml2 (config package) |
 
 A consumer only calls `find_package(aveva-azure-client CONFIG REQUIRED)` (and `aveva-http-client` if it uses the HTTP
 client directly); the config files call `find_dependency` for everything in the table, so Boost, OpenSSL and LibXml2
