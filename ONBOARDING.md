@@ -88,7 +88,10 @@ Follow these rules:
 
 You need these tools:
 
-1. Windows 10 or 11, or Linux. The CI covers both.
+1. Windows 10 or 11, or Linux. The CI covers both. The bootstrap, doctor, and
+   build steps below use PowerShell. On Linux, install
+   [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-linux)
+   and run those commands with `pwsh`.
 2. Git.
 3. CMake 3.24 or later.
 4. A C++23 compiler.
@@ -114,8 +117,13 @@ Do these steps one time:
 ```powershell
 git clone https://github.com/microsoft/vcpkg.git <vcpkg-path>
 & <vcpkg-path>/bootstrap-vcpkg.bat        # On Linux, use bootstrap-vcpkg.sh
-$env:VCPKG_ROOT = "<vcpkg-path>"          # Also add to System Environment Variables
+$env:VCPKG_ROOT = "<vcpkg-path>"          # Set this for the current shell only
 ```
+
+Persist `VCPKG_ROOT` so later shells see it. On Windows, add it to System
+Environment Variables. On Linux, add an `export VCPKG_ROOT=<vcpkg-path>` line
+to your shell profile (for example `~/.bashrc`, `~/.profile`, or the `pwsh`
+profile).
 
 Then restart your shell. The restart makes sure that later commands see
 `VCPKG_ROOT`.
@@ -125,7 +133,7 @@ Then restart your shell. The restart makes sure that later commands see
 Run this command from the repo root:
 
 ```powershell
-./devdoctor.ps1
+./devdoctor.ps1        # On Linux, run: pwsh ./devdoctor.ps1
 ```
 
 The doctor does these checks:
