@@ -11,7 +11,7 @@ The `pre-commit` script:
 
 - Scans staged files for secrets with [gitleaks](https://github.com/gitleaks/gitleaks)
   (required — the commit is blocked if gitleaks is not installed).
-- Formats staged C/C++ files under `src/`, `include/`, `tests/`, and `libs/` with `clang-format`.
+- Formats staged C/C++ files under `src/`, `include/`, `tests/`, `libs/`, and `tools/` (including `.ipp`) with `clang-format`.
 
 ## Setup
 

@@ -418,7 +418,7 @@ as numeric samples in `summary.csv`.
 
 ## P3: best practices and simplifications
 
-### [ ] T103 - Include the new template implementation files in formatting checks
+### [x] T103 - Include the new template implementation files in formatting checks
 
 **Evidence:** `.github\hooks\pre-commit:35` and
 `.github\workflows\build-and-test.yml:44` match only
@@ -435,6 +435,8 @@ formatter version and keep hook/CI behavior aligned.
 `.ipp` is selected and rejected by the check, then restore/format it. Confirm
 ordinary C++ sources remain selected. Do not combine this with unrelated bulk
 formatting changes.
+
+**Result (done):** Hook and CI now select `src|include|tests|libs|tools` with extensions `c|cc|cpp|cxx|h|hh|hpp|hxx|ipp`; hook README and copilot-instructions updated. Verified with pinned clang-format 22.1.3: all tracked `.ipp` files and `tools/db_bench/BenchmarkRunner.cpp` already pass `--dry-run --Werror`, so no reformatting was needed. Config-only; no native build/ctest.
 
 ### [ ] T104 - Use concrete ownership for the HTTP pending request state
 
