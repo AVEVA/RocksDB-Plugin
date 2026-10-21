@@ -455,7 +455,7 @@ client-destruction tests pass, with unchanged submission allocation counts.
 
 **Result (done):** `PendingRequest::state` is now `std::shared_ptr<RequestState>` (forward-declared); both `static_pointer_cast`s and the stale comment removed. WindowsDebug build and full ctest pass (1179/1179, allocation-count tests unchanged); clang-format clean.
 
-### [ ] T105 - Remove the obsolete upload-error accessor and stale wait wording
+### [x] T105 - Remove the obsolete upload-error accessor and stale wait wording
 
 **Evidence:** `HasUploadError` is declared at
 `src\Azure\Impl\include\AVEVA\RocksDB\Plugin\Azure\Impl\WriteableFileImpl.hpp:89`
@@ -471,6 +471,8 @@ Do not reintroduce duplicate upload-error checks or change the public API.
 **Acceptance:** Search for remaining references, build the implementation target
 and keep the existing flush/upload-error tests passing. No new behavior test is
 needed for removing an unused helper.
+
+**Result (done):** Removed `HasUploadError` (declaration and definition; no remaining references) and reworded the `StartFlush` comment to distinguish asynchronous flush, bounded back-pressure and durability waits. WindowsDebug build and full ctest pass (1179/1179, integration tests skipped); clang-format clean.
 
 ## Dependencies and recommended order
 

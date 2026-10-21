@@ -98,14 +98,6 @@ template <typename TBlob> BasicWriteableFileImpl<TBlob>::~BasicWriteableFileImpl
     DrainUploads();
 }
 
-template <typename TBlob> bool BasicWriteableFileImpl<TBlob>::HasUploadError() const noexcept {
-    if (!m_uploads) {
-        return false;
-    }
-    std::scoped_lock lock(m_uploads->Mutex);
-    return static_cast<bool>(m_uploads->Error);
-}
-
 template <typename TBlob> bool BasicWriteableFileImpl<TBlob>::HasPendingUploads() const noexcept {
     std::scoped_lock lock(m_uploads->Mutex);
     return m_uploads->InFlight > 0;
@@ -174,7 +166,9 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::RangeSync() {
     }
 }
 
-// Uploads the buffered data without waiting for it; Flush, Sync and Close wait. Asynchronous flushes send complete
+// Uploads the buffered data without waiting for its completion. Only the bounded back-pressure in StartFlush may
+// block, and only to cap in-flight uploads; Flush merely reports a recorded error, while Sync and Close wait for
+// durability. Asynchronous flushes send complete
 // pages only and keep the trailing partial page buffered: uploading it zero-padded and again later with more data
 // would put two overlapping requests in flight, and Azure does not order them. Only the final flush, which is
 // always followed by WaitForUploads(0), uploads the padded tail.

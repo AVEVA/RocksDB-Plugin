@@ -89,7 +89,6 @@ template <typename TBlob> class BasicWriteableFileImpl {
     void StartUpload(std::shared_ptr<const std::vector<char>> data, int64_t offset);
     [[nodiscard]] std::vector<char> RentBuffer() const;
     void WaitForUploads(size_t maxRemaining);
-    [[nodiscard]] bool HasUploadError() const noexcept;
     [[nodiscard]] bool HasPendingUploads() const noexcept;
     void DrainUploads() noexcept;
 };
