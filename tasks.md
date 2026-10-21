@@ -336,7 +336,11 @@ Do not remove the stable-blob optimization without measuring its replacement.
 
 ## P2: performance and measurement reliability
 
-### [ ] T100 - Construct the DNS leader guard without a live temporary
+### [x] T100 - Construct the DNS leader guard without a live temporary
+
+**Result:** Reproduced (new `StartedDnsLeaderKeepsItsPendingEntryWhileTheLookupIsInFlight` failed: a probe became a
+second leader). `LeaderGuard` now has a constructor, deleted copy/move, and is built in place by `make_shared`; a
+failed guard allocation releases the claim. Full WindowsDebug ctest: 1177/1177 passed.
 
 **Evidence:** `libs\HttpClient\src\private\RequestOperation.cpp:224-236`
 constructs the shared guard with

@@ -731,6 +731,32 @@ TEST(HttpClientRobustness, DestroyingTheClientWhileLeadingASharedLookupCompletes
     EXPECT_EQ(completions, 2);
 }
 
+TEST(HttpClientRobustness, StartedDnsLeaderKeepsItsPendingEntryWhileTheLookupIsInFlight) {
+    asio::io_context context;
+    auto client = AVEVA::HttpClient::Create(context);
+    client->SendAsync(MakeRequest("http://leader-guard.invalid/"), AVEVA::HttpRequestOptions{},
+                      [](std::error_code, AVEVA::HttpResponse) {});
+
+    bool probedAsLeader = true;
+    // Queued behind the request's start, before the resolver thread can post its completion.
+    asio::post(context, [&] {
+        probedAsLeader = AVEVA::Private::DnsCache::Shared().JoinOrLead(
+            "leader-guard.invalid", "80",
+            [] {
+                return AVEVA::Private::ResolveWaiter(
+                    std::shared_ptr<AVEVA::Private::RequestOperation<AVEVA::Private::PlainStream>>{});
+            },
+            &context);
+        if (probedAsLeader) {
+            AVEVA::Private::DnsCache::Shared().Finish("leader-guard.invalid", "80", asio::error::operation_aborted, {},
+                                                      &context);
+        }
+    });
+    RunBounded(context);
+
+    EXPECT_FALSE(probedAsLeader);
+}
+
 TEST(HttpClientRobustness, OversizedBodyIsReportedAsResponseTooLarge) {
     AVEVA::HttpRequestOptions options;
     options.SetResponseBodyLimit(4);

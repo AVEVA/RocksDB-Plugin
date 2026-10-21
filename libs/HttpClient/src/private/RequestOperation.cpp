@@ -227,13 +227,26 @@ template <typename Stream> void RequestOperation<Stream>::Resolve() {
         const void* scope;
         bool finished = false;
 
+        LeaderGuard(std::string hostName, std::string serviceName, const void* lookupScope)
+            : host(std::move(hostName)), service(std::move(serviceName)), scope(lookupScope) {}
+        // Copies or moves would leave a second owner of the leader claim.
+        LeaderGuard(const LeaderGuard&) = delete;
+        LeaderGuard& operator=(const LeaderGuard&) = delete;
+
         ~LeaderGuard() {
             if (!finished) {
                 DnsCache::Shared().Finish(host, service, asio::error::operation_aborted, {}, scope);
             }
         }
     };
-    auto guard = std::make_shared<LeaderGuard>(LeaderGuard{m_key.host, m_key.service, scope});
+    std::shared_ptr<LeaderGuard> guard;
+    try {
+        guard = std::make_shared<LeaderGuard>(m_key.host, m_key.service, scope);
+    } catch (...) {
+        // No guard exists yet to release the claim.
+        DnsCache::Shared().Finish(m_key.host, m_key.service, asio::error::operation_aborted, {}, scope);
+        throw;
+    }
     m_resolver.async_resolve(
         m_key.host, m_key.service,
         [self = this->shared_from_this(), guard](boost::system::error_code error, Tcp::resolver::results_type results) {
