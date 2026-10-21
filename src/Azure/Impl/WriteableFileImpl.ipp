@@ -83,7 +83,18 @@ template <typename TBlob> BasicWriteableFileImpl<TBlob>::~BasicWriteableFileImpl
         m_close.LogIfUnclosed(*m_w.H.Logger, m_w.H.Name, m_unsyncedSize);
     }
 
-    // Outstanding upload completions use the blob client and logger, which are released below.
+    // Outstanding upload completions use the blob client and logger, which are released below. Callers must not
+    // destroy the file on the host executor while uploads are pending: this noexcept path cannot throw, so it logs
+    // the violation and then still has to wait.
+    if (m_uploads && HasPendingUploads()) {
+        try {
+            AzureClient::ThrowIfRunningOn(m_w.H.Blob->get_executor());
+        } catch (const std::exception& e) {
+            BOOST_LOG_SEV(*m_w.H.Logger, boost::log::trivial::error)
+                << "Writeable file '" << m_w.H.Name
+                << "' destroyed on the client executor with uploads pending; this will block: " << e.what();
+        }
+    }
     DrainUploads();
 }
 
@@ -93,6 +104,11 @@ template <typename TBlob> bool BasicWriteableFileImpl<TBlob>::HasUploadError() c
     }
     std::scoped_lock lock(m_uploads->Mutex);
     return static_cast<bool>(m_uploads->Error);
+}
+
+template <typename TBlob> bool BasicWriteableFileImpl<TBlob>::HasPendingUploads() const noexcept {
+    std::scoped_lock lock(m_uploads->Mutex);
+    return m_uploads->InFlight > 0;
 }
 
 template <typename TBlob> void BasicWriteableFileImpl<TBlob>::DrainUploads() noexcept {
@@ -305,6 +321,13 @@ template <typename TBlob> std::vector<char> BasicWriteableFileImpl<TBlob>::RentB
 template <typename TBlob> void BasicWriteableFileImpl<TBlob>::WaitForUploads(const size_t maxRemaining) {
     {
         std::unique_lock lock(m_uploads->Mutex);
+        if (m_uploads->InFlight > maxRemaining) {
+            // Upload completions run on the host executor, so waiting for them there can never finish. Checked only
+            // when a wait is needed, so a call that has nothing to wait for stays valid on any thread.
+            lock.unlock();
+            AzureClient::ThrowIfRunningOn(m_w.H.Blob->get_executor());
+            lock.lock();
+        }
         m_uploads->Done.wait(lock, [&] { return m_uploads->InFlight <= maxRemaining; });
         if (m_uploads->Error) {
             std::rethrow_exception(m_uploads->Error);

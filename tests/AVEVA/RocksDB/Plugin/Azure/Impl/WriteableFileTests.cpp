@@ -10,11 +10,13 @@
 
 #include "FakeBlobEnvironment.hpp"
 
+#include <boost/asio/post.hpp>
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <set>
 #include <thread>
 #include <vector>
@@ -218,6 +220,32 @@ TEST_F(WriteableFileTests, RangeSync_UploadInFlight_ReturnsWithoutWaitingAndSync
     ASSERT_EQ(1U, m_env.Blob->PendingUploads());
     m_env.Blob->CompleteUpload();
     EXPECT_NO_THROW(file.Sync());
+}
+
+TEST_F(WriteableFileTests, Sync_FromTheClientExecutorWithAPendingUpload_ThrowsInsteadOfDeadlocking) {
+    m_env.Blob->DeferUploads = true;
+
+    auto file = MakeFile(2 * Configuration::PageBlob::PageSize);
+    file.Append(std::vector<char>(Configuration::PageBlob::PageSize, 'a'));
+    file.RangeSync();
+    ASSERT_EQ(1U, m_env.Blob->PendingUploads());
+
+    std::promise<bool> threw;
+    boost::asio::post(m_env.Http.get_executor(), [&] {
+        try {
+            file.Sync();
+            threw.set_value(false);
+        } catch (const std::logic_error&) {
+            threw.set_value(true);
+        }
+    });
+
+    auto result = threw.get_future();
+    const auto status = result.wait_for(std::chrono::seconds(5));
+    // Releases the upload so a regression fails this test instead of hanging the pump and the destructor.
+    m_env.Blob->CompleteUpload(0);
+    ASSERT_EQ(std::future_status::ready, status);
+    EXPECT_TRUE(result.get());
 }
 
 TEST_F(WriteableFileTests, GetFileSize_AfterUploadFailure_StillReportsTheTrackedSize) {

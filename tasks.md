@@ -245,7 +245,16 @@ has no test (a `thread_pool` executor cannot be made to throw); batch needed no
 change since its requests go through the fixed pipeline. Full WindowsDebug
 ctest passes.
 
-### [ ] T97 - Guard condition-variable upload waits on the host executor
+### [x] T97 - Guard condition-variable upload waits on the host executor
+
+**Result:** Reproduced: `Sync` posted to the client executor with a pending upload
+hung. `WaitForUploads` now calls `AzureClient::ThrowIfRunningOn` on the blob's
+executor before blocking, and only when a wait is actually needed (so `Flush`
+with nothing pending stays valid anywhere). The `noexcept` destructor logs an
+error if destroyed on the executor with uploads pending, then still drains
+(external lifetime precondition). Regression test
+`Sync_FromTheClientExecutorWithAPendingUpload_ThrowsInsteadOfDeadlocking`; full
+WindowsDebug ctest passes (1174).
 
 **Evidence:** `src\Azure\Impl\WriteableFileImpl.ipp:98-104,303-308` waits for
 upload callbacks without `AzureClient::ThrowIfRunningOn`. These waits are reached

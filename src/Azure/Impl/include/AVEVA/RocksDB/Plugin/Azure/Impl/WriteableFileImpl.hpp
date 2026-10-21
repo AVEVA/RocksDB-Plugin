@@ -90,6 +90,7 @@ template <typename TBlob> class BasicWriteableFileImpl {
     [[nodiscard]] std::vector<char> RentBuffer() const;
     void WaitForUploads(size_t maxRemaining);
     [[nodiscard]] bool HasUploadError() const noexcept;
+    [[nodiscard]] bool HasPendingUploads() const noexcept;
     void DrainUploads() noexcept;
 };
 extern template class BasicWriteableFileImpl<PageBlobClient>;
