@@ -10,25 +10,23 @@
 
 namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache {
 namespace {
-size_t MetadataLimit(const FileBasedSecondaryCacheOptions& options, const size_t capacity) {
+size_t MetadataLimit(const RegionBasedSecondaryCacheOptions& options, const size_t capacity) {
     return options.metadataBudget != 0 ? options.metadataBudget : std::max(size_t{1} << 20, capacity / 200);
 }
 } // namespace
 
-void RegionManager::Validate(const FileBasedSecondaryCacheOptions& options) {
-    if (options.engine != FileBasedSecondaryCacheEngine::kRegion ||
-        options.admissionPolicy != FileBasedSecondaryCacheAdmissionPolicy::kAdmitAll ||
-        options.regionSize < kRecordAlign || options.regionSize > UINT32_MAX ||
+void RegionManager::Validate(const RegionBasedSecondaryCacheOptions& options) {
+    if (options.regionSize < kRecordAlign || options.regionSize > UINT32_MAX ||
         options.regionSize % kRecordAlign != 0 || options.flushBlockSize == 0 ||
         options.flushBlockSize > options.regionSize || options.flushBlockSize % kRecordAlign != 0 ||
         options.maxEntrySize < kRecordAlign || options.maxEntrySize > options.regionSize ||
         options.maxEntrySize % kRecordAlign != 0 || options.transientBudget == 0 ||
         options.capacity / options.regionSize + (options.capacity % options.regionSize != 0 ? 1 : 0) > UINT32_MAX) {
-        throw std::invalid_argument("invalid region cache geometry, capacity, memory budget or admission policy");
+        throw std::invalid_argument("invalid region cache geometry, capacity or memory budget");
     }
 }
 
-RegionManager::RegionManager(DeviceFactory factory, FileBasedSecondaryCacheOptions options, CacheStats& stats)
+RegionManager::RegionManager(DeviceFactory factory, RegionBasedSecondaryCacheOptions options, CacheStats& stats)
     : m_options(options), m_stats(stats), m_metadata{MetadataLimit(options, options.capacity)}, m_index(m_metadata),
       m_regions(BudgetAllocator<Region>(m_metadata)) {
     Validate(options);
@@ -256,9 +254,9 @@ rocksdb::Status RegionManager::SetCapacity(const size_t capacity) {
     return rocksdb::Status::OK();
 }
 
-FileBasedSecondaryCacheStats RegionManager::Snapshot() const {
+RegionBasedSecondaryCacheStats RegionManager::Snapshot() const {
     std::lock_guard lock(m_mutex);
-    FileBasedSecondaryCacheStats snapshot;
+    RegionBasedSecondaryCacheStats snapshot;
     snapshot.liveEntries = m_index.Size();
     snapshot.liveBytes = m_usage;
     snapshot.capacityBytes = m_capacity;

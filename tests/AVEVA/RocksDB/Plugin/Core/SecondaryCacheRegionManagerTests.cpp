@@ -4,6 +4,8 @@
 #include "SecondaryCache/RegionManager.hpp"
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <atomic>
 #include <barrier>
 #include <thread>
 
@@ -16,10 +18,9 @@ class SecondaryCacheRegionManagerTests : public testing::Test {
     Secondary::CacheStats stats;
     Secondary::MemoryBudget transient{1 << 20};
     Secondary::MemoryBlockDevice* device{};
-    FileBasedSecondaryCacheOptions options;
+    RegionBasedSecondaryCacheOptions options;
     std::unique_ptr<Secondary::RegionManager> manager;
     void SetUp() override {
-        options.engine = FileBasedSecondaryCacheEngine::kRegion;
         options.capacity = 1024;
         options.regionSize = 512;
         options.maxEntrySize = 256;
@@ -146,5 +147,57 @@ TEST_F(SecondaryCacheRegionManagerTests, ConcurrentSameKeyPublicationAndRecyclin
     EXPECT_GT(snapshot.reclaims, 0u);
     EXPECT_EQ(snapshot.liveBytes, snapshot.liveEntries * 192u);
     EXPECT_LE(snapshot.liveEntries, 4u);
+    EXPECT_LE(snapshot.liveBytes, snapshot.capacityBytes);
+}
+
+TEST_F(SecondaryCacheRegionManagerTests, ConcurrentResizeReadEraseAndAppendMaintainExactUsage) {
+    std::barrier start(5);
+    std::atomic<bool> invalidRecord{false};
+    std::thread writer([&] {
+        start.arrive_and_wait();
+        for (uint64_t key = 1; key <= 600; ++key) {
+            EXPECT_TRUE(Append(key % 8 + 1).ok());
+        }
+    });
+    std::thread reader([&] {
+        start.arrive_and_wait();
+        auto bytes = Bytes();
+        Secondary::RegionManager::Identity identity;
+        for (uint64_t key = 1; key <= 600; ++key) {
+            if (manager->Read(key % 8 + 1, bytes, identity) == Secondary::RegionManager::ReadStatus::kOk &&
+                !std::all_of(bytes.begin(), bytes.end(), [](std::byte value) { return value == std::byte{0x53}; })) {
+                invalidRecord.store(true);
+            }
+        }
+    });
+    std::thread eraser([&] {
+        start.arrive_and_wait();
+        for (uint64_t key = 1; key <= 600; ++key) {
+            manager->Erase(key % 8 + 1);
+        }
+    });
+    std::thread resizer([&] {
+        start.arrive_and_wait();
+        for (const size_t capacity : {size_t{0}, size_t{512}, size_t{2048}, size_t{1024}}) {
+            for (size_t i = 0; i < 150; ++i) {
+                EXPECT_TRUE(manager->SetCapacity(capacity).ok());
+            }
+        }
+    });
+
+    start.arrive_and_wait();
+    writer.join();
+    reader.join();
+    eraser.join();
+    resizer.join();
+
+    EXPECT_FALSE(invalidRecord.load());
+    ASSERT_TRUE(manager->SetCapacity(1024).ok());
+    for (uint64_t key = 1; key <= 4; ++key) {
+        ASSERT_TRUE(Append(key).ok());
+    }
+    const auto snapshot = manager->Snapshot();
+    EXPECT_EQ(snapshot.liveEntries, 4u);
+    EXPECT_EQ(snapshot.liveBytes, 4u * 192u);
     EXPECT_LE(snapshot.liveBytes, snapshot.capacityBytes);
 }

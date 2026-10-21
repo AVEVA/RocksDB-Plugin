@@ -3,8 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Plugin.hpp"
-#include "AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
-#include "AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/RegionBasedSecondaryCache.hpp"
 #include "IntegrationTestHelpers.hpp"
 
 #include <rocksdb/cache.h>
@@ -65,12 +64,13 @@ class PluginSecondaryCacheIntegrationTests : public AzureIntegrationTestBase {
 
     // Opens a RocksDB database at m_dbPath using:
     //   • the Azure plugin env from Plugin::Register
-    //   • a fresh FileBasedCompressedSecondaryCache created via CreateFromString
+    //   • a fresh region-based secondary cache
     //   • a 4 KiB primary block cache (forces eviction to the secondary cache)
     std::unique_ptr<rocksdb::DB> OpenDb(bool createIfMissing = true) {
-        auto secondaryCache = std::make_shared<AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache>(
-            m_cacheDir, std::make_shared<AVEVA::RocksDB::Plugin::Core::LocalFilesystem>(m_logger),
-            /*capacity=*/64ULL * 1024 * 1024, m_logger);
+        AVEVA::RocksDB::Plugin::Core::RegionBasedSecondaryCacheOptions secondaryOptions;
+        secondaryOptions.capacity = 64ULL * 1024 * 1024;
+        auto secondaryCache = std::make_shared<AVEVA::RocksDB::Plugin::Core::RegionBasedSecondaryCache>(
+            m_cacheDir, secondaryOptions, m_logger);
 
         // 4 KiB primary block cache — small enough to evict SST blocks to secondary.
         rocksdb::LRUCacheOptions cacheOpts;
@@ -113,18 +113,17 @@ TEST_F(PluginSecondaryCacheIntegrationTests, OpenDb_PutFlushGet_RoundTrips) {
 }
 
 // ---------------------------------------------------------------------------
-// The secondary cache factory registered by the plugin creates a
-// FileBasedCompressedSecondaryCache that writes entry files to m_cacheDir
+// A RegionBasedSecondaryCache writes region files under m_cacheDir
 // when InsertSaved is called — the path used when RocksDB hands pre-serialised
 // block data to the secondary tier.
 // ---------------------------------------------------------------------------
-TEST_F(PluginSecondaryCacheIntegrationTests, SecondaryCache_InsertSaved_WritesFilesToCacheDirectory) {
-    auto secondaryCache = std::make_shared<AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache>(
-        m_cacheDir, std::make_shared<AVEVA::RocksDB::Plugin::Core::LocalFilesystem>(m_logger),
-        /*capacity=*/64ULL * 1024 * 1024, m_logger);
+TEST_F(PluginSecondaryCacheIntegrationTests, SecondaryCache_InsertSaved_WritesRegionFilesToCacheDirectory) {
+    AVEVA::RocksDB::Plugin::Core::RegionBasedSecondaryCacheOptions secondaryOptions;
+    secondaryOptions.capacity = 64ULL * 1024 * 1024;
+    secondaryOptions.flushBlockSize = 64; // Force this record to disk instead of the append buffer.
+    auto secondaryCache = std::make_shared<AVEVA::RocksDB::Plugin::Core::RegionBasedSecondaryCache>(
+        m_cacheDir, secondaryOptions, m_logger);
 
-    // Key must be ≤ 32 bytes so its hex representation fits within
-    // FileBasedCompressedSecondaryCache::Entry::kMaxFilenameLen (64 chars).
     const std::string keyData(16, '\x42');
     const std::string payload(256, 'X');
 
@@ -134,19 +133,22 @@ TEST_F(PluginSecondaryCacheIntegrationTests, SecondaryCache_InsertSaved_WritesFi
     ASSERT_TRUE(status.ok()) << status.ToString();
 
     size_t fileCount = 0;
-    for (const auto& entry : std::filesystem::recursive_directory_iterator(m_cacheDir))
-        if (entry.is_regular_file())
+    for (const auto& entry : std::filesystem::directory_iterator(m_cacheDir / "ssd-secondary-cache-v1")) {
+        if (entry.is_regular_file() && entry.path().filename().string().starts_with("region_") &&
+            entry.path().extension() == ".dat" && entry.file_size() > 0) {
             ++fileCount;
+        }
+    }
 
-    EXPECT_GT(fileCount, 0u) << "Expected entry files in the secondary cache directory after InsertSaved; "
+    EXPECT_GT(fileCount, 0u) << "Expected region files in the secondary cache directory after InsertSaved; "
                              << "cache dir: " << m_cacheDir;
 }
 
 // ---------------------------------------------------------------------------
 // Data written and flushed remains fully readable after the DB is closed and
-// reopened with the same secondary cache (primary block cache is cold on reopen).
+// reopened with a new, cold secondary cache.
 // ---------------------------------------------------------------------------
-TEST_F(PluginSecondaryCacheIntegrationTests, DataReadable_AfterDbReopenWithSameSecondaryCache) {
+TEST_F(PluginSecondaryCacheIntegrationTests, DataReadable_AfterDbReopenWithColdSecondaryCache) {
     const std::string expectedVal(512, 'Y');
 
     // First open: write 20 entries and flush them to SST.
@@ -160,8 +162,7 @@ TEST_F(PluginSecondaryCacheIntegrationTests, DataReadable_AfterDbReopenWithSameS
         ASSERT_TRUE(db->Flush({}).ok());
     }
 
-    // Second open: primary cache is cold; reads that miss the primary cache are
-    // served from the secondary cache before falling back to the SST on Azure.
+    // Both cache tiers start cold; reads fall back to the SST on Azure.
     {
         auto db = OpenDb(/*createIfMissing=*/false);
         ASSERT_NE(db, nullptr) << "Failed to reopen RocksDB after initial write";

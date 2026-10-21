@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
-#include "AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
-#include "AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/RegionBasedSecondaryCache.hpp"
 
 #include <rocksdb/advanced_options.h>
 #include <rocksdb/slice.h>
@@ -11,20 +10,16 @@
 #include <boost/log/trivial.hpp>
 
 #include <chrono>
-#include <cstdint>
 #include <filesystem>
 #include <iostream>
 #include <memory>
-#include <numeric>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace {
-using AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache;
-using AVEVA::RocksDB::Plugin::Core::FileBasedSecondaryCacheAdmissionPolicy;
-using AVEVA::RocksDB::Plugin::Core::FileBasedSecondaryCacheEngine;
-using AVEVA::RocksDB::Plugin::Core::FileBasedSecondaryCacheOptions;
-using AVEVA::RocksDB::Plugin::Core::LocalFilesystem;
+using AVEVA::RocksDB::Plugin::Core::RegionBasedSecondaryCache;
+using AVEVA::RocksDB::Plugin::Core::RegionBasedSecondaryCacheOptions;
 
 struct Payload {
     std::string data;
@@ -50,25 +45,15 @@ struct Trial {
     double lookupUs;
 };
 
-Trial Run(const std::filesystem::path& directory, const size_t count, const size_t size,
-          const FileBasedSecondaryCacheEngine engine) {
+Trial Run(const std::filesystem::path& directory, const size_t count, const size_t size) {
     const auto logger =
         std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
-    const size_t capacity = (count + 1) * (size + 128);
-    std::unique_ptr<FileBasedCompressedSecondaryCache> cache;
-    if (engine == FileBasedSecondaryCacheEngine::kLegacy) {
-        cache = std::make_unique<FileBasedCompressedSecondaryCache>(directory, std::make_shared<LocalFilesystem>(),
-                                                                    capacity, logger);
-    } else {
-        FileBasedSecondaryCacheOptions options;
-        options.capacity = capacity;
-        options.engine = FileBasedSecondaryCacheEngine::kRegion;
-        options.admissionPolicy = FileBasedSecondaryCacheAdmissionPolicy::kAdmitAll;
-        cache = std::make_unique<FileBasedCompressedSecondaryCache>(directory, options, logger);
-    }
+    RegionBasedSecondaryCacheOptions options;
+    options.capacity = (count + 1) * (size + 128);
+    auto cache = std::make_unique<RegionBasedSecondaryCache>(directory, options, logger);
     rocksdb::Cache::CacheItemHelper noSecondary{rocksdb::CacheEntryRole::kDataBlock, Delete};
-    rocksdb::Cache::CacheItemHelper helper{rocksdb::CacheEntryRole::kDataBlock, Delete, Size, Save, Create,
-                                           &noSecondary};
+    rocksdb::Cache::CacheItemHelper helper{
+        rocksdb::CacheEntryRole::kDataBlock, Delete, Size, Save, Create, &noSecondary};
     Payload value{std::string(size, 'X')};
     std::vector<std::string> keys;
     keys.reserve(count);
@@ -90,7 +75,11 @@ Trial Run(const std::filesystem::path& directory, const size_t count, const size
         if (!result || !kept) {
             throw std::runtime_error("Lookup miss: " + key);
         }
+        const bool matches = static_cast<Payload*>(result->Value())->data == value.data;
         Delete(result->Value(), nullptr);
+        if (!matches) {
+            throw std::runtime_error("Lookup payload mismatch: " + key);
+        }
     }
     const auto end = std::chrono::steady_clock::now();
     return {std::chrono::duration<double, std::micro>(beginLookup - beginInsert).count() / count,
@@ -100,21 +89,19 @@ Trial Run(const std::filesystem::path& directory, const size_t count, const size
 
 int main(int argc, char** argv) {
     try {
+        if (argc > 4) {
+            throw std::invalid_argument("usage: aveva-secondary-cache-benchmark [count] [bytes] [trials]");
+        }
         const size_t count = argc > 1 ? std::stoull(argv[1]) : 2000;
         const size_t size = argc > 2 ? std::stoull(argv[2]) : 8192;
         const size_t trials = argc > 3 ? std::stoull(argv[3]) : 7;
-        const std::string engineArg = argc > 4 ? argv[4] : "legacy";
-        const auto engine = engineArg == "region" ? FileBasedSecondaryCacheEngine::kRegion
-                                                  : FileBasedSecondaryCacheEngine::kLegacy;
         if (!count || !size || trials < 3) {
             throw std::invalid_argument("expected positive count and size, at least three trials");
         }
-        const auto directory = std::filesystem::temp_directory_path() /
-                               (engine == FileBasedSecondaryCacheEngine::kRegion ? "aveva_secondary_benchmark_region"
-                                                                                 : "aveva_secondary_benchmark_legacy");
+        const auto directory = std::filesystem::temp_directory_path() / "aveva_secondary_benchmark_region";
         for (size_t trial = 0; trial < trials; ++trial) {
-            const auto sample = Run(directory, count, size, engine);
-            std::cout << "engine=" << (engine == FileBasedSecondaryCacheEngine::kRegion ? "region" : "legacy")
+            const auto sample = Run(directory, count, size);
+            std::cout << "engine=region"
                       << " trial=" << trial << " count=" << count << " bytes=" << size
                       << " insert_us=" << sample.insertUs << " lookup_us=" << sample.lookupUs << '\n';
         }

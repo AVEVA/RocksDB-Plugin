@@ -5,13 +5,15 @@ SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 # ADR: high-performance local-disk secondary cache
 
-**Revision:** v0.4 (minimal synchronous reference, 2026-10-21).
-**Status:** Accepted direction; opt-in correctness baseline, not production-ready.
+**Revision:** v0.5 (region-only API replacement, 2026-10-21).
+**Status:** Accepted direction; synchronous correctness baseline, not production-ready.
 The current implementation is specified in the amendment below and the
-[cache-local README](../../src/Core/SecondaryCache/README.md). The legacy engine
-remains the default. Sections 1-14 retain the original proposal/research and
-historical measurements; they are not a claim that the full target is implemented.
-**Component:** `AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache`
+[cache-local README](../../src/Core/SecondaryCache/README.md). The previous
+dual-engine API has since been removed in favor of the breaking,
+region-only `RegionBasedSecondaryCache` API. Sections 1-14 retain the original
+proposal/research and historical measurements; references to the legacy engine
+are historical, not current implementation or compatibility requirements.
+**Component:** `AVEVA::RocksDB::Plugin::Core::RegionBasedSecondaryCache`
 **Scope constraint:** no changes to RocksDB; no changes to the plugin outside the secondary cache
 and the configuration needed to construct and load it.
 **RocksDB reference tree:** `C:\dev\rocksdb`, version 11.12.0 (`ROCKSDB_VERSION_INT = 11012000`).
@@ -22,10 +24,11 @@ derived from, committed alongside it so revisions can be diffed against their so
 
 ### Decision and consequences
 
-**Decision:** Introduce a cache-private, region-structured local-disk engine behind the existing
-`rocksdb::SecondaryCache` API. Keep the current file-per-entry engine selectable during rollout
-while the new engine is measured against it; do not alter RocksDB, the Azure filesystem layer, or
-the SST-file cache. Decisions Q1–Q19 in §14 are accepted for v1.
+**Historical proposal:** Introduce a cache-private, region-structured local-disk engine behind the
+existing `rocksdb::SecondaryCache` API, keeping the file-per-entry implementation selectable during
+rollout. The current implementation is region-only; do not alter RocksDB, the Azure filesystem
+layer, or the SST-file cache. Decisions Q1–Q19 in §14 are accepted for v1 unless the amendment
+below says otherwise.
 
 **Positive consequences:** eliminate per-entry filesystem metadata operations, bound index memory
 independently of filenames, make deletion index-only, and permit batched I/O. **Negative
@@ -42,6 +45,7 @@ the baseline/candidate workloads in §11.6 produce reproducible results.
 | v0.2 | 2026-09-29 | Incorporated Q1–Q19 decisions; scoped to one 16–256 GiB ephemeral cache per process, buffered I/O, FIFO reclaim, no new compression or warm restart. |
 | v0.3 | 2026-09-30 | Initial opt-in region substrate and single-thread Debug benchmark (§8.2). The original completion claim overstated coverage: 246 discovered tests included Azure skips, and the region manager had only two smoke tests. The subsequent review reproduced lifecycle, allocation, resource and callback defects. Historical benchmark means do not establish production p99, concurrency, reclaim or memory behavior. |
 | v0.4 | 2026-10-21 | Replace the unsafe split lifecycle with a minimal synchronous single-lock reference: resident reverse eviction lists, one append buffer, bounded handles/heap, safe cold directory ownership, transactional publication and reset-on-resize. Reject unimplemented admission policy; return NotSupported for optional RAM APIs. Add cache-local implementation/data-flow documentation and regression/adapter/local-DB tests. Follow-up production gates remain explicit. |
+| v0.5 | 2026-10-21 | User-approved breaking replacement with `RegionBasedSecondaryCache`; remove the old API, file-per-entry engine, LRU index, engine/admission selectors and unused shard option. Preserve the synchronous region lifecycle and outstanding production gates. Native Linux Debug/Release and project-instrumented ASan+UBSan/TSan cache suites now pass; exact evidence is in the review/to-do document. |
 
 ### v0.4 amendment: authoritative current implementation
 

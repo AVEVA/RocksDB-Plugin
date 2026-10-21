@@ -11,14 +11,86 @@ SPDX-FileCopyrightText: Copyright 2026 AVEVA
 The SST-file download cache (`Core/FileCache`), RocksDB, and other plugin services
 are not implementation targets. The already-approved Azure Release-build fix was
 inspected; no further Azure changes are proposed.
-**Status:** review complete; first minimal synchronous implementation now applied
-on `paul-pirogovsky/ssd-secondary-cache` (2026-10-21). Original findings below
-describe `41f8390`; implementation progress and remaining gates are recorded here.
-Keep `kLegacy` as the default. Do not describe `kRegion` as production-ready.
+**Status:** the original review below describes the dual-engine implementation at
+`41f8390`; its findings and validation records are historical. The current branch
+replaces that API with region-only `RegionBasedSecondaryCache`. It remains a
+synchronous correctness baseline, not production-ready; Q6 and the other release
+gates below are still open unless explicitly revalidated after the replacement.
+The current implementation and decisions are recorded in the
+[handoff](secondary-cache-handoff.md) and cache-local README. Earlier
+recommendations below are historical where they conflict with the breaking,
+region-only API.
 
 Start new sessions from the [handoff/background index](secondary-cache-handoff.md).
 
-## Implementation progress: first minimal milestone
+## Region-only replacement: current validation
+
+The public API is now `RegionBasedSecondaryCache`, `RegionBasedSecondaryCacheOptions`
+and `RegionBasedSecondaryCacheStats`. The old header, filesystem/capacity constructor,
+engine/admission selectors, unused shard option, `LegacyEngine`, dispatch abstraction
+and `LruFileIndex` have been removed. The PIMPL directly owns the region implementation.
+Shared filesystem/SST-cache components and the ready `ResultHandle` remain.
+
+Legacy-only LRU promotion, file-per-key/graveyard, capacity-gate and filesystem-mock
+tests were removed. Region tests retain the applicable serialization, compression/tier,
+ownership, resize, corruption, accounting, concurrency and real RocksDB contracts.
+The shared contract tests now run once against the sole implementation. A new API
+test checks null helpers, live usage, force-erase support and the renamed class name.
+The benchmark is region-only and verifies returned payloads; it is still not the
+steady-state performance experiment required by T10.
+
+| Exact command (from repository root) | Result |
+|---|---|
+| `cmake --build build\WindowsDebug --config Debug --target aveva-rocksdb-plugin-core-tests aveva-rocksdb-plugin-azure-impl-tests` | Passed |
+| `ctest --test-dir build\WindowsDebug -C Debug -R 'SecondaryCache|^FileCache' --output-on-failure` | 46 passed, 4 skipped, 0 failed; symlink permission and three Azure-credential skips |
+| `cmake --build build\WindowsRelease --config Release --target aveva-rocksdb-plugin-core-tests aveva-secondary-cache-benchmark` | Passed |
+| `ctest --test-dir build\WindowsRelease -C Release -R 'SecondaryCache|^FileCache' --output-on-failure` | 46 passed, 1 skipped, 0 failed; symlink permission skip; Azure target not built in this configuration |
+| `cmake --build build/LinuxDebug-readiness --target aveva-rocksdb-plugin-core-tests --parallel 2` | Passed, native GCC 13.3 build with LinuxDebug warning-as-error flags |
+| `ctest --test-dir build/LinuxDebug-readiness -R SecondaryCache --output-on-failure` | 40 passed, no skips or failures |
+| `cmake --build build/LinuxRelease-readiness --target aveva-rocksdb-plugin-core-tests --parallel 2` | Passed, native LinuxRelease preset (RelWithDebInfo/LTO) |
+| `ctest --test-dir build/LinuxRelease-readiness -R SecondaryCache --output-on-failure` | 40 passed, no skips or failures |
+| `cmake --build build/LinuxASan-readiness --target aveva-rocksdb-plugin-core-tests --parallel 2` | Passed |
+| `ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 ctest --test-dir build/LinuxASan-readiness -R SecondaryCache --output-on-failure` | 40 passed, no skips, failures or sanitizer reports |
+| `setarch "$(uname -m)" -R cmake --build build/LinuxTSan-readiness --target aveva-rocksdb-plugin-core-tests --parallel 2` | Passed, including instrumented GoogleTest discovery |
+| `setarch "$(uname -m)" -R ctest --test-dir build/LinuxTSan-readiness -R SecondaryCache --output-on-failure` | 40 passed, no skips, failures or race reports |
+
+Windows commands used VS 18's CMake/CTest executables; they are not on this host's
+ordinary PowerShell PATH. The existing Windows dependency installation was reused.
+Native Linux validation uses Ubuntu-24.04 on WSL2, not Windows headers or a
+standalone substitute probe. Sources were copied from the current worktree into
+`/root/src/rocksdb-plugin-t09-readiness-20261021`, excluding `.git` and Windows build
+artifacts; this is a snapshot, not a second editable repository. Setup installed
+`libssl-dev` and `libcurl4-openssl-dev` and reused `/root/vcpkg2` at the manifest
+baseline. No user elevation, reboot or authentication action was required.
+
+To reproduce the existing Linux builds, run `wsl -d Ubuntu-24.04` from PowerShell,
+then in the Linux shell:
+
+```bash
+cd /root/src/rocksdb-plugin-t09-readiness-20261021
+export VCPKG_ROOT=/root/vcpkg2 VCPKG_MAX_CONCURRENCY=2
+deps="$PWD/build/LinuxDebug-readiness/vcpkg_installed"
+cmake --preset LinuxDebug -G Ninja -B build/LinuxDebug-readiness
+cmake --preset LinuxRelease -G Ninja -B build/LinuxRelease-readiness \
+  -DVCPKG_INSTALLED_DIR="$deps" -DVCPKG_MANIFEST_INSTALL=OFF
+cmake --preset LinuxDebug -G Ninja -B build/LinuxASan-readiness \
+  -DVCPKG_INSTALLED_DIR="$deps" -DVCPKG_MANIFEST_INSTALL=OFF \
+  -DCMAKE_CXX_FLAGS_DEBUG="-g -fsanitize=address,undefined -fno-omit-frame-pointer" \
+  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+cmake --preset LinuxDebug -G Ninja -B build/LinuxTSan-readiness \
+  -DVCPKG_INSTALLED_DIR="$deps" -DVCPKG_MANIFEST_INSTALL=OFF \
+  -DCMAKE_CXX_FLAGS_DEBUG="-g -fsanitize=thread -fno-omit-frame-pointer" \
+  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+```
+
+The sanitizer builds instrument project code and tests, **not prebuilt vcpkg
+dependencies**. TSan requires the process-local `setarch -R` workaround for this
+WSL kernel's address mapping; no global ASLR setting was changed. Native Debug,
+Release and these full cache sanitizer-suite gates now have evidence, but broader
+native filesystem fault injection, dependency-instrumented coverage and long
+deployment-scale stress remain open. This does not complete all of T09 or Q6.
+
+## Implementation progress: first minimal milestone (historical)
 
 The [cache-local README](../../src/Core/SecondaryCache/README.md) describes files,
 methods, ownership, record layout and data flow. ADR v0.4 is authoritative where
@@ -29,21 +101,21 @@ part of this milestone.
 |---|---|---|
 | T00 | ADR amendments, public API docs and cache-local README; historical overclaims corrected | Keep future benchmark/production claims evidence-based |
 | T01 | Checked geometry/record arithmetic before filesystem creation; zero capacity; owned child/marker; exclusive owner lock; link/reparse rejection; bounded final-region search | Broader native create/marker-write fault injection |
-| T02 | Allocating internals may throw; allocation-free exception translation; failed-create output ignored; nullable deleter; success guard survives handle allocation; no reader pins. Permanent isolated OOM executable proves successful creation is cleaned exactly once if handle allocation fails | Expand deterministic system-OOM injection at additional allocator sites |
-| T03 | One manager mutex owns append, tentative index publication, commit, reclaim and usage; exact-location/incarnation cleanup; 32-bit generation wrap guard | Full engine/DB TSan run and longer mixed resize/read/write stress |
+| T02 | Allocating internals may throw; allocation-free exception translation; failed-create output ignored; nullable deleter; success guard survives handle allocation; no reader pins. Isolated OOM executable now sweeps insertion/lookup allocation failures in Release and checks targeted sites in MSVC Debug | Native create/marker/resize allocation failures and other unexercised allocator sites |
+| T03 | One manager mutex owns append, tentative index publication, commit, reclaim and usage; exact-location/incarnation cleanup; 32-bit generation wrap guard; mixed resize/read/erase/append stress | Full engine/DB TSan run and longer mixed-operation sanitizer coverage |
 | T04 | RAM reverse hash lists replace every footer/parser/scan; reclaim never reads corrupt storage; clear directly clears index/buffer/lists | Long churn/heap profiling at deployment scale |
 | T05 | One active buffer; direct writes for large records; lazy 64-handle pool; checked transfers/flush; write failure invalidates mappings; injectable memory device | More native partial-transfer/seek/close faults. ADR explicitly removes physical preallocation promise; files grow on write |
-| T06 | Valid resize invalidates all entries and builds a new layout; post-invalidation failure disables cache; invalid geometry preserves old state | Native filesystem failure matrix and longer concurrent control-operation stress |
+| T06 | Valid resize invalidates all entries and builds a new layout; post-invalidation failure disables cache; invalid geometry preserves old state; mixed concurrent resize/read/erase/append stress | Native filesystem failure matrix and longer sanitizer stress |
 | T07 | Useful admit-all FIFO with force-false turnover; reject unsupported second chance; no ghosts | Optional policies stay in T13 |
 | T08 | Additive stats snapshot; counted metadata allocator includes layout/buckets/reverse capacity and rehash overlap; bounded transient allocator; failure logging/counters; optional RAM APIs return NotSupported | Measure OS page cache/RSS/physical blocks separately. Node map can hit budget before disk fills; T12 remains a production gate |
-| T09 | Permanent regression, shared contract, default RocksDB LRU turnover and local DB data/hit tests; Windows Debug/Release and Linux compile/probe validation | Full native Linux linked RocksDB suite, complete OOM/fault matrix and applicable full-engine sanitizers |
+| T09 | Permanent regression, shared contract, default RocksDB LRU turnover and local DB data/hit tests; added insertion/lookup allocation-failure sweeps and mixed resize/read/erase/append stress | Full native Linux linked RocksDB suite, remaining native filesystem fault matrix and applicable full-engine sanitizers |
 | T10-T13 | Not implemented in this minimal milestone | Sequence below; do not combine speculative optimizations into this PR |
 
 ### Next implementation sequence
 
-1. Finish remaining T09 platform/fault gates, including a full native Linux build,
-   broader system-OOM sites and mixed resize/read/write sanitizer coverage. Keep the
-   permanent deterministic result-handle OOM test as a release regression gate.
+1. Finish remaining T09 platform/fault gates, including the full native Linux linked
+   suite, remaining filesystem fault cases and full-engine sanitizer coverage. Keep the
+   deterministic allocation-failure tests as release regression gates.
 2. **T10:** repair/extend the benchmark before drawing new performance conclusions:
    verify payloads, run beyond several capacities, report p50/p95/p99, hit ratio,
    disk writes, metadata/transient allocations, RSS, page cache and physical blocks.
@@ -55,7 +127,8 @@ part of this milestone.
    to existing Boost flat map only with comparable results. Then address duplicate
    serialization copies/CRC or lock contention one measured change at a time.
 5. **T13:** consider optional policies/asynchronous reads/native positioned I/O only
-   after evidence warrants them. Keep legacy default until release gates pass.
+   after evidence warrants them. The current public API is region-only; release
+   gates still apply regardless of the removed legacy implementation.
 
 Task checklists and release gates below deliberately remain acceptance checklists:
 implemented mechanisms are not a claim that every originally requested platform,
@@ -69,7 +142,7 @@ changes/restoration were required. Release uses that installed directory too.
 Cache test directories include the process ID so simultaneous Debug/Release/ASan
 runs do not delete each other's files.
 
-| Exact build/test command | Result |
+| Validation command/check | Result |
 |---|---|
 | `cmake --build build\WindowsDebug --config Debug --target aveva-rocksdb-plugin-core-tests` | Passed, including isolated allocation-failure executable |
 | `ctest --test-dir build\WindowsDebug -C Debug -R SecondaryCache --output-on-failure` | **89 passed, 4 skipped, 0 failed** (93 discovered) |
@@ -100,7 +173,7 @@ leak. This does not alter allocations in the main GTest process or the plugin.
 - Passed `g++ -std=c++23 $flags -fsyntax-only -Iinclude -Isrc/Core
   -isystem build/WindowsDebug/vcpkg_installed/x64-windows/include
   src/Core/SecondaryCache/BlockDevice.cpp src/Core/SecondaryCache/RecordFormat.cpp
-  src/Core/SecondaryCache/RegionManager.cpp src/Core/FileBasedCompressedSecondaryCache.cpp
+  src/Core/SecondaryCache/RegionManager.cpp src/Core/RegionBasedSecondaryCache.cpp
   tests/AVEVA/RocksDB/Plugin/Core/SecondaryCacheAllocationFailureTests.cpp`,
   with `$flags` taken directly from the `LinuxRelease` preset. The corresponding
   cache-source check also passed with the `LinuxDebug` warning flags.
@@ -123,6 +196,24 @@ These native probes do **not** replace the outstanding full Linux plugin/linked
 RocksDB test suite or full-engine TSan gate. No production-scale memory/latency,
 fuzzing, or physical-space-reservation claim is made. Final `clang-format --dry-run
 --Werror` on changed/new C++ files and `git diff --check` passed.
+
+**Additional T09 validation (2026-10-21):**
+
+| Exact build/test command | Result |
+|---|---|
+| `cmake --build build\WindowsDebug --config Debug --target aveva-rocksdb-plugin-core-tests` | Passed |
+| `ctest --test-dir build\WindowsDebug -C Debug -R SecondaryCache --output-on-failure` | **90 passed, 1 skipped, 0 failed** (91 discovered); the symlink test requires a permission unavailable on this host |
+| `cmake --preset WindowsRelease -DVCPKG_INSTALLED_DIR=C:/dev/copilot-worktrees/RocksDB-Plugin/paul-pirogovsky-aveva-didactic-train/build/WindowsDebug/vcpkg_installed -DVCPKG_MANIFEST_INSTALL=OFF` | Passed, reusing the Debug preset's vcpkg packages |
+| `cmake --build build\WindowsRelease --config Release --target aveva-rocksdb-plugin-core-tests` | Passed |
+| `ctest --test-dir build\WindowsRelease -C Release -R SecondaryCache --output-on-failure` | **90 passed, 1 skipped, 0 failed** (91 discovered); the symlink test requires a permission unavailable on this host |
+| WSL GCC 13, LinuxRelease warning-as-error `-fsyntax-only` check of the region sources and both changed tests, using installed Windows vcpkg headers | Passed; not a native linked Linux test |
+
+In MSVC Debug, the isolated OOM executable targets one insertion and one lookup
+allocation failure after the debug iterator proxy is constructed. The Release
+fail-after sweep passed at five insertion and three lookup allocation sites
+before each operation completed successfully.
+Linux linked tests, the complete filesystem fault matrix and full-engine TSan
+remain release gates.
 
 ## 1. Verdict
 
@@ -167,7 +258,7 @@ linked RocksDB interface; true asynchronous lookup can remain a later optimizati
 
 Line references below refer to the reviewed commit, not future edited files.
 Use the named methods when implementing; do not rely on line numbers remaining fixed.
-`Engine` means `src/Core/FileBasedCompressedSecondaryCache.cpp`;
+`Engine` means the implementation reviewed at `src/Core/FileBasedCompressedSecondaryCache.cpp`;
 `Manager`, `Device`, and `Index` mean the corresponding files under
 `src/Core/SecondaryCache/`.
 
@@ -274,11 +365,13 @@ Some rows cover multiple related assertions in one probe; they are evidence, not
 a claimed comprehensive fuzzing or concurrency test campaign. No new production
 latency, RSS-at-256-GiB, or SSD-endurance claim is made.
 
-## 4. Recommended smaller design
+## 4. Original smaller-design recommendation (historical)
 
 ### First reviewable milestone: synchronous correctness reference
 
-Keep the existing public wrapper/legacy engine and use these private rules:
+The original proposal kept the public wrapper and legacy engine while introducing
+the region implementation. The user later approved removing that dual-engine
+design; the remaining lifecycle rules below describe the region-only baseline.
 
 1. **One state mutex** owns region selection, append state, the index, the FIFO,
    reverse lists, live-byte accounting, and capacity transitions. Do not retain

@@ -7,7 +7,7 @@
 #include "CacheStats.hpp"
 #include "Index.hpp"
 
-#include "AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/RegionBasedSecondaryCache.hpp"
 
 #include <functional>
 #include <mutex>
@@ -22,8 +22,8 @@ class RegionManager {
     };
     enum class ReadStatus { kOk, kMiss, kIoError };
 
-    RegionManager(DeviceFactory factory, FileBasedSecondaryCacheOptions options, CacheStats& stats);
-    static void Validate(const FileBasedSecondaryCacheOptions& options);
+    RegionManager(DeviceFactory factory, RegionBasedSecondaryCacheOptions options, CacheStats& stats);
+    static void Validate(const RegionBasedSecondaryCacheOptions& options);
     rocksdb::Status Append(uint64_t hash, std::span<const std::byte> record, size_t payloadSize);
     ReadStatus Read(uint64_t hash, RecordBytes& record, Identity& identity);
     bool Remove(uint64_t hash, const Identity& identity);
@@ -32,7 +32,7 @@ class RegionManager {
     rocksdb::Status SetCapacity(size_t capacity);
     size_t CapacityBytes() const;
     size_t UsageBytes() const;
-    FileBasedSecondaryCacheStats Snapshot() const;
+    RegionBasedSecondaryCacheStats Snapshot() const;
 
   private:
     struct Region {
@@ -51,7 +51,7 @@ class RegionManager {
 
     // The only state lock: index, layout, reverse lists, buffer, device, usage.
     mutable std::mutex m_mutex;
-    FileBasedSecondaryCacheOptions m_options;
+    RegionBasedSecondaryCacheOptions m_options;
     CacheStats& m_stats;
     MemoryBudget m_metadata;
     Index m_index;

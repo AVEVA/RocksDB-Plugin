@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
-#include "FileBasedCompressedSecondaryCacheTestHelpers.hpp"
+#include "RegionBasedSecondaryCacheTestHelpers.hpp"
 #include "SecondaryCache/RecordFormat.hpp"
 
-TEST_F(RegionFileBasedCompressedSecondaryCacheTests, CorruptDiskRecordNeverCallsCreateAndRemovesIndexEntry) {
+#include <fstream>
+
+TEST_F(RegionBasedSecondaryCacheTests, CorruptDiskRecordNeverCallsCreateAndRemovesIndexEntry) {
     m_cache.reset();
     auto options = MakeOptions(8 * 1024 * 1024, 64 * 1024, 4 * 1024);
     options.maxEntrySize = 64 * 1024;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, options, MakeNullLogger());
+    m_cache = std::make_unique<RegionBasedSecondaryCache>(m_cacheDir, options, MakeNullLogger());
     TestPayload payload{std::string(32 * 1024, 'x')}; // Larger than flush block: direct disk write.
     for (const size_t offset : {size_t{0}, size_t{4}, size_t{16}, size_t{28}, size_t{40}}) {
         ASSERT_TRUE(m_cache->SetCapacity(options.capacity).ok());
@@ -34,7 +36,7 @@ TEST_F(RegionFileBasedCompressedSecondaryCacheTests, CorruptDiskRecordNeverCalls
         bool kept = true;
         EXPECT_EQ(m_cache->Lookup("key", &helper, nullptr, false, false, nullptr, kept), nullptr);
         EXPECT_FALSE(kept);
-        AVEVA::RocksDB::Plugin::Core::FileBasedSecondaryCacheStats stats;
+        AVEVA::RocksDB::Plugin::Core::RegionBasedSecondaryCacheStats stats;
         ASSERT_TRUE(m_cache->GetStats(stats).ok());
         EXPECT_EQ(stats.liveEntries, 65u);
         EXPECT_EQ(m_cache->Lookup("key", &helper, nullptr, false, false, nullptr, kept), nullptr);

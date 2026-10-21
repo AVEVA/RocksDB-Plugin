@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
-#include "FileBasedCompressedSecondaryCacheTestHelpers.hpp"
+#include "RegionBasedSecondaryCacheTestHelpers.hpp"
 
 #include <thread>
 
-TEST_F(RegionFileBasedCompressedSecondaryCacheTests, InsertAndLookupRoundTrip) {
+TEST_F(RegionBasedSecondaryCacheTests, InsertAndLookupRoundTrip) {
     TestPayload payload{"region-engine payload"};
     ASSERT_TRUE(m_cache->Insert(MakeKey("region-key"), &payload, &m_helper, true).ok());
 
@@ -19,7 +19,7 @@ TEST_F(RegionFileBasedCompressedSecondaryCacheTests, InsertAndLookupRoundTrip) {
     delete result;
 }
 
-TEST_F(RegionFileBasedCompressedSecondaryCacheTests, EraseRemovesEntry) {
+TEST_F(RegionBasedSecondaryCacheTests, EraseRemovesEntry) {
     TestPayload payload{"erase me"};
     ASSERT_TRUE(m_cache->Insert(MakeKey("erase-key"), &payload, &m_helper, true).ok());
     m_cache->Erase(MakeKey("erase-key"));
@@ -28,7 +28,7 @@ TEST_F(RegionFileBasedCompressedSecondaryCacheTests, EraseRemovesEntry) {
     EXPECT_EQ(m_cache->Lookup(MakeKey("erase-key"), &m_helper, nullptr, true, false, nullptr, kept), nullptr);
 }
 
-TEST_F(RegionFileBasedCompressedSecondaryCacheTests, OverwriteExistingKeyReturnsNewestValue) {
+TEST_F(RegionBasedSecondaryCacheTests, OverwriteExistingKeyReturnsNewestValue) {
     TestPayload original{"old"};
     ASSERT_TRUE(m_cache->Insert(MakeKey("overwrite-key"), &original, &m_helper, true).ok());
     TestPayload updated{"new"};
@@ -43,10 +43,10 @@ TEST_F(RegionFileBasedCompressedSecondaryCacheTests, OverwriteExistingKeyReturns
     delete result;
 }
 
-TEST_F(RegionFileBasedCompressedSecondaryCacheTests, CapacityReclaimsOldestRegion) {
+TEST_F(RegionBasedSecondaryCacheTests, CapacityReclaimsOldestRegion) {
     m_cache.reset();
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(
-        m_cacheDir, MakeOptions(512 * 1024, 256 * 1024, 64 * 1024), MakeNullLogger());
+    m_cache = std::make_unique<RegionBasedSecondaryCache>(m_cacheDir, MakeOptions(512 * 1024, 256 * 1024, 64 * 1024),
+                                                          MakeNullLogger());
 
     const std::string firstKey = "oldest-region-entry";
     TestPayload payload{std::string(60 * 1024, 'a')};
@@ -60,7 +60,7 @@ TEST_F(RegionFileBasedCompressedSecondaryCacheTests, CapacityReclaimsOldestRegio
     EXPECT_EQ(m_cache->Lookup(MakeKey(firstKey), &m_helper, nullptr, true, false, nullptr, kept), nullptr);
 }
 
-TEST_F(RegionFileBasedCompressedSecondaryCacheTests, DeflateInflateDoNotRemoveDiskEntries) {
+TEST_F(RegionBasedSecondaryCacheTests, DeflateInflateDoNotRemoveDiskEntries) {
     TestPayload payload{"keep me"};
     ASSERT_TRUE(m_cache->Insert(MakeKey("deflate-key"), &payload, &m_helper, true).ok());
 
@@ -79,7 +79,7 @@ TEST_F(RegionFileBasedCompressedSecondaryCacheTests, DeflateInflateDoNotRemoveDi
     delete static_cast<TestPayload*>(handle->Value());
 }
 
-TEST_F(RegionFileBasedCompressedSecondaryCacheTests, CacheDirectoryContainsOnlyRegionFiles) {
+TEST_F(RegionBasedSecondaryCacheTests, CacheDirectoryContainsOnlyRegionFiles) {
     TestPayload payload{"disk layout"};
     ASSERT_TRUE(m_cache->Insert(MakeKey("layout-key"), &payload, &m_helper, true).ok());
     for (const auto& entry : std::filesystem::directory_iterator(m_cacheDir / "ssd-secondary-cache-v1")) {
@@ -88,7 +88,7 @@ TEST_F(RegionFileBasedCompressedSecondaryCacheTests, CacheDirectoryContainsOnlyR
     }
 }
 
-TEST_F(RegionFileBasedCompressedSecondaryCacheTests, ConcurrentReadersAndWritersDoNotCrash) {
+TEST_F(RegionBasedSecondaryCacheTests, ConcurrentReadersAndWritersDoNotCrash) {
     std::atomic<bool> stop{false};
     std::thread writer([&] {
         for (int i = 0; i < 200; ++i) {

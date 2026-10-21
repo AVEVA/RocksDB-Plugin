@@ -10,7 +10,7 @@
 namespace AVEVA::RocksDB::Plugin::Core {
 /// <summary>
 /// Small immediately-ready SecondaryCacheResultHandle implementation used by
-/// FileBasedCompressedSecondaryCache to return reconstructed objects.
+/// RegionBasedSecondaryCache to return reconstructed objects.
 /// </summary>
 class ResultHandle final : public rocksdb::SecondaryCacheResultHandle {
   public:

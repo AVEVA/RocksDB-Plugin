@@ -5,10 +5,9 @@ SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 # SSD secondary cache: minimal synchronous implementation
 
-This directory implements the opt-in **region engine** of
-`FileBasedCompressedSecondaryCache`. It caches RocksDB's serialized block-cache
-entries, not SST files. The file-per-entry/LRU engine remains the default and is
-not implemented here.
+This directory implements `RegionBasedSecondaryCache`, a region-based local
+secondary cache for RocksDB's serialized block-cache entries, not SST files.
+The former file-per-entry/LRU implementation and its public API have been removed.
 
 This is a deliberately synchronous correctness baseline. One mutex protects
 placement, the index, FIFO reclaim, file access and accounting. Callbacks run
@@ -21,8 +20,8 @@ records completed work and remaining release gates.
 
 ## Construction and supported behavior
 
-Select `FileBasedSecondaryCacheOptions::engine = kRegion` and supply a non-null
-logger and a dedicated local parent directory. Pass the resulting shared cache to
+Supply `RegionBasedSecondaryCacheOptions`, a non-null logger and a dedicated
+local parent directory. Pass the resulting shared cache to
 `rocksdb::LRUCacheOptions::secondary_cache`. No RocksDB changes or NewTieredCache
 integration are required.
 
@@ -34,15 +33,13 @@ integration are required.
 | `maxEntrySize` | 16 MiB | Entire encoded record limit, including header, full key and alignment |
 | `metadataBudget` | 0 | Zero selects `max(1 MiB, capacity / 200)`; otherwise explicit allocator-requested metadata byte limit |
 | `transientBudget` | 64 MiB | Shared limit for concurrent serialization, encoding and lookup-copy allocations |
-| `admissionPolicy` | `kAdmitAll` | `kSecondChance` is retained in the API but rejected before filesystem changes |
-| `indexShards` | 64 | Retained for source compatibility, unused by this single-lock implementation |
 
 The 16-256 GiB deployment range is a target, not a measured capacity/performance
 claim. The simple node map can reach its metadata limit before filling disk.
 Metadata pressure drops admissions; it does not allocate beyond the limit.
 
 `forceInsert=false` **does permit FIFO recycling** in region mode. Neither value
-bypasses size or memory limits. This intentionally differs from the legacy engine.
+bypasses size or memory limits. This replaces the former file-per-entry admission behavior.
 Empty saved values and binary keys are supported. The cache adds no compression:
 `Insert` saves callback bytes as uncompressed/volatile; `InsertSaved` preserves
 both supplied compression and source-tier tags for `create_cb`.
@@ -55,13 +52,13 @@ not a fake successful RAM-budget adjustment. Zero disk capacity disables the cac
 
 | File | Responsibility and main methods |
 |---|---|
-| `../FileBasedCompressedSecondaryCache.cpp` | Public forwarding, unchanged selectable legacy implementation, and private `RegionEngine`. `Insert` checks size before serialization; `InsertSaved` accepts existing bytes; `InsertEncoded` validates/encodes/appends; `Lookup` verifies bytes and invokes `create_cb`; `ReportFailure` counts errors and logs the first and powers of two |
+| `../RegionBasedSecondaryCache.cpp` | Public forwarding and region-cache operations. `Insert` checks size before serialization; `InsertSaved` accepts existing bytes; `InsertEncoded` validates/encodes/appends; `Lookup` verifies bytes and invokes `create_cb`; `ReportFailure` counts errors and logs the first and powers of two |
 | `RegionManager.hpp/.cpp` | Sole mutable-state owner. `Append` is the publication transaction; `SelectRegionLocked` advances the FIFO ring; `ReclaimLocked` removes retired mappings; `FlushLocked` writes the active buffer; `Read` copies a record and identity; `Remove` performs conditional cleanup; `Erase` removes the current mapping; `SetCapacity` resets the layout; `Snapshot`, `CapacityBytes`, `UsageBytes` provide synchronized observations |
 | `Index.hpp` | An externally locked, lazily constructed `unordered_map<uint64_t, Location>`. `Upsert` returns the **old** location; `Find`, `Remove`, `Clear` do not mutate any independent lifecycle. `Clear` destroys the map without allocating, including MSVC's empty-map sentinel/buckets |
 | `RecordFormat.hpp/.cpp` | Checked `RecordSize`, `EncodeRecord`, portable CRC32C and `DecodeRecord`. Decode checks magic/version, exact bounds, header/key CRC, full key, then payload CRC before any callback receives bytes |
 | `MemoryBudget.hpp` | Atomic allocation reservation and a stateful allocator. Accounts container allocator requests, retained capacity and overlapping allocations during rehash/growth. `BudgetExceeded` is an internal admission-pressure signal, not an unsafe internal `noexcept` termination |
 | `BlockDevice.hpp/.cpp` | Serialized device interface, real local file implementation, and injectable memory device. `Configure` clears owned region files/layout; `Read`/`Write` check offset/length and transfer results; `Open` uses a lazy round-robin pool capped at 64 region handles. The memory device injects configure/read/write failures |
-| `CacheStats.hpp` | Atomic operational counters shared with the wrapper; the public `FileBasedSecondaryCacheStats` combines these with a locked layout/resource snapshot |
+| `CacheStats.hpp` | Atomic operational counters shared with the wrapper; the public `RegionBasedSecondaryCacheStats` combines these with a locked layout/resource snapshot |
 
 There is no footer format, disk scanner, ghost cache, per-region payload buffer,
 reader pin, asynchronous worker, recovery path or custom hash table.
