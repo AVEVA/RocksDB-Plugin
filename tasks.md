@@ -125,7 +125,19 @@ code. Findings marked **Verify first** are medium confidence: confirm or measure
   `HttpClientAllocationTests` with a request that carries a connected cancellation slot and passes through the
   limiter, and record the allocation count before and after.
 
-### [ ] T70 – Remaining internal erasure on the plugin read and lease paths (**Verify first**)
+### [-] T70 – Remaining internal erasure on the plugin read and lease paths (**Verify first**)
+- **Dropped (verified, no code change):**
+  - `RenewAsync`: its definition is in `LockFileImpl.ipp` and is only explicitly instantiated for `PageBlobClient`.
+    A `template <class TCallback>` member needs its body visible to `LeaseRenewalLoop.hpp` and the tests, which means
+    moving it, with `TotalDeadlineFor`, `Now`, `Unwrap` and the private lease state, into the header. That adds header
+    weight and breaks the `.ipp` plus `extern template` structure. The gain is one `std::function` allocation (a
+    40-byte capture) per lease renewal, once per renewal interval and next to a network round trip, so it is not
+    measurable.
+  - Prefetch waiters: the waiter embeds `makeDownload()`, an unnameable lambda local to `StartRead`. A concrete struct
+    would need that type, so it would have to be a template, and a homogeneous `Waiters` vector in the non-template
+    `ReadableFileImpl` state then needs erasure again. The path only runs while a prefetch is pending.
+  - `MetadataCallback`: waiters come from several `ReadAsyncAttempt<TCallback>` instantiations with no common
+    continuation type, so erasure stays (as the task allowed).
 - **Files:**
   - `src\Azure\Impl\include\AVEVA\RocksDB\Plugin\Azure\Impl\LockFileImpl.hpp:69-72` (`RenewCallback =
     std::function<void(std::exception_ptr, bool)>`); `src\Azure\Impl\LockFileImpl.ipp:229`
