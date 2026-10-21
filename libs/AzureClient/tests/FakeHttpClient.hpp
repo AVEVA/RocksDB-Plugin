@@ -32,6 +32,7 @@
 #include <cstddef>
 #include <deque>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -402,6 +403,32 @@ class FakeHttpClient final {
         }
     }
 
+    // Runs `task` on the client's executor, the way a real transport completes: completion handlers that check
+    // running_in_this_thread() would otherwise defer a call made from the bare test thread and never run it.
+    // Inline when already on the executor (a handler completing another request). Under the background pump the
+    // task runs on the pump thread and this waits for it, so the caller still observes the finished completion.
+    template <class F> void RunOnExecutor(F&& task) {
+        if (m_context.get_executor().running_in_this_thread()) {
+            task();
+            return;
+        }
+        if (m_pumpActive.load()) {
+            std::promise<void> done;
+            boost::asio::post(m_context, [&task, &done] {
+                try {
+                    task();
+                    done.set_value();
+                } catch (...) {
+                    done.set_exception(std::current_exception());
+                }
+            });
+            done.get_future().get();
+            return;
+        }
+        boost::asio::post(m_context, [&task] { task(); });
+        PollRaw();
+    }
+
     std::size_t PollRaw() {
         // restart() must not race a poll()/run() on another thread, so every thread that drives the context
         // (including the background pump) takes this lock. The pump holds it for its whole life, so skip then.
@@ -593,10 +620,12 @@ class FakeHttpClient final {
         // CompleteNext/CompletePending. SendAsyncErased still posts completions when
         // CompleteInline is false, so this keeps the non-reentrant testing helper behavior.
         const std::size_t writesBefore = DownloadWriters().Started.load();
-        if (pending->OnComplete) {
-            pending->OnComplete(pending->Response);
-        }
-        pending->Completion(pending->Error, std::move(pending->Response));
+        RunOnExecutor([&pending] {
+            if (pending->OnComplete) {
+                pending->OnComplete(pending->Response);
+            }
+            pending->Completion(pending->Error, std::move(pending->Response));
+        });
         SettleIfWritesStarted(writesBefore);
         return true;
     }
@@ -635,7 +664,7 @@ class FakeHttpClient final {
 
         // Invoke inline for test helper immediacy.
         const std::size_t writesBefore = DownloadWriters().Started.load();
-        pending->Completion(error, std::move(response));
+        RunOnExecutor([&] { pending->Completion(error, std::move(response)); });
         SettleIfWritesStarted(writesBefore);
         return true;
     }
