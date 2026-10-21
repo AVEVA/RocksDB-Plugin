@@ -96,7 +96,7 @@ TEST_F(WriteableFileTests, RangeSync_PartialPageThenMoreData_UploadsNeverOverlap
         expected.push_back(static_cast<char>('a' + i % 26));
     }
 
-    auto file = MakeFile();
+    auto file = MakeFile(2 * Configuration::PageBlob::PageSize);
     file.Append(std::span<const char>(expected.data(), static_cast<size_t>(pageSize + 100)));
     file.RangeSync();
     file.Append(std::span<const char>(expected.data() + pageSize + 100, 100));
@@ -136,7 +136,8 @@ TEST_F(WriteableFileTests, Destructor_UploadsStillInFlightAfterFailure_WaitsForT
     m_env.Blob->SetCapacity(16 * pageSize);
     m_env.Blob->DeferUploads = true;
 
-    auto file = std::make_unique<FakeWriteableFileImpl>("test.dat", m_env.Runtime, m_env.Client, nullptr, m_logger);
+    auto file = std::make_unique<FakeWriteableFileImpl>("test.dat", m_env.Runtime, m_env.Client, nullptr, m_logger,
+                                                        2 * pageSize);
     for (int i = 0; i < 4; ++i) {
         file->Append(std::vector<char>(pageSize, 'a'));
         file->RangeSync();
@@ -168,7 +169,7 @@ TEST_F(WriteableFileTests, Destructor_UploadsStillInFlightAfterFailure_WaitsForT
 TEST_F(WriteableFileTests, RangeSync_UploadInFlight_ReturnsWithoutWaitingAndSyncCompletesIt) {
     m_env.Blob->DeferUploads = true;
 
-    auto file = MakeFile();
+    auto file = MakeFile(2 * Configuration::PageBlob::PageSize);
     file.Append(std::vector<char>(Configuration::PageBlob::PageSize, 'a'));
     file.RangeSync();
 
@@ -181,7 +182,7 @@ TEST_F(WriteableFileTests, GetFileSize_AfterUploadFailure_StillReportsTheTracked
     constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
     m_env.Blob->DeferUploads = true;
 
-    auto file = MakeFile();
+    auto file = MakeFile(2 * Configuration::PageBlob::PageSize);
     file.Append(std::vector<char>(pageSize, 'a'));
     file.RangeSync();
     ASSERT_EQ(1U, m_env.Blob->PendingUploads());
@@ -195,7 +196,7 @@ TEST_F(WriteableFileTests, GetFileSize_AfterUploadFailure_StillReportsTheTracked
 TEST_F(WriteableFileTests, Sync_WritesFencedWhileAnUploadWasInFlight_FailsEvenThoughTheUploadSucceeded) {
     m_env.Blob->DeferUploads = true;
 
-    auto file = MakeFile();
+    auto file = MakeFile(2 * Configuration::PageBlob::PageSize);
     file.Append(std::vector<char>(Configuration::PageBlob::PageSize, 'a'));
     file.RangeSync();
     ASSERT_EQ(1U, m_env.Blob->PendingUploads());
@@ -211,7 +212,7 @@ TEST_F(WriteableFileTests, Sync_WritesFencedWhileAnUploadWasInFlight_FailsEvenTh
 TEST_F(WriteableFileTests, Sync_UploadFailed_ThrowsAndKeepsThrowing) {
     m_env.Blob->DeferUploads = true;
 
-    auto file = MakeFile();
+    auto file = MakeFile(2 * Configuration::PageBlob::PageSize);
     file.Append(std::vector<char>(Configuration::PageBlob::PageSize, 'a'));
     file.RangeSync();
     ASSERT_EQ(1U, m_env.Blob->PendingUploads());
@@ -230,7 +231,7 @@ TEST_F(WriteableFileTests, Flush_UploadThrowsSynchronously_KeepsTheTailForARetry
         expected.push_back(static_cast<char>('a' + i % 26));
     }
 
-    auto file = MakeFile();
+    auto file = MakeFile(3 * pageSize);
     file.Append(expected);
 
     auto throwOnce = std::make_shared<std::atomic<bool>>(true);
@@ -531,7 +532,7 @@ TEST_F(WriteableFileTests, Flush_ExactlyOnePage_OneUploadCall) {
     const std::vector<char> dataToWrite(Configuration::PageBlob::PageSize, 'z');
     m_env.Blob->SetCapacity(Configuration::PageBlob::PageSize);
 
-    auto file = MakeFile();
+    auto file = MakeFile(2 * Configuration::PageBlob::PageSize);
     file.Append(dataToWrite);
     file.Flush();
 
@@ -554,11 +555,30 @@ TEST_F(WriteableFileTests, Flush_PartialPage_UploadsNothingAndLeavesTheTailToSyn
     EXPECT_EQ(100, m_env.Blob->SizeWrites.back());
 }
 
+TEST_F(WriteableFileTests, Flush_BelowHalfTheBuffer_UploadsNothingUntilSync) {
+    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
+    m_env.Blob->SetCapacity(16 * pageSize);
+
+    auto file = MakeFile(16 * pageSize);
+    for (int i = 0; i < 12; ++i) {
+        file.Append(std::vector<char>(300, 'w'));
+        file.Flush();
+    }
+    EXPECT_TRUE(m_env.Blob->Uploads.empty());
+
+    file.Append(std::vector<char>(pageSize, 'w'));
+    file.Flush();
+    EXPECT_EQ(1U, m_env.Blob->Uploads.size());
+
+    file.Sync();
+    EXPECT_EQ(2U, m_env.Blob->Uploads.size());
+}
+
 TEST_F(WriteableFileTests, Flush_FullPage_ReturnsWithoutWaitingForTheUpload) {
     m_env.Blob->SetCapacity(4 * Configuration::PageBlob::PageSize);
     m_env.Blob->DeferUploads = true;
 
-    auto file = MakeFile();
+    auto file = MakeFile(2 * Configuration::PageBlob::PageSize);
     file.Append(std::vector<char>(Configuration::PageBlob::PageSize + 10, 'f'));
     file.Flush();
 
@@ -573,7 +593,7 @@ TEST_F(WriteableFileTests, Flush_AfterAnEarlierUploadFailed_ReportsTheFailure) {
     m_env.Blob->SetCapacity(4 * Configuration::PageBlob::PageSize);
     m_env.Blob->DeferUploads = true;
 
-    auto file = MakeFile();
+    auto file = MakeFile(2 * Configuration::PageBlob::PageSize);
     file.Append(std::vector<char>(Configuration::PageBlob::PageSize, 'f'));
     file.Flush();
     ASSERT_EQ(1U, m_env.Blob->PendingUploads());

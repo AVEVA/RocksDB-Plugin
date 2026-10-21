@@ -174,7 +174,7 @@ closed; their text is in git history at `HEAD:tasks.md` (commit `34947f4`), summ
 
 ## P2: performance
 
-### [ ] T85 – `Flush` uploads every completed page at once, which can block the WAL writer (**Verify first**: measure)
+### [x] T85 – `Flush` uploads every completed page at once, which can block the WAL writer (**Verify first**: measure)
 - **Files:** `src\Azure\Impl\WriteableFileImpl.ipp:140-212` (`Flush`, `RangeSync`, `StartFlush`); constants in
   `WriteableFileImpl.hpp:50` (`MaxInFlightUploads = 4`). Check whether `ReadWriteFileImpl.ipp` has the same pattern.
 - **Problem:** RocksDB calls `Flush` after every WAL record. Whenever at least one complete page is buffered,
@@ -190,6 +190,9 @@ closed; their text is in git history at `HEAD:tasks.md` (commit `34947f4`), summ
   and count requests per MB written before and after with the fake blob server's request log. Run
   `WriteableFileTests` (including `Flush_ReusesBuffersAndKeepsTheTailAcrossTheSwap`, which may need its thresholds
   adjusted). Drop the change if throughput does not improve.
+- **Done:** Flush/RangeSync start an upload only when at least half the buffer (64 KiB by default) is filled. Measured with
+  a temporary 300 B append+Flush loop of 16 MiB against the fake blob server (Debug): 32768 -> 256 uploads (2048 -> 16 per
+  MB) and 5407 ms -> 84 ms. Tests that relied on an upload after a single page now use a small buffer.
 
 ### [ ] T86 – Batch delete rebuilds each sub-request from scratch on every attempt
 - **File:** `libs\AzureClient\include\AVEVA\AzureClient\Detail\BlobBatch.hpp:189-210` (`BuildChunkBody`).

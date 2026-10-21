@@ -138,11 +138,15 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Append(const std::
     }
 }
 
-// RocksDB calls Flush after every WAL record, so it must stay cheap: it starts the upload of complete pages without
-// waiting for it and leaves the trailing partial page and durability to Sync and Close (re-uploading the same
-// zero-padded page on every flush would multiply the traffic). An earlier failed upload is still reported here.
+// RocksDB calls Flush after every WAL record, so it must stay cheap: once at least half the buffer is filled it starts
+// the upload of the complete pages without waiting for it, and it leaves the trailing partial page and durability to
+// Sync and Close (re-uploading the same zero-padded page on every flush would multiply the traffic). Below the
+// threshold nothing is sent: readers only see data after Sync publishes the size, so per-page uploads gave no
+// visibility, only one request per 512 B and a stall on every fifth one. An earlier failed upload is still reported.
 template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Flush() {
-    StartFlush(false);
+    if (m_bufferOffset >= m_bufferSize / 2) {
+        StartFlush(false);
+    }
     {
         std::scoped_lock lock(m_uploads->Mutex);
         if (m_uploads->Error) {
@@ -152,7 +156,11 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Flush() {
     m_w.H.Runtime->ThrowIfWritesFenced();
 }
 
-template <typename TBlob> void BasicWriteableFileImpl<TBlob>::RangeSync() { StartFlush(false); }
+template <typename TBlob> void BasicWriteableFileImpl<TBlob>::RangeSync() {
+    if (m_bufferOffset >= m_bufferSize / 2) {
+        StartFlush(false);
+    }
+}
 
 // Uploads the buffered data without waiting for it; Flush, Sync and Close wait. Asynchronous flushes send complete
 // pages only and keep the trailing partial page buffered: uploading it zero-padded and again later with more data
