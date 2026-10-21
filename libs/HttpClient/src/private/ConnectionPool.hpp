@@ -422,7 +422,12 @@ class ConnectionPool {
                 // MSG_DONTWAIT makes just this call non-blocking, so the socket's mode is never toggled.
                 char probe = 0;
                 const auto received = ::recv(socket.native_handle(), &probe, 1, MSG_PEEK | MSG_DONTWAIT);
-                return received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
+                // EAGAIN == EWOULDBLOCK on Linux, so comparing both trips -Wlogical-op.
+                return received < 0 && (errno == EAGAIN
+#if EAGAIN != EWOULDBLOCK
+                                        || errno == EWOULDBLOCK
+#endif
+                                       );
 #endif
             } catch (...) {
                 return false;

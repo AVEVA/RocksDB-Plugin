@@ -233,6 +233,16 @@ class FakeBlobServer {
     // Holds page uploads / ranged downloads until the test releases them.
     Knob<bool> DeferUploads;
     Knob<bool> DeferDownloads;
+    // Defined before its first use: GCC rejects calling an auto-returning member before its definition.
+    template <class THeld> auto Take(THeld& held, const std::size_t position, const char* missing) {
+        std::scoped_lock lock(m_mutex);
+        auto entry = held.Take(*m_http, position);
+        if (!entry) {
+            throw std::logic_error(missing);
+        }
+        return std::move(*entry);
+    }
+
     // Holds Get Blob Properties until CompleteProperties; the response carries the values it had when sent.
     Knob<bool> DeferProperties;
     size_t PendingProperties() { return Count(m_heldProperties); }
@@ -290,15 +300,6 @@ class FakeBlobServer {
     template <class THeld> std::size_t Count(THeld& held) {
         std::scoped_lock lock(m_mutex);
         return held.Count(*m_http);
-    }
-
-    template <class THeld> auto Take(THeld& held, const std::size_t position, const char* missing) {
-        std::scoped_lock lock(m_mutex);
-        auto entry = held.Take(*m_http, position);
-        if (!entry) {
-            throw std::logic_error(missing);
-        }
-        return std::move(*entry);
     }
 
     void FailHeld(const std::size_t requestIndex, const AzureClient::BlobStorageError& error) {

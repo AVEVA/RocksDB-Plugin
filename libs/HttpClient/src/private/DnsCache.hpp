@@ -84,7 +84,10 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     /// <param name="service">The port or service name whose entry to drop.</param>
     void Invalidate(std::string_view host, std::string_view service) {
         std::lock_guard<std::mutex> lock(m_mutex);
-        m_entries.erase(KeyView{host, service});
+        const auto it = m_entries.find(KeyView{host, service});
+        if (it != m_entries.end()) {
+            m_entries.erase(it);
+        }
     }
 
     /// <summary>

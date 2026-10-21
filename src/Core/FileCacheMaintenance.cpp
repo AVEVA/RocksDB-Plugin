@@ -146,7 +146,7 @@ void FileCache::ValidateCountersUnsafe() const {
     size_t stale = 0;
     size_t linked = 0;
     for (const auto& entry : m_entryList) {
-        linked += entry.MetadataOnly.is_linked() ? 1 : 0;
+        linked += entry.MetadataOnly.is_linked() ? size_t{1} : size_t{0};
         const auto state = entry.GetState();
         if (state != FileCacheEntry::State::Downloading && state != FileCacheEntry::State::QueuedForDownload) {
             bytes += entry.GetSize();

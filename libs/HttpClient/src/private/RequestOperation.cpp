@@ -152,7 +152,9 @@ template <typename Stream> bool RequestOperation<Stream>::ConfigureTlsForHost() 
         if (SSL_get_verify_mode(m_stream->native_handle()) != SSL_VERIFY_NONE) {
             m_stream->set_verify_callback(asio::ssl::host_name_verification(m_key.host));
         }
-        if (m_hostIsName && !SSL_set_tlsext_host_name(m_stream->native_handle(), m_key.host.c_str())) {
+        // SSL_set_tlsext_host_name is a macro with an old-style cast, so call SSL_ctrl directly.
+        if (m_hostIsName && !SSL_ctrl(m_stream->native_handle(), SSL_CTRL_SET_TLSEXT_HOSTNAME,
+                                      TLSEXT_NAMETYPE_host_name, const_cast<char*>(m_key.host.c_str()))) {
             Fail(HttpClientError::TlsFailed);
             return false;
         }
