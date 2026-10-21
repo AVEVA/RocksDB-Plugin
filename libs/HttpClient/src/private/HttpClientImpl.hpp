@@ -70,6 +70,8 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
   public:
     using Cancellation = CancelState<BasicHttpClientCore>;
 
+    struct RequestState;
+
     /// <summary>
     /// A request waiting in the per-origin limiter for a slot.
     /// </summary>
@@ -81,7 +83,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         Detail::CompletionPointer completion;
         std::shared_ptr<Cancellation> cancellation;
         std::chrono::steady_clock::time_point deadline;
-        std::shared_ptr<void> state; // The request's RequestState, kept so a failed start can return its slot.
+        std::shared_ptr<RequestState> state; // Kept so a failed start can return its slot.
     };
 
     /// <summary>
@@ -340,7 +342,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     void StartLimited(PendingRequest&& pending) noexcept {
         // The state was allocated at submission, so starting cannot fail for lack of tracking memory: the slot
         // is handed to it first, and from here its Finish returns the slot whichever path completes the request.
-        auto state = std::static_pointer_cast<RequestState>(std::move(pending.state));
+        auto state = std::move(pending.state);
         state->HoldSlot(m_limiter, std::move(pending.origin));
         try {
             FaultPolicy::OnStartLimited();
@@ -360,9 +362,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// </summary>
     /// <param name="pending">The request to fail.</param>
     /// <param name="error">Why it was dropped.</param>
-    void AbortLimited(PendingRequest&& pending, std::error_code error) noexcept {
-        FailLater(std::static_pointer_cast<RequestState>(std::move(pending.state)), error);
-    }
+    void AbortLimited(PendingRequest&& pending, std::error_code error) noexcept { FailLater(pending.state, error); }
 
     /// <summary>
     /// Sends the request immediately, reusing a pooled connection to its origin when one is available

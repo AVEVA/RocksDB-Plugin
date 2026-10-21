@@ -438,7 +438,7 @@ formatting changes.
 
 **Result (done):** Hook and CI now select `src|include|tests|libs|tools` with extensions `c|cc|cpp|cxx|h|hh|hpp|hxx|ipp`; hook README and copilot-instructions updated. Verified with pinned clang-format 22.1.3: all tracked `.ipp` files and `tools/db_bench/BenchmarkRunner.cpp` already pass `--dry-run --Werror`, so no reformatting was needed. Config-only; no native build/ctest.
 
-### [ ] T104 - Use concrete ownership for the HTTP pending request state
+### [x] T104 - Use concrete ownership for the HTTP pending request state
 
 **Evidence:** `libs\HttpClient\src\private\HttpClientImpl.hpp:84` stores the
 request's only possible state as `std::shared_ptr<void>`. Lines 343 and 364 cast
@@ -452,6 +452,8 @@ dispatch mechanism.
 
 **Acceptance:** Existing limiter cancellation, failed-start, failed-post and
 client-destruction tests pass, with unchanged submission allocation counts.
+
+**Result (done):** `PendingRequest::state` is now `std::shared_ptr<RequestState>` (forward-declared); both `static_pointer_cast`s and the stale comment removed. WindowsDebug build and full ctest pass (1179/1179, allocation-count tests unchanged); clang-format clean.
 
 ### [ ] T105 - Remove the obsolete upload-error accessor and stale wait wording
 
