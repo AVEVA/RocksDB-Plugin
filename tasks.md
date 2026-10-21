@@ -64,7 +64,7 @@ closed; their text is in git history at `HEAD:tasks.md` (commit `34947f4`), summ
   Append `N*PageSize + 100` bytes, call `Flush()` and expect the exception, then `Sync()`. Assert that the uploaded
   bytes equal the appended bytes (the last 100 bytes must not be zero). The test must fail before the fix.
 
-### [ ] T80 – A read restarted from inside a completion can be lost (hang plus an exception into the host `io_context`)
+### [x] T80 – A read restarted from inside a completion can be lost (hang plus an exception into the host `io_context`)
 - **Files:**
   - `src\Azure\Impl\ReadableFileImpl.ipp:459-523` (`ReadAsyncAttempt`, `RefreshMetadataAndReadAsync`)
   - `src\Azure\Impl\ReadableFileImpl.ipp:563-600` (`CoalescedMetadataAsync`, waiter loop)

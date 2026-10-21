@@ -11,6 +11,7 @@
 #include <cassert>
 #include <chrono>
 #include <functional>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -45,6 +46,42 @@ void FinishRead(std::shared_ptr<const BasicReadableFileImpl<TBlob>>& self, TCall
     done(std::move(error), data, std::move(owner));
 }
 
+// Guarantees a read's completion runs exactly once. A read is restarted from inside completion handlers, where an
+// initiation that throws destroys the callback unseen and the read would never finish (stranding its
+// AsyncReadRequest and AsyncReadTracker token). Destroying an unused guard completes the read with an error instead;
+// that is safe because the callback only completes the AsyncReadRequest, and RocksDB callbacks still run from Poll.
+template <typename TCallback> class ReadCompletionGuard {
+  public:
+    explicit ReadCompletionGuard(TCallback callback) : m_callback(std::move(callback)) {}
+    ReadCompletionGuard(const ReadCompletionGuard&) = delete;
+    ReadCompletionGuard& operator=(const ReadCompletionGuard&) = delete;
+    ReadCompletionGuard& operator=(ReadCompletionGuard&&) = delete;
+    ReadCompletionGuard(ReadCompletionGuard&& other) noexcept(std::is_nothrow_move_constructible_v<TCallback>)
+        : m_callback(std::move(other.m_callback)), m_pending(std::exchange(other.m_pending, false)) {}
+
+    ~ReadCompletionGuard() noexcept {
+        if (!m_pending) {
+            return;
+        }
+        try {
+            m_callback(std::make_exception_ptr(
+                           RequestFailedException(0, "ReadAbandoned", "Read abandoned before it completed", "", {})),
+                       std::string_view{}, std::shared_ptr<const void>{});
+        } catch (...) {
+            // Nothing left to report to: the callback only completes the request and must not throw.
+        }
+    }
+
+    void operator()(std::exception_ptr error, std::string_view data, std::shared_ptr<const void> owner) {
+        m_pending = false;
+        m_callback(std::move(error), data, std::move(owner));
+    }
+
+  private:
+    TCallback m_callback;
+    bool m_pending = true;
+};
+
 // Runs completion waiters, each isolated: one that throws must neither skip the rest (their reads would never
 // complete) nor escape into the host io_context's run().
 template <typename TLogger>
@@ -56,6 +93,22 @@ void RunWaiters(std::vector<std::move_only_function<void()>>& waiters, TLogger& 
             BOOST_LOG_SEV(logger, boost::log::trivial::error) << "Prefetch waiter failed: " << e.what();
         } catch (...) {
             BOOST_LOG_SEV(logger, boost::log::trivial::error) << "Prefetch waiter failed";
+        }
+    }
+}
+
+// Same isolation for metadata-refresh waiters. A waiter that throws has been destroyed with its read's completion
+// guard, which completes that read with an error, so only the log is left to do.
+template <typename TWaiters, typename TLogger>
+void RunMetadataWaiters(TWaiters& waiters, const std::shared_ptr<TLogger>& logger, const std::exception_ptr& error,
+                        const int64_t size, const std::string& etag, const uint64_t epoch) noexcept {
+    for (auto& waiter : waiters) {
+        try {
+            waiter(error, size, etag, epoch);
+        } catch (...) {
+            if (logger) {
+                BOOST_LOG_SEV(*logger, boost::log::trivial::error) << "Metadata refresh waiter failed";
+            }
         }
     }
 }
@@ -441,16 +494,17 @@ template <ReadCompletion TCallback>
 void BasicReadableFileImpl<TBlob>::ReadAsync(std::shared_ptr<const BasicReadableFileImpl<TBlob>> self,
                                              const int64_t offset, const int64_t bytesToRead, TCallback callback,
                                              const int attemptsLeft, const std::chrono::milliseconds timeout) {
+    ReadableFileDetail::ReadCompletionGuard<TCallback> guarded(std::move(callback));
     if (self->m_asyncReads) {
         // The token is declared first so it is released after the callback (and anything the callback holds).
-        auto tracked = [token = self->m_asyncReads->Begin(), callback = std::move(callback)](
+        auto tracked = [token = self->m_asyncReads->Begin(), callback = std::move(guarded)](
                            std::exception_ptr error, std::string_view data, std::shared_ptr<const void> owner) mutable {
             callback(std::move(error), data, std::move(owner));
         };
         ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(tracked), attemptsLeft, timeout);
         return;
     }
-    ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(callback), attemptsLeft, timeout);
+    ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(guarded), attemptsLeft, timeout);
 }
 
 // Async counterpart of DownloadWithRetry: every step (ETag check, conditional download, metadata refresh) is chained
@@ -509,8 +563,17 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
                         ReadableFileDetail::FinishRead(self, callback, ReadableFileDetail::StaleReadError(), {});
                         return;
                     }
-                    RefreshMetadataAndReadAsync(std::move(self), offset, bytesToRead, std::move(callback), left,
-                                                timeout);
+                    // This runs on the host io_context, so nothing may escape; if the restart throws, its callback is
+                    // destroyed unused and the completion guard fails the read.
+                    const auto logger = self->m_h.Logger;
+                    try {
+                        RefreshMetadataAndReadAsync(std::move(self), offset, bytesToRead, std::move(callback), left,
+                                                    timeout);
+                    } catch (...) {
+                        if (logger) {
+                            BOOST_LOG_SEV(*logger, boost::log::trivial::error) << "Restarting a stale read failed";
+                        }
+                    }
                     return;
                 }
                 ReadableFileDetail::FinishRead(self, callback, error, {});
@@ -575,10 +638,9 @@ void BasicReadableFileImpl<TBlob>::CoalescedMetadataAsync(
                     waiters.swap(refresh.Waiters);
                     refresh.InFlight = false;
                 }
+                const auto logger = file->m_h.Logger;
                 file.reset();
-                for (auto& waiter : waiters) {
-                    waiter(error, size, etag, epoch);
-                }
+                ReadableFileDetail::RunMetadataWaiters(waiters, logger, error, size, etag, epoch);
             });
     } catch (...) {
         const auto error = std::current_exception();
@@ -588,9 +650,7 @@ void BasicReadableFileImpl<TBlob>::CoalescedMetadataAsync(
             waiters.swap(state.Waiters);
             state.InFlight = false;
         }
-        for (auto& waiter : waiters) {
-            waiter(error, 0, std::string(), 0);
-        }
+        ReadableFileDetail::RunMetadataWaiters(waiters, file->m_h.Logger, error, 0, std::string(), 0);
     }
 }
 

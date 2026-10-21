@@ -1161,6 +1161,70 @@ TEST_F(AsyncReadTests, ReadAsync_TrackedReadEndsAfterCompletionAndPoll) {
     EXPECT_EQ(0U, tracker->InFlight());
 }
 
+TEST_F(AsyncReadTests, ReadAsync_RestartAfter412ThatThrowsOnInitiation_FailsTheReadAndDrainsTheTracker) {
+    HostIoContext host;
+    auto tracker = std::make_shared<AsyncReadTracker>(host.Context().get_executor());
+    FakeReadableFile file{std::make_shared<FakeReadableFileImpl>("test.sst", m_deferredEnv.Runtime,
+                                                                 m_deferredEnv.Client, nullptr, m_logger, tracker)};
+    std::vector<char> scratch(16);
+    auto req = MakeRequest(0, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+    ASSERT_TRUE(Submit(file, req, record, handle).ok());
+    m_deferredEnv.Blob->DeferProperties = true;
+    auto download = m_deferredEnv.Blob->TakeDownload();
+
+    EXPECT_NO_THROW({
+        download.Fail(FakeBlobServer::Error(412, "ConditionNotMet"));
+        ASSERT_EQ(1U, m_deferredEnv.Blob->PendingProperties());
+        m_deferredEnv.Http.FailNextInitiation(std::make_exception_ptr(std::bad_alloc()));
+        m_deferredEnv.Blob->CompleteProperties();
+    });
+
+    std::vector<void*> handles{handle.Handle};
+    ASSERT_TRUE(PollAsyncReads(handles).ok());
+    EXPECT_EQ(1, record.Calls.load());
+    EXPECT_FALSE(record.Status.ok());
+    handle.Reset();
+    EXPECT_EQ(0U, tracker->InFlight());
+}
+
+TEST_F(AsyncReadTests, ReadAsync_WaiterOnSharedMetadataRefreshThrows_TheOtherWaiterStillCompletes) {
+    auto file = CreateFile(m_deferredEnv);
+    m_deferredEnv.Blob->SetCapacity(BlobSize * 2);
+    m_deferredEnv.Blob->Size = BlobSize * 2;
+    m_deferredEnv.Blob->ETag = "etag2";
+    m_deferredEnv.Blob->DeferProperties = true;
+
+    std::vector<char> scratchA(16);
+    std::vector<char> scratchB(16);
+    auto reqA = MakeRequest(BlobSize, scratchA);
+    auto reqB = MakeRequest(BlobSize, scratchB);
+    CallbackRecord recordA;
+    CallbackRecord recordB;
+    IoHandle handleA;
+    IoHandle handleB;
+    ASSERT_TRUE(Submit(file, reqA, recordA, handleA).ok());
+    ASSERT_TRUE(Submit(file, reqB, recordB, handleB).ok());
+    ASSERT_EQ(1U, m_deferredEnv.Blob->PendingProperties());
+
+    // The first waiter restarts its read and its download initiation throws; the second must not be skipped.
+    EXPECT_NO_THROW({
+        m_deferredEnv.Http.FailNextInitiation(std::make_exception_ptr(std::bad_alloc()));
+        m_deferredEnv.Blob->CompleteProperties();
+    });
+    ASSERT_EQ(1U, m_deferredEnv.Blob->PendingDownloads());
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(16, 'W'));
+
+    std::vector<void*> handles{handleA.Handle, handleB.Handle};
+    ASSERT_TRUE(PollAsyncReads(handles).ok());
+    EXPECT_EQ(1, recordA.Calls.load());
+    EXPECT_FALSE(recordA.Status.ok());
+    EXPECT_EQ(1, recordB.Calls.load());
+    EXPECT_TRUE(recordB.Status.ok()) << recordB.Status.ToString();
+    EXPECT_EQ(std::string(16, 'W'), recordB.Data);
+}
+
 // A responder records a held request before the transport registers it as pending. Counting the held requests in
 // that window must not forget the request: doing so made the 32-wide MultiRead window tests wait for a download that
 // the test had silently dropped.
