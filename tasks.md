@@ -102,7 +102,7 @@ closed; their text is in git history at `HEAD:tasks.md` (commit `34947f4`), summ
 
   Both must hang or fail before the fix. Do not reintroduce erasure: the guard is a template over `TCallback`.
 
-### [ ] T81 – `MultiRead` can leak an in-flight read that writes into freed memory
+### [x] T81 – `MultiRead` can leak an in-flight read that writes into freed memory
 - **File:** `src\Azure\BasicReadableFile.ipp:155-315`.
 - **Problem:** In the `start` lambda, `StartRead` succeeds and only then is the handle stored with
   `active.push_back(Active{handle, &group})`. If `push_back` throws (`bad_alloc`), the handle is in neither `active`

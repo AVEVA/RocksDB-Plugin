@@ -172,6 +172,12 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
         std::unique_ptr<char[]> Buffer;
     };
 
+    // Marks requests that have no outcome yet, so the batch-level handler can tell them from per-request results.
+    for (size_t i = 0; i < num_reqs; ++i) {
+        reqs[i].status = rocksdb::IOStatus::IOError(kMultiReadPendingMessage);
+        reqs[i].result = rocksdb::Slice();
+    }
+
     // A request whose range overflows cannot be merged or read; it fails on its own like any per-request error.
     std::vector<size_t> order;
     order.reserve(num_reqs);
@@ -206,6 +212,8 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
         const Group* Owner;
     };
     std::vector<Active> active;
+    // Reserved up front so push_back cannot throw after a read has started and orphan its handle.
+    active.reserve(std::min<size_t>(kMultiReadMaxInFlight, groups.size()));
     // Deleting a handle aborts a request still in flight, so the handles are released even on an early exit. Declared
     // after `groups` so it runs first: an aborted request never touches its group's buffer afterwards.
     struct HandleCleanup {
@@ -304,7 +312,16 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
     return rocksdb::IOStatus::OK();
 } catch (...) {
     // RocksDB does not expect exceptions from a file. Locals (and so the in-flight handles) are already released here.
-    return AzureErrorTranslator::FromCurrentException(*m_logger, "MultiRead");
+    auto status = AzureErrorTranslator::FromCurrentException(*m_logger, "MultiRead");
+    // Requests without an outcome must not keep the caller's stale status or result.
+    for (size_t i = 0; i < num_reqs; ++i) {
+        if (reqs[i].status.IsIOError() && reqs[i].status.getState() != nullptr &&
+            std::string_view(reqs[i].status.getState()) == kMultiReadPendingMessage) {
+            reqs[i].status = status;
+            reqs[i].result = rocksdb::Slice();
+        }
+    }
+    return status;
 }
 
 // A hint: starts a background download into a per-file buffer that later reads of that range are served from.

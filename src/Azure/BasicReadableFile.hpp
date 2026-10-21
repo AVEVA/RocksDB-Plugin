@@ -11,6 +11,7 @@
 
 #include <functional>
 #include <memory>
+#include <string_view>
 
 namespace AVEVA::RocksDB::Plugin::Azure {
 // Adapts a readable file implementation to RocksDB. A template only so the tests can run it over a fake blob client;
@@ -29,6 +30,7 @@ template <class TImpl> class BasicReadableFile final : public rocksdb::FSRandomA
     // MultiRead keeps at most this many blob downloads outstanding, so a large batch cannot open unbounded
     // connections.
     static constexpr size_t kMultiReadMaxInFlight = 32;
+    static constexpr std::string_view kMultiReadPendingMessage = "MultiRead request has no outcome yet";
     // Requests separated by at most this many bytes are fetched with one GET; the few wasted bytes cost less than
     // another round trip.
     static constexpr uint64_t kMultiReadMaxGap = 4 * 1024;
