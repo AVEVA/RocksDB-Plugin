@@ -8,6 +8,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include <algorithm>
 #include <boost/log/trivial.hpp>
+#include <limits>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 namespace WriteableFileDetail {
@@ -147,13 +148,8 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Flush() {
     if (m_bufferOffset >= m_bufferSize / 2) {
         StartFlush(false);
     }
-    {
-        std::scoped_lock lock(m_uploads->Mutex);
-        if (m_uploads->Error) {
-            std::rethrow_exception(m_uploads->Error);
-        }
-    }
-    m_w.H.Runtime->ThrowIfWritesFenced();
+    // The predicate is immediately true, so this only reports a failed upload or a fenced writer.
+    WaitForUploads(std::numeric_limits<size_t>::max());
 }
 
 template <typename TBlob> void BasicWriteableFileImpl<TBlob>::RangeSync() {

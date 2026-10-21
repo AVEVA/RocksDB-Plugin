@@ -219,7 +219,7 @@ closed; their text is in git history at `HEAD:tasks.md` (commit `34947f4`), summ
 
 ## P3: cleanups / simplifications / header hygiene
 
-### [ ] T87 – `Flush` duplicates `WaitForUploads`' error reporting
+### [x] T87 – `Flush` duplicates `WaitForUploads`' error reporting
 - **File:** `src\Azure\Impl\WriteableFileImpl.ipp:144-153` and `:274-283`.
 - **Problem:** `Flush` repeats the "rethrow sticky upload error, then `ThrowIfWritesFenced`" sequence that
   `WaitForUploads` already contains.
