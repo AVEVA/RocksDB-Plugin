@@ -29,6 +29,12 @@ struct AzureErrorTranslator {
     static bool IsTransient(unsigned int statusCode, const std::error_code& code = {});
 
     /// <summary>
+    /// True when the service no longer recognises our lease (or another owner holds it), so the blob may be written
+    /// by someone else and the request must never be retried.
+    /// </summary>
+    static bool IsLeaseLost(const std::error_code& code);
+
+    /// <summary>
     /// Converts a captured exception to a status without logging (for callers that have no logger).
     /// </summary>
     static rocksdb::IOStatus FromException(const std::exception_ptr& error);

@@ -116,16 +116,7 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
     // These failures can never succeed on retry: the service no longer recognises our lease. The code is checked in
     // because 400/412 lease failures carry the same meaning as a 409 (which IsTransient already rejects).
     static bool IsFatalLeaseFailure(const RequestFailedException& e) {
-        using AzureClient::BlobStorageErrorCode;
-        for (const auto code :
-             {BlobStorageErrorCode::LeaseLost, BlobStorageErrorCode::LeaseIdMissing,
-              BlobStorageErrorCode::LeaseAlreadyPresent, BlobStorageErrorCode::LeaseIdMismatchWithBlobOperation,
-              BlobStorageErrorCode::LeaseNotPresentWithBlobOperation}) {
-            if (e.Code == AzureClient::make_error_code(code)) {
-                return true;
-            }
-        }
-        return false;
+        return AzureErrorTranslator::IsLeaseLost(e.Code);
     }
 
     // Only what the client's own retry policy would retry can plausibly succeed. Anything else (400, 401, 403, 404,

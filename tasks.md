@@ -79,7 +79,8 @@ code. Findings marked **Verify first** are medium confidence: confirm or measure
 
 ## P2: performance / improvements
 
-### [ ] T68 – Map the remaining Azure error codes; one lease-lost predicate
+### [x] T68 – Map the remaining Azure error codes; one lease-lost predicate
+- **Done:** `AzureErrorTranslator::IsLeaseLost` is now the single lease-lost list, used by the translator and `IsFatalLeaseFailure`. `InvalidPageRange` → `InvalidArgument`; 412 condition codes → non-retryable `IOError` with the "Blob changed concurrently: " prefix (not Corruption, since nothing on disk is corrupt); `LeaseAlreadyPresent` → `IOFenced`. `LockFileImpl` checks the raw 409, so lock contention is unchanged. Tests added to `AzureErrorTranslatorTests`.
 - **Files:**
   - `src\Azure\AzureErrorTranslator.cpp:60-101`
   - `src\Azure\Impl\include\AVEVA\RocksDB\Plugin\Azure\Impl\LeaseRenewalLoop.hpp:116-129` (`IsFatalLeaseFailure`)

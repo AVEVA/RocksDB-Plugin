@@ -231,6 +231,36 @@ TEST(AzureErrorTranslatorTests, NewLeaseCodesAreIOFencedAndPermissionMismatchIsN
     EXPECT_NE(denied.ToString().find("Authorization failed"), std::string::npos);
 }
 
+TEST(AzureErrorTranslatorTests, InvalidPageRangeIsNonRetryableInvalidArgument) {
+    const auto code =
+        ::AVEVA::AzureClient::make_error_code(::AVEVA::AzureClient::BlobStorageErrorCode::InvalidPageRange);
+    const auto status = AzureErrorTranslator::IOStatusFromError(Failure(416, "InvalidPageRange", code));
+    EXPECT_TRUE(status.IsInvalidArgument());
+    EXPECT_FALSE(status.GetRetryable());
+}
+
+TEST(AzureErrorTranslatorTests, ConditionNotMetCodesAreNonRetryableConcurrentChangeIOErrors) {
+    using ::AVEVA::AzureClient::BlobStorageErrorCode;
+    for (const auto condition : {BlobStorageErrorCode::SequenceNumberConditionNotMet,
+                                 BlobStorageErrorCode::ConditionNotMet, BlobStorageErrorCode::TargetConditionNotMet}) {
+        const auto status = AzureErrorTranslator::IOStatusFromError(
+            Failure(412, "Condition", ::AVEVA::AzureClient::make_error_code(condition)));
+        EXPECT_TRUE(status.IsIOError()) << static_cast<int>(condition);
+        EXPECT_FALSE(status.GetRetryable()) << static_cast<int>(condition);
+        EXPECT_NE(status.ToString().find("Blob changed concurrently"), std::string::npos);
+    }
+}
+
+TEST(AzureErrorTranslatorTests, LeaseAlreadyPresentIsIOFencedAndLeaseLost) {
+    const auto code =
+        ::AVEVA::AzureClient::make_error_code(::AVEVA::AzureClient::BlobStorageErrorCode::LeaseAlreadyPresent);
+    const auto status = AzureErrorTranslator::IOStatusFromError(Failure(409, "LeaseAlreadyPresent", code));
+    EXPECT_TRUE(status.IsIOFenced());
+    EXPECT_FALSE(status.GetRetryable());
+    EXPECT_TRUE(AzureErrorTranslator::IsLeaseLost(code));
+    EXPECT_FALSE(AzureErrorTranslator::IsLeaseLost(std::make_error_code(std::errc::timed_out)));
+}
+
 TEST(AzureErrorTranslatorTests, WritesFencedExceptionIsIOFenced) {
     const auto status = AzureErrorTranslator::FromException(std::make_exception_ptr(WritesFencedException("fenced")));
     EXPECT_TRUE(status.IsIOFenced());

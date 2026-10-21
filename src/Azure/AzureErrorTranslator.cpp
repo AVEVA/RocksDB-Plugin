@@ -59,15 +59,19 @@ rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const RequestFailedExc
         return IOStatus::Corruption("Invalid service response: " + text);
     }
     // Another writer may own the blob now, so retrying could corrupt data; IOFenced is non-retryable.
-    if (code == AzureClient::BlobStorageErrorCode::LeaseLost ||
-        code == AzureClient::BlobStorageErrorCode::LeaseIdMismatchWithBlobOperation ||
-        code == AzureClient::BlobStorageErrorCode::LeaseNotPresentWithBlobOperation ||
-        code == AzureClient::BlobStorageErrorCode::LeaseIdMissing ||
-        code == AzureClient::BlobStorageErrorCode::LeaseIdMismatchWithLeaseOperation ||
-        code == AzureClient::BlobStorageErrorCode::LeaseIsBrokenAndCannotBeRenewed ||
-        code == AzureClient::BlobStorageErrorCode::LeaseAlreadyBroken ||
-        code == AzureClient::BlobStorageErrorCode::LeaseIsBreakingAndCannotBeAcquired) {
+    // Lock-file acquisition inspects the raw client error instead, so contention there stays "locked", not fenced.
+    if (IsLeaseLost(code)) {
         return IOStatus::IOFenced("Lease lost: " + text);
+    }
+    if (code == AzureClient::BlobStorageErrorCode::InvalidPageRange) {
+        return IOStatus::InvalidArgument("Invalid page range: " + text);
+    }
+    // The blob changed underneath us. Nothing on disk is corrupt, so this is a non-retryable IOError rather than
+    // Corruption; the prefix lets callers and logs tell it from a generic failure.
+    if (code == AzureClient::BlobStorageErrorCode::SequenceNumberConditionNotMet ||
+        code == AzureClient::BlobStorageErrorCode::ConditionNotMet ||
+        code == AzureClient::BlobStorageErrorCode::TargetConditionNotMet) {
+        return IOStatus::IOError("Blob changed concurrently: " + text);
     }
     if (code == AzureClient::BlobStorageErrorCode::AuthorizationPermissionMismatch) {
         return IOStatus::IOError("Authorization failed: " + text);
@@ -102,6 +106,21 @@ rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const RequestFailedExc
     default:
         return IOStatusFromError(text, error.StatusCode);
     }
+}
+
+bool AzureErrorTranslator::IsLeaseLost(const std::error_code& code) {
+    using AzureClient::BlobStorageErrorCode;
+    for (const auto lost :
+         {BlobStorageErrorCode::LeaseLost, BlobStorageErrorCode::LeaseIdMismatchWithBlobOperation,
+          BlobStorageErrorCode::LeaseNotPresentWithBlobOperation, BlobStorageErrorCode::LeaseIdMissing,
+          BlobStorageErrorCode::LeaseIdMismatchWithLeaseOperation,
+          BlobStorageErrorCode::LeaseIsBrokenAndCannotBeRenewed, BlobStorageErrorCode::LeaseAlreadyBroken,
+          BlobStorageErrorCode::LeaseIsBreakingAndCannotBeAcquired, BlobStorageErrorCode::LeaseAlreadyPresent}) {
+        if (code == AzureClient::make_error_code(lost)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool AzureErrorTranslator::IsTransient(const RequestFailedException& error) {
