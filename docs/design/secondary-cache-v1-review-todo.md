@@ -16,6 +16,8 @@ on `paul-pirogovsky/ssd-secondary-cache` (2026-10-21). Original findings below
 describe `41f8390`; implementation progress and remaining gates are recorded here.
 Keep `kLegacy` as the default. Do not describe `kRegion` as production-ready.
 
+Start new sessions from the [handoff/background index](secondary-cache-handoff.md).
+
 ## Implementation progress: first minimal milestone
 
 The [cache-local README](../../src/Core/SecondaryCache/README.md) describes files,
