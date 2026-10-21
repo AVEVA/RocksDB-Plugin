@@ -5,6 +5,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -55,6 +57,45 @@ TEST(LruFileIndexTests, ReserveCapacity_EvictsOthersNotTheReservedKeyAndReleases
     EXPECT_EQ(60U, index.GetUsage());
     EXPECT_EQ(1U, index.SetCapacity(0).size());
 }
+
+namespace {
+// Fails the Nth allocation of at least kMinFailedAllocation bytes after arming (1-based); 0 means disarmed. Small
+// allocations (e.g. debug-STL iterator proxies) are skipped because they occur in noexcept contexts.
+constexpr size_t kMinFailedAllocation = 64;
+thread_local size_t g_failAllocationIn = 0;
+} // namespace
+
+void* operator new(const size_t size) {
+    if (size >= kMinFailedAllocation && g_failAllocationIn != 0 && --g_failAllocationIn == 0)
+        throw std::bad_alloc();
+    if (void* p = std::malloc(size ? size : 1))
+        return p;
+    throw std::bad_alloc();
+}
+
+void operator delete(void* p) noexcept { std::free(p); }
+
+void operator delete(void* p, size_t) noexcept { std::free(p); }
+
+// A reservation that throws (while reserving the eviction list or building eviction paths) must release its
+// temporary pin and size discount, so the replaced key stays accounted for and evictable.
+TEST(LruFileIndexTests, ReserveCapacity_ThrowingEvictionReleasesPinAndSizeDiscount) {
+    const std::string longDir(64, 'd');
+    for (size_t failAt = 1; failAt <= 3; ++failAt) {
+        LruFileIndex index(longDir, 100);
+        (void)index.RegisterEntry("a", 60);
+        (void)index.RegisterEntry("b", 30);
+
+        g_failAllocationIn = failAt;
+        EXPECT_THROW((void)index.ReserveCapacity("a", 95, true), std::bad_alloc) << "failAt=" << failAt;
+        g_failAllocationIn = 0;
+
+        EXPECT_EQ(90U, index.GetUsage()) << "failAt=" << failAt;
+        EXPECT_EQ(2U, index.SetCapacity(0).size()) << "failAt=" << failAt;
+        EXPECT_EQ(0U, index.GetUsage()) << "failAt=" << failAt;
+    }
+}
+
 // Pinned entries at the LRU tail must be skipped without disturbing eviction order of the unpinned ones.
 TEST(LruFileIndexTests, EvictionSkipsPinnedTailAndKeepsLruOrder) {
     constexpr size_t kPinned = 3000;

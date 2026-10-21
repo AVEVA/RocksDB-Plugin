@@ -65,17 +65,26 @@ std::optional<LruFileIndex::EvictList> LruFileIndex::ReserveCapacity(const std::
     }
 
     // Temporarily discount the existing entry so eviction is sized against the
-    // net new bytes required.  Restored before returning so m_currentSize stays
-    // consistent on any failure path after this method returns.
+    // net new bytes required.  The guard restores the discount and the pin on every
+    // exit (including a throw from eviction) while the mutex is still held; the
+    // existing entry is never evicted meanwhile, so its iterator stays valid.
     m_currentSize -= existingSize;
+    const bool pinned = indexIt != m_index.end();
+    struct Restore {
+        LruFileIndex& self;
+        LruIterator entry;
+        bool pinned;
+        size_t size;
+        ~Restore() {
+            if (pinned)
+                --entry->pinCount;
+            self.m_currentSize += size;
+        }
+    } restore{*this, pinned ? *indexIt : LruIterator{}, pinned, existingSize};
 
     // If a single entry is larger than the entire capacity it can never fit,
-    // even after evicting everything.  Restore the size accounting and bail.
+    // even after evicting everything.
     if (storedSize > m_capacity) {
-        if (indexIt != m_index.end()) {
-            --(*indexIt)->pinCount;
-        }
-        m_currentSize += existingSize;
         return std::nullopt;
     }
 
@@ -83,10 +92,6 @@ std::optional<LruFileIndex::EvictList> LruFileIndex::ReserveCapacity(const std::
         EvictUntilSizeLocked(m_capacity - storedSize, evictPairs);
     }
 
-    if (indexIt != m_index.end()) {
-        --(*indexIt)->pinCount;
-    }
-    m_currentSize += existingSize;
     return evictPairs;
 }
 

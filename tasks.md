@@ -277,7 +277,13 @@ RocksDB-thread back-pressure and shutdown drainage still work.
 
 ## P2: cache correctness and consistency
 
-### [ ] T98 - Roll back the new temporary LRU pin when reservation throws
+### [x] T98 - Roll back the new temporary LRU pin when reservation throws
+
+**Result:** Fixed. `ReserveCapacity` now restores the pin and size discount with a
+scope guard on every exit. Added fault-injection test
+`LruFileIndexTests.ReserveCapacity_ThrowingEvictionReleasesPinAndSizeDiscount`
+(failed before the fix, passes after). Full WindowsDebug ctest: 1175/1175 passed
+(integration tests skipped).
 
 **Evidence:** `src\Core\LruFileIndex.cpp:60-89` now increments the existing
 entry's `pinCount`, discounts its size and calls `EvictUntilSizeLocked`.
