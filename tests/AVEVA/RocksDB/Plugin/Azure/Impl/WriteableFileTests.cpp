@@ -221,6 +221,31 @@ TEST_F(WriteableFileTests, Sync_UploadFailed_ThrowsAndKeepsThrowing) {
     EXPECT_THROW(file.Sync(), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
 }
 
+TEST_F(WriteableFileTests, Flush_UploadThrowsSynchronously_KeepsTheTailForARetry) {
+    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
+    m_env.Blob->SetCapacity(16 * pageSize);
+
+    std::vector<char> expected;
+    for (int64_t i = 0; i < 2 * pageSize + 100; ++i) {
+        expected.push_back(static_cast<char>('a' + i % 26));
+    }
+
+    auto file = MakeFile();
+    file.Append(expected);
+
+    auto throwOnce = std::make_shared<std::atomic<bool>>(true);
+    m_env.Blob->Fault = [throwOnce](const FakeBlobServer::Operation operation) {
+        if (operation == FakeBlobServer::Operation::UploadPages && throwOnce->exchange(false)) {
+            throw std::bad_alloc();
+        }
+        return std::nullopt;
+    };
+    EXPECT_THROW(file.Flush(), std::bad_alloc);
+
+    file.Sync();
+    EXPECT_EQ(expected, Prefix(m_env.Blob->Data, expected.size()));
+}
+
 TEST_F(WriteableFileTests, AppendBytes_LessThanAPage_PageWritten) {
     m_env.Blob->SetCapacity(Configuration::PageBlob::PageSize);
 

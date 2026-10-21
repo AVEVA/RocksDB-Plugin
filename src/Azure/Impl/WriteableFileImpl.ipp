@@ -214,10 +214,12 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::StartFlush(const b
     try {
         StartUpload(std::shared_ptr<const std::vector<char>>(owner, &owner->Data), m_lastPageOffset);
     } catch (...) {
-        // Nothing was accepted, so the data stays buffered for a retry.
+        // Nothing was accepted, so the data stays buffered for a retry. Truncating the payload dropped the tail from
+        // it; the tail now sits at the start of the current buffer, so copy it back before the swap. The rented
+        // buffer ends up in the payload and returns to the pool when the payload is destroyed.
         owner->Data.resize(static_cast<size_t>(m_bufferSize));
+        std::copy(m_buffer.begin(), m_buffer.begin() + tail, owner->Data.begin() + fullBytes);
         std::swap(m_buffer, owner->Data);
-        owner->Pool.reset();
         throw;
     }
     BOOST_LOG_SEV(*m_w.H.Logger, boost::log::trivial::debug)
