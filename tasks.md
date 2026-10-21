@@ -307,7 +307,12 @@ the temporarily pinned entry. Check the existing replacement-generation pin
 tests. This finding is statically traced, not runtime fault-injection verified
 by this review.
 
-### [ ] T99 - Verify that partial-prefetch reads cannot return mixed blob versions
+### [x] T99 - Verify that partial-prefetch reads cannot return mixed blob versions
+
+**Result:** Reproduced with `AsyncReadTests.Read_BlobOverwrittenAfterPrefetch_NeverReturnsMixedVersions`
+(old prefix + new suffix returned OK). Fixed in `RandomRead`: if the ETag differs from the one the prefetched
+prefix was read under after the suffix download, the whole range is re-downloaded under one ETag. The stable-ETag
+suffix-only path is unchanged.
 
 **Verify first; medium confidence.**
 

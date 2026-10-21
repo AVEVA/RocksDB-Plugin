@@ -155,6 +155,9 @@ int64_t BasicReadableFileImpl<TBlob>::RandomRead(const int64_t offset, int64_t b
     }
 
     int64_t served = 0;
+    // Prefetched bytes belong to the version cached at this point; if the download below ends up on another
+    // version the copied prefix is stale and the whole range must be read again.
+    const auto prefetchEtag = GetMetadata().second;
     if (const auto prefetched = TryReadFromPrefetch(offset, bytesToRead, buffer, true, true)) {
         served = static_cast<int64_t>(*prefetched);
         if (served >= bytesToRead) {
@@ -164,6 +167,10 @@ int64_t BasicReadableFileImpl<TBlob>::RandomRead(const int64_t offset, int64_t b
 
     // Only the part the prefetch did not cover is downloaded.
     auto bytesRead = DownloadWithRetry(offset + served, bytesToRead - served, buffer + served);
+    if (served > 0 && !HasETag(prefetchEtag)) {
+        served = 0;
+        bytesRead = DownloadWithRetry(offset, bytesToRead, buffer);
+    }
     bytesRead = std::max<int64_t>(bytesRead, 0);
 
     return served + bytesRead;

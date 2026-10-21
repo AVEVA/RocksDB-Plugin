@@ -401,6 +401,35 @@ TEST_F(AsyncReadTests, Read_PartiallyOverlappingPrefetch_DownloadsOnlyTheRemaind
     EXPECT_EQ(std::string(256, 'P') + std::string(256, 'R'), result.ToString());
 }
 
+TEST_F(AsyncReadTests, Read_BlobOverwrittenAfterPrefetch_NeverReturnsMixedVersions) {
+    auto file = CreateFile(m_deferredEnv);
+    ASSERT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'P'));
+
+    std::vector<char> scratch(512);
+    rocksdb::Slice result;
+    auto reading = std::async(std::launch::async, [&] {
+        return file.Read(256, scratch.size(), rocksdb::IOOptions{}, &result, scratch.data(), nullptr);
+    });
+    ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return m_deferredEnv.Blob->PendingDownloads() == 1; }));
+    // The blob is overwritten after the prefix was served from the prefetch; the suffix download then hits a 412.
+    m_deferredEnv.Blob->ETag = "etag2";
+    m_deferredEnv.Blob->TakeDownload().Fail(FakeBlobServer::Error(412, "ConditionNotMet"));
+    while (reading.wait_for(std::chrono::milliseconds{10}) != std::future_status::ready) {
+        if (m_deferredEnv.Blob->PendingDownloads() > 0) {
+            auto download = m_deferredEnv.Blob->TakeDownload();
+            download.Succeed(std::string(static_cast<size_t>(download.Request.Length), 'N'));
+        } else {
+            (void)m_deferredEnv.Http.RunUntil([&] { return m_deferredEnv.Blob->PendingDownloads() > 0; },
+                                              std::chrono::milliseconds{20});
+        }
+    }
+    const auto status = reading.get();
+
+    EXPECT_TRUE(status.ok()) << status.ToString();
+    EXPECT_EQ(std::string(512, 'N'), result.ToString());
+}
+
 TEST_F(AsyncReadTests, Read_PastTheEndOfPrefetchedRange_ReleasesItsBudget) {
     auto budget = std::make_shared<std::atomic<int64_t>>(0);
     FakeReadableFile file{std::make_shared<FakeReadableFileImpl>(
