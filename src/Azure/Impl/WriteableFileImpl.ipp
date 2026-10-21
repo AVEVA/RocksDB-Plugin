@@ -190,11 +190,9 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::StartFlush(const b
     // The full buffer becomes the upload payload as-is and a recycled buffer takes its place; only the partial-page
     // tail (under one page) is copied. A pooled buffer returns to the pool when the last reference to the payload,
     // held by the in-flight request, is released.
+    // Everything fallible happens before m_buffer is touched, so a throw here leaves the buffered data intact.
     std::vector<char> next = RentBuffer();
     std::copy(m_buffer.begin() + fullBytes, m_buffer.begin() + m_bufferOffset, next.begin());
-    std::swap(m_buffer, next);
-    next.resize(static_cast<size_t>(bytesToWrite));
-
     // Owns an upload payload and hands its storage back to the pool when the last reference is released.
     struct PooledPayload {
         std::vector<char> Data;
@@ -214,7 +212,11 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::StartFlush(const b
             }
         }
     };
+    // The allocation may throw; make_shared forwards by reference and moves only after allocating, so `next` and
+    // m_buffer are still intact then.
     const auto owner = std::make_shared<PooledPayload>(std::move(next), m_uploads);
+    std::swap(m_buffer, owner->Data);
+    owner->Data.resize(static_cast<size_t>(bytesToWrite));
     try {
         StartUpload(std::shared_ptr<const std::vector<char>>(owner, &owner->Data), m_lastPageOffset);
     } catch (...) {

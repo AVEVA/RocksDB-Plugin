@@ -31,6 +31,20 @@ using boost::log::sources::severity_logger_mt;
 using boost::log::trivial::severity_level;
 
 namespace {
+// Lets a test fail one small allocation on its own thread, which is how the shared payload owner in StartFlush is
+// allocated. Inert unless armed.
+thread_local bool g_failSmallAllocation = false;
+constexpr size_t SmallAllocationMin = 40;
+constexpr size_t SmallAllocationMax = 96;
+
+bool ShouldFailAllocation(const size_t size) {
+    if (g_failSmallAllocation && size >= SmallAllocationMin && size <= SmallAllocationMax) {
+        g_failSmallAllocation = false;
+        return true;
+    }
+    return false;
+}
+
 std::vector<char> Prefix(const std::vector<char>& data, const size_t size) {
     return {data.begin(), data.begin() + static_cast<std::ptrdiff_t>(size)};
 }
@@ -49,6 +63,26 @@ class WriteableFileTests : public ::testing::Test {
     FakeWriteableFileImpl MakeKnownStateFile(const FakeWriteableFileImpl::BlobState state,
                                              const int64_t bufferSize = Configuration::PageBlob::DefaultBufferSize) {
         return {"test.dat", m_env.Runtime, m_env.Client, nullptr, m_logger, bufferSize, state};
+    }
+    void ExpectRetryAfterPayloadOwnerAllocationFailure(const int64_t tailSize) {
+        constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
+        m_env.Blob->SetCapacity(16 * pageSize);
+
+        std::vector<char> expected;
+        for (int64_t i = 0; i < 2 * pageSize + tailSize; ++i) {
+            expected.push_back(static_cast<char>('a' + (i * 5) % 26));
+        }
+
+        auto file = MakeFile(3 * pageSize);
+        file.Append(expected);
+
+        g_failSmallAllocation = true;
+        EXPECT_THROW(file.Flush(), std::bad_alloc);
+        g_failSmallAllocation = false;
+
+        file.Sync();
+        EXPECT_EQ(expected, Prefix(m_env.Blob->Data, expected.size()));
+        EXPECT_EQ(static_cast<int64_t>(expected.size()), file.GetFileSize());
     }
 };
 
@@ -245,6 +279,14 @@ TEST_F(WriteableFileTests, Flush_UploadThrowsSynchronously_KeepsTheTailForARetry
 
     file.Sync();
     EXPECT_EQ(expected, Prefix(m_env.Blob->Data, expected.size()));
+}
+
+TEST_F(WriteableFileTests, Flush_PayloadOwnerAllocationFails_KeepsFullPagesAndTailForARetry) {
+    ExpectRetryAfterPayloadOwnerAllocationFailure(100);
+}
+
+TEST_F(WriteableFileTests, Flush_PayloadOwnerAllocationFailsOnPageAlignedData_KeepsFullPagesForARetry) {
+    ExpectRetryAfterPayloadOwnerAllocationFailure(0);
 }
 
 TEST_F(WriteableFileTests, AppendBytes_LessThanAPage_PageWritten) {
@@ -651,3 +693,18 @@ TEST_F(WriteableFileTests, MoveAssignment_IsDeleted) {
     static_assert(!std::is_move_assignable_v<FakeWriteableFileImpl>);
     static_assert(!std::is_copy_assignable_v<FakeWriteableFileImpl>);
 }
+
+// Replaced so a test can inject an allocation failure; see g_failSmallAllocation.
+void* operator new(const size_t size) {
+    if (ShouldFailAllocation(size)) {
+        throw std::bad_alloc();
+    }
+    if (void* p = std::malloc(size ? size : 1)) {
+        return p;
+    }
+    throw std::bad_alloc();
+}
+
+void operator delete(void* p) noexcept { std::free(p); }
+
+void operator delete(void* p, size_t) noexcept { std::free(p); }

@@ -80,7 +80,7 @@ and releases the guard right after the handler runs. Covers the file-download
 writer path too, as the guard is taken at initiation for every operation (no
 separate download test added). Full WindowsDebug ctest: 1165 passed/skipped, 0 failed.
 
-### [ ] T92 - Include payload-owner allocation in `StartFlush` rollback
+### [x] T92 - Include payload-owner allocation in `StartFlush` rollback
 
 **Evidence:** `src\Azure\Impl\WriteableFileImpl.ipp:192-228` swaps the original
 buffer into `next` and truncates it before
@@ -102,6 +102,13 @@ and tail on every pre-acceptance exception, without adding a full-buffer copy.
 allocation failure, distinct from the existing `UploadPages` fault hook. Append
 distinct full-page and partial-tail patterns, fail once, then retry `Sync` and
 verify exact bytes and logical size. Include a page-aligned case.
+
+**Result:** Reproduced with two `WriteableFileTests` cases (tail and page-aligned) that
+fail the `make_shared` owner allocation via a thread-local-armed `operator new` hook
+(both failed before the fix: retry uploaded wrong bytes). `StartFlush` now rents the
+buffer and copies the tail into it before touching `m_buffer`, and swaps into the
+owner only after the owner allocation succeeded, so the swap is non-allocating. No
+extra copy. Full WindowsDebug ctest: 1167 tests, 0 failed.
 
 ### [ ] T93 - Make upload-buffer recycling non-throwing
 
