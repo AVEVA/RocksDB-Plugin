@@ -32,7 +32,6 @@
 #include <expected>
 #include <filesystem>
 #include <fstream>
-#include <functional>
 #include <ios>
 #include <limits>
 #include <map>

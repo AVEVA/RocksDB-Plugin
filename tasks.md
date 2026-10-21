@@ -258,7 +258,10 @@ code. Findings marked **Verify first** are medium confidence: confirm or measure
 - **Validation:** `DownloadToFileTests` with `::AVEVA::HttpClient` and no scheduler, asserting a bounded thread
   count.
 
-### [ ] T77 – Stale and unused includes in hot template headers
+### [x] T77 – Stale and unused includes in hot template headers
+- **Done:** removed `<functional>` from `BlobDownload.hpp`. `<map>`, `<fstream>` and `<filesystem>` are still used
+  there (`m_inFlight`/`m_ready`, `FinalizeFileDownload`), so they stay. `CancelState.hpp` and `ClientRuntime.hpp`
+  already have no `<functional>` include.
 - `libs\AzureClient\include\AVEVA\AzureClient\Detail\BlobDownload.hpp:35`: `<functional>` is unused there. Check
   `<map>`, `<fstream>` and `<filesystem>` as well, and move anything that only file sinks need to
   `DownloadSinks.hpp`.
