@@ -153,12 +153,13 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     bool JoinOrLead(std::string_view host, std::string_view service, MakeWaiter&& makeWaiter,
                     const void* scope = nullptr) {
         std::lock_guard<std::mutex> lock(m_mutex);
-        const auto [it, inserted] = m_pending.try_emplace(Key{std::string(host), std::string(service), scope});
-        if (inserted) {
-            return true;
+        // Probe with views: heterogeneous try_emplace needs C++26, and a join must not allocate an owning key.
+        if (const auto it = m_pending.find(KeyView{host, service, scope}); it != m_pending.end()) {
+            it->second.push_back(makeWaiter());
+            return false;
         }
-        it->second.push_back(makeWaiter());
-        return false;
+        m_pending.emplace(Key{std::string(host), std::string(service), scope}, std::vector<Waiter>{});
+        return true;
     }
 
     /// <summary>

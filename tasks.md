@@ -231,7 +231,7 @@ code. Findings marked **Verify first** are medium confidence: confirm or measure
   comment that explains why a declined hint is not `NotSupported`.
 - **Validation:** `ReadableFileTests`, `SequentialFileTests`.
 
-### [ ] T75 – `DnsCache::JoinOrLead` builds an owning key on every pending-lookup probe
+### [x] T75 – `DnsCache::JoinOrLead` builds an owning key on every pending-lookup probe
 - **File:** `libs\HttpClient\src\private\DnsCache.hpp:163-173`.
 - **Problem:** `m_pending.try_emplace(Key{std::string(host), std::string(service), scope})` allocates two strings
   even when the caller is only joining a lookup that is already in flight. The class comment says lookups use

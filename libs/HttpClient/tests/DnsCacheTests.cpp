@@ -9,7 +9,15 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstddef>
+#include <iostream>
+#include <string>
 #include <thread>
+
+namespace AllocationFailure {
+extern thread_local bool counting;
+extern thread_local std::size_t allocationCount;
+} // namespace AllocationFailure
 
 namespace {
 using AVEVA::Private::BasicDnsCache;
@@ -121,6 +129,26 @@ TEST(DnsCacheTests, WaiterFactoryRunsOnlyWhenJoining) {
     EXPECT_EQ(built, 1);
 
     cache.Finish("host", "80", boost::asio::error::host_not_found, {});
+    EXPECT_EQ(delivered, 1);
+}
+
+TEST(DnsCacheTests, JoiningAPendingLookupDoesNotCopyTheKey) {
+    TestDnsCache cache;
+    const std::string host = "account-name.blob.core.windows.net";
+    const std::string service = "a-service-name-beyond-sso";
+    int delivered = 0;
+    RecordingWaiter waiter{&delivered, nullptr};
+    ASSERT_TRUE(cache.JoinOrLead(host, service, waiter));
+
+    AllocationFailure::allocationCount = 0;
+    AllocationFailure::counting = true;
+    EXPECT_FALSE(cache.JoinOrLead(host, service, waiter));
+    AllocationFailure::counting = false;
+    // Only the waiter vector's first element may allocate; the two key strings must not.
+    EXPECT_LE(AllocationFailure::allocationCount, 1U);
+    std::cout << "join allocations: " << AllocationFailure::allocationCount << '\n';
+
+    cache.Finish(host, service, boost::asio::error::host_not_found, {});
     EXPECT_EQ(delivered, 1);
 }
 
