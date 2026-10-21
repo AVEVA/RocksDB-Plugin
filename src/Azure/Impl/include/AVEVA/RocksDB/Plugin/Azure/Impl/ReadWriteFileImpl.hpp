@@ -40,8 +40,13 @@ template <typename TBlob> class BasicReadWriteFileImpl {
         std::vector<size_t> Chunks;              // indices into m_bufferStats, in write order
         std::shared_ptr<std::vector<char>> Data; // shared so each upload's request views it without a copy
     };
+    struct GapRead {
+        BlobOperations::PendingDownload<TBlob> Download;
+        int64_t Offset = 0;
+        int64_t Length = 0; // bytes the gap must receive in full
+    };
     [[nodiscard]] std::vector<Extent> BuildExtents() const;
-    void PrepareExtent(Extent& extent, int64_t sizeBefore, std::vector<BlobOperations::PendingDownload<TBlob>>& reads);
+    void PrepareExtent(Extent& extent, int64_t sizeBefore, std::vector<GapRead>& reads);
     void RunWave(std::vector<Extent>& extents, size_t begin, size_t end, int64_t sizeBefore);
 
   public:

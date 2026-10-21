@@ -172,7 +172,7 @@ connection were resent: 2 requests, success). `RequestOperation::IsIdempotentMet
 for GET/HEAD/OPTIONS/TRACE, so PUT/DELETE failures surface to the Azure retry layer; pre-send replay and GET stale
 recovery are unchanged. Full WindowsDebug ctest: 1170 tests, 0 failed.
 
-### [ ] T95 - Require complete gap reads before read/modify/write uploads
+### [x] T95 - Require complete gap reads before read/modify/write uploads
 
 **Evidence:** `src\Azure\Impl\ReadWriteFileImpl.ipp:113-123,157-174` knows the
 length of every existing-data gap, but `finishRead` discards the byte count from
@@ -195,6 +195,12 @@ write a small subrange, make its preservation read succeed with too few bytes,
 and assert failure with no upload for that wave. Repeat with a reused extent
 buffer holding a different pattern, then restore the download and verify a retry.
 Keep draining all already-started reads before releasing their buffers.
+
+**Result:** Fixed. Added `Flush_ShortDownloadOfAnExistingGap_ThrowsAndUploadsNothing`
+(failed before: the extent was uploaded after a short gap read). Each gap read now
+carries its offset/length (`GapRead`) and a short result throws `InvalidResponse`
+before any upload in the wave; reads are still drained. The reused-buffer and
+retry variants were not added. Full WindowsDebug ctest: 1171 passed.
 
 ### [ ] T96 - Recover async runners when an internal continuation throws
 

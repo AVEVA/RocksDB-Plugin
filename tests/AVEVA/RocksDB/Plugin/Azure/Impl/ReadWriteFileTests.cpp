@@ -209,6 +209,21 @@ TEST_F(ReadWriteFileImplTests, Flush_PartialFirstPage_MergesExistingData) {
     EXPECT_EQ(newData, newDataBuffer);
 }
 
+TEST_F(ReadWriteFileImplTests, Flush_ShortDownloadOfAnExistingGap_ThrowsAndUploadsNothing) {
+    constexpr int64_t offset = 100;
+    std::fill_n(m_env.Blob->Data.begin(), offset, 'X');
+    m_env.Blob->Size = offset;
+    auto file = CreateFile();
+    // The blob ends before the size recorded when the file was opened, so the gap download is legitimately short.
+    m_env.Blob->Data.resize(10);
+    const std::vector<char> newData(100, 'Y');
+
+    file->Write(offset, newData.data(), 100);
+
+    EXPECT_THROW(file->Sync(), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
+    EXPECT_TRUE(m_env.Blob->Uploads.empty());
+}
+
 TEST_F(ReadWriteFileImplTests, Flush_WritesOnDifferentPages_EachMergesItsOwnExistingData) {
     // Arrange - existing data on three separate pages
     constexpr int64_t page = Configuration::PageBlob::PageSize;

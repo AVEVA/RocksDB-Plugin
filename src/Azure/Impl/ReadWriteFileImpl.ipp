@@ -12,10 +12,25 @@
 #include <exception>
 #include <numeric>
 #include <span>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
+namespace ReadWriteFileDetail {
+// A short gap read would leave zeros (or a recycled buffer's bytes) that the upload then writes over real data.
+inline void RequireFullGapDownload(std::string_view name, int64_t offset, int64_t expected, int64_t actual) {
+    if (actual != expected) {
+        throw RequestFailedException(0, "ShortDownload",
+                                     "Expected " + std::to_string(expected) + " bytes at offset " +
+                                         std::to_string(offset) + " of '" + std::string(name) + "' but received " +
+                                         std::to_string(actual),
+                                     "", AzureClient::BlobStorageErrorCode::InvalidResponse);
+    }
+}
+} // namespace ReadWriteFileDetail
+
 template <typename TBlob>
 BasicReadWriteFileImpl<TBlob>::BasicReadWriteFileImpl(
     std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
@@ -96,8 +111,7 @@ template <typename TBlob> auto BasicReadWriteFileImpl<TBlob>::BuildExtents() con
 // Fills the bytes of an extent that no chunk supplies with what the blob already holds. Reads past the file's old
 // end (`sizeBefore`) are skipped: that region holds no data yet and stays zero.
 template <typename TBlob>
-void BasicReadWriteFileImpl<TBlob>::PrepareExtent(Extent& extent, int64_t sizeBefore,
-                                                  std::vector<BlobOperations::PendingDownload<TBlob>>& reads) {
+void BasicReadWriteFileImpl<TBlob>::PrepareExtent(Extent& extent, int64_t sizeBefore, std::vector<GapRead>& reads) {
     // A reused buffer holds an earlier flush's bytes, so everything not copied or downloaded below is zeroed.
     extent.Data = AcquireExtentBuffer(static_cast<size_t>(extent.End - extent.Start));
     std::vector<std::pair<int64_t, int64_t>> covered;
@@ -120,7 +134,8 @@ void BasicReadWriteFileImpl<TBlob>::PrepareExtent(Extent& extent, int64_t sizeBe
         if (gapEnd > gapStart) {
             std::span<char> target(extent.Data->data() + (gapStart - extent.Start),
                                    static_cast<size_t>(gapEnd - gapStart));
-            reads.push_back(BlobOperations::StartDownload(*m_w.H.Blob, target, gapStart, gapEnd - gapStart));
+            reads.push_back(GapRead{BlobOperations::StartDownload(*m_w.H.Blob, target, gapStart, gapEnd - gapStart),
+                                    gapStart, gapEnd - gapStart});
         }
     };
     for (const auto& [start, end] : covered) {
@@ -137,7 +152,6 @@ void BasicReadWriteFileImpl<TBlob>::PrepareExtent(Extent& extent, int64_t sizeBe
 template <typename TBlob>
 void BasicReadWriteFileImpl<TBlob>::RunWave(std::vector<Extent>& extents, size_t begin, size_t end,
                                             int64_t sizeBefore) {
-    using PendingRead = BlobOperations::PendingDownload<TBlob>;
     const auto finishAll = [](auto& pending, auto&& finish) {
         std::exception_ptr failure;
         for (auto& item : pending) {
@@ -154,12 +168,14 @@ void BasicReadWriteFileImpl<TBlob>::RunWave(std::vector<Extent>& extents, size_t
             std::rethrow_exception(failure);
         }
     };
-    const auto finishRead = [](PendingRead& read) {
-        [[maybe_unused]] const auto bytes = BlobOperations::FinishDownload(read);
+    // A short gap read would upload zeros over bytes that were never fetched, so it fails the flush.
+    const auto finishRead = [this](GapRead& read) {
+        ReadWriteFileDetail::RequireFullGapDownload(m_w.H.Name, read.Offset, read.Length,
+                                                    BlobOperations::FinishDownload(read.Download));
     };
     const auto finishUpload = [](auto& upload) { BlobOperations::FinishUploadPages(upload); };
 
-    std::vector<PendingRead> reads;
+    std::vector<GapRead> reads;
     try {
         for (auto i = begin; i < end; ++i) {
             PrepareExtent(extents[i], sizeBefore, reads);
