@@ -407,6 +407,35 @@ TEST(AsyncBehaviorTests, HandlerExecutorWorkGuardIsTakenAtInitiation) {
     EXPECT_TRUE(completedOnStrand);
 }
 
+// A plain callback on the default executor takes the inline-completion path, but a credential still pending on
+// another thread must keep the client's context running: run() may not return and strand the completion.
+TEST(AsyncBehaviorTests, DefaultExecutorStaysBusyWhileCredentialIsPendingOffExecutor) {
+    boost::asio::io_context context;
+    FakeHttpClient httpClient{context};
+
+    auto tokenCredential = std::make_shared<ScriptedTokenCredential>();
+    tokenCredential->EnqueueDeferred(std::make_error_code(std::errc::permission_denied),
+                                     AVEVA::AzureClient::AccessToken{});
+
+    BlobClientOptions options = MakeBlobClientOptions();
+    options.SasToken.clear();
+    ScriptedBlobClient client{httpClient, options, tokenCredential};
+
+    int invocations = 0;
+    client.DeleteAsync([&](auto&&) { ++invocations; });
+    ASSERT_EQ(tokenCredential->PendingCount(), 1U);
+
+    // Nothing is queued on the context; only outstanding work can keep run() from returning.
+    context.run_for(std::chrono::milliseconds{50});
+    EXPECT_FALSE(context.stopped());
+
+    std::thread foreign{[&] { EXPECT_TRUE(tokenCredential->CompleteNext()); }};
+    foreign.join();
+
+    context.run();
+    EXPECT_EQ(invocations, 1);
+}
+
 // Task 16 stretch verification: a completion token with an explicit associated allocator (via
 // boost::asio::bind_allocator, layered under bind_executor so the non-skip branch of
 // BindAssociationsAndAdoptCancellation is actually taken) must have that allocator genuinely used

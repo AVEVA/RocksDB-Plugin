@@ -1,348 +1,436 @@
-# Review backlog (pass 4): `feature/trim-azure-client` vs `main`
+# Branch review execution backlog
 
-Review scope: merge-base `278868c`, 509 commits, 357 files (+53.1k / −5.5k). This pass re-covered `libs\HttpClient`,
-`libs\AzureClient`, the plugin read path and write/filesystem/lease code in `src\Azure`, `src\Core`, build/CI and test
-infrastructure, and docs. Every finding below was checked against the code at `HEAD` (`34947f4`). Findings marked
-**Verify first** are medium confidence: confirm or measure them before changing anything. Passes 1–3 (T01–T78) are
-closed; their text is in git history at `HEAD:tasks.md` (commit `34947f4`), summarised at the end.
+Reviewed `feature/trim-azure-client` at `c950080d652f9c6bb14264ba8f7f07c89d7ff3b1`
+against local `main` / merge base `278868c71dc55ffc1586f3f92ed8bc5d99587e6d`.
+The comparison contains 357 changed files, 53,525 insertions and 5,508 deletions.
+Review date: 2026-10-21.
 
-## Hard constraints for the executor
+This is a new backlog, not a request to repeat the previous passes. T01-T90 are
+closed or explicitly dropped in `c950080:tasks.md`; consult that history before
+reopening a previously measured optimization. IDs below continue from T91.
+The working tree had `tasks.md` deleted when this review started; this file
+recreates the requested handoff. No implementation files were edited.
 
-- **No type erasure.** Do not introduce `std::function`, `std::move_only_function`, `std::any`,
-  `any_io_executor`, `any_completion_handler`, virtual interfaces that replace templates, or erasing pimpls. The
-  branch exists to build zero-overhead, template-based async paths. Removing erasure that is already there is
-  welcome.
-- The RocksDB API boundary is fixed. For example, `FSRandomAccessFile::ReadAsync` takes a `std::function`, so
-  `AsyncReadRequest::Callback` stays as it is.
-- Never block with `.get()` or a wait on a thread that runs the host-supplied `io_context`. Guard any new blocking
-  point with `AzureClient::ThrowIfRunningOn(executor)`.
-- Keep the `AsyncReadRequest` invariants:
-  - downloads go into a pooled buffer, never into the caller's scratch;
-  - the scratch copy happens under the request lock;
-  - RocksDB callbacks run only from `Poll`/`AbortIO`.
-- Map every Azure client error to a `rocksdb::IOStatus`, and never swallow errors.
-- Public headers in `include\AVEVA\RocksDB\Plugin\` must stay source-compatible.
+Review concentrated on the changed production read/write, filesystem, lease,
+HTTP, retry, transfer and cache paths, plus representative tests and build/CI
+configuration. This is not a claim of exhaustive line-by-line coverage of every
+changed test or every supported service configuration.
 
-## Executor rules
+## Execution constraints
 
-- Build: `cmake --build build\WindowsDebug --config Debug` (or the `LinuxDebug` preset).
-- Test: `ctest --test-dir build\WindowsDebug --output-on-failure --build-config Debug -E Integration`
-  (Integration tests need `AZURE_*` env vars).
-- Run `clang-format` on touched files. Add new sources and tests to the owning `CMakeLists.txt`.
-- Performance tasks: measure before and after, with a micro-benchmark, an allocation count (see
-  `libs\HttpClient\tests\HttpClientAllocationTests.cpp`), or `tools\db_bench\Compare-Backends.ps1`. Put the numbers
-  in the commit message. If a change shows no measurable gain *and* adds complexity, drop it and record why here.
-- Do one task per commit, and tick its box when done (`[x]`; `[!]` blocked, with a reason; `[-]` dropped, with a
-  reason).
-- Never create or publish a PR without explicit user approval.
+- **Do not introduce or recommend type erasure.** Preserve concrete templates,
+  concepts, variants and statically typed continuations. Do not replace these
+  paths with erased callables, erased executors, virtual dispatch or erased
+  implementation objects. Existing callbacks mandated by RocksDB's API are not
+  a reason to generalize erasure internally.
+- Preserve public-header source compatibility, exactly-once completion,
+  associated executor/allocator/cancellation behavior and error translation.
+- Never wait for network completions on a thread running the host `io_context`.
+  The plugin must not own or run that context.
+- Keep downloads out of caller-owned scratch until the request lock confirms
+  the request is live. RocksDB callbacks still run only from `Poll`/`AbortIO`.
+- Keep write fencing, sticky upload errors, bounded upload concurrency and the
+  existing non-atomic-rename recovery guarantees.
+- Reproduce each correctness finding with a focused regression test before
+  changing it. **Verify first** items are hypotheses requiring that reproduction,
+  not instructions to change behavior speculatively.
+- For performance changes, record before/after allocation bytes/counts,
+  request counts or representative timings. Do not add complexity for an
+  unmeasurable improvement. Do not infer an end-to-end speedup from static review.
+- Make one focused change per commit, update its checkbox and record the result.
+  Do not create a PR without explicit user approval.
 
----
+## P1: correctness and completion/lifetime guarantees
 
-## P1: correctness
+### [x] T91 - Keep the default completion executor alive across off-executor work
 
-### [x] T79 – `StartFlush` rollback zeroes the buffered tail (silent data corruption on retry)
-- **File:** `src\Azure\Impl\WriteableFileImpl.ipp:179-212` (`BasicWriteableFileImpl::StartFlush`).
-- **Problem:** On an asynchronous flush (`includePartialPage == false`) with a partial-page tail:
-  1. the tail `[fullBytes, m_bufferOffset)` is copied to the start of a rented buffer `next`;
-  2. `std::swap(m_buffer, next)` makes the rented buffer current;
-  3. `next.resize(bytesToWrite)` with `bytesToWrite == fullBytes` **truncates the tail off the original buffer**.
+**Evidence:** `libs\AzureClient\include\AVEVA\AzureClient\Detail\AsyncInitiation.hpp:99-117`
+creates `BoundHandler::Work` only when `!direct`. A plain callback using the
+client executor takes the direct path and owns no work guard. That is not
+equivalent to having no asynchronous work: credential acquisition may finish on
+a foreign thread, and file downloads perform open/write/finalization on a writer
+executor before posting back to the client executor
+(`Detail\BlobDownload.hpp:720-786`). No transport operation necessarily holds
+the client context alive during those intervals.
 
-  If `StartUpload` then throws synchronously (`bad_alloc`, or any throw from `client.UploadPagesAsync` initiation;
-  fencing is reported through the callback, not thrown), the catch block does
-  `owner->Data.resize(m_bufferSize)`, which zero-fills `[fullBytes, m_bufferSize)`, and swaps it back.
-  `m_bufferOffset` is unchanged, so the buffer now holds zeros where the tail bytes were. A synchronous throw does
-  not set the sticky `m_uploads->Error`, so the next `Flush`/`Sync` succeeds and uploads zeros in place of real
-  data. The comment ("Nothing was accepted, so the data stays buffered for a retry") is false for the tail. The
-  catch also drops the rented buffer instead of returning it to `m_uploads->Free`.
-- **Change:** Make the rollback restore the exact pre-call state. Simplest option: in the catch, after resizing,
-  copy the tail back from the current `m_buffer` (`[0, tail)`) to `owner->Data[fullBytes, fullBytes + tail)` before
-  the swap, then hand the rented buffer back to the pool. A cleaner alternative is to keep the original buffer
-  untouched until `StartUpload` has accepted the payload, for example by building the payload owner first and only
-  swapping and truncating after `StartUpload` returns. That works because the request views a `shared_ptr` to the
-  vector, so `resize` must happen before the call. Pick whichever keeps the no-copy fast path.
-- **Validation:** New `WriteableFileTests` case: a blob fake whose `UploadPagesAsync` throws synchronously once.
-  Append `N*PageSize + 100` bytes, call `Flush()` and expect the exception, then `Sync()`. Assert that the uploaded
-  bytes equal the appended bytes (the last 100 bytes must not be zero). The test must fail before the fix.
+**Impact:** `io_context::run()` can return and leave the context stopped while
+the Azure operation is still outstanding. Its later posted continuation or
+completion then does not run without an unexpected `restart()`/second `run()`.
+Existing foreign-thread tests call the fake transport's polling helper after
+completion; the work-guard test covers an explicitly bound strand, not this path.
 
-### [x] T80 – A read restarted from inside a completion can be lost (hang plus an exception into the host `io_context`)
-- **Files:**
-  - `src\Azure\Impl\ReadableFileImpl.ipp:459-523` (`ReadAsyncAttempt`, `RefreshMetadataAndReadAsync`)
-  - `src\Azure\Impl\ReadableFileImpl.ipp:563-600` (`CoalescedMetadataAsync`, waiter loop)
-  - `src\Azure\Impl\include\AVEVA\RocksDB\Plugin\Azure\Impl\BlobOperations.hpp:597-634` (`DownloadAsync`),
-    `:636-650` (`GetMetadataAsync`)
-- **Problem:**
-  - `ReadAsyncAttempt` is re-entered from completion handlers: the metadata-refresh waiter, and the
-    `DownloadAsync` completion after a 412.
-  - `DownloadAsync` can throw synchronously after it has taken ownership of the callback: `TransferOptions`,
-    `DownloadBufferPool::Acquire` (`bad_alloc`), or the client initiation.
-  - At the top level, `BasicReadableFile::ReadAsync` catches this and returns an `IOStatus`. In the nested case
-    nothing catches it, with three effects:
-    1. The read's callback is destroyed without being invoked, so the `AsyncReadRequest` never finishes. `Poll`
-       never reports it, and `AsyncReadTracker` never drains, so filesystem teardown waits the full
-       `ShutdownWaitTimeout`.
-    2. The exception escapes into `io_context::run()` on a host thread.
-    3. In `CoalescedMetadataAsync`, the remaining waiters in the loop are skipped, so their reads are lost too.
-- **Change (no erasure):**
-  1. In `BasicReadableFileImpl::ReadAsync`, wrap the callback in a small move-only template guard,
-     `ReadCompletionGuard<TCallback>`. If the guard is destroyed without having been invoked and was not moved
-     from, it invokes the callback with an `IOError`-mapped exception, for example
-     `RequestFailedException(..., "Read abandoned")`. This is safe because the callback only completes the
-     `AsyncReadRequest`; RocksDB callbacks still run from `Poll`. Mark the destructor `noexcept` and swallow
-     anything the callback throws.
-  2. In the `CoalescedMetadataAsync` completion and in the catch fallback, invoke each waiter under its own
-     `try/catch` so that one waiter cannot skip the others. Once (1) is in place, a waiter that throws still
-     completes its read through the guard.
-  3. Make sure nothing propagates out of the `GetMetadataAsync`/`DownloadAsync` completion lambdas into the
-     `io_context`.
-- **Validation:** New `ReadableFileTests` cases:
-  - A fake blob returns 412 on the first download and its second `DownloadToAsync` throws synchronously. Assert
-    that `Poll` reports a non-OK status and that `AsyncReadTracker::InFlight()` returns to 0.
-  - Two reads join one metadata refresh, and the first one's continuation throws. Assert that the second read
-    still completes.
+**Action:** Decouple direct invocation from outstanding-work ownership. Retain
+the fast inline completion path when already on the right executor, but hold
+appropriate concrete executor work until all off-executor work and final
+completion dispatch have finished. Check the I/O executor as well as a different
+handler executor where both are involved.
 
-  Both must hang or fail before the fix. Do not reintroduce erasure: the guard is a template over `TCallback`.
+**Acceptance:** Extend `AsyncDeferredCompletionTests.cpp` and file-download
+tests. With no external work guard, block a credential or writer, start `run()`
+once, release the blocker and verify exactly one completion without restarting
+the context. Preserve the existing explicit-executor/allocator tests.
+An isolated probe using the actual binding helper confirmed `Work == nullopt`,
+a stopped context before completion, and an undelivered late completion until
+restart.
 
-### [x] T81 – `MultiRead` can leak an in-flight read that writes into freed memory
-- **File:** `src\Azure\BasicReadableFile.ipp:155-315`.
-- **Problem:** In the `start` lambda, `StartRead` succeeds and only then is the handle stored with
-  `active.push_back(Active{handle, &group})`. If `push_back` throws (`bad_alloc`), the handle is in neither `active`
-  nor `HandleCleanup`, so it is never deleted or aborted. The function returns through the function-try-block while
-  the download is still running, and its completion later copies into `group.Buffer` (freed with `groups`) or into
-  the caller's `reqs[i].scratch` (which RocksDB may have reused). Separately, on any batch-level exception, requests
-  that never received an outcome keep stale `status`/`result` values from the caller.
-- **Change:**
-  - Call `active.reserve(std::min(kMultiReadMaxInFlight, groups.size()))` before the loop, so `push_back` can never
-    allocate (and so never throw) after a read has started.
-  - In the function-try-block handler (`reqs` and `num_reqs` are in scope), set every request that has no outcome
-    to the returned status and an empty `Slice`. A `std::vector<bool>`, or a sentinel status assigned up front,
-    tracks which requests have an outcome; keep per-request errors that were already assigned.
-- **Validation:** `ReadableFileTests` MultiRead cases. Optionally add a fault-injection hook (the HttpClient
-  `FaultPolicy` pattern) that throws after the first `StartRead`, and assert that every request has a non-OK status
-  and that no read is still running after return (`AsyncReadTracker::InFlight() == 0` once the context is pumped).
+**Result:** Reproduced with `DefaultExecutorStaysBusyWhileCredentialIsPendingOffExecutor`
+(failed before the fix: context stopped). `BoundHandler` now always holds the
+executor work guard from initiation; the direct path keeps its inline fast path
+and releases the guard right after the handler runs. Covers the file-download
+writer path too, as the guard is taken at initiation for every operation (no
+separate download test added). Full WindowsDebug ctest: 1165 passed/skipped, 0 failed.
 
-### [x] T82 – HttpClient: a request aborted by the limiter can lose its completion
-- **Files:** `libs\HttpClient\src\private\HttpClientImpl.hpp:360-364` (`AbortLimited`), `:113-118`
-  (`LimiterSink::Abort`); callers in `libs\HttpClient\src\private\OriginLimiter.hpp:84, 167, 189, 263`.
-- **Problem:** `AbortLimited` moves `pending.completion` into an `asio::post` lambda without a fallback. If `post`
-  throws (allocation), the completion is destroyed unrun. The handler is never called and its work guard is never
-  released, so the caller's `run()` can hang. The exception also propagates:
-  - out of `OriginLimiter::Close()`, skipping every remaining queued abort, which loses those handlers too;
-  - out of the deadline-timer handler, into the host `io_context`.
+### [ ] T92 - Include payload-owner allocation in `StartFlush` rollback
 
-  `FailLater` (`:258-270`) already solves this for the submit path: it is `noexcept`, posts through the
-  `RequestState` cell, and completes inline as a last resort.
-- **Change:** `AbortLimited(PendingRequest&& pending, std::error_code error) noexcept` →
-  `FailLater(std::static_pointer_cast<RequestState>(std::move(pending.state)), error)`. The guarded completion in
-  `pending.completion` only forwards to `cell->Finish`, so dropping it is correct; check that `pending.state` is
-  never null on this path. This removes a second completion path and makes the abort exactly-once by construction.
-- **Validation:** `OriginLimiterTests`, `HttpClientRobustnessTests` (limiter close, queued deadline, cancellation).
-  Add a `FaultPolicy` hook that throws inside the abort post, and assert that the handler still runs exactly once.
+**Evidence:** `src\Azure\Impl\WriteableFileImpl.ipp:192-228` swaps the original
+buffer into `next` and truncates it before
+`std::make_shared<PooledPayload>(...)` at line 217. The rollback `try` begins
+only after that allocation.
 
-### [x] T83 – Idle sweeper can stop scheduling for good after one failed `Schedule`
-- **Files:** `libs\HttpClient\src\private\IdleSweeper.hpp:92-96` (`Notify`), `:203-212`
-  (`SweepScheduler::Schedule`); `libs\HttpClient\src\private\ConnectionPool.hpp:365-369` (`Release` calling
-  `m_notifier()`); `libs\HttpClient\src\private\RequestOperation.cpp:420-435` (`ReleaseOrClose`).
-- **Problem:** `Notify` sets `m_scheduled` with `exchange(true)` *before* calling `Schedule`. `Schedule` can throw:
-  `queue.emplace` can throw `bad_alloc`, and creating the `std::jthread` can throw `system_error`. When it does,
-  `m_scheduled` stays `true` forever, every later `Notify` is a no-op, and idle connections are never swept again
-  (no idle timeout, sockets held until the client is destroyed). The exception then leaves
-  `ConnectionPool::Release` *after* the pool has taken the connection, and `ReleaseOrClose` reports
-  "Returning the connection to the pool failed" for a connection that was in fact pooled.
-- **Change:**
-  - In `Notify`, catch exceptions from `Schedule`, reset `m_scheduled = false`, and report through the
-    diagnostics sink. The next release then retries scheduling.
-  - Make `SweeperNotifier::operator()` `noexcept`, and add a `static_assert(std::is_nothrow_invocable_v<const
-    Notifier&>)` in `ConnectionPool`. `Release` then cannot fail after taking ownership.
-- **Validation:** `IdleSweeperTests` and `ConnectionPoolTests`. Add a case with an injected scheduler failure on the
-  first `Schedule`, and assert that a later release schedules a sweep and that the idle connection expires.
+**Impact:** If allocating the shared payload owner throws, unwinding destroys
+`next`, which owns the original full pages. `m_buffer` contains only the copied
+tail, but offsets and `m_flushed` still describe all the original data. A later
+retry can upload missing/incorrect bytes while reporting success. T79 fixed
+throws from upload initiation, not this earlier allocation.
 
-### [x] T84 – `LockFileImpl::Lock` reports success without a lease when the acquire timeout is not positive
-- **File:** `src\Azure\Impl\LockFileImpl.ipp:48-63` (constructor), `:94-145` (`Lock`).
-- **Problem:** With `acquireTimeout <= 0` (or `leaseLength <= 0` and no explicit timeout, since the timeout defaults
-  to the lease length), `while ((end - start) < m_acquireTimeout)` never runs. `lastError` is empty, so `Lock()`
-  sets `m_held = true`, publishes a lease deadline and returns `true`, although no lease was acquired and `m_leaseId`
-  is unset. Writes would then proceed with no fencing. This is latent today because the values come from
-  `Configuration` (`LeaseLength = 20s`), but nothing enforces it and tests construct the class directly.
-- **Change:** In the constructor, throw `std::invalid_argument` when `leaseLength <= 0s` or
-  `m_acquireTimeout <= 0ms`. Also check that Azure accepts the lease length: it must be 15–60 s or −1 for
-  infinite. Validate that range too, unless infinite is a supported mode, in which case document it. Defensively,
-  at the end of `Lock()`, require `m_leaseId.has_value()` before setting `m_held`.
-- **Validation:** `LockFileImplTests`: zero and negative timeouts throw at construction. Existing
-  `LeaseSafetyTests` still pass.
+**Action:** Make ownership preparation and the buffer swap a transaction.
+Either finish fallible owner preparation before mutating buffered state or arm
+a non-allocating rollback before the swap. Preserve the original full pages
+and tail on every pre-acceptance exception, without adding a full-buffer copy.
 
----
+**Acceptance:** Extend `WriteableFileTests.cpp` with a targeted payload-owner
+allocation failure, distinct from the existing `UploadPages` fault hook. Append
+distinct full-page and partial-tail patterns, fail once, then retry `Sync` and
+verify exact bytes and logical size. Include a page-aligned case.
 
-## P2: performance
+### [ ] T93 - Make upload-buffer recycling non-throwing
 
-### [x] T85 – `Flush` uploads every completed page at once, which can block the WAL writer (**Verify first**: measure)
-- **Files:** `src\Azure\Impl\WriteableFileImpl.ipp:140-212` (`Flush`, `RangeSync`, `StartFlush`); constants in
-  `WriteableFileImpl.hpp:50` (`MaxInFlightUploads = 4`). Check whether `ReadWriteFileImpl.ipp` has the same pattern.
-- **Problem:** RocksDB calls `Flush` after every WAL record. Whenever at least one complete page is buffered,
-  `StartFlush(false)` starts a PutPage for those pages. A WAL with records of a few hundred bytes therefore sends
-  roughly one request per 512 B page boundary crossed. Every fifth such flush blocks the RocksDB write thread for a
-  network round trip in `WaitForUploads(MaxInFlightUploads - 1)`. Readers cannot see that data until `Sync` publishes
-  the size metadata (`BlobHelpers::FileSizeFromProperties` reads only the `size` metadata key), so the early uploads
-  give no visibility benefit. Sync durability is unchanged either way.
-- **Change:** Start an upload from `Flush`/`RangeSync` only when the full-page bytes reach a threshold. Fair options
-  are half the buffer, or a new `Configuration::PageBlob::MinAsyncFlushBytes` such as 256 KiB. `Append` (buffer
-  nearly full) and `Sync`/`Close` keep their current behaviour. Keep the sticky-error and fencing checks in `Flush`.
-- **Validation:** Use `Compare-Backends.ps1` with a WAL-heavy workload (`fillrandom` with `--sync=0`, small values),
-  and count requests per MB written before and after with the fake blob server's request log. Run
-  `WriteableFileTests` (including `Flush_ReusesBuffersAndKeepsTheTailAcrossTheSwap`, which may need its thresholds
-  adjusted). Drop the change if throughput does not improve.
-- **Done:** Flush/RangeSync start an upload only when at least half the buffer (64 KiB by default) is filled. Measured with
-  a temporary 300 B append+Flush loop of 16 MiB against the fake blob server (Debug): 32768 -> 256 uploads (2048 -> 16 per
-  MB) and 5407 ms -> 84 ms. Tests that relied on an upload after a single page now use a small buffer.
+**Evidence:** `src\Azure\Impl\WriteableFileImpl.ipp:200-215` calls
+`Pool->Free.push_back(std::move(Data))` from `PooledPayload::~PooledPayload`.
+The free list is a dynamically growing vector without reserved slots
+(`...\Impl\WriteableFileImpl.hpp:40-47`).
 
-### [-] T86 – Batch delete rebuilds each sub-request from scratch on every attempt
-- **File:** `libs\AzureClient\include\AVEVA\AzureClient\Detail\BlobBatch.hpp:189-210` (`BuildChunkBody`).
-- **Problem:** For each of up to 256 sub-requests, on every retry, the loop builds a new `HttpRequest` (header
-  vector), formats the `x-ms-date` value again with `BuildDateHeaderValue(system_clock::now())`, and appends to a
-  `body` string that started with no reserved capacity, so the body reallocates about log2(size) times. Within one
-  call the date has one-second resolution and is effectively the same for every part.
-- **Change:**
-  - Format the date once per `BuildChunkBody` call.
-  - Reuse one `HttpRequest` across iterations by clearing its headers, so the vector keeps its capacity.
-  - Before the loop, call `body.reserve(...)` with an estimate: per part, the fixed header bytes plus
-    `urls[i].size()` plus the boundary length.
+**Impact:** A free-list allocation failure escapes an implicitly `noexcept`
+destructor and terminates the process, including when releasing a successful
+upload on the host executor or unwinding another failure.
 
-  Each sub-request must still be signed separately.
-- **Validation:** `BatchDeleteTests` (body shape and the retry tests). Count allocations for a 256-blob chunk before
-  and after. Batch delete is not on the read/write hot path, so drop the change if it adds complexity for less than
-  a 2x allocation reduction.
-- **Dropped:** Measured with a counting `operator new` on a 256-blob chunk (Debug, token auth, 1100 B token): the
-  current loop makes 11285 allocations per attempt; one date/bearer string, a reused `HttpRequest` and a reserved body
-  make 5903 (1.9x, about 44 -> 23 per part). That is under the 2x bar, the remaining cost is the per-header string
-  copies in `AddHeader`/`AppendBatchDeletePart`, and batch delete is off the hot path, so the extra state is not worth it.
+**Action:** Use bounded, allocation-free return storage, or reserve the bounded
+free-list capacity safely during tracker construction. Alternatively, narrowly
+handle recycling allocation failure and release the buffer rather than retain
+it. Keep the existing four-upload bound; do not catch unrelated failures around
+the whole upload operation. The download pool's best-effort return policy is
+useful prior art.
 
----
+**Acceptance:** Force the first free-list-growth allocation to fail while a
+payload is released. The process must survive, upload tracking must drain, and
+the upload's real result must be preserved. Check warmed steady-state allocation
+counts so the fix does not add a per-upload allocation.
 
-## P3: cleanups / simplifications / header hygiene
+### [ ] T94 - Do not hide ambiguous Azure mutations inside HTTP stale-socket retries
 
-### [x] T87 – `Flush` duplicates `WaitForUploads`' error reporting
-- **File:** `src\Azure\Impl\WriteableFileImpl.ipp:144-153` and `:274-283`.
-- **Problem:** `Flush` repeats the "rethrow sticky upload error, then `ThrowIfWritesFenced`" sequence that
-  `WaitForUploads` already contains.
-- **Change:** `Flush()` → `StartFlush(false); WaitForUploads(std::numeric_limits<size_t>::max());`. The predicate is
-  immediately true, so it never waits. Alternatively, extract a `ThrowIfUploadFailed()` helper and use it in both.
-  Do this after T85 if T85 changes `Flush`.
-- **Validation:** `WriteableFileTests` (`Flush_AfterAnEarlierUploadFailed_ReportsTheFailure`, fencing cases).
+**Evidence:** `libs\HttpClient\src\private\RequestOperation.cpp:151-191,398-400`
+allows a reused connection's failed request to be resent after it may have been
+sent, based only on the HTTP verb. Both PUT and DELETE qualify. Azure's separate
+pipeline deliberately refuses ambiguous replay of ordinary DELETE and
+conditional create requests
+(`libs\AzureClient\src\RequestPipeline.cpp:126-133`,
+`Detail\RequestPipeline.hpp:519-525`), but never sees the first error when the
+HTTP layer retries it internally.
 
-### [x] T88 – Move the download-writer pool state out of the public `HttpClient.hpp`
-- **File:** `libs\HttpClient\include\AVEVA\HttpClient\HttpClient.hpp:23-25, 147-152`; `libs\HttpClient\src\HttpClient.cpp`.
-- **Problem:** T76 added `std::mutex m_writerMutex` and `std::unique_ptr<boost::asio::thread_pool> m_writerPool` as
-  members of the public class, which pulls `<mutex>` into every consumer. `HttpClient` already has a private
-  `Impl`, and `GetDownloadWriter()` is out-of-line and not on a hot path.
-- **Change:** Move both members into `HttpClient::Impl`, or into a small struct owned by it. Keep the destructor's
-  ordering: the pool is joined before `m_impl`'s transport is torn down. `<boost/asio/thread_pool.hpp>` must stay,
-  because `GetDownloadWriter()` returns `thread_pool::executor_type`. Drop `<mutex>` if nothing else in the header
-  uses it. This adds no erasure and no extra indirection on a request path.
-- **Validation:** `HttpClientConstructionTests`, `DownloadToFileTests`, the `PublicHeaderSelfContainedTests`, and
-  the T72 install-consume job.
+**Impact:** An ordinary `DeleteAsync` that actually deleted the blob but lost
+its response can be silently resent and return 404 instead of the original
+ambiguous transport failure. Similar replay changes conditional-mutation
+outcomes. The fake-transport tests in `RetryTests.cpp` exercise only the Azure
+retry layer, so they cannot detect this production-transport discrepancy.
 
-### [-] T89 – Lighter `AsyncInitiation.hpp`: do not pull `<future>`/`<thread>` into every client header (**Verify first**)
-- **Files:** `libs\AzureClient\include\AVEVA\AzureClient\Detail\AsyncInitiation.hpp:8`;
-  `libs\AzureClient\include\AVEVA\AzureClient\BlockOn.hpp`.
-- **Problem:** `AsyncInitiation.hpp` only needs `BlockOnToken`, `IsBlockOnToken` and `ThrowIfRunningOn`, but it
-  includes all of `BlockOn.hpp`, which brings `<future>`, `<thread>`, `<atomic>` and `io_context.hpp` into every
-  public client header.
-- **Hazard:** The `async_result<BlockOnToken, …>` specialization must be visible wherever `block_on` is used, and
-  users get `block_on` through the client headers today. Splitting the header without keeping the specialization
-  reachable would break `client.XAsync(block_on)` for anyone who does not include `BlockOn.hpp` directly.
-- **Change, only if worth it:**
-  - Move `BlockOnToken`, `block_on`, `IsBlockOnToken` and `ThrowIfRunningOn` into `Detail\BlockOnToken.hpp`.
-  - Keep `BlockOn.hpp` as that header plus the specialization.
-  - Have the client headers (`BlobClient.hpp`, `PageBlobClient.hpp`, `BlobContainerClient.hpp`,
-    `BlobServiceClient.hpp`) keep including `BlockOn.hpp`, so the public behaviour is unchanged.
-  - Have only the `Detail` headers include the light header.
+**Action:** Make the transport respect a concrete per-request replay policy,
+or leave ambiguous Azure-mutation replay to the Azure retry layer. Retrying
+before any bytes could have been sent and retrying safe reads should remain
+cheap. Do not solve this by disabling pooling across the client.
 
-  This only pays off for TUs that include `Detail` headers without a client header. Measure first; if no real TU
-  benefits, mark the task `[-]` with the numbers.
-- **Validation:** Preprocessed line count and compile time of `src\Azure\Impl\ReadableFileImpl.cpp` and
-  `libs\AzureClient\src\BlobBatch.cpp` before and after; `PublicHeaderSelfContainedTests`.
-- **Dropped:** Measured with `cl /P` (MSVC 14.51, C++latest, Debug flags). `ReadableFileImpl.cpp` includes the client
-  headers anyway, so it gains nothing. Only `BlobBatch.cpp` includes `Detail` headers without a client header; it
-  preprocesses to 208607 lines. Only `<future>` is exclusive to `BlockOn.hpp`: `<thread>` and `<atomic>` come in
-  through asio, and `ThrowIfRunningOn` itself needs `io_context.hpp`, `<thread>` and `<atomic>`, so they would stay in
-  the light header. A probe TU showed `<future>` adds about 17.7k lines (162586 -> 180286, roughly 8% of that one TU).
-  That is one internal TU, and the split adds a header and a second place to keep the `async_result` specialization
-  reachable, for no gain to any client or plugin TU, so it is not worth the complexity. No code changed, so no build
-  or tests were run.
+**Acceptance:** Add loopback tests with the real HTTP transport: warm a pooled
+connection, accept a DELETE or conditional PUT, apply its side effect and drop
+the response. Assert the intended error and number of requests. Include plain
+DELETE versus `DeleteIfExistsAsync` and confirm safe GET stale-socket recovery
+still works.
 
-### [x] T90 – Diagnose filesystem teardown on the client executor instead of waiting out the timeout
-- **File:** `src\Azure\Impl\BlobFilesystemImpl.ipp:343-366` (`~BasicBlobFilesystemImpl`); precondition documented in
-  `include\AVEVA\RocksDB\Plugin\Azure\Plugin.hpp:40-46`.
-- **Problem:** Destroying the filesystem on a thread that runs the client `io_context` is documented as a host bug.
-  With a single-threaded context it cannot drain, because the reads' completions need that thread. Today the
-  destructor still warns every 30 s for two minutes and then carries on, so the bug looks like an unexplained
-  two-minute hang followed by possible use-after-free.
-- **Change:** At the top of the destructor, if `m_asyncReads->InFlight() > 0` and the client executor's
-  `running_in_this_thread()` is true, log one `error` that names the precondition violation, and add an `assert`
-  for debug builds. Keep waiting as before, because a multi-threaded context can still drain. Do not throw from the
-  destructor.
-- **Validation:** A `BlobFilesystemFakeTests` case that destroys the filesystem from a handler posted to its own
-  context while a read is outstanding, with a second context thread so it can drain, and asserts that the error is
-  logged.
-- **Done:** The `assert` was left out: it would abort the required debug-build test, which destroys the filesystem on
-  the executor on purpose and must survive. The error log carries the diagnosis instead.
----
+### [ ] T95 - Require complete gap reads before read/modify/write uploads
 
-## Reviewed in pass 4 and rejected (do not redo)
+**Evidence:** `src\Azure\Impl\ReadWriteFileImpl.ipp:113-123,157-174` knows the
+length of every existing-data gap, but `finishRead` discards the byte count from
+`BlobOperations::FinishDownload`. The general download API legitimately permits
+a short read when the blob ends earlier than the requested range.
 
-- **"`RequestOperation::Read` reserves 16 KiB for every response":** the read buffer travels with the pooled
-  connection, and `TrimIdleBuffer` keeps up to `MaxRetainedBufferCapacity` (≥ `ReadChunk`, see the `static_assert`
-  in `ConnectionPool.hpp:79`). The reserve is paid once per connection, not once per request, and the TLS handshake
-  dwarfs it.
-- **"`<functional>` is unused in `AsyncInitiation.hpp`":** this is wrong, because the header uses `std::invoke`
-  (`:161`).
-- **"`FileCache::WaitUntilIdle` should wait for `m_failedDeletes`":** failed deletes are retried only when other work
-  wakes the worker, and they can keep failing (a file locked on Windows). Adding them to the idle predicate would
-  make `WaitUntilIdle()` with no timeout hang. The documented contract (no queued or in-flight work) is the intended
-  one.
-- **Stale duplicate `include\AVEVA\RocksDB\Plugin\Azure\Impl\*.hpp`:** only `Configuration.hpp` remains there. The
-  rest moved to `src\Azure\Impl\include`, and there are no duplicates.
+**Impact:** A short successful gap download is not a successful preservation of
+the old page. Uploading the extent can replace untouched bytes with zeros or
+bytes retained in a recycled extent buffer. `WriteableFileImpl` already rejects
+short reads of the reopened partial page; this mutating path needs the same
+invariant.
 
-## Reviewed in pass 4 and judged sound (no task)
+**Action:** Track the expected length alongside each pending gap read and reject
+a short result before starting any extent upload in that wave. Reuse/extract
+the existing exact-read validation where sensible, without making ordinary
+read-only EOF handling fail.
 
-- `FailLater` exactly-once fallback; `RequestState` slot release ordering; `ConnectionPool::Release` strong exception
-  safety up to the notifier (see T83).
-- `AsyncReadTracker::Registration` posting `End()` when released on the executor.
-- `WriteableFileImpl` upload pooling and back-pressure, sticky upload error, fencing re-check after in-flight
-  uploads, and the reopen tail treated as already flushed.
-- `LockFileImpl` reuse of the proposed lease ID across acquire retries, and per-attempt deadline bounding.
+**Acceptance:** Extend `ReadWriteFileTests.cpp`: seed a full page with a pattern,
+write a small subrange, make its preservation read succeed with too few bytes,
+and assert failure with no upload for that wave. Repeat with a reused extent
+buffer holding a different pattern, then restore the download and verify a retry.
+Keep draining all already-started reads before releasing their buffers.
 
----
+### [ ] T96 - Recover async runners when an internal continuation throws
 
-## Prior passes (T01–T78): closed, do not redo
+**Evidence:** `Detail\RequestPipeline.hpp:194-218` sets `m_draining` before
+dispatch with no exception cleanup; `StartAttempt:319-323` builds/copies the
+request outside the narrower signing/rebuild catches. A retry or 401 token
+refresh can execute that code from a transport/timer callback. The download
+runner similarly sets `m_processing` and calls `Handle` without recovery
+(`Detail\BlobDownload.hpp:169-189`); signal/map allocation and authorized-send
+initiation at lines 250-265 are outside its request-building catch.
 
-- **Pass 3 (T67–T78):**
-  - **Done:** T67 partial-cancellation filter; T50 Direct-path dispatch off foreign threads; T68 remaining error
-    codes plus one `IsLeaseLost`; T69 closed-variant `CancelState`; T58 `ClientRuntimeBase` split into
-    `WriteFence`, `BlobMetadataCache` and `ClientRuntimeTransport.hpp`; T72 per-package install-consume; T73 one
-    exception ladder; T74 read-path nits; T75 `DnsCache` key-view probe; T76 client-owned writer pool; T77 include
-    cleanup; T78 docs.
-  - **Dropped after measurement:**
-    - T70: remaining erasure on `RenewAsync`, prefetch waiters and `MetadataCallback`. Making these concrete needs
-      re-erasure or header weight for an unmeasurable gain.
-    - T71: one allocation fewer per `ReadAsync`, which is about 0.5%.
-- **Pass 3 rejected or sound:**
-  - `IdleSweeper::Stop` waits correctly.
-  - The ignored-range 200 body is bounded.
-  - Public-config callbacks (`AssertionProvider`, `SourceFailureObserver`, `HttpDiagnosticsCallback`,
-    `FileSystemFactory`) may stay erased.
-  - `TokenCredential` waiters as `any_completion_handler` are deliberate.
-  - `MultiRead` `active.erase` is fine.
-- **Pass 2 (T28–T66):** all done except T43, which was skipped because the merged-group copy is under 1%.
-- **Pass 1 (T01–T27):**
-  - **Done:** T01, T03–T12, T15, T17–T21, T26, T27.
-  - **Dropped after measurement:** T16, T22–T25 (T25 because the `BlockOn` stack promise is unsafe).
-  - **Rejected:**
-    - `LruFileIndex::RegisterEntry` erasing a pinned entry;
-    - rename always copying through a buffer;
-    - `LeaseRenewalLoop::Fail` race;
-    - public-header `unique_ptr` pimpl;
-    - AzureClient `cxx_std_23` PUBLIC→PRIVATE;
-    - one strand per client;
-    - ISO-8601 with more than 7 fraction digits;
-    - retry pipeline body sharing on a single attempt;
-    - TSan label split.
+**Impact:** An internal setup/allocation exception after initial initiation can
+escape the host event loop, leave the runner marked active and lose the expected
+completion. Errors starting writer work or posting its result can also strand
+the `m_writing` state. The read completion guard added in T80 does not make these
+lower-level state machines exception-safe.
+
+**Action:** Establish an explicit failure transition for internal continuation
+and scheduling failures. Restore runner state, cancel/drain accepted operations
+and complete once with the appropriate error. Distinguish internal setup throws
+from a user's final completion throwing; do not disguise a user-handler exception
+as a storage failure or invoke the handler again. Check batch continuation
+initiation for the same accepted-work invariant while making the fix.
+
+**Acceptance:** Use focused fault-injection tests in the existing retry and
+parallel-download suites: throw during a second attempt, a later chunk start
+and writer scheduling. Assert no exception escapes `run()`, one error completion,
+no permanently active runner, and no released buffer still used by accepted I/O.
+
+### [ ] T97 - Guard condition-variable upload waits on the host executor
+
+**Evidence:** `src\Azure\Impl\WriteableFileImpl.ipp:98-104,303-308` waits for
+upload callbacks without `AzureClient::ThrowIfRunningOn`. These waits are reached
+by back-pressure during `Append`/`Flush` and by `Sync`/`Close`; the lower-level
+future guards cannot help once the code is already waiting on the tracker.
+
+**Impact:** A call made on a single-threaded host executor with pending uploads
+deadlocks instead of failing promptly, despite the branch's explicit safeguards
+at other blocking boundaries.
+
+**Action:** Guard blocking public-operation waits before entering them, using
+the blob's concrete executor and the repository's existing misuse error policy.
+Treat destructor drainage separately: it is `noexcept` and must not throw or
+release state still needed by uploads. Preserve/document its external lifetime
+precondition and diagnose a violation rather than silently pretending to drain.
+
+**Acceptance:** Hold an upload pending, call the blocking operation from its
+executor and verify a prompt failure rather than a hang. Confirm normal
+RocksDB-thread back-pressure and shutdown drainage still work.
+
+## P2: cache correctness and consistency
+
+### [ ] T98 - Roll back the new temporary LRU pin when reservation throws
+
+**Evidence:** `src\Core\LruFileIndex.cpp:60-89` now increments the existing
+entry's `pinCount`, discounts its size and calls `EvictUntilSizeLocked`.
+The decrement/restoration happens only on normal return. Eviction can throw
+while reserving its output vector or constructing path strings.
+
+**Impact:** A failed replacement reservation can leave the existing entry
+permanently pinned. Size discount exception safety was already weak in `main`;
+the branch adds the leaked pin, making this a directly coupled regression rather
+than a request for a general cache rewrite.
+
+**Action:** Restore the temporary pin and size discount on every exit using
+non-allocating scope cleanup under the existing mutex. Do not invalidate the
+stored iterator or subtract already-evicted entries twice. Keep deferred disk
+I/O outside the index lock.
+
+**Acceptance:** In the existing LRU/secondary-cache tests, fail allocation before
+eviction and during path preparation for a same-key replacement. Afterwards,
+usage must match surviving entries, and shrinking the cache must still evict
+the temporarily pinned entry. Check the existing replacement-generation pin
+tests. This finding is statically traced, not runtime fault-injection verified
+by this review.
+
+### [ ] T99 - Verify that partial-prefetch reads cannot return mixed blob versions
+
+**Verify first; medium confidence.**
+
+**Evidence:** `src\Azure\Impl\ReadableFileImpl.ipp:157-169` copies a prefetched
+prefix into caller scratch and then downloads only the suffix.
+`DownloadWithRetry:661-700` can refresh metadata after a 412 and return the suffix
+from a new ETag. Clearing the prefetch at that point cannot undo the prefix
+already copied into scratch. The existing partial-overlap test in
+`AsyncReadTests.cpp:381-402` covers only a stable blob.
+
+**Action:** First reproduce an overwrite between prefetch completion and the
+suffix download. If the read returns old-prefix/new-suffix success, bind the
+whole read to one metadata version or restart the entire requested range when
+the version changes. Keep the suffix-only optimization for a stable ETag and
+preserve the existing bounded stale-read retry budget.
+
+**Acceptance:** Add a deterministic deferred-transport test with distinct old
+and new full-file patterns. A successful read must contain one version, not a
+mixture; exhausting version changes must return the existing stale-read error.
+Do not remove the stable-blob optimization without measuring its replacement.
+
+## P2: performance and measurement reliability
+
+### [ ] T100 - Construct the DNS leader guard without a live temporary
+
+**Evidence:** `libs\HttpClient\src\private\RequestOperation.cpp:224-236`
+constructs the shared guard with
+`std::make_shared<LeaderGuard>(LeaderGuard{...})`. `LeaderGuard` has a destructor
+but no move operation transferring/disarming its cleanup responsibility. The
+temporary's destructor calls `DnsCache::Finish(operation_aborted)` immediately
+at the end of that expression, before `async_resolve` starts.
+
+**Impact:** The pending-leader entry is removed prematurely, so subsequent
+requests can each become another DNS leader. An older leader can also publish
+against a replacement pending entry. This defeats the intended burst
+coalescing and makes cancellation testing less representative.
+
+**Action:** Construct the guard directly in shared storage and make cleanup
+ownership non-copyable (or explicitly transferable with the source disarmed).
+Ensure failure after claiming leadership also releases that claim.
+
+**Acceptance:** Test the actual guard/start path, not only `BasicDnsCache` in
+isolation. Hold resolution pending, submit multiple same-origin requests, verify
+one leader/lookup and one publication, then cover leader cancellation and
+abandonment. An isolated current-header probe confirmed that a follower becomes
+a second leader immediately after the existing guard-construction expression.
+
+### [ ] T101 - Publish download-pool byte accounting with the buffer
+
+**Evidence:** `src\Azure\Impl\include\AVEVA\RocksDB\Plugin\Azure\Impl\DownloadBufferPool.hpp:118-136`
+pushes a returned buffer under its size-class mutex, unlocks, then increments
+`m_pooledBytes`. `Acquire:69-75` can remove that buffer and decrement the counter
+between those operations.
+
+**Impact:** Starting from an empty pool, the counter transiently wraps below zero
+to a huge `size_t` value. Concurrent returns/evictions can interpret that value
+as severe over-capacity and discard otherwise useful buffers, undermining reuse.
+The existing pool tests in `BlobOperationsTests.cpp:505-577` are single-threaded
+and only check settled accounting.
+
+**Action:** Update byte ownership inside the same size-class critical section
+that makes a buffer visible/invisible. Keep actual deallocation outside locks
+and preserve the per-class and total retention bounds. Stronger atomic memory
+ordering alone does not fix the publication order.
+
+**Acceptance:** Add a controlled return/acquire interleaving or suitable narrow
+test hook, plus concurrent churn across classes. Accounting must not wrap and
+settled retained bytes must match free buffers. Measure allocation/reuse under
+contention, and run the relevant tests under TSan on Linux.
+
+### [ ] T102 - Make failed or unparsed benchmark runs explicitly incomplete
+
+**Evidence:** `tools\db_bench\Compare-Backends.ps1:108-126` returns `$null` for a
+nonzero benchmark exit but does not propagate a final failed status. A zero-exit
+process missing an expected metric returns a truthy map containing `Seconds`;
+callers such as lines 155-156 divide the missing map value by 1000, which can
+record a misleading zero. Results are averaged/exported at lines 213-231 without
+requiring valid paired samples.
+
+**Impact:** A failed backend can produce an apparently successful comparison
+with missing samples, or an output-format change can look like a dramatic
+performance improvement. This is especially problematic for the branch's
+performance acceptance workflow.
+
+**Action:** Validate expected metric keys and numeric values for each requested
+benchmark, retain explicit failure records, and return a failing/incomplete
+status when requested paired comparisons are unavailable. Keep partial logs and
+diagnostics; never turn missing measurements into zero latency. Preserve the
+existing bounded load retry policy rather than silently retrying every failure.
+
+**Acceptance:** Test with small fake baseline/candidate executables that require
+no Azure access: nonzero exit, zero exit without metrics, malformed metrics,
+one missing backend, and valid paired output. Only real measurements may appear
+as numeric samples in `summary.csv`.
+
+## P3: best practices and simplifications
+
+### [ ] T103 - Include the new template implementation files in formatting checks
+
+**Evidence:** `.github\hooks\pre-commit:35` and
+`.github\workflows\build-and-test.yml:44` match only
+`c|cc|cpp|cxx|h|hh|hpp|hxx`. The branch moves substantial production
+implementation into `.ipp` files, including the read/write and filesystem
+definitions; those files are now outside both checks.
+
+**Action:** Add `.ipp` consistently to the hook and CI selection, and update
+documented file-selection commands where needed. Include the new benchmark C++
+source under `tools` if it is meant to follow the same policy. Use the pinned
+formatter version and keep hook/CI behavior aligned.
+
+**Acceptance:** Demonstrate that an intentionally unformatted representative
+`.ipp` is selected and rejected by the check, then restore/format it. Confirm
+ordinary C++ sources remain selected. Do not combine this with unrelated bulk
+formatting changes.
+
+### [ ] T104 - Use concrete ownership for the HTTP pending request state
+
+**Evidence:** `libs\HttpClient\src\private\HttpClientImpl.hpp:84` stores the
+request's only possible state as `std::shared_ptr<void>`. Lines 343 and 364 cast
+it back to `RequestState` unconditionally.
+
+**Action:** Forward-declare the nested `RequestState` before `PendingRequest`
+and store `std::shared_ptr<RequestState>` directly, arranging the later
+definition around the existing `Limiter` alias. Remove the casts and obsolete
+comment. This is a bounded type-safety simplification, not a new abstraction or
+dispatch mechanism.
+
+**Acceptance:** Existing limiter cancellation, failed-start, failed-post and
+client-destruction tests pass, with unchanged submission allocation counts.
+
+### [ ] T105 - Remove the obsolete upload-error accessor and stale wait wording
+
+**Evidence:** `HasUploadError` is declared at
+`src\Azure\Impl\include\AVEVA\RocksDB\Plugin\Azure\Impl\WriteableFileImpl.hpp:89`
+and defined at `WriteableFileImpl.ipp:90-96`, but has no callers after the shared
+`WaitForUploads` error path was adopted. The comment at lines 161-164 still says
+`Flush` waits, although it only uses a nonblocking error-check predicate unless
+starting another upload requires back-pressure.
+
+**Action:** Remove the unused private helper and describe the actual distinction
+between asynchronous flushing, bounded back-pressure and durability waits.
+Do not reintroduce duplicate upload-error checks or change the public API.
+
+**Acceptance:** Search for remaining references, build the implementation target
+and keep the existing flush/upload-error tests passing. No new behavior test is
+needed for removing an unused helper.
+
+## Dependencies and recommended order
+
+T91-T98 are independently actionable. T92 and T93 touch the same buffer-lifecycle
+code and should be coordinated, but neither is a prerequisite for the other.
+Implement T99 only after reproducing it. T100-T105 do not require the correctness
+changes. T96 must preserve T91's work ownership while recovering failed
+continuations. No performance task justifies dropping a correctness guarantee.
+
+## Validation performed for this review
+
+- Passed:
+  `cmake --build build\WindowsDebug --config Debug --target aveva-http-client-tests aveva-azure-client-pipeline-tests aveva-rocksdb-plugin-azure-impl-tests -- /nologo /v:minimal`
+- Passed, **169/169 tests**:
+  `ctest --test-dir build\WindowsDebug -C Debug --output-on-failure --parallel 4 -R 'DnsCache|SharedDns|ReadWriteFileImplTests|WriteableFileTests|Retry|AsyncBehaviorTests.*(ForeignThread|WorkGuard)' -E Integration`
+- Isolated C++ probes using current headers confirmed T91 and the guard-lifetime
+  mechanism in T100. These were review artifacts outside the repository, not
+  committed regression tests or end-to-end throughput benchmarks.
+- Live Azure integration, Linux sanitizer runs and baseline/candidate
+  performance comparisons were **not run**. The passing existing tests do not
+  cover the newly identified failure/interleaving scenarios.
+
+For subsequent native changes, use the focused selectors above or the owning
+suite, then expand as warranted:
+
+```powershell
+cmake --build build\WindowsDebug --config Debug
+ctest --test-dir build\WindowsDebug --output-on-failure --build-config Debug -E Integration
+```
+
+Configure with `cmake --preset WindowsDebug` only if needed; use the repository's
+Linux presets/CI for sanitizer verification. Azure integration tests require
+their documented opt-in and credentials. Do not print credentials or add them
+to task notes, logs or commits.

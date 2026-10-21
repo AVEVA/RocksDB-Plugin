@@ -52,6 +52,7 @@ struct ClientSnapshotAccess {
 // with the caller emitting on that executor instead of racing on the transport thread.
 // Concrete (non-erased) wrapper produced by BindAssociationsAndAdoptCancellation. `Direct` is the fast path
 // where the handler already runs on the default executor and no slot was adopted: it is invoked in place.
+// Work always holds the executor busy until the completion has been delivered.
 template <class TArg, class THandler, class TExecutor, class TAllocator, class TSlot> struct BoundHandler {
     THandler Handler;
     TExecutor Executor;
@@ -76,6 +77,7 @@ template <class TArg, class THandler, class TExecutor, class TAllocator, class T
         // already on the client executor may skip the dispatch.
         if (Direct && OnExecutorThread()) {
             std::move(Handler)(std::move(result));
+            Work.reset();
             return;
         }
         boost::asio::dispatch(Executor,
@@ -109,10 +111,9 @@ template <class TArg, class RawHandler, class TExecutor>
 
     auto allocator = boost::asio::get_associated_allocator(handler);
     using Executor = decltype(executor);
-    std::optional<boost::asio::executor_work_guard<Executor>> work;
-    if (!direct) {
-        work.emplace(boost::asio::make_work_guard(executor));
-    }
+    // Held even on the direct path: credential or file work off the executor would otherwise let run() return
+    // before the completion is delivered. The direct path releases it right after the inline invocation.
+    std::optional<boost::asio::executor_work_guard<Executor>> work{boost::asio::make_work_guard(executor)};
     return BoundHandler<TArg, RawHandler, Executor, decltype(allocator), decltype(slot)>{
         std::move(handler), executor, allocator, slot, adoptedSlot, direct, std::move(work)};
 }
