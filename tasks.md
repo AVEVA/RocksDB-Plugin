@@ -389,7 +389,7 @@ contention, and run the relevant tests under TSan on Linux.
 
 **Result (done):** Reproduced deterministically with a static (non-erased) test-hook template parameter on the pool (`BasicDownloadBufferPool<Hooks>`, `DownloadBufferPool` alias unchanged): the counter wrapped to 2^64-1024 before the fix. `Return` now adds bytes inside the size-class lock that publishes the buffer. Added the interleaving test plus a concurrent churn test (stress alone never reproduced the race). WindowsDebug ctest: 1179/1179 pass (integration skipped). Not done: TSan run (Linux only) and contention allocation measurements; no performance change was made.
 
-### [ ] T102 - Make failed or unparsed benchmark runs explicitly incomplete
+### [x] T102 - Make failed or unparsed benchmark runs explicitly incomplete
 
 **Evidence:** `tools\db_bench\Compare-Backends.ps1:108-126` returns `$null` for a
 nonzero benchmark exit but does not propagate a final failed status. A zero-exit
@@ -413,6 +413,8 @@ existing bounded load retry policy rather than silently retrying every failure.
 no Azure access: nonzero exit, zero exit without metrics, malformed metrics,
 one missing backend, and valid paired output. Only real measurements may appear
 as numeric samples in `summary.csv`.
+
+**Result (done):** Reproduced with Pester tests (`tools\db_bench\Compare-Backends.Tests.ps1`, fake `.cmd` db_bench): 4 of 5 failed before (exit 0 despite failures; missing metrics recorded as 0). `Invoke-Bench` now requires each expected metric to be a finite number, records failures (shown in console and `failures.txt`), and the script exits 1 with a `Status` column (`complete`/`INCOMPLETE`) in `summary.csv` when any pair is missing; failed samples are never recorded as numbers. Load retry policy unchanged. All 5 Pester tests pass; no C++ changed, so no native build/ctest or clang-format was needed.
 
 ## P3: best practices and simplifications
 

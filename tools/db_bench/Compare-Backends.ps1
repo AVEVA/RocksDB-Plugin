@@ -104,8 +104,15 @@ function Remove-Secret([string]$path) {
     $text = [IO.File]::ReadAllText($path)
     if ($text.Contains($secret)) { [IO.File]::WriteAllText($path, $text.Replace($secret, '***REDACTED***')) }
 }
-# Runs db_bench; returns the parsed "<name> : <x> micros/op" values by benchmark name, or $null on failure.
-function Invoke-Bench($backend, $label, [string[]]$benchArgs) {
+# Every failed or unparsable run is kept here so the comparison is reported as incomplete instead of looking clean.
+$script:failures = [System.Collections.Generic.List[string]]::new()
+function Add-Failure($backend, $label, $reason) {
+    $script:failures.Add("[$backend] $label : $reason")
+    Write-Host "  FAILED [$backend] ${label}: $reason" -ForegroundColor Red
+}
+# Runs db_bench; returns the parsed "<name> : <x> micros/op" values by benchmark name, or $null on failure (nonzero
+# exit, or any name in $expect missing or not a finite number). Logs are kept either way.
+function Invoke-Bench($backend, $label, [string[]]$benchArgs, [string[]]$expect = @()) {
     UseContainer $backend
     $script:logIndex++
     $log = Join-Path $OutDir ("{0:D3}-{1}-{2}.txt" -f $script:logIndex, $backend, ($label -replace '[^\w.-]', '_'))
@@ -115,13 +122,15 @@ function Invoke-Bench($backend, $label, [string[]]$benchArgs) {
     $rc = $LASTEXITCODE
     Remove-Secret $log
     Write-Host (" rc={0} {1:N0}s" -f $rc, $sw.Elapsed.TotalSeconds)
-    if ($rc -ne 0) { return $null }
+    if ($rc -ne 0) { Add-Failure $backend $label "exit code $rc (log: $log)"; return $null }
 
     $parsed = @{ Seconds = $sw.Elapsed.TotalSeconds }
     # db_bench wraps long lines, so match the "<name> : <value> micros/op" prefix only.
-    foreach ($m in Select-String -Path $log -Pattern '^(\w+)\s+:\s+([\d.]+) micros/op') {
+    foreach ($m in Select-String -Path $log -Pattern '^(\w+)\s+:\s+(\d+(?:\.\d+)?) micros/op') {
         $parsed[$m.Matches[0].Groups[1].Value] = [double]$m.Matches[0].Groups[2].Value
     }
+    $missing = @($expect | Where-Object { -not $parsed.ContainsKey($_) })
+    if ($missing) { Add-Failure $backend $label "missing or malformed metric(s) $($missing -join ', ') (log: $log)"; return $null }
     $parsed
 }
 
@@ -134,6 +143,7 @@ function New-LoadedDb($backend, $tag) {
         if ($r) { return @{ Db = $db; Seconds = $r.Seconds } }
         Write-Host "  load failed (attempt $attempt)" -ForegroundColor Yellow
     }
+    Record 'load+compact (s)' $backend $null
     $null
 }
 
@@ -150,8 +160,8 @@ for ($rep = 1; $rep -le $Reps; $rep++) {
     if ('write' -in $Scenarios) {
         foreach ($b in $order) {
             $r = Invoke-Bench $b 'write' (@('--benchmarks=fillseq,fillrandom,overwrite', "--num=$(Scaled 500)",
-                    '--threads=1', '--statistics=0', '--disable_wal=0') + $common + "--db=$(NewDb $b 'write')")
-            if ($r) { foreach ($k in 'fillseq', 'fillrandom', 'overwrite') { Record "write-$k (ms/op)" $b ($r[$k] / 1000) } }
+                    '--threads=1',                     '--statistics=0', '--disable_wal=0') + $common + "--db=$(NewDb $b 'write')") 'fillseq', 'fillrandom', 'overwrite'
+                                foreach ($k in 'fillseq', 'fillrandom', 'overwrite') { Record "write-$k (ms/op)" $b $(if ($r) { $r[$k] / 1000 }) }
         }
     }
 
@@ -169,10 +179,10 @@ for ($rep = 1; $rep -le $Reps; $rep++) {
 
     if ('readrandom' -in $Scenarios) {
         foreach ($b in $order) {
-            if (-not $dbs[$b]) { continue }
+            if (-not $dbs[$b]) { Record 'readrandom-cold (ms/op)' $b $null; continue }
             $r = Invoke-Bench $b 'readrandom' ($readCommon + @('--benchmarks=readrandom', "--reads=$(Scaled 300)",
-                    '--threads=1', "--db=$($dbs[$b])"))
-            if ($r) { Record 'readrandom-cold (ms/op)' $b ($r['readrandom'] / 1000) }
+                    '--threads=1', "--db=$($dbs[$b])")) 'readrandom'
+            Record 'readrandom-cold (ms/op)' $b $(if ($r) { $r['readrandom'] / 1000 })
         }
     }
 
@@ -180,11 +190,12 @@ for ($rep = 1; $rep -le $Reps; $rep++) {
         foreach ($threads in 1, 8) {
             foreach ($async in 0, 1) {
                 foreach ($b in $order) {
-                    if (-not $dbs[$b]) { continue }
+                    $name = "seek t$threads async_io=$async (ms/op)"
+                    if (-not $dbs[$b]) { Record $name $b $null; continue }
                     $r = Invoke-Bench $b "seek-t$threads-async$async" ($readCommon + @('--benchmarks=seekrandom',
                             '--seek_nexts=1000', "--reads=$(Scaled 50)", "--threads=$threads", '--adaptive_readahead=1',
-                            "--async_io=$async", "--db=$($dbs[$b])"))
-                    if ($r) { Record "seek t$threads async_io=$async (ms/op)" $b ($r['seekrandom'] / 1000) }
+                            "--async_io=$async", "--db=$($dbs[$b])")) 'seekrandom'
+                    Record $name $b $(if ($r) { $r['seekrandom'] / 1000 })
                 }
             }
         }
@@ -193,11 +204,12 @@ for ($rep = 1; $rep -le $Reps; $rep++) {
     if ('multiget' -in $Scenarios) {
         foreach ($async in 0, 1) {
             foreach ($b in $order) {
-                if (-not $dbs[$b]) { continue }
+                $name = "multiget async_io=$async (ms/key)"
+                if (-not $dbs[$b]) { Record $name $b $null; continue }
                 $r = Invoke-Bench $b "multiget-async$async" ($readCommon + @('--benchmarks=multireadrandom',
                         '--multiread_batched=1', '--batch_size=32', "--reads=$(Scaled 1000)", '--threads=1',
-                        "--async_io=$async", "--db=$($dbs[$b])"))
-                if ($r) { Record "multiget async_io=$async (ms/key)" $b ($r['multireadrandom'] / 1000) }
+                        "--async_io=$async", "--db=$($dbs[$b])")) 'multireadrandom'
+                Record $name $b $(if ($r) { $r['multireadrandom'] / 1000 })
             }
         }
     }
@@ -221,6 +233,7 @@ $rows = foreach ($name in $results.Keys) {
         'candidate' = if ($null -ne $a) { '{0:N1}' -f $a } else { 'n/a' }
         'candidate vs baseline' = if ($null -ne $s -and $null -ne $a -and $s -ne 0) { '{0:+0;-0;0}%' -f (($a - $s) / $s * 100) } else { 'n/a' }
         Samples = '{0}/{1}' -f $results[$name].baseline.Count, $results[$name].candidate.Count
+        Status = if ($results[$name].baseline.Count -eq $Reps -and $results[$name].candidate.Count -eq $Reps) { 'complete' } else { 'INCOMPLETE' }
     }
 }
 
@@ -229,3 +242,11 @@ $rows | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
 $rows | Export-Csv (Join-Path $OutDir 'summary.csv') -NoTypeInformation
 Write-Host ("Total time {0:N0} min. Logs and summary.csv: {1}" -f $sw0.Elapsed.TotalMinutes, $OutDir)
 Write-Host "Test blobs remain in containers $ContainerPrefix-baseline and $ContainerPrefix-candidate; delete them when finished."
+
+$incomplete = @($rows | Where-Object Status -ne 'complete')
+if ($script:failures.Count -or $incomplete.Count -or -not $rows) {
+    $script:failures | Set-Content (Join-Path $OutDir 'failures.txt')
+    Write-Host ("INCOMPLETE comparison: {0} failed run(s), {1} scenario(s) without all {2} paired sample(s). See failures.txt and the logs in {3}." -f
+        $script:failures.Count, $incomplete.Count, $Reps, $OutDir) -ForegroundColor Red
+    exit 1
+}
