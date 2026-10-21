@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntimeTransport.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ServicePrincipalStorageInfo.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"

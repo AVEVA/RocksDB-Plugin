@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntimeTransport.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #pragma once
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntimeTransport.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/TokenCredentials.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ChainedCredentialInfo.hpp"

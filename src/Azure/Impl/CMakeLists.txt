@@ -15,6 +15,8 @@ add_library(aveva-rocksdb-plugin-azure-impl STATIC
     BlobAttributes.cpp
     DirectoryImpl.cpp
     ClientRuntime.cpp
+    WriteFence.cpp
+    BlobMetadataCache.cpp
     PluginClients.cpp
     Environment.cpp
 )

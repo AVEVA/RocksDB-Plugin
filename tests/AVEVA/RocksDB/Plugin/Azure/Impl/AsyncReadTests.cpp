@@ -3,7 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadRequest.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadTracker.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntimeTransport.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"

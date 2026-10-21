@@ -3,7 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadRequest.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntimeTransport.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
 #include "BasicReadableFile.hpp"

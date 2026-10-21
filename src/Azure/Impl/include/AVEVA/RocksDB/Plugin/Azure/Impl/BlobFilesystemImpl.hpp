@@ -4,7 +4,7 @@
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AzureContainerClient.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobAttributes.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntimeTransport.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/DirectoryImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LeaseRenewalLoop.hpp"

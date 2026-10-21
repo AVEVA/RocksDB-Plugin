@@ -173,7 +173,7 @@ code. Findings marked **Verify first** are medium confidence: confirm or measure
 - **Validation:** Count allocations per `ReadAsync` and run `ReadableFileTests`/`BlobFilesystemFakeTests`, then
   `Compare-Backends.ps1` with a random-read workload. Drop the change if it is below noise.
 
-### [ ] T58 – Split `ClientRuntimeBase` into concrete components (carried over, partial)
+### [x] T58 – Split `ClientRuntimeBase` into concrete components (carried over, partial)
 - **Done:** request helpers moved to `RequestHelpers.hpp`.
 - **Remaining (refined):**
   1. `ClientRuntime.hpp:4-31` still includes `HttpClient.hpp`, `thread_pool.hpp`, `use_future.hpp`,

@@ -2,33 +2,23 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #pragma once
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobMetadataCache.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/RequestHelpers.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteFence.hpp"
 
 #include <AVEVA/AzureClient/AzureRequestOptions.hpp>
-#include <AVEVA/AzureClient/BlobStorageError.hpp>
-#include <AVEVA/AzureClient/HttpClientLike.hpp>
-#include <AVEVA/AzureClient/Response.hpp>
-#include <AVEVA/HttpClient/HttpClient.hpp>
 
-#include <boost/asio/io_context.hpp>
-#include <boost/asio/post.hpp>
 #include <boost/asio/thread_pool.hpp>
-#include <boost/asio/use_future.hpp>
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <expected>
-#include <functional>
-#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <utility>
-#include <vector>
 
 #ifdef _WIN32
 // The target is built with _WIN32_WINNT=0x0A00 (exported publicly) and Boost.Asio's ABI depends on it.
@@ -45,24 +35,19 @@
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// <summary>
 /// What every file, lock and blob operation needs from the runtime, independent of the HTTP transport: the write
-/// fence shared by every file, lock and directory of a filesystem. Kept non-template so those classes need not know
-/// which transport they run on.
+/// fence and the blob metadata cache shared by every file, lock and directory of a filesystem, and the download
+/// writer pool. Kept non-template so those classes need not know which transport they run on. Not meant to be
+/// deleted through a base pointer; share it through the concrete runtime's shared_ptr.
 /// </summary>
 class ClientRuntimeBase {
-    std::atomic<bool> m_writesFenced{false};
-    // The earliest lease renewal deadline in steady_clock ticks; kNoDeadline when no lease is held. Written under
-    // m_leaseMutex (renewals are rare), read lock-free by every mutation.
-    static constexpr std::chrono::steady_clock::rep kNoDeadline =
-        (std::numeric_limits<std::chrono::steady_clock::rep>::max)();
-    std::atomic<std::chrono::steady_clock::rep> m_writeDeadline{kNoDeadline};
-    std::mutex m_leaseMutex;
-    std::vector<std::pair<const void*, std::chrono::steady_clock::rep>> m_leaseDeadlines;
+    WriteFence m_fence;
+    BlobMetadataCache m_metadata;
     mutable std::once_flag m_writerOnce;
     mutable std::unique_ptr<boost::asio::thread_pool> m_writerPool;
 
   public:
     ClientRuntimeBase() = default;
-    virtual ~ClientRuntimeBase();
+    ~ClientRuntimeBase();
     ClientRuntimeBase(const ClientRuntimeBase&) = delete;
     ClientRuntimeBase& operator=(const ClientRuntimeBase&) = delete;
     ClientRuntimeBase(ClientRuntimeBase&&) = delete;
@@ -74,86 +59,42 @@ class ClientRuntimeBase {
     /// </summary>
     [[nodiscard]] boost::asio::thread_pool::executor_type DownloadWriter() const;
 
-    /// <summary>
-    /// Makes every later mutation through this runtime's blobs fail. Called once the filesystem can no longer
-    /// prove it still holds its locks, so files opened earlier stop writing too. Irreversible.
-    /// </summary>
-    void FenceWrites() noexcept;
-    [[nodiscard]] bool WritesFenced() const noexcept;
-    /// <summary>
-    /// Throws std::runtime_error when writes are fenced or the earliest lease renewal deadline has passed. The
-    /// deadline check closes the window before the renewal loop gives up, in which another writer may already own
-    /// the lease. Returns the time left (empty when no deadline applies) so the caller can bound its request without
-    /// querying the deadline source a second time.
-    /// </summary>
-    std::optional<std::chrono::steady_clock::duration> ThrowIfWritesFenced() const;
+    [[nodiscard]] WriteFence& Fence() noexcept { return m_fence; }
+    [[nodiscard]] const WriteFence& Fence() const noexcept { return m_fence; }
+    [[nodiscard]] BlobMetadataCache& MetadataCache() noexcept { return m_metadata; }
+    [[nodiscard]] const BlobMetadataCache& MetadataCache() const noexcept { return m_metadata; }
 
-    /// <summary>
-    /// Publishes the renewal deadline of one lease (`owner` identifies it; empty removes it) so ThrowIfWritesFenced
-    /// can read the earliest of them without locking. A lease must republish whenever it is acquired, renewed or
-    /// released, and remove itself before it is destroyed.
-    /// </summary>
-    void SetLeaseDeadline(const void* owner, std::optional<std::chrono::steady_clock::time_point> deadline);
-    /// <summary>Time left before mutations must stop; empty when no lease deadline applies.</summary>
-    [[nodiscard]] std::optional<std::chrono::steady_clock::duration> WriteTimeRemaining() const;
+    // Forwarding functions to Fence() and MetadataCache(), kept so callers can migrate gradually.
+    void FenceWrites() noexcept { m_fence.Fence(); }
+    [[nodiscard]] bool WritesFenced() const noexcept { return m_fence.Fenced(); }
+    std::optional<std::chrono::steady_clock::duration> ThrowIfWritesFenced() const { return m_fence.ThrowIfFenced(); }
+    void SetLeaseDeadline(const void* owner, std::optional<std::chrono::steady_clock::time_point> deadline) {
+        m_fence.SetLeaseDeadline(owner, deadline);
+    }
+    [[nodiscard]] std::optional<std::chrono::steady_clock::duration> WriteTimeRemaining() const {
+        return m_fence.TimeRemaining();
+    }
 
-    /// <summary>
-    /// A short-lived cache of blobs' logical sizes (keyed by blob URL) for FileSystem::GetFileSize, which RocksDB
-    /// calls repeatedly for the same files. Every operation that can change a blob's size invalidates its entry
-    /// when it finishes, and a fetch that overlapped an invalidation of its own blob is never stored (see
-    /// BlobSizeEpoch), so only
-    /// another process's writes can be missed, and only for Configuration::MetadataCacheTtl.
-    /// </summary>
-    [[nodiscard]] std::optional<int64_t> CachedBlobSize(std::string_view blobUrl) const;
-    /// <summary>Read before fetching a size; pass it to CacheBlobSize so a racing invalidation wins.</summary>
-    [[nodiscard]] uint64_t BlobSizeEpoch() const noexcept;
-    void CacheBlobSize(std::string_view blobUrl, int64_t size, uint64_t epoch) const;
-    /// <summary>A cached (size, ETag) pair and when it was fetched.</summary>
-    struct CachedMetadata {
-        int64_t Size = 0;
-        std::string ETag;
-        std::chrono::steady_clock::time_point FetchedAt;
-    };
-    /// <summary>
-    /// Lets opening a file skip its properties round trip. The entry shares the size cache's lifetime and
-    /// invalidation; a stale ETag is harmless because ETag-conditioned reads refresh on a 412.
-    /// </summary>
-    [[nodiscard]] std::optional<CachedMetadata> CachedBlobMetadata(std::string_view blobUrl) const;
-    void CacheBlobMetadata(std::string_view blobUrl, int64_t size, std::string etag, uint64_t epoch) const;
-    void InvalidateBlobSize(std::string_view blobUrl) const;
-    /// <summary>For operations that touch many blobs at once (directory delete, rename).</summary>
-    void InvalidateAllBlobSizes() const;
-    /// <summary>
-    /// The time source of the size and metadata caches (Configuration::MetadataCacheTtl). Tests replace it with a
-    /// manual clock (nanoseconds since the steady_clock epoch, owned by the test and outliving the runtime), set
-    /// before any file is created, so expiry never depends on sleeping.
-    /// </summary>
-    [[nodiscard]] std::chrono::steady_clock::time_point MetadataNow() const;
-    void SetMetadataClockForTesting(const std::atomic<int64_t>* manualClockNanos) noexcept;
-
-  private:
-    void StoreBlobSize(std::string_view blobUrl, int64_t size, std::optional<std::string> etag, uint64_t epoch) const;
-    struct CachedSize {
-        int64_t Size = 0;
-        std::optional<std::string> ETag;
-        std::chrono::steady_clock::time_point FetchedAt;
-    };
-    mutable std::mutex m_sizeMutex;
-    // Transparent hashing lets string_view lookups avoid building a std::string.
-    struct UrlHash {
-        using is_transparent = void;
-        std::size_t operator()(const std::string_view url) const noexcept { return std::hash<std::string_view>{}(url); }
-    };
-    mutable std::unordered_map<std::string, CachedSize, UrlHash, std::equal_to<>> m_sizes;
-    mutable std::atomic<uint64_t> m_sizeEpoch{0};
-    // Per-URL invalidation epochs: a fetch is rejected only if its own URL was invalidated after it started, or it
-    // started before the watermark (raised whenever tombstones are dropped wholesale).
-    mutable std::unordered_map<std::string, uint64_t, UrlHash, std::equal_to<>> m_tombstones;
-    mutable uint64_t m_tombstoneWatermark = 0;
-    mutable std::chrono::steady_clock::time_point m_nextSweep{};
-    [[nodiscard]] std::unordered_map<std::string, CachedSize, UrlHash, std::equal_to<>>::iterator
-    FindFreshLocked(std::string_view blobUrl) const;
-    const std::atomic<int64_t>* m_manualMetadataClock = nullptr;
+    using CachedMetadata = BlobMetadataCache::CachedMetadata;
+    [[nodiscard]] std::optional<int64_t> CachedBlobSize(std::string_view blobUrl) const {
+        return m_metadata.Size(blobUrl);
+    }
+    [[nodiscard]] uint64_t BlobSizeEpoch() const noexcept { return m_metadata.SizeEpoch(); }
+    void CacheBlobSize(std::string_view blobUrl, int64_t size, uint64_t epoch) const {
+        m_metadata.StoreSize(blobUrl, size, epoch);
+    }
+    [[nodiscard]] std::optional<CachedMetadata> CachedBlobMetadata(std::string_view blobUrl) const {
+        return m_metadata.Metadata(blobUrl);
+    }
+    void CacheBlobMetadata(std::string_view blobUrl, int64_t size, std::string etag, uint64_t epoch) const {
+        m_metadata.StoreMetadata(blobUrl, size, std::move(etag), epoch);
+    }
+    void InvalidateBlobSize(std::string_view blobUrl) const { m_metadata.Invalidate(blobUrl); }
+    void InvalidateAllBlobSizes() const { m_metadata.InvalidateAll(); }
+    [[nodiscard]] std::chrono::steady_clock::time_point MetadataNow() const { return m_metadata.Now(); }
+    void SetMetadataClockForTesting(const std::atomic<int64_t>* manualClockNanos) noexcept {
+        m_metadata.SetClockForTesting(manualClockNanos);
+    }
 };
 
 /// <summary>
@@ -167,42 +108,4 @@ BoundByWriteDeadline(const ClientRuntimeBase& runtime, AVEVA::AzureClient::Azure
 [[nodiscard]] AVEVA::AzureClient::AzureRequestOptions
 BoundByWriteDeadline(std::optional<std::chrono::steady_clock::duration> remaining,
                      AVEVA::AzureClient::AzureRequestOptions options);
-
-/// <summary>
-/// How a transport is created on the host's io_context. Any transport constructible from an io_context works as is;
-/// the production one is specialised (in ClientRuntime.cpp) to configure connection pooling and trust roots.
-/// </summary>
-template <AzureClient::HttpClientLike THttp> struct HttpClientFactory {
-    static std::shared_ptr<THttp> Create(boost::asio::io_context& context) { return std::make_shared<THttp>(context); }
-};
-template <> struct HttpClientFactory<::AVEVA::HttpClient> {
-    static std::shared_ptr<::AVEVA::HttpClient> Create(boost::asio::io_context& context);
-};
-
-/// <summary>
-/// Holds the HTTP client that every Azure Blob Storage client of a filesystem uses, bound to an io_context
-/// owned and run by the host application. The runtime never runs, stops or destroys that io_context: the host
-/// must keep it alive and running on at least one thread for as long as the runtime exists.
-/// The HTTP client is shared with the Azure clients and credentials, which keep it alive for as long as they exist.
-/// Operations are started with boost::asio::use_future and waited for on the caller's thread, which
-/// must never be one of the threads running the io_context.
-/// </summary>
-template <AzureClient::HttpClientLike THttp> class BasicClientRuntime : public ClientRuntimeBase {
-    std::shared_ptr<THttp> m_httpClient;
-
-  public:
-    /// <summary>    Shares an already constructed transport (the way tests inject a fake).</summary>
-    explicit BasicClientRuntime(std::shared_ptr<THttp> httpClient) : m_httpClient(std::move(httpClient)) {}
-    /// <summary>Creates the transport on the host's io_context through HttpClientFactory.</summary>
-    explicit BasicClientRuntime(boost::asio::io_context& context)
-        : m_httpClient(HttpClientFactory<THttp>::Create(context)) {}
-
-    [[nodiscard]] THttp& HttpClient() const noexcept { return *m_httpClient; }
-    /// <summary>The owning handle to pass to Azure clients and credentials.</summary>
-    [[nodiscard]] const std::shared_ptr<THttp>& SharedHttpClient() const noexcept { return m_httpClient; }
-};
-
-/// <summary>The production runtime, over the real HTTP transport.</summary>
-using ClientRuntime = BasicClientRuntime<::AVEVA::HttpClient>;
-
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
