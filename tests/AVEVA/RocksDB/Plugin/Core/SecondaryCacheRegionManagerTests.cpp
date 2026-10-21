@@ -1,92 +1,150 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
-#include "SecondaryCache/BlockDevice.hpp"
-#include "SecondaryCache/CacheStats.hpp"
-#include "SecondaryCache/RecordFormat.hpp"
 #include "SecondaryCache/RegionManager.hpp"
-#include "SecondaryCache/ShardedIndex.hpp"
-
 #include <gtest/gtest.h>
 
-#include <string>
-#include <vector>
+#include <barrier>
+#include <thread>
 
 namespace Secondary = AVEVA::RocksDB::Plugin::Core::SecondaryCache;
+using namespace AVEVA::RocksDB::Plugin::Core;
 
 namespace {
-uint64_t HashForTest(const std::string& value) {
-    uint64_t hash = 14695981039346656037ull;
-    for (const unsigned char ch : value) {
-        hash ^= ch;
-        hash *= 1099511628211ull;
+class SecondaryCacheRegionManagerTests : public testing::Test {
+  protected:
+    Secondary::CacheStats stats;
+    Secondary::MemoryBudget transient{1 << 20};
+    Secondary::MemoryBlockDevice* device{};
+    FileBasedSecondaryCacheOptions options;
+    std::unique_ptr<Secondary::RegionManager> manager;
+    void SetUp() override {
+        options.engine = FileBasedSecondaryCacheEngine::kRegion;
+        options.capacity = 1024;
+        options.regionSize = 512;
+        options.maxEntrySize = 256;
+        options.flushBlockSize = 128;
+        manager = std::make_unique<Secondary::RegionManager>(
+            [&](Secondary::MemoryBudget&) {
+                auto result = std::make_unique<Secondary::MemoryBlockDevice>();
+                device = result.get();
+                return result;
+            },
+            options, stats);
     }
-    return hash;
-}
-
-Secondary::Location InsertRecord(Secondary::RegionManager& manager, Secondary::ShardedIndex& index, const std::string& key,
-                                 const std::string& payload, bool forceInsert = true) {
-    const uint64_t hash = HashForTest(key);
-    const size_t recordSize = Secondary::RecordSize(key.size(), payload.size());
-    Secondary::RegionManager::Reservation reservation{};
-    if (!manager.Reserve(hash, static_cast<uint32_t>(recordSize), forceInsert, reservation)) {
-        return {};
+    rocksdb::Status Append(uint64_t hash, size_t length = 192) {
+        std::vector<std::byte> record(length, std::byte{0x53});
+        return manager->Append(hash, record, length - 32);
     }
-
-    std::vector<std::byte> encoded(recordSize);
-    Secondary::EncodeRecord(
-        encoded,
-        std::span<const std::byte>(reinterpret_cast<const std::byte*>(key.data()), key.size()),
-        std::span<const std::byte>(reinterpret_cast<const std::byte*>(payload.data()), payload.size()),
-        rocksdb::CompressionType::kNoCompression, rocksdb::CacheTier::kVolatileTier, hash);
-    if (!manager.Publish(reservation, encoded, std::nullopt).ok()) {
-        return {};
-    }
-
-    Secondary::Location location{reservation.regionId, static_cast<uint32_t>(reservation.offset / Secondary::kRecordAlign),
-                                 static_cast<uint32_t>(reservation.length / Secondary::kRecordAlign),
-                                 reservation.generation, 0, 0};
-    const auto ignored = index.Upsert(hash, location);
-    static_cast<void>(ignored);
-    return location;
-}
+    Secondary::RecordBytes Bytes() { return Secondary::RecordBytes{Secondary::BudgetAllocator<std::byte>(transient)}; }
+};
 } // namespace
 
-TEST(SecondaryCacheRegionManagerTests, OpenSealReclaimCycleInvalidatesOldestRegion) {
-    auto rawDevice = new Secondary::MemoryBlockDevice(2, (1 << 20) + (256 << 10));
-    auto device = std::unique_ptr<Secondary::BlockDevice>(rawDevice);
-    Secondary::ShardedIndex index(8);
-    Secondary::CacheStats stats;
-    Secondary::RegionManager manager(std::move(device), index, stats,
-                                     Secondary::RegionManagerOptions{512 * 1024, (1 << 20) + (256 << 10), 64 * 1024,
-                                                                     64 * 1024});
-
-    const auto first = InsertRecord(manager, index, "k1", std::string(60 * 1024, 'a'));
-    for (int i = 2; i <= 12; ++i) {
-        InsertRecord(manager, index, "k" + std::to_string(i), std::string(60 * 1024, static_cast<char>('a' + i)));
+TEST_F(SecondaryCacheRegionManagerTests, FifoReclaimsWithoutReadingCorruptDisk) {
+    ASSERT_TRUE(Append(1).ok());
+    ASSERT_TRUE(Append(2).ok());
+    std::fill(device->MutableRegion(0).begin(), device->MutableRegion(0).end(), std::byte{0xff});
+    device->SetFaultHook(
+        [](auto operation, auto, auto, auto) { return operation == Secondary::DeviceOperation::kRead; });
+    for (uint64_t key = 3; key < 7; ++key) {
+        ASSERT_TRUE(Append(key).ok());
     }
-
-    std::vector<std::byte> record;
-    const auto status = manager.Read(first, record);
-    EXPECT_EQ(status, Secondary::RegionManager::ReadStatus::kRegionReclaimed);
+    auto bytes = Bytes();
+    Secondary::RegionManager::Identity identity;
+    EXPECT_EQ(manager->Read(1, bytes, identity), Secondary::RegionManager::ReadStatus::kMiss);
+    EXPECT_EQ(manager->Read(2, bytes, identity), Secondary::RegionManager::ReadStatus::kMiss);
+    const auto snapshot = manager->Snapshot();
+    EXPECT_EQ(snapshot.liveEntries, 4u);
+    EXPECT_EQ(snapshot.liveBytes, 4u * 192);
+    EXPECT_EQ(snapshot.reclaims, 1u);
 }
 
-TEST(SecondaryCacheRegionManagerTests, CorruptedFooterFallsBackToSafeScan) {
-    auto rawDevice = new Secondary::MemoryBlockDevice(1, (1 << 20) + (256 << 10));
-    auto device = std::unique_ptr<Secondary::BlockDevice>(rawDevice);
-    Secondary::ShardedIndex index(4);
-    Secondary::CacheStats stats;
-    Secondary::RegionManager manager(std::move(device), index, stats,
-                                     Secondary::RegionManagerOptions{256 * 1024, (1 << 20) + (256 << 10), 64 * 1024,
-                                                                     64 * 1024});
-
-    const auto location = InsertRecord(manager, index, "footer-key", std::string(60 * 1024, 'x'));
-    ASSERT_TRUE(manager.SetCapacity(0).ok());
-    auto& region = rawDevice->MutableRegion(location.regionId);
-    if (!region.empty()) {
-        region[region.size() - 1] ^= std::byte{0x1};
+TEST_F(SecondaryCacheRegionManagerTests, ResizeAndStaleIdentityCannotEraseReplacement) {
+    ASSERT_TRUE(Append(1).ok());
+    auto bytes = Bytes();
+    Secondary::RegionManager::Identity identity;
+    ASSERT_EQ(manager->Read(1, bytes, identity), Secondary::RegionManager::ReadStatus::kOk);
+    ASSERT_TRUE(Append(1).ok());
+    EXPECT_FALSE(manager->Remove(1, identity));
+    ASSERT_TRUE(manager->SetCapacity(2048).ok());
+    ASSERT_TRUE(Append(1).ok());
+    EXPECT_FALSE(manager->Remove(1, identity));
+    for (uint64_t key = 2; key < 30; ++key) {
+        ASSERT_TRUE(Append(key).ok());
     }
+    EXPECT_LE(manager->Snapshot().liveBytes, 2048u);
+    ASSERT_TRUE(manager->SetCapacity(64).ok());
+    EXPECT_EQ(manager->Snapshot().liveEntries, 0u);
+    ASSERT_TRUE(manager->SetCapacity(0).ok());
+    EXPECT_TRUE(Append(2).ok());
+    EXPECT_EQ(manager->Snapshot().liveEntries, 0u);
+    ASSERT_TRUE(manager->SetCapacity(1024).ok());
+    EXPECT_TRUE(Append(3).ok());
+}
 
-    ASSERT_TRUE(manager.SetCapacity(256 * 1024).ok());
-    EXPECT_TRUE(manager.SetCapacity(0).ok());
+TEST_F(SecondaryCacheRegionManagerTests, BufferedClearDoesNotRequireDeviceRead) {
+    ASSERT_TRUE(Append(1, 64).ok());
+    EXPECT_EQ(manager->Snapshot().deviceWriteBytes, 0u);
+    ASSERT_TRUE(manager->SetCapacity(0).ok());
+    const auto snapshot = manager->Snapshot();
+    EXPECT_EQ(snapshot.liveEntries, 0u);
+    EXPECT_EQ(snapshot.liveBytes, 0u);
+    EXPECT_EQ(snapshot.activeBufferBytes, 0u);
+}
+
+TEST_F(SecondaryCacheRegionManagerTests, FailedFlushInvalidatesAllMappingsAndAllowsRetry) {
+    ASSERT_TRUE(Append(1, 128).ok());
+    device->SetFaultHook([](auto op, auto, auto, auto) { return op == Secondary::DeviceOperation::kWrite; });
+    EXPECT_TRUE(Append(2, 128).IsIOError());
+    EXPECT_EQ(manager->Snapshot().liveEntries, 0u);
+    EXPECT_EQ(manager->Snapshot().liveBytes, 0u);
+    EXPECT_EQ(manager->Snapshot().ioErrors, 1u);
+    device->SetFaultHook({});
+    ASSERT_TRUE(Append(3, 192).ok());
+    auto bytes = Bytes();
+    Secondary::RegionManager::Identity identity;
+    ASSERT_EQ(manager->Read(3, bytes, identity), Secondary::RegionManager::ReadStatus::kOk);
+    EXPECT_EQ(bytes, Secondary::RecordBytes(192, std::byte{0x53}, bytes.get_allocator()));
+}
+
+TEST_F(SecondaryCacheRegionManagerTests, ReadFailureRemovesMapping) {
+    ASSERT_TRUE(Append(1).ok());
+    device->SetFaultHook([](auto op, auto, auto, auto) { return op == Secondary::DeviceOperation::kRead; });
+    auto bytes = Bytes();
+    Secondary::RegionManager::Identity identity;
+    EXPECT_EQ(manager->Read(1, bytes, identity), Secondary::RegionManager::ReadStatus::kIoError);
+    EXPECT_EQ(manager->Snapshot().liveBytes, 0u);
+}
+
+TEST_F(SecondaryCacheRegionManagerTests, FailedResizeLeavesDisabledAndCanBeReenabled) {
+    ASSERT_TRUE(Append(1).ok());
+    device->SetFaultHook([](auto op, auto, auto, auto) { return op == Secondary::DeviceOperation::kConfigure; });
+    EXPECT_THROW(manager->SetCapacity(4096), std::runtime_error);
+    EXPECT_EQ(manager->Snapshot().capacityBytes, 0u);
+    EXPECT_EQ(manager->Snapshot().liveEntries, 0u);
+    device->SetFaultHook({});
+    ASSERT_TRUE(manager->SetCapacity(512).ok());
+    EXPECT_TRUE(Append(3).ok());
+}
+
+TEST_F(SecondaryCacheRegionManagerTests, ConcurrentSameKeyPublicationAndRecyclingMaintainExactUsage) {
+    std::barrier start(5);
+    std::vector<std::thread> writers;
+    for (uint64_t writer = 0; writer < 4; ++writer) {
+        writers.emplace_back([&, writer] {
+            start.arrive_and_wait();
+            for (size_t i = 0; i < 500; ++i) {
+                EXPECT_TRUE(Append(writer, 192).ok());
+            }
+        });
+    }
+    start.arrive_and_wait();
+    for (auto& writer : writers) {
+        writer.join();
+    }
+    const auto snapshot = manager->Snapshot();
+    EXPECT_GT(snapshot.reclaims, 0u);
+    EXPECT_EQ(snapshot.liveBytes, snapshot.liveEntries * 192u);
+    EXPECT_LE(snapshot.liveEntries, 4u);
+    EXPECT_LE(snapshot.liveBytes, snapshot.capacityBytes);
 }

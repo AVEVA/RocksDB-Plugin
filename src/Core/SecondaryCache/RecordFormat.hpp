@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <span>
 
 namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache {
@@ -17,7 +18,6 @@ inline constexpr size_t kDeviceBlock = 4096;
 
 enum class RecordFlags : uint8_t {
     kNone = 0,
-    kTombstone = 1u << 0,
 };
 
 #pragma pack(push, 1)
@@ -55,6 +55,12 @@ struct DecodedRecordView {
 };
 
 [[nodiscard]] constexpr size_t RecordSize(const size_t keyLen, const size_t payloadLen) noexcept {
+    constexpr auto maximum = std::numeric_limits<size_t>::max();
+    if (keyLen > std::numeric_limits<uint32_t>::max() || payloadLen > std::numeric_limits<uint32_t>::max() ||
+        keyLen > maximum - sizeof(RecordHeader) - (kRecordAlign - 1) ||
+        payloadLen > maximum - sizeof(RecordHeader) - (kRecordAlign - 1) - keyLen) {
+        return 0;
+    }
     const size_t rawSize = sizeof(RecordHeader) + keyLen + payloadLen;
     return (rawSize + kRecordAlign - 1) & ~(kRecordAlign - 1);
 }
@@ -62,9 +68,10 @@ struct DecodedRecordView {
 [[nodiscard]] uint32_t ComputeCrc32c(std::span<const std::byte> bytes, uint32_t seed = 0) noexcept;
 
 /// <summary>Writes a record and zero-fills any alignment pad.</summary>
-void EncodeRecord(std::span<std::byte> dst, std::span<const std::byte> key, std::span<const std::byte> payload,
-                  rocksdb::CompressionType type, rocksdb::CacheTier tier, uint64_t keyHash,
-                  RecordFlags flags = RecordFlags::kNone) noexcept;
+[[nodiscard]] bool EncodeRecord(std::span<std::byte> dst, std::span<const std::byte> key,
+                                std::span<const std::byte> payload, rocksdb::CompressionType type,
+                                rocksdb::CacheTier tier, uint64_t keyHash,
+                                RecordFlags flags = RecordFlags::kNone) noexcept;
 
 /// <summary>Reads the packed header without validating checksums.</summary>
 [[nodiscard]] bool TryReadHeader(std::span<const std::byte> src, RecordHeader& headerOut) noexcept;

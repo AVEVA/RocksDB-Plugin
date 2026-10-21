@@ -3,138 +3,316 @@
 
 #include "BlockDevice.hpp"
 
-#include "RecordFormat.hpp"
+#include <boost/scope/scope_exit.hpp>
 
 #include <algorithm>
-#include <array>
-#include <cstdio>
-#include <iomanip>
-#include <sstream>
+#include <fstream>
+#include <limits>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+
+#ifdef _WIN32
+#define NOMINMAX
+#include <Windows.h>
+#else
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+#endif
 
 namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache {
 namespace {
-[[nodiscard]] std::filesystem::path RegionPath(const std::filesystem::path& cacheDir, const uint32_t regionId) {
-    std::ostringstream builder;
-    builder << "region_" << std::setfill('0') << std::setw(5) << regionId << ".dat";
-    return cacheDir / builder.str();
+constexpr auto kMarker = "AVEVA disposable secondary cache v1";
+
+bool IsLink(const std::filesystem::path& path) {
+#ifdef _WIN32
+    const auto attributes = GetFileAttributesW(path.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return true;
+    }
+#endif
+    return std::filesystem::is_symlink(std::filesystem::symlink_status(path));
 }
 
-void PreallocateFile(const std::filesystem::path& path, const uint64_t sizeBytes) {
-    {
-        std::ofstream creator(path, std::ios::binary | std::ios::trunc);
-        if (!creator.is_open()) {
-            throw std::runtime_error("failed to create region file");
-        }
-        if (sizeBytes != 0) {
-            creator.seekp(static_cast<std::streamoff>(sizeBytes - 1), std::ios::beg);
-            const char zero = 0;
-            creator.write(&zero, 1);
-        }
+bool IsRegionFile(const std::filesystem::path& path) {
+    const auto name = path.filename().string();
+    if (!name.starts_with("region_") || !name.ends_with(".dat") || name.size() <= 11) {
+        return false;
     }
+    return std::all_of(name.begin() + 7, name.end() - 4, [](char ch) { return ch >= '0' && ch <= '9'; });
+}
+
+bool Seek(std::FILE* file, const size_t offset) {
+    if (offset > INT64_MAX) {
+        return false;
+    }
+#ifdef _WIN32
+    return _fseeki64(file, static_cast<int64_t>(offset), SEEK_SET) == 0;
+#else
+    return fseeko(file, static_cast<off_t>(offset), SEEK_SET) == 0;
+#endif
 }
 } // namespace
 
-FileBlockDevice::FileBlockDevice(std::filesystem::path cacheDir, const uint32_t regionCount, const uint64_t regionSizeBytes)
-    : m_cacheDir(std::move(cacheDir)), m_regionSizeBytes(regionSizeBytes), m_regions(regionCount) {
-    std::filesystem::remove_all(m_cacheDir);
-    std::filesystem::create_directories(m_cacheDir);
+struct FileBlockDevice::Owner {
+#ifdef _WIN32
+    HANDLE handle{INVALID_HANDLE_VALUE};
+    ~Owner() {
+        if (handle != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle);
+        }
+    }
+#else
+    int descriptor{-1};
+    ~Owner() {
+        if (descriptor != -1) {
+            close(descriptor);
+        }
+    }
+#endif
+};
 
-    for (uint32_t regionId = 0; regionId < regionCount; ++regionId) {
-        const auto path = RegionPath(m_cacheDir, regionId);
-        PreallocateFile(path, m_regionSizeBytes);
-        auto& region = m_regions[regionId];
-        region.stream.open(path, std::ios::binary | std::ios::in | std::ios::out);
-        if (!region.stream.is_open()) {
-            throw std::runtime_error("failed to open region file");
+FileBlockDevice::FileBlockDevice(std::filesystem::path parent, MemoryBudget& budget)
+    : m_owner(std::make_unique<Owner>()), m_lengths(BudgetAllocator<size_t>(budget)) {
+    if (parent.empty()) {
+        throw std::invalid_argument("secondary cache parent is empty");
+    }
+    parent = std::filesystem::absolute(parent).lexically_normal();
+    if (parent == parent.root_path()) {
+        throw std::invalid_argument("secondary cache parent cannot be a filesystem root");
+    }
+    for (auto path = parent; !path.empty() && path != path.root_path(); path = path.parent_path()) {
+        if (IsLink(path)) {
+            throw std::invalid_argument("secondary cache parent contains a link");
+        }
+    }
+    m_directory = parent / "ssd-secondary-cache-v1";
+    const auto markerPath = m_directory / "owner";
+    const bool existed = std::filesystem::exists(std::filesystem::symlink_status(m_directory));
+    bool createdDirectory = false;
+    bool createdMarker = false;
+    auto cleanup = boost::scope::make_scope_exit([&] noexcept {
+        if (createdDirectory) {
+            m_owner.reset();
+            std::error_code ignored;
+            if (createdMarker) {
+                std::filesystem::remove(markerPath, ignored);
+            }
+            std::filesystem::remove(m_directory, ignored); // Only succeeds if empty.
+        }
+    });
+    if (existed) {
+        if (IsLink(m_directory) || !std::filesystem::is_directory(m_directory)) {
+            throw std::invalid_argument("secondary cache child is not an owned directory");
+        }
+        for (const auto& entry : std::filesystem::directory_iterator(m_directory)) {
+            if (IsLink(entry.path()) || !entry.is_regular_file() ||
+                (entry.path().filename() != "owner" && !IsRegionFile(entry.path()))) {
+                throw std::invalid_argument("unexpected contents in secondary cache child");
+            }
+        }
+        std::ifstream marker(markerPath);
+        std::array<char, 64> contents{};
+        marker.getline(contents.data(), static_cast<std::streamsize>(contents.size()));
+        if (!marker || std::string_view(contents.data()) != kMarker) {
+            throw std::invalid_argument("secondary cache ownership marker missing or invalid");
+        }
+    } else {
+        std::filesystem::create_directories(parent);
+        if (!std::filesystem::create_directory(m_directory)) {
+            throw DeviceError("secondary cache directory concurrently created");
+        }
+        createdDirectory = true;
+    }
+#ifdef _WIN32
+    m_owner->handle = CreateFileW(markerPath.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                                  existed ? OPEN_EXISTING : CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (m_owner->handle == INVALID_HANDLE_VALUE) {
+        throw DeviceError("secondary cache ownership lock unavailable");
+    }
+    if (!existed) {
+        createdMarker = true;
+        DWORD written = 0;
+        const std::string marker = std::string(kMarker) + "\n";
+        if (!WriteFile(m_owner->handle, marker.data(), static_cast<DWORD>(marker.size()), &written, nullptr) ||
+            written != marker.size()) {
+            throw DeviceError("secondary cache ownership marker write failed");
+        }
+    }
+#else
+    m_owner->descriptor = open(markerPath.c_str(), O_RDWR | O_NOFOLLOW | (existed ? 0 : O_CREAT | O_EXCL), 0600);
+    if (m_owner->descriptor == -1 || flock(m_owner->descriptor, LOCK_EX | LOCK_NB) != 0) {
+        throw DeviceError("secondary cache ownership lock unavailable");
+    }
+    if (!existed) {
+        createdMarker = true;
+        const std::string marker = std::string(kMarker) + "\n";
+        if (write(m_owner->descriptor, marker.data(), marker.size()) != static_cast<ssize_t>(marker.size())) {
+            throw DeviceError("secondary cache ownership marker write failed");
+        }
+    }
+#endif
+    cleanup.set_active(false);
+}
+
+FileBlockDevice::~FileBlockDevice() { CloseHandles(); }
+
+void FileBlockDevice::CloseHandles() noexcept {
+    for (auto& handle : m_handles) {
+        if (handle.file != nullptr) {
+            std::fclose(handle.file);
+            handle = {};
         }
     }
 }
 
-FileBlockDevice::~FileBlockDevice() = default;
-
-bool FileBlockDevice::Read(const uint32_t regionId, const uint64_t offset, const std::span<std::byte> out) noexcept {
-    if (regionId >= m_regions.size() || offset + out.size() > m_regionSizeBytes) {
-        return false;
+void FileBlockDevice::RemoveOwnedFiles() {
+    for (const auto& entry : std::filesystem::directory_iterator(m_directory)) {
+        if (IsLink(entry.path()) || !entry.is_regular_file() ||
+            (entry.path().filename() != "owner" && !IsRegionFile(entry.path()))) {
+            throw DeviceError("unexpected contents in owned secondary cache directory");
+        }
     }
-
-    auto& region = m_regions[regionId];
-    std::lock_guard lock(region.mu);
-    region.stream.clear();
-    region.stream.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
-    region.stream.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(out.size()));
-    return region.stream.good() || region.stream.gcount() == static_cast<std::streamsize>(out.size());
+    for (const auto& entry : std::filesystem::directory_iterator(m_directory)) {
+        if (IsRegionFile(entry.path()) && !std::filesystem::remove(entry.path())) {
+            throw DeviceError("failed to remove owned secondary cache region");
+        }
+    }
 }
 
-bool FileBlockDevice::Write(const uint32_t regionId, const uint64_t offset, const std::span<const std::byte> in) noexcept {
-    if (regionId >= m_regions.size() || offset + in.size() > m_regionSizeBytes) {
-        return false;
-    }
-
-    auto& region = m_regions[regionId];
-    std::lock_guard lock(region.mu);
-    region.stream.clear();
-    region.stream.seekp(static_cast<std::streamoff>(offset), std::ios::beg);
-    region.stream.write(reinterpret_cast<const char*>(in.data()), static_cast<std::streamsize>(in.size()));
-    region.stream.flush();
-    return region.stream.good();
+void FileBlockDevice::Configure(const size_t capacity, const size_t regionSize) {
+    CloseHandles();
+    m_capacity = 0;
+    RemoveOwnedFiles();
+    decltype(m_lengths)(m_lengths.get_allocator()).swap(m_lengths);
+    const size_t count = capacity / regionSize + (capacity % regionSize != 0 ? 1 : 0);
+    m_lengths.assign(count, 0);
+    m_regionSize = regionSize;
+    m_capacity = capacity;
 }
 
-size_t FileBlockDevice::AlignmentBytes() const noexcept { return kDeviceBlock; }
-
-void FileBlockDevice::Reset(const uint32_t regionId) noexcept {
-    if (regionId >= m_regions.size()) {
-        return;
+std::FILE* FileBlockDevice::Open(const uint32_t region) {
+    for (const auto& handle : m_handles) {
+        if (handle.file != nullptr && handle.region == region) {
+            return handle.file;
+        }
     }
-
-    auto& region = m_regions[regionId];
-    std::lock_guard lock(region.mu);
-    region.stream.flush();
+    auto& handle = m_handles[m_nextHandle++ % kHandleLimit];
+    if (handle.file != nullptr) {
+        std::fclose(handle.file); // Writes were explicitly flushed before publication.
+        handle = {};
+    }
+    const auto path = m_directory / ("region_" + std::to_string(region) + ".dat");
+    if (IsLink(path)) {
+        return nullptr;
+    }
+    const bool exists = std::filesystem::exists(path);
+#ifdef _WIN32
+    if (_wfopen_s(&handle.file, path.c_str(), exists ? L"r+b" : L"w+b") != 0) {
+        return nullptr;
+    }
+#else
+    handle.file = std::fopen(path.c_str(), exists ? "r+b" : "w+b");
+#endif
+    if (handle.file != nullptr) {
+        if (std::setvbuf(handle.file, nullptr, _IONBF, 0) != 0) {
+            std::fclose(handle.file);
+            handle = {};
+            return nullptr;
+        }
+        handle.region = region;
+    }
+    return handle.file;
 }
 
-MemoryBlockDevice::MemoryBlockDevice(const uint32_t regionCount, const uint64_t regionSizeBytes)
-    : m_regionSizeBytes(regionSizeBytes), m_regions(regionCount, std::vector<std::byte>(regionSizeBytes, std::byte{0})) {}
-
-bool MemoryBlockDevice::Read(const uint32_t regionId, const uint64_t offset, const std::span<std::byte> out) noexcept {
-    if (ShouldFail(DeviceOperation::kRead, regionId, offset, out.size()) || regionId >= m_regions.size() ||
-        offset + out.size() > m_regionSizeBytes) {
+bool FileBlockDevice::InBounds(const uint32_t region, const size_t offset, const size_t length) const noexcept {
+    if (region >= m_lengths.size()) {
         return false;
     }
-    const auto& region = m_regions[regionId];
-    std::copy_n(region.data() + static_cast<std::ptrdiff_t>(offset), out.size(), out.data());
+    const size_t budget = std::min(m_regionSize, m_capacity - size_t{region} * m_regionSize);
+    return offset <= budget && length <= budget - offset;
+}
+
+bool FileBlockDevice::Read(const uint32_t region, const size_t offset, const std::span<std::byte> out) {
+    if (!InBounds(region, offset, out.size()) || offset > m_lengths[region] ||
+        out.size() > m_lengths[region] - offset) {
+        return false;
+    }
+    auto* file = Open(region);
+    if (file == nullptr) {
+        return false;
+    }
+    std::clearerr(file);
+    if (!Seek(file, offset)) {
+        return false;
+    }
+    const auto read = std::fread(out.data(), 1, out.size(), file);
+    bytesRead += read;
+    return read == out.size();
+}
+
+bool FileBlockDevice::Write(const uint32_t region, const size_t offset, const std::span<const std::byte> in) {
+    if (!InBounds(region, offset, in.size())) {
+        return false;
+    }
+    auto* file = Open(region);
+    if (file == nullptr) {
+        return false;
+    }
+    std::clearerr(file);
+    if (!Seek(file, offset)) {
+        return false;
+    }
+    const auto written = std::fwrite(in.data(), 1, in.size(), file);
+    bytesWritten += written;
+    m_lengths[region] = std::max(m_lengths[region], offset + written);
+    return written == in.size() && std::fflush(file) == 0;
+}
+
+size_t FileBlockDevice::FileBytes() const noexcept {
+    size_t total = 0;
+    for (const auto length : m_lengths) {
+        total += length;
+    }
+    return total;
+}
+
+size_t FileBlockDevice::OpenHandles() const noexcept {
+    return static_cast<size_t>(
+        std::count_if(m_handles.begin(), m_handles.end(), [](const Handle& handle) { return handle.file != nullptr; }));
+}
+
+void MemoryBlockDevice::Configure(const size_t capacity, const size_t regionSize) {
+    if (m_faultHook && m_faultHook(DeviceOperation::kConfigure, 0, 0, capacity)) {
+        throw DeviceError("injected device configuration failure");
+    }
+    m_regions.clear();
+    const size_t count = capacity / regionSize + (capacity % regionSize != 0 ? 1 : 0);
+    for (size_t region = 0; region < count; ++region) {
+        m_regions.emplace_back(std::min(regionSize, capacity - region * regionSize), std::byte{0});
+    }
+}
+
+bool MemoryBlockDevice::Read(const uint32_t region, const size_t offset, const std::span<std::byte> out) {
+    if ((m_faultHook && m_faultHook(DeviceOperation::kRead, region, offset, out.size())) ||
+        region >= m_regions.size() || offset > m_regions[region].size() ||
+        out.size() > m_regions[region].size() - offset) {
+        return false;
+    }
+    std::copy_n(m_regions[region].data() + offset, out.size(), out.data());
+    bytesRead += out.size();
     return true;
 }
 
-bool MemoryBlockDevice::Write(const uint32_t regionId, const uint64_t offset,
-                              const std::span<const std::byte> in) noexcept {
-    if (ShouldFail(DeviceOperation::kWrite, regionId, offset, in.size()) || regionId >= m_regions.size() ||
-        offset + in.size() > m_regionSizeBytes) {
+bool MemoryBlockDevice::Write(const uint32_t region, const size_t offset, const std::span<const std::byte> in) {
+    if ((m_faultHook && m_faultHook(DeviceOperation::kWrite, region, offset, in.size())) ||
+        region >= m_regions.size() || offset > m_regions[region].size() ||
+        in.size() > m_regions[region].size() - offset) {
         return false;
     }
-    auto& region = m_regions[regionId];
-    std::copy_n(in.data(), in.size(), region.data() + static_cast<std::ptrdiff_t>(offset));
+    std::copy(in.begin(), in.end(), m_regions[region].begin() + static_cast<std::ptrdiff_t>(offset));
+    bytesWritten += in.size();
     return true;
-}
-
-size_t MemoryBlockDevice::AlignmentBytes() const noexcept { return kDeviceBlock; }
-
-void MemoryBlockDevice::Reset(const uint32_t regionId) noexcept {
-    if (ShouldFail(DeviceOperation::kReset, regionId, 0, 0) || regionId >= m_regions.size()) {
-        return;
-    }
-    std::fill(m_regions[regionId].begin(), m_regions[regionId].end(), std::byte{0});
-}
-
-void MemoryBlockDevice::SetFaultHook(FaultHook hook) { m_faultHook = std::move(hook); }
-
-std::vector<std::byte>& MemoryBlockDevice::MutableRegion(const uint32_t regionId) noexcept { return m_regions[regionId]; }
-
-const std::vector<std::byte>& MemoryBlockDevice::Region(const uint32_t regionId) const noexcept {
-    return m_regions[regionId];
-}
-
-bool MemoryBlockDevice::ShouldFail(const DeviceOperation op, const uint32_t regionId, const uint64_t offset,
-                                   const size_t size) noexcept {
-    return m_faultHook ? m_faultHook(op, regionId, offset, size) : false;
 }
 } // namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache

@@ -46,7 +46,7 @@ TEST_F(RegionFileBasedCompressedSecondaryCacheTests, OverwriteExistingKeyReturns
 TEST_F(RegionFileBasedCompressedSecondaryCacheTests, CapacityReclaimsOldestRegion) {
     m_cache.reset();
     m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(
-        m_cacheDir, MakeOptions(512 * 1024, (1 << 20) + (256 << 10), 64 * 1024), MakeNullLogger());
+        m_cacheDir, MakeOptions(512 * 1024, 256 * 1024, 64 * 1024), MakeNullLogger());
 
     const std::string firstKey = "oldest-region-entry";
     TestPayload payload{std::string(60 * 1024, 'a')};
@@ -66,8 +66,8 @@ TEST_F(RegionFileBasedCompressedSecondaryCacheTests, DeflateInflateDoNotRemoveDi
 
     size_t originalCapacity = 0;
     ASSERT_TRUE(m_cache->GetCapacity(originalCapacity).ok());
-    ASSERT_TRUE(m_cache->Deflate(originalCapacity).ok());
-    ASSERT_TRUE(m_cache->Inflate(originalCapacity).ok());
+    ASSERT_TRUE(m_cache->Deflate(originalCapacity).IsNotSupported());
+    ASSERT_TRUE(m_cache->Inflate(originalCapacity).IsNotSupported());
 
     size_t finalCapacity = 0;
     ASSERT_TRUE(m_cache->GetCapacity(finalCapacity).ok());
@@ -82,9 +82,9 @@ TEST_F(RegionFileBasedCompressedSecondaryCacheTests, DeflateInflateDoNotRemoveDi
 TEST_F(RegionFileBasedCompressedSecondaryCacheTests, CacheDirectoryContainsOnlyRegionFiles) {
     TestPayload payload{"disk layout"};
     ASSERT_TRUE(m_cache->Insert(MakeKey("layout-key"), &payload, &m_helper, true).ok());
-    for (const auto& entry : std::filesystem::directory_iterator(m_cacheDir)) {
-        EXPECT_TRUE(entry.path().filename().string().starts_with("region_"));
-        EXPECT_NE(entry.path().extension().string(), ".del");
+    for (const auto& entry : std::filesystem::directory_iterator(m_cacheDir / "ssd-secondary-cache-v1")) {
+        const auto name = entry.path().filename().string();
+        EXPECT_TRUE(name == "owner" || name.starts_with("region_"));
     }
 }
 

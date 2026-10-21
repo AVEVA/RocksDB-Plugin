@@ -31,6 +31,12 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
+
 using AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache;
 using AVEVA::RocksDB::Plugin::Core::FileBasedSecondaryCacheAdmissionPolicy;
 using AVEVA::RocksDB::Plugin::Core::FileBasedSecondaryCacheEngine;
@@ -76,7 +82,13 @@ void TestDeleteCb(rocksdb::Cache::ObjectPtr obj, rocksdb::MemoryAllocator*) { de
 
 // Returns a temporary directory that is removed when the test fixture tears down.
 std::filesystem::path MakeTempDir(const std::string& suffix) {
-    auto base = std::filesystem::temp_directory_path() / ("aveva_sec_cache_test_" + suffix);
+#ifdef _WIN32
+    const auto process = _getpid();
+#else
+    const auto process = getpid();
+#endif
+    auto base =
+        std::filesystem::temp_directory_path() / ("aveva_sec_cache_test_" + suffix + "_" + std::to_string(process));
     std::filesystem::remove_all(base);
     std::filesystem::create_directories(base);
     return base;
@@ -152,14 +164,13 @@ class RegionFileBasedCompressedSecondaryCacheTests : public ::testing::Test {
     rocksdb::Cache::CacheItemHelper m_helper{
         rocksdb::CacheEntryRole::kDataBlock, TestDeleteCb, TestSizeCb, TestSaveToCb, TestCreateCb, &m_helperNoSec};
 
-    static FileBasedSecondaryCacheOptions MakeOptions(size_t capacity = 8 * 1024 * 1024,
-                                                      size_t regionSize = (1 * 1024 * 1024) + (256 * 1024),
-                                                      size_t flushBlockSize = 64 * 1024) {
+    static FileBasedSecondaryCacheOptions MakeOptions(size_t capacity = 8 * 1024 * 1024, size_t regionSize = 256 * 1024,
+                                                      size_t flushBlockSize = 16 * 1024) {
         FileBasedSecondaryCacheOptions options;
         options.capacity = capacity;
         options.regionSize = regionSize;
         options.flushBlockSize = flushBlockSize;
-        options.maxEntrySize = (regionSize - (1 * 1024 * 1024)) / 4;
+        options.maxEntrySize = regionSize / 4;
         options.admissionPolicy = FileBasedSecondaryCacheAdmissionPolicy::kAdmitAll;
         options.engine = FileBasedSecondaryCacheEngine::kRegion;
         return options;

@@ -5,16 +5,18 @@ SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 # ADR: high-performance local-disk secondary cache
 
-**Revision:** v0.3 (v1 phase 2 implemented and measured, 2026-09-30).
-**Status:** Accepted design. Phase 2 ("region substrate", §10) is implemented behind an opt-in
-`FileBasedSecondaryCacheOptions{engine = kRegion}`; the legacy engine remains the default during
-rollout. [§14](#14-review-decisions-and-residual-concerns) records the explicit answers and
-accepted defaults. §8.2 records the first measured comparison; H1/H2 are supported, H3–H6 remain
-open (require multi-threaded/Zipfian/DRAM-occupancy measurement, out of scope for this pass).
+**Revision:** v0.4 (minimal synchronous reference, 2026-10-21).
+**Status:** Accepted direction; opt-in correctness baseline, not production-ready.
+The current implementation is specified in the amendment below and the
+[cache-local README](../../src/Core/SecondaryCache/README.md). The legacy engine
+remains the default. Sections 1-14 retain the original proposal/research and
+historical measurements; they are not a claim that the full target is implemented.
 **Component:** `AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache`
 **Scope constraint:** no changes to RocksDB; no changes to the plugin outside the secondary cache
 and the configuration needed to construct and load it.
 **RocksDB reference tree:** `C:\dev\rocksdb`, version 11.12.0 (`ROCKSDB_VERSION_INT = 11012000`).
+**Linked contract verified for this milestone:** installed RocksDB **11.1.2**,
+including `secondary_cache.h`, `advanced_cache.h` and the default LRU secondary adapter.
 **Evidence base:** [`research/`](research/) — the background-research outputs this proposal was
 derived from, committed alongside it so revisions can be diffed against their sources.
 
@@ -38,7 +40,69 @@ the baseline/candidate workloads in §11.6 produce reproducible results.
 |---|---|---|
 | v0.1 | 2026-09-28 | Initial draft. No open questions answered yet. All §8 figures are unvalidated hypotheses. |
 | v0.2 | 2026-09-29 | Incorporated Q1–Q19 decisions; scoped to one 16–256 GiB ephemeral cache per process, buffered I/O, FIFO reclaim, no new compression or warm restart. |
-| v0.3 | 2026-09-30 | Implemented and measured phase 2 (region substrate): `RecordFormat`, `BlockDevice`/`MemoryBlockDevice`, `ShardedIndex`, `RegionManager` (FIFO reclaim, footer + overflow scan, reader pinning), `AdmissionPolicy` (kAdmitAll/kSecondChance), all behind `FileBasedSecondaryCacheOptions{engine = kRegion}`; legacy engine unchanged and still the default. 246/246 tests pass (57 existing + new unit/corruption/concurrency/region-engine-parity tests). §8.2 records the first measured comparison (~99× faster insert, ~3.8× faster lookup on a single-threaded, single-VM, 8 KiB-entry, Debug-build workload). Async lookup, additional admission policies, direct I/O, Linux port, fuzzing, and the nightly perf gate remain out of scope (§10 phases 3–6). |
+| v0.3 | 2026-09-30 | Initial opt-in region substrate and single-thread Debug benchmark (§8.2). The original completion claim overstated coverage: 246 discovered tests included Azure skips, and the region manager had only two smoke tests. The subsequent review reproduced lifecycle, allocation, resource and callback defects. Historical benchmark means do not establish production p99, concurrency, reclaim or memory behavior. |
+| v0.4 | 2026-10-21 | Replace the unsafe split lifecycle with a minimal synchronous single-lock reference: resident reverse eviction lists, one append buffer, bounded handles/heap, safe cold directory ownership, transactional publication and reset-on-resize. Reject unimplemented admission policy; return NotSupported for optional RAM APIs. Add cache-local implementation/data-flow documentation and regression/adapter/local-DB tests. Follow-up production gates remain explicit. |
+
+### v0.4 amendment: authoritative current implementation
+
+This amendment supersedes conflicting implementation descriptions in the original
+proposal below. It implements the first minimal milestone in
+[the review plan](secondary-cache-v1-review-todo.md), not all of phases 3-6.
+
+- **One state mutex** owns index, append, FIFO placement/reclaim, device access,
+  usage and resize. Serialize and reconstruct outside that lock. Lookup copies
+  owned bytes first; stale cleanup compares full location and cache incarnation.
+  There are no reader pins, spin waits or split reserve/publish/index transactions.
+- **No footers or disk scans.** Cold-only operation needs no serialized reverse
+  metadata or recovery machinery. Each region keeps bounded, allocator-accounted
+  resident hashes. Corrupt storage cannot strand mappings during reclaim.
+- **One append buffer and at most 64 lazy region handles**, plus the ownership
+  lock. Larger records write directly from their transient allocation.
+- **Checked, variable-sized records** retain a 32-byte header, full key, CRC32C,
+  compression/source-tier tags and 64-byte alignment. All region bytes are usable;
+  there is no longer a 1 MiB footer subtraction. Capacity/live usage count encoded
+  bytes, not payload charge. A short final region is skipped when needed.
+- **Validated owned child directory**, exclusive owner lock and link/reparse-point
+  rejection replace recursive deletion of the caller's directory.
+  Files are demand-allocated: **physical preallocation/reservation is not promised**.
+  This deliberately drops the earlier preallocation claim rather than passing off
+  sparse last-byte sizing as reserved disk space.
+- **Explicit bounds:** metadata allocator requests (index nodes/buckets, reverse
+  list capacity and layout metadata, including growth overlap) have a hard budget.
+  Concurrent payload/record/read copies have a separate hard transient budget.
+  Resource pressure drops admission with counters; real allocation/I/O/callback
+  failures remain observable. Fixed runtime/allocator overhead and OS page cache
+  are not represented as counted metadata.
+- **Admit-all only.** Region FIFO recycling is independent of `force_insert`;
+  legacy gating is unchanged. `kSecondChance` is rejected before side effects.
+- **Resize discards all entries.** Invalid geometry leaves the cache unchanged;
+  failure after invalidation leaves an empty disabled object that can be retried.
+  Zero capacity allocates no data buffer/files.
+- **Deflate/Inflate return NotSupported** in region mode rather than pretending to
+  implement RAM rebalancing. This is supported by RocksDB's optional API contract.
+- **Synchronous insert and lookup** are intentional for this review milestone.
+  `wait=false` returns ready results legally, but foreground insert can wait for
+  I/O. The bounded writer queue (T11) remains required by accepted Q6 before
+  production; this amendment does not silently waive it.
+
+The node map is simple, not the originally proposed sharded/open-addressing map.
+Its hard metadata limit can cause drops before disk is full. The accepted 0.5%
+metadata goal and 16-256 GiB operating envelope remain **unmeasured release gates**;
+T10/T12 must quantify and resolve them before enabling this engine by default.
+
+Permanent coverage now includes actual on-disk corruption through `Lookup`,
+buffered clear, grow/shrink/zero/re-enable, stale identities, faulted reads/writes/
+resize, same-key concurrent publication with turnover and exact accounting,
+bounded allocator pressure, >512 region identities with a 64-handle bound,
+callback reentrancy/failure ownership, shared legacy/region contract cases, default
+LRU-adapter turnover and a local DB test verifying correct data and secondary hits.
+The review plan records validation commands, results and remaining platform gates.
+
+### Original target architecture and historical evidence
+
+The remainder preserves the detailed design rationale and future implementation
+targets. Where it differs from the amendment above (shards, footer, pins,
+preallocation, second chance, asynchronous operations), it is **not current code**.
 
 ---
 

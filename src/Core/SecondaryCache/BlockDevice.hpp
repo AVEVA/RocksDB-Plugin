@@ -3,72 +3,81 @@
 
 #pragma once
 
-#include <cstddef>
+#include "MemoryBudget.hpp"
+
+#include <array>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <functional>
-#include <fstream>
 #include <memory>
-#include <mutex>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache {
+class DeviceError final : public std::runtime_error {
+  public:
+    using std::runtime_error::runtime_error;
+};
+
+// Serialized by RegionManager. No durability promise: successful writes reach the OS cache.
 class BlockDevice {
   public:
     virtual ~BlockDevice() = default;
-    virtual bool Read(uint32_t regionId, uint64_t offset, std::span<std::byte> out) noexcept = 0;
-    virtual bool Write(uint32_t regionId, uint64_t offset, std::span<const std::byte> in) noexcept = 0;
-    [[nodiscard]] virtual size_t AlignmentBytes() const noexcept = 0;
-    virtual void Reset(uint32_t regionId) noexcept = 0;
+    virtual void Configure(size_t capacity, size_t regionSize) = 0;
+    virtual bool Read(uint32_t region, size_t offset, std::span<std::byte> out) = 0;
+    virtual bool Write(uint32_t region, size_t offset, std::span<const std::byte> in) = 0;
+    virtual size_t FileBytes() const noexcept = 0;
+    virtual size_t OpenHandles() const noexcept = 0;
+    uint64_t bytesWritten{0};
+    uint64_t bytesRead{0};
 };
 
 class FileBlockDevice final : public BlockDevice {
   public:
-    FileBlockDevice(std::filesystem::path cacheDir, uint32_t regionCount, uint64_t regionSizeBytes);
+    FileBlockDevice(std::filesystem::path parent, MemoryBudget& budget);
     ~FileBlockDevice() override;
-
-    bool Read(uint32_t regionId, uint64_t offset, std::span<std::byte> out) noexcept override;
-    bool Write(uint32_t regionId, uint64_t offset, std::span<const std::byte> in) noexcept override;
-    [[nodiscard]] size_t AlignmentBytes() const noexcept override;
-    void Reset(uint32_t regionId) noexcept override;
+    void Configure(size_t capacity, size_t regionSize) override;
+    bool Read(uint32_t region, size_t offset, std::span<std::byte> out) override;
+    bool Write(uint32_t region, size_t offset, std::span<const std::byte> in) override;
+    size_t FileBytes() const noexcept override;
+    size_t OpenHandles() const noexcept override;
+    static constexpr size_t kHandleLimit = 64;
 
   private:
-    struct RegionFile {
-        std::mutex mu;
-        std::fstream stream;
+    struct Owner;
+    struct Handle {
+        uint32_t region{UINT32_MAX};
+        std::FILE* file{nullptr};
     };
-
-    std::filesystem::path m_cacheDir;
-    uint64_t m_regionSizeBytes;
-    std::vector<RegionFile> m_regions;
+    std::FILE* Open(uint32_t region);
+    void CloseHandles() noexcept;
+    void RemoveOwnedFiles();
+    bool InBounds(uint32_t region, size_t offset, size_t length) const noexcept;
+    std::unique_ptr<Owner> m_owner;
+    std::filesystem::path m_directory;
+    std::array<Handle, kHandleLimit> m_handles{};
+    size_t m_nextHandle{0};
+    size_t m_capacity{0};
+    size_t m_regionSize{0};
+    std::vector<size_t, BudgetAllocator<size_t>> m_lengths;
 };
 
-enum class DeviceOperation : uint8_t {
-    kRead,
-    kWrite,
-    kReset,
-};
+enum class DeviceOperation : uint8_t { kConfigure, kRead, kWrite };
 
 class MemoryBlockDevice final : public BlockDevice {
   public:
-    using FaultHook = std::function<bool(DeviceOperation, uint32_t, uint64_t, size_t)>;
-
-    MemoryBlockDevice(uint32_t regionCount, uint64_t regionSizeBytes);
-
-    bool Read(uint32_t regionId, uint64_t offset, std::span<std::byte> out) noexcept override;
-    bool Write(uint32_t regionId, uint64_t offset, std::span<const std::byte> in) noexcept override;
-    [[nodiscard]] size_t AlignmentBytes() const noexcept override;
-    void Reset(uint32_t regionId) noexcept override;
-
-    void SetFaultHook(FaultHook hook);
-    [[nodiscard]] std::vector<std::byte>& MutableRegion(uint32_t regionId) noexcept;
-    [[nodiscard]] const std::vector<std::byte>& Region(uint32_t regionId) const noexcept;
+    using FaultHook = std::function<bool(DeviceOperation, uint32_t, size_t, size_t)>;
+    void Configure(size_t capacity, size_t regionSize) override;
+    bool Read(uint32_t region, size_t offset, std::span<std::byte> out) override;
+    bool Write(uint32_t region, size_t offset, std::span<const std::byte> in) override;
+    size_t FileBytes() const noexcept override { return 0; }
+    size_t OpenHandles() const noexcept override { return 0; }
+    void SetFaultHook(FaultHook hook) { m_faultHook = std::move(hook); }
+    std::vector<std::byte>& MutableRegion(uint32_t region) { return m_regions.at(region); }
 
   private:
-    [[nodiscard]] bool ShouldFail(DeviceOperation op, uint32_t regionId, uint64_t offset, size_t size) noexcept;
-
-    uint64_t m_regionSizeBytes;
     std::vector<std::vector<std::byte>> m_regions;
     FaultHook m_faultHook;
 };

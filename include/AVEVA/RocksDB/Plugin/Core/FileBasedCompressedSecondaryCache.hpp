@@ -38,20 +38,52 @@ struct FileBasedSecondaryCacheOptions {
     size_t maxEntrySize{16ULL * 1024 * 1024};
     FileBasedSecondaryCacheAdmissionPolicy admissionPolicy{FileBasedSecondaryCacheAdmissionPolicy::kAdmitAll};
     FileBasedSecondaryCacheEngine engine{FileBasedSecondaryCacheEngine::kLegacy};
+    // Region-only heap limits. Zero metadata budget selects max(1 MiB, capacity / 200).
+    size_t metadataBudget{0};
+    size_t transientBudget{64ULL * 1024 * 1024};
+};
+
+struct FileBasedSecondaryCacheStats {
+    size_t liveEntries{0};
+    size_t liveBytes{0};
+    size_t capacityBytes{0};
+    size_t fileBytes{0};     // Logical file lengths, not reserved disk space or page-cache residency.
+    size_t metadataBytes{0}; // Allocator-requested bytes, including buckets and reverse-list capacity.
+    size_t metadataLimit{0};
+    size_t activeBufferBytes{0};
+    size_t transientBytes{0};
+    size_t openHandles{0};
+    uint64_t inserts{0};
+    uint64_t admitted{0};
+    uint64_t droppedTooLarge{0};
+    uint64_t droppedPressure{0};
+    uint64_t droppedDisabled{0};
+    uint64_t lookups{0};
+    uint64_t hits{0};
+    uint64_t corruptions{0};
+    uint64_t keyMismatches{0};
+    uint64_t ioErrors{0};
+    uint64_t errors{0};
+    uint64_t reclaims{0};
+    uint64_t payloadBytes{0};
+    uint64_t encodedBytes{0};
+    uint64_t deviceWriteBytes{0};
+    uint64_t deviceReadBytes{0};
 };
 
 /// <summary>
 /// A file-based secondary cache for RocksDB that persists evicted block cache
 /// entries to disk. Entries serialized via the CacheItemHelper callbacks are
-/// written to individual files under a configurable directory and are evicted
-/// from disk using an LRU policy once the configured capacity is exceeded.
+/// The default legacy engine uses one file per entry and LRU eviction.
+/// The opt-in region engine uses buffered sequential records and FIFO eviction.
+/// Neither engine provides durable storage.
 /// </summary>
 class FileBasedCompressedSecondaryCache final : public rocksdb::SecondaryCache {
   public:
     static constexpr size_t kDefaultCapacity = 512ULL * 1024 * 1024; // 512 MiB
 
     /// <summary>
-    /// Per-entry on-disk overhead: one byte stores the RocksDB CompressionType
+    /// Legacy-only per-entry on-disk overhead: one byte stores the RocksDB CompressionType
     /// of the payload so it can be faithfully restored on lookup.
     /// </summary>
     static constexpr size_t kFileHeaderSize = 1;
@@ -73,6 +105,9 @@ class FileBasedCompressedSecondaryCache final : public rocksdb::SecondaryCache {
     /// <summary>
     /// Constructs the cache with explicit engine and region-engine options.
     /// The default engine remains the legacy file-per-entry implementation.
+    /// Region mode owns only the ssd-secondary-cache-v1 child of cacheDir; it starts
+    /// empty, supports admit-all only, and allocates disk space on write (not reserved).
+    /// indexShards is retained for compatibility but unused by the single-lock engine.
     /// </summary>
     explicit FileBasedCompressedSecondaryCache(
         std::filesystem::path cacheDir, FileBasedSecondaryCacheOptions options,
@@ -98,8 +133,8 @@ class FileBasedCompressedSecondaryCache final : public rocksdb::SecondaryCache {
     /// <param name="obj">Pointer to the cached object to serialize and store.</param>
     /// <param name="helper">Callbacks used to serialize the object and obtain its size/charge.</param>
     /// <param name="forceInsert">
-    /// If true, evict existing entries to make room; if false,
-    /// skip insertion when there is insufficient capacity.
+    /// Legacy: false skips insertion when full. Region: either value permits FIFO
+    /// recycling; force never bypasses size or memory bounds.
     /// </param>
     rocksdb::Status Insert(const rocksdb::Slice& key, rocksdb::Cache::ObjectPtr obj,
                            const rocksdb::Cache::CacheItemHelper* helper, bool forceInsert) noexcept override;
@@ -116,7 +151,7 @@ class FileBasedCompressedSecondaryCache final : public rocksdb::SecondaryCache {
     /// <param name="key">The key to look up in the secondary cache.</param>
     /// <param name="helper">Callbacks used to reconstruct the cached object from stored bytes.</param>
     /// <param name="create_context">Context provided by RocksDB, used when creating the object.</param>
-    /// <param name="wait">If true, wait for the lookup to complete; otherwise return immediately.</param>
+    /// <param name="wait">Both values currently perform a synchronous lookup and return a ready handle.</param>
     /// <param name="advise_erase">If true, advises that the found entry should be erased after use.</param>
     /// <param name="stats">Optional RocksDB statistics object to record secondary cache metrics.</param>
     /// <param name="kept_in_sec_cache">Set to true when the object will be retained in the secondary cache.</param>
@@ -136,7 +171,7 @@ class FileBasedCompressedSecondaryCache final : public rocksdb::SecondaryCache {
     /// <param name="handles">A vector of result handles to wait on (ignored by this implementation).</param>
     void WaitAll(std::vector<rocksdb::SecondaryCacheResultHandle*> handles) noexcept override;
 
-    /// <summary>Set the maximum capacity of the on-disk cache.</summary>
+    /// <summary>Set disk capacity. Region mode discards all entries; resize failure leaves it disabled.</summary>
     /// <param name="capacity">New capacity in bytes.</param>
     rocksdb::Status SetCapacity(size_t capacity) noexcept override;
 
@@ -144,17 +179,20 @@ class FileBasedCompressedSecondaryCache final : public rocksdb::SecondaryCache {
     /// <param name="capacity">Out-parameter receiving the capacity in bytes.</param>
     rocksdb::Status GetCapacity(size_t& capacity) noexcept override;
 
-    /// <summary>Decrease the configured capacity by <paramref name="decrease"/> bytes.</summary>
+    /// <summary>Legacy decreases disk capacity; region RAM rebalancing is NotSupported.</summary>
     /// <param name="decrease">Amount to reduce capacity by in bytes.</param>
     rocksdb::Status Deflate(size_t decrease) noexcept override;
 
-    /// <summary>Increase the configured capacity by <paramref name="increase"/> bytes.</summary>
+    /// <summary>Legacy increases disk capacity; region RAM rebalancing is NotSupported.</summary>
     /// <param name="increase">Amount to increase capacity by in bytes.</param>
     rocksdb::Status Inflate(size_t increase) noexcept override;
 
     /// <summary>Returns the number of bytes currently stored on disk.</summary>
     /// <param name="usage">Out-parameter receiving the number of bytes currently used by stored entries.</param>
     rocksdb::Status GetUsage(size_t& usage) const noexcept;
+
+    /// <summary>Region observability snapshot; NotSupported for legacy.</summary>
+    rocksdb::Status GetStats(FileBasedSecondaryCacheStats& stats) const noexcept;
 
   private:
     class Impl;

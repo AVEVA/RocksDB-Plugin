@@ -5,12 +5,7 @@
 
 #include "LruFileIndex.hpp"
 #include "ResultHandle.hpp"
-#include "SecondaryCache/AdmissionPolicy.hpp"
-#include "SecondaryCache/BlockDevice.hpp"
-#include "SecondaryCache/CacheStats.hpp"
-#include "SecondaryCache/RecordFormat.hpp"
 #include "SecondaryCache/RegionManager.hpp"
-#include "SecondaryCache/ShardedIndex.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp"
 
@@ -44,7 +39,6 @@ namespace Secondary = AVEVA::RocksDB::Plugin::Core::SecondaryCache;
 
 namespace {
 using Logger = boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>;
-constexpr size_t kReservedRegionFooterBytes = 1ULL << 20;
 
 struct FileUtil {
     static void CommitEviction(Filesystem& fs, const std::pair<std::string, std::string>& p) noexcept {
@@ -69,7 +63,7 @@ struct StatusUtil {
         try {
             throw;
         } catch (const std::bad_alloc&) {
-            return rocksdb::Status::MemoryLimit("out of memory");
+            return rocksdb::Status::MemoryLimit();
         } catch (const std::exception& e) {
             return rocksdb::Status::Aborted(e.what());
         } catch (...) {
@@ -130,6 +124,9 @@ class CacheEngine {
     virtual rocksdb::Status Deflate(size_t decrease) noexcept = 0;
     virtual rocksdb::Status Inflate(size_t increase) noexcept = 0;
     virtual rocksdb::Status GetUsage(size_t& usage) const noexcept = 0;
+    virtual rocksdb::Status GetStats(FileBasedSecondaryCacheStats&) const noexcept {
+        return rocksdb::Status::NotSupported();
+    }
 };
 
 class LegacyEngine final : public CacheEngine {
@@ -190,8 +187,7 @@ class LegacyEngine final : public CacheEngine {
     }
 
     rocksdb::Status InsertSaved(const rocksdb::Slice& key, const rocksdb::Slice& saved,
-                                const rocksdb::CompressionType type,
-                                rocksdb::CacheTier /*source*/) noexcept override {
+                                const rocksdb::CompressionType type, rocksdb::CacheTier /*source*/) noexcept override {
         try {
             if (saved.size() == 0) {
                 return rocksdb::Status::OK();
@@ -433,85 +429,69 @@ class LegacyEngine final : public CacheEngine {
 };
 
 class RegionEngine final : public CacheEngine {
-    std::filesystem::path m_cacheDir;
     FileBasedSecondaryCacheOptions m_options;
     std::shared_ptr<Logger> m_logger;
-    Secondary::CacheStats m_stats;
-    Secondary::ShardedIndex m_index;
-    Secondary::AdmissionPolicy m_admission;
+    mutable Secondary::CacheStats m_stats;
+    Secondary::MemoryBudget m_transient;
     Secondary::RegionManager m_regions;
-    size_t m_maxDramBudget;
-    size_t m_currentDramBudget;
 
   public:
     RegionEngine(std::filesystem::path cacheDir, const FileBasedSecondaryCacheOptions& options,
                  std::shared_ptr<Logger> logger)
-        : m_cacheDir(std::move(cacheDir)), m_options(options), m_logger(std::move(logger)),
-          m_index(options.indexShards),
-          m_admission(options.admissionPolicy == FileBasedSecondaryCacheAdmissionPolicy::kSecondChance
-                          ? Secondary::AdmissionPolicyKind::kSecondChance
-                          : Secondary::AdmissionPolicyKind::kAdmitAll,
-                      options.indexShards),
-          m_regions(std::make_unique<Secondary::FileBlockDevice>(
-                        m_cacheDir, ComputeRegionCount(options.capacity, options.regionSize), options.regionSize),
-                    m_index, m_stats,
-                    Secondary::RegionManagerOptions{options.capacity, options.regionSize, options.flushBlockSize,
-                                                    options.maxEntrySize}),
-          m_maxDramBudget(options.flushBlockSize),
-          m_currentDramBudget(options.flushBlockSize) {
-        if (!m_logger) {
-            throw std::invalid_argument("FileBasedCompressedSecondaryCache: logger cannot be null");
-        }
-        const size_t usableRegionBytes = options.regionSize - kReservedRegionFooterBytes;
-        if (options.regionSize <= kReservedRegionFooterBytes || options.maxEntrySize > usableRegionBytes) {
-            throw std::invalid_argument("FileBasedCompressedSecondaryCache: invalid region-engine sizing");
-        }
-    }
+        : m_options(options), m_logger(std::move(logger)), m_transient{options.transientBudget},
+          m_regions(
+              [cacheDir = std::move(cacheDir)](Secondary::MemoryBudget& budget) {
+                  return std::make_unique<Secondary::FileBlockDevice>(cacheDir, budget);
+              },
+              options, m_stats) {}
 
     const char* Name() const noexcept override { return "FileBasedCompressedSecondaryCache"; }
 
     rocksdb::Status Insert(const rocksdb::Slice& key, rocksdb::Cache::ObjectPtr obj,
-                           const rocksdb::Cache::CacheItemHelper* helper, const bool forceInsert) noexcept override {
+                           const rocksdb::Cache::CacheItemHelper* helper,
+                           const bool /*forceInsert*/) noexcept override {
+        ++m_stats.inserts;
         try {
-            m_stats.inserts.value.fetch_add(1, std::memory_order_relaxed);
             if (!helper || !helper->IsSecondaryCacheCompatible()) {
                 return rocksdb::Status::OK();
             }
-
             const size_t dataSize = helper->size_cb(obj);
-            if (dataSize == 0) {
+            if (!CanEncode(key.size(), dataSize)) {
                 return rocksdb::Status::OK();
             }
-
-            std::vector<std::byte> payload(dataSize);
-            if (auto s = helper->saveto_cb(obj, 0, dataSize, reinterpret_cast<char*>(payload.data())); !s.ok()) {
-                return s;
+            Secondary::RecordBytes payload{Secondary::BudgetAllocator<std::byte>(m_transient)};
+            payload.resize(dataSize);
+            if (dataSize != 0) {
+                if (auto s = helper->saveto_cb(obj, 0, dataSize, reinterpret_cast<char*>(payload.data())); !s.ok()) {
+                    ReportFailure("serialization callback failed");
+                    return s;
+                }
             }
-
-            return InsertEncoded(key, std::span<const std::byte>(payload.data(), payload.size()),
-                                 rocksdb::CompressionType::kNoCompression, rocksdb::CacheTier::kVolatileTier,
-                                 forceInsert);
+            return InsertEncoded(key, payload, rocksdb::kNoCompression, rocksdb::CacheTier::kVolatileTier);
+        } catch (const Secondary::BudgetExceeded&) {
+            ++m_stats.droppedPressure;
+            return rocksdb::Status::OK();
         } catch (...) {
-            const auto s = StatusUtil::CurrentExceptionToStatus();
-            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
-            return s;
+            return ExceptionStatus();
         }
     }
 
-    rocksdb::Status InsertSaved(const rocksdb::Slice& key, const rocksdb::Slice& saved, const rocksdb::CompressionType type,
+    rocksdb::Status InsertSaved(const rocksdb::Slice& key, const rocksdb::Slice& saved,
+                                const rocksdb::CompressionType type,
                                 const rocksdb::CacheTier source) noexcept override {
+        ++m_stats.inserts;
         try {
-            m_stats.inserts.value.fetch_add(1, std::memory_order_relaxed);
-            if (saved.size() == 0) {
+            if (!CanEncode(key.size(), saved.size())) {
                 return rocksdb::Status::OK();
             }
-            return InsertEncoded(key,
-                                 std::span<const std::byte>(reinterpret_cast<const std::byte*>(saved.data()), saved.size()),
-                                 type, source, true);
+            return InsertEncoded(
+                key, std::span<const std::byte>(reinterpret_cast<const std::byte*>(saved.data()), saved.size()), type,
+                source);
+        } catch (const Secondary::BudgetExceeded&) {
+            ++m_stats.droppedPressure;
+            return rocksdb::Status::OK();
         } catch (...) {
-            const auto s = StatusUtil::CurrentExceptionToStatus();
-            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
-            return s;
+            return ExceptionStatus();
         }
     }
 
@@ -519,27 +499,21 @@ class RegionEngine final : public CacheEngine {
     Lookup(const rocksdb::Slice& key, const rocksdb::Cache::CacheItemHelper* helper,
            rocksdb::Cache::CreateContext* createContext, bool /*wait*/, const bool adviseErase,
            rocksdb::Statistics* stats, bool& keptInSecondaryCache) noexcept override {
+        keptInSecondaryCache = false;
+        ++m_stats.lookups;
         try {
-            m_stats.lookups.value.fetch_add(1, std::memory_order_relaxed);
-            keptInSecondaryCache = false;
             if (!helper || !helper->IsSecondaryCacheCompatible()) {
                 return nullptr;
             }
 
             const uint64_t keyHash = HashKey(key);
-            Secondary::Location location{};
-            if (!m_index.FindAndTouch(keyHash, location)) {
-                m_stats.missesIndex.value.fetch_add(1, std::memory_order_relaxed);
-                return nullptr;
-            }
-
-            std::vector<std::byte> record;
-            const auto readStatus = m_regions.Read(location, record);
-            if (readStatus == Secondary::RegionManager::ReadStatus::kRegionReclaimed) {
-                m_stats.missesRegionReclaimed.value.fetch_add(1, std::memory_order_relaxed);
-                return nullptr;
-            }
+            Secondary::RegionManager::Identity identity;
+            Secondary::RecordBytes record{Secondary::BudgetAllocator<std::byte>(m_transient)};
+            const auto readStatus = m_regions.Read(keyHash, record, identity);
             if (readStatus != Secondary::RegionManager::ReadStatus::kOk) {
+                if (readStatus == Secondary::RegionManager::ReadStatus::kIoError) {
+                    ReportFailure("record read failed");
+                }
                 return nullptr;
             }
 
@@ -549,47 +523,46 @@ class RegionEngine final : public CacheEngine {
                 std::span<const std::byte>(reinterpret_cast<const std::byte*>(key.data()), key.size()), decoded);
             if (decodeResult != Secondary::DecodeResult::kOk) {
                 if (decodeResult == Secondary::DecodeResult::kKeyMismatch) {
-                    m_stats.missesKeyMismatch.value.fetch_add(1, std::memory_order_relaxed);
+                    ++m_stats.keyMismatches;
                 } else {
-                    m_stats.missesCrc.value.fetch_add(1, std::memory_order_relaxed);
-                    if (const auto removed = m_index.Remove(keyHash)) {
-                        m_regions.AdjustLiveBytes(-static_cast<int64_t>(Secondary::LocationLengthBytes(*removed)));
-                    }
+                    ++m_stats.corruptions;
+                    m_regions.Remove(keyHash, identity);
+                    ReportFailure("record integrity check failed");
                 }
                 return nullptr;
             }
 
             rocksdb::Cache::ObjectPtr outObj = nullptr;
             size_t outCharge = 0;
+            const rocksdb::Slice payloadSlice(reinterpret_cast<const char*>(decoded.payload.data()),
+                                              decoded.payload.size());
+            auto createStatus = helper->create_cb(payloadSlice, decoded.compressionType, decoded.sourceTier,
+                                                  createContext, nullptr, &outObj, &outCharge);
+            if (!createStatus.ok() || outObj == nullptr) {
+                // RocksDB's callback owns cleanup on failure; ignore its out_obj.
+                ReportFailure("creation callback failed");
+                return nullptr;
+            }
             auto cleanup = boost::scope::make_scope_exit([&] noexcept {
-                if (outObj != nullptr) {
+                if (helper->del_cb != nullptr) {
                     helper->del_cb(outObj, nullptr);
                 }
             });
-
-            const rocksdb::Slice payloadSlice(reinterpret_cast<const char*>(decoded.payload.data()), decoded.payload.size());
-            auto createStatus =
-                helper->create_cb(payloadSlice, decoded.compressionType, decoded.sourceTier, createContext, nullptr,
-                                  &outObj, &outCharge);
-            if (!createStatus.ok() || outObj == nullptr) {
-                return nullptr;
-            }
-
+            auto result = std::make_unique<ResultHandle>(outObj, outCharge);
             if (adviseErase) {
-                if (const auto removed = m_index.Remove(keyHash)) {
-                    m_regions.AdjustLiveBytes(-static_cast<int64_t>(Secondary::LocationLengthBytes(*removed)));
-                }
-            } else {
-                keptInSecondaryCache = true;
+                m_regions.Remove(keyHash, identity);
             }
-
-            m_stats.hits.value.fetch_add(1, std::memory_order_relaxed);
+            keptInSecondaryCache = !adviseErase && m_regions.Contains(keyHash, identity);
+            ++m_stats.hits;
             RecordHitStats(stats, helper->role);
             cleanup.set_active(false);
-            return std::make_unique<ResultHandle>(outObj, outCharge);
+            return result;
+        } catch (const Secondary::BudgetExceeded&) {
+            ++m_stats.droppedPressure;
+            return nullptr;
         } catch (...) {
-            BOOST_LOG_SEV(*m_logger, error)
-                << Name() << "::" << __func__ << ": " << StatusUtil::CurrentExceptionToStatus().ToString();
+            keptInSecondaryCache = false;
+            ExceptionStatus().PermitUncheckedError();
             return nullptr;
         }
     }
@@ -598,12 +571,9 @@ class RegionEngine final : public CacheEngine {
 
     void Erase(const rocksdb::Slice& key) noexcept override {
         try {
-            if (const auto removed = m_index.Remove(HashKey(key))) {
-                m_regions.AdjustLiveBytes(-static_cast<int64_t>(Secondary::LocationLengthBytes(*removed)));
-            }
+            m_regions.Erase(HashKey(key));
         } catch (...) {
-            BOOST_LOG_SEV(*m_logger, error)
-                << Name() << "::" << __func__ << ": " << StatusUtil::CurrentExceptionToStatus().ToString();
+            ExceptionStatus().PermitUncheckedError();
         }
     }
 
@@ -613,86 +583,108 @@ class RegionEngine final : public CacheEngine {
         try {
             return m_regions.SetCapacity(capacity);
         } catch (...) {
-            return StatusUtil::CurrentExceptionToStatus();
+            return ExceptionStatus();
         }
     }
 
     rocksdb::Status GetCapacity(size_t& capacity) noexcept override {
-        capacity = m_regions.CapacityBytes();
-        return rocksdb::Status::OK();
+        try {
+            capacity = m_regions.CapacityBytes();
+            return rocksdb::Status::OK();
+        } catch (...) {
+            return ExceptionStatus();
+        }
     }
 
-    rocksdb::Status Deflate(const size_t decrease) noexcept override {
-        m_currentDramBudget = decrease >= m_currentDramBudget ? 0 : m_currentDramBudget - decrease;
-        return rocksdb::Status::OK();
-    }
-
-    rocksdb::Status Inflate(const size_t increase) noexcept override {
-        m_currentDramBudget = std::min(m_maxDramBudget, m_currentDramBudget + increase);
-        return rocksdb::Status::OK();
-    }
+    rocksdb::Status Deflate(size_t) noexcept override { return rocksdb::Status::NotSupported(); }
+    rocksdb::Status Inflate(size_t) noexcept override { return rocksdb::Status::NotSupported(); }
 
     rocksdb::Status GetUsage(size_t& usage) const noexcept override {
-        usage = m_regions.UsageBytes();
-        return rocksdb::Status::OK();
+        try {
+            usage = m_regions.UsageBytes();
+            return rocksdb::Status::OK();
+        } catch (...) {
+            return ExceptionStatus();
+        }
+    }
+
+    rocksdb::Status GetStats(FileBasedSecondaryCacheStats& stats) const noexcept override {
+        try {
+            stats = m_regions.Snapshot();
+            stats.transientBytes = m_transient.used.load(std::memory_order_relaxed);
+            return rocksdb::Status::OK();
+        } catch (...) {
+            return ExceptionStatus();
+        }
     }
 
   private:
-    [[nodiscard]] static uint32_t ComputeRegionCount(const size_t capacity, const size_t regionSize) {
-        if (regionSize <= kReservedRegionFooterBytes) {
-            throw std::invalid_argument("FileBasedCompressedSecondaryCache: regionSize must exceed 1 MiB footer");
+    // Translate without constructing another allocating status message during OOM.
+    rocksdb::Status ExceptionStatus() const noexcept {
+        ReportFailure("operation threw; cache operation failed");
+        try {
+            throw;
+        } catch (const std::bad_alloc&) {
+            return rocksdb::Status::MemoryLimit();
+        } catch (const std::invalid_argument&) {
+            return rocksdb::Status::InvalidArgument();
+        } catch (const Secondary::DeviceError&) {
+            ++m_stats.ioErrors;
+            return rocksdb::Status::IOError();
+        } catch (const std::filesystem::filesystem_error&) {
+            ++m_stats.ioErrors;
+            return rocksdb::Status::IOError();
+        } catch (...) {
+            return rocksdb::Status::Aborted();
         }
-        const size_t usableRegionBytes = regionSize - kReservedRegionFooterBytes;
-        return std::max<uint32_t>(1, static_cast<uint32_t>((capacity + usableRegionBytes - 1) / usableRegionBytes));
+    }
+
+    void ReportFailure(const char* reason) const noexcept {
+        // First failure and powers of two: bounded log traffic, no status formatting on OOM.
+        const uint64_t count = m_stats.errors.fetch_add(1, std::memory_order_relaxed) + 1;
+        if ((count & (count - 1)) == 0) {
+            try {
+                BOOST_LOG_SEV(*m_logger, error) << Name() << ": " << reason << " (failure " << count << ")";
+            } catch (...) {
+                // Logging must not escape RocksDB's noexcept boundary; the counter remains observable.
+            }
+        }
+    }
+
+    bool CanEncode(const size_t keySize, const size_t payloadSize) {
+        const auto size = Secondary::RecordSize(keySize, payloadSize);
+        if (size == 0 || size > m_options.maxEntrySize) {
+            ++m_stats.droppedTooLarge;
+            return false;
+        }
+        const auto capacity = m_regions.CapacityBytes();
+        if (capacity == 0) {
+            ++m_stats.droppedDisabled;
+            return false;
+        }
+        if (size > capacity) {
+            ++m_stats.droppedTooLarge;
+            return false;
+        }
+        return true;
     }
 
     rocksdb::Status InsertEncoded(const rocksdb::Slice& key, const std::span<const std::byte> payload,
-                                  const rocksdb::CompressionType type, const rocksdb::CacheTier source,
-                                  const bool forceInsert) {
+                                  const rocksdb::CompressionType type, const rocksdb::CacheTier source) {
         const uint64_t keyHash = HashKey(key);
-        if (!m_admission.ShouldAdmit(keyHash, forceInsert)) {
-            m_stats.insertsRejectedByPolicy.value.fetch_add(1, std::memory_order_relaxed);
-            return rocksdb::Status::OK();
-        }
-
         const size_t recordSize = Secondary::RecordSize(key.size(), payload.size());
-        if (recordSize > m_options.maxEntrySize) {
-            m_stats.insertsRejectedTooLarge.value.fetch_add(1, std::memory_order_relaxed);
-            return rocksdb::Status::OK();
+        Secondary::RecordBytes record{Secondary::BudgetAllocator<std::byte>(m_transient)};
+        record.resize(recordSize);
+        if (!Secondary::EncodeRecord(
+                record, std::span<const std::byte>(reinterpret_cast<const std::byte*>(key.data()), key.size()), payload,
+                type, source, keyHash)) {
+            return rocksdb::Status::InvalidArgument("secondary cache record cannot be encoded");
         }
-
-        Secondary::RegionManager::Reservation reservation{};
-        if (!m_regions.Reserve(keyHash, static_cast<uint32_t>(recordSize), forceInsert, reservation)) {
-            m_stats.insertsDroppedNoBuffer.value.fetch_add(1, std::memory_order_relaxed);
-            return rocksdb::Status::OK();
+        auto status = m_regions.Append(keyHash, record, payload.size());
+        if (!status.ok()) {
+            ReportFailure("record append failed");
         }
-
-        std::vector<std::byte> record(recordSize, std::byte{0});
-        Secondary::EncodeRecord(
-            std::span<std::byte>(record.data(), record.size()),
-            std::span<const std::byte>(reinterpret_cast<const std::byte*>(key.data()), key.size()), payload, type, source,
-            keyHash);
-        const auto previous = m_index.Peek(keyHash);
-        if (auto status = m_regions.Publish(reservation, std::span<const std::byte>(record.data(), record.size()), previous);
-            !status.ok()) {
-            return status;
-        }
-
-        Secondary::Location newLocation{};
-        newLocation.regionId = reservation.regionId;
-        newLocation.offsetInAlignUnits = static_cast<uint32_t>(reservation.offset / Secondary::kRecordAlign);
-        newLocation.lengthInAlignUnits = static_cast<uint32_t>(reservation.length / Secondary::kRecordAlign);
-        newLocation.generation = reservation.generation;
-        newLocation.hitCount = 0;
-        newLocation.flags = static_cast<uint8_t>(Secondary::LocationFlags::kNone);
-
-        const auto replaced = m_index.Upsert(keyHash, newLocation);
-        if (replaced) {
-            static_cast<void>(*replaced);
-        }
-        m_admission.Forget(keyHash);
-        m_stats.insertsAdmitted.value.fetch_add(1, std::memory_order_relaxed);
-        return rocksdb::Status::OK();
+        return status;
     }
 };
 } // namespace
@@ -710,39 +702,50 @@ class FileBasedCompressedSecondaryCache::Impl {
                                 rocksdb::CacheTier source) noexcept {
         return m_engine->InsertSaved(key, saved, type, source);
     }
-    std::unique_ptr<rocksdb::SecondaryCacheResultHandle>
-    Lookup(const rocksdb::Slice& key, const rocksdb::Cache::CacheItemHelper* helper,
-           rocksdb::Cache::CreateContext* createContext, bool wait, bool adviseErase, rocksdb::Statistics* stats,
-           bool& keptInSecondaryCache) noexcept {
+    std::unique_ptr<rocksdb::SecondaryCacheResultHandle> Lookup(const rocksdb::Slice& key,
+                                                                const rocksdb::Cache::CacheItemHelper* helper,
+                                                                rocksdb::Cache::CreateContext* createContext, bool wait,
+                                                                bool adviseErase, rocksdb::Statistics* stats,
+                                                                bool& keptInSecondaryCache) noexcept {
         return m_engine->Lookup(key, helper, createContext, wait, adviseErase, stats, keptInSecondaryCache);
     }
     bool SupportForceErase() const noexcept { return m_engine->SupportForceErase(); }
     void Erase(const rocksdb::Slice& key) noexcept { m_engine->Erase(key); }
-    void WaitAll(std::vector<rocksdb::SecondaryCacheResultHandle*> handles) noexcept { m_engine->WaitAll(std::move(handles)); }
+    void WaitAll(std::vector<rocksdb::SecondaryCacheResultHandle*> handles) noexcept {
+        m_engine->WaitAll(std::move(handles));
+    }
     rocksdb::Status SetCapacity(size_t capacity) noexcept { return m_engine->SetCapacity(capacity); }
     rocksdb::Status GetCapacity(size_t& capacity) noexcept { return m_engine->GetCapacity(capacity); }
     rocksdb::Status Deflate(size_t decrease) noexcept { return m_engine->Deflate(decrease); }
     rocksdb::Status Inflate(size_t increase) noexcept { return m_engine->Inflate(increase); }
     rocksdb::Status GetUsage(size_t& usage) const noexcept { return m_engine->GetUsage(usage); }
+    rocksdb::Status GetStats(FileBasedSecondaryCacheStats& stats) const noexcept { return m_engine->GetStats(stats); }
 
   private:
     std::unique_ptr<CacheEngine> m_engine;
 };
 
-FileBasedCompressedSecondaryCache::FileBasedCompressedSecondaryCache(
-    std::filesystem::path cacheDir, std::shared_ptr<Filesystem> fs, const size_t capacity,
-    std::shared_ptr<Logger> logger)
-    : m_impl(std::make_unique<Impl>(std::make_unique<LegacyEngine>(std::move(cacheDir), std::move(fs), capacity,
-                                                                  std::move(logger)))) {}
+FileBasedCompressedSecondaryCache::FileBasedCompressedSecondaryCache(std::filesystem::path cacheDir,
+                                                                     std::shared_ptr<Filesystem> fs,
+                                                                     const size_t capacity,
+                                                                     std::shared_ptr<Logger> logger)
+    : m_impl(std::make_unique<Impl>(
+          std::make_unique<LegacyEngine>(std::move(cacheDir), std::move(fs), capacity, std::move(logger)))) {}
 
 FileBasedCompressedSecondaryCache::FileBasedCompressedSecondaryCache(std::filesystem::path cacheDir,
                                                                      FileBasedSecondaryCacheOptions options,
                                                                      std::shared_ptr<Logger> logger) {
+    if (!logger) {
+        throw std::invalid_argument("FileBasedCompressedSecondaryCache: logger cannot be null");
+    }
     if (options.engine == FileBasedSecondaryCacheEngine::kRegion) {
-        m_impl = std::make_unique<Impl>(std::make_unique<RegionEngine>(std::move(cacheDir), options, std::move(logger)));
-    } else {
+        m_impl =
+            std::make_unique<Impl>(std::make_unique<RegionEngine>(std::move(cacheDir), options, std::move(logger)));
+    } else if (options.engine == FileBasedSecondaryCacheEngine::kLegacy) {
         m_impl = std::make_unique<Impl>(std::make_unique<LegacyEngine>(
             std::move(cacheDir), std::make_shared<LocalFilesystem>(), options.capacity, std::move(logger)));
+    } else {
+        throw std::invalid_argument("FileBasedCompressedSecondaryCache: unknown engine");
     }
 }
 
@@ -786,6 +789,10 @@ rocksdb::Status FileBasedCompressedSecondaryCache::GetCapacity(size_t& capacity)
 
 rocksdb::Status FileBasedCompressedSecondaryCache::GetUsage(size_t& usage) const noexcept {
     return m_impl->GetUsage(usage);
+}
+
+rocksdb::Status FileBasedCompressedSecondaryCache::GetStats(FileBasedSecondaryCacheStats& stats) const noexcept {
+    return m_impl->GetStats(stats);
 }
 
 rocksdb::Status FileBasedCompressedSecondaryCache::Deflate(const size_t decrease) noexcept {

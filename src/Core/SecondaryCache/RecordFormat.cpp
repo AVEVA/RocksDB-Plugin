@@ -36,12 +36,12 @@ uint32_t ComputeCrc32c(const std::span<const std::byte> bytes, uint32_t seed) no
     return ~crc;
 }
 
-void EncodeRecord(const std::span<std::byte> dst, const std::span<const std::byte> key,
+bool EncodeRecord(const std::span<std::byte> dst, const std::span<const std::byte> key,
                   const std::span<const std::byte> payload, const rocksdb::CompressionType type,
                   const rocksdb::CacheTier tier, const uint64_t keyHash, const RecordFlags flags) noexcept {
     const size_t requiredSize = RecordSize(key.size(), payload.size());
-    if (dst.size() < requiredSize) {
-        return;
+    if (requiredSize == 0 || dst.size() != requiredSize) {
+        return false;
     }
 
     std::fill(dst.begin(), dst.begin() + static_cast<std::ptrdiff_t>(requiredSize), std::byte{0});
@@ -58,9 +58,13 @@ void EncodeRecord(const std::span<std::byte> dst, const std::span<const std::byt
     header.payloadCrc = ComputeCrc32c(payload);
 
     std::memcpy(dst.data(), &header, sizeof(header));
-    std::memcpy(dst.data() + static_cast<std::ptrdiff_t>(sizeof(RecordHeader)), key.data(), key.size());
-    std::memcpy(dst.data() + static_cast<std::ptrdiff_t>(sizeof(RecordHeader) + key.size()), payload.data(),
-                payload.size());
+    if (!key.empty()) {
+        std::memcpy(dst.data() + static_cast<std::ptrdiff_t>(sizeof(RecordHeader)), key.data(), key.size());
+    }
+    if (!payload.empty()) {
+        std::memcpy(dst.data() + static_cast<std::ptrdiff_t>(sizeof(RecordHeader) + key.size()), payload.data(),
+                    payload.size());
+    }
 
     header.headerCrc = ComputeCrc32c(
         std::span<const std::byte>(dst.data(), dst.data() + static_cast<std::ptrdiff_t>(kHeaderCrcPrefixBytes)));
@@ -69,6 +73,7 @@ void EncodeRecord(const std::span<std::byte> dst, const std::span<const std::byt
                                    dst.data() + static_cast<std::ptrdiff_t>(sizeof(RecordHeader) + key.size())),
         header.headerCrc);
     std::memcpy(dst.data(), &header, sizeof(header));
+    return true;
 }
 
 bool TryReadHeader(const std::span<const std::byte> src, RecordHeader& headerOut) noexcept {
@@ -96,8 +101,9 @@ DecodeResult DecodeRecord(const std::span<const std::byte> src, const std::span<
     }
 
     const size_t alignedSize = RecordSize(header);
-    const size_t rawSize = sizeof(RecordHeader) + static_cast<size_t>(header.keyLen) + static_cast<size_t>(header.payloadLen);
-    if (rawSize < sizeof(RecordHeader) || alignedSize > src.size()) {
+    const size_t rawSize =
+        sizeof(RecordHeader) + static_cast<size_t>(header.keyLen) + static_cast<size_t>(header.payloadLen);
+    if (alignedSize == 0 || rawSize < sizeof(RecordHeader) || alignedSize != src.size()) {
         return DecodeResult::kBadLength;
     }
 

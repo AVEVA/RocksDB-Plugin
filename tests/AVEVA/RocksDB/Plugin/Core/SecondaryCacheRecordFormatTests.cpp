@@ -21,8 +21,8 @@ TEST(SecondaryCacheRecordFormatTests, EncodeDecodeRoundTrips) {
     const auto key = ToBytes("record-key");
     const auto payload = ToBytes("record-payload");
     std::vector<std::byte> buffer(Secondary::RecordSize(key.size(), payload.size()));
-    Secondary::EncodeRecord(buffer, key, payload, rocksdb::CompressionType::kZSTD,
-                            rocksdb::CacheTier::kNonVolatileBlockTier, 42);
+    ASSERT_TRUE(Secondary::EncodeRecord(buffer, key, payload, rocksdb::CompressionType::kZSTD,
+                                        rocksdb::CacheTier::kNonVolatileBlockTier, 42));
 
     Secondary::DecodedRecordView decoded{};
     const auto result = Secondary::DecodeRecord(buffer, key, decoded);
@@ -38,8 +38,8 @@ TEST(SecondaryCacheRecordFormatTests, CorruptionIsDetectedInValidationOrder) {
     const auto key = ToBytes("abc");
     const auto payload = ToBytes("payload");
     std::vector<std::byte> buffer(Secondary::RecordSize(key.size(), payload.size()));
-    Secondary::EncodeRecord(buffer, key, payload, rocksdb::CompressionType::kNoCompression,
-                            rocksdb::CacheTier::kVolatileTier, 7);
+    ASSERT_TRUE(Secondary::EncodeRecord(buffer, key, payload, rocksdb::CompressionType::kNoCompression,
+                                        rocksdb::CacheTier::kVolatileTier, 7));
 
     auto mutated = buffer;
     mutated[0] = std::byte{0};
@@ -66,4 +66,24 @@ TEST(SecondaryCacheRecordFormatTests, CorruptionIsDetectedInValidationOrder) {
     mutated = buffer;
     mutated[sizeof(Secondary::RecordHeader) + key.size()] ^= std::byte{0x1};
     EXPECT_EQ(Secondary::DecodeRecord(mutated, key, decoded), Secondary::DecodeResult::kBadPayloadCrc);
+}
+
+TEST(SecondaryCacheRecordFormatTests, SizeArithmeticRejectsOverflowAndEncoderRejectsWrongBufferSize) {
+    EXPECT_EQ(Secondary::RecordSize(SIZE_MAX, 1), 0u);
+    EXPECT_EQ(Secondary::RecordSize(1, SIZE_MAX), 0u);
+    EXPECT_EQ(Secondary::RecordSize(0, 0), Secondary::kRecordAlign);
+    const auto key = ToBytes("key");
+    const auto payload = ToBytes("value");
+    std::vector<std::byte> small(16);
+    EXPECT_FALSE(
+        Secondary::EncodeRecord(small, key, payload, rocksdb::kNoCompression, rocksdb::CacheTier::kVolatileTier, 0));
+}
+
+TEST(SecondaryCacheRecordFormatTests, EmptyKeyAndPayloadPermitNullSpans) {
+    std::array<std::byte, Secondary::kRecordAlign> encoded{};
+    ASSERT_TRUE(
+        Secondary::EncodeRecord(encoded, {}, {}, rocksdb::kNoCompression, rocksdb::CacheTier::kVolatileTier, 0));
+    Secondary::DecodedRecordView decoded;
+    ASSERT_EQ(Secondary::DecodeRecord(encoded, {}, decoded), Secondary::DecodeResult::kOk);
+    EXPECT_TRUE(decoded.payload.empty());
 }

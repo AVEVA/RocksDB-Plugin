@@ -5,100 +5,62 @@
 
 #include "BlockDevice.hpp"
 #include "CacheStats.hpp"
-#include "ShardedIndex.hpp"
+#include "Index.hpp"
 
-#include <rocksdb/status.h>
+#include "AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
 
-#include <atomic>
-#include <cstddef>
-#include <cstdint>
-#include <deque>
-#include <memory>
+#include <functional>
 #include <mutex>
-#include <span>
-#include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache {
-struct RegionManagerOptions {
-    size_t capacityBytes{0};
-    size_t regionSizeBytes{64ULL << 20};
-    size_t flushBlockSizeBytes{1ULL << 20};
-    size_t maxEntrySizeBytes{16ULL << 20};
-};
-
 class RegionManager {
   public:
-    struct Reservation {
-        uint32_t regionId{0};
-        uint16_t generation{0};
-        uint64_t offset{0};
-        uint32_t length{0};
-        uint64_t keyHash{0};
+    using DeviceFactory = std::function<std::unique_ptr<BlockDevice>(MemoryBudget&)>;
+    struct Identity {
+        Location location;
+        uint64_t incarnation{0};
     };
+    enum class ReadStatus { kOk, kMiss, kIoError };
 
-    enum class ReadStatus : uint8_t {
-        kOk,
-        kRegionReclaimed,
-        kIoError,
-    };
-
-    RegionManager(std::unique_ptr<BlockDevice> device, ShardedIndex& index, CacheStats& stats, RegionManagerOptions options);
-
-    [[nodiscard]] bool Reserve(uint64_t keyHash, uint32_t recordSize, bool forceInsert, Reservation& out) noexcept;
-    rocksdb::Status Publish(const Reservation& reservation, std::span<const std::byte> record,
-                            std::optional<Location> replaced) noexcept;
-
-    [[nodiscard]] ReadStatus Read(const Location& location, std::vector<std::byte>& recordOut) noexcept;
-
-    rocksdb::Status SetCapacity(size_t capacityBytes) noexcept;
-    [[nodiscard]] size_t CapacityBytes() const noexcept;
-    [[nodiscard]] size_t UsageBytes() const noexcept;
-    void AdjustLiveBytes(int64_t delta) noexcept;
-    void ClearAll() noexcept;
+    RegionManager(DeviceFactory factory, FileBasedSecondaryCacheOptions options, CacheStats& stats);
+    static void Validate(const FileBasedSecondaryCacheOptions& options);
+    rocksdb::Status Append(uint64_t hash, std::span<const std::byte> record, size_t payloadSize);
+    ReadStatus Read(uint64_t hash, RecordBytes& record, Identity& identity);
+    bool Remove(uint64_t hash, const Identity& identity);
+    bool Contains(uint64_t hash, const Identity& identity) const;
+    void Erase(uint64_t hash);
+    rocksdb::Status SetCapacity(size_t capacity);
+    size_t CapacityBytes() const;
+    size_t UsageBytes() const;
+    FileBasedSecondaryCacheStats Snapshot() const;
 
   private:
-    struct FooterEntry {
-        uint64_t keyHash{0};
-        uint32_t offset{0};
-        uint32_t length{0};
-    };
-    static_assert(sizeof(FooterEntry) == 16);
-
     struct Region {
-        enum class State : uint8_t { kOpen, kSealed, kReclaiming };
-
-        mutable std::mutex mu;
-        std::atomic<uint32_t> activeReaders{0};
-        State state{State::kSealed};
-        uint16_t generation{0};
-        uint64_t writeCursor{0};
-        uint64_t bufferedOffset{0};
-        std::vector<std::byte> writeBuffer;
-        bool footerOverflow{false};
-        std::vector<FooterEntry> footerEntries;
+        explicit Region(MemoryBudget& budget) : hashes(BudgetAllocator<uint64_t>(budget)) {}
+        uint32_t generation{1};
+        size_t cursor{0};
+        std::vector<uint64_t, BudgetAllocator<uint64_t>> hashes;
     };
+    void ConfigureLocked(size_t capacity);
+    void InvalidateLocked();
+    void ReclaimLocked(uint32_t region);
+    bool FlushLocked();
+    bool SelectRegionLocked(size_t length);
+    size_t RegionBudget(uint32_t region) const noexcept;
+    void RemoveLocationLocked(uint64_t hash);
 
-    [[nodiscard]] uint32_t RegionCountFor(size_t capacityBytes) const noexcept;
-    [[nodiscard]] uint64_t RegionBudgetBytes(uint32_t regionId) const noexcept;
-    [[nodiscard]] bool EnsureWritableRegion(uint32_t recordSize, bool forceInsert) noexcept;
-    bool SealRegion(uint32_t regionId) noexcept;
-    bool ReclaimRegion(uint32_t regionId) noexcept;
-    void FlushOpenRegionLocked(Region& region, uint32_t regionId) noexcept;
-    [[nodiscard]] std::vector<FooterEntry> ScanRegionEntries(uint32_t regionId, uint64_t budgetBytes) noexcept;
-    [[nodiscard]] bool TryLoadFooter(uint32_t regionId, uint16_t generation, uint64_t budgetBytes,
-                                     std::vector<FooterEntry>& entriesOut, bool& overflowOut) noexcept;
-
-    std::unique_ptr<BlockDevice> m_device;
-    ShardedIndex& m_index;
+    // The only state lock: index, layout, reverse lists, buffer, device, usage.
+    mutable std::mutex m_mutex;
+    FileBasedSecondaryCacheOptions m_options;
     CacheStats& m_stats;
-    RegionManagerOptions m_options;
-    size_t m_footerSizeBytes;
-    uint64_t m_usableRegionBytes;
-    std::vector<Region> m_regions;
-    std::deque<uint32_t> m_sealedOrder;
-    uint32_t m_currentOpenRegion{0};
-    uint32_t m_nextUnusedRegion{1};
-    std::atomic<size_t> m_usageBytes{0};
-    mutable std::mutex m_managerMutex;
+    MemoryBudget m_metadata;
+    Index m_index;
+    std::vector<Region, BudgetAllocator<Region>> m_regions;
+    std::unique_ptr<BlockDevice> m_device;
+    std::vector<std::byte> m_buffer;
+    uint32_t m_current{UINT32_MAX};
+    uint64_t m_incarnation{0};
+    size_t m_capacity{0};
+    size_t m_usage{0};
 };
 } // namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache

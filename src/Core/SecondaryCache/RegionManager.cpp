@@ -3,451 +3,298 @@
 
 #include "RegionManager.hpp"
 
-#include "RecordFormat.hpp"
-
 #include <algorithm>
-#include <array>
-#include <cstring>
-#include <thread>
+#include <cassert>
+#include <limits>
+#include <stdexcept>
 
 namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache {
 namespace {
-constexpr uint32_t kFooterMagic = 0x31544752u; // 'RGT1'
-constexpr uint32_t kFooterVersion = 1;
-
-#pragma pack(push, 1)
-struct FooterHeader {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t generation;
-    uint32_t entryCount;
-    uint64_t writeCursor;
-    uint32_t overflow;
-    uint32_t reserved;
-    uint32_t crc;
-};
-#pragma pack(pop)
-static_assert(sizeof(FooterHeader) == 36);
-constexpr size_t kFooterCrcPrefixBytes = offsetof(FooterHeader, crc);
+size_t MetadataLimit(const FileBasedSecondaryCacheOptions& options, const size_t capacity) {
+    return options.metadataBudget != 0 ? options.metadataBudget : std::max(size_t{1} << 20, capacity / 200);
+}
 } // namespace
 
-RegionManager::RegionManager(std::unique_ptr<BlockDevice> device, ShardedIndex& index, CacheStats& stats,
-                             RegionManagerOptions options)
-    : m_device(std::move(device)), m_index(index), m_stats(stats), m_options(options), m_footerSizeBytes(1ULL << 20),
-      m_usableRegionBytes(m_options.regionSizeBytes > m_footerSizeBytes ? m_options.regionSizeBytes - m_footerSizeBytes : 0),
-      m_regions(RegionCountFor(m_options.capacityBytes)) {
-    if (m_usableRegionBytes == 0 || m_regions.empty()) {
-        throw std::invalid_argument("RegionManager requires a region larger than the reserved footer");
+void RegionManager::Validate(const FileBasedSecondaryCacheOptions& options) {
+    if (options.engine != FileBasedSecondaryCacheEngine::kRegion ||
+        options.admissionPolicy != FileBasedSecondaryCacheAdmissionPolicy::kAdmitAll ||
+        options.regionSize < kRecordAlign || options.regionSize > UINT32_MAX ||
+        options.regionSize % kRecordAlign != 0 || options.flushBlockSize == 0 ||
+        options.flushBlockSize > options.regionSize || options.flushBlockSize % kRecordAlign != 0 ||
+        options.maxEntrySize < kRecordAlign || options.maxEntrySize > options.regionSize ||
+        options.maxEntrySize % kRecordAlign != 0 || options.transientBudget == 0 ||
+        options.capacity / options.regionSize + (options.capacity % options.regionSize != 0 ? 1 : 0) > UINT32_MAX) {
+        throw std::invalid_argument("invalid region cache geometry, capacity, memory budget or admission policy");
     }
-
-    for (auto& region : m_regions) {
-        region.writeBuffer.reserve(std::max(m_options.flushBlockSizeBytes, m_options.maxEntrySizeBytes));
-    }
-    m_regions[0].state = Region::State::kOpen;
 }
 
-bool RegionManager::Reserve(const uint64_t keyHash, const uint32_t recordSize, const bool forceInsert,
-                            Reservation& out) noexcept {
-    std::lock_guard managerLock(m_managerMutex);
-    if (recordSize > m_options.maxEntrySizeBytes) {
-        return false;
-    }
-    if (!EnsureWritableRegion(recordSize, forceInsert)) {
-        return false;
-    }
+RegionManager::RegionManager(DeviceFactory factory, FileBasedSecondaryCacheOptions options, CacheStats& stats)
+    : m_options(options), m_stats(stats), m_metadata{MetadataLimit(options, options.capacity)}, m_index(m_metadata),
+      m_regions(BudgetAllocator<Region>(m_metadata)) {
+    Validate(options);
+    // Allocate the layout before the factory can touch the filesystem.
+    ConfigureLocked(options.capacity);
+    m_device = factory(m_metadata);
+    m_device->Configure(options.capacity, options.regionSize);
+}
 
-    auto& region = m_regions[m_currentOpenRegion];
-    std::lock_guard regionLock(region.mu);
-    out.regionId = m_currentOpenRegion;
-    out.generation = region.generation;
-    out.offset = region.writeCursor;
-    out.length = recordSize;
-    out.keyHash = keyHash;
-    region.writeCursor += recordSize;
+void RegionManager::ConfigureLocked(const size_t capacity) {
+    const size_t count = capacity / m_options.regionSize + (capacity % m_options.regionSize != 0 ? 1 : 0);
+    m_regions.reserve(count);
+    for (size_t region = 0; region < count; ++region) {
+        m_regions.emplace_back(m_metadata);
+    }
+    if (capacity != 0) {
+        m_buffer.reserve(m_options.flushBlockSize);
+    }
+    m_capacity = capacity;
+}
+
+size_t RegionManager::RegionBudget(const uint32_t region) const noexcept {
+    return std::min(m_options.regionSize, m_capacity - size_t{region} * m_options.regionSize);
+}
+
+void RegionManager::RemoveLocationLocked(const uint64_t hash) {
+    if (const auto removed = m_index.Remove(hash)) {
+        assert(m_usage >= LocationLengthBytes(*removed));
+        m_usage -= LocationLengthBytes(*removed);
+    }
+}
+
+void RegionManager::ReclaimLocked(const uint32_t regionId) {
+    auto& region = m_regions[regionId];
+    if (region.generation == UINT32_MAX) {
+        throw std::overflow_error("secondary cache generation exhausted; recreate cache");
+    }
+    for (const auto hash : region.hashes) {
+        const auto location = m_index.Find(hash);
+        if (location && location->regionId == regionId && location->generation == region.generation) {
+            RemoveLocationLocked(hash);
+        }
+    }
+    if (region.cursor != 0) {
+        ++m_stats.reclaims;
+    }
+    region.hashes.clear();
+    region.cursor = 0;
+    ++region.generation;
+}
+
+bool RegionManager::FlushLocked() {
+    if (m_buffer.empty()) {
+        return true;
+    }
+    const size_t offset = m_regions[m_current].cursor - m_buffer.size();
+    if (!m_device->Write(m_current, offset, m_buffer)) {
+        ++m_stats.ioErrors;
+        InvalidateLocked();
+        return false;
+    }
+    m_buffer.clear();
     return true;
 }
 
-rocksdb::Status RegionManager::Publish(const Reservation& reservation, const std::span<const std::byte> record,
-                                       const std::optional<Location> replaced) noexcept {
-    if (record.size() != reservation.length || reservation.regionId >= m_regions.size()) {
-        return rocksdb::Status::InvalidArgument("invalid reservation publish");
+bool RegionManager::SelectRegionLocked(const size_t length) {
+    if (m_current != UINT32_MAX && length <= RegionBudget(m_current) - m_regions[m_current].cursor) {
+        return true;
     }
-
-    auto& region = m_regions[reservation.regionId];
-    std::lock_guard lock(region.mu);
-    if (region.generation != reservation.generation || region.state != Region::State::kOpen) {
-        return rocksdb::Status::Busy("region recycled during publish");
+    if (!FlushLocked()) {
+        return false;
     }
-
-    if (region.writeBuffer.empty()) {
-        region.bufferedOffset = reservation.offset;
-    }
-    if (!region.writeBuffer.empty() &&
-        reservation.offset != region.bufferedOffset + static_cast<uint64_t>(region.writeBuffer.size())) {
-        FlushOpenRegionLocked(region, reservation.regionId);
-        region.bufferedOffset = reservation.offset;
-    }
-
-    if (!region.writeBuffer.empty() &&
-        region.writeBuffer.size() + record.size() > std::max(m_options.flushBlockSizeBytes, record.size())) {
-        FlushOpenRegionLocked(region, reservation.regionId);
-        region.bufferedOffset = reservation.offset;
-    }
-    if (region.writeBuffer.empty()) {
-        region.bufferedOffset = reservation.offset;
-    }
-
-    region.writeBuffer.insert(region.writeBuffer.end(), record.begin(), record.end());
-    region.footerEntries.push_back(FooterEntry{reservation.keyHash, static_cast<uint32_t>(reservation.offset),
-                                               reservation.length});
-    const size_t maxFooterEntries = (m_footerSizeBytes - sizeof(FooterHeader)) / sizeof(FooterEntry);
-    if (region.footerEntries.size() > maxFooterEntries) {
-        region.footerOverflow = true;
-        region.footerEntries.clear();
-    }
-
-    if (region.writeBuffer.size() >= m_options.flushBlockSizeBytes) {
-        FlushOpenRegionLocked(region, reservation.regionId);
-    }
-
-    AdjustLiveBytes(static_cast<int64_t>(record.size()));
-    if (replaced) {
-        AdjustLiveBytes(-static_cast<int64_t>(LocationLengthBytes(*replaced)));
-    }
-    m_stats.bytesInserted.value.fetch_add(record.size(), std::memory_order_relaxed);
-    return rocksdb::Status::OK();
-}
-
-RegionManager::ReadStatus RegionManager::Read(const Location& location, std::vector<std::byte>& recordOut) noexcept {
-    if (location.regionId >= m_regions.size()) {
-        return ReadStatus::kRegionReclaimed;
-    }
-
-    auto& region = m_regions[location.regionId];
-    region.activeReaders.fetch_add(1, std::memory_order_acq_rel);
-    auto activeReaderGuard = [&, this] { region.activeReaders.fetch_sub(1, std::memory_order_acq_rel); };
-
-    {
-        std::lock_guard lock(region.mu);
-        if (region.generation != location.generation || region.state == Region::State::kReclaiming) {
-            activeReaderGuard();
-            return ReadStatus::kRegionReclaimed;
-        }
-
-        const uint64_t offset = static_cast<uint64_t>(location.offsetInAlignUnits) * kRecordAlign;
-        const size_t length = LocationLengthBytes(location);
-        const uint64_t bufferEnd = region.bufferedOffset + region.writeBuffer.size();
-        if (!region.writeBuffer.empty() && offset >= region.bufferedOffset &&
-            offset + length <= bufferEnd) {
-            const auto beginIndex = static_cast<size_t>(offset - region.bufferedOffset);
-            recordOut.assign(region.writeBuffer.begin() + static_cast<std::ptrdiff_t>(beginIndex),
-                             region.writeBuffer.begin() + static_cast<std::ptrdiff_t>(beginIndex + length));
-            activeReaderGuard();
-            return ReadStatus::kOk;
-        }
-    }
-
-    const uint64_t offset = static_cast<uint64_t>(location.offsetInAlignUnits) * kRecordAlign;
-    const size_t length = LocationLengthBytes(location);
-    recordOut.resize(length);
-    const bool ok = m_device->Read(location.regionId, offset, std::span<std::byte>(recordOut.data(), recordOut.size()));
-    activeReaderGuard();
-    if (!ok) {
-        return ReadStatus::kIoError;
-    }
-
-    m_stats.bytesRead.value.fetch_add(recordOut.size(), std::memory_order_relaxed);
-    return ReadStatus::kOk;
-}
-
-rocksdb::Status RegionManager::SetCapacity(const size_t capacityBytes) noexcept {
-    std::lock_guard managerLock(m_managerMutex);
-    m_options.capacityBytes = capacityBytes;
-    if (capacityBytes == 0) {
-        ClearAll();
-        return rocksdb::Status::OK();
-    }
-
-    while (m_usageBytes.load(std::memory_order_relaxed) > capacityBytes && !m_sealedOrder.empty()) {
-        const auto victim = m_sealedOrder.front();
-        m_sealedOrder.pop_front();
-        if (!ReclaimRegion(victim)) {
-            return rocksdb::Status::IOError("failed to reclaim region during SetCapacity");
-        }
-    }
-    return rocksdb::Status::OK();
-}
-
-size_t RegionManager::CapacityBytes() const noexcept { return m_options.capacityBytes; }
-
-size_t RegionManager::UsageBytes() const noexcept { return m_usageBytes.load(std::memory_order_relaxed); }
-
-void RegionManager::AdjustLiveBytes(const int64_t delta) noexcept {
-    if (delta >= 0) {
-        m_usageBytes.fetch_add(static_cast<size_t>(delta), std::memory_order_relaxed);
-    } else {
-        const auto decrease = static_cast<size_t>(-delta);
-        size_t current = m_usageBytes.load(std::memory_order_relaxed);
-        while (!m_usageBytes.compare_exchange_weak(current, current > decrease ? current - decrease : 0,
-                                                   std::memory_order_relaxed)) {
-        }
-    }
-}
-
-void RegionManager::ClearAll() noexcept {
-    for (uint32_t regionId = 0; regionId < m_regions.size(); ++regionId) {
-        ReclaimRegion(regionId);
-    }
-    m_usageBytes.store(0, std::memory_order_relaxed);
-    m_sealedOrder.clear();
-    m_currentOpenRegion = 0;
-    m_nextUnusedRegion = 1;
-    for (uint32_t regionId = 0; regionId < m_regions.size(); ++regionId) {
-        auto& region = m_regions[regionId];
-        std::lock_guard lock(region.mu);
-        region.state = regionId == 0 ? Region::State::kOpen : Region::State::kSealed;
-        region.writeCursor = 0;
-        region.writeBuffer.clear();
-        region.footerEntries.clear();
-        region.footerOverflow = false;
-    }
-}
-
-uint32_t RegionManager::RegionCountFor(const size_t capacityBytes) const noexcept {
-    if (capacityBytes == 0 || m_usableRegionBytes == 0) {
-        return 1;
-    }
-    const auto count = static_cast<uint32_t>((capacityBytes + m_usableRegionBytes - 1) / m_usableRegionBytes);
-    return std::max<uint32_t>(1, count);
-}
-
-uint64_t RegionManager::RegionBudgetBytes(const uint32_t regionId) const noexcept {
-    const uint64_t regionStart = static_cast<uint64_t>(regionId) * m_usableRegionBytes;
-    if (regionStart >= m_options.capacityBytes) {
-        return 0;
-    }
-    return std::min<uint64_t>(m_usableRegionBytes, m_options.capacityBytes - regionStart);
-}
-
-bool RegionManager::EnsureWritableRegion(const uint32_t recordSize, const bool forceInsert) noexcept {
-    auto& current = m_regions[m_currentOpenRegion];
-    {
-        std::lock_guard currentLock(current.mu);
-        if (current.state == Region::State::kOpen && current.writeCursor + recordSize <= RegionBudgetBytes(m_currentOpenRegion)) {
+    const auto count = static_cast<uint32_t>(m_regions.size());
+    uint32_t next = m_current == UINT32_MAX ? 0 : (m_current + 1) % count;
+    for (uint32_t checked = 0; checked < count; ++checked, next = (next + 1) % count) {
+        if (length <= RegionBudget(next)) {
+            ReclaimLocked(next);
+            m_current = next;
             return true;
         }
     }
-
-    if (!forceInsert && m_nextUnusedRegion >= RegionCountFor(m_options.capacityBytes)) {
-        return false;
-    }
-
-    if (!SealRegion(m_currentOpenRegion)) {
-        return false;
-    }
-
-    const uint32_t activeRegionCount = RegionCountFor(m_options.capacityBytes);
-    if (m_nextUnusedRegion < activeRegionCount) {
-        m_currentOpenRegion = m_nextUnusedRegion++;
-        auto& next = m_regions[m_currentOpenRegion];
-        std::lock_guard nextLock(next.mu);
-        next.state = Region::State::kOpen;
-        next.writeCursor = 0;
-        next.writeBuffer.clear();
-        next.footerEntries.clear();
-        next.footerOverflow = false;
-        return recordSize <= RegionBudgetBytes(m_currentOpenRegion);
-    }
-
-    if (m_sealedOrder.empty()) {
-        return false;
-    }
-
-    const auto victim = m_sealedOrder.front();
-    m_sealedOrder.pop_front();
-    if (!ReclaimRegion(victim)) {
-        return false;
-    }
-    m_currentOpenRegion = victim;
-    auto& next = m_regions[m_currentOpenRegion];
-    std::lock_guard nextLock(next.mu);
-    next.state = Region::State::kOpen;
-    return recordSize <= RegionBudgetBytes(m_currentOpenRegion);
+    return false;
 }
 
-bool RegionManager::SealRegion(const uint32_t regionId) noexcept {
-    auto& region = m_regions[regionId];
-    std::lock_guard lock(region.mu);
-    if (region.state != Region::State::kOpen) {
-        return true;
+rocksdb::Status RegionManager::Append(const uint64_t hash, const std::span<const std::byte> record,
+                                      const size_t payloadSize) {
+    std::lock_guard lock(m_mutex);
+    if (m_capacity == 0) {
+        ++m_stats.droppedDisabled;
+        return rocksdb::Status::OK();
     }
-
-    FlushOpenRegionLocked(region, regionId);
-    if (region.writeCursor == 0) {
-        region.state = Region::State::kSealed;
-        m_sealedOrder.push_back(regionId);
-        return true;
+    if (record.size() % kRecordAlign != 0) {
+        return rocksdb::Status::InvalidArgument("secondary cache record alignment");
     }
-
-    std::vector<std::byte> footer(m_footerSizeBytes, std::byte{0});
-    FooterHeader header{};
-    header.magic = kFooterMagic;
-    header.version = kFooterVersion;
-    header.generation = region.generation;
-    header.entryCount = static_cast<uint32_t>(region.footerEntries.size());
-    header.writeCursor = region.writeCursor;
-    header.overflow = region.footerOverflow ? 1u : 0u;
-    std::memcpy(footer.data(), &header, sizeof(header));
-
-    const size_t maxEntries = (m_footerSizeBytes - sizeof(FooterHeader)) / sizeof(FooterEntry);
-    const size_t entryCount = std::min(region.footerEntries.size(), maxEntries);
-    if (entryCount != 0) {
-        std::memcpy(footer.data() + static_cast<std::ptrdiff_t>(sizeof(FooterHeader)), region.footerEntries.data(),
-                    entryCount * sizeof(FooterEntry));
+    if (record.empty() || record.size() > m_options.maxEntrySize ||
+        record.size() > std::min(m_capacity, m_options.regionSize)) {
+        ++m_stats.droppedTooLarge;
+        return rocksdb::Status::OK();
     }
+    if (!SelectRegionLocked(record.size())) {
+        return rocksdb::Status::IOError("secondary cache region flush failed");
+    }
+    if (!m_buffer.empty() && record.size() > m_options.flushBlockSize - m_buffer.size() && !FlushLocked()) {
+        return rocksdb::Status::IOError("secondary cache append flush failed");
+    }
+    auto& region = m_regions[m_current];
+    const Location location{m_current, static_cast<uint32_t>(region.cursor / kRecordAlign),
+                            static_cast<uint32_t>(record.size() / kRecordAlign), region.generation};
+    // Allocate both publication structures before performing I/O. Nothing can
+    // observe the tentative index mapping while this transaction owns the lock.
+    region.hashes.push_back(hash);
+    std::optional<Location> previous;
+    try {
+        previous = m_index.Upsert(hash, location);
+    } catch (...) {
+        region.hashes.pop_back();
+        throw;
+    }
+    try {
+        if (record.size() > m_options.flushBlockSize) {
+            if (!m_device->Write(m_current, region.cursor, record)) {
+                ++m_stats.ioErrors;
+                InvalidateLocked();
+                return rocksdb::Status::IOError("secondary cache direct write failed");
+            }
+        } else {
+            m_buffer.insert(m_buffer.end(), record.begin(), record.end());
+        }
+    } catch (...) {
+        InvalidateLocked();
+        throw;
+    }
+    region.cursor += record.size();
+    m_usage += record.size();
+    if (previous) {
+        assert(m_usage >= LocationLengthBytes(*previous));
+        m_usage -= LocationLengthBytes(*previous);
+    }
+    ++m_stats.admitted;
+    m_stats.payloadBytes += payloadSize;
+    m_stats.encodedBytes += record.size();
+    return rocksdb::Status::OK();
+}
 
-    header.crc = ComputeCrc32c(std::span<const std::byte>(footer.data(),
-                                                          footer.data() + static_cast<std::ptrdiff_t>(kFooterCrcPrefixBytes)));
-    header.crc = ComputeCrc32c(std::span<const std::byte>(footer.data() + static_cast<std::ptrdiff_t>(sizeof(FooterHeader)),
-                                                          footer.data() + static_cast<std::ptrdiff_t>(sizeof(FooterHeader) + entryCount * sizeof(FooterEntry))),
-                               header.crc);
-    std::memcpy(footer.data(), &header, sizeof(header));
+RegionManager::ReadStatus RegionManager::Read(const uint64_t hash, RecordBytes& record, Identity& identity) {
+    std::lock_guard lock(m_mutex);
+    const auto found = m_index.Find(hash);
+    if (!found) {
+        return ReadStatus::kMiss;
+    }
+    identity = {*found, m_incarnation};
+    const size_t offset = size_t{found->offsetInAlignUnits} * kRecordAlign;
+    record.resize(LocationLengthBytes(*found));
+    const size_t bufferOffset = m_current == UINT32_MAX ? 0 : m_regions[m_current].cursor - m_buffer.size();
+    if (found->regionId == m_current && offset >= bufferOffset) {
+        const size_t relative = offset - bufferOffset;
+        assert(relative <= m_buffer.size() && record.size() <= m_buffer.size() - relative);
+        std::copy_n(m_buffer.data() + relative, record.size(), record.data());
+    } else if (!m_device->Read(found->regionId, offset, record)) {
+        ++m_stats.ioErrors;
+        RemoveLocationLocked(hash);
+        return ReadStatus::kIoError;
+    }
+    return ReadStatus::kOk;
+}
 
-    const uint64_t footerOffset = m_options.regionSizeBytes - m_footerSizeBytes;
-    if (!m_device->Write(regionId, footerOffset, std::span<const std::byte>(footer.data(), footer.size()))) {
+bool RegionManager::Remove(const uint64_t hash, const Identity& identity) {
+    std::lock_guard lock(m_mutex);
+    const auto found = m_index.Find(hash);
+    if (identity.incarnation != m_incarnation || !found || *found != identity.location) {
         return false;
     }
-
-    region.state = Region::State::kSealed;
-    m_sealedOrder.push_back(regionId);
+    RemoveLocationLocked(hash);
     return true;
 }
 
-bool RegionManager::ReclaimRegion(const uint32_t regionId) noexcept {
-    auto& region = m_regions[regionId];
-    {
-        std::lock_guard lock(region.mu);
-        region.state = Region::State::kReclaiming;
-    }
-
-    std::vector<FooterEntry> entries;
-    bool overflow = false;
-    const uint16_t generation = region.generation;
-    const uint64_t budgetBytes = RegionBudgetBytes(regionId);
-    if (!TryLoadFooter(regionId, generation, budgetBytes, entries, overflow) || overflow) {
-        m_stats.footerOverflowScans.value.fetch_add(1, std::memory_order_relaxed);
-        entries = ScanRegionEntries(regionId, budgetBytes);
-    }
-
-    for (const auto& entry : entries) {
-        if (const auto removed = m_index.RemoveIfInRegion(entry.keyHash, regionId, generation)) {
-            AdjustLiveBytes(-static_cast<int64_t>(LocationLengthBytes(*removed)));
-            m_stats.entriesEvictedByReclaim.value.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
-
-    while (region.activeReaders.load(std::memory_order_acquire) != 0) {
-        std::this_thread::yield();
-    }
-
-    m_device->Reset(regionId);
-    std::lock_guard lock(region.mu);
-    region.writeCursor = 0;
-    region.bufferedOffset = 0;
-    region.writeBuffer.clear();
-    region.footerOverflow = false;
-    region.footerEntries.clear();
-    ++region.generation;
-    region.state = Region::State::kSealed;
-    m_stats.regionsReclaimed.value.fetch_add(1, std::memory_order_relaxed);
-    return true;
+bool RegionManager::Contains(const uint64_t hash, const Identity& identity) const {
+    std::lock_guard lock(m_mutex);
+    const auto found = m_index.Find(hash);
+    return identity.incarnation == m_incarnation && found && *found == identity.location;
 }
 
-void RegionManager::FlushOpenRegionLocked(Region& region, const uint32_t regionId) noexcept {
-    if (region.writeBuffer.empty()) {
-        return;
-    }
-
-    const bool ok =
-        m_device->Write(regionId, region.bufferedOffset, std::span<const std::byte>(region.writeBuffer.data(), region.writeBuffer.size()));
-    if (ok) {
-        m_stats.bytesWrittenToDevice.value.fetch_add(region.writeBuffer.size(), std::memory_order_relaxed);
-        region.writeBuffer.clear();
-        region.bufferedOffset = region.writeCursor;
-    }
+void RegionManager::Erase(const uint64_t hash) {
+    std::lock_guard lock(m_mutex);
+    RemoveLocationLocked(hash);
 }
 
-bool RegionManager::TryLoadFooter(const uint32_t regionId, const uint16_t generation, const uint64_t budgetBytes,
-                                  std::vector<FooterEntry>& entriesOut, bool& overflowOut) noexcept {
-    entriesOut.clear();
-    overflowOut = false;
-
-    std::vector<std::byte> footer(m_footerSizeBytes);
-    if (!m_device->Read(regionId, m_options.regionSizeBytes - m_footerSizeBytes,
-                        std::span<std::byte>(footer.data(), footer.size()))) {
-        return false;
+void RegionManager::InvalidateLocked() {
+    if (m_incarnation == UINT64_MAX) {
+        throw std::overflow_error("secondary cache incarnation exhausted; recreate cache");
     }
-
-    FooterHeader header{};
-    if (footer.size() < sizeof(FooterHeader)) {
-        return false;
+    ++m_incarnation;
+    m_index.Clear();
+    for (auto& region : m_regions) {
+        region.hashes.clear();
+        region.cursor = 0;
+        region.generation = 1;
     }
-    std::memcpy(&header, footer.data(), sizeof(header));
-    if (header.magic != kFooterMagic || header.version != kFooterVersion || header.generation != generation ||
-        header.writeCursor > budgetBytes) {
-        return false;
-    }
-
-    const size_t requiredBytes = sizeof(FooterHeader) + static_cast<size_t>(header.entryCount) * sizeof(FooterEntry);
-    if (requiredBytes > footer.size()) {
-        return false;
-    }
-
-    uint32_t crc = ComputeCrc32c(std::span<const std::byte>(footer.data(),
-                                                            footer.data() + static_cast<std::ptrdiff_t>(kFooterCrcPrefixBytes)));
-    crc = ComputeCrc32c(std::span<const std::byte>(footer.data() + static_cast<std::ptrdiff_t>(sizeof(FooterHeader)),
-                                                   footer.data() + static_cast<std::ptrdiff_t>(requiredBytes)),
-                        crc);
-    if (crc != header.crc) {
-        return false;
-    }
-
-    entriesOut.resize(header.entryCount);
-    if (header.entryCount != 0) {
-        std::memcpy(entriesOut.data(), footer.data() + static_cast<std::ptrdiff_t>(sizeof(FooterHeader)),
-                    entriesOut.size() * sizeof(FooterEntry));
-    }
-    overflowOut = header.overflow != 0;
-    return true;
+    m_buffer.clear();
+    m_current = UINT32_MAX;
+    m_usage = 0;
 }
 
-std::vector<RegionManager::FooterEntry> RegionManager::ScanRegionEntries(const uint32_t regionId,
-                                                                         const uint64_t budgetBytes) noexcept {
-    std::vector<std::byte> regionBytes(budgetBytes);
-    std::vector<FooterEntry> entries;
-    if (!m_device->Read(regionId, 0, std::span<std::byte>(regionBytes.data(), regionBytes.size()))) {
-        return entries;
+rocksdb::Status RegionManager::SetCapacity(const size_t capacity) {
+    auto options = m_options;
+    options.capacity = capacity;
+    Validate(options); // Invalid requests preserve the old state.
+    std::lock_guard lock(m_mutex);
+    InvalidateLocked();
+    m_capacity = 0;
+    decltype(m_regions)(m_regions.get_allocator()).swap(m_regions);
+    std::vector<std::byte>().swap(m_buffer);
+    // Device layout metadata is released before changing its allocator's limit.
+    m_device->Configure(0, m_options.regionSize);
+    m_metadata.limit = MetadataLimit(options, capacity);
+    try {
+        ConfigureLocked(capacity);
+        m_device->Configure(capacity, m_options.regionSize);
+    } catch (...) {
+        m_capacity = 0;
+        decltype(m_regions)(m_regions.get_allocator()).swap(m_regions);
+        std::vector<std::byte>().swap(m_buffer);
+        throw;
     }
+    return rocksdb::Status::OK();
+}
 
-    size_t offset = 0;
-    while (offset + sizeof(RecordHeader) <= regionBytes.size()) {
-        RecordHeader header{};
-        if (!TryReadHeader(std::span<const std::byte>(regionBytes.data() + static_cast<std::ptrdiff_t>(offset),
-                                                      regionBytes.size() - offset),
-                           header)) {
-            break;
-        }
-        if (header.magic != kRecordMagic || header.formatVersion != kFormatVersion) {
-            break;
-        }
-        const size_t recordSize = RecordSize(header);
-        if (recordSize == 0 || offset + recordSize > regionBytes.size()) {
-            break;
-        }
-        entries.push_back(FooterEntry{header.keyHash, static_cast<uint32_t>(offset), static_cast<uint32_t>(recordSize)});
-        offset += recordSize;
-    }
+FileBasedSecondaryCacheStats RegionManager::Snapshot() const {
+    std::lock_guard lock(m_mutex);
+    FileBasedSecondaryCacheStats snapshot;
+    snapshot.liveEntries = m_index.Size();
+    snapshot.liveBytes = m_usage;
+    snapshot.capacityBytes = m_capacity;
+    snapshot.fileBytes = m_device->FileBytes();
+    snapshot.metadataBytes = m_metadata.used.load(std::memory_order_relaxed);
+    snapshot.metadataLimit = m_metadata.limit;
+    snapshot.activeBufferBytes = m_buffer.capacity();
+    snapshot.openHandles = m_device->OpenHandles();
+    snapshot.deviceWriteBytes = m_device->bytesWritten;
+    snapshot.deviceReadBytes = m_device->bytesRead;
+#define COPY_COUNTER(name) snapshot.name = m_stats.name.load(std::memory_order_relaxed)
+    COPY_COUNTER(inserts);
+    COPY_COUNTER(admitted);
+    COPY_COUNTER(droppedTooLarge);
+    COPY_COUNTER(droppedPressure);
+    COPY_COUNTER(droppedDisabled);
+    COPY_COUNTER(lookups);
+    COPY_COUNTER(hits);
+    COPY_COUNTER(corruptions);
+    COPY_COUNTER(keyMismatches);
+    COPY_COUNTER(ioErrors);
+    COPY_COUNTER(errors);
+    COPY_COUNTER(reclaims);
+    COPY_COUNTER(payloadBytes);
+    COPY_COUNTER(encodedBytes);
+#undef COPY_COUNTER
+    return snapshot;
+}
 
-    return entries;
+size_t RegionManager::CapacityBytes() const {
+    std::lock_guard lock(m_mutex);
+    return m_capacity;
+}
+
+size_t RegionManager::UsageBytes() const {
+    std::lock_guard lock(m_mutex);
+    return m_usage;
 }
 } // namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache
