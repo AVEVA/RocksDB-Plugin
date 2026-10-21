@@ -156,7 +156,7 @@ closed; their text is in git history at `HEAD:tasks.md` (commit `34947f4`), summ
 - **Validation:** `IdleSweeperTests` and `ConnectionPoolTests`. Add a case with an injected scheduler failure on the
   first `Schedule`, and assert that a later release schedules a sweep and that the idle connection expires.
 
-### [ ] T84 – `LockFileImpl::Lock` reports success without a lease when the acquire timeout is not positive
+### [x] T84 – `LockFileImpl::Lock` reports success without a lease when the acquire timeout is not positive
 - **File:** `src\Azure\Impl\LockFileImpl.ipp:48-63` (constructor), `:94-145` (`Lock`).
 - **Problem:** With `acquireTimeout <= 0` (or `leaseLength <= 0` and no explicit timeout, since the timeout defaults
   to the lease length), `while ((end - start) < m_acquireTimeout)` never runs. `lastError` is empty, so `Lock()`

@@ -59,6 +59,19 @@ BasicLockFileImpl<TBlob>::BasicLockFileImpl(
     if (m_file == nullptr) {
         throw std::runtime_error("file cannot be null.");
     }
+
+    // Infinite leases (-1) are not supported: renewal and fencing rely on a finite lease deadline. Azure accepts
+    // 15-60s.
+    constexpr auto minLeaseLength = std::chrono::seconds(15);
+    constexpr auto maxLeaseLength = std::chrono::seconds(60);
+    if (m_leaseLength < minLeaseLength || m_leaseLength > maxLeaseLength) {
+        throw std::invalid_argument("leaseLength must be between 15 and 60 seconds.");
+    }
+
+    // A non-positive timeout would skip the acquire loop and report a lock that was never taken.
+    if (m_acquireTimeout <= std::chrono::milliseconds::zero()) {
+        throw std::invalid_argument("acquireTimeout must be positive.");
+    }
 }
 
 // Acquires the lease, retrying while another owner holds it, until the acquire timeout. Returns false only when the
@@ -135,6 +148,13 @@ template <typename TBlob> bool BasicLockFileImpl<TBlob>::Lock() {
             return false;
         }
         ThrowRequestFailed(*lastError);
+    }
+
+    {
+        const std::scoped_lock lock(m_stateMutex);
+        if (!m_leaseId.has_value()) {
+            throw std::runtime_error("Lock loop ended without acquiring a lease for '" + m_fileName + "'");
+        }
     }
 
     m_lastRenewalTime = attemptStart;

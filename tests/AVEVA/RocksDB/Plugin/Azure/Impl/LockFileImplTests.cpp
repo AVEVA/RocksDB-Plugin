@@ -101,6 +101,15 @@ TEST_F(LockFileImplTests, UnlockDuringInFlightRenewalMakesTheRejectedRenewalBeni
     EXPECT_FALSE(renewed);
 }
 
+TEST_F(LockFileImplTests, InvalidLeaseLengthOrAcquireTimeoutThrowsAtConstruction) {
+    EXPECT_THROW(CreateLock(std::chrono::seconds(0)), std::invalid_argument);
+    EXPECT_THROW(CreateLock(std::chrono::seconds(-1)), std::invalid_argument);
+    EXPECT_THROW(CreateLock(std::chrono::seconds(14)), std::invalid_argument);
+    EXPECT_THROW(CreateLock(std::chrono::seconds(61)), std::invalid_argument);
+    EXPECT_THROW(CreateLock(std::chrono::seconds(20), std::chrono::milliseconds(0)), std::invalid_argument);
+    EXPECT_THROW(CreateLock(std::chrono::seconds(20), std::chrono::milliseconds(-5)), std::invalid_argument);
+}
+
 TEST_F(LockFileImplTests, RetryReusesTheSameProposedLeaseId) {
     m_httpClient.EnqueueResponse(MakeAzureErrorResponse(503, "ServerBusy", "busy", "r1"));
     m_httpClient.EnqueueResponse(Acquired());
