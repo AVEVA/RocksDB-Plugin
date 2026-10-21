@@ -534,7 +534,8 @@ Result FakeBlobServer::GetPageRanges(const HttpRequest& request, const StoredBlo
                                 std::move(body)));
 }
 
-Result FakeBlobServer::PageCopyFromUrl(const HttpRequest& request, StoredBlob& blob) {
+Result FakeBlobServer::PageCopyFromUrl(const FakeHttpClient::RequestRecord& record, StoredBlob& blob) {
+    const HttpRequest& request = record.Request;
     const auto range = ParseRange(Header(request, "x-ms-range"));
     const auto sourceRange = ParseRange(Header(request, "x-ms-source-range"));
     if (!range || !sourceRange || range->second <= 0 || range->second != sourceRange->second) {
@@ -545,7 +546,8 @@ Result FakeBlobServer::PageCopyFromUrl(const HttpRequest& request, StoredBlob& b
                   Header(request, "x-ms-copy-source"),
                   sourceRange->first,
                   Header(request, "x-ms-source-if-match"),
-                  Header(request, "x-ms-copy-source-authorization")};
+                  Header(request, "x-ms-copy-source-authorization"),
+                  record.Options.GetTimeout()};
     PageCopies.push_back(copy);
 
     if (const auto fault = FaultFor(Operation::UploadPagesFromUrl)) {
@@ -586,7 +588,7 @@ Result FakeBlobServer::PageWrite(const FakeHttpClient::RequestRecord& record, co
                                  StoredBlob& blob) {
     const HttpRequest& request = record.Request;
     if (!Header(request, "x-ms-copy-source").empty()) {
-        return PageCopyFromUrl(request, blob);
+        return PageCopyFromUrl(record, blob);
     }
     const auto range = ParseRange(Header(request, "x-ms-range"));
     if (!range || range->second <= 0) {

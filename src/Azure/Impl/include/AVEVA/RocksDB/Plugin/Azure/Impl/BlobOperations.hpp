@@ -491,7 +491,7 @@ void CopyPages(const ClientRuntimeBase& runtime, TBlob& source, TBlob& destinati
 template <typename TBlob>
 [[nodiscard]] bool CopyPagesServerSide(const ClientRuntimeBase& runtime, TBlob& source, TBlob& destination,
                                        int64_t size, const std::string& etag) {
-    const auto writeBudget = runtime.ThrowIfWritesFenced();
+    runtime.ThrowIfWritesFenced();
     // A destination that cannot forward a bearer token cannot authorize a SAS-less source either; the service would
     // refuse the copy, so skip the doomed request and let the caller copy the bytes through the client.
     if (!destination.CanForwardCredential() && !source.HasSasToken()) {
@@ -506,6 +506,9 @@ template <typename TBlob>
     constexpr auto PageSize = static_cast<int64_t>(Configuration::PageBlob::PageSize);
     const auto sourceUrl = source.Url();
     const auto start = [&](const PageChunk& chunk, auto token) {
+        // Planning and earlier requests consume the lease budget, so it is taken afresh for every request; a relative
+        // duration captured earlier would let this one outlive the write deadline.
+        const auto writeBudget = runtime.ThrowIfWritesFenced();
         AzureClient::UploadPagesFromUrlOptions options;
         options.SourceIfMatch = etag;
         options.AuthorizeSourceWithClientCredential = true;
@@ -539,7 +542,6 @@ template <typename TBlob>
                 Unwrap(inFlight.front().get());
                 inFlight.pop_front();
             }
-            runtime.ThrowIfWritesFenced();
             inFlight.push_back(start(chunks[index], boost::asio::use_future));
         }
         while (!inFlight.empty()) {

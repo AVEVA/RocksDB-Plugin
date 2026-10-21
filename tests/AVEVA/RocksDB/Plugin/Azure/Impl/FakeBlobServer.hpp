@@ -129,6 +129,8 @@ class FakeBlobServer {
         int64_t SourceOffset = 0;
         std::string SourceIfMatch;
         std::string SourceAuthorization;
+        // The request's timeout, which the plugin bounds by the remaining write budget.
+        std::chrono::milliseconds Timeout{};
     };
     struct DownloadRequest {
         int64_t Offset = 0;
@@ -406,7 +408,7 @@ class FakeBlobServer {
     Result GetPageRanges(const HttpRequest& request, const StoredBlob& blob);
 
     // Put Page From URL: the service copies the range itself, so no body is expected and none is recorded as an upload.
-    Result PageCopyFromUrl(const HttpRequest& request, StoredBlob& blob);
+    Result PageCopyFromUrl(const FakeHttpClient::RequestRecord& record, StoredBlob& blob);
 
     Result PageWrite(const FakeHttpClient::RequestRecord& record, const std::string& path, StoredBlob& blob);
 

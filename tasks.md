@@ -104,7 +104,9 @@ run on the client context, and repeat with a blocked file writer.
 Verify one completion without `restart()`, for default callbacks, an explicitly
 different executor and `use_future`. Retain allocator/cancellation tests.
 
-### [ ] T108 - Recalculate the write budget immediately before every server-side copy
+### [x] T108 - Recalculate the write budget immediately before every server-side copy
+
+**Result:** Done. Regressions `ServerSideCopySendsNothingWhenPlanningExhaustsTheWriteBudget` (a copy was sent after planning exhausted the lease) and `ServerSideCopyBoundsLaterRequestsByTheRemainingWriteBudget` (later copies got a 30 s timeout instead of the ~2 s left) failed before the fix. `CopyPagesServerSide` now takes the fence decision and remaining budget inside the request-start lambda, so every copy, including the first after planning, is checked and bounded afresh; source ETag conditions and drain behavior are unchanged. The fake server now records each copy's timeout. Full WindowsDebug suite passes.
 
 **Status:** Source-traced; high confidence.
 

@@ -359,6 +359,49 @@ TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyIsSkippedWhenNeitherSideCanAut
     EXPECT_EQ(requestsBefore, m_env.Blob->PageCopies.size());
 }
 
+TEST_F(BlobOperationsFakeBlobTests, ServerSideCopySendsNothingWhenPlanningExhaustsTheWriteBudget) {
+    m_env.Fill(4096, 'q');
+    const auto destination = m_env.Blob->AddBlob("copy.sst", 4096);
+    m_env.Blob->Fault =
+        [this](const FakeBlobServer::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::GetPageRanges) {
+            m_env.Runtime->SetLeaseDeadline(this, std::chrono::steady_clock::now() - std::chrono::seconds(1));
+        }
+        return std::nullopt;
+    };
+    m_env.Runtime->SetLeaseDeadline(this, std::chrono::steady_clock::now() + std::chrono::minutes(5));
+
+    EXPECT_THROW(
+        (void)BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 4096, m_env.Blob->ETag),
+        AVEVA::RocksDB::Plugin::Azure::WritesFencedException);
+
+    EXPECT_TRUE(m_env.Blob->PageCopies.empty());
+}
+
+TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyBoundsLaterRequestsByTheRemainingWriteBudget) {
+    const auto chunk = AVEVA::RocksDB::Plugin::Azure::Impl::Configuration::Transfer::MaxCopyChunkSize;
+    m_env.Fill(chunk * 3, 'q');
+    const auto destination = m_env.Blob->AddBlob("copy.sst", chunk * 3);
+    m_env.Runtime->SetLeaseDeadline(this, std::chrono::steady_clock::now() + std::chrono::minutes(5));
+    // The first copy shrinks the lease budget, as a slow earlier request would.
+    int copies = 0;
+    m_env.Blob->Fault =
+        [&](const FakeBlobServer::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::UploadPagesFromUrl && ++copies == 1) {
+            m_env.Runtime->SetLeaseDeadline(this, std::chrono::steady_clock::now() + std::chrono::seconds(2));
+        }
+        return std::nullopt;
+    };
+
+    EXPECT_TRUE(
+        BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, chunk * 3, m_env.Blob->ETag));
+
+    ASSERT_EQ(3U, m_env.Blob->PageCopies.size());
+    EXPECT_GT(m_env.Blob->PageCopies[0].Timeout, std::chrono::seconds(2));
+    EXPECT_LE(m_env.Blob->PageCopies[1].Timeout, std::chrono::seconds(2));
+    EXPECT_LE(m_env.Blob->PageCopies[2].Timeout, std::chrono::seconds(2));
+}
+
 TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyFailsWhenTheSourceChangedSincePlanning) {
     m_env.Fill(1024, 'q');
     const auto destination = m_env.Blob->AddBlob("copy.sst", 1024);
