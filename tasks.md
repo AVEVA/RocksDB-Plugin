@@ -240,7 +240,7 @@ closed; their text is in git history at `HEAD:tasks.md` (commit `34947f4`), summ
 - **Validation:** `HttpClientConstructionTests`, `DownloadToFileTests`, the `PublicHeaderSelfContainedTests`, and
   the T72 install-consume job.
 
-### [ ] T89 – Lighter `AsyncInitiation.hpp`: do not pull `<future>`/`<thread>` into every client header (**Verify first**)
+### [-] T89 – Lighter `AsyncInitiation.hpp`: do not pull `<future>`/`<thread>` into every client header (**Verify first**)
 - **Files:** `libs\AzureClient\include\AVEVA\AzureClient\Detail\AsyncInitiation.hpp:8`;
   `libs\AzureClient\include\AVEVA\AzureClient\BlockOn.hpp`.
 - **Problem:** `AsyncInitiation.hpp` only needs `BlockOnToken`, `IsBlockOnToken` and `ThrowIfRunningOn`, but it
@@ -260,6 +260,14 @@ closed; their text is in git history at `HEAD:tasks.md` (commit `34947f4`), summ
   benefits, mark the task `[-]` with the numbers.
 - **Validation:** Preprocessed line count and compile time of `src\Azure\Impl\ReadableFileImpl.cpp` and
   `libs\AzureClient\src\BlobBatch.cpp` before and after; `PublicHeaderSelfContainedTests`.
+- **Dropped:** Measured with `cl /P` (MSVC 14.51, C++latest, Debug flags). `ReadableFileImpl.cpp` includes the client
+  headers anyway, so it gains nothing. Only `BlobBatch.cpp` includes `Detail` headers without a client header; it
+  preprocesses to 208607 lines. Only `<future>` is exclusive to `BlockOn.hpp`: `<thread>` and `<atomic>` come in
+  through asio, and `ThrowIfRunningOn` itself needs `io_context.hpp`, `<thread>` and `<atomic>`, so they would stay in
+  the light header. A probe TU showed `<future>` adds about 17.7k lines (162586 -> 180286, roughly 8% of that one TU).
+  That is one internal TU, and the split adds a header and a second place to keep the `async_result` specialization
+  reachable, for no gain to any client or plugin TU, so it is not worth the complexity. No code changed, so no build
+  or tests were run.
 
 ### [ ] T90 – Diagnose filesystem teardown on the client executor instead of waiting out the timeout
 - **File:** `src\Azure\Impl\BlobFilesystemImpl.ipp:343-366` (`~BasicBlobFilesystemImpl`); precondition documented in
