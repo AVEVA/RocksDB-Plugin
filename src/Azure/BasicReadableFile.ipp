@@ -17,6 +17,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -65,9 +66,6 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::ReadAsync(rocksdb::FSReadRequest& re
                                                       rocksdb::IODebugContext* dbg) {
     if (io_handle == nullptr || del_fn == nullptr) {
         return FSRandomAccessFile::ReadAsync(req, opts, std::move(cb), cb_arg, io_handle, del_fn, dbg);
-    }
-    if (!Impl::RangeCheck::IsValid(req.offset, req.len)) {
-        return rocksdb::IOStatus::InvalidArgument("ReadAsync offset or size is out of range");
     }
     if (!cb) {
         return rocksdb::IOStatus::InvalidArgument("ReadAsync requires a callback");
@@ -318,10 +316,8 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::Prefetch(const uint64_t offset, cons
     }
 
     try {
-        if (!TImpl::Prefetch(m_file, static_cast<int64_t>(offset), static_cast<int64_t>(n))) {
-            // NotSupported would make RocksDB stop prefetching this file for good; a declined hint is not an error.
-            return rocksdb::IOStatus::OK();
-        }
+        // NotSupported would make RocksDB stop prefetching this file for good; a declined hint is not an error.
+        std::ignore = TImpl::Prefetch(m_file, static_cast<int64_t>(offset), static_cast<int64_t>(n));
         return rocksdb::IOStatus::OK();
     } catch (...) {
         return AzureErrorTranslator::FromCurrentException(*m_logger, "Prefetch");

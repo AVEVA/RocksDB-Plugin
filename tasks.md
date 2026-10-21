@@ -222,7 +222,7 @@ code. Findings marked **Verify first** are medium confidence: confirm or measure
   `BOOST_LOG_SEV` lambda from `FromCurrentException`. A lambda template parameter is not erasure.
 - **Validation:** `AzureErrorTranslatorTests` unchanged and passing.
 
-### [ ] T74 – Read-path small items
+### [x] T74 – Read-path small items
 - `src\Azure\BasicReadableFile.ipp:69-70` and `:82-83`: `ReadAsync` runs `RangeCheck::IsValid` and then
   `StartRead` runs it again. `MultiRead` already filters invalid ranges before calling `StartRead`. Keep the check
   in `StartRead` only, and keep `ReadAsync`'s `cb` null-check.
