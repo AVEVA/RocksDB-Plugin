@@ -133,3 +133,30 @@ TEST(AsyncBehaviorTests, DownloadToAsyncAllowsDestroyingTheTargetStreamInTheComp
 TEST(AsyncBehaviorTests, DestroyingTheIoContextWithPendingWorkReleasesTheHandlerWithoutInvokingIt) {
     VerifyPendingWorkHandlersAreReleased();
 }
+
+// The client's context must stay alive while the handler completes on a distinct executor, otherwise its single
+// run() can return before a foreign-thread credential or writer posts the continuation back.
+TEST(AsyncBehaviorTests, DistinctHandlerExecutorKeepsTheClientContextAliveUntilCompletion) {
+    boost::asio::io_context clientContext;
+    boost::asio::io_context handlerContext;
+    int completions = 0;
+    AVEVA::AzureClient::AzureRequestOptions options;
+    {
+        auto handler = boost::asio::bind_executor(handlerContext.get_executor(), [&](int) { ++completions; });
+        auto bound = AVEVA::AzureClient::Private::BindAssociationsAndAdoptCancellationOn<int>(
+            handler, clientContext.get_executor(), options);
+
+        clientContext.poll();
+        EXPECT_FALSE(clientContext.stopped());
+
+        std::thread foreign{[&] { bound(7); }};
+        foreign.join();
+    }
+    EXPECT_EQ(completions, 0);
+    EXPECT_FALSE(clientContext.stopped());
+
+    handlerContext.run();
+    EXPECT_EQ(completions, 1);
+    clientContext.poll();
+    EXPECT_TRUE(clientContext.stopped());
+}

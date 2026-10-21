@@ -77,7 +77,9 @@ cap, expire/sweep them, then separately churn origins through a small global
 idle cap. Check exact stream destruction, idle accounting and continued reuse.
 Run these cases under ASan and preserve warmed pool allocation behavior.
 
-### [ ] T107 - Keep both I/O and handler executors alive during composed operations
+### [x] T107 - Keep both I/O and handler executors alive during composed operations
+
+**Result:** Done. Regression `DistinctHandlerExecutorKeepsTheClientContextAliveUntilCompletion` failed before the fix (client context stopped while the distinct handler context held the bound handler); `BoundHandler` now also holds a work guard on the client executor when the handler executor differs (none when they are equal; direct fast path preserved). All 1182 tests pass on WindowsDebug. The full credential/writer `run()`-once matrix and `use_future` (its associated executor is the default one, so it takes the single-guard path) were not added as separate end-to-end tests.
 
 **Status:** Reproduced at the actual binding-helper level; follow-up to T91.
 

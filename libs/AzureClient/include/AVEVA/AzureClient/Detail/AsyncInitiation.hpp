@@ -53,7 +53,8 @@ struct ClientSnapshotAccess {
 // Concrete (non-erased) wrapper produced by BindAssociationsAndAdoptCancellation. `Direct` is the fast path
 // where the handler already runs on the default executor and no slot was adopted: it is invoked in place.
 // Work always holds the executor busy until the completion has been delivered.
-template <class TArg, class THandler, class TExecutor, class TAllocator, class TSlot> struct BoundHandler {
+template <class TArg, class THandler, class TExecutor, class TIoExecutor, class TAllocator, class TSlot>
+struct BoundHandler {
     THandler Handler;
     TExecutor Executor;
     TAllocator Allocator;
@@ -61,6 +62,8 @@ template <class TArg, class THandler, class TExecutor, class TAllocator, class T
     bool AdoptedSlot;
     bool Direct;
     std::optional<boost::asio::executor_work_guard<TExecutor>> Work;
+    // Keeps the client's own context running when the handler completes on a distinct executor; empty otherwise.
+    std::optional<boost::asio::executor_work_guard<TIoExecutor>> IoWork;
 
     // Executors without running_in_this_thread() (e.g. use_future's) are thread-agnostic sinks, so inline is safe.
     [[nodiscard]] bool OnExecutorThread() const noexcept {
@@ -78,17 +81,18 @@ template <class TArg, class THandler, class TExecutor, class TAllocator, class T
         if (Direct && OnExecutorThread()) {
             std::move(Handler)(std::move(result));
             Work.reset();
+            IoWork.reset();
             return;
         }
-        boost::asio::dispatch(Executor,
-                              boost::asio::bind_allocator(
-                                  Allocator, [handler = std::move(Handler), result = std::move(result),
-                                              work = std::move(Work), slot = Slot, adopted = AdoptedSlot]() mutable {
-                                      if (adopted) {
-                                          slot.clear();
-                                      }
-                                      std::move(handler)(std::move(result));
-                                  }));
+        boost::asio::dispatch(
+            Executor, boost::asio::bind_allocator(Allocator, [handler = std::move(Handler), result = std::move(result),
+                                                              work = std::move(Work), ioWork = std::move(IoWork),
+                                                              slot = Slot, adopted = AdoptedSlot]() mutable {
+                if (adopted) {
+                    slot.clear();
+                }
+                std::move(handler)(std::move(result));
+            }));
     }
 };
 
@@ -114,8 +118,14 @@ template <class TArg, class RawHandler, class TExecutor>
     // Held even on the direct path: credential or file work off the executor would otherwise let run() return
     // before the completion is delivered. The direct path releases it right after the inline invocation.
     std::optional<boost::asio::executor_work_guard<Executor>> work{boost::asio::make_work_guard(executor)};
-    return BoundHandler<TArg, RawHandler, Executor, decltype(allocator), decltype(slot)>{
-        std::move(handler), executor, allocator, slot, adoptedSlot, direct, std::move(work)};
+    // A distinct completion executor does not keep the client's context alive while foreign-thread credential or
+    // file work finishes and the continuation must post back to it.
+    std::optional<boost::asio::executor_work_guard<TExecutor>> ioWork;
+    if (!usesDefaultExecutor) {
+        ioWork.emplace(boost::asio::make_work_guard(defaultExecutor));
+    }
+    return BoundHandler<TArg, RawHandler, Executor, TExecutor, decltype(allocator), decltype(slot)>{
+        std::move(handler), executor, allocator, slot, adoptedSlot, direct, std::move(work), std::move(ioWork)};
 }
 // Initiates a client operation completing with std::expected<Response<Result>, BlobStorageError>:
 // at initiation, binds the handler, then calls (client->*impl)(args..., handler, requestOptions).
