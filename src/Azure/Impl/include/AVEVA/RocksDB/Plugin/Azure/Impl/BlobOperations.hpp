@@ -25,6 +25,7 @@
 #include <fstream>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -46,6 +47,74 @@ struct BlobMetadata {
 };
 
 namespace Detail {
+// Owns the cancellation signal handed to a client request. The client installs its handler into the signal's slot
+// while initiating, and boost::asio signals are not thread-safe, so installation and emission share one mutex.
+// Posting the emission to the client's executor does not achieve that: another thread running the same io_context
+// can emit while the handler is being installed. A stop that arrives before installation is remembered and emitted as
+// soon as the handler is in place, so it is not lost.
+class StopBridge {
+    std::mutex m_mutex;
+    boost::asio::cancellation_signal m_signal;
+    bool m_installed = false;
+    bool m_emitted = false;
+    bool m_requested = false;
+
+    void EmitLocked() {
+        m_emitted = true;
+        m_signal.emit(boost::asio::cancellation_type::terminal);
+    }
+
+  public:
+    [[nodiscard]] boost::asio::cancellation_slot Slot() noexcept { return m_signal.slot(); }
+
+    // Runs `initiate`, which must install the handler synchronously, and returns its result. Emission is excluded
+    // for the duration, so it cannot observe a half-installed handler.
+    template <class Initiate> auto Install(Initiate&& initiate) {
+        const std::lock_guard lock(m_mutex);
+        auto result = std::forward<Initiate>(initiate)();
+        m_installed = true;
+        if (m_requested && !m_emitted) {
+            EmitLocked();
+        }
+        return result;
+    }
+
+    // Called from the stopping thread. The emission itself runs on the client's executor so the handler never runs on
+    // the stopping thread.
+    template <class Executor> static void Request(const std::shared_ptr<StopBridge>& self, const Executor& executor) {
+        {
+            const std::lock_guard lock(self->m_mutex);
+            self->m_requested = true;
+            if (!self->m_installed || self->m_emitted) {
+                return;
+            }
+            self->m_emitted = true;
+        }
+        boost::asio::post(executor, [self] {
+            const std::lock_guard lock(self->m_mutex);
+            self->m_signal.emit(boost::asio::cancellation_type::terminal);
+        });
+    }
+};
+
+// Starts `start(token, requestOptions)` with a cancellation slot that `stopToken` can fire, waits for the result and
+// returns its value; failures throw. Never call on a thread running the client's executor.
+template <class TBlob, class Start>
+auto CallStoppable(TBlob& client, std::stop_token stopToken, const char* stoppedMessage, Start&& start) {
+    AzureClient::ThrowIfRunningOn(client.get_executor());
+    auto bridge = std::make_shared<StopBridge>();
+    auto requestOptions = client.GetDefaultRequestOptions();
+    requestOptions.SetCancellationSlot(bridge->Slot());
+    const std::stop_callback onStop(stopToken,
+                                    [&client, bridge] { StopBridge::Request(bridge, client.get_executor()); });
+    if (stopToken.stop_requested()) {
+        throw std::system_error(std::make_error_code(std::errc::operation_canceled), stoppedMessage);
+    }
+    auto pending =
+        bridge->Install([&] { return std::forward<Start>(start)(boost::asio::use_future, std::move(requestOptions)); });
+    return Unwrap(pending.get());
+}
+
 inline AzureClient::Models::BlobByteRange ToRange(int64_t offset, int64_t length) {
     return AzureClient::Models::BlobByteRange{static_cast<uint64_t>(offset), static_cast<uint64_t>(length)};
 }
@@ -86,18 +155,10 @@ template <typename TBlob> [[nodiscard]] BlobInfo GetInfo(TBlob& client) {
 // As GetInfo, but a stop request cancels the call, which then throws. Lets a shutdown that is waiting for the caller's
 // thread return promptly instead of waiting out a slow or hung request.
 template <typename TBlob> [[nodiscard]] BlobInfo GetInfo(TBlob& client, std::stop_token stopToken) {
-    // The signal is emitted from the client's executor: the pipeline connects its slot there, and emitting from the
-    // stopping thread could race with that.
-    auto signal = std::make_shared<boost::asio::cancellation_signal>();
-    auto requestOptions = client.GetDefaultRequestOptions();
-    requestOptions.SetCancellationSlot(signal->slot());
-    const std::stop_callback onStop(stopToken, [&client, signal] {
-        boost::asio::post(client.get_executor(), [signal] { signal->emit(boost::asio::cancellation_type::terminal); });
-    });
-    if (stopToken.stop_requested()) {
-        throw std::system_error(std::make_error_code(std::errc::operation_canceled), "Request stopped");
-    }
-    auto properties = Call([&](auto token) { return client.GetPropertiesAsync(token, std::move(requestOptions)); });
+    auto properties =
+        Detail::CallStoppable(client, std::move(stopToken), "Request stopped", [&](auto token, auto options) {
+            return client.GetPropertiesAsync(token, std::move(options));
+        });
     return {BlobHelpers::FileSizeFromProperties(properties), static_cast<int64_t>(properties.ContentLength),
             std::move(properties.ETag), std::chrono::time_point_cast<std::chrono::seconds>(properties.LastModified)};
 }
@@ -238,19 +299,11 @@ void DownloadToFile(TBlob& client, const std::filesystem::path& path, int64_t of
     options.Concurrency = Configuration::Transfer::DownloadConcurrency;
     options.WriteScheduler = std::move(writeScheduler);
 
-    // The signal is emitted from the client's executor: the pipeline connects its slot there, and emitting from the
-    // stopping thread could race with that.
-    auto signal = std::make_shared<boost::asio::cancellation_signal>();
-    auto requestOptions = client.GetDefaultRequestOptions();
-    requestOptions.SetCancellationSlot(signal->slot());
-    const std::stop_callback onStop(stopToken, [&client, signal] {
-        boost::asio::post(client.get_executor(), [signal] { signal->emit(boost::asio::cancellation_type::terminal); });
+    // The client may install its cancellation handler after this call has returned the future (file preparation is
+    // queued), which the bridge cannot serialize; see tasks A05.
+    Detail::CallStoppable(client, std::move(stopToken), "Download stopped", [&](auto token, auto requestOptions) {
+        return client.DownloadToAsync(path, std::move(options), token, std::move(requestOptions));
     });
-    if (stopToken.stop_requested()) {
-        throw std::system_error(std::make_error_code(std::errc::operation_canceled), "Download stopped");
-    }
-    Call(
-        [&](auto token) { return client.DownloadToAsync(path, std::move(options), token, std::move(requestOptions)); });
 }
 
 // A download into a caller-owned buffer that has been started but not finished; see StartDownload.

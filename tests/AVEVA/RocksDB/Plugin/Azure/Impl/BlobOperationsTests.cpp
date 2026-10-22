@@ -125,6 +125,48 @@ TEST_F(BlobOperationsTests, BlockingFromTheIoContextThreadThrowsInsteadOfDeadloc
     EXPECT_TRUE(result.get());
 }
 
+TEST_F(BlobOperationsTests, StopBridgeEmitsAStopRequestedWhileTheHandlerIsBeingInstalled) {
+    using AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations::Detail::StopBridge;
+    auto bridge = std::make_shared<StopBridge>();
+    std::atomic<int> emitted{0};
+    std::thread requester;
+
+    bridge->Install([&] {
+        requester = std::thread([&] { StopBridge::Request(bridge, m_httpClient.get_executor()); });
+        // The request is made while the handler is not installed yet; it must not be lost or race the install.
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        bridge->Slot().assign([&](boost::asio::cancellation_type_t) { ++emitted; });
+        return 0;
+    });
+    requester.join();
+
+    EXPECT_EQ(1, emitted.load());
+}
+
+TEST_F(BlobOperationsTests, StopBridgeEmitsAfterInstallationExactlyOnce) {
+    using AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations::Detail::StopBridge;
+    auto bridge = std::make_shared<StopBridge>();
+    std::promise<void> fired;
+    std::atomic<int> emitted{0};
+    bridge->Install([&] {
+        bridge->Slot().assign([&](boost::asio::cancellation_type_t) {
+            if (emitted.fetch_add(1) == 0) {
+                fired.set_value();
+            }
+        });
+        return 0;
+    });
+
+    std::thread first([&] { StopBridge::Request(bridge, m_httpClient.get_executor()); });
+    std::thread second([&] { StopBridge::Request(bridge, m_httpClient.get_executor()); });
+    first.join();
+    second.join();
+
+    ASSERT_EQ(std::future_status::ready, fired.get_future().wait_for(std::chrono::seconds(10)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_EQ(1, emitted.load());
+}
+
 TEST_F(BlobOperationsTests, DownloadToBufferWithZeroLengthReturnsZeroWithoutRequest) {
     std::vector<char> buffer(8);
     EXPECT_EQ(0, BlobOperations::DownloadToBuffer(*m_blob, std::span<char>(buffer), 0, 0));
