@@ -79,8 +79,9 @@ using DownloadWriteScheduler = boost::asio::thread_pool::executor_type;
 struct DownloadBlobOptions {
     std::optional<Models::BlobByteRange> Range;
     Models::BlobRequestConditions Conditions;
-    // Largest download accepted; a bigger blob (or range) fails with std::errc::file_too_large before any
-    // body is buffered. Unset applies no limit beyond available memory.
+    // Largest download accepted; a bigger blob (or range) fails with std::errc::file_too_large. The check runs
+    // once the first ranged response has arrived and revealed the size, so that response (at most one chunk)
+    // is already buffered by the transport; no later chunk is requested. Unset applies no limit.
     std::optional<std::uint64_t> MaxSize;
     // Where file downloads run their blocking filesystem calls. Unset uses the HTTP client's
     // `GetDownloadWriter()` when it has one (::AVEVA::HttpClient provides a bounded, client-owned pool), otherwise
@@ -104,8 +105,9 @@ struct DownloadToOptions {
     std::size_t ChunkSize = DefaultChunkSize; // bytes; 0 selects the default (4 MiB); no upper bound
     // Count of concurrent chunk requests; 0 is treated as 1; no upper bound.
     std::size_t Concurrency = 1;
-    // Largest download accepted; a bigger blob (or range) fails with std::errc::file_too_large before the
-    // destination is written. Unset applies no limit.
+    // Largest output accepted; a bigger blob (or range) fails with std::errc::file_too_large before the
+    // destination is written. The first ranged response (at most ChunkSize bytes) is buffered before the
+    // size is known, so this does not bound transport buffering. Unset applies no limit.
     std::optional<std::uint64_t> MaxSize;
     // Where file downloads run their blocking filesystem calls. Unset uses the HTTP client's
     // `GetDownloadWriter()` when it has one (::AVEVA::HttpClient provides a bounded, client-owned pool), otherwise

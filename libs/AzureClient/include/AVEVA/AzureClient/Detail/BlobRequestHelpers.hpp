@@ -43,7 +43,6 @@
 #include <initializer_list>
 #include <memory>
 #include <optional>
-#include <ostream>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -560,18 +559,18 @@ void SendAuthorizedRequestAsync(THttp& httpClient, const BasicBlobTarget<TCred>&
 [[nodiscard]] DownloadToOptions ToDownloadToOptions(DownloadBlobOptions options);
 
 // Download engine (defined in BlobDownload.hpp). Each call owns all of its state; only `httpClient`
-// (and, for DownloadBlobToAsync, `stream`) must outlive the operation. The first request is a
+// and the span/path destination (see below) must outlive the operation. The first request is a
 // ranged GET of ChunkSize bytes (a 0-byte blob's 416 falls back to one un-ranged GET); the
 // remaining bytes are fetched in ChunkSize ranges, up to Concurrency at a time, with
 // If-Match: <first ETag> unless the caller supplied If-Match, and written in order. On failure or
 // cancellation the in-flight requests are cancelled and drained before the single completion.
+// MaxSize limits the output, not transport buffering: it is checked once the first response (at most
+// ChunkSize bytes, already buffered) has revealed the blob size. AzureRequestOptions::SetTotalDeadline is one
+// absolute budget for the whole download; each request receives only the time remaining.
 template <HttpClientLike THttp, class TCred, class TCompletion>
 void DownloadBlobAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
                        DownloadBlobOptions operationOptions, TCompletion completion,
                        AzureRequestOptions requestOptions);
-template <HttpClientLike THttp, class TCred, class TCompletion>
-void DownloadBlobToAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, DownloadToOptions operationOptions,
-                         std::ostream& stream, TCompletion completion, AzureRequestOptions requestOptions);
 // Writes straight into `destination`, which must stay valid until the completion runs. A range larger than
 // the buffer fails the download; a shorter blob leaves the tail untouched (see BytesWritten).
 template <HttpClientLike THttp, class TCred, class TCompletion>

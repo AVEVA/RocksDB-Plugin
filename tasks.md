@@ -570,7 +570,9 @@ missing coverage needed for any copy/rename sites migrated. Short mandatory
 reads must remain corruption/invalid-response failures, and legitimate EOF
 reads must still succeed with fewer bytes.
 
-### [ ] T126 - Remove the obsolete stream-download declaration and correct its contracts
+### [x] T126 - Remove the obsolete stream-download declaration and correct its contracts
+
+**Result:** Done. Removed the dead `DownloadBlobToAsync(..., std::ostream&, ...)` prototype, its `<ostream>` include and the stream wording from `BlobRequestHelpers.hpp`; no references remain. Documented that `MaxSize` limits output (checked after the first ranged response, which is already buffered) and that the total deadline is one absolute budget (T109). Documentation/declaration-only; no new test. WindowsDebug build succeeds; full ctest: 100% passed out of 1209 (integration tests skipped as before).
 
 **Status:** Source-verified dead declaration/documentation mismatch.
 
