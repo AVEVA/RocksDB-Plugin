@@ -371,7 +371,9 @@ files' contributions to the shared budget.
 Verify exact shared-budget restoration, absence of an orphaned pending slot,
 successful later prefetch, and no artificial wait on the rejected range.
 
-### [ ] T118 - Verify multi-chunk downloads reject an unusable version validator
+### [x] T118 - Verify multi-chunk downloads reject an unusable version validator
+
+**Result:** Done; reproduced. A first 206 with an empty ETag and no caller `IfMatch` let the download admit unconditional chunks (second request was sent; regression `FirstResponseWithoutETagRejectsFurtherChunks` failed before the fix). `OnProbe` now fails with `InvalidResponse` before admitting further chunks when more bytes remain and no exact validator exists. Caller-provided `IfMatch` and single-response transfers without an ETag still succeed (tests added); all WindowsDebug tests pass.
 
 **Status:** Verify first; malformed-response robustness, not a claim that Azure
 normally omits ETags.

@@ -452,6 +452,11 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
             Fail(MakeInvalidResponse("The download response range overflows."));
             return;
         }
+        // Without a validator the remaining chunks would be unconditional and could mix blob versions.
+        if (*next < *m_end && m_chunkConditions.IfMatch.empty()) {
+            Fail(MakeInvalidResponse("The download response has no ETag to keep later chunks on one blob version."));
+            return;
+        }
         m_next = *next;
         Deliver(m_begin, std::move(body));
     }
