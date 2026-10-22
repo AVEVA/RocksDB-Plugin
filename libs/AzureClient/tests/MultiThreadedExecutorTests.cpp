@@ -246,8 +246,8 @@ struct ConcurrentBlobData {
 
 void DownloadAndVerifyAllBlobs(std::vector<PoolPageBlobClient>& clients, const std::vector<std::string>& contents,
                                const DownloadToOptions& downloadOptions) {
-    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "mt-executor-downloads";
-    std::filesystem::create_directories(dir);
+    const AVEVA::AzureClient::Tests::ScopedTestDirectory scratch{"mt-executor-downloads"};
+    const std::filesystem::path& dir = scratch.Path();
     std::vector<std::future<std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>>> downloads;
     downloads.reserve(clients.size());
     for (std::size_t i = 0; i < clients.size(); ++i) {
@@ -261,8 +261,6 @@ void DownloadAndVerifyAllBlobs(std::vector<PoolPageBlobClient>& clients, const s
         const std::string actual{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
         EXPECT_EQ(actual, contents.at(i)) << "blob " << i;
     }
-    std::error_code ignored;
-    std::filesystem::remove_all(dir, ignored);
 }
 } // namespace
 

@@ -22,13 +22,16 @@
 
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <future>
 #include <initializer_list>
 #include <optional>
+#include <random>
 #include <regex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -249,4 +252,33 @@ inline void EnqueueChunks(FakeHttpClient& httpClient, const std::string& content
     }
     return httpClient.RequestCount();
 }
+
+// Uniquely named directory beneath the working directory, removed on destruction, so concurrent test processes
+// never share (or delete) each other's files. create_directory() only reports success for a directory this call
+// created, which makes the ownership claim race-free.
+class ScopedTestDirectory {
+  public:
+    explicit ScopedTestDirectory(std::string_view prefix) {
+        std::random_device entropy;
+        for (;;) {
+            const std::uint64_t suffix = (static_cast<std::uint64_t>(entropy()) << 32U) | entropy();
+            auto candidate = std::filesystem::current_path() / (std::string{prefix} + "-" + std::to_string(suffix));
+            if (std::filesystem::create_directory(candidate)) {
+                m_path = std::move(candidate);
+                return;
+            }
+        }
+    }
+    ScopedTestDirectory(const ScopedTestDirectory&) = delete;
+    ScopedTestDirectory& operator=(const ScopedTestDirectory&) = delete;
+    ~ScopedTestDirectory() {
+        std::error_code ignored;
+        std::filesystem::remove_all(m_path, ignored);
+    }
+
+    [[nodiscard]] const std::filesystem::path& Path() const noexcept { return m_path; }
+
+  private:
+    std::filesystem::path m_path;
+};
 } // namespace AVEVA::AzureClient::Tests

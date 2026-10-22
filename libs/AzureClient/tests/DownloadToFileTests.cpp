@@ -71,7 +71,8 @@ TEST(T06_DownloadToFileTests, SuccessRenamesAtomic) {
 
     PageBlobClient client{httpClient, BuildOptions()};
 
-    const std::filesystem::path path = std::filesystem::temp_directory_path() / "t06-download-output.txt";
+    const AVEVA::AzureClient::Tests::ScopedTestDirectory scratch{"t06-success"};
+    const std::filesystem::path path = scratch.Path() / "download-output.txt";
 
     // Create an existing target file to ensure rename overwrites atomically
     {
@@ -92,9 +93,6 @@ TEST(T06_DownloadToFileTests, SuccessRenamesAtomic) {
     std::ifstream ifs(path, std::ios::binary);
     std::string const contents((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
     EXPECT_EQ(contents, "downloaded");
-
-    std::error_code ignored;
-    std::filesystem::remove(path, ignored);
 }
 
 TEST(T06_DownloadToFileTests, DirectoryTargetReportsIsADirectory) {
@@ -103,7 +101,8 @@ TEST(T06_DownloadToFileTests, DirectoryTargetReportsIsADirectory) {
         HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "10"}}), "downloaded"};
     PageBlobClient client{httpClient, BuildOptions()};
 
-    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "t06-download-dir-target";
+    const AVEVA::AzureClient::Tests::ScopedTestDirectory scratch{"t06-dir-target"};
+    const std::filesystem::path dir = scratch.Path() / "target";
     std::filesystem::create_directories(dir);
 
     bool invoked = false;
@@ -115,9 +114,6 @@ TEST(T06_DownloadToFileTests, DirectoryTargetReportsIsADirectory) {
     httpClient.Poll();
     EXPECT_TRUE(invoked);
     EXPECT_TRUE(std::filesystem::is_directory(dir));
-
-    std::error_code ignored;
-    std::filesystem::remove_all(dir, ignored);
 }
 
 TEST(T06_DownloadToFileTests, HttpFailureRemovesPartialAndLeavesTargetUntouched) {
@@ -127,7 +123,8 @@ TEST(T06_DownloadToFileTests, HttpFailureRemovesPartialAndLeavesTargetUntouched)
 
     PageBlobClient client{httpClient, BuildOptions()};
 
-    const std::filesystem::path path = std::filesystem::temp_directory_path() / "t06-download-output-failure.txt";
+    const AVEVA::AzureClient::Tests::ScopedTestDirectory scratch{"t06-failure"};
+    const std::filesystem::path path = scratch.Path() / "download-output-failure.txt";
 
     // Create an existing target file to ensure it remains untouched on failure
     {
@@ -147,8 +144,8 @@ TEST(T06_DownloadToFileTests, HttpFailureRemovesPartialAndLeavesTargetUntouched)
 
     // Ensure no partial files remain (look for filename.partial-*)
     bool foundPartial = false;
-    for (const auto& p : std::filesystem::directory_iterator(std::filesystem::temp_directory_path())) {
-        if (p.path().filename().string().starts_with("t06-download-output-failure.txt.partial-")) {
+    for (const auto& p : std::filesystem::directory_iterator(scratch.Path())) {
+        if (p.path().filename().string().starts_with("download-output-failure.txt.partial-")) {
             foundPartial = true;
             break;
         }
@@ -159,7 +156,4 @@ TEST(T06_DownloadToFileTests, HttpFailureRemovesPartialAndLeavesTargetUntouched)
     std::ifstream ifs(path, std::ios::binary);
     std::string const contents((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
     EXPECT_EQ(contents, "preserved");
-
-    std::error_code ignored;
-    std::filesystem::remove(path, ignored);
 }
