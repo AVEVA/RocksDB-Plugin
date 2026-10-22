@@ -29,6 +29,7 @@ struct RecordingWaiter {
     int* delivered = nullptr;
     boost::system::error_code* seenError = nullptr;
     AVEVA::Private::ResolveResults* seenResults = nullptr;
+    bool throwsAfterRecording = false;
 
     void operator()(boost::system::error_code error, AVEVA::Private::ResolveResults results) const {
         if (delivered) {
@@ -39,6 +40,9 @@ struct RecordingWaiter {
         }
         if (seenResults) {
             *seenResults = std::move(results);
+        }
+        if (throwsAfterRecording) {
+            throw std::bad_alloc();
         }
     }
 };
@@ -162,6 +166,23 @@ TEST(DnsCacheTests, FinishPublishesAndReleasesTheLeaderEvenWhenCachingFails) {
     cache.Finish("host", "80", boost::asio::error::host_not_found, {});
 }
 
+TEST(DnsCacheTests, ThrowingWaiterDoesNotSkipLaterWaitersOrEscapeFinish) {
+    TestDnsCache cache;
+    RecordingWaiter leader;
+    ASSERT_TRUE(cache.JoinOrLead("host", "80", leader));
+    int delivered = 0;
+    for (int i = 0; i < 3; ++i) {
+        RecordingWaiter waiter{&delivered, nullptr, nullptr, i == 0};
+        EXPECT_FALSE(cache.JoinOrLead("host", "80", waiter));
+    }
+
+    EXPECT_NO_THROW(cache.Finish("host", "80", boost::asio::error::host_not_found, {}));
+
+    EXPECT_EQ(delivered, 3);
+    RecordingWaiter next;
+    EXPECT_TRUE(cache.JoinOrLead("host", "80", next));
+    cache.Finish("host", "80", boost::asio::error::host_not_found, {});
+}
 TEST(DnsCacheTests, WaiterFactoryRunsOnlyWhenJoining) {
     TestDnsCache cache;
     int built = 0;

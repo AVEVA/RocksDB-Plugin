@@ -191,8 +191,13 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
                 m_pending.erase(it);
             }
         }
+        // Delivery is isolated per waiter: one that throws must not skip the others or the leader that called this
+        // (which may be a destructor). A waiter is responsible for completing its own request.
         for (auto& waiter : waiters) {
-            waiter(error, results);
+            try {
+                waiter(error, results);
+            } catch (...) {
+            }
         }
     }
 

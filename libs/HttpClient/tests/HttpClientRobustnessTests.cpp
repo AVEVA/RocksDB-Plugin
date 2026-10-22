@@ -28,6 +28,10 @@
 #include <system_error>
 #include <thread>
 #include <vector>
+namespace AllocationFailure {
+extern thread_local int allocationsUntilFailure;
+extern thread_local std::size_t failureMinimumSize;
+} // namespace AllocationFailure
 
 namespace {
 namespace asio = boost::asio;
@@ -1104,6 +1108,40 @@ TEST(HttpClientRobustness, FailedStateAllocationStillCompletesTheOriginalHandler
 
     EXPECT_EQ(completions, 1);
     EXPECT_EQ(result, std::make_error_code(std::errc::not_enough_memory));
+}
+
+// The 16 KiB read buffer is the only allocation of that size a plain request makes, so failing it reaches the
+// read-stage setup (which runs from a transport completion, not from submission) deterministically.
+TEST(HttpClientRobustness, ReadBufferAllocationFailureCompletesOnceWithoutEscapingRunAndKeepsTheClientUsable) {
+    asio::io_context context;
+    AVEVA::Private::BasicHttpClientImpl<> impl(context, AVEVA::HttpClientOptions{});
+    ScriptedServer server(
+        context, [](int, const http::request<http::string_body>&) -> ServerAction { return {.Wire = OkResponse}; });
+
+    std::vector<int> completions(2, 0);
+    std::vector<std::error_code> results(2);
+    impl.Submit(MakeRequest(server.Url("/0")), AVEVA::HttpRequestOptions{},
+                AVEVA::Detail::MakeCompletion([&](std::error_code error, AVEVA::HttpResponse) {
+                    ++completions[0];
+                    results[0] = error;
+                    AllocationFailure::allocationsUntilFailure = -1;
+                    AllocationFailure::failureMinimumSize = 0;
+                    impl.Submit(MakeRequest(server.Url("/1")), AVEVA::HttpRequestOptions{},
+                                AVEVA::Detail::MakeCompletion([&](std::error_code second, AVEVA::HttpResponse) {
+                                    ++completions[1];
+                                    results[1] = second;
+                                    server.Stop();
+                                }));
+                }));
+    AllocationFailure::failureMinimumSize = 16 * 1024;
+    AllocationFailure::allocationsUntilFailure = 0;
+    EXPECT_NO_THROW(RunBounded(context));
+    AllocationFailure::allocationsUntilFailure = -1;
+    AllocationFailure::failureMinimumSize = 0;
+
+    EXPECT_EQ(completions, (std::vector<int>{1, 1}));
+    EXPECT_EQ(results[0], std::make_error_code(std::errc::not_enough_memory));
+    EXPECT_FALSE(results[1]);
 }
 
 TEST(HttpClientRobustness, DestroyingTheClientFailsQueuedRequestsAndCompletesActiveOnesOnce) {

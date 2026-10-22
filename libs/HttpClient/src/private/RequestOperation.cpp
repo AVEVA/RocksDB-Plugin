@@ -24,45 +24,63 @@
 
 namespace AVEVA::Private {
 
-template <typename Stream> void RequestOperation<Stream>::Start(HttpRequest request, const Route& route) {
-    if (IsCancellationRequested()) {
-        return Cancel();
-    }
-    if (!BuildRequest(request, route)) {
+template <typename Stream> template <typename Stage> void RequestOperation<Stream>::Contain(Stage&& stage) {
+    std::error_code failure;
+    try {
+        stage();
         return;
-    }
-    if (IsCancellationRequested()) {
-        return Cancel();
-    }
-    if (DeadlinePassed()) {
-        return Fail(HttpClientError::TimedOut);
-    }
-    m_reused = false;
-    if constexpr (std::is_same_v<Stream, TlsStream>) {
-        if (!ConfigureTlsForHost()) {
-            return;
+    } catch (...) {
+        if (m_finished) {
+            throw;
         }
+        failure = ClassifyBuildFailure(std::current_exception());
     }
-    ArmTimer();
-    Resolve();
+    Finish(failure, {});
 }
 
-template <typename Stream> void RequestOperation<Stream>::StartReused(HttpRequest request, const Route& route) {
-    if (IsCancellationRequested()) {
-        return Cancel();
-    }
-    if (!BuildRequest(request, route)) {
-        return;
-    }
-    if (IsCancellationRequested()) {
-        return Cancel();
-    }
-    if (DeadlinePassed()) {
-        return Fail(HttpClientError::TimedOut);
-    }
-    m_reused = true;
-    ArmTimer();
-    Write();
+template <typename Stream> void RequestOperation<Stream>::Start() {
+    Contain([&] {
+        if (IsCancellationRequested()) {
+            return Cancel();
+        }
+        if (!BuildRequest(m_stagedRequest, m_stagedRoute)) {
+            return;
+        }
+        if (IsCancellationRequested()) {
+            return Cancel();
+        }
+        if (DeadlinePassed()) {
+            return Fail(HttpClientError::TimedOut);
+        }
+        m_reused = false;
+        if constexpr (std::is_same_v<Stream, TlsStream>) {
+            if (!ConfigureTlsForHost()) {
+                return;
+            }
+        }
+        ArmTimer();
+        Resolve();
+    });
+}
+
+template <typename Stream> void RequestOperation<Stream>::StartReused() {
+    Contain([&] {
+        if (IsCancellationRequested()) {
+            return Cancel();
+        }
+        if (!BuildRequest(m_stagedRequest, m_stagedRoute)) {
+            return;
+        }
+        if (IsCancellationRequested()) {
+            return Cancel();
+        }
+        if (DeadlinePassed()) {
+            return Fail(HttpClientError::TimedOut);
+        }
+        m_reused = true;
+        ArmTimer();
+        Write();
+    });
 }
 
 template <typename Stream> bool RequestOperation<Stream>::BuildRequest(HttpRequest& request, const Route& route) {
@@ -205,13 +223,22 @@ template <typename Stream> void RequestOperation<Stream>::ResetParser() {
 
 template <typename Stream>
 void RequestOperation<Stream>::OnSharedResolve(boost::system::error_code error, ResolveResults results) {
-    asio::post(m_executor, [self = this->shared_from_this(), error, results = std::move(results)]() mutable {
-        // The leader was cancelled or timed out, which says nothing about this request's lookup.
-        if (error == asio::error::operation_aborted && !self->m_finished && !self->IsCancellationRequested()) {
-            return self->Resolve();
-        }
-        self->OnResolve(error, results);
-    });
+    auto self = this->shared_from_this();
+    try {
+        asio::post(m_executor, [self, error, results]() mutable {
+            self->Contain([&] {
+                // The leader was cancelled or timed out, which says nothing about this request's lookup.
+                if (error == asio::error::operation_aborted && !self->m_finished && !self->IsCancellationRequested()) {
+                    return self->Resolve();
+                }
+                self->OnResolve(error, results);
+            });
+        });
+    } catch (...) {
+        // The outcome cannot reach the request's executor, and the leader's delivery loop must not be where it is
+        // lost. As a last resort the request is failed from here; the rethrow inside Contain reuses this exception.
+        self->Contain([] { throw; });
+    }
 }
 
 template <typename Stream> void RequestOperation<Stream>::Resolve() {
@@ -278,47 +305,53 @@ template <typename Stream> bool RequestOperation<Stream>::AbortIfNeeded() {
 
 template <typename Stream>
 void RequestOperation<Stream>::OnResolve(boost::system::error_code error, const Tcp::resolver::results_type& results) {
-    if (AbortIfNeeded()) {
-        return;
-    }
-    if (error) {
-        return Fail(HttpClientError::ResolveFailed, error);
-    }
-    m_phase = HttpRequestPhase::Connect;
-    beast::get_lowest_layer(*m_stream).async_connect(
-        results, [self = this->shared_from_this()](boost::system::error_code connectError, const Tcp::endpoint&) {
-            self->OnConnect(connectError);
-        });
+    Contain([&] {
+        if (AbortIfNeeded()) {
+            return;
+        }
+        if (error) {
+            return Fail(HttpClientError::ResolveFailed, error);
+        }
+        m_phase = HttpRequestPhase::Connect;
+        beast::get_lowest_layer(*m_stream).async_connect(
+            results, [self = this->shared_from_this()](boost::system::error_code connectError, const Tcp::endpoint&) {
+                self->OnConnect(connectError);
+            });
+    });
 }
 
 template <typename Stream> void RequestOperation<Stream>::OnConnect(boost::system::error_code error) {
-    if (AbortIfNeeded()) {
-        return;
-    }
-    if (error) {
-        if (m_resolvedFromCache) {
-            // The cached address may be stale; make the next request resolve again.
-            DnsCache::Shared().Invalidate(m_key.host, m_key.service);
-            Report(HttpDiagnosticKind::DnsInvalidated, error,
-                   "Connecting to a cached address failed; dropped the cached DNS answer");
+    Contain([&] {
+        if (AbortIfNeeded()) {
+            return;
         }
-        return Fail(HttpClientError::ConnectFailed, error);
-    }
-    if constexpr (std::is_same_v<Stream, TlsStream>) {
-        m_phase = HttpRequestPhase::Handshake;
-        m_stream->async_handshake(asio::ssl::stream_base::client,
-                                  [self = this->shared_from_this()](boost::system::error_code handshakeError) {
-                                      if (self->AbortIfNeeded()) {
-                                          return;
-                                      }
-                                      if (handshakeError) {
-                                          return self->Fail(HttpClientError::TlsFailed, handshakeError);
-                                      }
-                                      self->Write();
-                                  });
-    } else {
-        Write();
-    }
+        if (error) {
+            if (m_resolvedFromCache) {
+                // The cached address may be stale; make the next request resolve again.
+                DnsCache::Shared().Invalidate(m_key.host, m_key.service);
+                Report(HttpDiagnosticKind::DnsInvalidated, error,
+                       "Connecting to a cached address failed; dropped the cached DNS answer");
+            }
+            return Fail(HttpClientError::ConnectFailed, error);
+        }
+        if constexpr (std::is_same_v<Stream, TlsStream>) {
+            m_phase = HttpRequestPhase::Handshake;
+            m_stream->async_handshake(asio::ssl::stream_base::client,
+                                      [self = this->shared_from_this()](boost::system::error_code handshakeError) {
+                                          self->Contain([&] {
+                                              if (self->AbortIfNeeded()) {
+                                                  return;
+                                              }
+                                              if (handshakeError) {
+                                                  return self->Fail(HttpClientError::TlsFailed, handshakeError);
+                                              }
+                                              self->Write();
+                                          });
+                                      });
+        } else {
+            Write();
+        }
+    });
 }
 
 template <typename Stream> void RequestOperation<Stream>::Write() {
@@ -327,23 +360,31 @@ template <typename Stream> void RequestOperation<Stream>::Write() {
     }
     m_phase = HttpRequestPhase::Write;
     m_writeInFlight = true;
-    http::async_write(*m_stream, m_request,
-                      [self = this->shared_from_this()](boost::system::error_code error, std::size_t bytesWritten) {
-                          self->m_writeInFlight = false;
-                          if (self->DeliverDeferredCompletion()) {
-                              return;
-                          }
-                          if (self->AbortIfNeeded()) {
-                              return;
-                          }
-                          if (error) {
-                              if (self->MaybeRetryAfterReuseFailure(bytesWritten != 0)) {
+    try {
+        http::async_write(*m_stream, m_request,
+                          [self = this->shared_from_this()](boost::system::error_code error, std::size_t bytesWritten) {
+                              self->m_writeInFlight = false;
+                              if (self->DeliverDeferredCompletion()) {
                                   return;
                               }
-                              return self->Fail(HttpClientError::WriteFailed, error);
-                          }
-                          self->Read();
-                      });
+                              self->Contain([&] {
+                                  if (self->AbortIfNeeded()) {
+                                      return;
+                                  }
+                                  if (error) {
+                                      if (self->MaybeRetryAfterReuseFailure(bytesWritten != 0)) {
+                                          return;
+                                      }
+                                      return self->Fail(HttpClientError::WriteFailed, error);
+                                  }
+                                  self->Read();
+                              });
+                          });
+    } catch (...) {
+        // Nothing was started, so no write handler will ever clear the flag that defers completion.
+        m_writeInFlight = false;
+        throw;
+    }
 }
 
 template <typename Stream> void RequestOperation<Stream>::Read() {
@@ -361,6 +402,10 @@ template <typename Stream> void RequestOperation<Stream>::Read() {
 }
 
 template <typename Stream> void RequestOperation<Stream>::OnRead(boost::system::error_code error) {
+    Contain([&] { OnReadStage(error); });
+}
+
+template <typename Stream> void RequestOperation<Stream>::OnReadStage(boost::system::error_code error) {
     if (AbortIfNeeded()) {
         return;
     }

@@ -497,11 +497,12 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
                        const std::shared_ptr<Cancellation>& cancellation, HttpRequest request, Route route,
                        bool reused) {
         operation->BindCancellation(cancellation);
-        asio::post(executor, [operation, request = std::move(request), route = std::move(route), reused]() mutable {
+        operation->Prepare(std::move(request), std::move(route));
+        asio::post(executor, [operation, reused] {
             if (reused) {
-                operation->StartReused(std::move(request), route);
+                operation->StartReused();
             } else {
-                operation->Start(std::move(request), route);
+                operation->Start();
             }
         });
     }

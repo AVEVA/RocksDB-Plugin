@@ -136,19 +136,31 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     void SetDiagnostics(std::shared_ptr<const DiagnosticsSink> diagnostics) { m_diagnostics = std::move(diagnostics); }
 
     /// <summary>
-    /// Fresh connection: resolve, connect, (TLS handshake), then send. Must run on the operation's strand.
+    /// Hands the operation the request and its route before it is posted, so the posted launch handler carries
+    /// only the operation and cannot throw while being moved.
     /// </summary>
-    /// <param name="request">The request to send; its owned body is moved out.</param>
-    void Start(HttpRequest request, const Route& route);
+    /// <param name="request">The request to send; its owned body is moved out when the operation starts.</param>
+    /// <param name="route">The request's parsed destination.</param>
+    void Prepare(HttpRequest request, Route route) {
+        m_stagedRequest = std::move(request);
+        m_stagedRoute = std::move(route);
+    }
+
+    /// <summary>
+    /// Fresh connection: resolve, connect, (TLS handshake), then send. Must run on the operation's strand, after
+    /// <see cref="Prepare"/>.
+    /// </summary>
+    void Start();
 
     /// <summary>
     /// Reused pooled connection: already connected (and, for TLS, already handshaked), so this writes
-    /// straight away. Must run on the operation's strand.
+    /// straight away. Must run on the operation's strand, after <see cref="Prepare"/>.
     /// </summary>
-    /// <param name="request">The request to send; its owned body is moved out.</param>
-    void StartReused(HttpRequest request, const Route& route);
+    void StartReused();
 
   private:
+    HttpRequest m_stagedRequest;
+    Route m_stagedRoute;
     void Report(HttpDiagnosticKind kind, std::error_code error, std::string message) const noexcept {
         if (m_diagnostics) {
             DiagnosticsSink::Report(m_diagnostics, kind, m_phase, m_key.host + ':' + m_key.service, error,
@@ -262,6 +274,11 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     void OnRead(boost::system::error_code error);
 
     /// <summary>
+    /// The body of <see cref="OnRead"/>, run inside <see cref="Contain"/>.
+    /// </summary>
+    void OnReadStage(boost::system::error_code error);
+
+    /// <summary>
     /// A TLS server may close TCP without close_notify. An attacker can also truncate an EOF-delimited body
     /// that way, so it is only accepted when the request opted in. (Bodyless 204/304 responses complete at the
     /// end of the header, so they never reach this path.)
@@ -328,6 +345,14 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// <returns>True when the request is already finished or has just been cancelled, so the callback must
     /// do nothing further.</returns>
     bool AbortIfNeeded();
+
+    /// <summary>
+    /// Runs one stage of the operation so that nothing internal (allocation, timer, resolver or socket
+    /// initiation) can escape onto the host's io_context thread and strand the completion. An exception thrown
+    /// before the request finished completes it with the classified error; one thrown after that came from the
+    /// caller's completion handler and keeps propagating.
+    /// </summary>
+    template <typename Stage> void Contain(Stage&& stage);
 
     /// <summary>
     /// Stops the timer and the resolver, closes the connection, and invokes the completion handler. Only the

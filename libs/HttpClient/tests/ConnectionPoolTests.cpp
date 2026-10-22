@@ -25,6 +25,9 @@
 // only way to reach the pool's allocation failures without changing the pool itself.
 namespace AllocationFailure {
 thread_local int allocationsUntilFailure = -1;
+// Allocations smaller than this are neither counted toward nor failed by the countdown, so a test can leave the
+// standard library's small debug-mode bookkeeping allocations (which sit in noexcept paths) alone.
+thread_local std::size_t failureMinimumSize = 0;
 // Allocation counting for HttpClientAllocationTests.cpp, which cannot replace operator new a second time.
 thread_local bool counting = false;
 thread_local std::size_t allocationCount = 0;
@@ -34,7 +37,8 @@ void* operator new(std::size_t size) {
     if (AllocationFailure::counting) {
         ++AllocationFailure::allocationCount;
     }
-    if (AllocationFailure::allocationsUntilFailure >= 0 && AllocationFailure::allocationsUntilFailure-- == 0) {
+    if (AllocationFailure::allocationsUntilFailure >= 0 && size >= AllocationFailure::failureMinimumSize &&
+        AllocationFailure::allocationsUntilFailure-- == 0) {
         throw std::bad_alloc();
     }
     if (void* memory = std::malloc(size != 0 ? size : 1)) {
