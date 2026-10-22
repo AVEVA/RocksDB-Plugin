@@ -162,13 +162,14 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
         } catch (...) {
             m_scheduled = false;
             DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::SwallowedException, HttpRequestPhase::Queued, {},
-                                    {}, "Scheduling an idle-connection sweep failed; it will be retried on a release");
+                                    {}, {},
+                                    "Scheduling an idle-connection sweep failed; it will be retried on a release");
         }
     }
 
     void ReportSweepFailure() const noexcept {
         DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::SwallowedException, HttpRequestPhase::Queued, {}, {},
-                                "An idle-connection sweep threw; it will be retried on the next release");
+                                {}, "An idle-connection sweep threw; it will be retried on the next release");
     }
 
     IdleSweeper(std::chrono::milliseconds idleTimeout, std::chrono::milliseconds minInterval)

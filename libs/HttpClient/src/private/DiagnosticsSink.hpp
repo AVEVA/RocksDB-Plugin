@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace AVEVA::Private {
@@ -29,15 +30,24 @@ class DiagnosticsSink {
         return std::make_shared<const DiagnosticsSink>(options.GetDiagnosticsCallback());
     }
 
-    /// <summary>Reports through `sink` if there is one.</summary>
+    /// <summary>
+    /// Reports through `sink` if there is one. The origin and message arrive as non-owning pieces and are copied
+    /// only here, inside the protected region, so an allocation failure while describing the event is swallowed
+    /// like a throwing receiver rather than terminating the caller, and a disabled sink never allocates.
+    /// </summary>
     static void Report(const std::shared_ptr<const DiagnosticsSink>& sink, HttpDiagnosticKind kind,
-                       HttpRequestPhase phase, std::string origin, std::error_code error,
-                       std::string message) noexcept {
+                       HttpRequestPhase phase, std::string_view host, std::string_view service, std::error_code error,
+                       std::string_view message) noexcept {
         if (!sink) {
             return;
         }
         try {
-            sink->m_callback(HttpDiagnostic{kind, phase, std::move(origin), error, std::move(message)});
+            std::string origin;
+            if (!host.empty() || !service.empty()) {
+                origin.reserve(host.size() + 1 + service.size());
+                origin.append(host).append(1, ':').append(service);
+            }
+            sink->m_callback(HttpDiagnostic{kind, phase, std::move(origin), error, std::string(message)});
         } catch (...) {
             // A throwing receiver must not disturb the request being reported on.
         }

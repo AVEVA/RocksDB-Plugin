@@ -25,6 +25,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <type_traits>
 #include <utility>
@@ -161,11 +162,8 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
   private:
     HttpRequest m_stagedRequest;
     Route m_stagedRoute;
-    void Report(HttpDiagnosticKind kind, std::error_code error, std::string message) const noexcept {
-        if (m_diagnostics) {
-            DiagnosticsSink::Report(m_diagnostics, kind, m_phase, m_key.host + ':' + m_key.service, error,
-                                    std::move(message));
-        }
+    void Report(HttpDiagnosticKind kind, std::error_code error, std::string_view message) const noexcept {
+        DiagnosticsSink::Report(m_diagnostics, kind, m_phase, m_key.host, m_key.service, error, message);
     }
 
     /// <summary>

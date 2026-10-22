@@ -258,7 +258,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
   private:
     void ReportHandlerThrew() const noexcept {
         DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::SwallowedException, HttpRequestPhase::Queued, {}, {},
-                                "A completion handler threw while the client was failing a request");
+                                {}, "A completion handler threw while the client was failing a request");
     }
 
     /// <summary>

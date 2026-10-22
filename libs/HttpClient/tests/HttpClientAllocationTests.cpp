@@ -3,6 +3,7 @@
 
 #include "AVEVA/HttpClient/HttpClient.hpp"
 #include "HttpClientTestHelpers.hpp"
+#include "private/DiagnosticsSink.hpp"
 #include "private/HttpClientImpl.hpp"
 
 #include <gtest/gtest.h>
@@ -17,6 +18,8 @@
 namespace AllocationFailure {
 extern thread_local bool counting;
 extern thread_local std::size_t allocationCount;
+extern thread_local int allocationsUntilFailure;
+extern thread_local std::size_t failureMinimumSize;
 } // namespace AllocationFailure
 
 namespace {
@@ -103,3 +106,35 @@ TEST(HttpClientAllocations, SubmitAllocationsPerRequest) {
     EXPECT_LE(pooled, 210u);
 }
 } // namespace
+
+TEST(HttpClientDiagnosticsAllocation, DisabledSinkAllocatesNothingForTheEvent) {
+    const std::shared_ptr<const AVEVA::Private::DiagnosticsSink> none;
+    const std::string host(64, 'h');
+    const std::string message(64, 'm');
+    AllocationFailure::allocationCount = 0;
+    AllocationFailure::counting = true;
+    AVEVA::Private::DiagnosticsSink::Report(none, AVEVA::HttpDiagnosticKind::Timeout, AVEVA::HttpRequestPhase::Queued,
+                                            host, "443", {}, message);
+    AllocationFailure::counting = false;
+    EXPECT_EQ(AllocationFailure::allocationCount, 0U);
+}
+
+TEST(HttpClientDiagnosticsAllocation, FailureBuildingTheEventIsSwallowed) {
+    int calls = 0;
+    AVEVA::HttpClientOptions options;
+    options.SetDiagnosticsCallback([&](const AVEVA::HttpDiagnostic&) { ++calls; });
+    const auto sink = AVEVA::Private::DiagnosticsSink::For(options);
+    const std::string host(64, 'h');
+    const std::string message(64, 'm');
+    AllocationFailure::failureMinimumSize = 32;
+    AllocationFailure::allocationsUntilFailure = 0;
+    AVEVA::Private::DiagnosticsSink::Report(sink, AVEVA::HttpDiagnosticKind::Timeout, AVEVA::HttpRequestPhase::Queued,
+                                            host, "443", {}, message);
+    AllocationFailure::allocationsUntilFailure = -1;
+    AllocationFailure::failureMinimumSize = 0;
+    EXPECT_EQ(calls, 0);
+
+    AVEVA::Private::DiagnosticsSink::Report(sink, AVEVA::HttpDiagnosticKind::Timeout, AVEVA::HttpRequestPhase::Queued,
+                                            host, "443", {}, message);
+    EXPECT_EQ(calls, 1);
+}
