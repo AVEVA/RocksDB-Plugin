@@ -134,8 +134,11 @@ void BasicReadWriteFileImpl<TBlob>::PrepareExtent(Extent& extent, int64_t sizeBe
         if (gapEnd > gapStart) {
             std::span<char> target(extent.Data->data() + (gapStart - extent.Start),
                                    static_cast<size_t>(gapEnd - gapStart));
-            reads.push_back(GapRead{BlobOperations::StartDownload(*m_w.H.Blob, target, gapStart, gapEnd - gapStart),
-                                    gapStart, gapEnd - gapStart});
+            BlobOperations::PushAccepted(
+                reads,
+                GapRead{BlobOperations::StartDownload(*m_w.H.Blob, target, gapStart, gapEnd - gapStart), gapStart,
+                        gapEnd - gapStart},
+                [](GapRead& read) { read.Download.Result.wait(); });
         }
     };
     for (const auto& [start, end] : covered) {
@@ -194,8 +197,10 @@ void BasicReadWriteFileImpl<TBlob>::RunWave(std::vector<Extent>& extents, size_t
     std::vector<PendingUploadT> uploads;
     try {
         for (auto i = begin; i < end; ++i) {
-            uploads.push_back(
-                BlobOperations::StartUploadPages(*m_w.H.Runtime, *m_w.H.Blob, extents[i].Data, extents[i].Start));
+            BlobOperations::PushAccepted(
+                uploads,
+                BlobOperations::StartUploadPages(*m_w.H.Runtime, *m_w.H.Blob, extents[i].Data, extents[i].Start),
+                [](PendingUploadT& upload) { upload.Result.wait(); });
         }
     } catch (...) {
         try {

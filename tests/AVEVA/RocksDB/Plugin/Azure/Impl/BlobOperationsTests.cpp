@@ -132,6 +132,37 @@ TEST_F(BlobOperationsTests, DownloadToBufferWithZeroLengthReturnsZeroWithoutRequ
 }
 
 namespace {
+struct ThrowingContainer {
+    void push_back(std::future<int>&&) { throw std::bad_alloc(); }
+};
+} // namespace
+
+TEST(BlobOperationsPushAcceptedTests, DrainsAnAcceptedOperationWhenTheContainerCannotGrow) {
+    std::promise<int> promise;
+    std::future<int> pending = promise.get_future();
+    ThrowingContainer container;
+    bool drained = false;
+
+    EXPECT_THROW(BlobOperations::PushAccepted(container, std::move(pending),
+                                              [&](std::future<int>& item) {
+                                                  EXPECT_TRUE(item.valid());
+                                                  drained = true;
+                                                  promise.set_value(1);
+                                                  item.wait();
+                                              }),
+                 std::bad_alloc);
+    EXPECT_TRUE(drained);
+}
+
+TEST(BlobOperationsPushAcceptedTests, KeepsTheOperationInTheContainerOnSuccess) {
+    std::promise<int> promise;
+    std::vector<std::future<int>> container;
+    BlobOperations::PushAccepted(container, promise.get_future(), [](std::future<int>&) { FAIL(); });
+    EXPECT_EQ(1U, container.size());
+    promise.set_value(1);
+}
+
+namespace {
 // Runs the operations against the in-memory blob, which answers without HTTP.
 class BlobOperationsFakeBlobTests : public ::testing::Test {
   protected:

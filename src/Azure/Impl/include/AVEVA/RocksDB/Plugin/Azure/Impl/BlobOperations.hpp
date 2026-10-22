@@ -358,6 +358,20 @@ struct PageChunk {
     int64_t Length = 0;
 };
 
+// Hands an already started operation to `container`. Growing the container can throw after the operation was
+// accepted, and a use_future future does not wait when destroyed, so the operation is drained (`drain(item)`) before
+// the exception propagates: whatever it reads or writes must stay alive until it completes, and the container's
+// cleanup cannot see an operation that never made it in.
+template <typename TContainer, typename TItem, typename TDrain>
+void PushAccepted(TContainer& container, TItem&& item, TDrain&& drain) {
+    try {
+        container.push_back(std::move(item));
+    } catch (...) {
+        drain(item); // push_back's strong guarantee leaves `item` intact
+        throw;
+    }
+}
+
 // The parts of the first `size` bytes that hold data, split to at most Configuration::Transfer::MaxCopyChunkSize.
 // Never-written and cleared pages read as zeros, so a copy need not transfer them. The listing is guarded by `etag`
 // (ignored when empty), so a concurrent write fails the call instead of being silently missed.
@@ -463,7 +477,8 @@ void CopyPages(const ClientRuntimeBase& runtime, TBlob& source, TBlob& destinati
                 FinishUploadPages(uploads.front());
                 uploads.pop_front();
             }
-            uploads.push_back(StartUploadPages(runtime, destination, filled, chunk.Offset));
+            PushAccepted(uploads, StartUploadPages(runtime, destination, filled, chunk.Offset),
+                         [](Upload& upload) { upload.Result.wait(); });
         }
         while (!uploads.empty()) {
             FinishUploadPages(uploads.front());
@@ -542,7 +557,8 @@ template <typename TBlob>
                 Unwrap(inFlight.front().get());
                 inFlight.pop_front();
             }
-            inFlight.push_back(start(chunks[index], boost::asio::use_future));
+            PushAccepted(inFlight, start(chunks[index], boost::asio::use_future),
+                         [](Pending& pending) { pending.wait(); });
         }
         while (!inFlight.empty()) {
             Unwrap(inFlight.front().get());

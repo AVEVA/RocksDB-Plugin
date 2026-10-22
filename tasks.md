@@ -157,7 +157,9 @@ individually but exceed the aggregate budget. Verify no late child starts and
 one timeout is reported. Cover a file download delayed before its first GET and
 a lease-bounded delete spanning multiple batches.
 
-### [ ] T110 - Secure pending-operation ownership before container growth can throw
+### [x] T110 - Secure pending-operation ownership before container growth can throw
+
+**Result:** Done. Added `BlobOperations::PushAccepted`, which drains an already-started operation if the container's `push_back` throws; used at the gap-read and upload sites in `ReadWriteFileImpl.ipp` and the `CopyPages`/`CopyPagesServerSide` queues (concurrency bounds unchanged). Tests `BlobOperationsPushAcceptedTests.*` inject a throwing container and assert the operation is drained before unwinding. The regression was written against the helper after the sites were edited, so no pre-fix runtime failure was demonstrated (the pre-fix pattern has no seam for injection); ASan was not run (MSVC debug preset). All 1189 tests pass on WindowsDebug.
 
 **Status:** Source-traced; high confidence.
 
