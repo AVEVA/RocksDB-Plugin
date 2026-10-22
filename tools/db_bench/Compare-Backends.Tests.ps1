@@ -15,12 +15,12 @@ BeforeAll {
         $path
     }
 
-    function Invoke-Compare([string]$Baseline, [string]$Candidate, [string]$Out) {
+    function Invoke-Compare([string]$Baseline, [string]$Candidate,     [string]$Out, [string]$Scenarios = 'write') {
         $env:AZURE_TENANT_ID = 't'
         $env:AZURE_SERVICE_PRINCIPAL_ID = 'c'
         $env:AZURE_SERVICE_PRINCIPAL_SECRET = 'fake-secret-value'
         $output = & pwsh -NoProfile -File $script:Script -BaselineExe $Baseline -CandidateExe $Candidate -Account fake `
-            -Scenarios write -Reps 1 -Quick -OutDir $Out 2>&1 | Out-String
+            -Scenarios $Scenarios -Reps 1 -Quick -OutDir $Out 2>&1 | Out-String
         [pscustomobject]@{
             ExitCode = $LASTEXITCODE
             Output   = $output
@@ -67,6 +67,30 @@ Describe 'Compare-Backends.ps1 result validation' {
         $r = Invoke-Compare $mal $script:Good1 "$script:Dir\out"
         $r.ExitCode | Should -Not -Be 0
         $r.Csv | ForEach-Object { $_.baseline | Should -Be 'n/a' }
+    }
+
+    It 'succeeds for a load-only comparison with valid fillrandom output' {
+        $r = Invoke-Compare $script:Good1 $script:Good1 "$script:Dir\out" 'load'
+        $r.ExitCode | Should -Be 0
+        $r.Csv.Count | Should -Be 1
+        $r.Csv[0].Samples | Should -Be '1/1'
+    }
+
+    It 'rejects a load with no metrics and never records a numeric sample' {
+        $none = New-FakeBench $script:Dir 'none' @('no metrics here')
+        $r = Invoke-Compare $script:Good1 $none "$script:Dir\out" 'load'
+        $r.ExitCode | Should -Not -Be 0
+        $r.Csv[0].candidate | Should -Be 'n/a'
+        $r.Csv[0].Samples | Should -Be '1/0'
+        $r.Output | Should -Match 'load failed \(attempt 3\)'
+    }
+
+    It 'rejects a load with a malformed fillrandom metric' {
+        $mal = New-FakeBench $script:Dir 'mal' @('fillrandom : 1.2.3 micros/op')
+        $r = Invoke-Compare $mal $script:Good1 "$script:Dir\out" 'load'
+        $r.ExitCode | Should -Not -Be 0
+        $r.Csv[0].baseline | Should -Be 'n/a'
+        $r.Csv[0].Samples | Should -Be '0/1'
     }
 
     It 'fails when a backend is missing every sample' {

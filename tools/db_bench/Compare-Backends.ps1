@@ -139,7 +139,7 @@ function New-LoadedDb($backend, $tag) {
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         $db = NewDb $backend $tag
         $r = Invoke-Bench $backend "load-$tag" (@('--benchmarks=fillrandom,waitforcompaction', "--num=$Num",
-                '--disable_wal=1', '--statistics=0') + $shape + $common + "--db=$db")
+                '--disable_wal=1', '--statistics=0') + $shape + $common + "--db=$db") 'fillrandom'
         if ($r) { return @{ Db = $db; Seconds = $r.Seconds } }
         Write-Host "  load failed (attempt $attempt)" -ForegroundColor Yellow
     }

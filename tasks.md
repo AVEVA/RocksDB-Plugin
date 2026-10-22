@@ -417,7 +417,9 @@ the release-path overhead of any additional notifications.
 acquiring the first, stop traffic and verify both expire automatically. Keep
 coalescing tests and compare warmed allocations/release throughput.
 
-### [ ] T120 - Validate load metrics before treating a database load as successful
+### [x] T120 - Validate load metrics before treating a database load as successful
+
+**Result:** Done. `New-LoadedDb` now passes `fillrandom` as the expected metric to `Invoke-Bench`; wall-clock `Seconds` and the 3-attempt retry are unchanged. Three new Pester regressions (valid load, no metrics, malformed metric) — the two invalid-load cases failed before the fix (exit 0, numeric sample) and all 8 Pester tests pass now. No C++ changed, so no CMake build was needed.
 
 **Status:** Reproduced at the script-function level; follow-up to T102.
 
