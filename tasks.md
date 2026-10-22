@@ -549,7 +549,9 @@ with measurements and no production change. Reuse T108's deadline coverage.
 
 ## P3: bounded simplifications and contract cleanup
 
-### [ ] T125 - Share the strict download-length check used by writer recovery paths
+### [x] T125 - Share the strict download-length check used by writer recovery paths
+
+**Result:** Done. Added `BlobHelpers::RequireFullDownload` (concrete, internal) replacing the duplicated checks in `WriteableFileImpl.ipp` and `ReadWriteFileImpl.ipp`; same `ShortDownload`/InvalidResponse error. Existing constructor and gap short-read regressions retained and pass, plus direct helper tests. Copy/rename read sites were not migrated (out of the narrow scope); EOF-tolerant reads untouched. Full WindowsDebug suite passes.
 
 **Status:** Concrete duplication introduced by the recent correctness fixes.
 

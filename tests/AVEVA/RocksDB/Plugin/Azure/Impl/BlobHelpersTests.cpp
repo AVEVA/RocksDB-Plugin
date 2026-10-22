@@ -220,4 +220,22 @@ TEST(PageRoundingTests, NearInt64Max_RoundDownSucceedsAndRoundUpThrowsInsteadOfO
     EXPECT_EQ(std::make_pair(int64_t{0}, rounded), BlobHelpers::RoundToEndOfNearestPage(rounded));
 }
 
+TEST(RequireFullDownloadTests, RequireFullDownload_MatchingCount_DoesNotThrow) {
+    EXPECT_NO_THROW(BlobHelpers::RequireFullDownload("f", 512, 512, 512));
+}
+
+TEST(RequireFullDownloadTests, RequireFullDownload_ShortOrLongCount_ThrowsWithFileAndRangeContext) {
+    for (const int64_t actual : {int64_t{0}, int64_t{100}, int64_t{600}}) {
+        try {
+            BlobHelpers::RequireFullDownload("file.sst", 1024, 512, actual);
+            FAIL() << "expected RequestFailedException";
+        } catch (const RequestFailedException& e) {
+            const std::string what = e.what();
+            EXPECT_NE(what.find("file.sst"), std::string::npos);
+            EXPECT_NE(what.find("1024"), std::string::npos);
+            EXPECT_NE(what.find(std::to_string(actual)), std::string::npos);
+        }
+    }
+}
+
 } // namespace

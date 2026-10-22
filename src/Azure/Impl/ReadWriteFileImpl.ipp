@@ -18,19 +18,6 @@
 #include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-namespace ReadWriteFileDetail {
-// A short gap read would leave zeros (or a recycled buffer's bytes) that the upload then writes over real data.
-inline void RequireFullGapDownload(std::string_view name, int64_t offset, int64_t expected, int64_t actual) {
-    if (actual != expected) {
-        throw RequestFailedException(0, "ShortDownload",
-                                     "Expected " + std::to_string(expected) + " bytes at offset " +
-                                         std::to_string(offset) + " of '" + std::string(name) + "' but received " +
-                                         std::to_string(actual),
-                                     "", AzureClient::BlobStorageErrorCode::InvalidResponse);
-    }
-}
-} // namespace ReadWriteFileDetail
-
 template <typename TBlob>
 BasicReadWriteFileImpl<TBlob>::BasicReadWriteFileImpl(
     std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
@@ -202,8 +189,8 @@ void BasicReadWriteFileImpl<TBlob>::RunWave(std::vector<Extent>& extents, size_t
     };
     // A short gap read would upload zeros over bytes that were never fetched, so it fails the flush.
     const auto finishRead = [this](GapRead& read) {
-        ReadWriteFileDetail::RequireFullGapDownload(m_w.H.Name, read.Offset, read.Length,
-                                                    BlobOperations::FinishDownload(read.Download));
+        BlobHelpers::RequireFullDownload(m_w.H.Name, read.Offset, read.Length,
+                                         BlobOperations::FinishDownload(read.Download));
     };
     const auto finishUpload = [](auto& upload) { BlobOperations::FinishUploadPages(upload); };
 

@@ -50,6 +50,16 @@ int64_t BlobHelpers::FileSizeFromProperties(const AzureClient::Models::BlobPrope
     return size;
 }
 
+void BlobHelpers::RequireFullDownload(std::string_view name, int64_t offset, int64_t expected, int64_t actual) {
+    if (actual != expected) {
+        throw RequestFailedException(0, "ShortDownload",
+                                     "Expected " + std::to_string(expected) + " bytes at offset " +
+                                         std::to_string(offset) + " of '" + std::string(name) + "' but received " +
+                                         std::to_string(actual),
+                                     "", AzureClient::BlobStorageErrorCode::InvalidResponse);
+    }
+}
+
 std::pair<int64_t, int64_t> BlobHelpers::RoundToEndOfNearestPage(int64_t size) {
     auto [partialPageSize, roundedSize] = RoundToBeginningOfNearestPage(size);
     if (partialPageSize != 0) {
