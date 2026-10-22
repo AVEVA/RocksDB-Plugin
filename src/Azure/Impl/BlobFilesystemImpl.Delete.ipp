@@ -10,12 +10,15 @@ template <typename THttp> bool BasicBlobFilesystemImpl<THttp>::DeleteFile(const 
     EnsureLiveness();
 
     auto [prefix, realPath, client] = ResolveBlob(filePath);
-    const auto existed = BlobOperations::Delete(*m_runtime, client);
 
-    auto cache = m_fileCaches.find(prefix);
-    if (cache != m_fileCaches.end()) {
-        cache->second->RemoveFile(realPath);
-    }
+    // Dropped whether or not the delete succeeds: a response lost after the service applied it must not leave the
+    // old bytes servable by name.
+    const boost::scope::scope_exit dropCached{[&] {
+        if (const auto cache = m_fileCaches.find(prefix); cache != m_fileCaches.end()) {
+            cache->second->RemoveFile(realPath);
+        }
+    }};
+    const auto existed = BlobOperations::Delete(*m_runtime, client);
 
     // A suppressed (not found) error means there was nothing to delete.
     return existed;

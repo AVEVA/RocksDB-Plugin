@@ -35,14 +35,18 @@ BasicBlobFilesystemImpl<THttp>::CreateWriteableFile(const std::string& filePath)
 
     // Creating a writeable file always provides a "new" file; the overwriting create gives exactly that, with a
     // known size and capacity, in a single request.
-    BlobOperations::CreateOrReplace(*m_runtime, blob, initialSize);
-    const int64_t capacity = initialSize;
-
-    // The replaced blob's cached bytes are stale, and nothing else would drop them if the file is never synced.
+    // The replaced blob's cached bytes are stale, and nothing else would drop them if the file is never synced. Dropped
+    // even if the create fails: the service may have applied it before the response was lost.
     auto cache = BlobFilesystemDetail::FindCache(m_fileCaches, prefix);
-    if (cache) {
-        cache->RemoveFile(realPath);
+    {
+        const boost::scope::scope_exit dropCached{[&] {
+            if (cache) {
+                cache->RemoveFile(realPath);
+            }
+        }};
+        BlobOperations::CreateOrReplace(*m_runtime, blob, initialSize);
     }
+    const int64_t capacity = initialSize;
 
     return WriteableFileType{
         realPath, m_runtime,  std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)), std::move(cache),
@@ -98,11 +102,14 @@ BasicBlobFilesystemImpl<THttp>::ReuseWritableFile(const std::string& filePath) {
     const auto [initialSize, bufferSize] =
         BlobFilesystemDetail::SizingFor(filePath, m_dataFileInitialSize, m_dataFileBufferSize);
 
-    BlobOperations::CreateOrReplace(*m_runtime, blob, initialSize);
-
     auto cache = BlobFilesystemDetail::FindCache(m_fileCaches, prefix);
-    if (cache) {
-        cache->RemoveFile(realPath);
+    {
+        const boost::scope::scope_exit dropCached{[&] {
+            if (cache) {
+                cache->RemoveFile(realPath);
+            }
+        }};
+        BlobOperations::CreateOrReplace(*m_runtime, blob, initialSize);
     }
 
     return WriteableFileType{

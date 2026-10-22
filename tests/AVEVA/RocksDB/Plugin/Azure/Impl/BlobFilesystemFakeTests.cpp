@@ -543,6 +543,42 @@ TEST_F(CachedFailureTests, RenameThatFailsMidCommitStillDropsTheDestinationsCach
     std::vector<char> buffer(1024);
     EXPECT_FALSE(file->TryReadFromCache(0, 1024, buffer.data()).has_value());
 }
+
+TEST_F(CachedFailureTests, DeleteThatFailsStillDropsTheCachedCopy) {
+    WriteCached("d.sst", std::string(1024, 'D'));
+    auto file = m_cached->CreateReadableFile(Path("d.sst"));
+    ASSERT_TRUE(WarmCache(file, 1024));
+    m_server->Fault = [](const auto operation) -> std::optional<AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::DeleteBlob) {
+            return FakeBlobServer::Error(400U, "InvalidInput");
+        }
+        return std::nullopt;
+    };
+
+    EXPECT_ANY_THROW((void)m_cached->DeleteFile(Path("d.sst")));
+
+    std::vector<char> buffer(1024);
+    EXPECT_FALSE(file->TryReadFromCache(0, 1024, buffer.data()).has_value());
+}
+
+TEST_F(CachedFailureTests, OverwritingCreateThatFailsStillDropsTheCachedCopy) {
+    WriteCached("o.sst", std::string(1024, 'O'));
+    auto file = m_cached->CreateReadableFile(Path("o.sst"));
+    ASSERT_TRUE(WarmCache(file, 1024));
+    m_server->Fault = [](const auto operation) -> std::optional<AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::Create) {
+            return FakeBlobServer::Error(400U, "InvalidInput");
+        }
+        return std::nullopt;
+    };
+
+    EXPECT_ANY_THROW((void)m_cached->CreateWriteableFile(Path("o.sst")));
+    EXPECT_ANY_THROW((void)m_cached->ReuseWritableFile(Path("o.sst")));
+
+    std::vector<char> buffer(1024);
+    EXPECT_FALSE(file->TryReadFromCache(0, 1024, buffer.data()).has_value());
+}
+
 // Page blobs are 512-byte aligned, so sizes straddling a page boundary exercise the padding/partial-page paths.
 class PageBoundaryTests : public BlobFilesystemFakeTests, public ::testing::WithParamInterface<size_t> {
   protected:

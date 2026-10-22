@@ -181,6 +181,9 @@ Result FakeBlobServer::Create(const HttpRequest& request, const std::string& pat
         return Failure(400U, "InvalidHeaderValue");
     }
     std::scoped_lock lock(m_mutex);
+    if (const auto fault = FaultFor(Operation::Create)) {
+        return FailureResult(*fault);
+    }
     const auto existing = m_blobs.find(path);
     if (existing != m_blobs.end() && existing->second.Exists && Header(request, "If-None-Match") == "*") {
         return Failure(409U, "BlobAlreadyExists");

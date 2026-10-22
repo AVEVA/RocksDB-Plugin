@@ -316,7 +316,13 @@ completion must run exactly once.
 
 ## P2: consistency, retry limits and reliable validation
 
-### [ ] T116 - Invalidate local cached bytes after ambiguous mutation failures
+### [x] T116 - Invalidate local cached bytes after ambiguous mutation failures
+
+**Result:** Done. `DeleteFile`, `CreateWriteableFile` and `ReuseWritableFile` now drop the cached copy with a
+`scope_exit`, so it is removed even when the mutation throws. Regression tests
+`CachedFailureTests.DeleteThatFailsStillDropsTheCachedCopy` and
+`OverwritingCreateThatFailsStillDropsTheCachedCopy` failed before the fix and pass after it (a `Create` fault
+operation was added to `FakeBlobServer`). Full ctest: 1200/1200 passed.
 
 **Status:** Source-traced; concrete extension of T35 and T94.
 

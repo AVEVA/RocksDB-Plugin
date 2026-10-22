@@ -115,6 +115,7 @@ class FakeBlobServer {
         ReleaseLease,
         ListBlobs,
         DeleteBlob,
+        Create,
     };
 
     struct Upload {
