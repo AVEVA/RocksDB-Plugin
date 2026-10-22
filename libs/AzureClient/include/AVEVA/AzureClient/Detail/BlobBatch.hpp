@@ -111,10 +111,18 @@ class BatchDeleteOperation final
             {
                 const std::scoped_lock lock(m_mutex);
                 if (!m_failure && m_nextChunk < ChunkCount() && m_inFlight < m_maxConcurrent) {
-                    chunk = m_nextChunk++;
-                    ++m_inFlight;
-                    signal = std::make_shared<boost::asio::cancellation_signal>();
-                    m_signals.emplace(*chunk, signal);
+                    // Admission is transactional: the counters only advance once the signal is registered, so a
+                    // failure here leaves no in-flight count that nothing will ever release.
+                    try {
+                        signal = std::make_shared<boost::asio::cancellation_signal>();
+                        m_signals.emplace(m_nextChunk, signal);
+                        chunk = m_nextChunk++;
+                        ++m_inFlight;
+                    } catch (...) {
+                        chunk.reset();
+                        m_failure = MakeFailureFromCurrentException();
+                        continue;
+                    }
                 } else if (m_inFlight == 0 && !m_finished && (m_failure || m_nextChunk >= ChunkCount())) {
                     m_finished = true;
                     finish = true;
@@ -137,7 +145,13 @@ class BatchDeleteOperation final
         // Slot assignment (inside SendChunk) and every emit on the signal are serialized by m_emitMutex because
         // cancellation_signal is not thread-safe. Recursive: a failure path may re-enter Pump on this thread.
         const std::scoped_lock emitLock(m_emitMutex);
-        SendChunk(chunk, signal);
+        try {
+            SendChunk(chunk, signal);
+        } catch (...) {
+            // Initiation threw before the child accepted the request, so no completion will ever arrive for it.
+            FailChunk(chunk, MakeFailureFromCurrentException());
+            return;
+        }
         // A cancel that raced the chunk start may have emitted before the pipeline attached its handler.
         if (m_cancelled.load(std::memory_order_acquire)) {
             signal->emit(boost::asio::cancellation_type::terminal);
@@ -278,10 +292,14 @@ class BatchDeleteOperation final
 
     // Never completes inline: the failure may be found while still inside the initiating call.
     void FailChunk(std::size_t chunk, BlobStorageError error) {
-        boost::asio::post(m_httpClient.get_executor(),
-                          [self = this->shared_from_this(), chunk, error = std::move(error)]() mutable {
-                              self->RecordFailure(chunk, std::move(error));
-                          });
+        try {
+            boost::asio::post(m_httpClient.get_executor(), [self = this->shared_from_this(), chunk, error]() mutable {
+                self->RecordFailure(chunk, std::move(error));
+            });
+        } catch (...) {
+            // Without a posted continuation the accounting must still be released, or the batch never completes.
+            RecordFailure(chunk, std::move(error));
+        }
     }
 
     void RecordFailure(std::size_t chunk, BlobStorageError error) {

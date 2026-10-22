@@ -671,3 +671,64 @@ TEST(BatchDeleteTests, SequentialBatchesShareOneAggregateDeadline) {
     ASSERT_FALSE(outcome->has_value());
     EXPECT_EQ(outcome->error().Code, std::make_error_code(std::errc::timed_out));
 }
+
+TEST(BatchDeleteTests, ChildInitiationFailureAfterACompletedChunkCompletesOnceWithTheFailure) {
+    FakeHttpClient http;
+    http.SetResponder([](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
+        FakeHttpClient::ScriptedResult result =
+            BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
+        result.Deferred = true;
+        return result;
+    });
+    BlobContainerClient client{http, MakeBlobContainerClientOptions()};
+
+    int completions = 0;
+    std::optional<BatchOutcome> outcome;
+    client.DeleteBlobsAsync(MakeNames(256U * 3U), DeleteBlobsOptions{.MaxConcurrentRequests = 1},
+                            [&](BatchOutcome result) {
+                                ++completions;
+                                outcome = std::move(result);
+                            });
+    ASSERT_EQ(http.PendingCount(), 1U);
+
+    http.FailNextInitiation(std::make_exception_ptr(std::bad_alloc{}));
+    // The completion of the first chunk starts the next one; its failure must not escape into the event loop.
+    EXPECT_NO_THROW(static_cast<void>(http.CompleteNext()));
+    ASSERT_TRUE(http.RunUntil([&] { return completions > 0; }));
+
+    EXPECT_EQ(completions, 1);
+    ASSERT_FALSE(outcome->has_value());
+    EXPECT_EQ(http.RequestCount(), 1U);
+    EXPECT_EQ(http.PendingCount(), 0U);
+}
+
+TEST(BatchDeleteTests, ChildInitiationFailureDrainsTheChunksAlreadyAdmitted) {
+    FakeHttpClient http;
+    http.SetResponder([](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
+        FakeHttpClient::ScriptedResult result =
+            BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
+        result.Deferred = true;
+        return result;
+    });
+    BlobContainerClient client{http, MakeBlobContainerClientOptions()};
+
+    int completions = 0;
+    std::optional<BatchOutcome> outcome;
+    client.DeleteBlobsAsync(MakeNames(256U * 4U), DeleteBlobsOptions{.MaxConcurrentRequests = 2},
+                            [&](BatchOutcome result) {
+                                ++completions;
+                                outcome = std::move(result);
+                            });
+    ASSERT_EQ(http.PendingCount(), 2U);
+
+    http.FailNextInitiation(std::make_exception_ptr(std::bad_alloc{}));
+    EXPECT_NO_THROW(static_cast<void>(http.CompleteNext()));
+    // One chunk is still in flight, so the aggregate must wait for it rather than complete early or hang.
+    EXPECT_EQ(completions, 0);
+    ASSERT_TRUE(http.CompleteNext());
+    ASSERT_TRUE(http.RunUntil([&] { return completions > 0; }));
+
+    EXPECT_EQ(completions, 1);
+    ASSERT_FALSE(outcome->has_value());
+    EXPECT_EQ(http.RequestCount(), 2U);
+}

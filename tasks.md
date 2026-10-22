@@ -288,7 +288,9 @@ handoff and finalization scheduling. Use concrete test hooks/executors or narrow
 allocation injection. Assert one error completion, no escaping worker exception,
 no retained writing state, preserved old destination and no leaked partial file.
 
-### [ ] T115 - Roll back batch admission when signal, map or child initiation fails
+### [x] T115 - Roll back batch admission when signal, map or child initiation fails
+
+**Result:** Done. Regressions `ChildInitiationFailureAfterACompletedChunkCompletesOnceWithTheFailure` and `ChildInitiationFailureDrainsTheChunksAlreadyAdmitted` failed before the fix (initiation exception escaped / aggregate never completed). `Pump` now registers the signal before advancing `m_nextChunk`/`m_inFlight` and records an allocation failure as the batch failure; `StartChunk` routes pre-acceptance child-start exceptions through `FailChunk` (inline fallback if the post throws). Admitted chunks drain and the aggregate completes once. Full WindowsDebug suite passes (integration tests skipped). Signal-allocation/map-insertion faults are covered by code path only (no allocation-injection seam).
 
 **Status:** Source-traced; follow-up to T96's conclusion that batch needed no change.
 
