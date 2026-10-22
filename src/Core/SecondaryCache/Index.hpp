@@ -12,8 +12,8 @@
 
 namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache {
 /// <summary>
-/// Where one encoded record lives. Offsets and lengths are stored in kRecordAlign units so every field fits in 32
-/// bits and the whole entry stays at 16 bytes.
+/// Where one encoded record lives: four 32-bit fields, totaling 16 bytes. Offsets and lengths use kRecordAlign
+/// units; the location may refer to buffered or device-backed bytes.
 /// </summary>
 struct Location {
     /// Index into RegionManager's region ring.
@@ -35,9 +35,9 @@ inline size_t LocationLengthBytes(const Location& location) noexcept {
 }
 
 /// <summary>
-/// Maps a 64-bit key fingerprint to the newest Location for that key (at most one per hash). Not thread-safe: every
-/// call requires RegionManager's m_mutex. Allocations are charged to the metadata budget, and the map is created
-/// lazily and destroyed by Clear so an empty index holds no memory.
+/// Maps a 64-bit fingerprint to its newest Location (at most one per hash, even for colliding keys). Requires
+/// external synchronization, supplied by RegionManager. The map is created lazily and charged to the metadata
+/// budget. Remove can leave an empty map with retained buckets; Clear destroys it and releases its allocations.
 /// </summary>
 class Index {
     using Map = std::unordered_map<uint64_t, Location, std::hash<uint64_t>, std::equal_to<uint64_t>,

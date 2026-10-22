@@ -31,7 +31,7 @@ integration are required.
 
 | Option | Default | Meaning in region mode |
 |---|---|---|
-| `capacity` | 512 MiB | Maximum live **encoded record bytes**, not payload charge or reserved physical space |
+| `capacity` | 512 MiB | Total logical region space, including obsolete records and unused tails; not reserved physical space |
 | `regionSize` | 64 MiB | Maximum bytes per region; multiple of 64, at most `UINT32_MAX` |
 | `flushBlockSize` | 1 MiB | Capacity of the single active append buffer; nonzero multiple of 64, at most region size |
 | `maxEntrySize` | 16 MiB | Entire encoded record limit, including header, full key and alignment |
@@ -57,7 +57,7 @@ not a fake successful RAM-budget adjustment. Zero disk capacity disables the cac
 | File | Responsibility and main methods |
 |---|---|
 | `../RegionBasedSecondaryCache.cpp` | Public forwarding and region-cache operations. `Insert` checks size before serialization; `InsertSaved` accepts existing bytes; `InsertEncoded` validates/encodes/appends; `Lookup` verifies bytes and invokes `create_cb`; `ReportFailure` counts errors and logs the first and powers of two |
-| `RegionManager.hpp/.cpp` | Sole mutable-state owner. `Append` is the publication transaction; `SelectRegionLocked` advances the FIFO ring; `ReclaimLocked` removes retired mappings; `FlushLocked` writes the active buffer; `Read` copies a record and identity; `Remove` performs conditional cleanup; `Erase` removes the current mapping; `SetCapacity` resets the layout; `Snapshot`, `CapacityBytes`, `UsageBytes` provide synchronized observations |
+| `RegionManager.hpp/.cpp` | Mutable storage-state owner. `Append` is the publication transaction; `SelectRegionLocked` advances the FIFO ring; `ReclaimLocked` removes retired mappings; `FlushLocked` writes the active buffer; `Read` copies a record and identity; `Remove` performs conditional cleanup; `Erase` removes the current mapping; `SetCapacity` resets the layout; `Snapshot`, `CapacityBytes`, `UsageBytes` provide synchronized observations |
 | `Index.hpp` | An externally locked, lazily constructed `unordered_map<uint64_t, Location>`. `Upsert` returns the **old** location; `Find`, `Remove`, `Clear` do not mutate any independent lifecycle. `Clear` destroys the map without allocating, including MSVC's empty-map sentinel/buckets |
 | `RecordFormat.hpp/.cpp` | Checked `RecordSize`, `EncodeRecord`, portable CRC32C and `DecodeRecord`. Decode checks magic/version, exact bounds, header/key CRC, full key, then payload CRC before any callback receives bytes |
 | `MemoryBudget.hpp` | Atomic allocation reservation and a stateful allocator. Accounts container allocator requests, retained capacity and overlapping allocations during rehash/growth. `BudgetExceeded` is an internal admission-pressure signal, not an unsafe internal `noexcept` termination |
@@ -133,7 +133,8 @@ single-writer queue must preserve this reference transaction and failure behavio
    guard active until result-handle construction and postprocessing succeed. A null
    deleter is allowed for objects requiring no destruction.
 5. On `adviseErase`, conditionally remove the captured mapping. Otherwise report
-   whether that same identity is still retained. The returned charge is callback
+   whether that same identity is retained at the final locked check, not a promise
+   of retention after that check. The returned charge is callback
    `out_charge`, not payload length. Record RocksDB role-specific hit statistics.
 
 The caller consumes/owns the created value, following RocksDB's result-handle
@@ -157,8 +158,9 @@ The supplied path is a **parent**, never a recursive deletion target. The engine
 owns only its `ssd-secondary-cache-v1` child, containing an ownership marker/lock
 named `owner` and `region_<number>.dat` files. Existing child contents must match
 this format and marker. Directory/file links and Windows reparse points are
-rejected. An exclusive OS lock prevents two live instances from sharing the child.
-Unrelated files in the parent are untouched.
+rejected. An exclusive OS lock prevents two cooperating cache instances from
+sharing the child. The caller must prevent external changes to that child and
+its path while in use. Unrelated files in the parent are untouched.
 
 Cold initialization removes only validated owned region files. There is no warm
 restart scan or persistence promise. Region files and handles are created lazily;
@@ -167,10 +169,12 @@ Disk exhaustion is a cache I/O error, not a database correctness failure.
 
 The C streams are unbuffered: the one explicit append buffer batches writes, and
 the OS page cache supplies buffered I/O. There is no `fsync`/durability barrier.
-Short transfer, seek, write or flush failure is not acknowledged as success. A
-failed write/flush invalidates all cache mappings and buffered state; a read failure
-removes that mapping. A future insert can retry after the underlying error clears.
-Callbacks never receive bytes from an I/O error or corrupt record.
+Short transfer, seek, write or flush failure is not acknowledged as success.
+A write/flush returning false invalidates all cache mappings and buffered state;
+a read returning false removes that mapping. Exceptions during preliminary flushes
+or reads do not take those invalidation paths. A future insert can retry after
+the underlying error clears. Callbacks run only after a successful read,
+full-key match and both CRC checks.
 
 Allocating private functions may throw. RocksDB's public methods catch exceptions:
 real allocation failures return `MemoryLimit` or lookup miss, while configured

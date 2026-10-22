@@ -18,11 +18,11 @@ namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache {
 class BudgetExceeded final : public std::bad_alloc {};
 
 /// <summary>
-/// Lock-free byte counter that enforces a memory limit. It counts bytes requested through BudgetAllocator, not
+/// Atomic byte counter that enforces a memory limit. It counts bytes requested through BudgetAllocator, not
 /// heap overhead, so it is an accounting bound rather than an exact RSS bound.
 /// </summary>
 struct MemoryBudget {
-    /// Maximum bytes that may be acquired. Not atomic: change it only while no other thread can call Acquire.
+    /// Maximum bytes that may be acquired. Not atomic: synchronize changes against Acquire and all other readers.
     size_t limit;
     /// Bytes currently acquired.
     std::atomic<size_t> used{0};

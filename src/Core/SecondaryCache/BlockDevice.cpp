@@ -23,10 +23,10 @@
 
 namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache {
 namespace {
-/// First line of the owner marker; proves the child directory was created by this cache.
+/// Expected first line of the owner marker, used to recognize an existing cache child directory.
 constexpr auto kMarker = "AVEVA disposable secondary cache v1";
 
-/// <param name="path">Path to inspect; not followed.</param>
+/// <param name="path">Path whose final component is inspected.</param>
 /// <returns>True for a symlink or, on Windows, any reparse point such as a junction.</returns>
 bool IsLink(const std::filesystem::path& path) {
 #ifdef _WIN32
@@ -101,7 +101,7 @@ FileBlockDevice::FileBlockDevice(std::filesystem::path parent, MemoryBudget& bud
     const bool existed = std::filesystem::exists(std::filesystem::symlink_status(m_directory));
     bool createdDirectory = false;
     bool createdMarker = false;
-    // If construction fails, remove only what this attempt created, leaving no half-owned directory behind.
+    // Best-effort cleanup of this attempt's child and marker; never remove a pre-existing child's contents.
     auto cleanup = boost::scope::make_scope_exit([&] noexcept {
         if (createdDirectory) {
             m_owner.reset();

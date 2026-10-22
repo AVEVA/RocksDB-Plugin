@@ -8,9 +8,9 @@
 
 namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache {
 /// <summary>
-/// Monotonic operation counters shared by the facade and RegionManager. Updated with relaxed atomics, so they need
-/// no lock but a group of counters read together is not mutually consistent. Each field has the meaning of the
-/// same-named field in RegionBasedSecondaryCacheStats.
+/// Cumulative operation counters shared by the facade and RegionManager. Updates are atomic; snapshots use relaxed
+/// loads and need no external lock, but do not give a mutually consistent group of counters. Each field has the
+/// meaning of the same-named field in RegionBasedSecondaryCacheStats.
 /// </summary>
 struct CacheStats {
     std::atomic<uint64_t> inserts{0};

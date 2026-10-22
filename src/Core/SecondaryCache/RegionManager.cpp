@@ -11,7 +11,7 @@
 namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache {
 namespace {
 /// <param name="options">Options supplying metadataBudget.</param>
-/// <param name="capacity">Capacity the budget must cover.</param>
+/// <param name="capacity">Logical region-space capacity used to derive the automatic metadata limit.</param>
 /// <returns>metadataBudget if nonzero, otherwise max(1 MiB, capacity / 200).</returns>
 size_t MetadataLimit(const RegionBasedSecondaryCacheOptions& options, const size_t capacity) {
     return options.metadataBudget != 0 ? options.metadataBudget : std::max(size_t{1} << 20, capacity / 200);
@@ -186,7 +186,7 @@ RegionManager::ReadStatus RegionManager::Read(const uint64_t hash, RecordBytes& 
     identity = {*found, m_incarnation};
     const size_t offset = size_t{found->offsetInAlignUnits} * kRecordAlign;
     record.resize(LocationLengthBytes(*found));
-    // Bytes of the current region at or after bufferOffset have not been flushed and exist only in m_buffer.
+    // The active suffix [bufferOffset, cursor) has not been written to the device; read it from m_buffer.
     const size_t bufferOffset = m_current == UINT32_MAX ? 0 : m_regions[m_current].cursor - m_buffer.size();
     if (found->regionId == m_current && offset >= bufferOffset) {
         const size_t relative = offset - bufferOffset;

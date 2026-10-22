@@ -128,7 +128,8 @@ Identity = Location + cache-wide uint64 incarnation
 
 The hash-table allocation costs more than these field sizes: nodes, buckets and
 allocator overhead are separate concerns. This baseline uses a standard node
-map, not a tightly packed custom table.
+map, not a tightly packed custom table. Removing the last mapping can retain
+bucket storage; `Index::Clear` destroys the map and releases those allocations.
 
 `Identity` lets a lookup say "remove exactly the record I read." Location protects
 against ordinary replacement and region reuse. Incarnation also protects against
@@ -324,10 +325,13 @@ another thread recycles the region.
 
 `DecodeRecord` checks magic/version, exact record bounds, header-plus-key CRC,
 the full expected key, and payload CRC, in that order. `TryReadHeader` alone
-only copies the header; it does not validate it. A collision causes a key
-mismatch and a miss; that path preserves the other key's index mapping.
-Corruption conditionally removes the captured mapping. Invalid bytes never
-reach `create_cb`.
+only copies the header; it does not validate its fields. Padding, enum values
+and agreement between the stored hash and the requested fingerprint are not
+validated. A collision causes a key mismatch and a miss; that path preserves
+the other key's index mapping.
+The payload CRC is not checked on that mismatch path. Detected corruption
+conditionally removes the captured mapping. Only matching-key records that
+pass both CRC checks reach `create_cb`.
 
 Callbacks can reenter the cache. If a callback replaces the same key or resets
 capacity, the old lookup's `Remove(hash, identity)` cannot erase that new entry.
@@ -340,8 +344,9 @@ calls `del_cb` exactly once when a deleter exists. On callback failure, callback
 cleanup is the callback's responsibility; the wrapper ignores its failure output.
 
 With `adviseErase=true`, lookup removes only the captured identity; otherwise
-it checks whether that identity remains. Hits also update RocksDB's total and
-role-specific secondary-hit counters through `RecordHitStats`.
+it checks whether that identity remains at the final locked check. That result
+does not prevent a concurrent eviction immediately afterwards. Hits also update
+RocksDB's total and role-specific secondary-hit counters through `RecordHitStats`.
 
 `ResultHandle::Size()` returns callback `out_charge`, not saved-payload length.
 The successfully created value transfers to the caller under RocksDB's contract:
@@ -374,8 +379,9 @@ before region space fills.
 Configured budget pressure produces a counted best-effort drop or lookup miss.
 A real `std::bad_alloc` becomes `MemoryLimit` for status-returning operations.
 `ExceptionStatus` translates other exception categories; `ReportFailure` counts
-failures and attempts logging at counts 1, 2, 4, 8, ... . Ordinary pressure drops
-increment their dedicated counter without going through that logging path.
+failures and attempts logging at global counts 1, 2, 4, 8, ... across all reasons.
+Ordinary pressure drops increment their dedicated counter without going through
+that logging path.
 
 ### Failure scope matters
 
@@ -387,6 +393,7 @@ increment their dedicated counter without going through that logging path.
 | Record fails integrity validation | Conditionally remove the captured mapping; return miss |
 | Full key differs | Return miss without removing the collision mapping |
 | Buffered flush or direct write returns failure | Invalidate all mappings and buffered state; return an I/O error |
+| Exception during a preliminary flush or device read | Report an error or miss; does not take the false-return invalidation path |
 | Exception during the record write/buffer-copy stage | Invalidate cache mappings, then translate the exception |
 | Successful reset followed by reconfiguration failure | Remain empty/disabled; return error; a later resize can retry |
 
@@ -396,8 +403,10 @@ not durable media. Losing buffered entries on shutdown or failure is acceptable.
 There is no destructor-time persistence promise.
 
 `InvalidateLocked` advances incarnation and clears mappings, cursors, histories,
-buffer contents and usage. For an ordinary write failure it retains the layout
-and configured capacity, so a later insert can retry. `SetCapacity` does more:
+buffer contents and usage. For an ordinary write failure it retains the layout,
+allocated buffer/reverse-list storage, configured capacity and device files.
+Old disk bytes become unreachable rather than being deleted, so a later insert
+can retry. `SetCapacity` does more:
 validate first, invalidate, disable, release layout/buffer, clear owned files and
 configure a new empty layout. Even setting the same capacity is a cold reset.
 Invalid geometry is rejected before invalidation.

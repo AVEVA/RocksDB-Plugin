@@ -28,8 +28,8 @@ namespace {
 using Logger = boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>;
 
 /// <summary>
-/// 64-bit FNV-1a fingerprint of the key. Only this hash is kept in RAM; the full key stored in the record is
-/// compared on lookup, so a collision costs a miss, never a wrong value.
+/// 64-bit FNV-1a fingerprint of the key. The index stores this hash rather than full keys; buffered and transient
+/// record copies still contain the key. Full-key comparison on lookup makes collisions misses, not wrong-value hits.
 /// </summary>
 /// <param name="key">RocksDB cache key.</param>
 /// <returns>The index key, also stored in the record header.</returns>
@@ -71,9 +71,9 @@ void RecordHitStats(rocksdb::Statistics* stats, const rocksdb::CacheEntryRole ro
 } // namespace
 
 /// <summary>
-/// Facade logic behind RegionBasedSecondaryCache: serializes and validates records, owns RocksDB-created values
-/// until they reach a handle, enforces the transient budget and turns every exception into a Status. Public
-/// methods mirror the facade; see its header for their contracts.
+/// Facade logic behind RegionBasedSecondaryCache: serializes and validates records, guards successfully created
+/// values until handoff and budgets transient byte buffers. Exceptions become Status errors, lookup misses or
+/// counted failures for void operations. Public methods mirror the facade; see its header for their contracts.
 /// </summary>
 class RegionBasedSecondaryCache::Impl {
     /// Construction options; only maxEntrySize is consulted afterwards.
@@ -82,7 +82,8 @@ class RegionBasedSecondaryCache::Impl {
     std::shared_ptr<Logger> m_logger;
     /// Counters shared with m_regions; mutable so const methods can count failures.
     mutable Secondary::CacheStats m_stats;
-    /// Budget for short-lived buffers: serialized payloads, encoded records and lookup copies.
+    /// Budget for serialized payloads, encoded records and lookup copies; excludes handles and callback-created
+    /// objects.
     Secondary::MemoryBudget m_transient;
     /// Index, regions and device. Declared after m_stats, which it references.
     Secondary::RegionManager m_regions;
@@ -203,7 +204,7 @@ class RegionBasedSecondaryCache::Impl {
             if (adviseErase) {
                 m_regions.Remove(keyHash, identity);
             }
-            // Identity-checked: a concurrent replace, erase, reclaim or reset means this copy is no longer kept.
+            // Snapshot only: match the exact copy under the lock; another operation can remove it after this check.
             keptInSecondaryCache = !adviseErase && m_regions.Contains(keyHash, identity);
             ++m_stats.hits;
             RecordHitStats(stats, helper->role);
@@ -274,8 +275,8 @@ class RegionBasedSecondaryCache::Impl {
     /// while out of memory. Must be called from inside a catch block.
     /// </summary>
     /// <returns>
-    /// MemoryLimit for allocation failures, InvalidArgument, IOError for device or filesystem errors (also counted
-    /// in ioErrors), otherwise Aborted.
+    /// MemoryLimit for std::bad_alloc, InvalidArgument for std::invalid_argument, IOError for DeviceError or
+    /// filesystem_error (also counted in ioErrors), otherwise Aborted.
     /// </returns>
     rocksdb::Status ExceptionStatus() const noexcept {
         ReportFailure("operation threw; cache operation failed");
@@ -297,10 +298,10 @@ class RegionBasedSecondaryCache::Impl {
     }
 
     /// <summary>
-    /// Counts a failure in errors and logs the 1st, 2nd, 4th, 8th, ... occurrence, so a persistent fault cannot
-    /// flood the log.
+    /// Counts a failure in errors and attempts logging at global counts 1, 2, 4, 8, ... across all operations and
+    /// reasons. Logging exceptions are suppressed; the counter remains observable.
     /// </summary>
-    /// <param name="reason">Static description of the failure; not copied.</param>
+    /// <param name="reason">Description consumed synchronously; not retained by the cache.</param>
     void ReportFailure(const char* reason) const noexcept {
         // First failure and powers of two: bounded log traffic, no status formatting on OOM.
         const uint64_t count = m_stats.errors.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -314,7 +315,7 @@ class RegionBasedSecondaryCache::Impl {
     }
 
     /// <summary>
-    /// Admission precheck before any allocation. Counts the matching drop when the record is unrepresentable,
+    /// Admission precheck before allocating payload/record buffers. Counts a drop when the record is unrepresentable,
     /// larger than maxEntrySize or capacity, or the cache is disabled.
     /// </summary>
     /// <param name="keySize">Key length in bytes.</param>

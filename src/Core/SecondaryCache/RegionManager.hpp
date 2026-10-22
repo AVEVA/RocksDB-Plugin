@@ -14,9 +14,9 @@
 
 namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache {
 /// <summary>
-/// Owns all mutable cache state: the hash index, the FIFO ring of regions, the single append buffer and the block
-/// device. Records are opaque, already-encoded byte spans; this class never decodes them. Every public method takes
-/// m_mutex, so callers need no locking; *Locked helpers require it to be held.
+/// Owns mutable storage state: the hash index, FIFO region ring, single append buffer and block device. Records
+/// are opaque, already-encoded byte spans; this class never decodes them. After construction, m_mutex protects
+/// storage state; callers need no locking. *Locked helpers require the lock except during construction.
 /// </summary>
 class RegionManager {
   public:
@@ -45,10 +45,10 @@ class RegionManager {
     };
 
     /// <summary>
-    /// Validates options and allocates the region layout before creating and configuring the device, so invalid
-    /// geometry or an undersized metadata budget never touches the filesystem.
+    /// Validates options and allocates the region layout before creating the device. Invalid geometry or failure
+    /// to allocate that layout cannot touch the filesystem; device setup can still fail after claiming its directory.
     /// </summary>
-    /// <param name="factory">Creates the backing device; called exactly once.</param>
+    /// <param name="factory">Creates a non-null backing device; invoked once after layout allocation succeeds.</param>
     /// <param name="options">Geometry, initial capacity and budgets.</param>
     /// <param name="stats">Counters to update; must outlive this object.</param>
     /// <exception cref="std::invalid_argument">options fail Validate.</exception>
@@ -77,6 +77,11 @@ class RegionManager {
     /// </returns>
     /// <exception cref="BudgetExceeded">Index or reverse-list growth exceeds the metadata budget; the record is not
     /// admitted.</exception>
+    /// <remarks>
+    /// Region selection can evict older entries before admission later fails. A false device write invalidates all
+    /// mappings; an exception during the direct-write/buffer-copy stage does too. A preliminary flush exception
+    /// propagates without that invalidation.
+    /// </remarks>
     rocksdb::Status Append(uint64_t hash, std::span<const std::byte> record, size_t payloadSize);
 
     /// <summary>
@@ -84,8 +89,10 @@ class RegionManager {
     /// from the device. Does not validate them.
     /// </summary>
     /// <param name="hash">Key fingerprint to look up.</param>
-    /// <param name="record">[out] Resized to the mapped length and filled on kOk.</param>
-    /// <param name="identity">[out] The copy that was read; set on kOk and kIoError.</param>
+    /// <param name="record">[out] Unchanged on kMiss; resized and filled on kOk. Do not use its bytes after
+    /// kIoError or an exception.</param>
+    /// <param name="identity">[out] Unchanged on kMiss; set before copying on a hit, even if copying then
+    /// fails.</param>
     /// <returns>kOk, kMiss, or kIoError (the failed mapping is removed).</returns>
     /// <exception cref="BudgetExceeded">record cannot grow within its allocator's budget.</exception>
     ReadStatus Read(uint64_t hash, RecordBytes& record, Identity& identity);
@@ -114,7 +121,11 @@ class RegionManager {
     /// <returns>OK.</returns>
     /// <exception cref="std::invalid_argument">Geometry is invalid for capacity; existing state is
     /// preserved.</exception>
-    /// <remarks>Any other exception happens after the reset and leaves the cache disabled.</remarks>
+    /// <exception cref="std::overflow_error">Incarnation exhausted; existing state is preserved.</exception>
+    /// <remarks>
+    /// Lock acquisition can also fail before invalidation. Once invalidation completes, later failures leave the
+    /// cache disabled; region-file deletion may be incomplete.
+    /// </remarks>
     rocksdb::Status SetCapacity(size_t capacity);
 
     /// <returns>Current capacity in bytes; 0 means disabled.</returns>
@@ -134,8 +145,8 @@ class RegionManager {
         /// Fill number: bumped on every reclaim, reset to 1 by invalidation (which bumps m_incarnation instead).
         /// Makes copies written at the same offset in different fills compare unequal.
         uint32_t generation{1};
-        /// Next append offset in bytes. For m_current, the last m_buffer.size() bytes before it exist only in
-        /// m_buffer.
+        /// Next append offset in bytes. For m_current, the last m_buffer.size() bytes before it are not yet
+        /// written to the device; they are served from m_buffer.
         size_t cursor{0};
         /// Reverse list of hashes appended during this generation, used to unmap them on reclaim. May hold stale or
         /// duplicate hashes; reclaim unmaps only those still mapped to this region and generation.
@@ -150,7 +161,8 @@ class RegionManager {
 
     /// <summary>
     /// Drops every mapping, region fill and buffered byte, and bumps m_incarnation so outstanding identities go
-    /// stale. Keeps the layout and capacity.
+    /// stale. Keeps the layout, allocated buffer/reverse-list storage, capacity and device files; disk bytes
+    /// become unreachable, not deleted.
     /// </summary>
     /// <exception cref="std::overflow_error">m_incarnation is exhausted.</exception>
     void InvalidateLocked();
@@ -198,8 +210,8 @@ class RegionManager {
     std::vector<Region, BudgetAllocator<Region>> m_regions;
     /// Backing store for flushed bytes.
     std::unique_ptr<BlockDevice> m_device;
-    /// Unflushed tail of m_current, ending at its cursor; capacity is flushBlockSize. Records larger than
-    /// flushBlockSize bypass it.
+    /// Unflushed tail of m_current, ending at its cursor; size never exceeds flushBlockSize, with storage reserved
+    /// up front. Larger records bypass it. Separate from the metadata and transient budgets.
     std::vector<std::byte> m_buffer;
     /// Region receiving appends; UINT32_MAX when none is selected (startup or after invalidation).
     uint32_t m_current{UINT32_MAX};

@@ -58,7 +58,7 @@ static_assert(sizeof(RecordHeader) == 32);
 /// Outcome of DecodeRecord. Failures are listed in check order, except that a buffer shorter than a header is
 /// reported as kBadLength before any other check.
 enum class DecodeResult : uint8_t {
-    /// Record is intact and stores the expected key.
+    /// Structural/CRC checks passed and the full key matches; see DecodeRecord for unchecked fields.
     kOk,
     /// Bytes do not start with kRecordMagic.
     kBadMagic,
@@ -68,7 +68,7 @@ enum class DecodeResult : uint8_t {
     kBadLength,
     /// Header or key bytes are corrupt.
     kBadHeaderCrc,
-    /// Record is intact but stores a different key (fingerprint collision).
+    /// Header/key CRC passed but the key differs; payload CRC has not been checked.
     kKeyMismatch,
     /// Payload bytes are corrupt.
     kBadPayloadCrc,
@@ -114,8 +114,8 @@ struct DecodedRecordView {
 
 /// <summary>Writes a complete record, including both CRCs, and zero-fills the alignment pad.</summary>
 /// <param name="dst">[out] Destination; its size must equal RecordSize(key.size(), payload.size()).</param>
-/// <param name="key">Full cache key.</param>
-/// <param name="payload">Serialized value.</param>
+/// <param name="key">Full cache key; must not overlap dst.</param>
+/// <param name="payload">Serialized value; must not overlap dst.</param>
 /// <param name="type">Compression of payload.</param>
 /// <param name="tier">Tier payload came from.</param>
 /// <param name="keyHash">Key fingerprint to store; callers pass the same hash they index by.</param>
@@ -126,9 +126,9 @@ struct DecodedRecordView {
                                 rocksdb::CacheTier tier, uint64_t keyHash,
                                 RecordFlags flags = RecordFlags::kNone) noexcept;
 
-/// <summary>Copies the packed header out of src without validating anything.</summary>
+/// <summary>Copies the packed header if src is long enough; does not validate header fields.</summary>
 /// <param name="src">Record bytes.</param>
-/// <param name="headerOut">[out] Receives the header on success.</param>
+/// <param name="headerOut">[out] Receives the header on success; unchanged on failure.</param>
 /// <returns>False if src is shorter than a header.</returns>
 [[nodiscard]] bool TryReadHeader(std::span<const std::byte> src, RecordHeader& headerOut) noexcept;
 
@@ -144,6 +144,10 @@ struct DecodedRecordView {
 /// <param name="expectedKey">Key the caller looked up; compared in full.</param>
 /// <param name="decodedOut">[out] Filled only on kOk; its payload aliases src.</param>
 /// <returns>kOk, or the first check that failed.</returns>
+/// <remarks>
+/// Does not validate padding, compression/tier/flag enum values, or whether keyHash is the expected fingerprint.
+/// Full-key comparison, rather than keyHash, establishes the key match.
+/// </remarks>
 [[nodiscard]] DecodeResult DecodeRecord(std::span<const std::byte> src, std::span<const std::byte> expectedKey,
                                         DecodedRecordView& decodedOut) noexcept;
 } // namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache
