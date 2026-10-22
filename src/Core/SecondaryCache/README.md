@@ -9,6 +9,10 @@ This directory implements `RegionBasedSecondaryCache`, a region-based local
 secondary cache for RocksDB's serialized block-cache entries, not SST files.
 The former file-per-entry/LRU implementation and its public API have been removed.
 
+For a review-oriented walkthrough of state, class/function responsibilities and
+worked insert/large-entry/FIFO examples, read the
+[developer guide](DEVELOPER-GUIDE.md).
+
 This is a deliberately synchronous correctness baseline. One mutex protects
 placement, the index, FIFO reclaim, file access and accounting. Callbacks run
 outside that mutex. It is not the final nonblocking spill implementation.
