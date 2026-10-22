@@ -66,10 +66,19 @@ template <typename TBlob> class BasicReadableFileImpl {
         std::vector<PrefetchSlot> Slots; // Oldest first.
         // Reads waiting for a pending slot (by id) to settle. Kept outside the slots so a slot that is cleared while
         // downloading still releases its waiters when its download finishes.
-        std::vector<std::pair<uint64_t, std::move_only_function<void()>>> Waiters;
+        // Grouped per slot id so completion detaches one group with a non-throwing move instead of allocating.
+        struct WaiterGroup {
+            uint64_t Id = 0;
+            std::vector<std::move_only_function<void()>> Callbacks;
+        };
+        std::vector<WaiterGroup> Waiters;
         std::shared_ptr<std::atomic<int64_t>> Budget;
 
         ~PrefetchState();
+        // Queues a waiter for `id`. On allocation failure `waiter` is left untouched. Caller holds Mutex.
+        void AddWaiter(uint64_t id, std::move_only_function<void()>& waiter);
+        // Detaches every waiter of `id` without allocating. Caller holds Mutex.
+        [[nodiscard]] std::vector<std::move_only_function<void()>> TakeWaiters(uint64_t id) noexcept;
         // Removes a slot and returns its bytes to the budget. Caller holds Mutex.
         void Drop(std::vector<PrefetchSlot>::iterator slot);
         void DropAll();

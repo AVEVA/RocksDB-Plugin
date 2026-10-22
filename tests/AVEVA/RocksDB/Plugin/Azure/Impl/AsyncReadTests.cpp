@@ -359,6 +359,68 @@ TEST_F(AsyncReadTests, PrefetchCompletion_ThrowingWaiter_DoesNotEscapeOrSkipTheO
 
     EXPECT_TRUE(secondRan);
 }
+TEST_F(AsyncReadTests, PrefetchCompletion_ManyInterleavedWaiters_EachRunsOnceAndOnlyForItsSlot) {
+    auto file = std::make_shared<FakeReadableFileImpl>("test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
+                                                       m_logger);
+    ASSERT_TRUE(FakeReadableFileImpl::Prefetch(file, 0, 512));
+    ASSERT_TRUE(FakeReadableFileImpl::Prefetch(file, 1024, 512));
+    constexpr int kWaitersPerSlot = 3000;
+    std::vector<int> ranA(kWaitersPerSlot, 0);
+    std::vector<int> ranB(kWaitersPerSlot, 0);
+    for (int i = 0; i < kWaitersPerSlot; ++i) {
+        std::move_only_function<void()> a = [&ranA, i] { ++ranA[i]; };
+        std::move_only_function<void()> b = [&ranB, i] { ++ranB[i]; };
+        ASSERT_TRUE(file->ChainOntoPendingPrefetch(100, 64, a));
+        ASSERT_TRUE(file->ChainOntoPendingPrefetch(1100, 64, b));
+    }
+
+    auto first = m_deferredEnv.Blob->TakeDownload();
+    ASSERT_EQ(0, first.Request.Offset);
+    first.Succeed(std::string(512, 'A'));
+    ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return ranA.back() == 1; }));
+    EXPECT_EQ(std::vector<int>(kWaitersPerSlot, 1), ranA);
+    EXPECT_EQ(std::vector<int>(kWaitersPerSlot, 0), ranB);
+
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'B'));
+    ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return ranB.back() == 1; }));
+    EXPECT_EQ(std::vector<int>(kWaitersPerSlot, 1), ranA);
+    EXPECT_EQ(std::vector<int>(kWaitersPerSlot, 1), ranB);
+}
+
+TEST_F(AsyncReadTests, PrefetchCompletion_SlotInvalidatedDuringDownload_StillReleasesWaiters) {
+    auto file = std::make_shared<FakeReadableFileImpl>("test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
+                                                       m_logger);
+    ASSERT_TRUE(FakeReadableFileImpl::Prefetch(file, 0, 512));
+    int ran = 0;
+    std::move_only_function<void()> waiter = [&ran] { ++ran; };
+    ASSERT_TRUE(file->ChainOntoPendingPrefetch(100, 64, waiter));
+
+    m_deferredEnv.Blob->ETag = "etag2";
+    m_deferredEnv.AdvanceMetadataClock(Configuration::MetadataCacheTtl);
+    EXPECT_EQ(BlobSize, file->GetSize());
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'P'));
+
+    ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return ran == 1; }));
+    EXPECT_EQ(1, ran);
+    std::vector<char> buffer(64);
+    EXPECT_FALSE(file->TryReadFromCache(100, 64, buffer.data()).has_value());
+}
+
+TEST_F(AsyncReadTests, PrefetchChain_OntoSettledSlot_DeclinesAndKeepsTheCallback) {
+    auto file = std::make_shared<FakeReadableFileImpl>("test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
+                                                       m_logger);
+    ASSERT_TRUE(FakeReadableFileImpl::Prefetch(file, 0, 512));
+    int ran = 0;
+    std::move_only_function<void()> waiter = [&ran] { ++ran; };
+    ASSERT_TRUE(file->ChainOntoPendingPrefetch(100, 64, waiter));
+    // A later chain onto a settled slot is declined and must not consume the callback.
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'P'));
+    ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return ran == 1; }));
+    std::move_only_function<void()> late = [&ran] { ++ran; };
+    EXPECT_FALSE(file->ChainOntoPendingPrefetch(100, 64, late));
+    EXPECT_TRUE(static_cast<bool>(late));
+}
+
 TEST_F(AsyncReadTests, ReadAsync_ChainedOntoFailedPrefetch_FallsBackToOwnDownload) {
     auto file = CreateFile(m_deferredEnv);
     ASSERT_TRUE(file.Prefetch(1024, 2048, rocksdb::IOOptions{}, nullptr).ok());

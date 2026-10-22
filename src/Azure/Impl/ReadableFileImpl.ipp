@@ -224,6 +224,38 @@ template <typename TBlob> void BasicReadableFileImpl<TBlob>::SetMetadata(const i
 template <typename TBlob> BasicReadableFileImpl<TBlob>::PrefetchState::~PrefetchState() { DropAll(); }
 
 template <typename TBlob>
+void BasicReadableFileImpl<TBlob>::PrefetchState::AddWaiter(const uint64_t id,
+                                                            std::move_only_function<void()>& waiter) {
+    auto group = std::ranges::find(Waiters, id, &WaiterGroup::Id);
+    if (group == Waiters.end()) {
+        Waiters.reserve(Waiters.size() + 1);
+        group = Waiters.emplace(Waiters.end());
+        group->Id = id;
+    }
+    // Reserved first so the move below cannot fail and strand the caller's callback.
+    try {
+        group->Callbacks.reserve(group->Callbacks.size() + 1);
+    } catch (...) {
+        if (group->Callbacks.empty()) {
+            Waiters.erase(group);
+        }
+        throw;
+    }
+    group->Callbacks.push_back(std::move(waiter));
+}
+
+template <typename TBlob>
+std::vector<std::move_only_function<void()>>
+BasicReadableFileImpl<TBlob>::PrefetchState::TakeWaiters(const uint64_t id) noexcept {
+    std::vector<std::move_only_function<void()>> taken;
+    if (const auto group = std::ranges::find(Waiters, id, &WaiterGroup::Id); group != Waiters.end()) {
+        taken = std::move(group->Callbacks);
+        Waiters.erase(group);
+    }
+    return taken;
+}
+
+template <typename TBlob>
 void BasicReadableFileImpl<TBlob>::PrefetchState::Drop(const std::vector<PrefetchSlot>::iterator slot) {
     if (Budget) {
         Budget->fetch_sub(slot->Length);
@@ -307,6 +339,8 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
                       std::vector<std::move_only_function<void()>> waiters;
                       {
                           std::scoped_lock lock(state->Mutex);
+                          // Detached first so nothing after this point can fail before the waiters are notified.
+                          waiters = state->TakeWaiters(id);
                           const auto slot = std::ranges::find(state->Slots, id, &PrefetchSlot::Id);
                           if (slot != state->Slots.end()) {
                               if (error) {
@@ -323,14 +357,6 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
                                   // The slot keeps the pooled download buffer instead of copying up to 8 MiB out of it.
                                   slot->Owner = std::move(owner);
                                   slot->Data = data;
-                              }
-                          }
-                          for (auto it = state->Waiters.begin(); it != state->Waiters.end();) {
-                              if (it->first == id) {
-                                  waiters.push_back(std::move(it->second));
-                                  it = state->Waiters.erase(it);
-                              } else {
-                                  ++it;
                               }
                           }
                       }
@@ -350,22 +376,12 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
                       }
                   });
     } catch (...) {
-        {
-            std::scoped_lock lock(state->Mutex);
-            if (const auto slot = std::ranges::find(state->Slots, id, &PrefetchSlot::Id); slot != state->Slots.end()) {
-                state->Drop(slot);
-            }
-        }
         std::vector<std::move_only_function<void()>> waiters;
         {
             std::scoped_lock lock(state->Mutex);
-            for (auto it = state->Waiters.begin(); it != state->Waiters.end();) {
-                if (it->first == id) {
-                    waiters.push_back(std::move(it->second));
-                    it = state->Waiters.erase(it);
-                } else {
-                    ++it;
-                }
+            waiters = state->TakeWaiters(id);
+            if (const auto slot = std::ranges::find(state->Slots, id, &PrefetchSlot::Id); slot != state->Slots.end()) {
+                state->Drop(slot);
             }
         }
         state->Done.notify_all();
@@ -479,7 +495,7 @@ bool BasicReadableFileImpl<TBlob>::ChainOntoPendingPrefetch(const int64_t offset
     if (slot == m_prefetch.Slots.end()) {
         return false;
     }
-    m_prefetch.Waiters.emplace_back(slot->Id, std::move(resume));
+    m_prefetch.AddWaiter(slot->Id, resume);
     return true;
 }
 
