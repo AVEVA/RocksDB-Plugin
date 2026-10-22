@@ -680,6 +680,10 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         if (!m_failure.has_value() && (!m_end.has_value() || *m_end < m_begin || m_written != *m_end - m_begin)) {
             Fail(MakeInvalidResponse("The download ended before all data was received."));
         }
+        // The last write can outlast the budget after the final response arrived in time.
+        if (!m_failure.has_value() && m_deadline.Expired()) {
+            Fail(MakeFailure(std::errc::timed_out, "The download exceeded its total deadline."));
+        }
         if (m_failure.has_value()) {
             Finish(std::unexpected(std::move(*m_failure)));
             return;
@@ -772,10 +776,13 @@ using FileResult = std::expected<Response<Models::DownloadBlobToResult>, BlobSto
 // and `Completed` keeps the completion exactly-once however many paths race to fail the download.
 template <class TCompletion> struct FileDownloadState {
     FileDownloadState(std::optional<DownloadWriteScheduler> scheduler, std::filesystem::path targetPath,
-                      TCompletion userCompletion)
-        : Scheduler(std::move(scheduler)), Target(std::move(targetPath)), Completion(std::move(userCompletion)) {}
+                      TCompletion userCompletion, const AzureRequestOptions& requestOptions,
+                      std::chrono::steady_clock::time_point start)
+        : Scheduler(std::move(scheduler)), Deadline(requestOptions, start), Target(std::move(targetPath)),
+          Completion(std::move(userCompletion)) {}
 
     std::optional<DownloadWriteScheduler> Scheduler;
+    AggregateDeadline Deadline;
     std::filesystem::path TempPath;
     std::filesystem::path Target;
     TCompletion Completion;
@@ -847,6 +854,11 @@ void FinishFileDownloadOnWriter(THttp& httpClient, const std::shared_ptr<TState>
         if (state->Canceled.load() && state->Result->has_value()) {
             AbandonFileDownload(httpClient, state,
                                 MakeFailure(std::errc::operation_canceled, "The operation was canceled."));
+            return;
+        }
+        if (state->Result->has_value() && state->Deadline.Expired()) {
+            AbandonFileDownload(httpClient, state,
+                                MakeFailure(std::errc::timed_out, "The download exceeded its total deadline."));
             return;
         }
         auto result =
@@ -924,8 +936,11 @@ void DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobT
                              DownloadToOptions operationOptions, const std::filesystem::path& path,
                              TCompletion completion, AzureRequestOptions requestOptions) {
     using State = DownloadDetail::FileDownloadState<TCompletion>;
+    // The budget covers the hand-offs to the writer and back, so it starts here rather than at the first GET.
+    const auto start = std::chrono::steady_clock::now();
     // Holds the completion and temporary path for the whole operation, so no hand-off can lose them if it throws.
-    auto state = std::make_shared<State>(operationOptions.WriteScheduler, path, std::move(completion));
+    auto state =
+        std::make_shared<State>(operationOptions.WriteScheduler, path, std::move(completion), requestOptions, start);
     auto scheduler = operationOptions.WriteScheduler;
     if (auto parentSlot = requestOptions.GetCancellationSlot(); parentSlot.is_connected()) {
         std::weak_ptr<State> const weak = state;
@@ -942,8 +957,6 @@ void DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobT
         });
         requestOptions.SetCancellationSlot(state->Signal.slot());
     }
-    // The budget covers the hand-offs to the writer and back, so it starts here rather than at the first GET.
-    const auto start = std::chrono::steady_clock::now();
     try {
         DownloadDetail::RunOnWriter(
             httpClient, scheduler,

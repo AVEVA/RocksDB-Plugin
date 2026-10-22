@@ -42,6 +42,14 @@ class AggregateDeadline {
         return true;
     }
 
+    /// <summary>
+    /// Whether the budget is spent; used for work that cannot be interrupted, such as the last disk write, to decide
+    /// whether an otherwise successful operation may still be reported as one.
+    /// </summary>
+    [[nodiscard]] bool Expired() const noexcept {
+        return m_end.has_value() && std::chrono::steady_clock::now() >= *m_end;
+    }
+
   private:
     std::optional<std::chrono::steady_clock::time_point> m_end;
 };

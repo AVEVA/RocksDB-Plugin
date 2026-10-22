@@ -1116,6 +1116,60 @@ TEST(T11_ParallelDownloadAcceptanceTests, CancellationAfterTheLastChunkBeforeFin
 }
 
 namespace {
+// A one-chunk file download over an existing destination with a 400 ms budget whose last write is held up past it.
+void ExpectDeadlinePassingInLastDiskWorkTimesOut() {
+    FakeHttpClient httpClient;
+    EnqueueChunks(httpClient, MakeContent(3), 3U, "\"etag-a\"");
+    BlobClient client{httpClient, BuildOptions()};
+
+    boost::asio::thread_pool pool{1U};
+    auto options = Parallel(3U, 1U);
+    options.WriteScheduler = pool.get_executor();
+    AVEVA::AzureClient::AzureRequestOptions requestOptions;
+    requestOptions.SetTotalDeadline(std::chrono::milliseconds{400});
+    TempFile out;
+    CreateFileWithContents(out.Path, "old");
+    int callbackCount = 0;
+    std::optional<DownloadToResult> result;
+    client.DownloadToAsync(
+        out.Path, options,
+        [&](DownloadToResult value) {
+            ++callbackCount;
+            result = std::move(value);
+        },
+        requestOptions);
+    ASSERT_TRUE(httpClient.WaitForRequest(1U));
+
+    std::promise<void> started;
+    std::promise<void> release;
+    const auto block = [&] {
+        boost::asio::post(pool, [&started, gate = release.get_future()]() mutable {
+            started.set_value();
+            gate.wait();
+        });
+        started.get_future().wait();
+    };
+    block();
+    ASSERT_TRUE(httpClient.CompleteRequest(0U));
+    // The last response arrived within budget; the paused disk work is what outlasts it.
+    std::this_thread::sleep_for(std::chrono::milliseconds{450});
+    release.set_value();
+    ASSERT_TRUE(httpClient.RunUntil([&] { return callbackCount > 0; }));
+    pool.join();
+
+    ASSERT_EQ(callbackCount, 1);
+    ASSERT_FALSE(result->has_value());
+    EXPECT_EQ(result->error().Code, std::make_error_code(std::errc::timed_out));
+    EXPECT_EQ(ReadFile(out.Path), "old");
+    EXPECT_FALSE(HasPartialFiles(out.Path));
+}
+} // namespace
+
+TEST(T11_ParallelDownloadAcceptanceTests, DeadlinePassingDuringTheLastWriteTimesOutAndKeepsTheDestination) {
+    ExpectDeadlinePassingInLastDiskWorkTimesOut();
+}
+
+namespace {
 // Makes chosen posts throw, as an allocation failure would. Writer posts are counted across every thread; posts to
 // the I/O executor are counted only when made off the test thread (that is, by a writer).
 struct PostFaults {
