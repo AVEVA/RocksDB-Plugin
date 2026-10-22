@@ -702,7 +702,7 @@ TEST_F(BlobFilesystemIntegrationTests, ReopenWriteableFile_PreservesExistingData
     EXPECT_EQ(initialData.size() + newData.size(), m_filesystem->GetFileSize(path));
 }
 
-TEST_F(BlobFilesystemIntegrationTests, ReuseWritableFile_CreatesNewFile) {
+TEST_F(BlobFilesystemIntegrationTests, CreateWriteableFile_OverwritesExistingFile) {
     // Arrange
     const auto path = m_containerPrefix + "/" + m_blobName;
     std::vector<char> oldData(1024, 'X');
@@ -712,8 +712,8 @@ TEST_F(BlobFilesystemIntegrationTests, ReuseWritableFile_CreatesNewFile) {
 
     EXPECT_EQ(oldData.size(), m_filesystem->GetFileSize(path));
 
-    // Act - Reuse the file (should delete and recreate)
-    auto reusedFile = m_filesystem->ReuseWritableFile(path);
+    // Act - Create over the existing file (should replace it)
+    auto reusedFile = m_filesystem->CreateWriteableFile(path);
 
     // Assert - File should be reset
     EXPECT_TRUE(m_filesystem->FileExists(path));

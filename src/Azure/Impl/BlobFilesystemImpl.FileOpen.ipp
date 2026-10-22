@@ -94,30 +94,6 @@ BasicBlobFilesystemImpl<THttp>::ReopenWriteableFile(const std::string& filePath)
 }
 
 template <typename THttp>
-typename BasicBlobFilesystemImpl<THttp>::WriteableFileType
-BasicBlobFilesystemImpl<THttp>::ReuseWritableFile(const std::string& filePath) {
-    EnsureLiveness();
-
-    auto [prefix, realPath, blob] = ResolveBlob(filePath);
-    const auto [initialSize, bufferSize] =
-        BlobFilesystemDetail::SizingFor(filePath, m_dataFileInitialSize, m_dataFileBufferSize);
-
-    auto cache = BlobFilesystemDetail::FindCache(m_fileCaches, prefix);
-    {
-        const boost::scope::scope_exit dropCached{[&] {
-            if (cache) {
-                cache->RemoveFile(realPath);
-            }
-        }};
-        BlobOperations::CreateOrReplace(*m_runtime, blob, initialSize);
-    }
-
-    return WriteableFileType{
-        realPath, m_runtime,  std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)), std::move(cache),
-        m_logger, bufferSize, typename WriteableFileType::BlobState{0, initialSize}};
-}
-
-template <typename THttp>
 LoggerImpl BasicBlobFilesystemImpl<THttp>::CreateLogger(const std::string& filePath, const int logLevel,
                                                         const std::chrono::seconds cooldown) {
     EnsureLiveness();

@@ -620,7 +620,6 @@ TEST_F(CachedFailureTests, OverwritingCreateThatFailsStillDropsTheCachedCopy) {
     };
 
     EXPECT_ANY_THROW((void)m_cached->CreateWriteableFile(Path("o.sst")));
-    EXPECT_ANY_THROW((void)m_cached->ReuseWritableFile(Path("o.sst")));
 
     std::vector<char> buffer(1024);
     EXPECT_FALSE(file->TryReadFromCache(0, 1024, buffer.data()).has_value());

@@ -197,7 +197,6 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     [[nodiscard]] WriteableFileType CreateWriteableFile(const std::string& filePath);
     [[nodiscard]] ReadWriteFileType CreateReadWriteFile(const std::string& filePath);
     [[nodiscard]] WriteableFileType ReopenWriteableFile(const std::string& filePath);
-    [[nodiscard]] WriteableFileType ReuseWritableFile(const std::string& filePath);
     LoggerImpl CreateLogger(const std::string& filePath, int logLevel,
                             std::chrono::seconds cooldown = Configuration::LogRateLimiterCooldown);
     std::shared_ptr<LockFileType> LockFile(const std::string& filePath);
