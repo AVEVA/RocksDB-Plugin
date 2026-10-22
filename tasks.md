@@ -471,7 +471,9 @@ the ordinary no-match result instead of treating either as a skip.
 buffer, a true no-match diff, and a failing producer. Select the build for the
 first case, skip only the second, and explicitly fail the third.
 
-### [ ] T122 - Share one stale-read refresh budget across partial-prefetch recovery
+### [x] T122 - Share one stale-read refresh budget across partial-prefetch recovery
+
+**Result:** Done. Regression `Read_OverwrittenAfterPrefetchAndAgainDuringRecovery_SharesOneRefreshBudget` (suffix 412 twice then success, whole-range re-read 412 every time) failed before the fix (9 downloads vs bound kMaxStaleReadRetries+2 = 7, and the stale-read error). `RandomRead` now passes one `refreshesLeft` budget into both `DownloadWithRetry` calls; stable-ETag suffix-only path unchanged and existing error returned on exhaustion.
 
 **Status:** Source-traced; follow-up to T99's untested exhaustion case.
 

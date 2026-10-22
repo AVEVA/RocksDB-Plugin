@@ -94,7 +94,7 @@ template <typename TBlob> class BasicReadableFileImpl {
     [[nodiscard]] std::optional<size_t> TryReadFromPrefetch(int64_t offset, int64_t bytesToRead, char* buffer,
                                                             bool wait, bool allowPartial = false) const;
     void ClearPrefetch() const;
-    int64_t DownloadWithRetry(const int64_t offset, const int64_t bytesToRead, char* buffer) const;
+    int64_t DownloadWithRetry(const int64_t offset, const int64_t bytesToRead, char* buffer, int& refreshesLeft) const;
     [[nodiscard]] std::pair<int64_t, std::string> GetMetadata() const;
     void SetMetadata(int64_t size, std::string etag) const;
     // Publishes a refreshed (size, ETag) to the runtime cache for later opens, then to this file. `epoch` is the

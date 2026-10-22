@@ -165,11 +165,13 @@ int64_t BasicReadableFileImpl<TBlob>::RandomRead(const int64_t offset, int64_t b
         }
     }
 
-    // Only the part the prefetch did not cover is downloaded.
-    auto bytesRead = DownloadWithRetry(offset + served, bytesToRead - served, buffer + served);
+    // Only the part the prefetch did not cover is downloaded. The suffix and the whole-range re-read share one
+    // stale-read budget so a single read cannot spend it twice under churn.
+    int refreshesLeft = kMaxStaleReadRetries;
+    auto bytesRead = DownloadWithRetry(offset + served, bytesToRead - served, buffer + served, refreshesLeft);
     if (served > 0 && !HasETag(prefetchEtag)) {
         served = 0;
-        bytesRead = DownloadWithRetry(offset, bytesToRead, buffer);
+        bytesRead = DownloadWithRetry(offset, bytesToRead, buffer, refreshesLeft);
     }
     bytesRead = std::max<int64_t>(bytesRead, 0);
 
@@ -668,14 +670,13 @@ void BasicReadableFileImpl<TBlob>::CoalescedMetadataAsync(
 
 // Downloads from the blob conditioned on the cached ETag. When the blob changed underneath us (precondition
 // failure, or reading at the cached end of a blob whose ETag moved on) the metadata is refreshed and the read
-// retried, so readers observe data appended by other writers.
+// retried, so readers observe data appended by other writers. `refreshesLeft` is the caller's per-read budget.
 template <typename TBlob>
-int64_t BasicReadableFileImpl<TBlob>::DownloadWithRetry(const int64_t offset, const int64_t bytesToRead,
-                                                        char* buffer) const {
+int64_t BasicReadableFileImpl<TBlob>::DownloadWithRetry(const int64_t offset, const int64_t bytesToRead, char* buffer,
+                                                        int& refreshesLeft) const {
     int64_t bytesRead = 0;
 
     bool success = false;
-    int refreshesLeft = kMaxStaleReadRetries;
     do {
         auto [size, etag] = GetMetadata();
         auto remaining = std::max<int64_t>(0, size - offset);

@@ -433,6 +433,45 @@ TEST_F(AsyncReadTests, Read_BlobOverwrittenAfterPrefetch_NeverReturnsMixedVersio
     EXPECT_EQ(std::string(512, 'N'), result.ToString());
 }
 
+TEST_F(AsyncReadTests, Read_OverwrittenAfterPrefetchAndAgainDuringRecovery_SharesOneRefreshBudget) {
+    auto file = CreateFile(m_deferredEnv);
+    ASSERT_TRUE(file.Prefetch(0, 512, rocksdb::IOOptions{}, nullptr).ok());
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'P'));
+
+    std::vector<char> scratch(512);
+    rocksdb::Slice result;
+    auto reading = std::async(std::launch::async, [&] {
+        return file.Read(256, scratch.size(), rocksdb::IOOptions{}, &result, scratch.data(), nullptr);
+    });
+
+    // The suffix download is refused twice (the blob changed), then succeeds; the whole range is then re-read and
+    // refused every time. Both phases must draw on the same stale-read budget.
+    int downloads = 0;
+    while (reading.wait_for(std::chrono::milliseconds{10}) != std::future_status::ready) {
+        if (m_deferredEnv.Blob->PendingDownloads() > 0) {
+            auto download = m_deferredEnv.Blob->TakeDownload();
+            ++downloads;
+            if (downloads == 1) {
+                m_deferredEnv.Blob->ETag = "etag2";
+            }
+            if (downloads == 3) {
+                download.Succeed(std::string(static_cast<size_t>(download.Request.Length), 'N'));
+            } else {
+                download.Fail(FakeBlobServer::Error(412, "ConditionNotMet"));
+            }
+        } else {
+            (void)m_deferredEnv.Http.RunUntil([&] { return m_deferredEnv.Blob->PendingDownloads() > 0; },
+                                              std::chrono::milliseconds{20});
+        }
+    }
+    const auto status = reading.get();
+
+    EXPECT_FALSE(status.ok());
+    // At most kMaxStaleReadRetries refreshes across both phases: each refused download but the last spends one, and
+    // the one successful suffix download is the only other request.
+    EXPECT_LE(downloads, FakeReadableFileImpl::kMaxStaleReadRetries + 2);
+}
+
 TEST_F(AsyncReadTests, Read_PastTheEndOfPrefetchedRange_ReleasesItsBudget) {
     auto budget = std::make_shared<std::atomic<int64_t>>(0);
     FakeReadableFile file{std::make_shared<FakeReadableFileImpl>(
