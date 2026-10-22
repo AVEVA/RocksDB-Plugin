@@ -253,6 +253,7 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
     n = std::min(n, kMaxPrefetchBytes);
     auto* const state = &self->m_prefetch;
     uint64_t id = 0;
+    std::string name;
     {
         std::scoped_lock lock(state->Mutex);
         for (const auto& slot : state->Slots) {
@@ -260,6 +261,11 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
                 return true; // Already (being) fetched.
             }
         }
+
+        // Everything fallible is prepared before budget or slot state changes, so a failure leaves both untouched and
+        // the admission below cannot throw. Done before locating the victim because reserving can invalidate iterators.
+        state->Slots.reserve(state->Slots.size() + 1);
+        name = self->m_h.Name;
 
         // A declined prefetch must not cost data already held, so nothing is evicted until it is known to fit.
         auto victim = state->Slots.end();
@@ -289,7 +295,6 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
 
     // A superseded or cleared prefetch (its slot is gone) must not publish its bytes.
     auto logger = self->m_h.Logger;
-    auto name = self->m_h.Name;
     // The completion needs the prefetch state, which is part of the file, so it keeps the file alive. The pointer is
     // taken before `self` moves into the read.
     auto keepAlive = self;

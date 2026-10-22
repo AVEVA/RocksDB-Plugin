@@ -35,6 +35,11 @@ using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeWriteableFileImpl;
 using boost::log::sources::severity_logger_mt;
 using boost::log::trivial::severity_level;
 
+// Fails the Nth allocation of at least LargeAllocationMin bytes on this thread (1-based, 0 = disarmed). Shared with
+// AsyncReadTests, which lives in the same executable and so the same replaced operator new.
+thread_local size_t g_failLargeAllocationIn = 0;
+constexpr size_t LargeAllocationMin = 64;
+
 namespace {
 // Lets a test fail one small allocation on its own thread, which is how the shared payload owner in StartFlush is
 // allocated. Inert unless armed.
@@ -51,6 +56,9 @@ thread_local bool g_failAllAllocations = false;
 
 bool ShouldFailAllocation(const size_t size) {
     if (g_failAllAllocations) {
+        return true;
+    }
+    if (g_failLargeAllocationIn != 0 && size >= LargeAllocationMin && --g_failLargeAllocationIn == 0) {
         return true;
     }
     if (g_failFreeListGrowth && size == FreeListGrowthSize) {

@@ -41,6 +41,9 @@ using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeWriteableFileImpl;
 using boost::log::sources::severity_logger_mt;
 using boost::log::trivial::severity_level;
 
+// Defined next to the replaced operator new in WriteableFileTests.cpp.
+extern thread_local size_t g_failLargeAllocationIn;
+
 namespace {
 constexpr int64_t BlobSize = 4096;
 
@@ -542,6 +545,32 @@ TEST_F(AsyncReadTests, Prefetch_ConfiguredBudget_CapsPrefetchedBytes) {
     EXPECT_TRUE(file.Prefetch(1024, 1024, rocksdb::IOOptions{}, nullptr).ok());
     EXPECT_EQ(1U, m_deferredEnv.Blob->PendingDownloads());
     EXPECT_EQ(512, budget->load());
+}
+
+TEST_F(AsyncReadTests, Prefetch_AllocationFailureWhileAdmitting_RestoresBudgetAndLeavesNoPendingSlot) {
+    for (size_t failAt = 1; failAt <= 2; ++failAt) {
+        auto budget = std::make_shared<std::atomic<int64_t>>(0);
+        auto file = std::make_shared<FakeReadableFileImpl>("test-" + std::string(200, 'n'), m_deferredEnv.Runtime,
+                                                           m_deferredEnv.Client, nullptr, m_logger, nullptr, budget);
+        ASSERT_TRUE(FakeReadableFileImpl::Prefetch(file, 0, 512));
+        m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'A'));
+        ASSERT_EQ(512, budget->load());
+
+        g_failLargeAllocationIn = failAt;
+        EXPECT_THROW((void)FakeReadableFileImpl::Prefetch(file, 1024, 512), std::bad_alloc) << "failAt=" << failAt;
+        g_failLargeAllocationIn = 0;
+
+        EXPECT_EQ(512, budget->load()) << "failAt=" << failAt;
+        EXPECT_FALSE(file->HasPendingPrefetch(1024, 512)) << "failAt=" << failAt;
+        EXPECT_EQ(0U, m_deferredEnv.Blob->PendingDownloads()) << "failAt=" << failAt;
+        std::vector<char> buffer(256);
+        EXPECT_EQ(256U, file->TryReadFromCache(0, 256, buffer.data()).value_or(0)) << "failAt=" << failAt;
+
+        ASSERT_TRUE(FakeReadableFileImpl::Prefetch(file, 1024, 512)) << "failAt=" << failAt;
+        EXPECT_EQ(1U, m_deferredEnv.Blob->PendingDownloads()) << "failAt=" << failAt;
+        m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'B'));
+        EXPECT_EQ(256U, file->TryReadFromCache(1024, 256, buffer.data()).value_or(0)) << "failAt=" << failAt;
+    }
 }
 
 TEST_F(AsyncReadTests, Prefetch_ZeroBudget_NeverStartsADownload) {

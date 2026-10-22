@@ -346,7 +346,9 @@ and then return an ambiguous transport failure with retries disabled/exhausted.
 Recreate or inspect the path and prove no subsequent read returns old cached
 bytes. Retain the existing successful-recreation regression.
 
-### [ ] T117 - Make prefetch budget and slot admission one transaction
+### [x] T117 - Make prefetch budget and slot admission one transaction
+
+**Result:** Done. Regression `Prefetch_AllocationFailureWhileAdmitting_RestoresBudgetAndLeavesNoPendingSlot` (slot-vector growth and name copy failed separately) failed before the fix (orphaned pending slot, no download). `Prefetch` now reserves slot capacity and copies the name before touching budget or slots, so admission cannot throw; the prior finished slot and budget are preserved and a later prefetch succeeds. Full WindowsDebug suite passes (1201).
 
 **Status:** Source-traced; high confidence.
 
