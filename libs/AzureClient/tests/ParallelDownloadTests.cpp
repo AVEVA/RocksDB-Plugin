@@ -1022,6 +1022,100 @@ TEST(T11_ParallelDownloadAcceptanceTests, FileDownloadDelayedBeforeTheFirstGetSt
 }
 
 namespace {
+// Starts a file download whose preparation is queued behind a blocked writer over an existing destination.
+struct GatedFileDownload {
+    FakeHttpClient HttpClient;
+    boost::asio::thread_pool Pool{1U};
+    std::promise<void> Release;
+    boost::asio::cancellation_signal Cancel;
+    TempFile Out;
+    int CallbackCount = 0;
+    std::optional<DownloadToResult> Result;
+
+    void Start(const std::string& content) {
+        EnqueueChunks(HttpClient, content, 3U, "\"etag-a\"");
+        BlobClient client{HttpClient, BuildOptions()};
+        boost::asio::post(Pool, [gate = Release.get_future()]() mutable { gate.wait(); });
+        auto options = Parallel(3U, 1U);
+        options.WriteScheduler = Pool.get_executor();
+        HttpRequestOptions requestOptions;
+        requestOptions.SetCancellationSlot(Cancel.slot());
+        CreateFileWithContents(Out.Path, "old");
+        client.DownloadToAsync(
+            Out.Path, options,
+            [this](DownloadToResult value) {
+                ++CallbackCount;
+                Result = std::move(value);
+            },
+            requestOptions);
+    }
+};
+} // namespace
+
+TEST(T11_ParallelDownloadAcceptanceTests, CancellationWhileFilePreparationIsQueuedCompletesCanceledWithoutAGet) {
+    GatedFileDownload download;
+    download.Start(MakeContent(9));
+    download.Cancel.emit(boost::asio::cancellation_type::terminal);
+    download.Release.set_value();
+    ASSERT_TRUE(download.HttpClient.RunUntil([&] { return download.CallbackCount > 0; }));
+    download.Pool.join();
+
+    EXPECT_EQ(download.HttpClient.RequestCount(), 0U);
+    ASSERT_EQ(download.CallbackCount, 1);
+    ASSERT_FALSE(download.Result->has_value());
+    EXPECT_EQ(download.Result->error().Code, std::make_error_code(std::errc::operation_canceled));
+    EXPECT_EQ(ReadFile(download.Out.Path), "old");
+    EXPECT_FALSE(HasPartialFiles(download.Out.Path));
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, CancellationAfterTheLastChunkBeforeFinalizationKeepsTheOriginalFile) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(3);
+    EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
+    BlobClient client{httpClient, BuildOptions()};
+
+    boost::asio::thread_pool pool{1U};
+    boost::asio::cancellation_signal cancel;
+    HttpRequestOptions requestOptions;
+    requestOptions.SetCancellationSlot(cancel.slot());
+    auto options = Parallel(3U, 1U);
+    options.WriteScheduler = pool.get_executor();
+    TempFile out;
+    CreateFileWithContents(out.Path, "old");
+    int callbackCount = 0;
+    std::optional<DownloadToResult> result;
+    client.DownloadToAsync(
+        out.Path, options,
+        [&](DownloadToResult value) {
+            ++callbackCount;
+            result = std::move(value);
+        },
+        requestOptions);
+    ASSERT_TRUE(httpClient.WaitForRequest(1U));
+    ASSERT_TRUE(httpClient.CompleteRequest(0U));
+
+    // The gate is queued behind the final write, so finalization (posted once that write is reported) waits behind it.
+    std::promise<void> started;
+    std::promise<void> release;
+    boost::asio::post(pool, [&started, gate = release.get_future()]() mutable {
+        started.set_value();
+        gate.wait();
+    });
+    started.get_future().wait();
+    static_cast<void>(httpClient.RunUntil([] { return false; }, std::chrono::milliseconds{300}));
+    cancel.emit(boost::asio::cancellation_type::terminal);
+    release.set_value();
+    ASSERT_TRUE(httpClient.RunUntil([&] { return callbackCount > 0; }));
+    pool.join();
+
+    ASSERT_EQ(callbackCount, 1);
+    ASSERT_FALSE(result->has_value());
+    EXPECT_EQ(result->error().Code, std::make_error_code(std::errc::operation_canceled));
+    EXPECT_EQ(ReadFile(out.Path), "old");
+    EXPECT_FALSE(HasPartialFiles(out.Path));
+}
+
+namespace {
 // Makes chosen posts throw, as an allocation failure would. Writer posts are counted across every thread; posts to
 // the I/O executor are counted only when made off the test thread (that is, by a writer).
 struct PostFaults {

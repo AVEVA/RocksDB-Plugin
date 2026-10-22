@@ -782,6 +782,14 @@ template <class TCompletion> struct FileDownloadState {
     std::optional<FileSink> Sink;
     std::optional<SummaryResult> Result;
     std::atomic<bool> Completed{false};
+
+    // The caller's slot is owned here for the whole operation. The inner download listens to `Signal` instead, and
+    // `Canceled` remembers an abort that arrives while no inner download exists yet (queued file preparation) or
+    // after it finished (queued finalization). `SignalMutex` serializes the inner download installing its handler
+    // with an abort being forwarded.
+    std::atomic<bool> Canceled{false};
+    std::mutex SignalMutex;
+    boost::asio::cancellation_signal Signal;
 };
 
 [[nodiscard]] inline BlobStorageError CurrentFailure() {
@@ -835,6 +843,12 @@ void AbandonFileDownloadFromIo(THttp& httpClient, const std::shared_ptr<TState>&
 template <HttpClientLike THttp, class TState>
 void FinishFileDownloadOnWriter(THttp& httpClient, const std::shared_ptr<TState>& state) noexcept {
     try {
+        // The commit point: once the rename starts the destination is published and a cancellation is too late.
+        if (state->Canceled.load() && state->Result->has_value()) {
+            AbandonFileDownload(httpClient, state,
+                                MakeFailure(std::errc::operation_canceled, "The operation was canceled."));
+            return;
+        }
         auto result =
             FinalizeFileDownload(state->Sink->File(), state->TempPath, state->Target, std::move(*state->Result));
         state->Sink.reset();
@@ -913,6 +927,21 @@ void DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobT
     // Holds the completion and temporary path for the whole operation, so no hand-off can lose them if it throws.
     auto state = std::make_shared<State>(operationOptions.WriteScheduler, path, std::move(completion));
     auto scheduler = operationOptions.WriteScheduler;
+    if (auto parentSlot = requestOptions.GetCancellationSlot(); parentSlot.is_connected()) {
+        std::weak_ptr<State> const weak = state;
+        // The handler may outlive the operation (an explicit slot stays connected), so it holds only the weak state.
+        parentSlot.assign([weak](boost::asio::cancellation_type_t type) {
+            if (!IsAbortingCancellation(type)) {
+                return;
+            }
+            if (auto self = weak.lock()) {
+                self->Canceled.store(true);
+                std::lock_guard lock(self->SignalMutex);
+                self->Signal.emit(type);
+            }
+        });
+        requestOptions.SetCancellationSlot(state->Signal.slot());
+    }
     // The budget covers the hand-offs to the writer and back, so it starts here rather than at the first GET.
     const auto start = std::chrono::steady_clock::now();
     try {
@@ -921,6 +950,14 @@ void DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobT
             [&httpClient, state, start, options, operationOptions = std::move(operationOptions),
              requestOptions]() mutable {
                 try {
+                    if (state->Canceled.load()) {
+                        DownloadDetail::CompleteFileDownload(
+                            httpClient, *state,
+                            DownloadDetail::FileResult{std::unexpect,
+                                                       DownloadDetail::MakeFailure(std::errc::operation_canceled,
+                                                                                   "The operation was canceled.")});
+                        return;
+                    }
                     std::error_code statusError;
                     if (std::filesystem::is_directory(state->Target, statusError)) {
                         DownloadDetail::CompleteFileDownload(
@@ -946,6 +983,13 @@ void DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobT
                                                                            "Failed to open destination file.")});
                         return;
                     }
+                    if (state->Canceled.load()) {
+                        file.close();
+                        DownloadDetail::AbandonFileDownload(
+                            httpClient, state,
+                            DownloadDetail::MakeFailure(std::errc::operation_canceled, "The operation was canceled."));
+                        return;
+                    }
 
                     // The chunk requests are started from the I/O executor, like any other download. If the post
                     // throws, the discarded task takes only the stream; the state still lets us clean up.
@@ -954,9 +998,14 @@ void DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobT
                                                                   file = std::move(file), requestOptions,
                                                                   start]() mutable {
                         try {
+                            std::lock_guard lock(state->SignalMutex);
                             DownloadDetail::StartDownload(
                                 httpClient, std::move(options), std::move(operationOptions), FileSink{std::move(file)},
                                 DownloadDetail::FileFinalizer<THttp, State>{&httpClient, state}, requestOptions, start);
+                            // An abort that arrived before the inner download installed its handler was only recorded.
+                            if (state->Canceled.load()) {
+                                state->Signal.emit(boost::asio::cancellation_type::terminal);
+                            }
                         } catch (...) {
                             DownloadDetail::AbandonFileDownloadFromIo(httpClient, state,
                                                                       DownloadDetail::CurrentFailure());
