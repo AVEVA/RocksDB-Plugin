@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstddef>
 #include <iostream>
+#include <new>
 #include <string>
 #include <thread>
 
@@ -109,6 +110,53 @@ TEST(DnsCacheTests, ConcurrentLookupsForOneOriginShareASingleLeader) {
     EXPECT_TRUE(cache.Find("host", "80"));
 
     // The key is free again once the leader has finished.
+    RecordingWaiter next;
+    EXPECT_TRUE(cache.JoinOrLead("host", "80", next));
+    cache.Finish("host", "80", boost::asio::error::host_not_found, {});
+}
+
+namespace {
+// Stands in for an allocation failure while caching: Store reads the clock, so a throwing clock fails it.
+struct ThrowingClock {
+    using rep = std::chrono::steady_clock::rep;
+    using period = std::chrono::steady_clock::period;
+    using duration = std::chrono::steady_clock::duration;
+    using time_point = std::chrono::time_point<ThrowingClock>;
+    static constexpr bool is_steady = true;
+
+    static inline bool fail = false;
+    static time_point now() {
+        if (fail) {
+            throw std::bad_alloc();
+        }
+        return {};
+    }
+};
+} // namespace
+
+TEST(DnsCacheTests, FinishPublishesAndReleasesTheLeaderEvenWhenCachingFails) {
+    boost::asio::io_context io;
+    const auto results = Loopback(io);
+    BasicDnsCache<ThrowingClock, RecordingWaiter> cache;
+
+    RecordingWaiter leader;
+    ASSERT_TRUE(cache.JoinOrLead("host", "80", leader));
+    int delivered = 0;
+    boost::system::error_code seenError = boost::asio::error::operation_aborted;
+    AVEVA::Private::ResolveResults seenResults;
+    for (int i = 0; i < 3; ++i) {
+        RecordingWaiter waiter{&delivered, &seenError, &seenResults};
+        EXPECT_FALSE(cache.JoinOrLead("host", "80", waiter));
+    }
+
+    ThrowingClock::fail = true;
+    EXPECT_NO_THROW(cache.Finish("host", "80", {}, results));
+    ThrowingClock::fail = false;
+
+    EXPECT_EQ(delivered, 3);
+    EXPECT_FALSE(seenError);
+    EXPECT_EQ(seenResults.size(), results.size());
+    EXPECT_FALSE(cache.Find("host", "80"));
     RecordingWaiter next;
     EXPECT_TRUE(cache.JoinOrLead("host", "80", next));
     cache.Finish("host", "80", boost::asio::error::host_not_found, {});

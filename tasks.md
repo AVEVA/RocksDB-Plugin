@@ -236,7 +236,9 @@ Keep the existing concrete cache-hit fast path.
 of a still-valid token, including concurrent joiners. Later calls must retry
 the inner credential or receive the documented failure/backoff, never hang.
 
-### [ ] T113 - Release a DNS leader claim even when caching its answer fails
+### [x] T113 - Release a DNS leader claim even when caching its answer fails
+
+**Result:** Done. Regression `FinishPublishesAndReleasesTheLeaderEvenWhenCachingFails` (leader + 3 followers, throwing clock fails `Store`) failed before the fix; `BasicDnsCache::Finish` now treats caching as best-effort so the answer is published to all waiters, the pending claim is released and a later lookup can lead. All 1193 tests pass on WindowsDebug.
 
 **Status:** Source-traced; follow-up to T100.
 

@@ -174,7 +174,12 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     void Finish(std::string_view host, std::string_view service, boost::system::error_code error,
                 const Tcp::resolver::results_type& results, const void* scope = nullptr) {
         if (!error) {
-            Store(host, service, results);
+            // Caching is an optimisation: if it throws, the answer must still reach the waiters and the pending
+            // claim must still be released, or later requests would join a lookup nobody completes.
+            try {
+                Store(host, service, results);
+            } catch (...) {
+            }
         }
         std::vector<Waiter> waiters;
         {
