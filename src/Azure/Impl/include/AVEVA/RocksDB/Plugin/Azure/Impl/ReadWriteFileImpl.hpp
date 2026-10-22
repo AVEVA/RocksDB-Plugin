@@ -16,6 +16,7 @@
 #include <boost/log/trivial.hpp>
 
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -46,7 +47,8 @@ template <typename TBlob> class BasicReadWriteFileImpl {
         int64_t Length = 0; // bytes the gap must receive in full
     };
     [[nodiscard]] std::vector<Extent> BuildExtents() const;
-    void PrepareExtent(Extent& extent, int64_t sizeBefore, std::vector<GapRead>& reads);
+    void PrepareExtent(Extent& extent, int64_t sizeBefore, std::deque<GapRead>& reads);
+    void FinishGapRead(GapRead& read);
     void OverlayChunks(const Extent& extent);
     void RunWave(std::vector<Extent>& extents, size_t begin, size_t end, int64_t sizeBefore);
 

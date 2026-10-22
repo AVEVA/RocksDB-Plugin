@@ -332,6 +332,99 @@ TEST_F(ReadWriteFileImplTests, Flush_ManySmallWritesAcrossPages_CoalesceGapReads
     EXPECT_EQ(expected, actual);
 }
 
+// Islands wider than the bridging threshold, one per two pages, merge into a single extent (their padded ranges touch)
+// yet leave a gap read apart from each other.
+class ReadWriteFileGapWindowTests : public ReadWriteFileImplTests {
+  protected:
+    static constexpr int64_t page = Configuration::PageBlob::PageSize;
+    static constexpr int64_t islandPages = 32;
+    static constexpr int64_t secondExtentPage = 40;
+    static constexpr size_t gapsPerExtent = islandPages / 2;
+
+    std::vector<char> m_expected;
+    std::unique_ptr<FakeReadWriteFileImpl> m_file;
+
+    void Arrange() {
+        const auto total = (secondExtentPage + islandPages) * page;
+        m_expected.resize(static_cast<size_t>(total));
+        for (size_t i = 0; i < m_expected.size(); ++i) {
+            m_expected[i] = static_cast<char>('a' + i % 23);
+        }
+        std::ranges::copy(m_expected, m_env.Blob->Data.begin());
+        m_env.Blob->Size = total;
+        m_file = CreateFile();
+        const std::string payload(600, 'Z');
+        for (const auto base : {int64_t{0}, secondExtentPage}) {
+            for (int64_t p = 0; p < islandPages; p += 2) {
+                const auto offset = (base + p) * page;
+                m_file->Write(offset, payload.data(), static_cast<int64_t>(payload.size()));
+                std::ranges::fill_n(m_expected.begin() + offset, payload.size(), 'Z');
+            }
+        }
+    }
+
+    // Serves held downloads from the blob until Sync finishes, returning the most that were ever outstanding.
+    size_t ServeDownloads(std::future<void>& sync) {
+        size_t maxPending = 0;
+        while (sync.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready) {
+            maxPending = std::max(maxPending, m_env.Blob->PendingDownloads());
+            if (m_env.Blob->PendingDownloads() > 0) {
+                auto held = m_env.Blob->TakeDownload();
+                const auto first = m_env.Blob->Data.begin() + held.Request.Offset;
+                held.Succeed(std::string(first, first + held.Request.Length));
+            }
+        }
+        return maxPending;
+    }
+};
+
+TEST_F(ReadWriteFileGapWindowTests, Flush_ManySeparatedGaps_KeepsOutstandingReadsBoundedAndPreservesBytes) {
+    Arrange();
+    m_env.Blob->DeferDownloads = true;
+
+    auto sync = std::async(std::launch::async, [&] { m_file->Sync(); });
+    const auto maxPending = ServeDownloads(sync);
+    m_env.Blob->DeferDownloads = false;
+
+    EXPECT_NO_THROW(sync.get());
+    EXPECT_LE(maxPending, Configuration::Transfer::MaxConcurrentPageCopies);
+    EXPECT_GE(m_env.Blob->Downloads.size(), 2 * gapsPerExtent);
+    std::vector<char> actual(m_expected.size());
+    ASSERT_EQ(static_cast<int64_t>(actual.size()), m_file->Read(0, static_cast<int64_t>(actual.size()), actual.data()));
+    EXPECT_EQ(m_expected, actual);
+}
+
+TEST_F(ReadWriteFileGapWindowTests, Flush_GapReadFailsWhileOthersAreOutstanding_DrainsThemAndUploadsNothing) {
+    Arrange();
+    m_env.Blob->DeferDownloads = true;
+
+    auto sync = std::async(std::launch::async, [&] { m_file->Sync(); });
+    struct Release {
+        FakeBlobServer& Blob;
+        std::future<void>& Sync;
+        ~Release() {
+            Blob.DeferDownloads = false;
+            while (Sync.valid() && Sync.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready) {
+                if (Blob.PendingDownloads() > 0) {
+                    Blob.TakeDownload().Succeed(std::string(512, 'q'));
+                }
+            }
+        }
+    } release{*m_env.Blob, sync};
+    ASSERT_TRUE(m_env.Blob->WaitForPendingDownloads(Configuration::Transfer::MaxConcurrentPageCopies));
+
+    // Fails the oldest once the window is full, so the flush must still wait out the other held reads.
+    m_env.Blob->TakeDownload().Succeed(std::string(1, 'x')); // short read of the oldest
+    m_env.Blob->DeferDownloads = false;
+    while (sync.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready) {
+        if (m_env.Blob->PendingDownloads() > 0) {
+            m_env.Blob->TakeDownload().Succeed(std::string(512, 'q'));
+        }
+    }
+    EXPECT_THROW(sync.get(), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
+    EXPECT_TRUE(m_env.Blob->Uploads.empty());
+}
+
 TEST_F(ReadWriteFileImplTests, Flush_Coalesced_ReadsStillFailOnShortDownload) {
     constexpr int64_t page = Configuration::PageBlob::PageSize;
     m_env.Blob->Size = 4 * page;
