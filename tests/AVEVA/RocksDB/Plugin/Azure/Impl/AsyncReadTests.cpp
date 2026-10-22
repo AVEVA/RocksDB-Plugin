@@ -1266,6 +1266,63 @@ TEST_F(AsyncReadTests, MultiRead_OverflowingRequest_FailsOnlyThatRequest) {
     EXPECT_TRUE(reqs[1].status.IsInvalidArgument()) << reqs[1].status.ToString();
 }
 
+TEST_F(AsyncReadTests, MultiRead_AllocationFailurePartwayThroughSetup_EveryRequestGetsAFinalOutcome) {
+    FillPattern(m_inlineEnv, 100000);
+    {
+        // Warms up the logger so its lazy first-use allocations are not what the armed allocation failure hits.
+        auto warmFile = CreateFile(m_inlineEnv);
+        std::vector<char> scratch(16);
+        std::vector<rocksdb::FSReadRequest> warm(1);
+        SetRequest(warm[0], 0, scratch);
+        m_inlineEnv.Blob->Fault = [](const auto operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+            if (operation == FakeBlobServer::Operation::Download) {
+                return FakeBlobServer::Error(403, "denied");
+            }
+            return std::nullopt;
+        };
+        ASSERT_TRUE(warmFile.MultiRead(warm.data(), warm.size(), rocksdb::IOOptions{}, nullptr).ok());
+        m_inlineEnv.Blob->Fault = nullptr;
+    }
+    bool sawFailure = false;
+    for (size_t failAt = 1; failAt <= 6; ++failAt) {
+        auto file = CreateFile(m_inlineEnv);
+        std::vector<char> invalid(16);
+        std::vector<char> mergedA(256);
+        std::vector<char> mergedB(256);
+        std::vector<char> separate(128);
+        std::vector<rocksdb::FSReadRequest> reqs(4);
+        reqs[0] = MakeRequest(UINT64_MAX - 3, invalid);
+        SetRequest(reqs[1], 0, mergedA);
+        SetRequest(reqs[2], 256, mergedB);
+        SetRequest(reqs[3], 50000, separate);
+        // Stale values a pending request must not keep.
+        for (auto& req : reqs) {
+            req.status = rocksdb::IOStatus::OK();
+            req.result = rocksdb::Slice(req.scratch, 1);
+        }
+
+        const rocksdb::IOOptions options;
+        g_failLargeAllocationIn = failAt;
+        const auto status = file.MultiRead(reqs.data(), reqs.size(), options, nullptr);
+        g_failLargeAllocationIn = 0;
+        EXPECT_TRUE(reqs[0].status.IsInvalidArgument()) << "failAt=" << failAt << " " << reqs[0].status.ToString();
+        const std::array<size_t, 4> lengths{0, 256, 256, 128};
+        for (size_t i = 1; i < reqs.size(); ++i) {
+            if (reqs[i].status.ok()) {
+                EXPECT_EQ(lengths[i], reqs[i].result.size()) << "failAt=" << failAt << " request " << i;
+            } else {
+                sawFailure = true;
+                EXPECT_EQ(0U, reqs[i].result.size()) << "failAt=" << failAt << " request " << i;
+            }
+        }
+        if (status.ok() && reqs[1].status.ok() && reqs[3].status.ok()) {
+            EXPECT_EQ(Expected(0, 256), reqs[1].result.ToString()) << "failAt=" << failAt;
+            EXPECT_EQ(Expected(50000, 128), reqs[3].result.ToString()) << "failAt=" << failAt;
+        }
+    }
+    EXPECT_TRUE(sawFailure);
+}
+
 TEST_F(AsyncReadTests, ReadAsync_NullCallback_ReturnsInvalidArgument) {
     auto file = CreateFile(m_deferredEnv);
     std::vector<char> scratch(16);

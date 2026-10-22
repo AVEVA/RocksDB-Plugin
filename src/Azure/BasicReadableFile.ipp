@@ -181,178 +181,195 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& re
 // reported in each request's status, as RocksDB expects; the returned status only covers batch-level problems.
 template <class TImpl>
 rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* reqs, const size_t num_reqs,
-                                                      const rocksdb::IOOptions& opts, rocksdb::IODebugContext*) try {
-    // The waits below need completions that run on the host io_context, so they would hang on one of its threads.
+                                                      const rocksdb::IOOptions& opts, rocksdb::IODebugContext*) {
+    // Tracks which requests have an outcome, kept outside the try so the batch-level handler can still read it. It
+    // is sized inside the try; if that allocation fails it stays empty and every request counts as unresolved.
+    std::vector<char> resolved;
     try {
-        AzureClient::ThrowIfRunningOn(m_file->ClientExecutor());
-    } catch (const std::logic_error& error) {
-        return rocksdb::IOStatus::InvalidArgument(error.what());
-    }
+        // The waits below need completions that run on the host io_context, so they would hang on one of its threads.
+        try {
+            AzureClient::ThrowIfRunningOn(m_file->ClientExecutor());
+        } catch (const std::logic_error& error) {
+            return rocksdb::IOStatus::InvalidArgument(error.what());
+        }
 
-    // One merged download: the member requests it serves (the run [FirstMember, EndMember) of `order`, which is
-    // sorted by offset) and, when it serves more than one, the buffer the merged range is fetched into. The buffer is
-    // left uninitialised because the download overwrites it.
-    struct Group {
-        size_t FirstMember = 0;
-        size_t EndMember = 0;
-        uint64_t Start = 0;
-        uint64_t End = 0;
-        std::unique_ptr<char[]> Buffer;
-    };
+        // One merged download: the member requests it serves (the run [FirstMember, EndMember) of `order`, which is
+        // sorted by offset) and, when it serves more than one, the buffer the merged range is fetched into. The buffer
+        // is left uninitialised because the download overwrites it.
+        struct Group {
+            size_t FirstMember = 0;
+            size_t EndMember = 0;
+            uint64_t Start = 0;
+            uint64_t End = 0;
+            std::unique_ptr<char[]> Buffer;
+        };
 
-    // Marks requests that have no outcome yet, so the batch-level handler can tell them from per-request results.
-    for (size_t i = 0; i < num_reqs; ++i) {
-        reqs[i].status = rocksdb::IOStatus::IOError(kMultiReadPendingMessage);
-        reqs[i].result = rocksdb::Slice();
-    }
-
-    // A request whose range overflows cannot be merged or read; it fails on its own like any per-request error.
-    std::vector<size_t> order;
-    order.reserve(num_reqs);
-    for (size_t i = 0; i < num_reqs; ++i) {
-        if (Impl::RangeCheck::IsValid(reqs[i].offset, reqs[i].len)) {
-            order.push_back(i);
-        } else {
-            reqs[i].status = rocksdb::IOStatus::InvalidArgument("MultiRead offset or size is out of range");
+        resolved.assign(num_reqs, 0);
+        for (size_t i = 0; i < num_reqs; ++i) {
+            reqs[i].status = rocksdb::IOStatus::OK();
             reqs[i].result = rocksdb::Slice();
         }
-    }
-    std::ranges::sort(order, [&](const size_t a, const size_t b) { return reqs[a].offset < reqs[b].offset; });
 
-    std::vector<Group> groups;
-    for (size_t position = 0; position < order.size(); ++position) {
-        const auto& req = reqs[order[position]];
-        const uint64_t end = req.offset + req.len;
-        if (!groups.empty()) {
-            auto& last = groups.back();
-            if (req.offset <= last.End + kMultiReadMaxGap &&
-                std::max(last.End, end) - last.Start <= kMultiReadMaxMergedBytes) {
-                last.EndMember = position + 1;
-                last.End = std::max(last.End, end);
-                continue;
+        // A request whose range overflows cannot be merged or read; it fails on its own like any per-request error.
+        std::vector<size_t> order;
+        order.reserve(num_reqs);
+        for (size_t i = 0; i < num_reqs; ++i) {
+            if (Impl::RangeCheck::IsValid(reqs[i].offset, reqs[i].len)) {
+                order.push_back(i);
+            } else {
+                reqs[i].status = rocksdb::IOStatus::InvalidArgument("MultiRead offset or size is out of range");
+                reqs[i].result = rocksdb::Slice();
+                resolved[i] = 1;
             }
         }
-        groups.push_back(Group{.FirstMember = position, .EndMember = position + 1, .Start = req.offset, .End = end});
-    }
+        std::ranges::sort(order, [&](const size_t a, const size_t b) { return reqs[a].offset < reqs[b].offset; });
 
-    struct Active {
-        void* Handle;
-        Group* Owner;
-    };
-    std::vector<Active> active;
-    // Reserved up front so push_back cannot throw after a read has started and orphan its handle.
-    active.reserve(std::min<size_t>(kMultiReadMaxInFlight, groups.size()));
-    // Deleting a handle aborts a request still in flight, so the handles are released even on an early exit. Declared
-    // after `groups` so it runs first: an aborted request never touches its group's buffer afterwards.
-    struct HandleCleanup {
-        std::vector<Active>& Handles;
-        ~HandleCleanup() {
-            for (auto& entry : Handles) {
-                DeleteAsyncReadHandle(entry.Handle);
-            }
-        }
-    } cleanup{active};
-
-    auto signal = std::make_shared<Impl::AsyncReadSignal>();
-    size_t nextGroup = 0;
-
-    auto start = [&](Group& group) {
-        const bool single = group.EndMember - group.FirstMember == 1;
-        // A merged group is fetched into its own buffer; the callback then copies each member's slice out.
-        rocksdb::FSReadRequest merged;
-        rocksdb::FSReadRequest* target = &reqs[order[group.FirstMember]];
-        if (!single) {
-            merged.offset = group.Start;
-            merged.len = group.End - group.Start;
-            group.Buffer = std::make_unique_for_overwrite<char[]>(merged.len);
-            merged.scratch = group.Buffer.get();
-            target = &merged;
-        }
-
-        void* handle = nullptr;
-        rocksdb::IOHandleDeleter deleter = nullptr;
-        // No callback: MultiRead reads the outcome straight from the finished request.
-        auto started = StartRead(*target, opts, nullptr, nullptr, &handle, &deleter, signal);
-        if (!started.ok()) {
-            for (size_t position = group.FirstMember; position < group.EndMember; ++position) {
-                reqs[order[position]].status = started;
-                reqs[order[position]].result = rocksdb::Slice();
-            }
-            group.Buffer.reset();
-            return;
-        }
-        active.push_back(Active{handle, &group});
-    };
-
-    // A single-member group read straight into its request's scratch; a merged one is split back out of its buffer.
-    auto applyOutcome = [&](const Group& group, const rocksdb::FSReadRequest& finished) {
-        if (group.EndMember - group.FirstMember == 1) {
-            auto& target = reqs[order[group.FirstMember]];
-            target.status = finished.status;
-            target.result = finished.result;
-            return;
-        }
-        for (size_t position = group.FirstMember; position < group.EndMember; ++position) {
-            auto& member = reqs[order[position]];
-            const uint64_t relative = member.offset - group.Start;
-            size_t available = 0;
-            if (finished.status.ok() && finished.result.size() > relative) {
-                available = std::min<size_t>(member.len, finished.result.size() - relative);
-                if (available > 0) {
-                    std::memcpy(member.scratch, finished.result.data() + relative, available);
+        std::vector<Group> groups;
+        for (size_t position = 0; position < order.size(); ++position) {
+            const auto& req = reqs[order[position]];
+            const uint64_t end = req.offset + req.len;
+            if (!groups.empty()) {
+                auto& last = groups.back();
+                if (req.offset <= last.End + kMultiReadMaxGap &&
+                    std::max(last.End, end) - last.Start <= kMultiReadMaxMergedBytes) {
+                    last.EndMember = position + 1;
+                    last.End = std::max(last.End, end);
+                    continue;
                 }
             }
-            member.status = finished.status;
-            member.result = rocksdb::Slice(member.scratch, available);
-        }
-    };
-
-    while (true) {
-        while (active.size() < kMultiReadMaxInFlight && nextGroup < groups.size()) {
-            start(groups[nextGroup++]);
-        }
-        if (active.empty()) {
-            break;
+            groups.push_back(
+                Group{.FirstMember = position, .EndMember = position + 1, .Start = req.offset, .End = end});
         }
 
-        // Read the count before scanning so a read that finishes during the scan is not missed.
-        const auto seen = signal->Count();
-        bool progressed = false;
-        for (auto it = active.begin(); it != active.end();) {
-            auto* handle = static_cast<AsyncReadHandle*>(it->Handle);
-            if (!handle->Request->Finished()) {
-                ++it;
-                continue;
+        struct Active {
+            void* Handle;
+            Group* Owner;
+        };
+        std::vector<Active> active;
+        // Reserved up front so push_back cannot throw after a read has started and orphan its handle.
+        active.reserve(std::min<size_t>(kMultiReadMaxInFlight, groups.size()));
+        // Deleting a handle aborts a request still in flight, so the handles are released even on an early exit.
+        // Declared after `groups` so it runs first: an aborted request never touches its group's buffer afterwards.
+        struct HandleCleanup {
+            std::vector<Active>& Handles;
+            ~HandleCleanup() {
+                for (auto& entry : Handles) {
+                    DeleteAsyncReadHandle(entry.Handle);
+                }
             }
-            // Finished, so reading the outcome does not block.
-            rocksdb::FSReadRequest finished;
-            if (handle->Request->TryGetOutcome(finished)) {
-                applyOutcome(*it->Owner, finished);
-            }
-            DeleteAsyncReadHandle(it->Handle);
-            // The handle is gone, so nothing can write the buffer; the slices are already copied out.
-            it->Owner->Buffer.reset();
-            it = active.erase(it);
-            progressed = true;
-        }
-        if (!progressed) {
-            signal->WaitPast(seen);
-        }
-    }
+        } cleanup{active};
 
-    return rocksdb::IOStatus::OK();
-} catch (...) {
-    // RocksDB does not expect exceptions from a file. Locals (and so the in-flight handles) are already released here.
-    auto status = AzureErrorTranslator::FromCurrentException(*m_logger, "MultiRead");
-    // Requests without an outcome must not keep the caller's stale status or result.
-    for (size_t i = 0; i < num_reqs; ++i) {
-        if (reqs[i].status.IsIOError() && reqs[i].status.getState() != nullptr &&
-            std::string_view(reqs[i].status.getState()) == kMultiReadPendingMessage) {
-            reqs[i].status = status;
-            reqs[i].result = rocksdb::Slice();
+        auto signal = std::make_shared<Impl::AsyncReadSignal>();
+        size_t nextGroup = 0;
+
+        auto start = [&](Group& group) {
+            const bool single = group.EndMember - group.FirstMember == 1;
+            // A merged group is fetched into its own buffer; the callback then copies each member's slice out.
+            rocksdb::FSReadRequest merged;
+            rocksdb::FSReadRequest* target = &reqs[order[group.FirstMember]];
+            if (!single) {
+                merged.offset = group.Start;
+                merged.len = group.End - group.Start;
+                group.Buffer = std::make_unique_for_overwrite<char[]>(merged.len);
+                merged.scratch = group.Buffer.get();
+                target = &merged;
+            }
+
+            void* handle = nullptr;
+            rocksdb::IOHandleDeleter deleter = nullptr;
+            // No callback: MultiRead reads the outcome straight from the finished request.
+            auto started = StartRead(*target, opts, nullptr, nullptr, &handle, &deleter, signal);
+            if (!started.ok()) {
+                for (size_t position = group.FirstMember; position < group.EndMember; ++position) {
+                    reqs[order[position]].status = started;
+                    reqs[order[position]].result = rocksdb::Slice();
+                    resolved[order[position]] = 1;
+                }
+                group.Buffer.reset();
+                return;
+            }
+            active.push_back(Active{handle, &group});
+        };
+
+        // A single-member group read straight into its request's scratch; a merged one is split back out of its buffer.
+        auto applyOutcome = [&](const Group& group, const rocksdb::FSReadRequest& finished) {
+            if (group.EndMember - group.FirstMember == 1) {
+                auto& target = reqs[order[group.FirstMember]];
+                target.status = finished.status;
+                target.result = finished.result;
+                resolved[order[group.FirstMember]] = 1;
+                return;
+            }
+            for (size_t position = group.FirstMember; position < group.EndMember; ++position) {
+                auto& member = reqs[order[position]];
+                const uint64_t relative = member.offset - group.Start;
+                size_t available = 0;
+                if (finished.status.ok() && finished.result.size() > relative) {
+                    available = std::min<size_t>(member.len, finished.result.size() - relative);
+                    if (available > 0) {
+                        std::memcpy(member.scratch, finished.result.data() + relative, available);
+                    }
+                }
+                member.status = finished.status;
+                member.result = rocksdb::Slice(member.scratch, available);
+                resolved[order[position]] = 1;
+            }
+        };
+
+        while (true) {
+            while (active.size() < kMultiReadMaxInFlight && nextGroup < groups.size()) {
+                start(groups[nextGroup++]);
+            }
+            if (active.empty()) {
+                break;
+            }
+
+            // Read the count before scanning so a read that finishes during the scan is not missed.
+            const auto seen = signal->Count();
+            bool progressed = false;
+            for (auto it = active.begin(); it != active.end();) {
+                auto* handle = static_cast<AsyncReadHandle*>(it->Handle);
+                if (!handle->Request->Finished()) {
+                    ++it;
+                    continue;
+                }
+                // Finished, so reading the outcome does not block.
+                rocksdb::FSReadRequest finished;
+                if (handle->Request->TryGetOutcome(finished)) {
+                    applyOutcome(*it->Owner, finished);
+                } else {
+                    const auto failure = rocksdb::IOStatus::IOError("MultiRead request finished without an outcome");
+                    for (size_t position = it->Owner->FirstMember; position < it->Owner->EndMember; ++position) {
+                        reqs[order[position]].status = failure;
+                        reqs[order[position]].result = rocksdb::Slice();
+                        resolved[order[position]] = 1;
+                    }
+                }
+                DeleteAsyncReadHandle(it->Handle);
+                // The handle is gone, so nothing can write the buffer; the slices are already copied out.
+                it->Owner->Buffer.reset();
+                it = active.erase(it);
+                progressed = true;
+            }
+            if (!progressed) {
+                signal->WaitPast(seen);
+            }
         }
+
+        return rocksdb::IOStatus::OK();
+    } catch (...) {
+        // RocksDB does not expect exceptions from a file. The try block's locals (and so the in-flight handles) are
+        // already released here.
+        auto status = AzureErrorTranslator::FromCurrentException(*m_logger, "MultiRead");
+        // Requests without an outcome must not keep the caller's stale status or result.
+        for (size_t i = 0; i < num_reqs; ++i) {
+            if (resolved.size() != num_reqs || resolved[i] == 0) {
+                reqs[i].status = status;
+                reqs[i].result = rocksdb::Slice();
+            }
+        }
+        return status;
     }
-    return status;
 }
 
 // A hint: starts a background download into a per-file buffer that later reads of that range are served from.
