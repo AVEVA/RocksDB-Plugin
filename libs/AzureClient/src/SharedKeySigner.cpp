@@ -263,21 +263,21 @@ std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpR
             }
         }
     }
-    std::vector<std::pair<std::string_view, std::size_t>> canonicalizedHeaders;
-    canonicalizedHeaders.reserve(entries.size());
-    for (const CanonicalizedHeader& entry : entries) {
-        canonicalizedHeaders.emplace_back(std::string_view{lowercaseNames}.substr(entry.Offset, entry.Length),
-                                          entry.Index);
-    }
-    std::ranges::stable_sort(canonicalizedHeaders,
-                             [](const auto& lhs, const auto& rhs) { return CultureAwareLess(lhs.first, rhs.first); });
+    const std::string_view allNames{lowercaseNames};
+    const auto nameOf = [allNames](const CanonicalizedHeader& entry) {
+        return allNames.substr(entry.Offset, entry.Length);
+    };
+    std::ranges::stable_sort(entries, [&nameOf](const CanonicalizedHeader& lhs, const CanonicalizedHeader& rhs) {
+        return CultureAwareLess(nameOf(lhs), nameOf(rhs));
+    });
 
     std::string canonicalizedHeadersText;
-    canonicalizedHeadersText.reserve(canonicalizedHeaders.size() * EstimatedCanonicalizedHeaderLength);
+    canonicalizedHeadersText.reserve(entries.size() * EstimatedCanonicalizedHeaderLength);
     // Repeated header names are combined into one `name:v1,v2` line, in their original order.
-    for (std::size_t position = 0; position < canonicalizedHeaders.size(); ++position) {
-        const auto& [lowercaseName, headerIndex] = canonicalizedHeaders.at(position);
-        if (position == 0 || canonicalizedHeaders.at(position - 1).first != lowercaseName) {
+    for (std::size_t position = 0; position < entries.size(); ++position) {
+        const CanonicalizedHeader& entry = entries.at(position);
+        const std::string_view lowercaseName = nameOf(entry);
+        if (position == 0 || nameOf(entries.at(position - 1)) != lowercaseName) {
             if (position != 0) {
                 canonicalizedHeadersText.push_back('\n');
             }
@@ -285,7 +285,7 @@ std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpR
         } else {
             canonicalizedHeadersText.push_back(',');
         }
-        AppendCollapsedWhitespace(canonicalizedHeadersText, headers.at(headerIndex).GetValue());
+        AppendCollapsedWhitespace(canonicalizedHeadersText, headers.at(entry.Index).GetValue());
     }
     if (!canonicalizedHeadersText.empty()) {
         canonicalizedHeadersText.push_back('\n');
