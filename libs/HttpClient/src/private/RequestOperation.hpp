@@ -338,6 +338,12 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     void Finish(std::error_code error, HttpResponse response);
 
     /// <summary>
+    /// Delivers the completion that <see cref="Finish"/> held back until the outstanding write drained.
+    /// </summary>
+    /// <returns>True if a held-back completion was delivered.</returns>
+    bool DeliverDeferredCompletion();
+
+    /// <summary>
     /// Whether cancellation has been asked for. Checked at every step so a cancelled operation stops as
     /// soon as the strand next runs.
     /// </summary>
@@ -372,6 +378,8 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     std::shared_ptr<const void> m_bodyKeepAlive;
     std::optional<http::response_parser<http::string_body>> m_parser;
     bool m_finished = false;
+    bool m_writeInFlight = false;
+    std::optional<std::pair<std::error_code, HttpResponse>> m_deferredCompletion;
     bool m_reused = false;
     bool m_retried = false;
     bool m_receivedAnyResponse = false;

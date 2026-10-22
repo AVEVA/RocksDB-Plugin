@@ -326,8 +326,13 @@ template <typename Stream> void RequestOperation<Stream>::Write() {
         return;
     }
     m_phase = HttpRequestPhase::Write;
+    m_writeInFlight = true;
     http::async_write(*m_stream, m_request,
                       [self = this->shared_from_this()](boost::system::error_code error, std::size_t bytesWritten) {
+                          self->m_writeInFlight = false;
+                          if (self->DeliverDeferredCompletion()) {
+                              return;
+                          }
                           if (self->AbortIfNeeded()) {
                               return;
                           }
@@ -528,8 +533,25 @@ template <typename Stream> void RequestOperation<Stream>::Finish(std::error_code
     m_timer.cancel();
     m_resolver.cancel();
     Close();
+    if (m_writeInFlight) {
+        // Closing the socket only starts cancelling the write, and the request body (possibly a caller-owned raw
+        // view) must stay valid until the transport reports the write finished, so completion waits for it.
+        m_deferredCompletion.emplace(error, std::move(response));
+        return;
+    }
     auto completion = std::move(m_completion);
     Detail::Complete(std::move(completion), error, std::move(response));
+}
+
+template <typename Stream> bool RequestOperation<Stream>::DeliverDeferredCompletion() {
+    if (!m_deferredCompletion) {
+        return false;
+    }
+    auto outcome = std::move(*m_deferredCompletion);
+    m_deferredCompletion.reset();
+    auto completion = std::move(m_completion);
+    Detail::Complete(std::move(completion), outcome.first, std::move(outcome.second));
+    return true;
 }
 
 template <typename Stream> void RequestOperation<Stream>::RequestCancellation() {

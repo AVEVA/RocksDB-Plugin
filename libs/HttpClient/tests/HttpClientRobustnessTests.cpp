@@ -297,6 +297,70 @@ TEST(HttpClientRobustness, PlainHttpRequestTimesOut) {
     EXPECT_EQ(server.Accepted(), 1);
 }
 
+TEST(HttpClientRobustness, TimeoutOfAStalledRawViewUploadCompletesOnceAndLetsTheCallerFreeTheBody) {
+    asio::io_context context;
+    auto client = AVEVA::HttpClient::Create(context);
+    // Accepts the connection but never reads, so the client's upload stalls once the socket buffers fill.
+    Tcp::acceptor acceptor(context, {asio::ip::make_address("127.0.0.1"), 0});
+    Tcp::socket accepted(context);
+    acceptor.async_accept(accepted, [](boost::system::error_code) {});
+
+    auto body = std::make_unique<std::vector<std::byte>>(64U * 1024U * 1024U, std::byte{0x41});
+    AVEVA::HttpRequest request;
+    request.SetMethod(AVEVA::HttpMethod::Put);
+    request.SetUrl("http://127.0.0.1:" + std::to_string(acceptor.local_endpoint().port()) + "/");
+    request.SetBodyView(std::span<const std::byte>(*body));
+    AVEVA::HttpRequestOptions options;
+    options.SetTimeout(std::chrono::milliseconds(300));
+
+    int completions = 0;
+    std::error_code observed;
+    client->SendAsync(std::move(request), options, [&](std::error_code error, AVEVA::HttpResponse) {
+        ++completions;
+        observed = error;
+        body.reset(); // A late transport access would now touch freed memory.
+        acceptor.close();
+        accepted.close();
+    });
+    RunBounded(context);
+
+    EXPECT_EQ(completions, 1);
+    EXPECT_EQ(observed, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
+}
+
+TEST(HttpClientRobustness, CancellingAStalledRawViewUploadCompletesOnceAndLetsTheCallerFreeTheBody) {
+    asio::io_context context;
+    auto client = AVEVA::HttpClient::Create(context);
+    Tcp::acceptor acceptor(context, {asio::ip::make_address("127.0.0.1"), 0});
+    Tcp::socket accepted(context);
+    acceptor.async_accept(accepted, [](boost::system::error_code) {});
+
+    auto body = std::make_unique<std::vector<std::byte>>(64U * 1024U * 1024U, std::byte{0x41});
+    AVEVA::HttpRequest request;
+    request.SetMethod(AVEVA::HttpMethod::Put);
+    request.SetUrl("http://127.0.0.1:" + std::to_string(acceptor.local_endpoint().port()) + "/");
+    request.SetBodyView(std::span<const std::byte>(*body));
+    asio::cancellation_signal cancellation;
+    AVEVA::HttpRequestOptions options;
+    options.SetCancellationSlot(cancellation.slot());
+
+    int completions = 0;
+    std::error_code observed;
+    client->SendAsync(std::move(request), options, [&](std::error_code error, AVEVA::HttpResponse) {
+        ++completions;
+        observed = error;
+        body.reset();
+        acceptor.close();
+        accepted.close();
+    });
+    asio::steady_timer cancelTimer(context, std::chrono::milliseconds(300));
+    cancelTimer.async_wait([&](boost::system::error_code) { cancellation.emit(asio::cancellation_type::terminal); });
+    RunBounded(context);
+
+    EXPECT_EQ(completions, 1);
+    EXPECT_EQ(observed, std::make_error_code(std::errc::operation_canceled));
+}
+
 TEST(HttpClientRobustness, ReusedConnectionRequestTimesOut) {
     asio::io_context context;
     auto client = AVEVA::HttpClient::Create(context);

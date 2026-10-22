@@ -143,7 +143,8 @@ class TlsTestServer {
         AbortConnection,
         AdvertiseClose,
         EofDelimitedAbort, // No Content-Length; the TCP connection closes without a TLS close_notify.
-        ShortBodyAbort     // Content-Length promises more than is sent; closes without a TLS close_notify.
+        ShortBodyAbort,    // Content-Length promises more than is sent; closes without a TLS close_notify.
+        StallReads         // Completes the handshake and then never reads, so a large upload stalls.
     };
 
     TlsTestServer(asio::io_context& context, const std::string& subjectAltName, AfterResponse after,
@@ -222,7 +223,9 @@ class TlsTestServer {
                                                     ++m_resumed;
                                                 }
                                                 m_negotiatedVersion = SSL_get_version(session->Stream.native_handle());
-                                                ReadRequest(session);
+                                                if (m_after != AfterResponse::StallReads) {
+                                                    ReadRequest(session);
+                                                }
                                             });
         });
     }
@@ -508,6 +511,35 @@ TEST(HttpClientTls, RequestStateIsReleasedAtCompletionNotAfterTheTlsShutdownGrac
 
     EXPECT_TRUE(completed);
     EXPECT_TRUE(releasedPromptly);
+}
+
+TEST(HttpClientTls, TimeoutOfAStalledRawViewUploadCompletesOnceAndLetsTheCallerFreeTheBody) {
+    asio::io_context context;
+    TlsTestServer server(context, "IP:127.0.0.1", TlsTestServer::AfterResponse::StallReads);
+    AVEVA::HttpClientOptions options;
+    options.SetCaPem(server.CertificatePem());
+    auto client = AVEVA::HttpClient::Create(context, options);
+
+    auto body = std::make_unique<std::vector<std::byte>>(64U * 1024U * 1024U, std::byte{0x41});
+    AVEVA::HttpRequest request;
+    request.SetMethod(AVEVA::HttpMethod::Put);
+    request.SetUrl("https://127.0.0.1:" + std::to_string(server.Port()) + "/");
+    request.SetBodyView(std::span<const std::byte>(*body));
+    AVEVA::HttpRequestOptions requestOptions;
+    requestOptions.SetTimeout(std::chrono::milliseconds(300));
+
+    int completions = 0;
+    std::error_code observed;
+    client->SendAsync(std::move(request), requestOptions, [&](std::error_code error, AVEVA::HttpResponse) {
+        ++completions;
+        observed = error;
+        body.reset(); // A late transport access would now touch freed memory.
+        server.Stop();
+    });
+    RunBounded(context);
+
+    EXPECT_EQ(completions, 1);
+    EXPECT_EQ(observed, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
 }
 
 TEST(HttpClientTls, CompletionRunsOnceWhenTheTlsShutdownSetupThrows) {
