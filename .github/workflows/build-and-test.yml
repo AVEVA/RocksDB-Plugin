@@ -206,11 +206,10 @@ jobs:
           fi
           # The checkout is the PR merge commit, so only the base tip is needed to list what the PR changes.
           git fetch --quiet --depth=1 origin "$BASE_SHA"
-          if git diff --name-only "$BASE_SHA" HEAD |
-               grep -qE '^(include/|src/|libs/|infrastructure/|tools/db_bench/|\.github/actions/setup-vcpkg/|vcpkg\.json$|vcpkg-configuration\.json$|CMakeLists\.txt$|CMakePresets\.json$)'; then
-            echo "relevant=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "relevant=false" >> "$GITHUB_OUTPUT"
+          # Not piped into $GITHUB_OUTPUT directly so a failing diff fails this step instead of selecting a skip.
+          result="$(bash .github/scripts/detect-relevant-changes.sh "$BASE_SHA")"
+          echo "$result" >> "$GITHUB_OUTPUT"
+          if [ "$result" = "relevant=false" ]; then
             echo "No library, overlay or db_bench changes; skipping."
           fi
 

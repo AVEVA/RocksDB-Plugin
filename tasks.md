@@ -440,7 +440,16 @@ measurement and preserve the bounded load-retry policy.
 metrics and valid load output. Invalid loads must never produce numeric samples;
 exhausted retries must mark the summary incomplete and return nonzero.
 
-### [ ] T121 - Do not let SIGPIPE turn relevant benchmark changes into a CI skip
+### [x] T121 - Do not let SIGPIPE turn relevant benchmark changes into a CI skip
+
+**Result:** Detection moved to `.github\scripts\detect-relevant-changes.sh`,
+which captures the full `git diff` output (so a diff failure fails the step
+under `set -e`) before matching with non-quiet `grep`. The workflow calls it.
+Pester tests (`detect-relevant-changes.Tests.ps1`): early match plus 3,000 paths
+selects the build; no match skips; a failing diff exits nonzero. Before the fix
+the failing-producer test failed (old logic reported `relevant=false`); the
+SIGPIPE ordering itself did not reproduce under Git-for-Windows bash, only on
+Linux semantics, so that case is a guard rather than a demonstrated failure here.
 
 **Status:** Failure mechanism reproduced; current branch's smaller diff selected
 the benchmark build correctly.
