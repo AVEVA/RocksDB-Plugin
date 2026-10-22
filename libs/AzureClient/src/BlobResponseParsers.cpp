@@ -3,33 +3,19 @@
 
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 
-#include "AVEVA/AzureClient/BlobClientOptions.hpp"
-#include "AVEVA/AzureClient/BlobContainerClient.hpp"
-#include "AVEVA/AzureClient/BlobOperationOptions.hpp"
-#include "AVEVA/AzureClient/BlobServiceClient.hpp"
 #include "AVEVA/AzureClient/BlobStorageError.hpp"
-#include "AVEVA/AzureClient/Detail/AsyncInitiation.hpp"
 #include "AVEVA/AzureClient/Models/BlobContainerModels.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
-#include "AVEVA/AzureClient/TokenCredential.hpp"
 #include "BlobStorageErrorCategory.hpp"
 #include "BlobXmlParser.hpp"
 
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 
 #include <AVEVA/AzureClient/AzureRequestOptions.hpp>
-#include <AVEVA/HttpClient/HttpClient.hpp>
 #include <AVEVA/HttpClient/HttpMethod.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
-#include <boost/url/encode.hpp> // IWYU pragma: keep (symbol is defined in a Boost impl/ header)
-#include <boost/url/parse.hpp>
 #include <boost/url/pct_string_view.hpp>
-#include <boost/url/rfc/unreserved_chars.hpp>
-#include <boost/url/url.hpp>
-#include <boost/url/url_view.hpp>
-#include <boost/uuid/random_generator.hpp>
-#include <boost/uuid/uuid_io.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -37,11 +23,6 @@
 #include <iterator>
 #include <libxml/parser.h>
 #include <libxml/tree.h>
-
-#include <libxml/xmlstring.h>
-#include <openssl/core_names.h>
-#include <openssl/crypto.h>
-#include <openssl/evp.h>
 
 #include <algorithm>
 #include <array>
@@ -53,7 +34,6 @@
 #include <locale>
 #include <memory>
 #include <mutex>
-#include <openssl/params.h>
 #include <optional>
 #include <ranges>
 #include <span>
