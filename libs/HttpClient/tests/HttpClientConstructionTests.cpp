@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <fstream>
 #include <mutex>
 #include <set>
@@ -78,6 +79,38 @@ TEST(HttpClientConstruction, FactoryReturnsUsableClients) {
     boost::asio::post(context, [&handlerRan] { handlerRan = true; });
     EXPECT_EQ(context.run(), 1);
     EXPECT_TRUE(handlerRan);
+}
+TEST(HttpClientConstruction, LastOwnerReleasedOnAWriterThreadDoesNotSelfJoin) {
+    boost::asio::io_context context;
+    std::atomic<int> done{0};
+    constexpr int Queued = 50;
+    for (const bool viaBoundCompletion : {false, true}) {
+        done = 0;
+        auto client = AVEVA::HttpClient::Create(context);
+        const auto writer = client->GetDownloadWriter();
+        boost::asio::post(writer, [&] { ++done; });
+        for (int i = 0; i < Queued; ++i) {
+            boost::asio::post(writer, [&] { ++done; });
+        }
+        auto release = [owner = std::move(client), &done]() mutable {
+            owner.reset();
+            ++done;
+        };
+        if (viaBoundCompletion) {
+            // A completion bound to the writer executor runs there, like an HTTP handler would.
+            boost::asio::post(context, boost::asio::bind_executor(writer, std::move(release)));
+            context.restart();
+            context.run();
+        } else {
+            boost::asio::post(writer, std::move(release));
+        }
+        // The helper thread joins the pool, so every queued task still runs before the client goes away.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (done.load() < Queued + 2 && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        EXPECT_EQ(done.load(), Queued + 2);
+    }
 }
 TEST(HttpClientConstruction, DownloadWriterRunsManyTasksOnABoundedClientOwnedPool) {
     boost::asio::io_context context;
