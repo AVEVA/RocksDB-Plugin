@@ -609,7 +609,8 @@ void UploadPagesAsync(const ClientRuntimeBase& runtime, TBlob& client, std::shar
 /// callers can classify failures without rethrowing, and the downloaded bytes.
 /// The bytes live in a pooled buffer that is valid until the callback returns, or for as long as `owner` is held;
 /// keep `owner` to retain the bytes without copying.
-/// A non-zero `timeout` caps how long the request may take; it only ever shortens the transfer-scaled default.
+/// A non-zero `timeout` caps how long the request may take, retries included; it only ever shortens the
+/// transfer-scaled default.
 /// </summary>
 template <typename TBlob, typename TCallback>
 void DownloadAsync(TBlob& client, int64_t blobOffset, int64_t readLength, std::string ifMatch,
@@ -619,8 +620,12 @@ void DownloadAsync(TBlob& client, int64_t blobOffset, int64_t readLength, std::s
     options.Conditions.IfMatch = std::move(ifMatch);
     // The transfer-scaled default timeout can be minutes; a caller-supplied deadline only ever shortens it.
     auto requestOptions = TransferOptions(client, static_cast<uint64_t>(readLength));
-    if (timeout.count() > 0 && timeout < requestOptions.GetTimeout()) {
-        requestOptions.SetTimeout(timeout);
+    if (timeout.count() > 0) {
+        if (timeout < requestOptions.GetTimeout()) {
+            requestOptions.SetTimeout(timeout);
+        }
+        // The timeout is per attempt; the total deadline is what stops transport retries from outliving the caller.
+        requestOptions.SetTotalDeadline(timeout);
     }
     // The lease is owned by the completion, so the transfer can never write into freed memory.
     auto buffer = DownloadBufferPool::Shared()->Acquire(static_cast<size_t>(readLength));

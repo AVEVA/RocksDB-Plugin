@@ -7,10 +7,13 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/RangeCheck.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include <algorithm>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/log/trivial.hpp>
 #include <cassert>
 #include <chrono>
 #include <functional>
+#include <mutex>
+#include <optional>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -24,6 +27,23 @@ inline RequestFailedException StaleReadException() {
 }
 
 inline std::exception_ptr StaleReadError() { return std::make_exception_ptr(StaleReadException()); }
+
+// A metadata waiter and its deadline timer race to run the continuation; whichever claims it first wins.
+template <typename TExecutor, typename TContinuation> struct MetadataGate {
+    MetadataGate(const TExecutor& executor, TContinuation continuation)
+        : Timer(executor), Continuation(std::move(continuation)) {}
+
+    std::optional<TContinuation> Claim() {
+        std::scoped_lock lock(Mutex);
+        std::optional<TContinuation> claimed(std::move(Continuation));
+        Continuation.reset();
+        return claimed;
+    }
+
+    boost::asio::steady_timer Timer;
+    std::mutex Mutex;
+    std::optional<TContinuation> Continuation;
+};
 
 // The one policy for reads against a blob that may change underneath us, shared by the synchronous
 // (DownloadWithRetry) and asynchronous (ReadAsyncAttempt) paths so they cannot drift apart: a 412 from the
@@ -531,27 +551,33 @@ void BasicReadableFileImpl<TBlob>::ReadAsync(std::shared_ptr<const BasicReadable
                                              const int64_t offset, const int64_t bytesToRead, TCallback callback,
                                              const int attemptsLeft, const std::chrono::milliseconds timeout) {
     ReadableFileDetail::ReadCompletionGuard<TCallback> guarded(std::move(callback));
+    const auto deadline = ReadableFileDetail::DeadlineAfter(timeout);
     if (self->m_asyncReads) {
         // The token is declared first so it is released after the callback (and anything the callback holds).
         auto tracked = [token = self->m_asyncReads->Begin(), callback = std::move(guarded)](
                            std::exception_ptr error, std::string_view data, std::shared_ptr<const void> owner) mutable {
             callback(std::move(error), data, std::move(owner));
         };
-        ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(tracked), attemptsLeft, timeout);
+        ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(tracked), attemptsLeft, deadline);
         return;
     }
-    ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(guarded), attemptsLeft, timeout);
+    ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(guarded), attemptsLeft, deadline);
 }
 
 // Async counterpart of DownloadWithRetry: every step (ETag check, conditional download, metadata refresh) is chained
-// through completion callbacks so no thread ever blocks on the io_context.
+// through completion callbacks so no thread ever blocks on the io_context. The deadline is checked before each step
+// and bounds each wait, so a short caller timeout cannot be stretched by restarts.
 template <typename TBlob>
 template <ReadCompletion TCallback>
 void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicReadableFileImpl<TBlob>> self,
                                                     const int64_t offset, const int64_t bytesToRead, TCallback callback,
-                                                    const int attemptsLeft, const std::chrono::milliseconds timeout) {
+                                                    const int attemptsLeft, const ReadDeadline deadline) {
     if (offset < 0 || bytesToRead <= 0) {
         ReadableFileDetail::FinishRead(self, callback, nullptr, {});
+        return;
+    }
+    if (ReadableFileDetail::Expired(deadline)) {
+        ReadableFileDetail::FinishRead(self, callback, ReadableFileDetail::ReadTimedOutError(), {});
         return;
     }
 
@@ -560,38 +586,39 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
     if (remaining == 0) {
         // At the cached end of the blob: only re-read if another writer moved the blob on.
         const auto file = self;
-        CoalescedMetadataAsync(file, [self = std::move(self), offset, bytesToRead, callback = std::move(callback),
-                                      etag = std::move(etag), attemptsLeft,
-                                      timeout](std::exception_ptr error, int64_t latestSize, std::string latestEtag,
-                                               uint64_t epoch) mutable {
-            if (error) {
-                ReadableFileDetail::FinishRead(self, callback, error, {});
-                return;
-            }
-            if (latestEtag == etag) {
-                self->ApplyRefreshedMetadata(latestSize, std::move(latestEtag), epoch);
-                ReadableFileDetail::FinishRead(self, callback, nullptr, {});
-                return;
-            }
+        WaitForMetadataAsync(
+            file, deadline,
+            [self = std::move(self), offset, bytesToRead, callback = std::move(callback), etag = std::move(etag),
+             attemptsLeft,
+             deadline](std::exception_ptr error, int64_t latestSize, std::string latestEtag, uint64_t epoch) mutable {
+                if (error) {
+                    ReadableFileDetail::FinishRead(self, callback, error, {});
+                    return;
+                }
+                if (latestEtag == etag) {
+                    self->ApplyRefreshedMetadata(latestSize, std::move(latestEtag), epoch);
+                    ReadableFileDetail::FinishRead(self, callback, nullptr, {});
+                    return;
+                }
 
-            auto left = attemptsLeft;
-            if (!ReadableFileDetail::StaleReadPolicy::TrySpendRefresh(left)) {
-                ReadableFileDetail::FinishRead(self, callback, ReadableFileDetail::StaleReadError(), {});
-                return;
-            }
-            self->ApplyRefreshedMetadata(latestSize, std::move(latestEtag), epoch);
-            ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(callback), left, timeout);
-        });
+                auto left = attemptsLeft;
+                if (!ReadableFileDetail::StaleReadPolicy::TrySpendRefresh(left)) {
+                    ReadableFileDetail::FinishRead(self, callback, ReadableFileDetail::StaleReadError(), {});
+                    return;
+                }
+                self->ApplyRefreshedMetadata(latestSize, std::move(latestEtag), epoch);
+                ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(callback), left, deadline);
+            });
         return;
     }
 
     const auto toRead = std::min(bytesToRead, remaining);
     auto& blob = *self->m_h.Blob;
     BlobOperations::DownloadAsync(
-        blob, offset, toRead, std::move(etag), timeout,
+        blob, offset, toRead, std::move(etag), ReadableFileDetail::Remaining(deadline),
         [self = std::move(self), offset, bytesToRead, remaining, callback = std::move(callback), attemptsLeft,
-         timeout](std::exception_ptr error, unsigned int status, std::string_view data,
-                  std::shared_ptr<const void> owner) mutable {
+         deadline](std::exception_ptr error, unsigned int status, std::string_view data,
+                   std::shared_ptr<const void> owner) mutable {
             if (error) {
                 if (status == HttpStatus::PreconditionFailed) {
                     auto left = attemptsLeft;
@@ -604,7 +631,7 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
                     const auto logger = self->m_h.Logger;
                     try {
                         RefreshMetadataAndReadAsync(std::move(self), offset, bytesToRead, std::move(callback), left,
-                                                    timeout);
+                                                    deadline);
                     } catch (...) {
                         if (logger) {
                             BOOST_LOG_SEV(*logger, boost::log::trivial::error) << "Restarting a stale read failed";
@@ -628,19 +655,60 @@ template <ReadCompletion TCallback>
 void BasicReadableFileImpl<TBlob>::RefreshMetadataAndReadAsync(std::shared_ptr<const BasicReadableFileImpl<TBlob>> self,
                                                                const int64_t offset, const int64_t bytesToRead,
                                                                TCallback callback, const int attemptsLeft,
-                                                               const std::chrono::milliseconds timeout) {
+                                                               const ReadDeadline deadline) {
+    // Skip the properties call when the budget is already spent; the restart would only time out afterwards.
+    if (ReadableFileDetail::Expired(deadline)) {
+        ReadableFileDetail::FinishRead(self, callback, ReadableFileDetail::ReadTimedOutError(), {});
+        return;
+    }
     const auto file = self;
-    CoalescedMetadataAsync(
-        file, [self = std::move(self), offset, bytesToRead, callback = std::move(callback), attemptsLeft,
-               timeout](std::exception_ptr error, int64_t size, std::string etag, uint64_t epoch) mutable {
-            if (error) {
-                ReadableFileDetail::FinishRead(self, callback, error, {});
-                return;
-            }
+    WaitForMetadataAsync(file, deadline,
+                         [self = std::move(self), offset, bytesToRead, callback = std::move(callback), attemptsLeft,
+                          deadline](std::exception_ptr error, int64_t size, std::string etag, uint64_t epoch) mutable {
+                             if (error) {
+                                 ReadableFileDetail::FinishRead(self, callback, error, {});
+                                 return;
+                             }
 
-            self->ApplyRefreshedMetadata(size, std::move(etag), epoch);
-            ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(callback), attemptsLeft, timeout);
-        });
+                             self->ApplyRefreshedMetadata(size, std::move(etag), epoch);
+                             ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(callback), attemptsLeft,
+                                              deadline);
+                         });
+}
+
+template <typename TBlob>
+template <typename TContinuation>
+void BasicReadableFileImpl<TBlob>::WaitForMetadataAsync(const std::shared_ptr<const BasicReadableFileImpl>& file,
+                                                        const ReadDeadline& deadline, TContinuation continuation) {
+    if (!deadline) {
+        CoalescedMetadataAsync(file, std::move(continuation));
+        return;
+    }
+
+    using Gate = ReadableFileDetail::MetadataGate<typename TBlob::executor_type, TContinuation>;
+    const auto gate = std::make_shared<Gate>(file->ClientExecutor(), std::move(continuation));
+    gate->Timer.expires_at(*deadline);
+    gate->Timer.async_wait([gate, logger = file->m_h.Logger](const boost::system::error_code& cancelled) {
+        if (cancelled) {
+            return;
+        }
+        try {
+            if (auto expired = gate->Claim()) {
+                (*expired)(ReadableFileDetail::ReadTimedOutError(), 0, std::string(), 0);
+            }
+        } catch (...) {
+            // Runs on the host io_context: the continuation's completion guard fails the read if it throws.
+            if (logger) {
+                BOOST_LOG_SEV(*logger, boost::log::trivial::error) << "Timing out a metadata wait failed";
+            }
+        }
+    });
+    CoalescedMetadataAsync(file, [gate](std::exception_ptr error, int64_t size, std::string etag, uint64_t epoch) {
+        if (auto claimed = gate->Claim()) {
+            gate->Timer.cancel();
+            (*claimed)(std::move(error), size, std::move(etag), epoch);
+        }
+    });
 }
 
 // The first caller starts the properties call; callers arriving while it is in flight just queue behind it. A joiner

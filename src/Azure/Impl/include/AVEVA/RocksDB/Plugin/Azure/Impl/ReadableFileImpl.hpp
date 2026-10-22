@@ -24,6 +24,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
@@ -34,6 +35,38 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// </summary>
 template <typename TCallback>
 concept ReadCompletion = std::invocable<TCallback&, std::exception_ptr, std::string_view, std::shared_ptr<const void>>;
+
+/// <summary>
+/// The absolute time by which an async read must finish; empty means no deadline. It is fixed once when the read
+/// starts, so every step (prefetch wait, metadata refresh, download, stale-read restart) draws on one budget.
+/// </summary>
+using ReadDeadline = std::optional<std::chrono::steady_clock::time_point>;
+
+namespace ReadableFileDetail {
+// Translates to a retryable TimedOut status, like a transport timeout.
+inline std::exception_ptr ReadTimedOutError() {
+    return std::make_exception_ptr(RequestFailedException(0, "ReadTimedOut", "The read deadline was exceeded", "",
+                                                          std::make_error_code(std::errc::timed_out)));
+}
+
+inline ReadDeadline DeadlineAfter(const std::chrono::milliseconds timeout) {
+    if (timeout.count() <= 0) {
+        return std::nullopt;
+    }
+    return std::chrono::steady_clock::now() + timeout;
+}
+
+inline bool Expired(const ReadDeadline& deadline) { return deadline && std::chrono::steady_clock::now() >= *deadline; }
+
+// The time left as a request timeout: zero means "no deadline", so a live deadline never rounds down to it.
+inline std::chrono::milliseconds Remaining(const ReadDeadline& deadline) {
+    if (!deadline) {
+        return std::chrono::milliseconds::zero();
+    }
+    return std::max(std::chrono::milliseconds(1),
+                    std::chrono::ceil<std::chrono::milliseconds>(*deadline - std::chrono::steady_clock::now()));
+}
+} // namespace ReadableFileDetail
 
 // Neither copyable nor movable: it is built once, in place, by make_shared, and in-flight reads hold it by shared_ptr.
 template <typename TBlob> class BasicReadableFileImpl {
@@ -113,6 +146,11 @@ template <typename TBlob> class BasicReadableFileImpl {
     mutable MetadataRefreshState m_metadataRefresh;
     static void CoalescedMetadataAsync(const std::shared_ptr<const BasicReadableFileImpl>& file,
                                        MetadataCallback callback);
+    // Like CoalescedMetadataAsync, but `continuation` also runs (with a TimedOut error) once `deadline` passes. The
+    // shared properties call is never cancelled on behalf of one waiter that gave up.
+    template <typename TContinuation>
+    static void WaitForMetadataAsync(const std::shared_ptr<const BasicReadableFileImpl>& file,
+                                     const ReadDeadline& deadline, TContinuation continuation);
 
     // Serves from a completed prefetch only. With `wait`, first waits (bounded) for a covering pending prefetch.
     // With `allowPartial`, a range that only starts inside a slot is served up to the slot's end and the caller
@@ -128,11 +166,11 @@ template <typename TBlob> class BasicReadableFileImpl {
     void ApplyRefreshedMetadata(int64_t size, std::string etag, uint64_t epoch) const;
     template <ReadCompletion TCallback>
     static void ReadAsyncAttempt(std::shared_ptr<const BasicReadableFileImpl> self, int64_t offset, int64_t bytesToRead,
-                                 TCallback callback, int attemptsLeft, std::chrono::milliseconds timeout);
+                                 TCallback callback, int attemptsLeft, ReadDeadline deadline);
     template <ReadCompletion TCallback>
     static void RefreshMetadataAndReadAsync(std::shared_ptr<const BasicReadableFileImpl> self, int64_t offset,
                                             int64_t bytesToRead, TCallback callback, int attemptsLeft,
-                                            std::chrono::milliseconds timeout);
+                                            ReadDeadline deadline);
 
   public:
     // A blob that keeps changing underneath the reader fails with an IOError after this many metadata refreshes.
@@ -168,7 +206,9 @@ template <typename TBlob> class BasicReadableFileImpl {
     // semantics as RandomRead. `self` keeps the file alive until `callback` has run; the callback may run on an
     // io_context thread or inline, so it must not block on blob I/O. The file is released before `callback` runs,
     // and the read stays registered with the AsyncReadTracker (if any) until `callback` itself is released.
-    // A non-zero `timeout` caps each blob download of the read (see BlobOperations::DownloadAsync).
+    // A non-zero `timeout` bounds the whole read, measured from this call: metadata refreshes, downloads (including
+    // their transport retries) and stale-read restarts all draw on it, and the read completes with a TimedOut error
+    // once it is spent.
     template <ReadCompletion TCallback>
     static void ReadAsync(std::shared_ptr<const BasicReadableFileImpl> self, int64_t offset, int64_t bytesToRead,
                           TCallback callback, int attemptsLeft = kMaxStaleReadRetries,

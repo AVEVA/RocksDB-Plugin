@@ -968,6 +968,76 @@ TEST_F(AsyncReadTests, ReadAsync_WithoutIoOptionsTimeoutRequestsNoDeadline) {
     ASSERT_TRUE(PollAsyncReads(handles).ok());
 }
 
+TEST_F(AsyncReadTests, ReadAsync_PausedPrefetchWithShortTimeout_TimesOutLeavesScratchAndKeepsThePrefetch) {
+    auto file = CreateFile(m_deferredEnv);
+    ASSERT_TRUE(file.Prefetch(1024, 2048, rocksdb::IOOptions{}, nullptr).ok());
+    std::vector<char> scratch(64, 'x');
+    auto req = MakeRequest(1100, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+    rocksdb::IOOptions options;
+    options.timeout = std::chrono::milliseconds(30);
+
+    ASSERT_TRUE(Submit(file, req, record, handle, options).ok());
+    std::vector<void*> handles{handle.Handle};
+    ASSERT_TRUE(PollAsyncReads(handles).ok());
+
+    EXPECT_EQ(1, record.Calls.load());
+    EXPECT_TRUE(record.Status.IsTimedOut()) << record.Status.ToString();
+    // The shared prefetch is not cancelled for one waiter, and finishing it later must not revive the read.
+    ASSERT_EQ(1U, m_deferredEnv.Blob->PendingDownloads());
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(2048, 'P'));
+    EXPECT_EQ(0U, m_deferredEnv.Blob->PendingDownloads());
+    EXPECT_EQ(std::string(64, 'x'), std::string(scratch.begin(), scratch.end()));
+}
+
+TEST_F(AsyncReadTests, ReadAsync_DelayedMetadataWithShortTimeout_TimesOutWithoutCancellingTheRefresh) {
+    auto file = CreateFile(m_deferredEnv);
+    m_deferredEnv.Blob->DeferProperties = true;
+    std::vector<char> scratch(64, 'x');
+    auto req = MakeRequest(BlobSize, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+    rocksdb::IOOptions options;
+    options.timeout = std::chrono::milliseconds(30);
+
+    ASSERT_TRUE(Submit(file, req, record, handle, options).ok());
+    ASSERT_EQ(1U, m_deferredEnv.Blob->PendingProperties());
+    std::vector<void*> handles{handle.Handle};
+    ASSERT_TRUE(PollAsyncReads(handles).ok());
+
+    EXPECT_EQ(1, record.Calls.load());
+    EXPECT_TRUE(record.Status.IsTimedOut()) << record.Status.ToString();
+    EXPECT_EQ(1U, m_deferredEnv.Blob->PendingProperties());
+    m_deferredEnv.Blob->CompleteProperties();
+    EXPECT_EQ(0U, m_deferredEnv.Blob->PendingProperties());
+    EXPECT_EQ(std::string(64, 'x'), std::string(scratch.begin(), scratch.end()));
+}
+
+TEST_F(AsyncReadTests, ReadAsync_StaleReadAfterTheDeadline_TimesOutInsteadOfRefreshingAndRetrying) {
+    auto file = CreateFile(m_deferredEnv);
+    std::vector<char> scratch(16, 'x');
+    auto req = MakeRequest(0, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+    rocksdb::IOOptions options;
+    options.timeout = std::chrono::milliseconds(150);
+
+    ASSERT_TRUE(Submit(file, req, record, handle, options).ok());
+    auto download = m_deferredEnv.Blob->TakeDownload();
+    const int propertiesBefore = m_deferredEnv.Blob->PropertiesRequests;
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    m_deferredEnv.Blob->ETag = "etag2";
+    download.Fail(FakeBlobServer::Error(412, "ConditionNotMet"));
+
+    std::vector<void*> handles{handle.Handle};
+    ASSERT_TRUE(PollAsyncReads(handles).ok());
+    EXPECT_TRUE(record.Status.IsTimedOut()) << record.Status.ToString();
+    EXPECT_EQ(propertiesBefore, m_deferredEnv.Blob->PropertiesRequests);
+    EXPECT_EQ(0U, m_deferredEnv.Blob->PendingDownloads());
+    EXPECT_EQ(std::string(16, 'x'), std::string(scratch.begin(), scratch.end()));
+}
+
 TEST_F(AsyncReadTests, ReadAsync_InlineCompletion_PollDeliversData) {
     auto file = CreateFile(m_inlineEnv);
     std::vector<char> scratch(16);
