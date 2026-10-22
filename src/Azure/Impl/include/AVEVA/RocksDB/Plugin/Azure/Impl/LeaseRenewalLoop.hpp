@@ -218,10 +218,18 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
                             last = --round->Pending == 0;
                         }
                         if (last) {
-                            boost::asio::post(self->m_executor, [self, round] {
-                                std::scoped_lock lock(self->m_mutex);
-                                self->OnRoundDone(round);
-                            });
+                            // This may run on a foreign thread or inline from RenewAsync, so a failed post must not
+                            // escape: nothing else would ever finish the round.
+                            try {
+                                boost::asio::post(self->m_executor, [self, round] {
+                                    std::scoped_lock lock(self->m_mutex);
+                                    self->OnRoundDone(round);
+                                });
+                            } catch (const std::exception& e) {
+                                self->AbandonRound(e.what());
+                            } catch (...) {
+                                self->AbandonRound("unknown error");
+                            }
                         }
                     });
             }
@@ -242,13 +250,39 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
         }
     }
 
+    // Runs the round's follow-up and guarantees it is released exactly once. If classifying or scheduling throws (for
+    // example on allocation or timer setup), renewal could no longer continue, so fence rather than let the exception
+    // escape the host's run().
+    void OnRoundDone(const std::shared_ptr<Round>& round) {
+        bool finished = false;
+        const auto finish = [this, &finished] {
+            if (!std::exchange(finished, true)) {
+                --m_activeRounds;
+                m_roundsIdle.notify_all();
+            }
+        };
+        std::string failure;
+        try {
+            FinishRound(round, finish);
+            return;
+        } catch (const std::exception& e) {
+            failure = e.what();
+        } catch (...) {
+            failure = "unknown error";
+        }
+        finish();
+        if (!m_stopped) {
+            try {
+                Fail(failure);
+            } catch (...) {
+                // Fail marks the loop stopped before notifying, so a throwing onFatal cannot be reported twice.
+            }
+        }
+    }
+
     // Classifies a finished round and schedules what comes next: retry the failed leases, fail, or sleep until the
     // next interval.
-    void OnRoundDone(const std::shared_ptr<Round>& round) {
-        const auto finish = [this] {
-            --m_activeRounds;
-            m_roundsIdle.notify_all();
-        };
+    template <typename TFinish> void FinishRound(const std::shared_ptr<Round>& round, const TFinish& finish) {
         if (m_stopped) {
             finish();
             return;

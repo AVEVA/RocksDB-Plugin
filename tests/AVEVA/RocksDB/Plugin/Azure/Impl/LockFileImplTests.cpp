@@ -570,6 +570,7 @@ struct FailingLock {
         std::mutex Mutex;
         std::vector<std::chrono::steady_clock::time_point> Calls;
         std::optional<std::chrono::milliseconds> RetryAfter;
+        bool ThrowOnDeadlineQuery = false;
         std::condition_variable Attempted;
     };
     std::shared_ptr<Shared> State;
@@ -588,7 +589,12 @@ struct FailingLock {
                  false);
     }
     [[nodiscard]] bool IsRenewalOverdue() const { return false; }
-    [[nodiscard]] std::optional<std::chrono::steady_clock::duration> RenewalTimeRemaining() const { return Remaining; }
+    [[nodiscard]] std::optional<std::chrono::steady_clock::duration> RenewalTimeRemaining() const {
+        if (State->ThrowOnDeadlineQuery) {
+            throw std::runtime_error("deadline unavailable");
+        }
+        return Remaining;
+    }
 };
 
 struct FailingSnapshot {
@@ -685,6 +691,30 @@ TEST(LeaseRenewalLoopBackoffTests, WakeUpAfterRetriesRunOutNeverOutlastsTheRenew
     thread.join();
     ASSERT_GE(state->Calls.size(), 6u);
     EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(state->Calls[5] - state->Calls[4]).count(), 700);
+}
+
+TEST(LeaseRenewalLoopThrowTests, ThrowWhileSchedulingTheRetryIsFatalOnceAndDoesNotBlockStop) {
+    using Loop = BasicLeaseRenewalLoop<FailingSnapshot, ScriptedFatal, FailingLock>;
+    boost::asio::io_context context;
+    auto guard = boost::asio::make_work_guard(context);
+    std::jthread thread([&context] { context.run(); });
+    auto logger = std::make_shared<Loop::Logger>();
+    auto state = std::make_shared<FailingLock::Shared>();
+    state->ThrowOnDeadlineQuery = true;
+    FatalCounter fatal;
+    FailingSnapshot snapshot{{std::make_shared<FailingLock>(FailingLock{state, std::nullopt})}};
+
+    auto loop = Loop::Start(context.get_executor(), logger, snapshot, ScriptedFatal{&fatal},
+                            std::chrono::milliseconds(5), std::chrono::milliseconds(1), 5);
+    ASSERT_TRUE(fatal.WaitForAtLeast(1));
+
+    // The round was released before fencing, so Stop must return promptly and the host thread must have survived.
+    loop->Stop(std::chrono::seconds(10));
+    guard.reset();
+    thread.join();
+    EXPECT_EQ(fatal.Count(), 1);
+    EXPECT_TRUE(loop->IsStopped());
+    EXPECT_EQ(state->Calls.size(), 1u);
 }
 
 TEST(LeaseRenewalLoopThrowTests, StopGivesUpOnARoundThatNeverCompletes) {
