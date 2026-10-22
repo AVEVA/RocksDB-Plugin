@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <AVEVA/HttpClient/Detail/Lifetime.hpp>
+
 #include <chrono>
 #include <cstddef>
 #include <functional>
@@ -104,19 +106,19 @@ class HttpClientOptions {
     /// Path to a PEM file of trusted CA certificates.
     /// </summary>
     /// <returns>The path, empty when none was set.</returns>
-    [[nodiscard]] const std::string& GetCaFile() const noexcept;
+    [[nodiscard]] const std::string& GetCaFile() const noexcept AVEVA_LIFETIMEBOUND;
 
     /// <summary>
     /// Path to an OpenSSL-style hashed directory of trusted CA certificates.
     /// </summary>
     /// <returns>The path, empty when none was set.</returns>
-    [[nodiscard]] const std::string& GetCaDirectory() const noexcept;
+    [[nodiscard]] const std::string& GetCaDirectory() const noexcept AVEVA_LIFETIMEBOUND;
 
     /// <summary>
     /// Trusted CA certificates held in memory as PEM text.
     /// </summary>
     /// <returns>The PEM text, empty when none was set.</returns>
-    [[nodiscard]] const std::string& GetCaPem() const noexcept;
+    [[nodiscard]] const std::string& GetCaPem() const noexcept AVEVA_LIFETIMEBOUND;
 
     /// <summary>
     /// How many idle keep-alive connections may be kept per origin.
@@ -222,7 +224,7 @@ class HttpClientOptions {
     /// The diagnostics receiver.
     /// </summary>
     /// <returns>The callback; empty when none was set.</returns>
-    [[nodiscard]] const HttpDiagnosticsCallback& GetDiagnosticsCallback() const noexcept;
+    [[nodiscard]] const HttpDiagnosticsCallback& GetDiagnosticsCallback() const noexcept AVEVA_LIFETIMEBOUND;
 
   private:
     TlsVersion m_tlsVersion = TlsVersion::Tls12OrLater;

@@ -8,6 +8,7 @@ find_package(boost_asio CONFIG REQUIRED)
 find_package(boost_json CONFIG REQUIRED)
 find_package(boost_url CONFIG REQUIRED)
 find_package(boost_uuid CONFIG REQUIRED)
+find_package(Microsoft.GSL CONFIG REQUIRED)
 find_package(LibXml2 CONFIG REQUIRED)
 
 add_library(aveva-azure-client
@@ -94,6 +95,7 @@ target_link_libraries(aveva-azure-client
     PUBLIC
         aveva::http-client
         Boost::asio
+        Microsoft.GSL::GSL
     PRIVATE
         Boost::json
         Boost::url

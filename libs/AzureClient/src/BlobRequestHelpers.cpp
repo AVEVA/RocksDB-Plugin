@@ -45,6 +45,8 @@
 #include <charconv>
 #include <chrono>
 #include <format>
+#include <gsl/narrow>
+#include <gsl/util>
 #include <limits>
 #include <locale>
 #include <memory>
@@ -445,10 +447,13 @@ BlobStorageError MakeFailureFromCurrentException() {
 }
 
 std::span<char> AsChars(std::span<std::byte> bytes) noexcept {
+    // Reinterpreting std::byte as char is always valid (both are character-like, so aliasing is allowed).
+    GSL_SUPPRESS(type.1)
     return {reinterpret_cast<char*>(bytes.data()), bytes.size()};
 }
 
 std::string_view AsChars(std::span<const std::byte> bytes) noexcept {
+    GSL_SUPPRESS(type.1)
     return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
 }
 
@@ -459,12 +464,16 @@ std::string Base64Encode(std::span<const std::byte> bytes) {
         return {};
     }
 
+    // OpenSSL takes unsigned char buffers; std::byte aliases them legally.
+    GSL_SUPPRESS(type.1)
     const auto* data = reinterpret_cast<const unsigned char*>(bytes.data());
     std::string encoded;
     encoded.resize(((bytes.size() + 2U) / 3U) * 4U);
-    const int written =
-        EVP_EncodeBlock(reinterpret_cast<unsigned char*>(encoded.data()), data, static_cast<int>(bytes.size()));
-    encoded.resize(written > 0 ? static_cast<std::size_t>(written) : 0U);
+    // EVP_EncodeBlock takes an int length, so an input past INT_MAX throws rather than being truncated.
+    const int length = gsl::narrow<int>(bytes.size());
+    GSL_SUPPRESS(type.1)
+    const int written = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(encoded.data()), data, length);
+    encoded.resize(written > 0 ? gsl::narrow_cast<std::size_t>(written) : 0U);
     return encoded;
 }
 
@@ -732,9 +741,9 @@ HttpRequest BuildCreateContainerRequest(const ContainerTarget& target, const Cre
     return request;
 }
 
-std::optional<std::string> ValidatePageAligned(std::uint64_t value, const char* fieldName) {
+std::optional<std::string> ValidatePageAligned(std::uint64_t value, gsl::not_null<gsl::czstring> fieldName) {
     if ((value % PageBlobPageSize) != 0U) {
-        return std::string(fieldName) + " must be a multiple of 512 bytes.";
+        return std::string(fieldName.get()) + " must be a multiple of 512 bytes.";
     }
 
     return std::nullopt;

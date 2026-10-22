@@ -32,6 +32,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <cstdlib>
 
+#include <AVEVA/HttpClient/Detail/Lifetime.hpp>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -40,6 +41,7 @@
 #include <expected>
 #include <filesystem>
 #include <functional>
+#include <gsl/zstring>
 #include <initializer_list>
 #include <memory>
 #include <optional>
@@ -74,16 +76,16 @@ inline constexpr std::chrono::seconds MaxFixedLeaseDuration{60};
 // parameter in a function signature (see bugprone-easily-swappable-parameters). Implicitly
 // constructible from anything that already implicitly converts to std::string_view at the call
 // site, so callers are unaffected.
-template <class Tag> struct StringLabel {
+template <class Tag> struct AVEVA_GSL_POINTER StringLabel {
     std::string_view Value;
 
     constexpr StringLabel() noexcept = default;
 
-    constexpr StringLabel(const char* value) noexcept : Value(value) {}
+    constexpr StringLabel(gsl::czstring value AVEVA_LIFETIMEBOUND) noexcept : Value(value) {}
 
-    constexpr StringLabel(std::string_view value) noexcept : Value(value) {}
+    constexpr StringLabel(std::string_view value AVEVA_LIFETIMEBOUND) noexcept : Value(value) {}
 
-    StringLabel(const std::string& value) noexcept : Value(value) {}
+    StringLabel(const std::string& value AVEVA_LIFETIMEBOUND) noexcept : Value(value) {}
 };
 
 // Same purpose as StringLabel, but for a numeric parameter of type `T`.
@@ -107,7 +109,7 @@ class SharedKeySigner {
     SharedKeySigner(SharedKeySigner&&) = delete;
     SharedKeySigner& operator=(SharedKeySigner&&) = delete;
 
-    [[nodiscard]] const std::string& AccountName() const noexcept { return m_accountName; }
+    [[nodiscard]] const std::string& AccountName() const noexcept AVEVA_LIFETIMEBOUND { return m_accountName; }
 
     // Base64 HMAC-SHA256 of `stringToSign`.
     [[nodiscard]] std::string Sign(std::string_view stringToSign) const;
@@ -299,21 +301,22 @@ template <class THttp> THttp& RequireHttpClient(const std::shared_ptr<THttp>& ht
 }
 
 [[nodiscard]] std::string ToLowerAscii(std::string_view value);
-[[nodiscard]] std::string_view TrimWhitespace(std::string_view value) noexcept;
+[[nodiscard]] std::string_view TrimWhitespace(std::string_view value AVEVA_LIFETIMEBOUND) noexcept;
 // True if `value` contains CR, LF or NUL (header injection / truncation).
 [[nodiscard]] bool HasHeaderControlCharacters(std::string_view value) noexcept;
 // Throws std::invalid_argument unless `value` is canonical padded base64; returns the decoded length.
 // An empty value is accepted only when `allowEmpty` is set.
 [[nodiscard]] std::size_t ValidateBase64AndGetDecodedLength(std::string_view value, bool allowEmpty);
-[[nodiscard]] std::string_view FindHeaderValue(const HttpResponse& response, std::string_view headerName) noexcept;
+[[nodiscard]] std::string_view FindHeaderValue(const HttpResponse& response AVEVA_LIFETIMEBOUND,
+                                               std::string_view headerName) noexcept;
 [[nodiscard]] bool ParseBoolHeader(std::string_view value) noexcept;
 [[nodiscard]] Models::LeaseStatus ParseLeaseStatus(std::string_view value);
 [[nodiscard]] Models::LeaseState ParseLeaseState(std::string_view value);
 [[nodiscard]] Models::LeaseDurationType ParseLeaseDurationType(std::string_view value);
 [[nodiscard]] std::optional<std::chrono::system_clock::time_point> ParseHttpDateHeader(std::string_view value) noexcept;
 [[nodiscard]] std::string BuildDateHeaderValue(std::chrono::system_clock::time_point now);
-[[nodiscard]] std::string_view TrimTrailingSlashes(std::string_view value) noexcept;
-[[nodiscard]] std::string_view TrimLeadingQuestionMark(std::string_view value) noexcept;
+[[nodiscard]] std::string_view TrimTrailingSlashes(std::string_view value AVEVA_LIFETIMEBOUND) noexcept;
+[[nodiscard]] std::string_view TrimLeadingQuestionMark(std::string_view value AVEVA_LIFETIMEBOUND) noexcept;
 [[nodiscard]] std::string CreateClientRequestId();
 // RFC 7231 date name tables shared by the request formatter and the response parsers.
 inline constexpr std::array<std::string_view, 12> MonthNames{"Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -322,8 +325,8 @@ inline constexpr std::array<std::string_view, 7> ShortWeekdayNames{"Sun", "Mon",
 inline constexpr std::array<std::string_view, 7> LongWeekdayNames{"Sunday",   "Monday", "Tuesday", "Wednesday",
                                                                   "Thursday", "Friday", "Saturday"};
 
-[[nodiscard]] std::span<char> AsChars(std::span<std::byte> bytes) noexcept;
-[[nodiscard]] std::string_view AsChars(std::span<const std::byte> bytes) noexcept;
+[[nodiscard]] std::span<char> AsChars(std::span<std::byte> bytes AVEVA_LIFETIMEBOUND) noexcept;
+[[nodiscard]] std::string_view AsChars(std::span<const std::byte> bytes AVEVA_LIFETIMEBOUND) noexcept;
 [[nodiscard]] std::string BytesToString(std::span<const std::byte> bytes);
 [[nodiscard]] std::string Base64Encode(std::span<const std::byte> bytes);
 [[nodiscard]] std::string UrlEncode(std::string_view value, std::string_view extraSafeChars);

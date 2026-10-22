@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <AVEVA/HttpClient/Detail/Lifetime.hpp>
+#include <gsl/util>
+
 #include <algorithm>
 #include <concepts>
 #include <cstddef>
@@ -34,11 +37,11 @@ class FileSink final {
     void Reserve(std::uint64_t /*size*/) {}
 
     [[nodiscard]] bool Write(std::string data) {
-        m_file.write(data.data(), static_cast<std::streamsize>(data.size()));
+        m_file.write(data.data(), gsl::narrow_cast<std::streamsize>(data.size()));
         return m_file.good();
     }
 
-    [[nodiscard]] std::ofstream& File() noexcept { return m_file; }
+    [[nodiscard]] std::ofstream& File() noexcept AVEVA_LIFETIMEBOUND { return m_file; }
 
   private:
     std::ofstream m_file;
@@ -47,9 +50,9 @@ class FileSink final {
 // Copies each received body string into caller-owned memory (one copy; the HTTP client has no body-sink hook
 // to read straight into the span). A blob range larger than the buffer fails the download instead of writing
 // past the end.
-class SpanSink final {
+class AVEVA_GSL_POINTER SpanSink final {
   public:
-    explicit SpanSink(std::span<char> destination) : m_destination(destination) {}
+    explicit SpanSink(std::span<char> destination AVEVA_LIFETIME_CAPTURE_BY(this)) : m_destination(destination) {}
 
     void Reserve(std::uint64_t size) {
         if (size > m_destination.size()) {
@@ -63,7 +66,7 @@ class SpanSink final {
         if (data.size() > m_destination.size() - m_position) {
             return false;
         }
-        std::memcpy(m_destination.data() + m_position, data.data(), data.size());
+        std::ranges::copy(data, m_destination.begin() + gsl::narrow_cast<std::ptrdiff_t>(m_position));
         m_position += data.size();
         return true;
     }
@@ -95,7 +98,7 @@ class StringSink final {
             return true;
         }
         if (m_data.empty()) {
-            m_data.reserve(static_cast<std::size_t>(m_expected));
+            m_data.reserve(gsl::narrow_cast<std::size_t>(m_expected));
         }
         m_data.append(data);
         return true;

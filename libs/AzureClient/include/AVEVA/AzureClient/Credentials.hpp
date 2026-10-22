@@ -27,6 +27,8 @@
 #include <cstdlib>
 #include <expected>
 #include <functional>
+#include <gsl/pointers>
+#include <gsl/zstring>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -127,7 +129,7 @@ using Clock = std::chrono::system_clock;
 constexpr std::int64_t MinTokenLifetimeSeconds = 1;
 constexpr std::int64_t MaxTokenLifetimeSeconds = 24 * 60 * 60;
 
-[[nodiscard]] std::string GetEnvironmentValue(const char* name);
+[[nodiscard]] std::string GetEnvironmentValue(gsl::not_null<gsl::czstring> name);
 
 [[nodiscard]] std::optional<std::int64_t> ParseInteger(std::string_view text) noexcept;
 
@@ -251,7 +253,7 @@ template <HttpClientLike THttp> class BasicClientSecretCredential final {
             m_options.RequestOptions, m_options.Retry, false, std::move(completion));
     }
 
-    THttp* m_httpClient;
+    gsl::not_null<THttp*> m_httpClient;
     std::shared_ptr<THttp> m_httpOwner;
     ClientSecretCredentialOptions m_options;
 };
@@ -300,7 +302,7 @@ template <HttpClientLike THttp> class BasicWorkloadIdentityCredential final {
             m_options.RequestOptions, m_options.Retry, false, std::move(completion));
     }
 
-    THttp* m_httpClient;
+    gsl::not_null<THttp*> m_httpClient;
     std::shared_ptr<THttp> m_httpOwner;
     WorkloadIdentityCredentialOptions m_options;
 };
@@ -360,7 +362,7 @@ template <HttpClientLike THttp> class BasicClientAssertionCredential final {
         });
     }
 
-    THttp* m_httpClient;
+    gsl::not_null<THttp*> m_httpClient;
     std::shared_ptr<THttp> m_httpOwner;
     std::shared_ptr<const ClientAssertionCredentialOptions> m_options;
 };
@@ -425,7 +427,7 @@ template <HttpClientLike THttp> class BasicManagedIdentityCredential final {
                                   std::move(completion));
     }
 
-    THttp* m_httpClient;
+    gsl::not_null<THttp*> m_httpClient;
     std::shared_ptr<THttp> m_httpOwner;
     ManagedIdentityCredentialOptions m_options;
 };

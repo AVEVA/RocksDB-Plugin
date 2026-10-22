@@ -13,6 +13,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstdint>
+#include <gsl/util>
 #include <memory>
 #include <optional>
 #include <random>
@@ -75,10 +76,10 @@ std::optional<std::chrono::milliseconds> ParseRetryAfter(const HttpResponse& res
     constexpr std::uint64_t MaxMilliseconds = 24ULL * 60ULL * 60ULL * 1000ULL;
     if (const auto ms = ParseHeaderUnsigned(FindHeaderValue(response, "x-ms-retry-after-ms")); ms.has_value()) {
         return std::chrono::milliseconds{
-            static_cast<std::chrono::milliseconds::rep>(std::min<std::uint64_t>(*ms, MaxMilliseconds))};
+            gsl::narrow_cast<std::chrono::milliseconds::rep>(std::min<std::uint64_t>(*ms, MaxMilliseconds))};
     }
     if (const auto seconds = ParseHeaderUnsigned(FindHeaderValue(response, "Retry-After")); seconds.has_value()) {
-        return std::chrono::milliseconds{static_cast<std::chrono::milliseconds::rep>(
+        return std::chrono::milliseconds{gsl::narrow_cast<std::chrono::milliseconds::rep>(
             std::min<std::uint64_t>(*seconds, MaxMilliseconds / MillisecondsPerSecond) * MillisecondsPerSecond)};
     }
     // The HTTP-date form; a date in the past means "retry now". The server's Date header is the reference when
@@ -88,7 +89,7 @@ std::optional<std::chrono::milliseconds> ParseRetryAfter(const HttpResponse& res
         const auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(
             *date - serverNow.value_or(std::chrono::system_clock::now()));
         return std::clamp(wait, std::chrono::milliseconds{0},
-                          std::chrono::milliseconds{static_cast<std::chrono::milliseconds::rep>(MaxMilliseconds)});
+                          std::chrono::milliseconds{gsl::narrow_cast<std::chrono::milliseconds::rep>(MaxMilliseconds)});
     }
     return std::nullopt;
 }

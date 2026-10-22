@@ -28,6 +28,7 @@
 #include <cstddef>
 #include <exception>
 #include <expected>
+#include <gsl/util>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -280,7 +281,7 @@ class BatchDeleteOperation final
 
         {
             const std::scoped_lock lock(m_mutex);
-            std::ranges::move(items, m_items.begin() + static_cast<std::ptrdiff_t>(chunk * MaxBatchSubrequests));
+            std::ranges::move(items, m_items.begin() + gsl::narrow_cast<std::ptrdiff_t>(chunk * MaxBatchSubrequests));
             if (!m_rawResponse.has_value()) {
                 m_rawResponse = std::move(response);
             }

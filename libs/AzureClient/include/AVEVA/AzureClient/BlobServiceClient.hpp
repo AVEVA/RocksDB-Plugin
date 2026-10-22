@@ -17,6 +17,7 @@
 #include <concepts>
 #include <expected>
 #include <functional>
+#include <gsl/pointers>
 #include <memory>
 #include <optional>
 #include <string>
@@ -81,7 +82,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobServic
     }
 
   private:
-    THttp* m_httpClient = nullptr;
+    gsl::not_null<THttp*> m_httpClient;
     // Set when the client was given shared ownership of the HTTP client; null when it only borrows it.
     std::shared_ptr<THttp> m_httpOwner;
     // Shared immutable connection state referenced by child clients.

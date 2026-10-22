@@ -11,6 +11,7 @@
 #include <boost/url/parse.hpp>
 #include <boost/url/scheme.hpp>
 #include <boost/url/url_view.hpp>
+#include <gsl/util>
 
 #include <algorithm>
 #include <cctype>
@@ -60,7 +61,7 @@ struct Route {
         route.Host = parsed->host_address();
         if (parsed->host_type() == urls::host_type::name) {
             std::ranges::transform(route.Host, route.Host.begin(),
-                                   [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                                   [](const unsigned char c) { return gsl::narrow_cast<char>(std::tolower(c)); });
         }
         route.Port = parsed->has_port() ? std::string(parsed->port()) : (route.Tls ? "443" : "80");
         route.HostIsName = parsed->host_type() == urls::host_type::name;

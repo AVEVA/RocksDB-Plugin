@@ -25,6 +25,7 @@
 #include <expected>
 #include <filesystem>
 #include <functional>
+#include <gsl/pointers>
 #include <memory>
 #include <optional>
 #include <ostream>
@@ -92,7 +93,9 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
 
     // The blob's URL without any query string (no SAS), stable for the blob's lifetime and safe to log or to use as
     // an identity key.
-    [[nodiscard]] const std::string& ResourceUrl() const noexcept { return m_target->EncodedResource; }
+    [[nodiscard]] const std::string& ResourceUrl() const noexcept AVEVA_LIFETIMEBOUND {
+        return m_target->EncodedResource;
+    }
 
     // True when Url() carries a SAS token, so the blob can be named as a copy source without any other authorization.
     [[nodiscard]] bool HasSasToken() const noexcept { return !m_target->Connection->SasToken.empty(); }
@@ -104,7 +107,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
 
     // Request options (timeout, response body limit, cancellation slot) applied to every operation
     // that is not given its own via WithRequestOptions(...) or the trailing requestOptions argument.
-    [[nodiscard]] const AzureRequestOptions& GetDefaultRequestOptions() const noexcept {
+    [[nodiscard]] const AzureRequestOptions& GetDefaultRequestOptions() const noexcept AVEVA_LIFETIMEBOUND {
         return m_target->Connection->DefaultRequestOptions;
     }
 
@@ -299,21 +302,24 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
         : m_httpClient(&httpClient), m_httpOwner(std::move(owner)), m_target(std::move(target)) {}
 
     // Connection state owned by this client; derived blob-type clients read it to build requests.
-    [[nodiscard]] THttp& Http() const noexcept { return *m_httpClient; }
-    [[nodiscard]] const std::shared_ptr<THttp>& HttpOwner() const noexcept { return m_httpOwner; }
+    [[nodiscard]] THttp& Http() const noexcept AVEVA_LIFETIMEBOUND { return *m_httpClient; }
+    [[nodiscard]] const std::shared_ptr<THttp>& HttpOwner() const noexcept AVEVA_LIFETIMEBOUND { return m_httpOwner; }
 
-    [[nodiscard]] const Private::BasicBlobTarget<TCred>& Target() const noexcept { return *m_target; }
+    [[nodiscard]] const Private::BasicBlobTarget<TCred>& Target() const noexcept AVEVA_LIFETIMEBOUND {
+        return *m_target;
+    }
 
     // A client sharing this one's state, owned by a deferred operation so it survives the original being moved from.
     [[nodiscard]] BasicBlobClient MakeSnapshot() const { return BasicBlobClient{*m_httpClient, m_target, m_httpOwner}; }
 
     // For operations that outlive the call and must keep the target alive.
-    [[nodiscard]] const std::shared_ptr<const Private::BasicBlobTarget<TCred>>& SharedTarget() const noexcept {
+    [[nodiscard]] const std::shared_ptr<const Private::BasicBlobTarget<TCred>>&
+    SharedTarget() const noexcept AVEVA_LIFETIMEBOUND {
         return m_target;
     }
 
   private:
-    THttp* m_httpClient = nullptr;
+    gsl::not_null<THttp*> m_httpClient;
     // Set when the client was given shared ownership of the HTTP client; null when it only borrows it.
     std::shared_ptr<THttp> m_httpOwner;
     std::shared_ptr<const Private::BasicBlobTarget<TCred>> m_target;

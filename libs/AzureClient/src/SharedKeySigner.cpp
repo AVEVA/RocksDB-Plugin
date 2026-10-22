@@ -19,6 +19,7 @@
 #include <charconv>
 #include <cstddef>
 #include <format>
+#include <gsl/util>
 #include <iterator>
 #include <limits>
 #include <locale>
@@ -164,7 +165,7 @@ constexpr std::array<int, 128> CultureTableLevel4 = MakeCultureTableLevel4();
     const std::size_t decodedLength = ValidateBase64AndGetDecodedLength(value, true);
     std::vector<unsigned char> decoded(((value.size() + 3U) / 4U) * 3U);
     const int written = EVP_DecodeBlock(decoded.data(), reinterpret_cast<const unsigned char*>(value.data()),
-                                        static_cast<int>(value.size()));
+                                        gsl::narrow_cast<int>(value.size()));
     if (written < 0) {
         throw std::invalid_argument("SharedKey.AccountKey must be a valid base64 string.");
     }

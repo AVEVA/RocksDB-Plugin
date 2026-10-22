@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <AVEVA/HttpClient/Detail/Lifetime.hpp>
 #include <AVEVA/HttpClient/HttpHeader.hpp>
 
 #include <string>
@@ -39,7 +40,7 @@ class HttpResponse {
     /// The response headers.
     /// </summary>
     /// <returns>The headers, in the order the server sent them.</returns>
-    [[nodiscard]] const std::vector<HttpHeader>& GetHeaders() const& noexcept;
+    [[nodiscard]] const std::vector<HttpHeader>& GetHeaders() const& noexcept AVEVA_LIFETIMEBOUND;
 
     /// <summary>
     /// Moves the headers out of an rvalue response, so a caller that owns the response can take them
@@ -52,7 +53,7 @@ class HttpResponse {
     /// The response body.
     /// </summary>
     /// <returns>The fully buffered body; empty for a bodiless response.</returns>
-    [[nodiscard]] const std::string& GetBody() const& noexcept;
+    [[nodiscard]] const std::string& GetBody() const& noexcept AVEVA_LIFETIMEBOUND;
 
     /// <summary>
     /// Moves the body out of an rvalue response, so a caller that owns the response can take it

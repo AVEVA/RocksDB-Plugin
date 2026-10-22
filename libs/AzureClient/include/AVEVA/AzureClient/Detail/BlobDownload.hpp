@@ -34,6 +34,8 @@
 #include <expected>
 #include <filesystem>
 #include <fstream>
+#include <gsl/pointers>
+#include <gsl/util>
 #include <ios>
 #include <limits>
 #include <map>
@@ -383,7 +385,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
             }
             std::string body = TakeBody(response);
             if (m_end.has_value() && body.size() > *m_end) {
-                body.resize(static_cast<std::size_t>(*m_end));
+                body.resize(gsl::narrow_cast<std::size_t>(*m_end));
             }
             m_end = body.size();
             m_summary.FirstResponse = std::move(response);
@@ -843,7 +845,7 @@ void FinishFileDownloadOnWriter(THttp& httpClient, const std::shared_ptr<TState>
 template <HttpClientLike THttp, class TState> struct FileFinalizer {
     static constexpr bool IsInternal = true;
 
-    THttp* Http;
+    gsl::not_null<THttp*> Http;
     std::shared_ptr<TState> State;
 
     void operator()(SummaryResult result, FileSink sink) noexcept {

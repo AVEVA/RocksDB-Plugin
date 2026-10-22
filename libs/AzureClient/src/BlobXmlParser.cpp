@@ -3,6 +3,7 @@
 
 #include "BlobXmlParser.hpp"
 
+#include <gsl/util>
 #include <limits>
 #include <mutex>
 #include <new>
@@ -55,8 +56,8 @@ void InitializeXmlParser() {
         throw std::bad_alloc();
     }
 
-    std::unique_ptr<xmlDoc, XmlDocDeleter> document{
-        xmlCtxtReadMemory(context.get(), xml.data(), static_cast<int>(xml.size()), nullptr, nullptr, XmlParseOptions)};
+    std::unique_ptr<xmlDoc, XmlDocDeleter> document{xmlCtxtReadMemory(
+        context.get(), xml.data(), gsl::narrow_cast<int>(xml.size()), nullptr, nullptr, XmlParseOptions)};
     if (!document || xmlGetIntSubset(document.get()) != nullptr) {
         return nullptr;
     }

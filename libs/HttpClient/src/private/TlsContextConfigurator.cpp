@@ -12,7 +12,11 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
+#include <gsl/pointers>
+#include <gsl/util>
+
 #include <filesystem>
+#include <limits>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -40,7 +44,11 @@ struct BioDeleter {
 };
 
 int CountPemCertificates(const std::string& pem) {
-    const std::unique_ptr<BIO, BioDeleter> bio(BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size())));
+    // BIO_new_mem_buf takes an int length, so a larger buffer cannot be parsed.
+    if (pem.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        return 0;
+    }
+    const std::unique_ptr<BIO, BioDeleter> bio(BIO_new_mem_buf(pem.data(), gsl::narrow_cast<int>(pem.size())));
     if (!bio) {
         return 0;
     }
@@ -107,11 +115,11 @@ class TlsSessionCache {
 };
 
 void FreeCache(void* /*parent*/, void* data, CRYPTO_EX_DATA* /*ad*/, int /*index*/, long /*argl*/, void* /*argp*/) {
-    delete static_cast<TlsSessionCache*>(data);
+    delete static_cast<gsl::owner<TlsSessionCache*>>(data);
 }
 
 void FreeOrigin(void* /*parent*/, void* data, CRYPTO_EX_DATA* /*ad*/, int /*index*/, long /*argl*/, void* /*argp*/) {
-    delete static_cast<std::string*>(data);
+    delete static_cast<gsl::owner<std::string*>>(data);
 }
 
 int CacheIndex() {

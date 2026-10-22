@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <gsl/util>
 #include <string>
 
 namespace AVEVA::AzureClient {
@@ -65,8 +66,8 @@ const std::error_category& TokenEndpointErrorCategory() noexcept {
 
 std::error_code MakeTokenEndpointError(const unsigned int statusCode, const std::string_view oauthError) noexcept {
     const auto found = std::ranges::find(KnownErrors, oauthError);
-    const auto index = found == KnownErrors.end() ? 0 : static_cast<int>(found - KnownErrors.begin());
-    const int status = static_cast<int>(std::min(statusCode, 999U));
+    const auto index = found == KnownErrors.end() ? 0 : gsl::narrow_cast<int>(found - KnownErrors.begin());
+    const int status = gsl::narrow_cast<int>(std::min(statusCode, 999U));
     return {status * Stride + index, TokenEndpointErrorCategory()};
 }
 
@@ -78,7 +79,7 @@ std::optional<TokenEndpointFailure> GetTokenEndpointFailure(const std::error_cod
         return std::nullopt;
     }
     const auto index = static_cast<std::size_t>(code.value() % Stride);
-    return TokenEndpointFailure{.StatusCode = static_cast<unsigned int>(code.value() / Stride),
+    return TokenEndpointFailure{.StatusCode = gsl::narrow_cast<unsigned int>(code.value() / Stride),
                                 .ErrorCode = index < KnownErrors.size() ? KnownErrors[index] : std::string_view{}};
 }
 } // namespace AVEVA::AzureClient

@@ -20,6 +20,8 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/thread_pool.hpp>
 
+#include <gsl/pointers>
+
 #include <memory>
 #include <system_error>
 #include <utility>
@@ -144,7 +146,7 @@ class HttpClient {
     /// <param name="completion">Completed with the outcome.</param>
     void Submit(HttpRequest request, HttpRequestOptions options, Detail::CompletionPointer completion);
 
-    boost::asio::io_context* m_context;
+    gsl::not_null<boost::asio::io_context*> m_context;
     std::unique_ptr<Impl> m_impl;
 };
 } // namespace AVEVA

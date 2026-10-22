@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <AVEVA/HttpClient/Detail/Lifetime.hpp>
+
 #include <string>
 
 namespace AVEVA {
@@ -27,13 +29,13 @@ class HttpHeader {
     /// The field name.
     /// </summary>
     /// <returns>The name, empty on a default-constructed header.</returns>
-    [[nodiscard]] const std::string& GetName() const noexcept;
+    [[nodiscard]] const std::string& GetName() const noexcept AVEVA_LIFETIMEBOUND;
 
     /// <summary>
     /// The field value.
     /// </summary>
     /// <returns>The value, empty on a default-constructed header.</returns>
-    [[nodiscard]] const std::string& GetValue() const noexcept;
+    [[nodiscard]] const std::string& GetValue() const noexcept AVEVA_LIFETIMEBOUND;
 
     /// <summary>
     /// Replaces the field name.

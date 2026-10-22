@@ -9,6 +9,7 @@ include(CMakeFindDependencyMacro)
 find_dependency(aveva-http-client CONFIG REQUIRED)
 find_dependency(OpenSSL REQUIRED)
 find_dependency(boost_asio CONFIG REQUIRED)
+find_dependency(Microsoft.GSL CONFIG REQUIRED)
 # Private dependencies: a static library still exports them as $<LINK_ONLY:...> link items.
 find_dependency(boost_json CONFIG REQUIRED)
 find_dependency(boost_url CONFIG REQUIRED)

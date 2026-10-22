@@ -23,6 +23,8 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <gsl/pointers>
+#include <gsl/zstring>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -42,7 +44,8 @@ namespace Private {
 constexpr std::string_view PageBlobTypeValue = "PageBlob";
 constexpr std::string_view PageWriteUpdateValue = "update";
 
-[[nodiscard]] std::optional<std::string> ValidatePageAligned(std::uint64_t value, const char* fieldName);
+[[nodiscard]] std::optional<std::string> ValidatePageAligned(std::uint64_t value,
+                                                             gsl::not_null<gsl::czstring> fieldName);
 
 // The x-ms-range value for a page write, or a validation message.
 [[nodiscard]] std::expected<std::string, std::string> BuildPageWriteRangeHeaderValue(std::uint64_t offset,

@@ -17,6 +17,7 @@
     "boost-unordered",
     "boost-url",
     "boost-uuid",
+    "ms-gsl",
     "openssl",
     "rocksdb",
     "zstd",

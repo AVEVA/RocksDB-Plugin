@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstddef>
 #include <functional>
+#include <gsl/pointers>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -477,7 +478,7 @@ class ConnectionPool {
     /// Destroys a node (and with it its socket) when an intrusive list is cleared.
     /// </summary>
     struct NodeDisposer {
-        void operator()(Node* node) const noexcept { delete node; }
+        void operator()(gsl::owner<Node*> node) const noexcept { delete node; }
     };
 
     /// <summary>
@@ -485,7 +486,7 @@ class ConnectionPool {
     /// first when the stream has one. Falls back to destroying it in place if posting fails.
     /// </summary>
     struct ExecutorDisposer {
-        void operator()(Node* node) const noexcept {
+        void operator()(gsl::owner<Node*> node) const noexcept {
             DisposeConnection(std::move(node->connection));
             delete node;
         }
@@ -518,7 +519,7 @@ class ConnectionPool {
     /// Returns a node to hold a connection, reusing a retired one when possible. May throw.
     /// </summary>
     /// <returns>An unlinked node owned by the pool.</returns>
-    Node* Obtain() {
+    gsl::owner<Node*> Obtain() {
         if (m_recycled.empty()) {
             return new Node();
         }

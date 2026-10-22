@@ -20,17 +20,17 @@
 
 namespace AVEVA::AzureClient {
 namespace Private {
-std::string GetEnvironmentValue(const char* name) {
+std::string GetEnvironmentValue(gsl::not_null<gsl::czstring> name) {
 #ifdef _WIN32
-    char* buffer = nullptr;
+    gsl::owner<char*> buffer = nullptr;
     std::size_t size = 0;
-    if (_dupenv_s(&buffer, &size, name) != 0 || buffer == nullptr) {
+    if (_dupenv_s(&buffer, &size, name.get()) != 0 || buffer == nullptr) {
         return {};
     }
     const std::unique_ptr<char, decltype(&std::free)> owner{buffer, &std::free};
     return std::string{buffer};
 #else
-    const char* value = std::getenv(name);
+    const char* value = std::getenv(name.get());
     return value == nullptr ? std::string{} : std::string{value};
 #endif
 }

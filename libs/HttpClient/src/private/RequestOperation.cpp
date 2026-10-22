@@ -12,6 +12,7 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/ssl/host_name_verification.hpp>
 
+#include <gsl/util>
 #include <openssl/ssl.h>
 
 #include <algorithm>
@@ -99,11 +100,14 @@ void RequestOperation<Stream>::BuildRequestUnchecked(HttpRequest& request, const
         const auto view = request.GetBodyView();
         m_ownedBodyStorage.clear();
         m_bodyKeepAlive = request.GetBodyKeepAlive();
+        // Beast's buffer_body wants a mutable pointer but only reads it when sending.
+        GSL_SUPPRESS(type.3)
         m_request.body().data = const_cast<void*>(static_cast<const void*>(view.data()));
         m_request.body().size = view.size();
     } else {
         m_bodyKeepAlive.reset();
         m_ownedBodyStorage = request.ReleaseBody();
+        GSL_SUPPRESS(type.3)
         m_request.body().data = m_ownedBodyStorage.empty()
                                     ? nullptr
                                     : const_cast<void*>(static_cast<const void*>(m_ownedBodyStorage.data()));
@@ -139,8 +143,11 @@ template <typename Stream> bool RequestOperation<Stream>::ConfigureTlsForHost() 
             m_stream->set_verify_callback(asio::ssl::host_name_verification(m_key.host));
         }
         // SSL_set_tlsext_host_name is a macro with an old-style cast, so call SSL_ctrl directly.
-        if (m_hostIsName && !SSL_ctrl(m_stream->native_handle(), SSL_CTRL_SET_TLSEXT_HOSTNAME,
-                                      TLSEXT_NAMETYPE_host_name, const_cast<char*>(m_key.host.c_str()))) {
+        // SSL_ctrl takes the name as void* but only reads it.
+        GSL_SUPPRESS(type.3)
+        char* const hostName = const_cast<char*>(m_key.host.c_str());
+        if (m_hostIsName &&
+            !SSL_ctrl(m_stream->native_handle(), SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_host_name, hostName)) {
             Fail(HttpClientError::TlsFailed);
             return false;
         }
@@ -420,7 +427,7 @@ template <typename Stream> std::expected<HttpResponse, std::error_code> RequestO
         std::vector<HttpHeader> headers;
         // Walking Beast's linked list twice is cheaper than the reallocations of a growing vector. Each name and
         // value is built once, straight from the parser's view, and moved into the header.
-        headers.reserve(static_cast<std::size_t>(std::distance(message.base().begin(), message.base().end())));
+        headers.reserve(gsl::narrow_cast<std::size_t>(std::distance(message.base().begin(), message.base().end())));
         for (const auto& header : message.base()) {
             headers.emplace_back(std::string(header.name_string()), std::string(header.value()));
         }

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <AVEVA/HttpClient/Detail/Lifetime.hpp>
 #include <AVEVA/HttpClient/HttpHeader.hpp>
 #include <AVEVA/HttpClient/HttpMethod.hpp>
 
@@ -37,26 +38,26 @@ class HttpRequest {
     /// The request URL, exactly as supplied; it is not parsed or validated here.
     /// </summary>
     /// <returns>The URL, empty unless set.</returns>
-    [[nodiscard]] const std::string& GetUrl() const noexcept;
+    [[nodiscard]] const std::string& GetUrl() const noexcept AVEVA_LIFETIMEBOUND;
 
     /// <summary>
     /// The request headers.
     /// </summary>
     /// <returns>The headers, in the order they were added.</returns>
-    [[nodiscard]] const std::vector<HttpHeader>& GetHeaders() const noexcept;
+    [[nodiscard]] const std::vector<HttpHeader>& GetHeaders() const noexcept AVEVA_LIFETIMEBOUND;
 
     /// <summary>
     /// The request headers, for in-place modification before the request is sent.
     /// </summary>
     /// <returns>A mutable reference to the headers.</returns>
-    [[nodiscard]] std::vector<HttpHeader>& GetHeaders() noexcept;
+    [[nodiscard]] std::vector<HttpHeader>& GetHeaders() noexcept AVEVA_LIFETIMEBOUND;
 
     /// <summary>
     /// Returns the owned body set via <see cref="SetBody"/>.
     /// </summary>
     /// <returns>The owned body. Empty if a non-owning body was set via <see cref="SetBodyView"/> -- use
     /// <see cref="GetBodyView"/> (and <see cref="HasBodyView"/>) in that case.</returns>
-    [[nodiscard]] const std::string& GetBody() const noexcept;
+    [[nodiscard]] const std::string& GetBody() const noexcept AVEVA_LIFETIMEBOUND;
 
     /// <summary>
     /// Sets the request method.
@@ -108,7 +109,7 @@ class HttpRequest {
     /// duration of the operation), or use the overload that takes a keep-alive.
     /// </summary>
     /// <param name="content">The caller-owned bytes to send, subject to the lifetime contract above.</param>
-    void SetBodyView(std::span<const std::byte> content) noexcept;
+    void SetBodyView(std::span<const std::byte> content AVEVA_LIFETIME_CAPTURE_BY(this)) noexcept;
 
     /// <summary>
     /// Like <see cref="SetBodyView"/>, but the request (and every copy of it, and the HTTP operation that
@@ -123,7 +124,7 @@ class HttpRequest {
     /// The owner passed to <c>SetBodyView(content, keepAlive)</c>.
     /// </summary>
     /// <returns>The keep-alive, or null if none was given.</returns>
-    [[nodiscard]] const std::shared_ptr<const void>& GetBodyKeepAlive() const noexcept;
+    [[nodiscard]] const std::shared_ptr<const void>& GetBodyKeepAlive() const noexcept AVEVA_LIFETIMEBOUND;
 
     /// <summary>
     /// Moves the owned body out of the request, leaving it empty. Has no effect on a body view.

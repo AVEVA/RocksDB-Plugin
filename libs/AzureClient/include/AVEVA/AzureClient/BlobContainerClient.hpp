@@ -29,6 +29,7 @@
 #include <concepts>
 #include <expected>
 #include <functional>
+#include <gsl/pointers>
 #include <iterator>
 #include <memory>
 #include <optional>
@@ -98,7 +99,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContai
 
     // Request options (timeout, response body limit, cancellation slot) applied to every operation
     // that is not given its own via WithRequestOptions(...) or the trailing requestOptions argument.
-    [[nodiscard]] const AzureRequestOptions& GetDefaultRequestOptions() const noexcept {
+    [[nodiscard]] const AzureRequestOptions& GetDefaultRequestOptions() const noexcept AVEVA_LIFETIMEBOUND {
         return m_target->Connection->DefaultRequestOptions;
     }
 
@@ -257,7 +258,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContai
                                   requestOptions);
     }
 
-    THttp* m_httpClient = nullptr;
+    gsl::not_null<THttp*> m_httpClient;
     // Set when the client was given shared ownership of the HTTP client; null when it only borrows it.
     std::shared_ptr<THttp> m_httpOwner;
     std::shared_ptr<const Private::BasicContainerTarget<TCred>> m_target;

@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstddef>
 #include <functional>
+#include <gsl/pointers>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -119,7 +120,7 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     static BasicDnsCache& Shared() {
         // Intentionally leaked: a host's static io_context can outlive this and run LeaderGuard::~LeaderGuard
         // after static destruction.
-        static auto* cache = new BasicDnsCache;
+        static gsl::owner<BasicDnsCache*> cache = new BasicDnsCache;
         return *cache;
     }
 

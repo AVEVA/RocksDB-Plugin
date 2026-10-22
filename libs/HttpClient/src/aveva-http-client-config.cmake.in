@@ -12,6 +12,7 @@ find_dependency(boost_intrusive CONFIG REQUIRED)
 find_dependency(boost_url CONFIG REQUIRED)
 find_dependency(boost_unordered CONFIG REQUIRED)
 find_dependency(OpenSSL REQUIRED)
+find_dependency(Microsoft.GSL CONFIG REQUIRED)
 
 include(${CMAKE_CURRENT_LIST_DIR}/aveva-http-client-targets.cmake)
 
