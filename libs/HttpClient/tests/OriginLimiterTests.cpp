@@ -6,12 +6,14 @@
 #include <boost/asio/io_context.hpp>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <latch>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -162,6 +164,65 @@ TEST(OriginLimiterTests, CancelFindsWaitersThatWereQueuedOutOfTicketOrder) {
     limiter.Cancel("origin", later);
 
     EXPECT_EQ(recorder->Aborted, (std::vector<int>{2, 3}));
+}
+
+namespace {
+// Throws from Abort for chosen requests, after recording them, like a completion handler that throws.
+class ThrowingSink {
+  public:
+    ThrowingSink(std::shared_ptr<Recorder> recorder, int throwOn)
+        : m_recorder(std::move(recorder)), m_throwOn(throwOn) {}
+
+    void Start(int&& pending) const { m_recorder->Started.push_back(pending); }
+    void Abort(int&& pending, std::error_code error) const {
+        m_recorder->Aborted.push_back(pending);
+        m_recorder->Errors.push_back(error);
+        if (pending == m_throwOn) {
+            throw std::runtime_error("handler failed");
+        }
+    }
+
+  private:
+    std::shared_ptr<Recorder> m_recorder;
+    int m_throwOn;
+};
+} // namespace
+
+TEST(OriginLimiterTests, CloseAbortsEveryWaiterEvenWhenOneCompletionThrows) {
+    auto recorder = std::make_shared<Recorder>();
+    AVEVA::Private::OriginLimiter<int, ThrowingSink> limiter{1, ThrowingSink{recorder, 2}};
+    limiter.Run("a", limiter.NextTicket(), 1);
+    limiter.Run("a", limiter.NextTicket(), 2);
+    limiter.Run("a", limiter.NextTicket(), 3);
+    limiter.Run("b", limiter.NextTicket(), 4);
+    limiter.Run("b", limiter.NextTicket(), 5);
+
+    EXPECT_THROW(limiter.Close(), std::runtime_error);
+
+    std::ranges::sort(recorder->Aborted);
+    EXPECT_EQ(recorder->Aborted, (std::vector<int>{2, 3, 5}));
+}
+
+TEST(OriginLimiterTests, ExpiryThrowingCompletionDoesNotStrandLaterDeadlines) {
+    using namespace std::chrono_literals;
+    using ThrowingLimiter = AVEVA::Private::OriginLimiter<int, ThrowingSink>;
+    boost::asio::io_context context;
+    auto recorder = std::make_shared<Recorder>();
+    auto limiter = std::make_shared<ThrowingLimiter>(1, ThrowingSink{recorder, 2});
+    limiter->EnableDeadlines(context, std::make_error_code(std::errc::timed_out));
+
+    const auto now = ThrowingLimiter::Clock::now();
+    limiter->Run("origin", limiter->NextTicket(), 1, now + 1h);
+    limiter->Run("origin", limiter->NextTicket(), 2, now + 20ms);
+    limiter->Run("origin", limiter->NextTicket(), 3, now + 20ms);
+    limiter->Run("origin", limiter->NextTicket(), 4, now + 150ms);
+
+    EXPECT_THROW(context.run_for(1s), std::runtime_error);
+    context.restart();
+    context.run_for(1s);
+
+    EXPECT_EQ(recorder->Started, std::vector<int>{1});
+    EXPECT_EQ(recorder->Aborted, (std::vector<int>{2, 3, 4}));
 }
 
 namespace {

@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <exception>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -184,21 +185,34 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
     /// and may still call <see cref="Release"/>.
     /// </summary>
     void Close() {
-        std::vector<Pending> aborts;
+        // Moving the whole map out is non-throwing, so no allocation can fail between taking the waiters and
+        // aborting them. Origins that only had running requests need no entry: Release ignores unknown origins
+        // once closed.
+        decltype(m_origins) drained;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_closed = true;
-            for (auto& [origin, state] : m_origins) {
-                for (auto& waiter : state.waiters) {
-                    aborts.push_back(std::move(waiter.pending));
-                }
-                state.waiters.clear();
-            }
+            drained = std::move(m_origins);
+            m_origins.clear();
             m_expiries.clear();
-            ArmTimerLocked();
+            RearmQuietlyLocked();
         }
-        for (auto& pending : aborts) {
-            m_sink.Abort(std::move(pending), std::make_error_code(std::errc::operation_canceled));
+        const auto canceled = std::make_error_code(std::errc::operation_canceled);
+        // A throwing completion must not abandon the remaining requests; the first failure is rethrown at the end.
+        std::exception_ptr failure;
+        for (auto& [origin, state] : drained) {
+            for (auto& waiter : state.waiters) {
+                try {
+                    m_sink.Abort(std::move(waiter.pending), canceled);
+                } catch (...) {
+                    if (!failure) {
+                        failure = std::current_exception();
+                    }
+                }
+            }
+        }
+        if (failure) {
+            std::rethrow_exception(failure);
         }
     }
 
@@ -255,30 +269,59 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
     /// Aborts every queued request whose deadline has passed, then re-arms for the next one.
     /// </summary>
     void OnTimer() {
-        std::vector<Pending> expired;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             if (m_closed) {
                 return;
             }
             m_armedFor = Clock::time_point::max();
-            const auto now = Clock::now();
-            while (!m_expiries.empty() && m_expiries.begin()->first.first <= now) {
-                const auto& [key, origin] = *m_expiries.begin();
-                if (const auto it = m_origins.find(origin); it != m_origins.end()) {
-                    auto& waiters = it->second.waiters;
-                    const auto waiter = std::ranges::lower_bound(waiters, key.second, {}, &Waiter::ticket);
-                    if (waiter != waiters.end() && waiter->ticket == key.second) {
-                        expired.push_back(std::move(waiter->pending));
-                        waiters.erase(waiter);
-                    }
-                }
-                m_expiries.erase(m_expiries.begin());
-            }
-            ArmTimerLocked();
         }
-        for (auto& pending : expired) {
-            m_sink.Abort(std::move(pending), m_expiredError);
+        const auto now = Clock::now();
+        // One request is extracted per lock hold, so nothing allocates between taking a request out of the queue
+        // and handing it to the sink; no batch container can fail halfway and strand extracted requests.
+        for (;;) {
+            std::optional<Pending> expired;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_closed) {
+                    return;
+                }
+                while (!expired && !m_expiries.empty() && m_expiries.begin()->first.first <= now) {
+                    const auto& [key, origin] = *m_expiries.begin();
+                    if (const auto it = m_origins.find(origin); it != m_origins.end()) {
+                        auto& waiters = it->second.waiters;
+                        const auto waiter = std::ranges::lower_bound(waiters, key.second, {}, &Waiter::ticket);
+                        if (waiter != waiters.end() && waiter->ticket == key.second) {
+                            expired.emplace(std::move(waiter->pending));
+                            waiters.erase(waiter);
+                        }
+                    }
+                    m_expiries.erase(m_expiries.begin());
+                }
+                if (!expired) {
+                    RearmQuietlyLocked();
+                    return;
+                }
+            }
+            try {
+                m_sink.Abort(std::move(*expired), m_expiredError);
+            } catch (...) {
+                // Later deadlines must not be stranded by a throwing completion handler.
+                std::lock_guard<std::mutex> lock(m_mutex);
+                RearmQuietlyLocked();
+                throw;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Re-aims the timer from a context that cannot report failure; if arming fails, the next queue activity
+    /// retries it.
+    /// </summary>
+    void RearmQuietlyLocked() noexcept {
+        try {
+            ArmTimerLocked();
+        } catch (...) {
         }
     }
 
