@@ -24,6 +24,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <expected>
 #include <filesystem>
@@ -33,6 +34,7 @@
 #include <iterator>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <span>
 #include <string>
@@ -876,4 +878,140 @@ TEST(T11_ParallelDownloadAcceptanceTests, FileDownloadDelayedBeforeTheFirstGetSt
     ASSERT_FALSE(result->has_value());
     EXPECT_EQ(result->error().Code, std::make_error_code(std::errc::timed_out));
     EXPECT_FALSE(HasPartialFiles(out.Path));
+}
+
+namespace {
+// Makes chosen posts throw, as an allocation failure would. Writer posts are counted across every thread; posts to
+// the I/O executor are counted only when made off the test thread (that is, by a writer).
+struct PostFaults {
+    std::thread::id Main = std::this_thread::get_id();
+    std::atomic<int> WriterPosts{0};
+    std::atomic<int> FailWriterPost{0};
+    std::atomic<int> WriterThreadPosts{0};
+    std::atomic<int> FailWriterThreadPost{0};
+};
+
+class FlakyExecutor {
+  public:
+    FlakyExecutor(FakeHttpClient::executor_type inner, PostFaults* faults) : m_inner(inner), m_faults(faults) {}
+
+    template <class F> void execute(F&& task) const {
+        if (std::this_thread::get_id() != m_faults->Main &&
+            m_faults->WriterThreadPosts.fetch_add(1) + 1 == m_faults->FailWriterThreadPost.load()) {
+            throw std::bad_alloc{};
+        }
+        boost::asio::post(m_inner, std::forward<F>(task));
+    }
+    [[nodiscard]] FlakyExecutor require(boost::asio::execution::blocking_t::never_t) const noexcept { return *this; }
+    // Lets the pipeline's deadline timer, which is a steady_timer, be built on this executor.
+    [[nodiscard]] boost::asio::execution_context&
+    query(boost::asio::execution::context_as_t<boost::asio::execution_context&> /*property*/) const noexcept {
+        return boost::asio::query(m_inner, boost::asio::execution::context);
+    }
+    [[nodiscard]] FakeHttpClient::executor_type Inner() const noexcept { return m_inner; }
+    bool operator==(const FlakyExecutor&) const noexcept = default;
+
+  private:
+    FakeHttpClient::executor_type m_inner;
+    PostFaults* m_faults;
+};
+
+class FlakyWriterExecutor {
+  public:
+    explicit FlakyWriterExecutor(PostFaults* faults) : m_faults(faults) {}
+
+    template <class F> void execute(F&& task) const {
+        if (m_faults->WriterPosts.fetch_add(1) + 1 == m_faults->FailWriterPost.load()) {
+            throw std::bad_alloc{};
+        }
+        FakeHttpClient::GetDownloadWriter().execute(std::forward<F>(task));
+    }
+    [[nodiscard]] FlakyWriterExecutor require(boost::asio::execution::blocking_t::never_t) const noexcept {
+        return *this;
+    }
+    bool operator==(const FlakyWriterExecutor&) const noexcept = default;
+
+  private:
+    PostFaults* m_faults;
+};
+
+class FlakyRetryTimer : public FakeHttpClient::RetryTimer {
+  public:
+    explicit FlakyRetryTimer(const FlakyExecutor& executor) : RetryTimer(executor.Inner()) {}
+};
+
+// Delegates to a FakeHttpClient but hands out executors that can fail on demand.
+class FlakyHttpClient {
+  public:
+    using executor_type = FlakyExecutor;
+    using retry_timer_type = FlakyRetryTimer;
+
+    FlakyHttpClient(FakeHttpClient& fake, PostFaults& faults) : m_fake(fake), m_faults(faults) {}
+
+    [[nodiscard]] executor_type get_executor() const noexcept { return {m_fake.get_executor(), &m_faults}; }
+    [[nodiscard]] FlakyWriterExecutor GetDownloadWriter() const noexcept { return FlakyWriterExecutor{&m_faults}; }
+
+    template <class TToken> auto SendAsync(AVEVA::HttpRequest request, HttpRequestOptions options, TToken&& token) {
+        return m_fake.SendAsync(std::move(request), options, std::forward<TToken>(token));
+    }
+
+  private:
+    FakeHttpClient& m_fake;
+    PostFaults& m_faults;
+};
+
+// Runs a one-chunk file download over an existing destination with the given post failures armed, and checks what
+// every such failure must leave behind.
+void ExpectFaultedFileDownloadFailsCleanly(int failWriterPost, int failWriterThreadPost) {
+    using AVEVA::AzureClient::NoTokenCredential;
+    using AVEVA::AzureClient::Private::BasicBlobTarget;
+
+    FakeHttpClient fake;
+    const std::string content = MakeContent(4);
+    EnqueueChunks(fake, content, 8U);
+    PostFaults faults;
+    faults.FailWriterPost = failWriterPost;
+    faults.FailWriterThreadPost = failWriterThreadPost;
+    FlakyHttpClient httpClient{fake, faults};
+    const auto target = std::make_shared<const BasicBlobTarget<NoTokenCredential>>(
+        BasicBlobTarget<NoTokenCredential>{AVEVA::AzureClient::Private::MakeBlobTarget(BuildOptions()), nullptr});
+
+    TempFile out;
+    CreateFileWithContents(out.Path, "old");
+    int callbackCount = 0;
+    std::optional<DownloadToResult> result;
+    EXPECT_NO_THROW({
+        AVEVA::AzureClient::Private::DownloadBlobToFileAsync(
+            httpClient, target, DownloadToOptions{}, out.Path,
+            [&](DownloadToResult value) {
+                ++callbackCount;
+                result = std::move(value);
+            },
+            AVEVA::AzureClient::AzureRequestOptions{});
+        ASSERT_TRUE(fake.RunUntil([&] { return callbackCount > 0 || fake.RequestCount() > 0U; }));
+        if (callbackCount == 0) {
+            ASSERT_TRUE(fake.CompleteRequest(0U));
+        }
+        ASSERT_TRUE(fake.RunUntil([&] { return callbackCount > 0; }));
+    });
+    fake.SettleWriters();
+
+    ASSERT_EQ(callbackCount, 1);
+    ASSERT_TRUE(result.has_value());
+    ASSERT_FALSE(result->has_value());
+    EXPECT_EQ(ReadFile(out.Path), "old");
+    EXPECT_FALSE(HasPartialFiles(out.Path));
+}
+} // namespace
+
+TEST(T114_DownloadWriterHandoffTests, FailureOfAWritersReturnPostFailsTheDownloadOnceAndCleansUp) {
+    ExpectFaultedFileDownloadFailsCleanly(0, 2);
+}
+
+TEST(T114_DownloadWriterHandoffTests, FailureOfTheFileStartHandoffFailsTheDownloadOnceAndCleansUp) {
+    ExpectFaultedFileDownloadFailsCleanly(0, 1);
+}
+
+TEST(T114_DownloadWriterHandoffTests, FailureToScheduleFinalizationFailsTheDownloadOnceAndCleansUp) {
+    ExpectFaultedFileDownloadFailsCleanly(3, 0);
 }

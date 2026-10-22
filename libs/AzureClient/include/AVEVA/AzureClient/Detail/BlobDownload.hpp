@@ -24,6 +24,7 @@
 #include <boost/asio/post.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -114,6 +115,11 @@ struct DownloadSummary {
 
 using SummaryResult = std::expected<DownloadSummary, BlobStorageError>;
 
+// An internal completion adapter never reaches a user handler and does not throw, so it may run inline on the
+// initiating thread; only a user's completion has to be deferred to its executor.
+template <class T>
+concept InternalCompletion = requires { requires T::IsInternal; };
+
 // One download (to a stream, file, or memory). The first ranged GET learns the blob size and
 // ETag; the rest is fetched in ChunkSize ranges with up to Concurrency requests in flight and
 // written strictly in order through a reorder window of at most Concurrency chunks. Later
@@ -190,6 +196,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         bool WriteDone = false;
         bool WriteOk = true;
         std::size_t WriteSize = 0;
+        std::optional<BlobStorageError> WriteError;
     };
 
     void Enqueue(Event event) {
@@ -570,9 +577,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
                                         }
                                         size += chunkSize;
                                     }
-                                    boost::asio::post(self->m_httpClient.get_executor(), [self, ok, size]() {
-                                        self->Enqueue(Event{.WriteDone = true, .WriteOk = ok, .WriteSize = size});
-                                    });
+                                    PostWriteDone(self, ok, size);
                                 });
                 } catch (...) {
                     // Scheduling failed, so no write-done event will ever clear the writing state.
@@ -585,11 +590,36 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         }
     }
 
+    // Runs on a writer thread. The hop back to the I/O executor is what normally clears `m_writing`; if it cannot be
+    // scheduled the event is queued from here instead, so the failure still completes the download exactly once
+    // rather than escaping the worker and stranding the write.
+    static void PostWriteDone(const std::shared_ptr<DownloadOperation>& self, bool ok, std::size_t size) noexcept {
+        std::optional<BlobStorageError> failure;
+        try {
+            boost::asio::post(self->m_httpClient.get_executor(), [self, ok, size]() {
+                self->Enqueue(Event{.WriteDone = true, .WriteOk = ok, .WriteSize = size});
+            });
+            return;
+        } catch (...) {
+            try {
+                failure = MakeFailureFromCurrentException();
+            } catch (...) {
+                // The generic write failure is reported instead.
+            }
+        }
+        try {
+            self->Enqueue(
+                Event{.WriteDone = true, .WriteOk = false, .WriteSize = size, .WriteError = std::move(failure)});
+        } catch (...) {
+            // Nothing is left to report the failure to; the worker must still not unwind.
+        }
+    }
+
     void OnWriteDone(const Event& event) {
         m_writing = false;
         m_writingChunks = 0U;
         if (!event.WriteOk) {
-            Fail(MakeFailure(std::errc::io_error, "Failed to write the downloaded data."));
+            Fail(event.WriteError.value_or(MakeFailure(std::errc::io_error, "Failed to write the downloaded data.")));
             return;
         }
         m_written += event.WriteSize;
@@ -665,7 +695,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
                 return std::move(m_completion);
             }
         }();
-        if (m_initiating) {
+        if (m_initiating && !InternalCompletion<TDone>) {
             PostCompletion(m_httpClient, std::move(completion), std::move(result));
         } else {
             completion(std::move(result));
@@ -723,6 +753,105 @@ void StartDownload(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCre
 [[nodiscard]] std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>
 FinalizeFileDownload(std::ofstream& file, const std::filesystem::path& tempPath, const std::filesystem::path& target,
                      SummaryResult result);
+
+using FileResult = std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>;
+
+// What a file download owns across its writer and I/O-executor hand-offs. It is shared so a hand-off that throws
+// while being scheduled cannot take the user's completion or the temporary file's path down with the discarded task,
+// and `Completed` keeps the completion exactly-once however many paths race to fail the download.
+template <class TCompletion> struct FileDownloadState {
+    FileDownloadState(std::optional<DownloadWriteScheduler> scheduler, std::filesystem::path targetPath,
+                      TCompletion userCompletion)
+        : Scheduler(std::move(scheduler)), Target(std::move(targetPath)), Completion(std::move(userCompletion)) {}
+
+    std::optional<DownloadWriteScheduler> Scheduler;
+    std::filesystem::path TempPath;
+    std::filesystem::path Target;
+    TCompletion Completion;
+    std::optional<FileSink> Sink;
+    std::optional<SummaryResult> Result;
+    std::atomic<bool> Completed{false};
+};
+
+[[nodiscard]] inline BlobStorageError CurrentFailure() {
+    try {
+        return MakeFailureFromCurrentException();
+    } catch (...) {
+        return MakeFailure(std::errc::not_enough_memory);
+    }
+}
+
+// Delivers the user's completion once, on its associated executor. If even that post fails the handler has been
+// consumed by it and nobody is left to tell.
+template <HttpClientLike THttp, class TState>
+void CompleteFileDownload(THttp& httpClient, TState& state, FileResult result) noexcept {
+    if (state.Completed.exchange(true)) {
+        return;
+    }
+    try {
+        PostCompletion(httpClient, std::move(state.Completion), std::move(result));
+    } catch (...) {
+    }
+}
+
+// Closes the temporary file, removes it and reports `error`. Blocks on the disk, so it runs on a writer thread (or
+// before any file exists).
+template <HttpClientLike THttp, class TState>
+void AbandonFileDownload(THttp& httpClient, const std::shared_ptr<TState>& state, BlobStorageError error) noexcept {
+    state->Sink.reset();
+    if (!state->TempPath.empty()) {
+        std::error_code ignored;
+        std::filesystem::remove(state->TempPath, ignored);
+    }
+    CompleteFileDownload(httpClient, *state, FileResult{std::unexpect, std::move(error)});
+}
+
+// As AbandonFileDownload, for a thread that must not block: it hops to a writer. Only when that hop fails too does
+// the cleanup run here, because leaking the partial file and the completion would be worse.
+template <HttpClientLike THttp, class TState>
+void AbandonFileDownloadFromIo(THttp& httpClient, const std::shared_ptr<TState>& state,
+                               const BlobStorageError& error) noexcept {
+    try {
+        RunOnWriter(httpClient, state->Scheduler,
+                    [&httpClient, state, error]() { AbandonFileDownload(httpClient, state, error); });
+        return;
+    } catch (...) {
+    }
+    AbandonFileDownload(httpClient, state, error);
+}
+
+// The last writer-thread step: closes the file and renames it over the target (see FinalizeFileDownload).
+template <HttpClientLike THttp, class TState>
+void FinishFileDownloadOnWriter(THttp& httpClient, const std::shared_ptr<TState>& state) noexcept {
+    try {
+        auto result =
+            FinalizeFileDownload(state->Sink->File(), state->TempPath, state->Target, std::move(*state->Result));
+        state->Sink.reset();
+        CompleteFileDownload(httpClient, *state, std::move(result));
+    } catch (...) {
+        AbandonFileDownload(httpClient, state, CurrentFailure());
+    }
+}
+
+// Receives the network phase's outcome on the I/O thread and schedules finalization on a writer. It is internal
+// (see InternalCompletion): it never throws, and a failure to schedule becomes the download's error.
+template <HttpClientLike THttp, class TState> struct FileFinalizer {
+    static constexpr bool IsInternal = true;
+
+    THttp* Http;
+    std::shared_ptr<TState> State;
+
+    void operator()(SummaryResult result, FileSink sink) noexcept {
+        try {
+            State->Sink.emplace(std::move(sink));
+            State->Result.emplace(std::move(result));
+            RunOnWriter(*Http, State->Scheduler,
+                        [http = Http, state = State]() { FinishFileDownloadOnWriter(*http, state); });
+        } catch (...) {
+            AbandonFileDownloadFromIo(*Http, State, CurrentFailure());
+        }
+    }
+};
 } // namespace DownloadDetail
 
 template <HttpClientLike THttp, class TCred, class TCompletion>
@@ -769,60 +898,66 @@ template <HttpClientLike THttp, class TCred, class TCompletion>
 void DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
                              DownloadToOptions operationOptions, const std::filesystem::path& path,
                              TCompletion completion, AzureRequestOptions requestOptions) {
-    using FileResult = std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>;
+    using State = DownloadDetail::FileDownloadState<TCompletion>;
+    // Holds the completion and temporary path for the whole operation, so no hand-off can lose them if it throws.
+    auto state = std::make_shared<State>(operationOptions.WriteScheduler, path, std::move(completion));
     auto scheduler = operationOptions.WriteScheduler;
     // The budget covers the hand-offs to the writer and back, so it starts here rather than at the first GET.
     const auto start = std::chrono::steady_clock::now();
-    DownloadDetail::RunOnWriter(
-        httpClient, scheduler,
-        [&httpClient, scheduler, start, options, operationOptions = std::move(operationOptions), path,
-         completion = std::move(completion), requestOptions]() mutable {
-            std::error_code statusError;
-            if (std::filesystem::is_directory(path, statusError)) {
-                PostCompletion(httpClient, std::move(completion),
-                               FileResult{std::unexpect,
-                                          DownloadDetail::MakeFailure(std::make_error_code(std::errc::is_a_directory),
-                                                                      "The destination path is a directory.")});
-                return;
-            }
+    try {
+        DownloadDetail::RunOnWriter(
+            httpClient, scheduler,
+            [&httpClient, state, start, options, operationOptions = std::move(operationOptions),
+             requestOptions]() mutable {
+                try {
+                    std::error_code statusError;
+                    if (std::filesystem::is_directory(state->Target, statusError)) {
+                        DownloadDetail::CompleteFileDownload(
+                            httpClient, *state,
+                            DownloadDetail::FileResult{
+                                std::unexpect,
+                                DownloadDetail::MakeFailure(std::make_error_code(std::errc::is_a_directory),
+                                                            "The destination path is a directory.")});
+                        return;
+                    }
 
-            // Download into a sibling temporary file and rename it over the target only on success, so a
-            // failed download never leaves a truncated target behind.
-            std::filesystem::path tempPath = path;
-            tempPath += ".partial-" + CreateClientRequestId();
-            errno = 0;
-            std::ofstream file(tempPath, std::ios::binary | std::ios::trunc);
-            if (!file) {
-                PostCompletion(
-                    httpClient, std::move(completion),
-                    FileResult{std::unexpect, DownloadDetail::MakeFailure(DownloadDetail::LastOpenError(),
-                                                                          "Failed to open destination file.")});
-                return;
-            }
+                    // Download into a sibling temporary file and rename it over the target only on success, so a
+                    // failed download never leaves a truncated target behind.
+                    state->TempPath = state->Target;
+                    state->TempPath += ".partial-" + CreateClientRequestId();
+                    errno = 0;
+                    std::ofstream file(state->TempPath, std::ios::binary | std::ios::trunc);
+                    if (!file) {
+                        DownloadDetail::CompleteFileDownload(
+                            httpClient, *state,
+                            DownloadDetail::FileResult{
+                                std::unexpect, DownloadDetail::MakeFailure(DownloadDetail::LastOpenError(),
+                                                                           "Failed to open destination file.")});
+                        return;
+                    }
 
-            // The chunk requests are started from the I/O executor, like any other download.
-            boost::asio::post(
-                httpClient.get_executor(),
-                [&httpClient, scheduler = std::move(scheduler), options = std::move(options),
-                 operationOptions = std::move(operationOptions), file = std::move(file), tempPath = std::move(tempPath),
-                 target = std::move(path), completion = std::move(completion), requestOptions, start]() mutable {
-                    DownloadDetail::StartDownload(
-                        httpClient, std::move(options), std::move(operationOptions), FileSink{std::move(file)},
-                        [&httpClient, scheduler = std::move(scheduler), tempPath = std::move(tempPath),
-                         target = std::move(target), completion = std::move(completion)](
-                            DownloadDetail::SummaryResult result, FileSink sink) mutable {
-                            DownloadDetail::RunOnWriter(
-                                httpClient, scheduler,
-                                [&httpClient, sink = std::move(sink), tempPath = std::move(tempPath),
-                                 target = std::move(target), completion = std::move(completion),
-                                 result = std::move(result)]() mutable {
-                                    PostCompletion(httpClient, std::move(completion),
-                                                   DownloadDetail::FinalizeFileDownload(sink.File(), tempPath, target,
-                                                                                        std::move(result)));
-                                });
-                        },
-                        requestOptions, start);
-                });
-        });
+                    // The chunk requests are started from the I/O executor, like any other download. If the post
+                    // throws, the discarded task takes only the stream; the state still lets us clean up.
+                    boost::asio::post(httpClient.get_executor(), [&httpClient, state, options = std::move(options),
+                                                                  operationOptions = std::move(operationOptions),
+                                                                  file = std::move(file), requestOptions,
+                                                                  start]() mutable {
+                        try {
+                            DownloadDetail::StartDownload(
+                                httpClient, std::move(options), std::move(operationOptions), FileSink{std::move(file)},
+                                DownloadDetail::FileFinalizer<THttp, State>{&httpClient, state}, requestOptions, start);
+                        } catch (...) {
+                            DownloadDetail::AbandonFileDownloadFromIo(httpClient, state,
+                                                                      DownloadDetail::CurrentFailure());
+                        }
+                    });
+                } catch (...) {
+                    DownloadDetail::AbandonFileDownload(httpClient, state, DownloadDetail::CurrentFailure());
+                }
+            });
+    } catch (...) {
+        // Nothing has started and no file exists, so only the completion remains to be delivered.
+        DownloadDetail::AbandonFileDownload(httpClient, state, DownloadDetail::CurrentFailure());
+    }
 }
 } // namespace AVEVA::AzureClient::Private

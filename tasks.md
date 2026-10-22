@@ -261,7 +261,9 @@ cache insertion, and verify no exception escapes `run()`, all requests complete
 once, and a later uncached request can become leader. A valid DNS answer must
 not become a timeout solely because caching it failed.
 
-### [ ] T114 - Guard internal download work on both sides of writer handoffs
+### [x] T114 - Guard internal download work on both sides of writer handoffs
+
+**Result:** Done. Three regressions (`T114_DownloadWriterHandoffTests`, using a concrete throwing-executor test client) failed before the fix: failing a writer's return post or the file-start handoff aborted the process (exception escaped the pool worker) and failing finalization scheduling lost the completion and leaked the `.partial-*` file. Now a file download's completion, temp path and sink live in a shared `FileDownloadState`; the return post falls back to queueing the failed write-done event from the writer, every handoff failure becomes one error completion with temp-file cleanup on a writer (old destination preserved), and the finalization adapter is a concrete internal `FileFinalizer` that runs inline and never throws. All 1196 tests pass on WindowsDebug. Last-resort limits: if posting the user's completion itself fails the handler is consumed and cannot be told; a failed hop to a writer for cleanup runs cleanup inline.
 
 **Status:** Source-traced; follow-up to T96's incomplete writer coverage.
 
