@@ -12,9 +12,11 @@
 
 #include <chrono>
 #include <concepts>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -193,6 +195,8 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         std::vector<Waiter> Completions;
         // Guards Completions; the state can outlive the credential that created it.
         std::mutex Mutex;
+        // Set once the waiters were taken for completion (guarded by Mutex).
+        bool Drained = false;
     };
 
     // Result of consulting the cache under lock: either a cached token to serve immediately, a refresh to
@@ -276,7 +280,9 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
 
     // The two mutexes are never held together: the state is detached under the cache mutex first, so no lock
     // order exists to violate. Waiters can no longer join once it is detached, so draining it afterwards is complete.
-    std::vector<Waiter> DrainAndReset(const std::shared_ptr<RefreshState>& refreshState) {
+    // `alreadyDrained` reports whether an earlier drain (the inner completion) already ran for this state.
+    std::vector<Waiter> DrainAndReset(const std::shared_ptr<RefreshState>& refreshState,
+                                      bool* alreadyDrained = nullptr) {
         {
             std::scoped_lock const lock(m_mutex);
             if (m_inFlightRefresh == refreshState) {
@@ -284,7 +290,34 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
             }
         }
         std::scoped_lock const stateLock(refreshState->Mutex);
+        if (alreadyDrained != nullptr) {
+            *alreadyDrained = refreshState->Drained;
+        }
+        refreshState->Drained = true;
         return std::move(refreshState->Completions);
+    }
+
+    // The inner credential threw before it could deliver a result, so nothing will ever complete the waiters
+    // admitted to this refresh. Releases the claim and fails them once. Returns false when the inner credential
+    // had already delivered, in which case the exception came from a completion and must not be swallowed.
+    bool FailRefreshAfterInitiationThrow(const std::shared_ptr<RefreshState>& refreshState,
+                                         std::exception_ptr failure) {
+        bool alreadyDrained = false;
+        std::vector<Waiter> completions = DrainAndReset(refreshState, &alreadyDrained);
+        if (alreadyDrained) {
+            return false;
+        }
+        std::error_code error = std::make_error_code(std::errc::io_error);
+        try {
+            std::rethrow_exception(failure);
+        } catch (const std::bad_alloc&) {
+            error = std::make_error_code(std::errc::not_enough_memory);
+        } catch (...) {
+        }
+        for (auto& pending : completions) {
+            Private::CompleteOnExecutorIfSet(refreshState->Executor, std::move(pending), error, AccessToken{});
+        }
+        return true;
     }
 
     void CompleteWithNoInnerCredentialError(const std::shared_ptr<RefreshState>& refreshState) {
@@ -347,26 +380,44 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
             return;
         }
 
-        GetTokenForScopes(*m_inner, scopes,
-                          [weakSelf = this->weak_from_this(), refreshState = lookup.RefreshToStart,
-                           scopes](std::error_code error, AccessToken token) mutable {
-                              if (const auto self = weakSelf.lock()) {
-                                  self->HandleInnerTokenResult(error, std::move(token), refreshState, *scopes);
-                                  return;
-                              }
+        std::exception_ptr initiationFailure;
+        try {
+            GetTokenForScopes(*m_inner, scopes,
+                              [weakSelf = this->weak_from_this(), refreshState = lookup.RefreshToStart,
+                               scopes](std::error_code error, AccessToken token) mutable {
+                                  if (const auto self = weakSelf.lock()) {
+                                      self->HandleInnerTokenResult(error, std::move(token), refreshState, *scopes);
+                                      return;
+                                  }
 
-                              std::vector<Waiter> completions;
-                              {
-                                  std::scoped_lock const stateLock(refreshState->Mutex);
-                                  completions = std::move(refreshState->Completions);
-                              }
-                              CompleteAll(refreshState->Executor, std::move(completions), error, std::move(token));
-                          });
+                                  std::vector<Waiter> completions;
+                                  {
+                                      std::scoped_lock const stateLock(refreshState->Mutex);
+                                      refreshState->Drained = true;
+                                      completions = std::move(refreshState->Completions);
+                                  }
+                                  CompleteAll(refreshState->Executor, std::move(completions), error, std::move(token));
+                              });
+        } catch (...) {
+            initiationFailure = std::current_exception();
+            if (FailRefreshAfterInitiationThrow(lookup.RefreshToStart, initiationFailure)) {
+                initiationFailure = nullptr;
+            }
+            if (!lookup.CachedToken.has_value()) {
+                if (initiationFailure) {
+                    std::rethrow_exception(initiationFailure);
+                }
+                return;
+            }
+        }
 
         // The background refresh is started first, so a re-entrant call from this completion joins it.
         if (lookup.CachedToken.has_value()) {
             Private::CompleteOnExecutorIfSet(completionExecutor, std::move(completion), std::error_code{},
                                              std::move(*lookup.CachedToken));
+        }
+        if (initiationFailure) {
+            std::rethrow_exception(initiationFailure);
         }
     }
 

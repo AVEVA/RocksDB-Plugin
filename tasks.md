@@ -211,7 +211,9 @@ mutation scope, including during error unwinding. The process must survive,
 preserve the real operation outcome, reject older in-flight metadata and permit
 fresh metadata to be stored afterwards.
 
-### [ ] T112 - Reset credential refresh state when inner initiation throws
+### [x] T112 - Reset credential refresh state when inner initiation throws
+
+**Result:** Done. Two throw-once regressions (empty cache with a joiner; background refresh inside the refresh window with a joiner) failed before the fix and pass now. `Start` catches an inner initiation throw, releases the refresh claim and fails admitted waiters once (`not_enough_memory` for `std::bad_alloc`, else `io_error`); a `Drained` flag rethrows when the exception came from a user completion after delivery. In the background case the caller still gets the cached token. Later calls retry the inner credential. All 1192 tests pass on WindowsDebug.
 
 **Status:** Reproduced with the current `CachingTokenCredential` template.
 

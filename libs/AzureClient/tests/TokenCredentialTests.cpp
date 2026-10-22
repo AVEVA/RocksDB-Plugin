@@ -11,7 +11,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <memory>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -492,6 +494,93 @@ TEST(TokenCredentialTests, CachingTokenCredential_NullInnerResetsInFlightStateFo
     });
 
     EXPECT_EQ(secondError, std::make_error_code(std::errc::operation_not_permitted));
+}
+
+namespace {
+// Throws std::bad_alloc from initiation on the first call, after running `OnFirstCall` (used to join a refresh
+// that has been published but has no producer yet). Later calls answer inline.
+class ThrowOnceCredential final {
+  public:
+    template <boost::asio::completion_token_for<AVEVA::AzureClient::TokenSignature> CompletionToken>
+    auto GetTokenAsync(std::vector<std::string> /*scopes*/, CompletionToken&& token) {
+        return boost::asio::async_initiate<AVEVA::AzureClient::TokenSignature>(
+            [this](auto handler) {
+                ++Calls;
+                if (Calls == 1) {
+                    if (OnFirstCall) {
+                        OnFirstCall();
+                    }
+                    throw std::bad_alloc();
+                }
+                std::move(handler)(std::error_code{}, MakeToken("recovered", std::chrono::hours(1)));
+            },
+            token);
+    }
+
+    int Calls = 0;
+    std::function<void()> OnFirstCall;
+};
+} // namespace
+
+TEST(TokenCredentialTests, CachingTokenCredential_InnerInitiationThrowFailsAdmittedWaitersAndAllowsRetry) {
+    auto inner = std::make_shared<ThrowOnceCredential>();
+    auto credential = CachingTokenCredential<ThrowOnceCredential>::Create(inner, std::chrono::minutes(5));
+
+    std::vector<std::error_code> errors;
+    inner->OnFirstCall = [&] {
+        credential->GetTokenAsync({"scope-a"},
+                                  [&](std::error_code error, const AccessToken&) { errors.push_back(error); });
+    };
+    credential->GetTokenAsync({"scope-a"}, [&](std::error_code error, const AccessToken&) { errors.push_back(error); });
+
+    ASSERT_EQ(errors.size(), 2U);
+    EXPECT_EQ(errors[0], std::make_error_code(std::errc::not_enough_memory));
+    EXPECT_EQ(errors[1], std::make_error_code(std::errc::not_enough_memory));
+
+    std::string token;
+    credential->GetTokenAsync({"scope-a"}, [&](std::error_code error, AccessToken value) {
+        EXPECT_FALSE(error);
+        token = std::move(value.Token);
+    });
+    EXPECT_EQ(token, "recovered");
+    EXPECT_EQ(inner->Calls, 2);
+}
+
+TEST(TokenCredentialTests, CachingTokenCredential_InnerInitiationThrowDuringBackgroundRefreshKeepsServingToken) {
+    auto inner = std::make_shared<ThrowOnceCredential>();
+    auto now = std::chrono::system_clock::now();
+    auto credential = CachingTokenCredential<ThrowOnceCredential, NowRef>::Create(inner, std::chrono::minutes(5),
+                                                                                  std::nullopt, NowRef{&now});
+
+    // Prime a token that is valid but inside the refresh window, bypassing the throw on the first call.
+    inner->Calls = 1;
+    std::string primed;
+    credential->GetTokenAsync({"scope-a"},
+                              [&](std::error_code, AccessToken value) { primed = std::move(value.Token); });
+    EXPECT_EQ(primed, "recovered");
+
+    // Make the cached token fall inside the refresh window, then fail the background refresh's initiation.
+    now += std::chrono::minutes(58);
+    inner->Calls = 0;
+    std::vector<std::error_code> errors;
+    inner->OnFirstCall = [&] {
+        credential->GetTokenAsync({"scope-a"}, [&](std::error_code error, const AccessToken& value) {
+            errors.push_back(error);
+            EXPECT_EQ(value.Token, "recovered");
+        });
+    };
+    std::string served;
+    credential->GetTokenAsync({"scope-a"}, [&](std::error_code error, AccessToken value) {
+        EXPECT_FALSE(error);
+        served = std::move(value.Token);
+    });
+    EXPECT_EQ(served, "recovered");
+    EXPECT_EQ(errors.size(), 1U);
+
+    // The failed claim was released, so the next in-window call starts a fresh refresh.
+    inner->OnFirstCall = nullptr;
+    credential->GetTokenAsync({"scope-a"}, [](std::error_code, const AccessToken&) {});
+    EXPECT_EQ(inner->Calls, 2);
 }
 
 TEST(TokenCredentialTests, CachingTokenCredential_FanOutDeliversSameTokenToAllWaiters) {
