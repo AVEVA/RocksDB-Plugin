@@ -257,9 +257,6 @@ BasicReadableFileImpl<TBlob>::PrefetchState::TakeWaiters(const uint64_t id) noex
 
 template <typename TBlob>
 void BasicReadableFileImpl<TBlob>::PrefetchState::Drop(const std::vector<PrefetchSlot>::iterator slot) {
-    if (Budget) {
-        Budget->fetch_sub(slot->Length);
-    }
     Slots.erase(slot);
 }
 
@@ -288,6 +285,7 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
     auto* const state = &self->m_prefetch;
     uint64_t id = 0;
     std::string name;
+    std::shared_ptr<PrefetchCharge> charge;
     {
         std::scoped_lock lock(state->Mutex);
         for (const auto& slot : state->Slots) {
@@ -300,6 +298,9 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
         // the admission below cannot throw. Done before locating the victim because reserving can invalidate iterators.
         state->Slots.reserve(state->Slots.size() + 1);
         name = self->m_h.Name;
+        if (state->Budget) {
+            charge = std::make_shared<PrefetchCharge>();
+        }
 
         // A declined prefetch must not cost data already held, so nothing is evicted until it is known to fit.
         auto victim = state->Slots.end();
@@ -311,20 +312,27 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
             }
         }
 
-        if (state->Budget) {
-            const int64_t freed = victim != state->Slots.end() ? victim->Length : 0;
-            if (state->Budget->fetch_add(n) + n - freed > self->m_maxPrefetchBytes) {
-                state->Budget->fetch_sub(n);
+        if (charge) {
+            // The download buffer is a whole size class, not just the requested length.
+            const auto bytes = static_cast<int64_t>(DownloadBufferPool::CapacityFor(static_cast<size_t>(n)));
+            // The victim only frees its charge if nothing else (a reader) still holds its buffer.
+            const int64_t freed = victim != state->Slots.end() && victim->Charge && victim->Charge.use_count() == 1
+                                      ? victim->Charge->Bytes
+                                      : 0;
+            if (state->Budget->fetch_add(bytes) + bytes - freed > self->m_maxPrefetchBytes) {
+                state->Budget->fetch_sub(bytes);
                 return false;
             }
+            charge->Budget = state->Budget;
+            charge->Bytes = bytes;
         }
         if (victim != state->Slots.end()) {
             state->Drop(victim);
         }
 
         id = ++state->NextId;
-        state->Slots.push_back(
-            PrefetchSlot{.Id = id, .Offset = offset, .Length = n, .Pending = true, .Owner = {}, .Data = {}});
+        state->Slots.push_back(PrefetchSlot{
+            .Id = id, .Offset = offset, .Length = n, .Pending = true, .Charge = charge, .Owner = {}, .Data = {}});
     }
 
     // A superseded or cleared prefetch (its slot is gone) must not publish its bytes.
@@ -334,8 +342,8 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
     auto keepAlive = self;
     try {
         ReadAsync(std::move(self), offset, n,
-                  [state, id, logger, name = std::move(name),
-                   keepAlive](std::exception_ptr error, std::string_view data, std::shared_ptr<const void> owner) {
+                  [state, id, logger, name = std::move(name), keepAlive, charge = std::move(charge)](
+                      std::exception_ptr error, std::string_view data, std::shared_ptr<const void> owner) {
                       std::vector<std::move_only_function<void()>> waiters;
                       {
                           std::scoped_lock lock(state->Mutex);
@@ -347,11 +355,8 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
                                   state->Drop(slot);
                               } else {
                                   slot->Pending = false;
-                                  // A short read at EOF returns the part of the budget it never used.
+                                  // A short read keeps its charge: the pooled buffer is still fully allocated.
                                   if (const auto got = static_cast<int64_t>(data.size()); got < slot->Length) {
-                                      if (state->Budget) {
-                                          state->Budget->fetch_sub(slot->Length - got);
-                                      }
                                       slot->Length = got;
                                   }
                                   // The slot keeps the pooled download buffer instead of copying up to 8 MiB out of it.
@@ -452,6 +457,7 @@ std::optional<size_t> BasicReadableFileImpl<TBlob>::TryReadFromPrefetch(const in
     // Published data is immutable, so copy it outside the lock; `owner` keeps the buffer alive meanwhile.
     const auto id = slot->Id;
     const auto owner = slot->Owner;
+    const auto charge = slot->Charge; // keeps the budget charged while the buffer is being read
     const auto source = slot->Data.data() + start;
     const bool reachedEnd = offset + bytesToRead >= slot->Offset + slot->Length;
     lock.unlock();

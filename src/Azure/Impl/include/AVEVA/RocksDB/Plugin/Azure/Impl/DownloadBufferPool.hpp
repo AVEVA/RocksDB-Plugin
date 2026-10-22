@@ -69,9 +69,15 @@ class BasicDownloadBufferPool : public std::enable_shared_from_this<BasicDownloa
         return pool;
     }
 
+    /// <summary>The bytes actually allocated for a request of `size`; callers budgeting memory should charge
+    /// this.</summary>
+    [[nodiscard]] static constexpr std::size_t CapacityFor(const std::size_t size) {
+        return size > MaxPooledBufferBytes ? size : std::bit_ceil(std::max(size, MinBufferBytes));
+    }
+
     /// <summary>A buffer of exactly `size` bytes; its contents are unspecified.</summary>
     [[nodiscard]] std::shared_ptr<Lease> Acquire(const std::size_t size) {
-        const std::size_t capacity = size > MaxPooledBufferBytes ? size : std::bit_ceil(std::max(size, MinBufferBytes));
+        const std::size_t capacity = CapacityFor(size);
         std::unique_ptr<char[]> buffer;
         if (capacity <= MaxPooledBufferBytes) {
             auto& sizeClass = m_classes[ClassOf(capacity)];

@@ -556,7 +556,7 @@ TEST_F(AsyncReadTests, Read_PastTheEndOfPrefetchedRange_ReleasesItsBudget) {
     EXPECT_EQ(0, budget->load());
 }
 
-TEST_F(AsyncReadTests, Prefetch_ShortAtEof_ReturnsUnusedBudget) {
+TEST_F(AsyncReadTests, Prefetch_ShortAtEof_KeepsChargeForTheWholeBackingBuffer) {
     auto budget = std::make_shared<std::atomic<int64_t>>(0);
     FakeReadableFile file{std::make_shared<FakeReadableFileImpl>(
         "test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr, m_logger, nullptr, budget)};
@@ -564,7 +564,56 @@ TEST_F(AsyncReadTests, Prefetch_ShortAtEof_ReturnsUnusedBudget) {
     ASSERT_EQ(512, budget->load());
     m_deferredEnv.Blob->TakeDownload().Succeed(std::string(300, 'P'));
 
-    EXPECT_EQ(300, budget->load());
+    EXPECT_EQ(512, budget->load());
+}
+
+TEST_F(AsyncReadTests, Prefetch_NonPowerOfTwoRange_ChargesTheSizeClassCapacity) {
+    auto budget = std::make_shared<std::atomic<int64_t>>(0);
+    FakeReadableFile file{std::make_shared<FakeReadableFileImpl>(
+        "test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr, m_logger, nullptr, budget, 1024)};
+
+    ASSERT_TRUE(file.Prefetch(0, 600, rocksdb::IOOptions{}, nullptr).ok());
+    EXPECT_EQ(1024, budget->load());
+    // 600 logical bytes would leave room for another 424, but the real allocation fills the cap.
+    EXPECT_TRUE(file.Prefetch(4096, 400, rocksdb::IOOptions{}, nullptr).ok());
+    EXPECT_EQ(1U, m_deferredEnv.Blob->PendingDownloads());
+    EXPECT_EQ(1024, budget->load());
+}
+
+TEST_F(AsyncReadTests, Prefetch_InvalidatedWhileDownloading_KeepsChargeUntilTheDownloadEnds) {
+    auto budget = std::make_shared<std::atomic<int64_t>>(0);
+    auto impl = std::make_shared<FakeReadableFileImpl>("test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
+                                                       m_logger, nullptr, budget, 1024);
+    ASSERT_TRUE(FakeReadableFileImpl::Prefetch(impl, 0, 1024));
+    m_deferredEnv.Blob->ETag = "etag2";
+    m_deferredEnv.AdvanceMetadataClock(Configuration::MetadataCacheTtl);
+    EXPECT_EQ(BlobSize, impl->GetSize());
+    ASSERT_EQ(1024, budget->load());
+
+    // The paused download still owns its buffer, so a replacement prefetch must not fit yet.
+    EXPECT_FALSE(FakeReadableFileImpl::Prefetch(impl, 0, 1024));
+    EXPECT_EQ(1U, m_deferredEnv.Blob->PendingDownloads());
+
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(1024, 'P'));
+    EXPECT_EQ(0, budget->load());
+    EXPECT_TRUE(FakeReadableFileImpl::Prefetch(impl, 0, 1024));
+    EXPECT_EQ(1U, m_deferredEnv.Blob->PendingDownloads());
+    EXPECT_EQ(1024, budget->load());
+}
+
+TEST_F(AsyncReadTests, Prefetch_FinishedRangeStillHeldElsewhere_IsNotCreditedWhenEvicted) {
+    auto budget = std::make_shared<std::atomic<int64_t>>(0);
+    auto impl = std::make_shared<FakeReadableFileImpl>("test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
+                                                       m_logger, nullptr, budget, 3072);
+    ASSERT_TRUE(FakeReadableFileImpl::Prefetch(impl, 0, 1024));
+    ASSERT_TRUE(FakeReadableFileImpl::Prefetch(impl, 2048, 1024));
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(1024, 'A'));
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(1024, 'B'));
+
+    // The slot budget forces the oldest finished range out, which frees its charge when nothing else holds it.
+    EXPECT_TRUE(FakeReadableFileImpl::Prefetch(impl, 1024, 2048));
+    EXPECT_EQ(1U, m_deferredEnv.Blob->PendingDownloads());
+    EXPECT_EQ(3072, budget->load());
 }
 
 TEST_F(AsyncReadTests, Read_ConcurrentReadersOfPrefetchedRange_AllGetDataAndBudgetIsReleased) {

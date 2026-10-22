@@ -51,12 +51,28 @@ template <typename TBlob> class BasicReadableFileImpl {
 
     // One range requested through FSRandomAccessFile::Prefetch. The download's completion runs on the host io_context
     // and holds the file, so this state lives as long as that read.
+    // Reservation of the backing buffer's real capacity in the shared budget. It is shared by the slot, the pending
+    // download's completion and any reader copying from the buffer, so the bytes are refunded only once none of them
+    // can still touch the allocation, even if the slot was dropped or shortened earlier.
+    struct PrefetchCharge {
+        std::shared_ptr<std::atomic<int64_t>> Budget;
+        int64_t Bytes = 0;
+        PrefetchCharge() = default;
+        PrefetchCharge(const PrefetchCharge&) = delete;
+        PrefetchCharge& operator=(const PrefetchCharge&) = delete;
+        ~PrefetchCharge() {
+            if (Budget) {
+                Budget->fetch_sub(Bytes);
+            }
+        }
+    };
     struct PrefetchSlot {
         uint64_t Id = 0;
         int64_t Offset = 0;
-        int64_t Length = 0; // Also the number of bytes reserved from the shared budget.
+        int64_t Length = 0; // The visible range; the budget is charged for the buffer capacity via Charge.
         bool Pending = false;
-        std::shared_ptr<const void> Owner; // keeps the pooled download buffer behind Data alive
+        std::shared_ptr<PrefetchCharge> Charge; // Null when no shared budget is configured.
+        std::shared_ptr<const void> Owner;      // keeps the pooled download buffer behind Data alive
         std::string_view Data;
     };
     struct PrefetchState {
@@ -79,7 +95,8 @@ template <typename TBlob> class BasicReadableFileImpl {
         void AddWaiter(uint64_t id, std::move_only_function<void()>& waiter);
         // Detaches every waiter of `id` without allocating. Caller holds Mutex.
         [[nodiscard]] std::vector<std::move_only_function<void()>> TakeWaiters(uint64_t id) noexcept;
-        // Removes a slot and returns its bytes to the budget. Caller holds Mutex.
+        // Removes a slot; its budget charge is returned once no download or reader still holds the buffer. Caller
+        // holds Mutex.
         void Drop(std::vector<PrefetchSlot>::iterator slot);
         void DropAll();
     };
