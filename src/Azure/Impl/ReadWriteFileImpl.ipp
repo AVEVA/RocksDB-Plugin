@@ -78,7 +78,8 @@ template <typename TBlob> auto BasicReadWriteFileImpl<TBlob>::BuildExtents() con
     const auto rangeEnd = [&](size_t i) {
         return m_bufferStats[i].targetOffset + m_bufferStats[i].dataLength + m_bufferStats[i].postPadding;
     };
-    std::ranges::stable_sort(order, [&](size_t a, size_t b) { return rangeStart(a) < rangeStart(b); });
+    // Stability is not needed: each extent's chunks are re-sorted into write order below.
+    std::ranges::sort(order, [&](size_t a, size_t b) { return rangeStart(a) < rangeStart(b); });
 
     std::vector<Extent> extents;
     for (const auto index : order) {
@@ -116,6 +117,7 @@ void BasicReadWriteFileImpl<TBlob>::PrepareExtent(Extent& extent, int64_t sizeBe
     // A reused buffer holds an earlier flush's bytes, so everything not downloaded or copied later is zeroed.
     extent.Data = AcquireExtentBuffer(static_cast<size_t>(extent.End - extent.Start));
     std::vector<std::pair<int64_t, int64_t>> covered;
+    covered.reserve(extent.Chunks.size());
     for (const auto index : extent.Chunks) {
         const auto& chunk = m_bufferStats[index];
         covered.emplace_back(chunk.targetOffset, chunk.targetOffset + chunk.dataLength);

@@ -484,6 +484,33 @@ TEST_F(ReadWriteFileImplTests, Flush_OverlappingWritesToOnePage_LastWriteWins) {
     EXPECT_EQ(expected, actual);
 }
 
+TEST_F(ReadWriteFileImplTests, Flush_OverlappingWritesWithTheSameStart_LastWriteWins) {
+    // Arrange
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    std::fill_n(m_env.Blob->Data.begin(), page, 'X');
+    m_env.Blob->Size = page;
+    auto file = CreateFile();
+
+    // Act
+    const std::string first(50, 'A');
+    const std::string second(20, 'B');
+    const std::string third(10, 'C');
+    file->Write(100, first.data(), static_cast<int64_t>(first.size()));
+    file->Write(100, second.data(), static_cast<int64_t>(second.size()));
+    file->Write(100, third.data(), static_cast<int64_t>(third.size()));
+    file->Sync();
+
+    // Assert
+    EXPECT_EQ(1u, m_env.Blob->Uploads.size());
+    std::vector<char> actual(static_cast<size_t>(page));
+    ASSERT_EQ(page, file->Read(0, page, actual.data()));
+    std::vector<char> expected(static_cast<size_t>(page), 'X');
+    std::fill_n(expected.begin() + 100, first.size(), 'A');
+    std::fill_n(expected.begin() + 100, second.size(), 'B');
+    std::fill_n(expected.begin() + 100, third.size(), 'C');
+    EXPECT_EQ(expected, actual);
+}
+
 TEST_F(ReadWriteFileImplTests, Flush_AppendingPastTheEnd_ReadsNothing) {
     // Arrange
     auto file = CreateFile();

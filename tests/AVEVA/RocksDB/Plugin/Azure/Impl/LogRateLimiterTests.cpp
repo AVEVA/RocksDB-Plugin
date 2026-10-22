@@ -48,6 +48,16 @@ TEST(LogRateLimiterTests, NullFormat_AlwaysAllowed) {
 
 // ─── First occurrence ─────────────────────────────────────────────────────────
 
+TEST(LogRateLimiterTests, MessageMatchingSeveralPatterns_IsTrackedUnderTheFirstListedPattern) {
+    // Arrange — the message contains both patterns; the first listed one owns the state.
+    LogRateLimiter limiter{{"Stalling writes", "level-0 files"}, kCooldown};
+    limiter.CheckAndRecord(kStallingWritesFormat);
+
+    // Act / Assert — a message matching only the second pattern has its own, untouched window.
+    EXPECT_EQ(RateDecision::Suppress, limiter.CheckAndRecord(kStallingWritesFormat).decision);
+    EXPECT_EQ(RateDecision::Allow, limiter.CheckAndRecord(kStoppingWritesFormat).decision);
+}
+
 TEST(LogRateLimiterTests, MatchingFormat_FirstCall_Allowed) {
     // Arrange
     LogRateLimiter limiter{{"Stalling writes because we have"}, kCooldown};

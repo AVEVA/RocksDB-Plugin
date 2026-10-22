@@ -5,6 +5,8 @@
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 #include <AVEVA/HttpClient/HttpClientError.hpp>
+#include <algorithm>
+#include <array>
 #include <system_error>
 namespace AVEVA::RocksDB::Plugin::Azure {
 namespace {
@@ -144,17 +146,18 @@ rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const RequestFailedExc
 
 bool AzureErrorTranslator::IsLeaseLost(const std::error_code& code) {
     using AzureClient::BlobStorageErrorCode;
-    for (const auto lost :
-         {BlobStorageErrorCode::LeaseLost, BlobStorageErrorCode::LeaseIdMismatchWithBlobOperation,
-          BlobStorageErrorCode::LeaseNotPresentWithBlobOperation, BlobStorageErrorCode::LeaseIdMissing,
-          BlobStorageErrorCode::LeaseIdMismatchWithLeaseOperation,
-          BlobStorageErrorCode::LeaseIsBrokenAndCannotBeRenewed, BlobStorageErrorCode::LeaseAlreadyBroken,
-          BlobStorageErrorCode::LeaseIsBreakingAndCannotBeAcquired, BlobStorageErrorCode::LeaseAlreadyPresent}) {
-        if (code == AzureClient::make_error_code(lost)) {
-            return true;
-        }
-    }
-    return false;
+    static constexpr std::array leaseErrors{BlobStorageErrorCode::LeaseLost,
+                                            BlobStorageErrorCode::LeaseIdMismatchWithBlobOperation,
+                                            BlobStorageErrorCode::LeaseNotPresentWithBlobOperation,
+                                            BlobStorageErrorCode::LeaseIdMissing,
+                                            BlobStorageErrorCode::LeaseIdMismatchWithLeaseOperation,
+                                            BlobStorageErrorCode::LeaseIsBrokenAndCannotBeRenewed,
+                                            BlobStorageErrorCode::LeaseAlreadyBroken,
+                                            BlobStorageErrorCode::LeaseIsBreakingAndCannotBeAcquired,
+                                            BlobStorageErrorCode::LeaseAlreadyPresent};
+    // Compare full error codes (value and category), not just the numeric value.
+    return std::ranges::any_of(leaseErrors,
+                               [&](BlobStorageErrorCode lost) { return code == AzureClient::make_error_code(lost); });
 }
 
 bool AzureErrorTranslator::IsTransient(const RequestFailedException& error) {

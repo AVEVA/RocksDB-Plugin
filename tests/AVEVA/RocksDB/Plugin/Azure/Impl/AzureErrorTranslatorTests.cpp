@@ -261,6 +261,23 @@ TEST(AzureErrorTranslatorTests, LeaseAlreadyPresentIsIOFencedAndLeaseLost) {
     EXPECT_FALSE(AzureErrorTranslator::IsLeaseLost(std::make_error_code(std::errc::timed_out)));
 }
 
+TEST(AzureErrorTranslatorTests, IsLeaseLost_MatchesEveryLeaseCodeAndNoOtherCategory) {
+    using ::AVEVA::AzureClient::BlobStorageErrorCode;
+    for (const auto lost :
+         {BlobStorageErrorCode::LeaseLost, BlobStorageErrorCode::LeaseIdMismatchWithBlobOperation,
+          BlobStorageErrorCode::LeaseNotPresentWithBlobOperation, BlobStorageErrorCode::LeaseIdMissing,
+          BlobStorageErrorCode::LeaseIdMismatchWithLeaseOperation,
+          BlobStorageErrorCode::LeaseIsBrokenAndCannotBeRenewed, BlobStorageErrorCode::LeaseAlreadyBroken,
+          BlobStorageErrorCode::LeaseIsBreakingAndCannotBeAcquired, BlobStorageErrorCode::LeaseAlreadyPresent}) {
+        EXPECT_TRUE(AzureErrorTranslator::IsLeaseLost(::AVEVA::AzureClient::make_error_code(lost)));
+        // Same numeric value in a different category must not match.
+        EXPECT_FALSE(
+            AzureErrorTranslator::IsLeaseLost(std::error_code(static_cast<int>(lost), std::generic_category())));
+    }
+    EXPECT_FALSE(
+        AzureErrorTranslator::IsLeaseLost(::AVEVA::AzureClient::make_error_code(BlobStorageErrorCode::BlobNotFound)));
+}
+
 TEST(AzureErrorTranslatorTests, WritesFencedExceptionIsIOFenced) {
     const auto status = AzureErrorTranslator::FromException(std::make_exception_ptr(WritesFencedException("fenced")));
     EXPECT_TRUE(status.IsIOFenced());

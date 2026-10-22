@@ -3,7 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LogRateLimiter.hpp"
 
-#include <optional>
+#include <algorithm>
 #include <string_view>
 #include <vector>
 
@@ -23,22 +23,17 @@ RateCheckResult LogRateLimiter::CheckAndRecord(const char* format, std::chrono::
 
     const std::string_view sv{format};
 
-    // Find the first matching pattern (if any).
-    std::optional<std::string_view> matched;
-    for (const auto& p : m_patterns) {
-        if (sv.find(p) != std::string_view::npos) {
-            matched = std::string_view{p};
-            break;
-        }
-    }
+    // The first matching pattern wins.
+    const auto matched =
+        std::ranges::find_if(m_patterns, [&](const std::string& p) { return sv.find(p) != std::string_view::npos; });
 
-    if (!matched) {
+    if (matched == m_patterns.end()) {
         // Not a noisy pattern — pass straight through, no state update.
         return {RateDecision::Allow, 0};
     }
 
     std::lock_guard<std::mutex> lock(m_mutex);
-    auto& state = m_state[*matched]; // default-inserts PatternState{} on first access
+    auto& state = m_state[std::string_view{*matched}]; // default-inserts PatternState{} on first access
 
     // nullopt means this pattern has never been emitted — always allow on first occurrence.
     const bool cooldownExpired = !state.lastEmitted || (now - *state.lastEmitted) >= m_cooldown;
