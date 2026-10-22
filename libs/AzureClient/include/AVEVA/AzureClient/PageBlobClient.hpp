@@ -287,13 +287,30 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
         return request;
     }
 
+    // Only a LeaseId and an If-None-Match of "*" are accepted. Any other validator could either let the PUT overwrite
+    // an existing blob or make a 412 mean something other than "the blob exists".
+    [[nodiscard]] static std::optional<std::string>
+    ValidateCreateIfNotExistsConditions(const Models::BlobRequestConditions& conditions) {
+        if (!conditions.IfNoneMatch.empty() && conditions.IfNoneMatch != "*") {
+            return "CreateIfNotExists only accepts an If-None-Match condition of \"*\".";
+        }
+        if (!conditions.IfMatch.empty() || conditions.IfModifiedSince.has_value() ||
+            conditions.IfUnmodifiedSince.has_value()) {
+            return "CreateIfNotExists does not accept IfMatch, IfModifiedSince or IfUnmodifiedSince conditions.";
+        }
+        return std::nullopt;
+    }
+
     // Create with If-None-Match: * so an existing blob is left untouched; BlobAlreadyExists (409) and
     // ConditionNotMet (412) are suppressed per the *IfNotExists contract (Response::Error() stays engaged).
+    // Conditions that could overwrite an existing blob or cause an unrelated 412 are rejected before sending.
     template <class THandler>
     void CreateIfNotExistsAsyncImpl(std::uint64_t contentLength, CreatePageBlobOptions options, THandler completion,
                                     AzureRequestOptions requestOptions) {
         if (Private::ValidateOrFail<Models::CreatePageBlobResult>(
-                this->Http(), completion, Private::ValidatePageAligned(contentLength, "contentLength"))) {
+                this->Http(), completion, Private::ValidatePageAligned(contentLength, "contentLength")) ||
+            Private::ValidateOrFail<Models::CreatePageBlobResult>(
+                this->Http(), completion, ValidateCreateIfNotExistsConditions(options.Conditions))) {
             return;
         }
         if (options.Conditions.IfNoneMatch.empty()) {

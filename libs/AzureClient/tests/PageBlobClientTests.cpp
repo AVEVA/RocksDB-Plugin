@@ -47,10 +47,12 @@ using AVEVA::HttpResponse;
 using AVEVA::AzureClient::BlobClientOptions;
 using AVEVA::AzureClient::BlobStorageError;
 using AVEVA::AzureClient::BlobStorageErrorCode;
+using AVEVA::AzureClient::CreatePageBlobOptions;
 using AVEVA::AzureClient::PageBlobPageSize;
 using AVEVA::AzureClient::Response;
 using AVEVA::AzureClient::Models::AcquireBlobLeaseResult;
 using AVEVA::AzureClient::Models::BlobProperties;
+using AVEVA::AzureClient::Models::BlobRequestConditions;
 using AVEVA::AzureClient::Models::BlobType;
 using AVEVA::AzureClient::Models::CreatePageBlobResult;
 using AVEVA::AzureClient::Models::DeleteBlobResult;
@@ -309,6 +311,53 @@ TEST(PageBlobClientTests, CreateIfNotExistsAsync_OtherErrorsAndValidationStillFa
     httpClient.Poll();
     EXPECT_TRUE(failedValidation);
     EXPECT_EQ(httpClient.RequestCount(), 1U);
+}
+
+TEST(PageBlobClientTests, CreateIfNotExistsAsync_RejectsConditionsThatCouldOverwriteOrMisclassify) {
+    using Mutator = void (*)(BlobRequestConditions&);
+    const Mutator mutators[] = {
+        [](BlobRequestConditions& c) { c.IfNoneMatch = "\"other\""; },
+        [](BlobRequestConditions& c) { c.IfMatch = "\"abc\""; },
+        [](BlobRequestConditions& c) { c.IfMatch = "*"; },
+        [](BlobRequestConditions& c) { c.IfModifiedSince = std::chrono::system_clock::now(); },
+        [](BlobRequestConditions& c) { c.IfUnmodifiedSince = std::chrono::system_clock::now(); },
+    };
+    for (const auto mutate : mutators) {
+        FakeHttpClient httpClient;
+        PageBlobClient client{httpClient, BuildOptions()};
+        CreatePageBlobOptions options;
+        mutate(options.Conditions);
+
+        bool failed = false;
+        client.CreateIfNotExistsAsync(PageBlobPageSize, std::move(options),
+                                      [&](std::expected<Response<CreatePageBlobResult>, BlobStorageError> result) {
+                                          ASSERT_FALSE(result.has_value());
+                                          EXPECT_EQ(result.error().Code,
+                                                    std::make_error_code(std::errc::invalid_argument));
+                                          failed = true;
+                                      });
+        httpClient.Poll();
+        EXPECT_TRUE(failed);
+        EXPECT_EQ(httpClient.RequestCount(), 0U);
+    }
+}
+
+TEST(PageBlobClientTests, CreateIfNotExistsAsync_AcceptsExplicitWildcardAndLease) {
+    FakeHttpClient httpClient;
+    httpClient.DefaultResponse() = HttpResponse{201, MakeCanonicalSuccessHeaders(), ""};
+    PageBlobClient client{httpClient, BuildOptions()};
+    CreatePageBlobOptions options;
+    options.Conditions.IfNoneMatch = "*";
+    options.Conditions.LeaseId = "lease-1";
+
+    bool succeeded = false;
+    client.CreateIfNotExistsAsync(PageBlobPageSize, std::move(options),
+                                  [&](std::expected<Response<CreatePageBlobResult>, BlobStorageError> result) {
+                                      succeeded = result.has_value() && !result->Error().has_value();
+                                  });
+    httpClient.Poll();
+    EXPECT_TRUE(succeeded);
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.LastRequest(), "If-None-Match"), "*");
 }
 
 TEST(PageBlobClientTests, UploadPagesAsync_SetsRangeAndPageWriteHeaders) {
