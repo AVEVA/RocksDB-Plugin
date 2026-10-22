@@ -40,6 +40,11 @@ template <class Executor> void ThrowIfRunningOn(const Executor& executor) {
         if (executor.running_in_this_thread()) {
             throw std::logic_error(message);
         }
+        // A strand only answers "inside this strand"; another handler on the same single-threaded context
+        // would still deadlock, so also ask the executor it adapts.
+        if constexpr (requires { executor.get_inner_executor(); }) {
+            ThrowIfRunningOn(executor.get_inner_executor());
+        }
     } else {
         if constexpr (requires { executor.template target<boost::asio::io_context::executor_type>(); }) {
             if (const auto* ioExecutor = executor.template target<boost::asio::io_context::executor_type>()) {

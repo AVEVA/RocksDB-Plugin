@@ -8,7 +8,9 @@
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
 
 #include <AVEVA/HttpClient/HttpResponse.hpp>
+#include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
+#include <boost/asio/strand.hpp>
 #include <gtest/gtest.h>
 
 #include <future>
@@ -46,6 +48,32 @@ TEST(BlockOnTokenTests, ReturnsServiceFailureAsExpectedError) {
 
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().Code, BlobStorageErrorCode::BlobNotFound);
+}
+
+TEST(BlockOnTokenTests, StrandRejectsCallsFromItsContextButNotFromExternalThreads) {
+    boost::asio::io_context context;
+    auto strand = boost::asio::make_strand(context);
+
+    EXPECT_NO_THROW(AVEVA::AzureClient::ThrowIfRunningOn(strand));
+
+    std::promise<bool> fromStrand;
+    std::promise<bool> fromOtherHandler;
+    auto strandFuture = fromStrand.get_future();
+    auto otherFuture = fromOtherHandler.get_future();
+    const auto probe = [&](std::promise<bool>& result) {
+        try {
+            AVEVA::AzureClient::ThrowIfRunningOn(strand);
+            result.set_value(false);
+        } catch (const std::logic_error&) {
+            result.set_value(true);
+        }
+    };
+    boost::asio::post(strand, [&] { probe(fromStrand); });
+    boost::asio::post(context, [&] { probe(fromOtherHandler); });
+    context.run();
+
+    EXPECT_TRUE(strandFuture.get());
+    EXPECT_TRUE(otherFuture.get());
 }
 
 TEST(BlockOnTokenTests, ThrowsWithoutSendingWhenCalledOnTheClientsExecutor) {
