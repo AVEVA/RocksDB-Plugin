@@ -221,6 +221,21 @@ TEST_F(BlobFilesystemFakeTests, RenameOfASmallFileDownloadsOnceAndCopiesNothingI
     }
 }
 
+TEST(RenameTempNameTests, OnlyExactGeneratedUuidSuffixesAreRecognized) {
+    const std::string uuid = "123e4567-e89b-12d3-a456-426614174000";
+    EXPECT_TRUE(BlobFilesystemDetail::IsRenameTempName("d/new.rename-" + uuid));
+    EXPECT_TRUE(BlobFilesystemDetail::IsRenameTempName("new.rename-" + uuid));
+
+    EXPECT_FALSE(BlobFilesystemDetail::IsRenameTempName("d/new.rename-" + std::string(36, 'x')));
+    EXPECT_FALSE(BlobFilesystemDetail::IsRenameTempName("d/new.rename-123e4567-e89b-12d3-a456-42661417400g"));
+    EXPECT_FALSE(BlobFilesystemDetail::IsRenameTempName("d/new.rename-123E4567-E89B-12D3-A456-426614174000"));
+    EXPECT_FALSE(BlobFilesystemDetail::IsRenameTempName("d/new.rename-123e4567e-89b-12d3-a456-426614174000"));
+    EXPECT_FALSE(BlobFilesystemDetail::IsRenameTempName("d/new.rename-123e4567-e89b-12d3-a456-426614174000x"));
+    EXPECT_FALSE(BlobFilesystemDetail::IsRenameTempName("d/new.rename-" + uuid.substr(1)));
+    EXPECT_FALSE(BlobFilesystemDetail::IsRenameTempName(".rename-" + uuid));
+    EXPECT_FALSE(BlobFilesystemDetail::IsRenameTempName("d/new.rename" + uuid + "-"));
+}
+
 TEST_F(BlobFilesystemFakeTests, RenameOfAnEmptyFileCreatesAnEmptyDestination) {
     Write("old.sst", "");
 

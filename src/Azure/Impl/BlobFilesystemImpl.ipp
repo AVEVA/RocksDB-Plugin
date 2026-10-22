@@ -75,10 +75,31 @@ inline uint32_t ToListPageSize(int32_t sizeHint) {
 inline constexpr std::string_view RenameTempMarker = ".rename-";
 inline constexpr size_t RenameTempUuidLength = 36;
 
+// Matches boost::uuids::to_string output exactly: lowercase hex in 8-4-4-4-12 groups.
+inline bool IsCanonicalUuid(std::string_view text) {
+    if (text.size() != RenameTempUuidLength) {
+        return false;
+    }
+    for (size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (c != '-') {
+                return false;
+            }
+        } else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 inline bool IsRenameTempName(std::string_view blobName) {
     constexpr auto suffixLength = RenameTempMarker.size() + RenameTempUuidLength;
-    return blobName.size() > suffixLength &&
-           blobName.substr(blobName.size() - suffixLength, RenameTempMarker.size()) == RenameTempMarker;
+    if (blobName.size() <= suffixLength) {
+        return false;
+    }
+    const auto suffix = blobName.substr(blobName.size() - suffixLength);
+    return suffix.starts_with(RenameTempMarker) && IsCanonicalUuid(suffix.substr(RenameTempMarker.size()));
 }
 
 // A database's lock file is named "LOCK" in its directory (possibly the container root).
