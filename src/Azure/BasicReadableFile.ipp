@@ -209,7 +209,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
 
     struct Active {
         void* Handle;
-        const Group* Owner;
+        Group* Owner;
     };
     std::vector<Active> active;
     // Reserved up front so push_back cannot throw after a read has started and orphan its handle.
@@ -250,6 +250,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
                 reqs[order[position]].status = started;
                 reqs[order[position]].result = rocksdb::Slice();
             }
+            group.Buffer.reset();
             return;
         }
         active.push_back(Active{handle, &group});
@@ -301,6 +302,8 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
                 applyOutcome(*it->Owner, finished);
             }
             DeleteAsyncReadHandle(it->Handle);
+            // The handle is gone, so nothing can write the buffer; the slices are already copied out.
+            it->Owner->Buffer.reset();
             it = active.erase(it);
             progressed = true;
         }

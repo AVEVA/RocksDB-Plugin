@@ -43,6 +43,10 @@ using boost::log::trivial::severity_level;
 
 // Defined next to the replaced operator new in WriteableFileTests.cpp.
 extern thread_local size_t g_failLargeAllocationIn;
+// Live and peak count of allocations of exactly g_trackedAllocationSize bytes; 0 disarms the tracking.
+extern std::atomic<size_t> g_trackedAllocationSize;
+extern std::atomic<size_t> g_liveTrackedAllocations;
+extern std::atomic<size_t> g_peakTrackedAllocations;
 
 namespace {
 constexpr int64_t BlobSize = 4096;
@@ -840,6 +844,48 @@ TEST_F(AsyncReadTests, MultiRead_StartsTheNextDownloadAsSoonAsAnyFinishes) {
     }
 }
 
+TEST_F(AsyncReadTests, MultiRead_ManyMergedGroupsWithStalledOne_RetainsOnlyTheActiveWindowsBuffers) {
+    FillPattern(m_deferredEnv, 3000000);
+    auto file = CreateFile(m_deferredEnv);
+    constexpr size_t groups = 80;
+    // Each pair is 3000 bytes apart, so it merges into one 3016-byte download; pairs are farther apart than the gap.
+    constexpr size_t mergedLength = 3016;
+    std::vector<std::vector<char>> scratch(groups * 2, std::vector<char>(16));
+    std::vector<rocksdb::FSReadRequest> reqs(groups * 2);
+    for (size_t i = 0; i < groups; ++i) {
+        SetRequest(reqs[2 * i], i * 30000, scratch[2 * i]);
+        SetRequest(reqs[2 * i + 1], i * 30000 + 3000, scratch[2 * i + 1]);
+    }
+
+    g_liveTrackedAllocations = 0;
+    g_peakTrackedAllocations = 0;
+    g_trackedAllocationSize = mergedLength;
+    rocksdb::IOStatus status;
+    {
+        std::jthread reader([&] { status = file.MultiRead(reqs.data(), reqs.size(), rocksdb::IOOptions{}, nullptr); });
+
+        // The first group stays stalled until every other one has been served, so finished buffers pile up if kept.
+        ASSERT_TRUE(m_deferredEnv.Blob->WaitForPendingDownloads(1));
+        auto stalled = m_deferredEnv.Blob->TakeDownload();
+        ASSERT_EQ(0, stalled.Request.Offset);
+        for (size_t served = 1; served < groups; ++served) {
+            ASSERT_TRUE(m_deferredEnv.Blob->WaitForPendingDownloads(1));
+            auto download = m_deferredEnv.Blob->TakeDownload();
+            ASSERT_EQ(mergedLength, static_cast<size_t>(download.Request.Length));
+            download.Succeed(Expected(download.Request.Offset, mergedLength));
+        }
+        stalled.Succeed(Expected(0, mergedLength));
+    }
+    g_trackedAllocationSize = 0;
+
+    EXPECT_TRUE(status.ok()) << status.ToString();
+    EXPECT_LE(g_peakTrackedAllocations.load(), 32U);
+    EXPECT_EQ(0U, g_liveTrackedAllocations.load());
+    for (size_t i = 0; i < groups; ++i) {
+        EXPECT_EQ(Expected(i * 30000, 16), reqs[2 * i].result.ToString()) << i;
+        EXPECT_EQ(Expected(i * 30000 + 3000, 16), reqs[2 * i + 1].result.ToString()) << i;
+    }
+}
 TEST_F(AsyncReadTests, ReadAsync_PassesIoOptionsTimeoutToTheDownload) {
     auto file = CreateFile(m_deferredEnv);
     std::vector<char> scratch(64);

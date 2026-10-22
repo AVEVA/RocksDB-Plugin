@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <future>
@@ -72,6 +73,45 @@ bool ShouldFailAllocation(const size_t size) {
     return false;
 }
 
+} // namespace
+
+// Shared with AsyncReadTests like g_failLargeAllocationIn.
+// Counts the live allocations of exactly g_trackedAllocationSize bytes (0 = disarmed) and their peak, on any thread.
+// Slots are a fixed array because this runs inside operator new and must not allocate.
+std::atomic<size_t> g_trackedAllocationSize{0};
+std::atomic<size_t> g_liveTrackedAllocations{0};
+std::atomic<size_t> g_peakTrackedAllocations{0};
+std::array<std::atomic<void*>, 512> g_trackedSlots{};
+
+void TrackAllocation(void* p, const size_t size) {
+    if (size == 0 || size != g_trackedAllocationSize.load(std::memory_order_relaxed)) {
+        return;
+    }
+    for (auto& slot : g_trackedSlots) {
+        void* expected = nullptr;
+        if (slot.compare_exchange_strong(expected, p)) {
+            const size_t live = g_liveTrackedAllocations.fetch_add(1) + 1;
+            size_t peak = g_peakTrackedAllocations.load();
+            while (live > peak && !g_peakTrackedAllocations.compare_exchange_weak(peak, live)) {
+            }
+            return;
+        }
+    }
+}
+
+void UntrackAllocation(void* p) {
+    if (g_trackedAllocationSize.load(std::memory_order_relaxed) == 0 || p == nullptr) {
+        return;
+    }
+    for (auto& slot : g_trackedSlots) {
+        void* expected = p;
+        if (slot.compare_exchange_strong(expected, nullptr)) {
+            g_liveTrackedAllocations.fetch_sub(1);
+            return;
+        }
+    }
+}
+namespace {
 std::vector<char> Prefix(const std::vector<char>& data, const size_t size) {
     return {data.begin(), data.begin() + static_cast<std::ptrdiff_t>(size)};
 }
@@ -804,11 +844,18 @@ void* operator new(const size_t size) {
         throw std::bad_alloc();
     }
     if (void* p = std::malloc(size ? size : 1)) {
+        TrackAllocation(p, size);
         return p;
     }
     throw std::bad_alloc();
 }
 
-void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p) noexcept {
+    UntrackAllocation(p);
+    std::free(p);
+}
 
-void operator delete(void* p, size_t) noexcept { std::free(p); }
+void operator delete(void* p, size_t) noexcept {
+    UntrackAllocation(p);
+    std::free(p);
+}
