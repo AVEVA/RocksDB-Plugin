@@ -8,6 +8,7 @@
 #include "FakeHttpClient.hpp"
 #include "TestSupport.hpp"
 #include "ValueOrFail.hpp"
+#include <AVEVA/AzureClient/Detail/AggregateDeadline.hpp>
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 #include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
 
@@ -952,6 +953,27 @@ TEST(RetryTests, RequestOptionsWithoutOverridesKeepClientPolicy) {
     const AVEVA::AzureClient::AzureRequestOptions defaults;
     EXPECT_FALSE(defaults.GetTotalDeadline().has_value());
     EXPECT_FALSE(defaults.GetMaxRetries().has_value());
+}
+
+TEST(RetryTests, ExtremeTotalDeadlinesAreSaturated) {
+    AVEVA::AzureClient::AzureRequestOptions options;
+    options.SetTotalDeadline(std::chrono::milliseconds::max());
+    EXPECT_EQ(options.GetTotalDeadline(), AVEVA::AzureClient::AzureRequestOptions::MaxTotalDeadline);
+    options.SetTotalDeadline(std::chrono::milliseconds::min());
+    EXPECT_EQ(options.GetTotalDeadline(), -AVEVA::AzureClient::AzureRequestOptions::MaxTotalDeadline);
+    options.SetTotalDeadline(std::chrono::seconds{10});
+    EXPECT_EQ(options.GetTotalDeadline(), std::chrono::milliseconds{10000});
+
+    // The aggregate budget adds the saturated value to a clock reading without overflowing.
+    options.SetTotalDeadline(std::chrono::milliseconds::max());
+    const AVEVA::AzureClient::Private::AggregateDeadline aggregate{options};
+    AVEVA::AzureClient::AzureRequestOptions child;
+    EXPECT_TRUE(aggregate.Apply(child));
+    EXPECT_FALSE(aggregate.Expired());
+    options.SetTotalDeadline(std::chrono::milliseconds::min());
+    const AVEVA::AzureClient::Private::AggregateDeadline spent{options};
+    EXPECT_FALSE(spent.Apply(child));
+    EXPECT_TRUE(spent.Expired());
 }
 
 TEST(RetryTests, NegativeRetryCountOverrideIsRejected) {

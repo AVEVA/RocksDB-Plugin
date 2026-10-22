@@ -5,6 +5,7 @@
 
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <optional>
 #include <stdexcept>
@@ -45,8 +46,16 @@ class AzureRequestOptions : public HttpRequestOptions {
     /// cancelled and the operation completes with <c>std::errc::timed_out</c>. Each attempt's own timeout is
     /// additionally clamped to the time that remains.
     /// </summary>
-    /// <param name="totalDeadline">The deadline; a non-positive value expires immediately.</param>
-    void SetTotalDeadline(std::chrono::milliseconds totalDeadline) noexcept { m_totalDeadline = totalDeadline; }
+    /// <param name="totalDeadline">The deadline; a non-positive value expires immediately. Magnitudes beyond
+    /// <c>MaxTotalDeadline</c> are saturated so that adding them to a clock reading cannot overflow.</param>
+    void SetTotalDeadline(std::chrono::milliseconds totalDeadline) noexcept {
+        m_totalDeadline = std::clamp(totalDeadline, -MaxTotalDeadline, MaxTotalDeadline);
+    }
+
+    /// <summary>
+    /// The longest total deadline that is honoured; longer budgets are treated as this long.
+    /// </summary>
+    static constexpr std::chrono::milliseconds MaxTotalDeadline{std::chrono::hours{24 * 365 * 10}};
 
     /// <summary>
     /// Replaces the client's retry count for this request (0 disables retries).

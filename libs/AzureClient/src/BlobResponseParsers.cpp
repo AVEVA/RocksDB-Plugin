@@ -264,9 +264,17 @@ BuildUtcTimePoint(int yearValue, UtcTimeComponent monthValue, unsigned int dayVa
         return std::nullopt;
     }
 
+    // A calendar-valid year such as 9999 does not fit a signed 64-bit nanosecond clock, so the whole-second count is
+    // bounded before it is converted. One second of headroom is left for the leap second and the fraction.
+    constexpr auto earliest = duration_cast<seconds>(system_clock::duration::min()) + seconds{1};
+    constexpr auto latest = duration_cast<seconds>(system_clock::duration::max()) - seconds{1};
     const sys_days days{calendarDate};
-    return system_clock::time_point{duration_cast<system_clock::duration>(
-        days.time_since_epoch() + hours{hourValue.Value} + minutes{minuteValue} + seconds{secondValue.Value})};
+    const seconds total = duration_cast<seconds>(days.time_since_epoch()) + hours{hourValue.Value} +
+                          minutes{minuteValue} + seconds{secondValue.Value};
+    if (total < earliest || total > latest) {
+        return std::nullopt;
+    }
+    return system_clock::time_point{duration_cast<system_clock::duration>(total)};
 }
 
 // "Sun, 06 Nov 1994 08:49:37 GMT" - the preferred HTTP-date format (RFC 9110 5.6.7).

@@ -253,6 +253,25 @@ TEST(AS_R08_HttpDateFormsTests, AcceptsRfc1123Rfc850AndAsctime) {
     }
 }
 
+TEST(AS_A09_DateRangeTests, DatesOutsideTheClockRangeAreRejectedNotWrapped) {
+    const bool clockHoldsYear9999 =
+        duration_cast<seconds>(system_clock::duration::max()) > sys_days{9999y / December / 31}.time_since_epoch();
+    for (const std::string_view value : {"9999-12-31T23:59:59.9999999Z", "0001-01-01T00:00:00Z"}) {
+        SCOPED_TRACE(value);
+        const auto parsed = ParseIso8601Utc(value);
+        EXPECT_EQ(parsed.has_value(), clockHoldsYear9999);
+        if (parsed) {
+            EXPECT_EQ(parsed->time_since_epoch() > system_clock::duration::zero(), value.starts_with("9999"));
+        }
+    }
+    const auto httpDate = ParseHttpDateHeader("Fri, 31 Dec 9999 23:59:59 GMT");
+    EXPECT_EQ(httpDate.has_value(), clockHoldsYear9999);
+
+    // Ordinary dates well inside the range of every clock stay accepted.
+    EXPECT_TRUE(ParseIso8601Utc("1970-01-01T00:00:00Z").has_value());
+    EXPECT_TRUE(ParseIso8601Utc("2200-01-01T00:00:00.9999999Z").has_value());
+}
+
 TEST(AS_R07_Iso8601FractionTests, DigitsBeyondTheSeventhAreTruncatedNotRounded) {
     const auto seven = ParseIso8601Utc("2024-01-02T03:04:05.1234567Z");
     const auto nine = ParseIso8601Utc("2024-01-02T03:04:05.123456789Z");
