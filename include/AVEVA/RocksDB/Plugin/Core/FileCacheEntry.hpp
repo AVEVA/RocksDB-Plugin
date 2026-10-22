@@ -37,6 +37,9 @@ class FileCacheEntry
     using MetadataOnlyHook =
         boost::intrusive::list_member_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>>;
     MetadataOnlyHook MetadataOnly;
+    // Set only for an entry recorded on first access with no download ever queued for it and nothing of that name
+    // possibly on disk; pruning it then skips the delete. Guarded by the owning cache's mutex.
+    bool KnownNotOnDisk = false;
 
     enum class State {
         Stale,

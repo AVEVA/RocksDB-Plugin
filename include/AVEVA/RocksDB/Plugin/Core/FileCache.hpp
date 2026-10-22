@@ -58,6 +58,10 @@ class FileCache {
     std::vector<PendingRelease> m_pendingReleases;
     // Cache keys whose delete failed; retried whenever the background thread wakes, unless re-cached meanwhile.
     std::vector<std::string> m_failedDeletes;
+    // The most recent path popped for download; a new entry of that name may have a file being written.
+    std::string m_lastDownloadPath;
+    // Set at construction if the cache directory already held files; a same-named entry may then have one on disk.
+    bool m_priorRunFilesPresent = false;
 
     // Running totals kept in step with the entries (see UpdateEntryUnsafe) so neither is a list scan.
     int64_t m_activeBytes = 0;
@@ -107,6 +111,7 @@ class FileCache {
     // Returns whether the entry left the cache; false when it was absent or, after an allocation failure, was only
     // invalidated (kept Stale) and will be evicted later.
     bool RemoveFileUnsafe(std::string_view filePath);
+    void DropNeverDownloadedEntryUnsafe(std::string_view filePath);
     void ReservePendingReleaseUnsafe();
     void InvalidateEntryUnsafe(FileCacheEntry& entry) noexcept;
     // Applies `mutate` to the entry and keeps the running totals consistent with its new state and size.

@@ -72,11 +72,15 @@ void FileCache::PurgePartialDownloads() noexcept {
     while (!error && it != end) {
         const auto& path = it->path();
         std::error_code entryError;
-        if (it->is_regular_file(entryError) && IsPartialDownloadName(path.filename().string())) {
-            std::filesystem::remove(path, entryError);
-            if (entryError) {
-                BOOST_LOG_SEV(*m_logger, warning)
-                    << "Could not delete partial download '" << path.string() << "': " << entryError.message();
+        if (it->is_regular_file(entryError)) {
+            if (!IsPartialDownloadName(path.filename().string())) {
+                m_priorRunFilesPresent = true;
+            } else {
+                std::filesystem::remove(path, entryError);
+                if (entryError) {
+                    BOOST_LOG_SEV(*m_logger, warning)
+                        << "Could not delete partial download '" << path.string() << "': " << entryError.message();
+                }
             }
         }
         // An iteration error ends the walk, but the files already handled stay deleted.
@@ -155,6 +159,10 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
         auto [inserted, _] = m_cache.emplace(std::piecewise_construct, std::forward_as_tuple(std::string(filePath)),
                                              std::forward_as_tuple(filePath, 0));
         inserted->second.SetGeneration(++m_nextGeneration);
+        // Without files from an earlier run, and with no download or failed delete of this name pending, nothing of
+        // this entry can be on disk, so pruning it needs no delete.
+        inserted->second.KnownNotOnDisk = !m_priorRunFilesPresent && m_lastDownloadPath != filePath &&
+                                          std::ranges::find(m_failedDeletes, filePath) == m_failedDeletes.end();
         m_entryList.push_front(inserted->second);
         // A new entry is stale with no size yet.
         m_metadataOnlyList.push_front(inserted->second);
@@ -173,6 +181,7 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
             if (state == FileCacheEntry::State::Stale) {
                 BOOST_LOG_SEV(*m_logger, debug) << "File is stale. Queueing for download: '" << filePath << "'";
                 m_fileDownloadQueue.emplace(filePath);
+                fileEntry.KnownNotOnDisk = false;
 
                 // A fresh download must not sit at its old, possibly least recent, LRU position.
                 EntryAccessedUnsafe(fileEntry);
@@ -352,6 +361,7 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                 } else if (!m_fileDownloadQueue.empty()) {
                     filePath = m_fileDownloadQueue.front();
                     m_fileDownloadQueue.pop();
+                    m_lastDownloadPath = filePath;
                     m_downloadInFlight = true;
                     inFlight.armed = true;
 
@@ -582,6 +592,16 @@ bool FileCache::RemoveFileUnsafe(const std::string_view filePath) {
         return false;
     }
     return true;
+}
+
+// Allocation-free and noexcept: an entry that never had a download has no file or handle to release, so it only
+// leaves the accounting and the lists.
+void FileCache::DropNeverDownloadedEntryUnsafe(const std::string_view filePath) {
+    const auto it = m_cache.find(filePath);
+    assert(it != m_cache.end() && it->second.KnownNotOnDisk);
+    it->second.unlink();
+    UpdateEntryUnsafe(it->second, [](FileCacheEntry&) {}, true);
+    m_cache.erase(it);
 }
 
 // Allocation-free fallback: the entry stays cached but Stale, so it never serves old bytes and a later read

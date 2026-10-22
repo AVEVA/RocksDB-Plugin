@@ -1086,6 +1086,96 @@ TEST(FileCacheShutdownTests, PartialDownloadsFromAnEarlierRunAreDeletedAtStartup
     EXPECT_TRUE(std::filesystem::exists(finished));
 }
 
+namespace {
+// Records every delete the cache asks the filesystem for.
+struct PruneDeleteCounter {
+    std::mutex Mutex;
+    std::vector<std::filesystem::path> Deleted;
+
+    void Attach(FilesystemMock& filesystem) {
+        ON_CALL(filesystem, DeleteFile(_)).WillByDefault([this](const std::filesystem::path& path) {
+            std::scoped_lock lock(Mutex);
+            Deleted.push_back(path);
+            return true;
+        });
+    }
+};
+
+void TouchOnce(FileCache& cache, const int count, const std::string& prefix) {
+    char buffer[1];
+    for (int i = 0; i < count; ++i) {
+        ASSERT_FALSE(cache.ReadFile(prefix + std::to_string(i) + ".sst", 0, 1, buffer));
+    }
+}
+} // namespace
+
+TEST(FileCacheShutdownTests, PruningOneTouchEntries_InAnEmptyCacheDirectory_DeletesNothing) {
+    // Arrange
+    const AVEVA::RocksDB::Plugin::Core::Mocks::TempDirectory directory("filecache_prune_empty");
+    auto filesystem = std::make_shared<NiceMock<FilesystemMock>>();
+    PruneDeleteCounter counter;
+    counter.Attach(*filesystem);
+    auto containerClient = std::make_shared<ContainerClientMock>();
+    auto logger = std::make_shared<severity_logger_mt<severity_level>>();
+    FileCache cache(directory.Path(), 1000, containerClient, filesystem, logger);
+
+    // Act
+    TouchOnce(cache, 3000, "");
+    cache.WaitUntilIdle();
+
+    // Assert
+    EXPECT_FALSE(cache.HasFile("0.sst"));
+    EXPECT_TRUE(cache.HasFile("2999.sst"));
+    EXPECT_TRUE(counter.Deleted.empty());
+}
+
+TEST(FileCacheShutdownTests, PruningOneTouchEntries_WhenAnEarlierRunLeftFiles_StillDeletesThem) {
+    // Arrange
+    const AVEVA::RocksDB::Plugin::Core::Mocks::TempDirectory directory("filecache_prune_prior");
+    std::ofstream{directory.Path() / "0.sst"} << "from an earlier run";
+    auto filesystem = std::make_shared<NiceMock<FilesystemMock>>();
+    PruneDeleteCounter counter;
+    counter.Attach(*filesystem);
+    auto containerClient = std::make_shared<ContainerClientMock>();
+    auto logger = std::make_shared<severity_logger_mt<severity_level>>();
+    FileCache cache(directory.Path(), 1000, containerClient, filesystem, logger);
+
+    // Act
+    TouchOnce(cache, 2050, "");
+    cache.WaitUntilIdle();
+
+    // Assert
+    ASSERT_FALSE(counter.Deleted.empty());
+    EXPECT_EQ("0.sst", counter.Deleted.front().filename().string());
+}
+
+TEST(FileCacheShutdownTests, PruningAStaleZeroLengthDownloadedEntry_StillDeletesItsFile) {
+    // Arrange
+    const AVEVA::RocksDB::Plugin::Core::Mocks::TempDirectory directory("filecache_prune_zero");
+    auto filesystem = std::make_shared<NiceMock<FilesystemMock>>();
+    PruneDeleteCounter counter;
+    counter.Attach(*filesystem);
+    auto containerClient = std::make_shared<ContainerClientMock>();
+    EXPECT_CALL(*containerClient, GetBlobSize(_)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
+    auto logger = std::make_shared<severity_logger_mt<severity_level>>();
+    FileCache cache(directory.Path(), 1000, containerClient, filesystem, logger);
+    for (int attempt = 0; attempt < 4 && !cache.ReadFile("zero.sst", 0, 0, nullptr); ++attempt) {
+        cache.WaitUntilIdle();
+    }
+    ASSERT_TRUE(cache.ReadFile("zero.sst", 0, 0, nullptr));
+    cache.MarkFileAsStaleIfExists("zero.sst");
+
+    // Act
+    TouchOnce(cache, 2049, "other");
+    cache.WaitUntilIdle();
+
+    // Assert
+    EXPECT_FALSE(cache.HasFile("zero.sst"));
+    ASSERT_EQ(1U, counter.Deleted.size());
+    EXPECT_EQ("zero.sst", counter.Deleted.front().filename().string());
+}
+
 TEST(FileCacheShutdownTests, FailedDelete_IsRetriedOnceAtShutdown) {
     // Arrange
     auto filesystem = std::make_shared<NiceMock<FilesystemMock>>();
