@@ -18,6 +18,7 @@
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/cancellation_type.hpp>
+#include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/thread_pool.hpp>
 #include <cstddef>
@@ -432,6 +433,41 @@ TEST(T11_ParallelDownloadAcceptanceTests, ParentCancellationCancelsAllInFlightCh
     EXPECT_EQ(callbackCount, 1);
     EXPECT_EQ(httpClient.PendingCount(), 0U);
     EXPECT_EQ(httpClient.RequestCount(), 5U);
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, ExplicitSlotEmittedAfterCompletionAndClientDestructionTouchesNothing) {
+    boost::asio::io_context context;
+    boost::asio::cancellation_signal cancel;
+    const std::string content = MakeContent(8);
+    TempFile out;
+    int callbackCount = 0;
+    {
+        FakeHttpClient httpClient{context};
+        EnqueueChunks(httpClient, content, 4U);
+        BlobClient client{httpClient, BuildOptions()};
+        HttpRequestOptions requestOptions;
+        requestOptions.SetCancellationSlot(cancel.slot());
+        client.DownloadToAsync(
+            out.Path, Parallel(4U, 2U),
+            [&](DownloadToResult result) {
+                ++callbackCount;
+                EXPECT_TRUE(result.has_value());
+            },
+            requestOptions);
+        ASSERT_TRUE(httpClient.RunUntil([&] {
+            while (CompleteNewest(httpClient)) {
+            }
+            return callbackCount > 0;
+        }));
+        context.restart();
+        context.poll();
+    }
+
+    // The operation is gone, so the leftover handler must not post anything (nor read the destroyed transport).
+    cancel.emit(boost::asio::cancellation_type::terminal);
+    context.restart();
+    EXPECT_EQ(context.poll(), 0U);
+    EXPECT_EQ(callbackCount, 1);
 }
 
 TEST(T11_ParallelDownloadAcceptanceTests, PartialCancellationDoesNotAbortTheDownload) {

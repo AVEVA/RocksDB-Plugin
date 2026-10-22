@@ -19,6 +19,7 @@
 
 #include <boost/asio/bind_cancellation_slot.hpp>
 #include <boost/asio/cancellation_signal.hpp>
+#include <boost/asio/io_context.hpp>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -339,6 +340,34 @@ TEST(BatchDeleteTests, CancelAbortsEveryChunkInFlightAndStartsNoMore) {
     EXPECT_EQ(outcome->error().Code, std::make_error_code(std::errc::operation_canceled));
     EXPECT_EQ(http.PendingCount(), 0U);
     EXPECT_EQ(http.RequestCount(), 3U);
+}
+
+TEST(BatchDeleteTests, ExplicitSlotEmittedAfterCompletionAndClientDestructionTouchesNothing) {
+    boost::asio::io_context context;
+    boost::asio::cancellation_signal signal;
+    std::optional<BatchOutcome> outcome;
+    {
+        FakeHttpClient http{context};
+        http.SetResponder(
+            [](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
+                return BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
+            });
+        BlobContainerClient client{http, MakeBlobContainerClientOptions()};
+        AVEVA::AzureClient::AzureRequestOptions requestOptions;
+        requestOptions.SetCancellationSlot(signal.slot());
+        client.DeleteBlobsAsync(
+            MakeNames(3U), DeleteBlobsOptions{}, [&outcome](BatchOutcome result) { outcome = std::move(result); },
+            requestOptions);
+        ASSERT_TRUE(http.RunUntil([&] { return outcome.has_value(); }));
+        ASSERT_TRUE(outcome->has_value());
+        context.restart();
+        context.poll();
+    }
+
+    // The operation is gone, so the leftover handler must not post anything (nor read the destroyed transport).
+    signal.emit(boost::asio::cancellation_type::terminal);
+    context.restart();
+    EXPECT_EQ(context.poll(), 0U);
 }
 
 TEST(BatchDeleteTests, PartialCancellationDoesNotAbortTheBatchButTerminalDoes) {
