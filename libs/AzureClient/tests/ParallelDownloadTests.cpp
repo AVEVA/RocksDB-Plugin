@@ -371,6 +371,53 @@ TEST(T118_DownloadVersionValidatorTests, CallerIfMatchPermitsChunksWhenTheRespon
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(1).Request, "If-Match"), "\"caller\"");
 }
 
+TEST(T118_DownloadVersionValidatorTests, WildcardIfMatchIsReplacedByTheResponseETagForLaterChunks) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(12);
+    EnqueueForRange(httpClient, RangeHeader(0, 6), RangeResponse(0, content.substr(0, 6), content.size(), "\"etagA\""));
+    EnqueueForRange(
+        httpClient, RangeHeader(6, 6),
+        HttpResponse{412, MakeCanonicalSuccessHeaders({{"x-ms-error-code", "ConditionNotMet"}, {"ETag", "\"etagB\""}}),
+                     ""});
+    BlobClient client{httpClient, BuildOptions()};
+
+    TempFile out;
+    int callbackCount = 0;
+    auto options = Parallel(6U, 2U);
+    options.Conditions.IfMatch = "*";
+    StartDownloadToAsyncAndExpectStatus(client, out.Path, options, callbackCount, 412U, "ConditionNotMet");
+    httpClient.CompleteAll();
+    httpClient.Poll();
+
+    EXPECT_EQ(callbackCount, 1);
+    ASSERT_EQ(httpClient.RequestCount(), 2U);
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(0).Request, "If-Match"), "*");
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(1).Request, "If-Match"), "\"etagA\"");
+}
+
+TEST(T118_DownloadVersionValidatorTests, WildcardIfMatchWithoutResponseETagRejectsFurtherChunks) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(12);
+    EnqueueForRange(httpClient, RangeHeader(0, 6), RangeResponse(0, content.substr(0, 6), content.size(), ""));
+    EnqueueForRange(httpClient, RangeHeader(6, 6), RangeResponse(6, content.substr(6), content.size(), ""));
+    BlobClient client{httpClient, BuildOptions()};
+
+    TempFile out;
+    int callbackCount = 0;
+    auto options = Parallel(6U, 2U);
+    options.Conditions.IfMatch = "*";
+    client.DownloadToAsync(out.Path, options, [&callbackCount](DownloadToResult result) {
+        ++callbackCount;
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().Code, AVEVA::AzureClient::BlobStorageErrorCode::InvalidResponse);
+    });
+    httpClient.CompleteAll();
+    httpClient.Poll();
+
+    EXPECT_EQ(callbackCount, 1);
+    EXPECT_EQ(httpClient.RequestCount(), 1U);
+}
+
 TEST(T118_DownloadVersionValidatorTests, SingleResponseWithoutETagStillSucceeds) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(6);

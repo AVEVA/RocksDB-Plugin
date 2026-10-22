@@ -447,8 +447,11 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         }
 
         m_chunkConditions = m_options.Conditions;
-        if (m_chunkConditions.IfMatch.empty()) {
+        // A wildcard or list only tests existence, so it cannot keep later chunks on one blob version.
+        if (!m_etag.empty()) {
             m_chunkConditions.IfMatch = m_etag;
+        } else if (m_chunkConditions.IfMatch == "*" || m_chunkConditions.IfMatch.find(',') != std::string::npos) {
+            m_chunkConditions.IfMatch.clear();
         }
         const auto next = CheckedAdd(m_begin, body.size());
         if (!next.has_value()) {
