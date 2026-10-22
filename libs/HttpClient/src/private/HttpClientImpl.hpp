@@ -37,6 +37,8 @@ struct NoFault {
     static void OnSubmit() noexcept {}
     static void OnStartLimited() noexcept {}
     static void OnFailPost() noexcept {}
+    static void OnStateAlloc() noexcept {}
+    static void OnAdmit() noexcept {}
 };
 
 /// <summary>
@@ -220,7 +222,14 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         // Initiation must never throw into the caller with the handler lost: the handler is parked in a cell
         // so that, if anything throws (in practice std::bad_alloc), it is failed exactly once and, as always,
         // never from inside this call.
-        auto cell = std::make_shared<RequestState>(std::move(completion));
+        std::shared_ptr<RequestState> cell;
+        try {
+            FaultPolicy::OnStateAlloc();
+            cell = std::make_shared<RequestState>(std::move(completion));
+        } catch (...) {
+            // The allocation failed before the state took the handler, so it is still ours to fail.
+            return FailWithoutState(std::move(completion), ClassifyBuildFailure(std::current_exception()));
+        }
         try {
             FaultPolicy::OnSubmit();
             auto route = Route::Of(request, options);
@@ -235,8 +244,9 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
             const auto deadline = DeadlineFor(options);
             if (m_limiter) {
                 auto origin = route.Origin();
+                // `cell` is copied, not moved: the catch below still needs it if admission throws.
                 return SendLimited(std::move(origin), std::move(route), std::move(request), std::move(guarded),
-                                   std::move(options), std::move(cancellation), deadline, std::move(cell));
+                                   std::move(options), std::move(cancellation), deadline, cell);
             }
             SendUnlimited(std::move(route), std::move(request), std::move(guarded), std::move(options),
                           std::move(cancellation), deadline);
@@ -269,6 +279,37 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
             cell->Finish(error, HttpResponse{});
         } catch (...) {
             // The handler or response construction threw; only the diagnostics receiver remains to report it to.
+            ReportHandlerThrew();
+        }
+    }
+
+    /// <summary>
+    /// Fails a request whose state could not even be allocated. The handler is posted from a holder that keeps
+    /// ownership until the post is accepted, so a failing post leaves it recoverable and it is completed inline
+    /// as a last resort rather than lost.
+    /// </summary>
+    /// <param name="completion">The request's handler, not yet owned by any state.</param>
+    /// <param name="error">Why the request failed.</param>
+    void FailWithoutState(Detail::CompletionPointer completion, std::error_code error) noexcept {
+        struct Holder {
+            Detail::CompletionPointer completion;
+            std::error_code error;
+
+            void operator()() { Detail::Complete(std::move(completion), error, HttpResponse{}); }
+        };
+        Holder holder{std::move(completion), error};
+        try {
+            FaultPolicy::OnFailPost();
+            asio::post(m_context, std::move(holder));
+            return;
+        } catch (...) {
+        }
+        if (!holder.completion) {
+            return;
+        }
+        try {
+            holder();
+        } catch (...) {
             ReportHandlerThrew();
         }
     }
@@ -327,6 +368,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         }
         PendingRequest pending{std::move(origin),     std::move(route), std::move(request), std::move(options),
                                std::move(completion), cancellation,     deadline,           std::move(state)};
+        FaultPolicy::OnAdmit();
         // Run reads the origin from the request before it consumes it.
         m_limiter->Run(pending.origin, ticket, std::move(pending), deadline);
         // A cancel that fired before the request was queued found nothing to remove; deliver it again to

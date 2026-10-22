@@ -860,14 +860,14 @@ TEST(HttpClientRobustness, RequestTargetIsBuiltFromPathAndQuery) {
     EXPECT_EQ(targets, (std::vector<std::string>{"/", "/?a=1", "/p/q%20r?x=%2F&y=", "/p?"}));
 }
 
-struct ThrowBadAlloc {
+struct ThrowBadAlloc : AVEVA::Private::NoFault {
     static void OnSubmit() { throw std::bad_alloc(); }
     static void OnStartLimited() noexcept {}
     static void OnFailPost() noexcept {}
 };
 
 // Throws from the Nth call to StartLimited, counted across the process; each test resets the counters.
-struct ThrowOnStartLimited {
+struct ThrowOnStartLimited : AVEVA::Private::NoFault {
     static inline std::atomic<int> Calls{0};
     static inline std::atomic<int> ThrowOnCall{0};
     static void OnSubmit() noexcept {}
@@ -879,7 +879,7 @@ struct ThrowOnStartLimited {
     static void OnFailPost() noexcept {}
 };
 
-struct ThrowOnFailPost {
+struct ThrowOnFailPost : AVEVA::Private::NoFault {
     static void OnSubmit() noexcept {}
     static void OnStartLimited() noexcept {}
     static void OnFailPost() { throw std::bad_alloc(); }
@@ -985,6 +985,109 @@ TEST(HttpClientRobustness, ThrowingReleaseTriggeredStartCompletesBothHandlersOnc
 TEST(HttpClientRobustness, ThrowingInitiationCompletesTheHandlerExactlyOnceAndNeverInline) {
     asio::io_context context;
     AVEVA::Private::BasicHttpClientImpl<ThrowBadAlloc> impl(context, AVEVA::HttpClientOptions{});
+
+    int completions = 0;
+    std::error_code result;
+    bool inSubmit = true;
+    impl.Submit(MakeRequest(HttpClientTests::ClosedLocalUrl()), AVEVA::HttpRequestOptions{},
+                AVEVA::Detail::MakeCompletion([&](std::error_code error, AVEVA::HttpResponse) {
+                    ++completions;
+                    result = error;
+                    EXPECT_FALSE(inSubmit);
+                }));
+    inSubmit = false;
+    EXPECT_EQ(completions, 0);
+    RunBounded(context);
+
+    EXPECT_EQ(completions, 1);
+    EXPECT_EQ(result, std::make_error_code(std::errc::not_enough_memory));
+}
+
+struct ThrowOnAdmit : AVEVA::Private::NoFault {
+    static inline std::atomic<int> Calls{0};
+    static inline std::atomic<int> ThrowOnCall{0};
+    static void OnAdmit() {
+        if (++Calls == ThrowOnCall) {
+            throw std::bad_alloc();
+        }
+    }
+};
+
+struct ThrowOnStateAlloc : AVEVA::Private::NoFault {
+    static inline std::atomic<int> Calls{0};
+    static void OnStateAlloc() {
+        if (++Calls == 1) {
+            throw std::bad_alloc();
+        }
+    }
+};
+
+// Admission throws after the request was moved into the limiter's hands; the failure must still reach the handler
+// through the retained state, once, with the slot intact for whoever comes next.
+static void RunFailedAdmission(const int failingAdmission, const bool withCancellation) {
+    ThrowOnAdmit::Calls = 0;
+    ThrowOnAdmit::ThrowOnCall = failingAdmission;
+    asio::io_context context;
+    AVEVA::HttpClientOptions clientOptions;
+    clientOptions.SetMaxConnectionsPerHost(1);
+    AVEVA::Private::BasicHttpClientImpl<ThrowOnAdmit> impl(context, clientOptions);
+    ScriptedServer server(context, [](int, const http::request<http::string_body>&) -> ServerAction {
+        return {.Wire = OkResponse, .Delay = std::chrono::milliseconds(50)};
+    });
+
+    std::vector<int> completions(3, 0);
+    std::vector<std::error_code> results(3);
+    std::vector<asio::cancellation_signal> signals(3);
+    const auto submit = [&](const int index, std::function<void()> then = {}) {
+        AVEVA::HttpRequestOptions options;
+        if (withCancellation) {
+            options.SetCancellationSlot(signals[index].slot());
+        }
+        impl.Submit(MakeRequest(server.Url("/" + std::to_string(index))), options,
+                    AVEVA::Detail::MakeCompletion([&, index, then](std::error_code error, AVEVA::HttpResponse) {
+                        ++completions[index];
+                        results[index] = error;
+                        if (then) {
+                            then();
+                        }
+                    }));
+    };
+    // With admission 1 failing, request 0 never runs. With admission 2 failing, request 1 is the queued one,
+    // behind request 0, which holds the only slot.
+    submit(0, [&] {
+        if (failingAdmission == 1) {
+            submit(2, [&] { server.Stop(); });
+        }
+    });
+    if (failingAdmission == 2) {
+        submit(1, [&] { submit(2, [&] { server.Stop(); }); });
+    } else {
+        submit(1);
+    }
+    if (withCancellation) {
+        signals[failingAdmission - 1].emit(asio::cancellation_type::terminal);
+    }
+    EXPECT_NO_THROW(context.run());
+
+    const auto failed = static_cast<std::size_t>(failingAdmission - 1);
+    EXPECT_EQ(completions[failed], 1);
+    EXPECT_EQ(results[failed], std::make_error_code(std::errc::not_enough_memory));
+    EXPECT_EQ(completions[2], 1);
+    EXPECT_FALSE(results[2]);
+}
+
+TEST(HttpClientRobustness, FirstAdmissionFailureCompletesOnceAndLaterRequestsRun) { RunFailedAdmission(1, false); }
+
+TEST(HttpClientRobustness, FirstAdmissionFailureWithCancellationCompletesOnce) { RunFailedAdmission(1, true); }
+
+TEST(HttpClientRobustness, QueuedAdmissionFailureCompletesOnceAndLaterRequestsRun) { RunFailedAdmission(2, false); }
+
+TEST(HttpClientRobustness, QueuedAdmissionFailureWithCancellationCompletesOnce) { RunFailedAdmission(2, true); }
+
+TEST(HttpClientRobustness, FailedStateAllocationStillCompletesTheOriginalHandlerOnceAndNeverInline) {
+    ThrowOnStateAlloc::Calls = 0;
+    asio::io_context context;
+    AVEVA::Private::BasicHttpClientImpl<ThrowOnStateAlloc> impl(context, AVEVA::HttpClientOptions{});
 
     int completions = 0;
     std::error_code result;

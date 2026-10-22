@@ -95,12 +95,24 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
         // sorted by ticket (an insertion that is almost always at the back) lets Cancel binary-search it.
         auto& waiters = state.waiters;
         const auto position = std::ranges::upper_bound(waiters, ticket, {}, &Waiter::ticket);
-        // Indexed before the move below, which may empty the string `origin` refers to.
-        if (m_timer && deadline != Clock::time_point::max()) {
+        // Indexed before the move below, which may empty the string `origin` refers to. If anything after the
+        // index entry throws, the entry is dropped again so a request the caller is told failed cannot also
+        // be woken or started later.
+        const bool indexed = m_timer && deadline != Clock::time_point::max();
+        if (indexed) {
             m_expiries.emplace(ExpiryKey{deadline, ticket}, origin);
-            ArmTimerLocked();
         }
-        waiters.insert(position, Waiter{ticket, deadline, std::move(pending)});
+        try {
+            if (indexed) {
+                ArmTimerLocked();
+            }
+            waiters.insert(position, Waiter{ticket, deadline, std::move(pending)});
+        } catch (...) {
+            if (indexed) {
+                m_expiries.erase(ExpiryKey{deadline, ticket});
+            }
+            throw;
+        }
     }
 
     /// <summary>
@@ -222,15 +234,21 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
             return;
         }
         m_armedFor = earliest;
-        m_timer->expires_at(earliest);
-        m_timer->async_wait(
-            [weak = std::weak_ptr<OriginLimiter>(this->weak_from_this())](const boost::system::error_code& error) {
-                if (!error) {
-                    if (auto self = weak.lock()) {
-                        self->OnTimer();
+        try {
+            m_timer->expires_at(earliest);
+            m_timer->async_wait(
+                [weak = std::weak_ptr<OriginLimiter>(this->weak_from_this())](const boost::system::error_code& error) {
+                    if (!error) {
+                        if (auto self = weak.lock()) {
+                            self->OnTimer();
+                        }
                     }
-                }
-            });
+                });
+        } catch (...) {
+            // Not armed after all; forgetting the target lets the next attempt try again.
+            m_armedFor = Clock::time_point::max();
+            throw;
+        }
     }
 
     /// <summary>
