@@ -23,8 +23,11 @@
 
 namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache {
 namespace {
+/// First line of the owner marker; proves the child directory was created by this cache.
 constexpr auto kMarker = "AVEVA disposable secondary cache v1";
 
+/// <param name="path">Path to inspect; not followed.</param>
+/// <returns>True for a symlink or, on Windows, any reparse point such as a junction.</returns>
 bool IsLink(const std::filesystem::path& path) {
 #ifdef _WIN32
     const auto attributes = GetFileAttributesW(path.c_str());
@@ -35,6 +38,8 @@ bool IsLink(const std::filesystem::path& path) {
     return std::filesystem::is_symlink(std::filesystem::symlink_status(path));
 }
 
+/// <param name="path">Path whose file name is checked.</param>
+/// <returns>True for names of the form region_DIGITS.dat.</returns>
 bool IsRegionFile(const std::filesystem::path& path) {
     const auto name = path.filename().string();
     if (!name.starts_with("region_") || !name.ends_with(".dat") || name.size() <= 11) {
@@ -43,6 +48,10 @@ bool IsRegionFile(const std::filesystem::path& path) {
     return std::all_of(name.begin() + 7, name.end() - 4, [](char ch) { return ch >= '0' && ch <= '9'; });
 }
 
+/// <summary>64-bit absolute seek on both platforms.</summary>
+/// <param name="file">Open stream.</param>
+/// <param name="offset">Byte offset from the start of the file.</param>
+/// <returns>False if offset exceeds INT64_MAX or the seek fails.</returns>
 bool Seek(std::FILE* file, const size_t offset) {
     if (offset > INT64_MAX) {
         return false;
@@ -92,6 +101,7 @@ FileBlockDevice::FileBlockDevice(std::filesystem::path parent, MemoryBudget& bud
     const bool existed = std::filesystem::exists(std::filesystem::symlink_status(m_directory));
     bool createdDirectory = false;
     bool createdMarker = false;
+    // If construction fails, remove only what this attempt created, leaving no half-owned directory behind.
     auto cleanup = boost::scope::make_scope_exit([&] noexcept {
         if (createdDirectory) {
             m_owner.reset();

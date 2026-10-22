@@ -7,6 +7,11 @@
 #include <cstdint>
 
 namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache {
+/// <summary>
+/// Monotonic operation counters shared by the facade and RegionManager. Updated with relaxed atomics, so they need
+/// no lock but a group of counters read together is not mutually consistent. Each field has the meaning of the
+/// same-named field in RegionBasedSecondaryCacheStats.
+/// </summary>
 struct CacheStats {
     std::atomic<uint64_t> inserts{0};
     std::atomic<uint64_t> admitted{0};

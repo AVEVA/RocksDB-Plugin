@@ -10,6 +10,9 @@
 
 namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache {
 namespace {
+/// <param name="options">Options supplying metadataBudget.</param>
+/// <param name="capacity">Capacity the budget must cover.</param>
+/// <returns>metadataBudget if nonzero, otherwise max(1 MiB, capacity / 200).</returns>
 size_t MetadataLimit(const RegionBasedSecondaryCacheOptions& options, const size_t capacity) {
     return options.metadataBudget != 0 ? options.metadataBudget : std::max(size_t{1} << 20, capacity / 200);
 }
@@ -65,6 +68,7 @@ void RegionManager::ReclaimLocked(const uint32_t regionId) {
         throw std::overflow_error("secondary cache generation exhausted; recreate cache");
     }
     for (const auto hash : region.hashes) {
+        // Unmap only copies from this fill; a newer copy in another region or fill must survive.
         const auto location = m_index.Find(hash);
         if (location && location->regionId == regionId && location->generation == region.generation) {
             RemoveLocationLocked(hash);
@@ -129,6 +133,8 @@ rocksdb::Status RegionManager::Append(const uint64_t hash, const std::span<const
     if (!SelectRegionLocked(record.size())) {
         return rocksdb::Status::IOError("secondary cache region flush failed");
     }
+    // Flush first if the record does not fit in the buffer's remaining space. A record larger than flushBlockSize
+    // always triggers this, so the buffer is empty before the direct write below.
     if (!m_buffer.empty() && record.size() > m_options.flushBlockSize - m_buffer.size() && !FlushLocked()) {
         return rocksdb::Status::IOError("secondary cache append flush failed");
     }
@@ -180,6 +186,7 @@ RegionManager::ReadStatus RegionManager::Read(const uint64_t hash, RecordBytes& 
     identity = {*found, m_incarnation};
     const size_t offset = size_t{found->offsetInAlignUnits} * kRecordAlign;
     record.resize(LocationLengthBytes(*found));
+    // Bytes of the current region at or after bufferOffset have not been flushed and exist only in m_buffer.
     const size_t bufferOffset = m_current == UINT32_MAX ? 0 : m_regions[m_current].cursor - m_buffer.size();
     if (found->regionId == m_current && offset >= bufferOffset) {
         const size_t relative = offset - bufferOffset;

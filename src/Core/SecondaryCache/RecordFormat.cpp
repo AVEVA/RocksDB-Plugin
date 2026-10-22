@@ -9,8 +9,10 @@
 
 namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache {
 namespace {
+/// Reflected CRC-32C (Castagnoli) polynomial.
 constexpr uint32_t kCrc32cPolynomial = 0x82f63b78u;
 
+/// <returns>The 256-entry bytewise lookup table for kCrc32cPolynomial, built at compile time.</returns>
 constexpr std::array<uint32_t, 256> BuildCrc32cTable() noexcept {
     std::array<uint32_t, 256> table{};
     for (size_t i = 0; i < table.size(); ++i) {
@@ -24,6 +26,7 @@ constexpr std::array<uint32_t, 256> BuildCrc32cTable() noexcept {
 }
 
 constexpr std::array<uint32_t, 256> kCrc32cTable = BuildCrc32cTable();
+/// Header bytes covered by headerCrc: every field before headerCrc itself.
 constexpr size_t kHeaderCrcPrefixBytes = offsetof(RecordHeader, headerCrc);
 } // namespace
 

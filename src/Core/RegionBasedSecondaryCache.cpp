@@ -27,6 +27,12 @@ namespace Secondary = AVEVA::RocksDB::Plugin::Core::SecondaryCache;
 namespace {
 using Logger = boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>;
 
+/// <summary>
+/// 64-bit FNV-1a fingerprint of the key. Only this hash is kept in RAM; the full key stored in the record is
+/// compared on lookup, so a collision costs a miss, never a wrong value.
+/// </summary>
+/// <param name="key">RocksDB cache key.</param>
+/// <returns>The index key, also stored in the record header.</returns>
 [[nodiscard]] uint64_t HashKey(const rocksdb::Slice& key) noexcept {
     constexpr uint64_t kOffset = 14695981039346656037ull;
     constexpr uint64_t kPrime = 1099511628211ull;
@@ -38,6 +44,9 @@ using Logger = boost::log::sources::severity_logger_mt<boost::log::trivial::seve
     return hash;
 }
 
+/// <summary>Records RocksDB's secondary-cache hit ticker plus the per-role filter, index or data ticker.</summary>
+/// <param name="stats">RocksDB statistics; null makes this a no-op.</param>
+/// <param name="role">Role of the hit entry, from its CacheItemHelper.</param>
 void RecordHitStats(rocksdb::Statistics* stats, const rocksdb::CacheEntryRole role) noexcept {
     if (stats == nullptr) {
         return;
@@ -61,11 +70,21 @@ void RecordHitStats(rocksdb::Statistics* stats, const rocksdb::CacheEntryRole ro
 
 } // namespace
 
+/// <summary>
+/// Facade logic behind RegionBasedSecondaryCache: serializes and validates records, owns RocksDB-created values
+/// until they reach a handle, enforces the transient budget and turns every exception into a Status. Public
+/// methods mirror the facade; see its header for their contracts.
+/// </summary>
 class RegionBasedSecondaryCache::Impl {
+    /// Construction options; only maxEntrySize is consulted afterwards.
     RegionBasedSecondaryCacheOptions m_options;
+    /// Non-null destination for rate-limited failure reports.
     std::shared_ptr<Logger> m_logger;
+    /// Counters shared with m_regions; mutable so const methods can count failures.
     mutable Secondary::CacheStats m_stats;
+    /// Budget for short-lived buffers: serialized payloads, encoded records and lookup copies.
     Secondary::MemoryBudget m_transient;
+    /// Index, regions and device. Declared after m_stats, which it references.
     Secondary::RegionManager m_regions;
 
   public:
@@ -175,6 +194,7 @@ class RegionBasedSecondaryCache::Impl {
                 return nullptr;
             }
             auto cleanup = boost::scope::make_scope_exit([&] noexcept {
+                // Deletes the created value if anything below throws before the handle is returned.
                 if (helper->del_cb != nullptr) {
                     helper->del_cb(outObj, nullptr);
                 }
@@ -183,6 +203,7 @@ class RegionBasedSecondaryCache::Impl {
             if (adviseErase) {
                 m_regions.Remove(keyHash, identity);
             }
+            // Identity-checked: a concurrent replace, erase, reclaim or reset means this copy is no longer kept.
             keptInSecondaryCache = !adviseErase && m_regions.Contains(keyHash, identity);
             ++m_stats.hits;
             RecordHitStats(stats, helper->role);
@@ -248,7 +269,14 @@ class RegionBasedSecondaryCache::Impl {
     }
 
   private:
-    // Translate without constructing another allocating status message during OOM.
+    /// <summary>
+    /// Maps the in-flight exception to a Status and reports the failure. Builds no status message, so it is safe
+    /// while out of memory. Must be called from inside a catch block.
+    /// </summary>
+    /// <returns>
+    /// MemoryLimit for allocation failures, InvalidArgument, IOError for device or filesystem errors (also counted
+    /// in ioErrors), otherwise Aborted.
+    /// </returns>
     rocksdb::Status ExceptionStatus() const noexcept {
         ReportFailure("operation threw; cache operation failed");
         try {
@@ -268,6 +296,11 @@ class RegionBasedSecondaryCache::Impl {
         }
     }
 
+    /// <summary>
+    /// Counts a failure in errors and logs the 1st, 2nd, 4th, 8th, ... occurrence, so a persistent fault cannot
+    /// flood the log.
+    /// </summary>
+    /// <param name="reason">Static description of the failure; not copied.</param>
     void ReportFailure(const char* reason) const noexcept {
         // First failure and powers of two: bounded log traffic, no status formatting on OOM.
         const uint64_t count = m_stats.errors.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -280,6 +313,13 @@ class RegionBasedSecondaryCache::Impl {
         }
     }
 
+    /// <summary>
+    /// Admission precheck before any allocation. Counts the matching drop when the record is unrepresentable,
+    /// larger than maxEntrySize or capacity, or the cache is disabled.
+    /// </summary>
+    /// <param name="keySize">Key length in bytes.</param>
+    /// <param name="payloadSize">Payload length in bytes.</param>
+    /// <returns>True if the record may be encoded and appended.</returns>
     bool CanEncode(const size_t keySize, const size_t payloadSize) {
         const auto size = Secondary::RecordSize(keySize, payloadSize);
         if (size == 0 || size > m_options.maxEntrySize) {
@@ -298,6 +338,13 @@ class RegionBasedSecondaryCache::Impl {
         return true;
     }
 
+    /// <summary>Encodes the record into a transient buffer and appends it.</summary>
+    /// <param name="key">Cache key.</param>
+    /// <param name="payload">Serialized value.</param>
+    /// <param name="type">Compression of payload.</param>
+    /// <param name="source">Tier payload came from.</param>
+    /// <returns>RegionManager::Append's status, or InvalidArgument if encoding fails.</returns>
+    /// <exception cref="Secondary::BudgetExceeded">The transient or metadata budget is exhausted.</exception>
     rocksdb::Status InsertEncoded(const rocksdb::Slice& key, const std::span<const std::byte> payload,
                                   const rocksdb::CompressionType type, const rocksdb::CacheTier source) {
         const uint64_t keyHash = HashKey(key);
