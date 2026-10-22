@@ -302,7 +302,7 @@ struct CountingNotifier {
     void operator()() const noexcept { ++*notifications; }
 };
 
-TEST(ConnectionPool, NotifiesWhenTheFirstIdleConnectionIsAdded) {
+TEST(ConnectionPool, NotifiesOnEverySuccessfulRelease) {
     int live = 0;
     int notifications = 0;
     ConnectionPool<TrackedStream, std::chrono::steady_clock, CountingNotifier> pool(4, LongTimeout, 256,
@@ -310,12 +310,12 @@ TEST(ConnectionPool, NotifiesWhenTheFirstIdleConnectionIsAdded) {
 
     pool.Release(MakeKey("a.com"), MakeConnection(1, live));
     pool.Release(MakeKey("b.com"), MakeConnection(2, live));
-    EXPECT_EQ(notifications, 1);
+    EXPECT_EQ(notifications, 2);
 
     EXPECT_TRUE(pool.Acquire(MakeKey("a.com")).has_value());
     EXPECT_TRUE(pool.Acquire(MakeKey("b.com")).has_value());
     pool.Release(MakeKey("a.com"), MakeConnection(3, live));
-    EXPECT_EQ(notifications, 2);
+    EXPECT_EQ(notifications, 3);
 }
 
 TEST(ConnectionPool, DestroyingThePoolClosesIdleConnections) {

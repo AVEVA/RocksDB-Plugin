@@ -88,10 +88,11 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
     const std::shared_ptr<TlsConnectionPool>& TlsPool() const noexcept { return m_tlsPool; }
 
     /// <summary>
-    /// Called when a pool gains an idle connection; schedules a sweep unless one is already pending.
+    /// Called on every release into a pool; schedules a sweep unless one is already pending. The plain load
+    /// keeps the common already-pending case free of a read-modify-write on a line shared by all releasers.
     /// </summary>
     void Notify() noexcept {
-        if (!m_scheduled.exchange(true)) {
+        if (!m_scheduled.load(std::memory_order_acquire) && !m_scheduled.exchange(true)) {
             ScheduleSweep();
         }
     }

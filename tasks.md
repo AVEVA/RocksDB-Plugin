@@ -393,7 +393,9 @@ single-response transfer unnecessarily or weaken normal ETag checking.
 check absent/empty ETag, caller-provided exact `IfMatch`, and ordinary
 single-chunk success. Return the standard invalid-response error where appropriate.
 
-### [ ] T119 - Recover an unscheduled idle sweeper while the pool remains nonempty
+### [x] T119 - Recover an unscheduled idle sweeper while the pool remains nonempty
+
+**Result:** Done. Regression `IdleSweeper.ReleaseSchedulesAgainAfterAFailedSchedule` (now releases a second origin without emptying the pool) failed before the fix and passes after. `ConnectionPool::Release` now notifies on every successful release, and `IdleSweeper::Notify` does an acquire load before the exchange so the already-pending case adds no read-modify-write. Coalescing tests unchanged; `ConnectionPool.NotifiesOnEverySuccessfulRelease` updated. Full WindowsDebug suite passes (1204). Release-path overhead is one `weak_ptr::lock` plus one atomic load per release; no allocations added. A warmed release-throughput/allocation benchmark was not run, so no timing figure is claimed.
 
 **Status:** Source-traced; follow-up to T83.
 

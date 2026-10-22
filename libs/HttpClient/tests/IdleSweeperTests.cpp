@@ -87,11 +87,10 @@ TEST(IdleSweeper, ReleaseSchedulesAgainAfterAFailedSchedule) {
     fixture.AddIdleConnection();
     EXPECT_EQ(fixture.plain->IdleCount(), 1U);
 
-    // The pool was non-empty, so only a release into an empty pool notifies again.
-    auto taken = fixture.plain->Acquire({"127.0.0.1", "80"});
-    ASSERT_TRUE(taken.has_value());
-    EXPECT_EQ(fixture.plain->IdleCount(), 0U);
-    fixture.AddIdleConnection();
+    // The pool is still non-empty, so this release must be the one that recovers the unscheduled sweep.
+    fixture.plain->Release({"127.0.0.2", "80"},
+                           PooledConnection<PlainStream>{std::make_unique<PlainStream>(context), {}});
+    EXPECT_EQ(fixture.plain->IdleCount(), 2U);
 
     EXPECT_TRUE(WaitUntil([&] { return fixture.plain->IdleCount() == 0; }));
 }

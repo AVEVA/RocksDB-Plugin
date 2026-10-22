@@ -318,12 +318,10 @@ class ConnectionPool {
             LruList& list;
             ~DisposeOnExit() { list.clear_and_dispose(ExecutorDisposer{}); }
         } disposeRetired{retired};
-        bool notify = false;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             const auto now = Clock::now();
             DropExpired(now, retired);
-            const bool wasEmpty = m_lru.empty();
 
             // Everything that can throw happens before any pool state changes, so a bad_alloc
             // leaves the pool consistent and the socket owned by the caller's (RAII) parameter.
@@ -365,11 +363,10 @@ class ConnectionPool {
                 }
                 retired.push_back(oldest);
             }
-            notify = wasEmpty;
         }
-        if (notify) {
-            m_notifier();
-        }
+        // Every successful release notifies, not just the empty-to-nonempty one: a failed schedule leaves the
+        // pending flag clear while the pool stays nonempty, and only a later release can recover the sweep.
+        m_notifier();
         return true;
     }
 
