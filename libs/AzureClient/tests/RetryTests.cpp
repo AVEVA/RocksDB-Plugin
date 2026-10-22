@@ -253,6 +253,89 @@ TEST(RetryTests, DeleteIsNotReplayedAfterAnAmbiguousTransportErrorBecauseItsOutc
     }
 }
 
+namespace {
+// Runs a conditional mutation whose first attempt fails with `error`; a replay would answer 412 because the ETag moved.
+template <class TStart>
+void ExpectConditionalMutationSentOnceOrRetried(const std::error_code& error, bool expectReplay, TStart start) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{}, error);
+    httpClient.EnqueueResponse(HttpResponse{412, {{"x-ms-error-code", "ConditionNotMet"}}, ""});
+    PageBlobClient client{httpClient, MakeRetryOptions(3)};
+
+    std::optional<unsigned> observedStatus;
+    bool done = false;
+    start(client, [&](BlobStorageError failure) {
+        observedStatus = failure.StatusCode;
+        done = true;
+    });
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return done; })) << error.message();
+    EXPECT_EQ(httpClient.RequestCount(), expectReplay ? 2U : 1U) << error.message();
+    // The ambiguous transport outcome is preserved rather than reported as a precondition failure.
+    EXPECT_EQ(observedStatus.value_or(0U) == 412U, expectReplay) << error.message();
+}
+
+template <class TResult> [[nodiscard]] auto FailureSink(const std::function<void(BlobStorageError)>& onFailure) {
+    return [onFailure](std::expected<Response<TResult>, BlobStorageError> result) {
+        onFailure(result.has_value() ? BlobStorageError{} : std::move(result).error());
+    };
+}
+
+Models::BlobRequestConditions IfMatchConditions() {
+    Models::BlobRequestConditions conditions;
+    conditions.IfMatch = "\"0x8DC\"";
+    return conditions;
+}
+} // namespace
+
+TEST(RetryTests, ConditionalMutationsAreNotReplayedAfterAnAmbiguousTransportError) {
+    const std::error_code error{AVEVA::HttpClientError::ReadFailed};
+    const auto upload = [](PageBlobClient& client, const std::function<void(BlobStorageError)>& sink) {
+        UploadPagesOptions options;
+        options.Conditions = IfMatchConditions();
+        client.UploadPagesAsync(0, std::string(512, 'p'), options, FailureSink<Models::UploadPagesResult>(sink));
+    };
+    const auto resize = [](PageBlobClient& client, const std::function<void(BlobStorageError)>& sink) {
+        ResizePageBlobOptions options;
+        options.Conditions = IfMatchConditions();
+        client.ResizeAsync(1024, options, FailureSink<Models::ResizePageBlobResult>(sink));
+    };
+    const auto metadata = [](PageBlobClient& client, const std::function<void(BlobStorageError)>& sink) {
+        SetBlobMetadataOptions options;
+        options.Conditions = IfMatchConditions();
+        client.SetMetadataAsync(options, FailureSink<Models::SetBlobMetadataResult>(sink));
+    };
+    const auto unmodifiedSince = [](PageBlobClient& client, const std::function<void(BlobStorageError)>& sink) {
+        UploadPagesOptions options;
+        options.Conditions.IfUnmodifiedSince = std::chrono::system_clock::now();
+        client.UploadPagesAsync(0, std::string(512, 'p'), options, FailureSink<Models::UploadPagesResult>(sink));
+    };
+    ExpectConditionalMutationSentOnceOrRetried(error, false, upload);
+    ExpectConditionalMutationSentOnceOrRetried(error, false, resize);
+    ExpectConditionalMutationSentOnceOrRetried(error, false, metadata);
+    ExpectConditionalMutationSentOnceOrRetried(error, false, unmodifiedSince);
+}
+
+TEST(RetryTests, ConditionalMutationsAreStillRetriedWhenNothingWasSent) {
+    ExpectConditionalMutationSentOnceOrRetried(
+        std::error_code{AVEVA::HttpClientError::ConnectFailed}, true,
+        [](PageBlobClient& client, const std::function<void(BlobStorageError)>& sink) {
+            UploadPagesOptions options;
+            options.Conditions = IfMatchConditions();
+            client.UploadPagesAsync(0, std::string(512, 'p'), options, FailureSink<Models::UploadPagesResult>(sink));
+        });
+}
+
+TEST(RetryTests, WildcardIfMatchMutationIsStillReplayedAfterAnAmbiguousTransportError) {
+    ExpectConditionalMutationSentOnceOrRetried(
+        std::error_code{AVEVA::HttpClientError::ReadFailed}, true,
+        [](PageBlobClient& client, const std::function<void(BlobStorageError)>& sink) {
+            UploadPagesOptions options;
+            options.Conditions.IfMatch = "*";
+            client.UploadPagesAsync(0, std::string(512, 'p'), options, FailureSink<Models::UploadPagesResult>(sink));
+        });
+}
+
 using CreateResult = std::expected<Response<Models::CreatePageBlobResult>, BlobStorageError>;
 
 TEST(RetryTests, ConditionalCreateIfNotExistsIsReplayedAfterAnAmbiguousTransportErrorBecauseTheReplayIsAbsorbed) {
@@ -357,7 +440,7 @@ TEST(RetryTests, AcquireLeaseReplayedAfterAnAmbiguousErrorSurfacesTheSubsequent4
     EXPECT_EQ(observed->error().StatusCode, 409U);
 }
 
-TEST(RetryTests, ConditionalUploadPagesReplayedAfterAnAmbiguousErrorSurfacesTheSubsequent412) {
+TEST(RetryTests, ConditionalUploadPagesAfterAnAmbiguousErrorIsNotReplayedAndKeepsTheTransportError) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ReadFailed);
     httpClient.EnqueueResponse(HttpResponse{412, {{"x-ms-error-code", "ConditionNotMet"}}, ""});
@@ -370,10 +453,9 @@ TEST(RetryTests, ConditionalUploadPagesReplayedAfterAnAmbiguousErrorSurfacesTheS
                             [&](auto result) { observed = std::move(result); });
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
-    EXPECT_EQ(httpClient.RequestCount(), 2U);
-    // A 412 after a lost If-Match write is ambiguous (our write may have changed the ETag), so it must surface.
+    EXPECT_EQ(httpClient.RequestCount(), 1U);
     ASSERT_FALSE(observed->has_value());
-    EXPECT_EQ(observed->error().StatusCode, 412U);
+    EXPECT_NE(observed->error().StatusCode, 412U);
 }
 
 TEST(RetryTests, ConditionalCreateIsRetriedAfterFailuresThatHappenedBeforeAnythingWasSent) {

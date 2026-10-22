@@ -128,8 +128,18 @@ void SetBearerAuthorization(HttpRequest& request, std::string_view token) {
     if (request.GetMethod() == HttpMethod::Delete) {
         return false;
     }
-    return std::ranges::none_of(request.GetHeaders(), [](const HttpHeader& header) {
-        return IEquals(header.GetName(), IfNoneMatchHeaderName) && header.GetValue() == "*";
+    const bool isRead = request.GetMethod() == HttpMethod::Get || request.GetMethod() == HttpMethod::Head;
+    // A successful conditional mutation changes the ETag and last-modified time, so replaying it with the original
+    // If-Match / If-Unmodified-Since would answer 412. A wildcard If-Match stays satisfied and reads change nothing.
+    return std::ranges::none_of(request.GetHeaders(), [isRead](const HttpHeader& header) {
+        if (IEquals(header.GetName(), IfNoneMatchHeaderName)) {
+            return header.GetValue() == "*";
+        }
+        if (isRead) {
+            return false;
+        }
+        return IEquals(header.GetName(), IfUnmodifiedSinceHeaderName) ||
+               (IEquals(header.GetName(), IfMatchHeaderName) && header.GetValue() != "*");
     });
 }
 } // namespace RetryDetail

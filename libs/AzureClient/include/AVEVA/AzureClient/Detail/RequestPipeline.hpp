@@ -77,7 +77,8 @@ void ResolveCopySourceAuthorization(HttpRequest& request, std::string_view beare
 void SetBearerAuthorization(HttpRequest& request, std::string_view token);
 
 // A request that cannot be replayed safely after an ambiguous transport failure: a conditional create
-// (If-None-Match: *) would answer 409 BlobAlreadyExists and a delete 404 if the first attempt had in fact succeeded.
+// (If-None-Match: *) would answer 409 BlobAlreadyExists, a delete 404, and an ETag/unmodified-since conditional
+// mutation 412 if the first attempt had in fact succeeded.
 [[nodiscard]] bool IsReplaySafe(const HttpRequest& request);
 
 // The timer that waits out a retry delay. A client type may name its own `retry_timer_type` so tests can observe
