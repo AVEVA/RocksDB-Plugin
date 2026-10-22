@@ -62,8 +62,9 @@ namespace {
 // Fails the Nth allocation of at least kMinFailedAllocation bytes after arming (1-based); 0 means disarmed. Small
 // allocations (e.g. debug-STL iterator proxies) are skipped because they occur in noexcept contexts.
 constexpr size_t kMinFailedAllocation = 64;
-thread_local size_t g_failAllocationIn = 0;
 } // namespace
+// Shared with the other tests of this executable, which see the same replaced operator new.
+thread_local size_t g_failAllocationIn = 0;
 
 void* operator new(const size_t size) {
     if (size >= kMinFailedAllocation && g_failAllocationIn != 0 && --g_failAllocationIn == 0)

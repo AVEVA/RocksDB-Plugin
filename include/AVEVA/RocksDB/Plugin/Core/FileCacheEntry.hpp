@@ -72,6 +72,7 @@ class FileCacheEntry
     std::shared_ptr<detail::CachedReadHandle> GetOrCreateReadHandle();
     // Detaches the handle (null if none) so the owner can close it outside its mutex.
     std::shared_ptr<detail::CachedReadHandle> TakeReadHandle() noexcept;
+    bool HasReadHandle() const noexcept;
     // True if this entry still owns exactly this handle, i.e. it is the entry the caller read from.
     bool HasReadHandle(const std::shared_ptr<detail::CachedReadHandle>& handle) const noexcept;
 

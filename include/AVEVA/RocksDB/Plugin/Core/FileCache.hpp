@@ -104,7 +104,11 @@ class FileCache {
     // logging) when downloads in progress keep it above the maximum.
     bool ShrinkToMaxUnsafe();
     bool EvictBytesUnsafe(int64_t bytes);
-    void RemoveFileUnsafe(std::string_view filePath);
+    // Returns whether the entry left the cache; false when it was absent or, after an allocation failure, was only
+    // invalidated (kept Stale) and will be evicted later.
+    bool RemoveFileUnsafe(std::string_view filePath);
+    void ReservePendingReleaseUnsafe();
+    void InvalidateEntryUnsafe(FileCacheEntry& entry) noexcept;
     // Applies `mutate` to the entry and keeps the running totals consistent with its new state and size.
     template <typename F> void UpdateEntryUnsafe(FileCacheEntry& entry, F&& mutate, bool removing = false);
     void ReleaseOnBackgroundThread(std::vector<PendingRelease>& releases);

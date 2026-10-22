@@ -30,7 +30,9 @@ size_t FileCache::PruneUndownloadedStaleEntriesUnsafe() {
     size_t pruned = 0;
     while (m_undownloadedStaleCount > MaxUndownloadedStaleEntries && !m_metadataOnlyList.empty()) {
         const std::string staleEntry = m_metadataOnlyList.back().GetFilePath();
-        RemoveFileUnsafe(staleEntry);
+        if (!RemoveFileUnsafe(staleEntry)) {
+            break;
+        }
         ++pruned;
     }
     return pruned;
@@ -93,8 +95,9 @@ bool FileCache::EvictBytesUnsafe(const int64_t bytes) {
 
             BOOST_LOG_SEV(*m_logger, debug)
                 << "Evicting '" << filePath << "' of size " << fileSize << "'bytes' from file cache";
-            bytesEvicted += fileSize;
-            RemoveFileUnsafe(filePath);
+            if (RemoveFileUnsafe(filePath)) {
+                bytesEvicted += fileSize;
+            }
         }
 
         if (atFront) {

@@ -33,6 +33,8 @@ std::shared_ptr<detail::CachedReadHandle> FileCacheEntry::GetOrCreateReadHandle(
 
 std::shared_ptr<detail::CachedReadHandle> FileCacheEntry::TakeReadHandle() noexcept { return std::move(m_readHandle); }
 
+bool FileCacheEntry::HasReadHandle() const noexcept { return m_readHandle != nullptr; }
+
 bool FileCacheEntry::HasReadHandle(const std::shared_ptr<detail::CachedReadHandle>& handle) const noexcept {
     return m_readHandle == handle;
 }

@@ -567,6 +567,87 @@ TEST_F(FileCacheTests, RemoveFile_WhileAReaderIsInsideTheCachedFile_DoesNotWaitF
     EXPECT_EQ(0, m_cache.CacheSize());
 }
 
+extern thread_local size_t g_failAllocationIn;
+
+TEST_F(FileCacheTests, RemoveFile_WhenAnAllocationFails_NeverThrowsAndNeverServesTheOldFile) {
+    // Arrange - long names, so the path copy is a heap allocation, and a cached file with an open handle.
+    EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(4));
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
+        auto file = std::make_unique<FileMock>();
+        ON_CALL(*file, Read(_, _, _)).WillByDefault([](char*, uint64_t, uint64_t length) -> uint64_t {
+            return length;
+        });
+        return file;
+    });
+
+    for (size_t failAt = 1; failAt <= 4; ++failAt) {
+        const std::string name = std::string(70, 'a') + std::to_string(failAt) + ".sst";
+        char buffer[4];
+        EnsureReadFromCache(name, 4);
+        ASSERT_TRUE(m_cache.ReadFile(name, 0, 4, buffer).has_value());
+
+        // Act
+        g_failAllocationIn = failAt;
+        EXPECT_NO_THROW(m_cache.RemoveFile(name)) << "failAt=" << failAt;
+        g_failAllocationIn = 0;
+
+        // Assert - either removed, or invalidated so that the old bytes are no longer served.
+        EXPECT_FALSE(m_cache.ReadFile(name, 0, 4, buffer).has_value() && m_cache.HasFile(name)) << "failAt=" << failAt;
+        m_cache.RemoveFile(name);
+        EXPECT_TRUE(m_cache.WaitUntilIdle(std::chrono::seconds(5)));
+        EXPECT_FALSE(m_cache.HasFile(name)) << "failAt=" << failAt;
+        EXPECT_EQ(0, m_cache.CacheSize()) << "failAt=" << failAt;
+
+        // The file can be cached again afterwards.
+        EnsureReadFromCache(name, 4);
+        m_cache.RemoveFile(name);
+        EXPECT_TRUE(m_cache.WaitUntilIdle(std::chrono::seconds(5)));
+        EXPECT_EQ(0, m_cache.CacheSize()) << "failAt=" << failAt;
+    }
+}
+
+TEST_F(FileCacheTests, MarkFileAsStale_WhenAnAllocationFails_StillClosesTheHandleAndDoesNotServeTheOldFile) {
+    EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(4));
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
+        auto file = std::make_unique<FileMock>();
+        ON_CALL(*file, Read(_, _, _)).WillByDefault([](char*, uint64_t, uint64_t length) -> uint64_t {
+            return length;
+        });
+        return file;
+    });
+
+    // Failures in the debug logging that precedes the handoff propagate as before; the ones that hit the handoff
+    // itself must be absorbed.
+    size_t absorbed = 0;
+    for (size_t failAt = 1; failAt <= 4; ++failAt) {
+        const std::string name = std::string(70, 'b') + std::to_string(failAt) + ".sst";
+        char buffer[4];
+        EnsureReadFromCache(name, 4);
+        ASSERT_TRUE(m_cache.ReadFile(name, 0, 4, buffer).has_value());
+
+        g_failAllocationIn = failAt;
+        bool threw = false;
+        try {
+            m_cache.MarkFileAsStaleIfExists(name);
+        } catch (const std::bad_alloc&) {
+            threw = true;
+        }
+        const bool consumed = g_failAllocationIn == 0;
+        g_failAllocationIn = 0;
+
+        if (!threw) {
+            absorbed += consumed ? 1 : 0;
+            EXPECT_FALSE(m_cache.ReadFile(name, 0, 4, buffer).has_value()) << "failAt=" << failAt;
+        }
+        m_cache.RemoveFile(name);
+        EXPECT_TRUE(m_cache.WaitUntilIdle(std::chrono::seconds(5)));
+        EXPECT_EQ(0, m_cache.CacheSize()) << "failAt=" << failAt;
+    }
+    EXPECT_GT(absorbed, 0U);
+}
+
 TEST_F(FileCacheTests, DownloadThatFailsAfterTheFileWasMarkedStale_LeavesNothingActiveAndCanBeRetried) {
     // Arrange - the first download blocks, then fails; later ones succeed.
     std::promise<void> started;

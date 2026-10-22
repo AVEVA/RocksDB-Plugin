@@ -114,10 +114,21 @@ void FileCache::MarkFileAsStaleIfExists(const std::string& filePath) {
             // azure.
             UpdateEntryUnsafe(it->second, [](FileCacheEntry& entry) { entry.SetState(FileCacheEntry::State::Stale); });
 
-            // The file is about to be replaced, so its open handle must not serve any more reads.
-            if (auto handle = it->second.TakeReadHandle()) {
-                m_pendingReleases.push_back({filePath, std::move(handle), false});
-                m_cv.notify_one();
+            // The file is about to be replaced, so its open handle must not serve any more reads. The release is
+            // prepared before the handle is taken so a failed allocation cannot lose it.
+            if (it->second.HasReadHandle()) {
+                try {
+                    PendingRelease release{filePath, nullptr, false};
+                    ReservePendingReleaseUnsafe();
+                    release.Handle = it->second.TakeReadHandle();
+                    m_pendingReleases.push_back(std::move(release));
+                    m_cv.notify_one();
+                } catch (const std::exception& e) {
+                    // The entry is already Stale, so it cannot serve reads; dropping the handle closes the file.
+                    (void)it->second.TakeReadHandle();
+                    BOOST_LOG_SEV(*m_logger, error)
+                        << "Could not queue the release of '" << filePath << "': " << e.what();
+                }
             }
         }
     }
@@ -246,7 +257,7 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
 
 void FileCache::RemoveFile(const std::string_view filePath) {
     std::scoped_lock lock(m_mutex);
-    RemoveFileUnsafe(filePath);
+    (void)RemoveFileUnsafe(filePath);
 }
 
 int64_t FileCache::CacheSize() const {
@@ -527,20 +538,58 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
     }
 }
 
-void FileCache::RemoveFileUnsafe(const std::string_view filePath) {
-    auto it = m_cache.find(filePath);
-    if (it != m_cache.end()) {
-        BOOST_LOG_SEV(*m_logger, debug) << "Removing file '" << filePath << "' from file cache.";
-        auto& fileEntry = it->second;
-        fileEntry.unlink();
+void FileCache::ReservePendingReleaseUnsafe() {
+    if (m_pendingReleases.size() == m_pendingReleases.capacity()) {
+        m_pendingReleases.reserve(std::max<size_t>(8, m_pendingReleases.capacity() * 2));
+    }
+}
 
-        // The entry leaves the totals now; the file itself is deleted (and its handle closed) later on the background
-        // thread, outside this mutex.
+// Everything that can throw (the path copy and the vector growth) happens before the entry is touched, so a failure
+// leaves it fully cached. The commit that follows cannot throw. Returns whether the entry left the cache.
+bool FileCache::RemoveFileUnsafe(const std::string_view filePath) {
+    auto it = m_cache.find(filePath);
+    if (it == m_cache.end()) {
+        return false;
+    }
+    auto& fileEntry = it->second;
+    try {
+        PendingRelease release{std::string(filePath), nullptr, true};
+        ReservePendingReleaseUnsafe();
+
+        fileEntry.unlink();
+        // The entry leaves the totals now; the file itself is deleted (and its handle closed) later on the
+        // background thread, outside this mutex.
         UpdateEntryUnsafe(fileEntry, [](FileCacheEntry&) {}, true);
-        m_pendingReleases.push_back({std::string(filePath), fileEntry.TakeReadHandle(), true});
+        release.Handle = fileEntry.TakeReadHandle();
+        m_pendingReleases.push_back(std::move(release));
         m_cache.erase(it);
         m_cv.notify_one();
+    } catch (const std::exception& e) {
+        InvalidateEntryUnsafe(fileEntry);
+        try {
+            BOOST_LOG_SEV(*m_logger, error)
+                << "Could not queue the removal of '" << filePath << "'; invalidated the entry instead: " << e.what();
+        } catch (...) {
+            // Logging is best effort: this runs from cleanup paths that must not throw.
+        }
+        // A metadata-only entry has nothing on disk to delete, so it can still be dropped without allocating.
+        if (fileEntry.GetState() == FileCacheEntry::State::Stale && fileEntry.GetSize() == 0) {
+            fileEntry.unlink();
+            UpdateEntryUnsafe(fileEntry, [](FileCacheEntry&) {}, true);
+            m_cache.erase(it);
+            return true;
+        }
+        return false;
     }
+    return true;
+}
+
+// Allocation-free fallback: the entry stays cached but Stale, so it never serves old bytes and a later read
+// downloads it afresh. Eviction removes it (and its file) once an allocation succeeds.
+void FileCache::InvalidateEntryUnsafe(FileCacheEntry& entry) noexcept {
+    entry.SetGeneration(++m_nextGeneration);
+    UpdateEntryUnsafe(entry, [](FileCacheEntry& e) { e.SetState(FileCacheEntry::State::Stale); });
+    (void)entry.TakeReadHandle();
 }
 
 template <typename F> void FileCache::UpdateEntryUnsafe(FileCacheEntry& entry, F&& mutate, const bool removing) {
