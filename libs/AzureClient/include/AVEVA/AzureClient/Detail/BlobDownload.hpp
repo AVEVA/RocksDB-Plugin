@@ -14,6 +14,7 @@
 #include <AVEVA/AzureClient/Detail/ProtocolConstants.hpp>
 
 #include <AVEVA/AzureClient/AzureRequestOptions.hpp>
+#include <AVEVA/AzureClient/Detail/AggregateDeadline.hpp>
 #include <AVEVA/AzureClient/HttpClientLike.hpp>
 #include <AVEVA/HttpClient/HttpMethod.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
@@ -126,10 +127,11 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink, class TDone
 class DownloadOperation final : public std::enable_shared_from_this<DownloadOperation<THttp, TCred, TSink, TDone>> {
   public:
     DownloadOperation(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> clientOptions,
-                      DownloadToOptions options, AzureRequestOptions requestOptions, TSink sink, TDone completion)
+                      DownloadToOptions options, AzureRequestOptions requestOptions, TSink sink, TDone completion,
+                      std::chrono::steady_clock::time_point start)
         : m_httpClient(httpClient), m_clientOptions(std::move(clientOptions)), m_options(std::move(options)),
-          m_requestOptions(requestOptions), m_sink(std::move(sink)), m_completion(std::move(completion)),
-          m_parentSlot(m_requestOptions.GetCancellationSlot()),
+          m_requestOptions(requestOptions), m_deadline(m_requestOptions, start), m_sink(std::move(sink)),
+          m_completion(std::move(completion)), m_parentSlot(m_requestOptions.GetCancellationSlot()),
           m_chunkSize(m_options.ChunkSize == 0U ? DefaultDownloadChunkSize : m_options.ChunkSize),
           m_concurrency(std::min(std::max<std::size_t>(1U, m_options.Concurrency),
                                  std::max<std::size_t>(1U, MaxBufferedDownloadBytes / m_chunkSize))) {}
@@ -249,6 +251,11 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
               const Models::BlobRequestConditions& conditions) {
         HttpRequest request;
         AzureRequestOptions requestOptions = m_requestOptions;
+        // Every request gets only what is left of the whole download's budget, and none starts once it is spent.
+        if (!m_deadline.Apply(requestOptions)) {
+            Fail(MakeFailure(std::errc::timed_out, "The download exceeded its total deadline."));
+            return;
+        }
         try {
             request = BuildBlobRequest(*m_clientOptions, HttpMethod::Get);
             if (kind != RequestKind::Full) {
@@ -669,6 +676,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
     std::shared_ptr<const BasicBlobTarget<TCred>> m_clientOptions;
     DownloadToOptions m_options;
     AzureRequestOptions m_requestOptions;
+    AggregateDeadline m_deadline;
     TSink m_sink;
     TDone m_completion;
     boost::asio::cancellation_slot m_parentSlot;
@@ -704,11 +712,11 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
 
 template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink, class TDone>
 void StartDownload(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
-                   DownloadToOptions operationOptions, TSink sink, TDone completion,
-                   AzureRequestOptions requestOptions) {
+                   DownloadToOptions operationOptions, TSink sink, TDone completion, AzureRequestOptions requestOptions,
+                   std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now()) {
     std::make_shared<DownloadOperation<THttp, TCred, TSink, TDone>>(httpClient, std::move(options),
                                                                     std::move(operationOptions), requestOptions,
-                                                                    std::move(sink), std::move(completion))
+                                                                    std::move(sink), std::move(completion), start)
         ->Start();
 }
 // Closes the temporary file and, on success, renames it over `target`; any failure removes the temporary file.
@@ -763,9 +771,11 @@ void DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobT
                              TCompletion completion, AzureRequestOptions requestOptions) {
     using FileResult = std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>;
     auto scheduler = operationOptions.WriteScheduler;
+    // The budget covers the hand-offs to the writer and back, so it starts here rather than at the first GET.
+    const auto start = std::chrono::steady_clock::now();
     DownloadDetail::RunOnWriter(
         httpClient, scheduler,
-        [&httpClient, scheduler, options, operationOptions = std::move(operationOptions), path,
+        [&httpClient, scheduler, start, options, operationOptions = std::move(operationOptions), path,
          completion = std::move(completion), requestOptions]() mutable {
             std::error_code statusError;
             if (std::filesystem::is_directory(path, statusError)) {
@@ -795,7 +805,7 @@ void DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobT
                 httpClient.get_executor(),
                 [&httpClient, scheduler = std::move(scheduler), options = std::move(options),
                  operationOptions = std::move(operationOptions), file = std::move(file), tempPath = std::move(tempPath),
-                 target = std::move(path), completion = std::move(completion), requestOptions]() mutable {
+                 target = std::move(path), completion = std::move(completion), requestOptions, start]() mutable {
                     DownloadDetail::StartDownload(
                         httpClient, std::move(options), std::move(operationOptions), FileSink{std::move(file)},
                         [&httpClient, scheduler = std::move(scheduler), tempPath = std::move(tempPath),
@@ -811,7 +821,7 @@ void DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobT
                                                                                         std::move(result)));
                                 });
                         },
-                        requestOptions);
+                        requestOptions, start);
                 });
         });
 }

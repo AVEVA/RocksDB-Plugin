@@ -53,6 +53,7 @@ target_sources(aveva-azure-client
         "${base-include-dir}/AVEVA/AzureClient/BlobServiceClient.hpp"
         "${base-include-dir}/AVEVA/AzureClient/BlobStorageError.hpp"
         "${base-include-dir}/AVEVA/AzureClient/BlobStorageErrorCode.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/Detail/AggregateDeadline.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Detail/AsyncInitiation.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Detail/BlobBatch.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Detail/BlobDownload.hpp"

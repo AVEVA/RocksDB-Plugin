@@ -7,6 +7,7 @@
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
+#include <AVEVA/AzureClient/Detail/AggregateDeadline.hpp>
 #include <AVEVA/AzureClient/Detail/AsyncInitiation.hpp>
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 #include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
@@ -67,7 +68,8 @@ class BatchDeleteOperation final
                          AzureRequestOptions requestOptions)
         : m_httpClient(httpClient), m_target(std::move(target)), m_names(std::move(names)),
           m_maxConcurrent(std::max<std::size_t>(1U, maxConcurrentRequests)), m_completion(std::move(completion)),
-          m_requestOptions(requestOptions), m_parentSlot(requestOptions.GetCancellationSlot()),
+          m_requestOptions(requestOptions), m_deadline(requestOptions),
+          m_parentSlot(requestOptions.GetCancellationSlot()),
           m_auth(MakeRequestAuth(*m_target->Connection, m_target->Credential != nullptr)) {
         m_items.resize(m_names.size());
     }
@@ -226,6 +228,12 @@ class BatchDeleteOperation final
         }
 
         AzureRequestOptions chunkOptions = m_requestOptions;
+        // Each batch gets only what is left of the whole delete's budget, and none starts once it is spent.
+        if (!m_deadline.Apply(chunkOptions)) {
+            FailChunk(chunk, MakeClientError(std::make_error_code(std::errc::timed_out),
+                                             "The batch delete exceeded its total deadline."));
+            return;
+        }
         chunkOptions.SetCancellationSlot(signal->slot());
         SendAuthorizedRequestAsync(
             m_httpClient, *m_target, std::move(request),
@@ -306,6 +314,7 @@ class BatchDeleteOperation final
     std::size_t m_maxConcurrent;
     TCompletion m_completion;
     AzureRequestOptions m_requestOptions;
+    AggregateDeadline m_deadline;
     boost::asio::cancellation_slot m_parentSlot;
     RequestAuth m_auth;
 

@@ -4,6 +4,7 @@
 #include "FakeHttpClient.hpp"
 #include "TestSupport.hpp"
 
+#include <AVEVA/AzureClient/AzureRequestOptions.hpp>
 #include <AVEVA/AzureClient/BlobClientOptions.hpp>
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
@@ -21,6 +22,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <functional>
 #include <optional>
@@ -29,6 +31,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -631,4 +634,40 @@ TEST(BatchDeleteTests, SuccessfulPartsNeedNoHeaderParsingAndFailedPartsKeepTheir
     ASSERT_TRUE(items[2].Error.has_value());
     EXPECT_EQ(items[2].Error->StatusCode, 403);
     EXPECT_EQ(items[2].Error->RequestId, "r2");
+}
+
+TEST(BatchDeleteTests, SequentialBatchesShareOneAggregateDeadline) {
+    FakeHttpClient http;
+    http.SetResponder([](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
+        FakeHttpClient::ScriptedResult result =
+            BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
+        result.Deferred = true;
+        return result;
+    });
+    BlobContainerClient client{http, MakeBlobContainerClientOptions()};
+
+    AVEVA::AzureClient::AzureRequestOptions requestOptions;
+    requestOptions.SetTotalDeadline(std::chrono::milliseconds{200});
+    int completions = 0;
+    std::optional<BatchOutcome> outcome;
+    client.DeleteBlobsAsync(
+        MakeNames(256U * 3U), DeleteBlobsOptions{.MaxConcurrentRequests = 1},
+        [&](BatchOutcome result) {
+            ++completions;
+            outcome = std::move(result);
+        },
+        requestOptions);
+
+    // Each batch fits the 200 ms budget on its own, but together they overrun it.
+    ASSERT_EQ(http.PendingCount(), 1U);
+    std::this_thread::sleep_for(std::chrono::milliseconds{110});
+    ASSERT_TRUE(http.CompleteNext());
+    std::this_thread::sleep_for(std::chrono::milliseconds{110});
+    static_cast<void>(http.CompleteNext());
+    ASSERT_TRUE(http.RunUntil([&] { return completions > 0 || http.RequestCount() > 2U; }));
+
+    EXPECT_EQ(http.RequestCount(), 2U);
+    ASSERT_EQ(completions, 1);
+    ASSERT_FALSE(outcome->has_value());
+    EXPECT_EQ(outcome->error().Code, std::make_error_code(std::errc::timed_out));
 }

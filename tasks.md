@@ -129,7 +129,9 @@ and existing drain/rollback behavior.
 sent. Delay an earlier copy and verify each subsequent request's total deadline
 is bounded by the remaining lease time, not the original duration.
 
-### [ ] T109 - Apply one absolute total deadline across download and batch children
+### [x] T109 - Apply one absolute total deadline across download and batch children
+
+**Result:** Done. New `Detail\AggregateDeadline.hpp` records the absolute end of the budget; `DownloadOperation::Send` and `BatchDeleteOperation::SendChunk` pass each child only the remaining time and, once it is spent, start no further request and fail once with `timed_out` (in-flight children drain as before). File downloads start the clock before the writer hand-off/open. Regressions (failed before the fix, pass after): `T11_ParallelDownloadAcceptanceTests.SequentialChunksShareOneAggregateDeadline`, `...FileDownloadDelayedBeforeTheFirstGetStartsNoRequestAfterTheDeadline`, `BatchDeleteTests.SequentialBatchesShareOneAggregateDeadline`. Full WindowsDebug ctest passes (integration tests skipped as before).
 
 **Status:** Source-traced; high confidence.
 

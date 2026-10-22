@@ -8,6 +8,7 @@
 #include "FakeHttpClient.hpp"
 #include "TestSupport.hpp"
 
+#include <AVEVA/AzureClient/AzureRequestOptions.hpp>
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 #include <AVEVA/AzureClient/Detail/BlobDownload.hpp>
@@ -17,13 +18,17 @@
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/cancellation_type.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/asio/thread_pool.hpp>
 #include <cstddef>
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <expected>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <ios>
 #include <iterator>
 #include <limits>
@@ -801,4 +806,74 @@ TEST(T11_ParallelDownloadAcceptanceTests, DownloadExactlyAtMaxSizeSucceeds) {
 
     ASSERT_EQ(callbackCount, 1);
     EXPECT_EQ(ReadFile(out.Path), content);
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, SequentialChunksShareOneAggregateDeadline) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(9);
+    EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
+    BlobClient client{httpClient, BuildOptions()};
+
+    AVEVA::AzureClient::AzureRequestOptions requestOptions;
+    requestOptions.SetTotalDeadline(std::chrono::milliseconds{200});
+    TempFile out;
+    int callbackCount = 0;
+    std::optional<DownloadToResult> result;
+    client.DownloadToAsync(
+        out.Path, Parallel(3U, 1U),
+        [&](DownloadToResult value) {
+            ++callbackCount;
+            result = std::move(value);
+        },
+        requestOptions);
+
+    // Each request fits the 200 ms budget on its own, but together they overrun it.
+    ASSERT_EQ(httpClient.RequestCount(), 1U);
+    std::this_thread::sleep_for(std::chrono::milliseconds{110});
+    ASSERT_TRUE(httpClient.CompleteRequest(0U));
+    std::this_thread::sleep_for(std::chrono::milliseconds{110});
+    static_cast<void>(httpClient.CompleteRequest(1U));
+    ASSERT_TRUE(httpClient.RunUntil([&] { return callbackCount > 0 || httpClient.RequestCount() > 2U; }));
+
+    EXPECT_EQ(httpClient.RequestCount(), 2U);
+    ASSERT_EQ(callbackCount, 1);
+    ASSERT_FALSE(result->has_value());
+    EXPECT_EQ(result->error().Code, std::make_error_code(std::errc::timed_out));
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, FileDownloadDelayedBeforeTheFirstGetStartsNoRequestAfterTheDeadline) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(9);
+    EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
+    BlobClient client{httpClient, BuildOptions()};
+
+    boost::asio::thread_pool pool{1U};
+    std::promise<void> release;
+    boost::asio::post(pool, [gate = release.get_future()]() mutable { gate.wait(); });
+    auto options = Parallel(3U, 1U);
+    options.WriteScheduler = pool.get_executor();
+    AVEVA::AzureClient::AzureRequestOptions requestOptions;
+    requestOptions.SetTotalDeadline(std::chrono::milliseconds{50});
+
+    TempFile out;
+    int callbackCount = 0;
+    std::optional<DownloadToResult> result;
+    client.DownloadToAsync(
+        out.Path, options,
+        [&](DownloadToResult value) {
+            ++callbackCount;
+            result = std::move(value);
+        },
+        requestOptions);
+    // The file open is queued behind the blocked writer, so the budget runs out before the first GET could start.
+    std::this_thread::sleep_for(std::chrono::milliseconds{150});
+    release.set_value();
+    ASSERT_TRUE(httpClient.RunUntil([&] { return callbackCount > 0 || httpClient.RequestCount() > 0U; }));
+    pool.join();
+
+    EXPECT_EQ(httpClient.RequestCount(), 0U);
+    ASSERT_EQ(callbackCount, 1);
+    ASSERT_FALSE(result->has_value());
+    EXPECT_EQ(result->error().Code, std::make_error_code(std::errc::timed_out));
+    EXPECT_FALSE(HasPartialFiles(out.Path));
 }
