@@ -316,6 +316,38 @@ TEST_F(BlobFilesystemFakeTests, LockingOneDirectoryOnlyPurgesItsOwnOrphanedRenam
     m_fs->UnlockFile(*lock);
 }
 
+TEST_F(BlobFilesystemFakeTests, LockingAParentDoesNotPurgeTheTempOfANestedDatabaseThatHoldsItsOwnLock) {
+    const auto childLock = m_fs->LockFile(Path("a/child/LOCK"));
+    Write("a/child/old", LargeContent());
+    Write("a/child/new", "original destination");
+    int sizeWrites = 0;
+    bool crashed = false;
+    m_server->Fault = [&](const auto operation) -> std::optional<AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::SetMetadata && ++sizeWrites == 2) {
+            crashed = true;
+        }
+        return crashed ? std::optional{FakeBlobServer::Error(400U, "ProcessCrashed")} : std::nullopt;
+    };
+    EXPECT_ANY_THROW(m_fs->RenameFile(Path("a/child/old"), Path("a/child/new")));
+    m_server->Fault = nullptr;
+    const auto orphans = [&] {
+        return std::ranges::count_if(m_server->BlobNames(),
+                                     [](const auto& name) { return BlobFilesystemDetail::IsRenameTempName(name); });
+    };
+    ASSERT_EQ(orphans(), 1);
+
+    FakeFilesystem parent(
+        m_runtime, Container, AccountUrl, AccountKey, 4096, 1024,
+        std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>());
+    const auto parentLock = parent.LockFile(Path("a/LOCK"));
+    EXPECT_EQ(orphans(), 1);
+    parent.UnlockFile(*parentLock);
+    const auto rootLock = parent.LockFile(Path("LOCK"));
+    EXPECT_EQ(orphans(), 1);
+    parent.UnlockFile(*rootLock);
+    m_fs->UnlockFile(*childLock);
+}
+
 // The filesystem authenticates with Shared Key, which cannot authorize a SAS-less copy source, so the rename copies
 // through the client without first sending a Put Page From URL that is bound to be refused.
 TEST_F(BlobFilesystemFakeTests, SharedKeyRenameCopiesThroughTheClientWithoutSendingAServerSideCopy) {

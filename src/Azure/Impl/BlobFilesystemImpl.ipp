@@ -81,6 +81,12 @@ inline bool IsRenameTempName(std::string_view blobName) {
            blobName.substr(blobName.size() - suffixLength, RenameTempMarker.size()) == RenameTempMarker;
 }
 
+// A database's lock file is named "LOCK" in its directory (possibly the container root).
+inline bool IsLockBlobName(std::string_view blobName) {
+    constexpr std::string_view lock = "LOCK";
+    return blobName == lock || (blobName.ends_with(lock) && blobName[blobName.size() - lock.size() - 1] == '/');
+}
+
 // The directory holding a file, as a list prefix; empty when the file sits at the container root.
 inline std::string DirectoryPrefixOfFile(std::string_view filePath) {
     const auto slash = filePath.rfind('/');
@@ -199,12 +205,25 @@ void BasicBlobFilesystemImpl<THttp>::PurgeOrphanedRenameTemps(const std::string_
         AzureClient::ListBlobsOptions options;
         options.Prefix = BlobFilesystemDetail::DirectoryPrefixOfFile(lockPath);
         options.MaxResults = static_cast<uint32_t>(Configuration::Transfer::MaxListPageSize);
-        BlobFilesystemDetail::ForEachBlob(*container, std::move(options),
-                                          [&](const AzureClient::Models::BlobItem& blob) {
-                                              if (BlobFilesystemDetail::IsRenameTempName(blob.Name)) {
-                                                  orphans.push_back(blob.Name);
-                                              }
-                                          });
+        // A nested directory with its own LOCK blob is another database that may hold its lease and have a rename in
+        // flight; holding this lock proves nothing about its temps, so that whole subtree is skipped.
+        std::vector<std::string> foreignDatabases;
+        std::vector<std::string> candidates;
+        BlobFilesystemDetail::ForEachBlob(
+            *container, std::move(options), [&](const AzureClient::Models::BlobItem& blob) {
+                if (BlobFilesystemDetail::IsRenameTempName(blob.Name)) {
+                    candidates.push_back(blob.Name);
+                } else if (blob.Name != lockPath && BlobFilesystemDetail::IsLockBlobName(blob.Name)) {
+                    foreignDatabases.push_back(BlobFilesystemDetail::DirectoryPrefixOfFile(blob.Name));
+                }
+            });
+        for (auto& candidate : candidates) {
+            const auto foreign = std::ranges::any_of(
+                foreignDatabases, [&](const std::string& directory) { return candidate.starts_with(directory); });
+            if (!foreign) {
+                orphans.push_back(std::move(candidate));
+            }
+        }
         if (orphans.empty()) {
             return;
         }
