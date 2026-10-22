@@ -66,6 +66,7 @@ template <typename TBlob> class BasicReadWriteFileImpl {
     void Flush();
     [[nodiscard]] std::shared_ptr<std::vector<char>> AcquireExtentBuffer(size_t size);
     void TrimExtentPool();
+    [[nodiscard]] size_t PooledExtentBufferCount() const noexcept { return m_extentPool.size(); }
     void Write(int64_t offset, const char* data, int64_t size);
     /// Provides read-your-writes: buffered bytes are flushed to the blob first, so data passed to Write is visible
     /// whether or not Sync has been called. Reads are bounded by the written size, not the last synced size.

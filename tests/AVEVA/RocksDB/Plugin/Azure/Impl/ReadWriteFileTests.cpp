@@ -444,6 +444,50 @@ TEST_F(ReadWriteFileImplTests, Flush_WritesOnDifferentPages_AreUploadedConcurren
     EXPECT_EQ(3u, m_env.Blob->Uploads.size());
 }
 
+TEST_F(ReadWriteFileImplTests, Flush_ManyExtents_ReusesBuffersAcrossWavesAndKeepsThePoolBounded) {
+    // Arrange
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    constexpr auto extentCount = 3 * Configuration::Transfer::MaxConcurrentPageCopies;
+    std::fill_n(m_env.Blob->Data.begin(), 2 * extentCount * page, 'X');
+    m_env.Blob->Size = static_cast<int64_t>(2 * extentCount) * page;
+    auto file = CreateFile();
+    const std::string payload(10, 'A');
+    const auto writeEveryOtherPage = [&] {
+        for (int64_t i = 0; i < static_cast<int64_t>(extentCount); ++i) {
+            file->Write(2 * i * page + 10, payload.data(), static_cast<int64_t>(payload.size()));
+        }
+    };
+
+    // Act / Assert - later waves reuse the buffers of earlier ones, on a clean flush
+    writeEveryOtherPage();
+    file->Sync();
+    EXPECT_LE(file->PooledExtentBufferCount(), Configuration::Transfer::MaxConcurrentPageCopies);
+    writeEveryOtherPage();
+    file->Sync();
+    EXPECT_LE(file->PooledExtentBufferCount(), Configuration::Transfer::MaxConcurrentPageCopies);
+
+    // and on a flush whose later wave fails
+    bool fail = false;
+    size_t uploads = 0;
+    m_env.Blob->Fault =
+        [&](FakeBlobServer::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::UploadPages &&
+            ++uploads > Configuration::Transfer::MaxConcurrentPageCopies) {
+            fail = true;
+            return FakeBlobServer::Error(400, "InvalidInput");
+        }
+        return std::nullopt;
+    };
+    writeEveryOtherPage();
+    EXPECT_ANY_THROW(file->Sync());
+    EXPECT_TRUE(fail);
+    EXPECT_LE(file->PooledExtentBufferCount(), Configuration::Transfer::MaxConcurrentPageCopies);
+
+    m_env.Blob->Fault = nullptr;
+    EXPECT_NO_THROW(file->Sync());
+    EXPECT_LE(file->PooledExtentBufferCount(), Configuration::Transfer::MaxConcurrentPageCopies);
+}
+
 TEST_F(ReadWriteFileImplTests, Flush_UploadFailure_KeepsTheBufferedWritesForARetry) {
     // Arrange
     constexpr int64_t page = Configuration::PageBlob::PageSize;

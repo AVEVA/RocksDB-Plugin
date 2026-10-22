@@ -194,6 +194,19 @@ void BasicReadWriteFileImpl<TBlob>::RunWave(std::vector<Extent>& extents, size_t
     };
     const auto finishUpload = [](auto& upload) { BlobOperations::FinishUploadPages(upload); };
 
+    // Runs on every exit, after the reads and uploads above have drained, so the wave's buffers go back to the pool
+    // for the next wave instead of staying owned until the whole flush ends.
+    struct ReleaseWave {
+        std::vector<Extent>& Extents;
+        size_t Begin;
+        size_t End;
+        ~ReleaseWave() {
+            for (auto i = Begin; i < End; ++i) {
+                Extents[i].Data.reset();
+            }
+        }
+    } releaseWave{extents, begin, end};
+
     std::vector<GapRead> reads;
     try {
         for (auto i = begin; i < end; ++i) {
@@ -257,6 +270,11 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
     m_w.EnsureCapacity(maxSizeNeeded + pageSize);
 
     auto extents = BuildExtents();
+    // Trims on failure too, once each wave has released its buffers; the buffered writes stay for a retry.
+    struct TrimOnExit {
+        BasicReadWriteFileImpl& File;
+        ~TrimOnExit() { File.TrimExtentPool(); }
+    } trimOnExit{*this};
     for (size_t begin = 0; begin < extents.size(); begin += Configuration::Transfer::MaxConcurrentPageCopies) {
         const auto end = std::min(extents.size(), begin + Configuration::Transfer::MaxConcurrentPageCopies);
         RunWave(extents, begin, end, m_size);
@@ -266,7 +284,6 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
 
     m_size = maxSizeNeeded;
     m_bufferStats.clear();
-    TrimExtentPool();
 }
 // Hands out an idle pooled buffer resized to `size`, or a new one. A buffer an upload's request still references is
 // not idle, so it is never rewritten while in use. The contents are unspecified: callers set every byte.
