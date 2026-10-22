@@ -602,6 +602,77 @@ TEST(TokenCredentialTests, CachingTokenCredential_FanOutDeliversSameTokenToAllWa
     }
 }
 
+namespace {
+// Five coalesced waiters where waiter `throwingIndex` throws; checks all run once and the first exception surfaces.
+void ExpectFanOutSurvivesThrowingRecipient(std::size_t throwingIndex, std::error_code innerError) {
+    auto inner = std::make_shared<ScriptedTokenCredential>();
+    inner->EnqueueDeferred(innerError, MakeToken("shared-token", std::chrono::hours(1)));
+    inner->EnqueueImmediate({}, MakeToken("next-token", std::chrono::hours(1)));
+    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+
+    constexpr std::size_t WaiterCount = 5;
+    std::vector<int> invocations(WaiterCount, 0);
+    std::vector<std::error_code> errors(WaiterCount);
+    for (std::size_t i = 0; i < WaiterCount; ++i) {
+        credential->GetTokenAsync({"scope-a"}, [&, i](std::error_code error, const AccessToken&) {
+            ++invocations.at(i);
+            errors.at(i) = error;
+            if (i == throwingIndex || i == throwingIndex + 1) {
+                throw std::runtime_error("recipient " + std::to_string(i));
+            }
+        });
+    }
+
+    try {
+        static_cast<void>(inner->CompleteNext());
+        ADD_FAILURE() << "the first recipient exception was swallowed";
+    } catch (const std::runtime_error& failure) {
+        EXPECT_EQ(std::string(failure.what()), "recipient " + std::to_string(throwingIndex));
+    }
+
+    EXPECT_EQ(invocations, std::vector<int>(WaiterCount, 1));
+    for (const auto& error : errors) {
+        EXPECT_EQ(error, innerError);
+    }
+
+    if (innerError) {
+        // The failure is negatively cached, so a later request is answered without throwing or hanging.
+        std::string received;
+        bool completed = false;
+        credential->GetTokenAsync({"scope-b"}, [&](std::error_code error, AccessToken token) {
+            EXPECT_FALSE(error);
+            received = std::move(token.Token);
+            completed = true;
+        });
+        EXPECT_TRUE(completed);
+        EXPECT_EQ(received, "next-token");
+    } else {
+        std::string received;
+        credential->GetTokenAsync({"scope-a"}, [&](std::error_code error, AccessToken token) {
+            EXPECT_FALSE(error);
+            received = std::move(token.Token);
+        });
+        EXPECT_EQ(received, "shared-token");
+    }
+}
+} // namespace
+
+TEST(TokenCredentialTests, CachingTokenCredential_ThrowingFirstRecipientDoesNotStrandOthersOnSuccess) {
+    ExpectFanOutSurvivesThrowingRecipient(0U, {});
+}
+
+TEST(TokenCredentialTests, CachingTokenCredential_ThrowingMiddleRecipientDoesNotStrandOthersOnSuccess) {
+    ExpectFanOutSurvivesThrowingRecipient(2U, {});
+}
+
+TEST(TokenCredentialTests, CachingTokenCredential_ThrowingFirstRecipientDoesNotStrandOthersOnError) {
+    ExpectFanOutSurvivesThrowingRecipient(0U, std::make_error_code(std::errc::connection_reset));
+}
+
+TEST(TokenCredentialTests, CachingTokenCredential_ThrowingMiddleRecipientDoesNotStrandOthersOnError) {
+    ExpectFanOutSurvivesThrowingRecipient(2U, std::make_error_code(std::errc::connection_reset));
+}
+
 TEST(TokenCredentialTests, CachingTokenCredential_CompletesOutstandingRequestAfterDestruction) {
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueDeferred({}, MakeToken("late-token", std::chrono::hours(1)));

@@ -217,12 +217,28 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
             return;
         }
 
+        // With no completion executor the handlers run inline. A throwing recipient must not strand the ones
+        // behind it, so every recipient is invoked and the first exception is rethrown afterwards.
+        std::exception_ptr firstFailure;
+        const auto deliver = [&](Waiter&& pending, AccessToken&& value) {
+            try {
+                Private::CompleteOnExecutorIfSet(executor, std::move(pending), error, std::move(value));
+            } catch (...) {
+                if (!firstFailure) {
+                    firstFailure = std::current_exception();
+                }
+            }
+        };
+
         Waiter last = std::move(completions.back());
         completions.pop_back();
         for (auto& pending : completions) {
-            Private::CompleteOnExecutorIfSet(executor, std::move(pending), error, token);
+            deliver(std::move(pending), AccessToken{token});
         }
-        Private::CompleteOnExecutorIfSet(executor, std::move(last), error, std::move(token));
+        deliver(std::move(last), std::move(token));
+        if (firstFailure) {
+            std::rethrow_exception(firstFailure);
+        }
     }
 
     // `completion` is only erased into a Waiter when it has to queue behind a refresh; otherwise the caller keeps it.
@@ -314,18 +330,14 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
             error = std::make_error_code(std::errc::not_enough_memory);
         } catch (...) {
         }
-        for (auto& pending : completions) {
-            Private::CompleteOnExecutorIfSet(refreshState->Executor, std::move(pending), error, AccessToken{});
-        }
+        CompleteAll(refreshState->Executor, std::move(completions), error, AccessToken{});
         return true;
     }
 
     void CompleteWithNoInnerCredentialError(const std::shared_ptr<RefreshState>& refreshState) {
         std::vector<Waiter> completions = DrainAndReset(refreshState);
-        for (auto& pending : completions) {
-            Private::CompleteOnExecutorIfSet(refreshState->Executor, std::move(pending),
-                                             std::make_error_code(std::errc::operation_not_permitted), AccessToken{});
-        }
+        CompleteAll(refreshState->Executor, std::move(completions),
+                    std::make_error_code(std::errc::operation_not_permitted), AccessToken{});
     }
 
     void HandleInnerTokenResult(std::error_code error, AccessToken token,
