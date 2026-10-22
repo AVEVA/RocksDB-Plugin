@@ -108,46 +108,75 @@ template <typename TBlob> auto BasicReadWriteFileImpl<TBlob>::BuildExtents() con
     return extents;
 }
 
-// Fills the bytes of an extent that no chunk supplies with what the blob already holds. Reads past the file's old
-// end (`sizeBefore`) are skipped: that region holds no data yet and stays zero.
-template <typename TBlob>
-void BasicReadWriteFileImpl<TBlob>::PrepareExtent(Extent& extent, int64_t sizeBefore, std::vector<GapRead>& reads) {
-    // A reused buffer holds an earlier flush's bytes, so everything not copied or downloaded below is zeroed.
-    extent.Data = AcquireExtentBuffer(static_cast<size_t>(extent.End - extent.Start));
-    std::vector<std::pair<int64_t, int64_t>> covered;
+// Copies the buffered chunks of an extent into its buffer in write order, so the last write wins.
+template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::OverlayChunks(const Extent& extent) {
     for (const auto index : extent.Chunks) {
         const auto& chunk = m_bufferStats[index];
         const auto* source = m_buffer.data() + chunk.bufferOffset + chunk.prePadding;
         std::copy(source, source + chunk.dataLength, extent.Data->begin() + (chunk.targetOffset - extent.Start));
+    }
+}
+
+// Fills the bytes of an extent that no chunk supplies with what the blob already holds. Reads past the file's old
+// end (`sizeBefore`) are skipped: that region holds no data yet and stays zero.
+//
+// Gaps separated by no more than a page of buffered data share one request: many tiny writes would otherwise each
+// cost a GET plus a pending download. The wider read also fetches the bytes in between, so the chunks are copied over
+// the extent afterwards (OverlayChunks) rather than before.
+template <typename TBlob>
+void BasicReadWriteFileImpl<TBlob>::PrepareExtent(Extent& extent, int64_t sizeBefore, std::vector<GapRead>& reads) {
+    constexpr int64_t maxBridgedBytes = Configuration::PageBlob::PageSize;
+    // A reused buffer holds an earlier flush's bytes, so everything not downloaded or copied later is zeroed.
+    extent.Data = AcquireExtentBuffer(static_cast<size_t>(extent.End - extent.Start));
+    std::vector<std::pair<int64_t, int64_t>> covered;
+    for (const auto index : extent.Chunks) {
+        const auto& chunk = m_bufferStats[index];
         covered.emplace_back(chunk.targetOffset, chunk.targetOffset + chunk.dataLength);
     }
     std::ranges::sort(covered);
 
-    auto cursor = extent.Start;
-    const auto readGap = [&](int64_t gapStart, int64_t gapEnd) {
+    int64_t readStart = 0;
+    int64_t readEnd = 0; // empty when equal to readStart
+    const auto startRead = [&] {
+        if (readEnd > readStart) {
+            std::span<char> target(extent.Data->data() + (readStart - extent.Start),
+                                   static_cast<size_t>(readEnd - readStart));
+            BlobOperations::PushAccepted(
+                reads,
+                GapRead{BlobOperations::StartDownload(*m_w.H.Blob, target, readStart, readEnd - readStart), readStart,
+                        readEnd - readStart},
+                [](GapRead& read) { read.Download.Result.wait(); });
+        }
+        readStart = readEnd = 0;
+    };
+    const auto addGap = [&](int64_t gapStart, int64_t gapEnd) {
         const auto zeroFrom = std::max(gapStart, sizeBefore);
         if (gapEnd > zeroFrom) {
             std::fill(extent.Data->begin() + (zeroFrom - extent.Start), extent.Data->begin() + (gapEnd - extent.Start),
                       '\0');
         }
         gapEnd = std::min(gapEnd, sizeBefore);
-        if (gapEnd > gapStart) {
-            std::span<char> target(extent.Data->data() + (gapStart - extent.Start),
-                                   static_cast<size_t>(gapEnd - gapStart));
-            BlobOperations::PushAccepted(
-                reads,
-                GapRead{BlobOperations::StartDownload(*m_w.H.Blob, target, gapStart, gapEnd - gapStart), gapStart,
-                        gapEnd - gapStart},
-                [](GapRead& read) { read.Download.Result.wait(); });
+        if (gapEnd <= gapStart) {
+            return;
         }
+        if (readEnd > readStart && gapStart - readEnd <= maxBridgedBytes) {
+            readEnd = gapEnd;
+            return;
+        }
+        startRead();
+        readStart = gapStart;
+        readEnd = gapEnd;
     };
+
+    auto cursor = extent.Start;
     for (const auto& [start, end] : covered) {
         if (start > cursor) {
-            readGap(cursor, start);
+            addGap(cursor, start);
         }
         cursor = std::max(cursor, end);
     }
-    readGap(cursor, extent.End);
+    addGap(cursor, extent.End);
+    startRead();
 }
 
 // Reads the gaps of, then uploads, extents [begin, end). Waits for everything before reporting the first failure: the
@@ -191,6 +220,9 @@ void BasicReadWriteFileImpl<TBlob>::RunWave(std::vector<Extent>& extents, size_t
         throw;
     }
     finishAll(reads, finishRead);
+    for (auto i = begin; i < end; ++i) {
+        OverlayChunks(extents[i]);
+    }
 
     using PendingUploadT = decltype(BlobOperations::StartUploadPages(
         *m_w.H.Runtime, *m_w.H.Blob, std::shared_ptr<const std::vector<char>>{}, int64_t{0}));

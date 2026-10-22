@@ -498,7 +498,9 @@ counts. This review did not run a new exhaustion reproduction.
 
 ## P2: performance opportunities requiring measurement
 
-### [ ] T123 - Bound and coalesce read/modify/write gap downloads
+### [x] T123 - Bound and coalesce read/modify/write gap downloads
+
+**Result:** Done. Measured on the fake transport (64 pages, two overlapping small writes per page, one merged extent): before = 65 gap GETs / 65 pending downloads at peak, ~31.9 KB fetched; after = 1 GET / 1 pending, ~32.3 KB fetched (bytes bridged between gaps are at most one page each, and only when gaps are that close). Gaps separated by <= one page of buffered data now share one download and `OverlayChunks` copies the buffered writes over the extent after the reads finish, so last-write-wins is preserved; fully overwritten extents are still not downloaded and gaps past the old EOF are still zeroed. Regression `Flush_ManySmallWritesAcrossPages_CoalesceGapReadsAndKeepLastWriteWins` failed before (65 > 2); added a short-download-failure case and updated the existing gap-count test (4 -> 1). All 1207 WindowsDebug tests pass. Timings are request counts on a fake transport only, not an end-to-end speedup claim.
 
 **Status:** Source-traced request-amplification opportunity; measure first.
 

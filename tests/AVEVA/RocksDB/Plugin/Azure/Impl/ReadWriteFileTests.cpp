@@ -290,8 +290,8 @@ TEST_F(ReadWriteFileImplTests, Flush_WritesSharingAPage_AreMergedIntoOneUploadAn
     ASSERT_EQ(1u, m_env.Blob->Uploads.size());
     EXPECT_EQ(0, m_env.Blob->Uploads[0].Offset);
     EXPECT_EQ(static_cast<size_t>(2 * page), m_env.Blob->Uploads[0].Data.size());
-    // Four gaps (before, between and after the writes), no read of the bytes the writes supply.
-    EXPECT_EQ(4u, m_env.Blob->Downloads.size());
+    // The gaps are close together, so one read covers them; the writes are overlaid afterwards.
+    EXPECT_EQ(1u, m_env.Blob->Downloads.size());
     std::vector<char> actual(static_cast<size_t>(2 * page));
     ASSERT_EQ(2 * page, file->Read(0, 2 * page, actual.data()));
     std::vector<char> expected(static_cast<size_t>(2 * page), 'X');
@@ -299,6 +299,50 @@ TEST_F(ReadWriteFileImplTests, Flush_WritesSharingAPage_AreMergedIntoOneUploadAn
     std::fill_n(expected.begin() + 200, payload.size(), 'A');
     std::fill_n(expected.begin() + page + 50, payload.size(), 'A');
     EXPECT_EQ(expected, actual);
+}
+
+// Many tiny writes scattered over one merged extent leave a gap between each pair; they must be read with a bounded
+// number of requests, and the buffered writes must still win over the bytes the wider read returned.
+TEST_F(ReadWriteFileImplTests, Flush_ManySmallWritesAcrossPages_CoalesceGapReadsAndKeepLastWriteWins) {
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    constexpr int64_t pages = 64;
+    std::vector<char> original(static_cast<size_t>(pages * page));
+    for (size_t i = 0; i < original.size(); ++i) {
+        original[i] = static_cast<char>('a' + i % 23);
+    }
+    std::ranges::copy(original, m_env.Blob->Data.begin());
+    m_env.Blob->Size = pages * page;
+    auto file = CreateFile();
+
+    auto expected = original;
+    for (int64_t p = 0; p < pages; ++p) {
+        const std::string first(10, 'A');
+        const std::string second(4, 'B');
+        file->Write(p * page + 100, first.data(), static_cast<int64_t>(first.size()));
+        file->Write(p * page + 104, second.data(), static_cast<int64_t>(second.size())); // overlaps: later wins
+        std::ranges::fill_n(expected.begin() + p * page + 100, first.size(), 'A');
+        std::ranges::fill_n(expected.begin() + p * page + 104, second.size(), 'B');
+    }
+    file->Sync();
+
+    EXPECT_LE(m_env.Blob->Downloads.size(), 2u);
+    ASSERT_EQ(1u, m_env.Blob->Uploads.size());
+    std::vector<char> actual(expected.size());
+    ASSERT_EQ(pages * page, file->Read(0, pages * page, actual.data()));
+    EXPECT_EQ(expected, actual);
+}
+
+TEST_F(ReadWriteFileImplTests, Flush_Coalesced_ReadsStillFailOnShortDownload) {
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    m_env.Blob->Size = 4 * page;
+    auto file = CreateFile();
+    m_env.Blob->Data.resize(static_cast<size_t>(page));
+    const std::string payload(10, 'Y');
+    file->Write(100, payload.data(), 10);
+    file->Write(page + 100, payload.data(), 10);
+
+    EXPECT_THROW(file->Sync(), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
+    EXPECT_TRUE(m_env.Blob->Uploads.empty());
 }
 
 TEST_F(ReadWriteFileImplTests, Flush_ReusedBufferDoesNotLeakEarlierBytesIntoUnwrittenGaps) {

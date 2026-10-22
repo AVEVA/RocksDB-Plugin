@@ -47,6 +47,7 @@ template <typename TBlob> class BasicReadWriteFileImpl {
     };
     [[nodiscard]] std::vector<Extent> BuildExtents() const;
     void PrepareExtent(Extent& extent, int64_t sizeBefore, std::vector<GapRead>& reads);
+    void OverlayChunks(const Extent& extent);
     void RunWave(std::vector<Extent>& extents, size_t begin, size_t end, int64_t sizeBefore);
 
   public:
