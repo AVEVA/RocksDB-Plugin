@@ -525,7 +525,9 @@ case without regressing aligned full-page writes. Verify untouched bytes,
 overlap ordering, EOF zeros, short-read failure and retry after a failed wave.
 Coordinate ownership changes with T110; do not retain a speculative rewrite.
 
-### [ ] T124 - Measure eager page-copy planning on large fragmented blobs
+### [x] T124 - Measure eager page-copy planning on large fragmented blobs
+
+**Result:** Closed, no production change (not material). Plan cost is deterministic: `PageChunk` is 16 B and one entry is emitted per range (split at `MaxCopyChunkSize`), so memory is ~16 B x chunks (vector doubling gives up to ~2x transient). Dense 1 GiB blob: ~256 chunks at 4 MiB (~4 KiB). Worst-case fully fragmented 1 GiB blob (every other 512 B page populated, 1,048,576 ranges): ~16 MiB final, ~32 MiB peak, versus the 1 GiB being copied (<=3%); the service returns ranges in pages (~5,000 per list request, ~210 requests), and that list count is identical for incremental planning, only delaying the first copy by those list round trips. Request counts and plan size are analytic; no wall-clock time-to-first-copy was measured (needs a real transport, and fake-transport timings are not valid evidence). RocksDB SST/WAL files are dense, so supported workloads sit at the first case. Incremental planning would complicate ETag-guarded rollback and failure drainage for a negligible gain; T108's per-copy deadline checks are untouched.
 
 **Status:** Verify first; scalability opportunity, not a measured speedup.
 
