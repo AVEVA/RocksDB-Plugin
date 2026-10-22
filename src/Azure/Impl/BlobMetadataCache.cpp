@@ -89,22 +89,36 @@ void BlobMetadataCache::Store(std::string_view blobUrl, const int64_t size, std:
     }
 }
 
-void BlobMetadataCache::Invalidate(std::string_view blobUrl) const {
+void BlobMetadataCache::Invalidate(std::string_view blobUrl) const noexcept {
     const std::scoped_lock lock(m_mutex);
     constexpr std::size_t MaxTombstones = 4096;
     const auto invalidatedAt = ++m_epoch;
     if (const auto it = m_sizes.find(blobUrl); it != m_sizes.end()) {
         m_sizes.erase(it);
     }
-    if (m_tombstones.size() >= MaxTombstones && !m_tombstones.contains(blobUrl)) {
-        // Dropping tombstones must not let an older in-flight fetch through, so raise the watermark past them.
+    // An existing tombstone is advanced in place, so repeated invalidations of a URL never allocate.
+    if (const auto it = m_tombstones.find(blobUrl); it != m_tombstones.end()) {
+        it->second = invalidatedAt;
+        return;
+    }
+    try {
+        if (m_tombstones.size() >= MaxTombstones) {
+            // Dropping tombstones must not let an older in-flight fetch through, so raise the watermark past them.
+            m_tombstoneWatermark = invalidatedAt;
+            m_tombstones.clear();
+        }
+        m_tombstones.emplace(std::string(blobUrl), invalidatedAt);
+    } catch (...) {
+        // Invalidation runs from destructors and scope guards and cannot be skipped. Without room for a tombstone,
+        // the watermark rejects every fetch that started before now and the cached entries are dropped; both are
+        // non-allocating.
         m_tombstoneWatermark = invalidatedAt;
         m_tombstones.clear();
+        m_sizes.clear();
     }
-    m_tombstones.insert_or_assign(std::string(blobUrl), invalidatedAt);
 }
 
-void BlobMetadataCache::InvalidateAll() const {
+void BlobMetadataCache::InvalidateAll() const noexcept {
     const std::scoped_lock lock(m_mutex);
     m_tombstoneWatermark = ++m_epoch;
     m_tombstones.clear();

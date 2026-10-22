@@ -184,7 +184,9 @@ operation deferred. Assert that unwinding does not finish or release its buffer
 or client until that operation drains. Include both gap reads and copy/upload
 queues; run the buffer-lifetime case under ASan.
 
-### [ ] T111 - Make mutation-scope metadata invalidation safe during unwinding
+### [x] T111 - Make mutation-scope metadata invalidation safe during unwinding
+
+**Result:** Done. Regression `BlobMetadataCacheAllocationTests.InvalidationSurvivesAllocationFailureAndRejectsOlderFetches` (all allocations failed during invalidation of a short-new and a 200-char URL) failed before the fix (`InvalidateBlobSize` was not `noexcept`; the insert throws `bad_alloc` from the `SizeInvalidation` destructor). `Invalidate`/`InvalidateAll` (and the runtime wrappers) are now `noexcept`: existing tombstones are advanced in place without allocating, and if a new tombstone cannot be allocated the watermark is raised to the new epoch and tombstones and cached sizes are cleared (non-allocating), so older in-flight fetches are rejected and fresh metadata can be stored afterwards. All 1190 tests pass on WindowsDebug. ASan not run.
 
 **Status:** Source-traced; high confidence.
 

@@ -89,8 +89,8 @@ class ClientRuntimeBase {
     void CacheBlobMetadata(std::string_view blobUrl, int64_t size, std::string etag, uint64_t epoch) const {
         m_metadata.StoreMetadata(blobUrl, size, std::move(etag), epoch);
     }
-    void InvalidateBlobSize(std::string_view blobUrl) const { m_metadata.Invalidate(blobUrl); }
-    void InvalidateAllBlobSizes() const { m_metadata.InvalidateAll(); }
+    void InvalidateBlobSize(std::string_view blobUrl) const noexcept { m_metadata.Invalidate(blobUrl); }
+    void InvalidateAllBlobSizes() const noexcept { m_metadata.InvalidateAll(); }
     [[nodiscard]] std::chrono::steady_clock::time_point MetadataNow() const { return m_metadata.Now(); }
     void SetMetadataClockForTesting(const std::atomic<int64_t>* manualClockNanos) noexcept {
         m_metadata.SetClockForTesting(manualClockNanos);

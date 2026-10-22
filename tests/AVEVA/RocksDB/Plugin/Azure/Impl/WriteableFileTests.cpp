@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
@@ -18,6 +19,8 @@
 #include <chrono>
 #include <future>
 #include <set>
+#include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -43,7 +46,13 @@ constexpr size_t SmallAllocationMax = 96;
 thread_local bool g_failFreeListGrowth = false;
 constexpr size_t FreeListGrowthSize = sizeof(std::vector<char>);
 
+// Fails every allocation on this thread while set, to exercise cleanup that must not allocate.
+thread_local bool g_failAllAllocations = false;
+
 bool ShouldFailAllocation(const size_t size) {
+    if (g_failAllAllocations) {
+        return true;
+    }
     if (g_failFreeListGrowth && size == FreeListGrowthSize) {
         g_failFreeListGrowth = false;
         return true;
@@ -753,6 +762,32 @@ TEST_F(WriteableFileTests, Release_FreeListAllocationFailure_DoesNotTerminateAnd
 TEST_F(WriteableFileTests, MoveAssignment_IsDeleted) {
     static_assert(!std::is_move_assignable_v<FakeWriteableFileImpl>);
     static_assert(!std::is_copy_assignable_v<FakeWriteableFileImpl>);
+}
+
+// Invalidation runs from destructors and scope guards, so it must survive allocation failure without letting an
+// older in-flight fetch repopulate the cache.
+TEST(BlobMetadataCacheAllocationTests, InvalidationSurvivesAllocationFailureAndRejectsOlderFetches) {
+    static_assert(
+        noexcept(std::declval<const AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntimeBase&>().InvalidateBlobSize(
+            std::string_view{})));
+    const std::string longUrl(200, 'u');
+    for (const std::string url : {std::string("a-new-url-tombstone-that-is-not-short-sso"), longUrl}) {
+        AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntimeBase runtime;
+        runtime.CacheBlobSize(url, 1, runtime.BlobSizeEpoch());
+        const auto staleEpoch = runtime.BlobSizeEpoch();
+
+        g_failAllAllocations = true;
+        runtime.InvalidateBlobSize(url);
+        g_failAllAllocations = false;
+
+        EXPECT_FALSE(runtime.CachedBlobSize(url)) << url.size();
+        runtime.CacheBlobSize(url, 2, staleEpoch);
+        EXPECT_FALSE(runtime.CachedBlobSize(url)) << url.size();
+        runtime.CacheBlobSize("other", 3, staleEpoch);
+        EXPECT_FALSE(runtime.CachedBlobSize("other")) << "watermark fallback rejects older fetches";
+        runtime.CacheBlobSize(url, 4, runtime.BlobSizeEpoch());
+        EXPECT_EQ(4, runtime.CachedBlobSize(url)) << url.size();
+    }
 }
 
 // Replaced so a test can inject an allocation failure; see g_failSmallAllocation.

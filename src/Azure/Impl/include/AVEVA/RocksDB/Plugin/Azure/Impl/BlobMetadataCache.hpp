@@ -38,9 +38,10 @@ class BlobMetadataCache {
     /// </summary>
     [[nodiscard]] std::optional<CachedMetadata> Metadata(std::string_view blobUrl) const;
     void StoreMetadata(std::string_view blobUrl, int64_t size, std::string etag, uint64_t epoch) const;
-    void Invalidate(std::string_view blobUrl) const;
+    /// <summary>Never throws: if a tombstone cannot be recorded it falls back to a non-allocating watermark.</summary>
+    void Invalidate(std::string_view blobUrl) const noexcept;
     /// <summary>For operations that touch many blobs at once (directory delete, rename).</summary>
-    void InvalidateAll() const;
+    void InvalidateAll() const noexcept;
     /// <summary>
     /// The time source of the cache (Configuration::MetadataCacheTtl). Tests replace it with a manual clock
     /// (nanoseconds since the steady_clock epoch, owned by the test and outliving the cache), set before any entry is
