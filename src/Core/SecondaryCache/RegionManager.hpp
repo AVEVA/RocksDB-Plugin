@@ -42,19 +42,27 @@ class RegionManager {
         kIoError,
     };
 
-    RegionManager(std::unique_ptr<BlockDevice> device, ShardedIndex& index, CacheStats& stats, RegionManagerOptions options);
+    RegionManager(std::unique_ptr<BlockDevice> device, ShardedIndex& index, CacheStats& stats,
+                  RegionManagerOptions options);
 
     [[nodiscard]] bool Reserve(uint64_t keyHash, uint32_t recordSize, bool forceInsert, Reservation& out) noexcept;
-    rocksdb::Status Publish(const Reservation& reservation, std::span<const std::byte> record,
-                            std::optional<Location> replaced) noexcept;
+    /// Appends an already-reserved record. Returns Busy if the region was recycled after Reserve;
+    /// callers should treat that as a dropped insert, not an error.
+    rocksdb::Status Publish(const Reservation& reservation, std::span<const std::byte> record) noexcept;
 
     [[nodiscard]] ReadStatus Read(const Location& location, std::vector<std::byte>& recordOut) noexcept;
+
+    /// True while the location's region still holds the generation the location was written in.
+    /// The engine re-checks this after publishing to the index, because a reclaim may have swept
+    /// the region before the index entry existed.
+    [[nodiscard]] bool IsLive(const Location& location) noexcept;
 
     rocksdb::Status SetCapacity(size_t capacityBytes) noexcept;
     [[nodiscard]] size_t CapacityBytes() const noexcept;
     [[nodiscard]] size_t UsageBytes() const noexcept;
     void AdjustLiveBytes(int64_t delta) noexcept;
     void ClearAll() noexcept;
+    void ClearAllLocked() noexcept;
 
   private:
     struct FooterEntry {
@@ -65,7 +73,7 @@ class RegionManager {
     static_assert(sizeof(FooterEntry) == 16);
 
     struct Region {
-        enum class State : uint8_t { kOpen, kSealed, kReclaiming };
+        enum class State : uint8_t { kOpen, kSealed, kReclaiming, kRetired };
 
         mutable std::mutex mu;
         std::atomic<uint32_t> activeReaders{0};
@@ -83,6 +91,7 @@ class RegionManager {
     [[nodiscard]] bool EnsureWritableRegion(uint32_t recordSize, bool forceInsert) noexcept;
     bool SealRegion(uint32_t regionId) noexcept;
     bool ReclaimRegion(uint32_t regionId) noexcept;
+    void ApplyCapacityLocked() noexcept;
     void FlushOpenRegionLocked(Region& region, uint32_t regionId) noexcept;
     [[nodiscard]] std::vector<FooterEntry> ScanRegionEntries(uint32_t regionId, uint64_t budgetBytes) noexcept;
     [[nodiscard]] bool TryLoadFooter(uint32_t regionId, uint16_t generation, uint64_t budgetBytes,
@@ -96,6 +105,7 @@ class RegionManager {
     uint64_t m_usableRegionBytes;
     std::vector<Region> m_regions;
     std::deque<uint32_t> m_sealedOrder;
+    std::deque<uint32_t> m_freeRegions;
     uint32_t m_currentOpenRegion{0};
     uint32_t m_nextUnusedRegion{1};
     std::atomic<size_t> m_usageBytes{0};

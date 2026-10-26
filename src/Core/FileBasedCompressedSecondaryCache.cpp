@@ -190,8 +190,7 @@ class LegacyEngine final : public CacheEngine {
     }
 
     rocksdb::Status InsertSaved(const rocksdb::Slice& key, const rocksdb::Slice& saved,
-                                const rocksdb::CompressionType type,
-                                rocksdb::CacheTier /*source*/) noexcept override {
+                                const rocksdb::CompressionType type, rocksdb::CacheTier /*source*/) noexcept override {
         try {
             if (saved.size() == 0) {
                 return rocksdb::Status::OK();
@@ -269,7 +268,9 @@ class LegacyEngine final : public CacheEngine {
                 }
             });
 
-            auto s = cacheItemHelper->create_cb(dataSlice, compressionType, rocksdb::CacheTier::kNonVolatileBlockTier,
+            // RocksDB's typed cache helpers reject any tier other than kVolatileTier, so entries read
+            // back from disk must be reported as volatile or every Lookup() silently becomes a miss.
+            auto s = cacheItemHelper->create_cb(dataSlice, compressionType, rocksdb::CacheTier::kVolatileTier,
                                                 createContext, nullptr, &outObj, &outCharge);
             if (!s.ok() || outObj == nullptr) {
                 return nullptr;
@@ -441,7 +442,7 @@ class RegionEngine final : public CacheEngine {
     Secondary::AdmissionPolicy m_admission;
     Secondary::RegionManager m_regions;
     size_t m_maxDramBudget;
-    size_t m_currentDramBudget;
+    std::atomic<size_t> m_currentDramBudget;
 
   public:
     RegionEngine(std::filesystem::path cacheDir, const FileBasedSecondaryCacheOptions& options,
@@ -457,14 +458,46 @@ class RegionEngine final : public CacheEngine {
                     m_index, m_stats,
                     Secondary::RegionManagerOptions{options.capacity, options.regionSize, options.flushBlockSize,
                                                     options.maxEntrySize}),
-          m_maxDramBudget(options.flushBlockSize),
-          m_currentDramBudget(options.flushBlockSize) {
+          m_maxDramBudget(options.flushBlockSize), m_currentDramBudget(options.flushBlockSize) {
         if (!m_logger) {
             throw std::invalid_argument("FileBasedCompressedSecondaryCache: logger cannot be null");
         }
         const size_t usableRegionBytes = options.regionSize - kReservedRegionFooterBytes;
         if (options.regionSize <= kReservedRegionFooterBytes || options.maxEntrySize > usableRegionBytes) {
             throw std::invalid_argument("FileBasedCompressedSecondaryCache: invalid region-engine sizing");
+        }
+        BOOST_LOG_SEV(*m_logger, info) << "FileBasedCompressedSecondaryCache[region engine]: initialized dir='"
+                                       << m_cacheDir.string() << "', capacity=" << options.capacity
+                                       << " bytes, regionSize=" << options.regionSize
+                                       << ", flushBlockSize=" << options.flushBlockSize
+                                       << ", indexShards=" << options.indexShards;
+    }
+
+    ~RegionEngine() override { LogStats("final stats"); }
+
+    // Benchmark processes exit without running destructors, so Lookup() also emits this periodically.
+    void LogStats(const char* label) noexcept {
+        const auto load = [](const Secondary::PaddedAtomicU64& counter) {
+            return counter.value.load(std::memory_order_relaxed);
+        };
+        try {
+            BOOST_LOG_SEV(*m_logger, info)
+                << "FileBasedCompressedSecondaryCache[region engine]: " << label << " inserts=" << load(m_stats.inserts)
+                << " admitted=" << load(m_stats.insertsAdmitted)
+                << " rejectedPolicy=" << load(m_stats.insertsRejectedByPolicy)
+                << " rejectedTooLarge=" << load(m_stats.insertsRejectedTooLarge)
+                << " droppedNoBuffer=" << load(m_stats.insertsDroppedNoBuffer)
+                << " skippedPresent=" << load(m_stats.insertsSkippedPresent) << " lookups=" << load(m_stats.lookups)
+                << " hits=" << load(m_stats.hits) << " missIndex=" << load(m_stats.missesIndex)
+                << " missKeyMismatch=" << load(m_stats.missesKeyMismatch) << " missCrc=" << load(m_stats.missesCrc)
+                << " missReclaimed=" << load(m_stats.missesRegionReclaimed)
+                << " bytesInserted=" << load(m_stats.bytesInserted)
+                << " bytesWrittenToDevice=" << load(m_stats.bytesWrittenToDevice)
+                << " bytesRead=" << load(m_stats.bytesRead) << " regionsReclaimed=" << load(m_stats.regionsReclaimed)
+                << " entriesEvictedByReclaim=" << load(m_stats.entriesEvictedByReclaim)
+                << " deviceWriteFailures=" << load(m_stats.deviceWriteFailures)
+                << " insertsDroppedStale=" << load(m_stats.insertsDroppedStale);
+        } catch (...) {
         }
     }
 
@@ -498,16 +531,17 @@ class RegionEngine final : public CacheEngine {
         }
     }
 
-    rocksdb::Status InsertSaved(const rocksdb::Slice& key, const rocksdb::Slice& saved, const rocksdb::CompressionType type,
+    rocksdb::Status InsertSaved(const rocksdb::Slice& key, const rocksdb::Slice& saved,
+                                const rocksdb::CompressionType type,
                                 const rocksdb::CacheTier source) noexcept override {
         try {
             m_stats.inserts.value.fetch_add(1, std::memory_order_relaxed);
             if (saved.size() == 0) {
                 return rocksdb::Status::OK();
             }
-            return InsertEncoded(key,
-                                 std::span<const std::byte>(reinterpret_cast<const std::byte*>(saved.data()), saved.size()),
-                                 type, source, true);
+            return InsertEncoded(
+                key, std::span<const std::byte>(reinterpret_cast<const std::byte*>(saved.data()), saved.size()), type,
+                source, true);
         } catch (...) {
             const auto s = StatusUtil::CurrentExceptionToStatus();
             BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
@@ -521,6 +555,9 @@ class RegionEngine final : public CacheEngine {
            rocksdb::Statistics* stats, bool& keptInSecondaryCache) noexcept override {
         try {
             m_stats.lookups.value.fetch_add(1, std::memory_order_relaxed);
+            if (const auto n = m_stats.lookups.value.load(std::memory_order_relaxed); n % 20000 == 0) {
+                LogStats("periodic stats");
+            }
             keptInSecondaryCache = false;
             if (!helper || !helper->IsSecondaryCacheCompatible()) {
                 return nullptr;
@@ -540,6 +577,8 @@ class RegionEngine final : public CacheEngine {
                 return nullptr;
             }
             if (readStatus != Secondary::RegionManager::ReadStatus::kOk) {
+                // Unreadable bytes will never become readable; drop the entry unless it was replaced.
+                RemoveIfStillAt(keyHash, location);
                 return nullptr;
             }
 
@@ -552,9 +591,7 @@ class RegionEngine final : public CacheEngine {
                     m_stats.missesKeyMismatch.value.fetch_add(1, std::memory_order_relaxed);
                 } else {
                     m_stats.missesCrc.value.fetch_add(1, std::memory_order_relaxed);
-                    if (const auto removed = m_index.Remove(keyHash)) {
-                        m_regions.AdjustLiveBytes(-static_cast<int64_t>(Secondary::LocationLengthBytes(*removed)));
-                    }
+                    RemoveIfStillAt(keyHash, location);
                 }
                 return nullptr;
             }
@@ -567,18 +604,19 @@ class RegionEngine final : public CacheEngine {
                 }
             });
 
-            const rocksdb::Slice payloadSlice(reinterpret_cast<const char*>(decoded.payload.data()), decoded.payload.size());
+            const rocksdb::Slice payloadSlice(reinterpret_cast<const char*>(decoded.payload.data()),
+                                              decoded.payload.size());
+            // The stored tier is the tier the data came from, but RocksDB's typed cache helpers only
+            // accept kVolatileTier here; anything else (e.g. from InsertSaved) would turn hits into misses.
             auto createStatus =
-                helper->create_cb(payloadSlice, decoded.compressionType, decoded.sourceTier, createContext, nullptr,
-                                  &outObj, &outCharge);
+                helper->create_cb(payloadSlice, decoded.compressionType, rocksdb::CacheTier::kVolatileTier,
+                                  createContext, nullptr, &outObj, &outCharge);
             if (!createStatus.ok() || outObj == nullptr) {
                 return nullptr;
             }
 
             if (adviseErase) {
-                if (const auto removed = m_index.Remove(keyHash)) {
-                    m_regions.AdjustLiveBytes(-static_cast<int64_t>(Secondary::LocationLengthBytes(*removed)));
-                }
+                RemoveIfStillAt(keyHash, location);
             } else {
                 keptInSecondaryCache = true;
             }
@@ -623,12 +661,20 @@ class RegionEngine final : public CacheEngine {
     }
 
     rocksdb::Status Deflate(const size_t decrease) noexcept override {
-        m_currentDramBudget = decrease >= m_currentDramBudget ? 0 : m_currentDramBudget - decrease;
+        size_t current = m_currentDramBudget.load(std::memory_order_relaxed);
+        while (!m_currentDramBudget.compare_exchange_weak(current, decrease >= current ? 0 : current - decrease,
+                                                          std::memory_order_relaxed)) {
+        }
         return rocksdb::Status::OK();
     }
 
     rocksdb::Status Inflate(const size_t increase) noexcept override {
-        m_currentDramBudget = std::min(m_maxDramBudget, m_currentDramBudget + increase);
+        size_t current = m_currentDramBudget.load(std::memory_order_relaxed);
+        while (!m_currentDramBudget.compare_exchange_weak(
+            current,
+            increase >= m_maxDramBudget - std::min(current, m_maxDramBudget) ? m_maxDramBudget : current + increase,
+            std::memory_order_relaxed)) {
+        }
         return rocksdb::Status::OK();
     }
 
@@ -638,6 +684,12 @@ class RegionEngine final : public CacheEngine {
     }
 
   private:
+    void RemoveIfStillAt(const uint64_t keyHash, const Secondary::Location& location) noexcept {
+        if (const auto removed = m_index.RemoveIfMatches(keyHash, location)) {
+            m_regions.AdjustLiveBytes(-static_cast<int64_t>(Secondary::LocationLengthBytes(*removed)));
+        }
+    }
+
     [[nodiscard]] static uint32_t ComputeRegionCount(const size_t capacity, const size_t regionSize) {
         if (regionSize <= kReservedRegionFooterBytes) {
             throw std::invalid_argument("FileBasedCompressedSecondaryCache: regionSize must exceed 1 MiB footer");
@@ -650,6 +702,12 @@ class RegionEngine final : public CacheEngine {
                                   const rocksdb::CompressionType type, const rocksdb::CacheTier source,
                                   const bool forceInsert) {
         const uint64_t keyHash = HashKey(key);
+        if (m_options.skipInsertIfPresent) {
+            if (const auto existing = m_index.Peek(keyHash); existing && m_regions.IsLive(*existing)) {
+                m_stats.insertsSkippedPresent.value.fetch_add(1, std::memory_order_relaxed);
+                return rocksdb::Status::OK();
+            }
+        }
         if (!m_admission.ShouldAdmit(keyHash, forceInsert)) {
             m_stats.insertsRejectedByPolicy.value.fetch_add(1, std::memory_order_relaxed);
             return rocksdb::Status::OK();
@@ -668,13 +726,17 @@ class RegionEngine final : public CacheEngine {
         }
 
         std::vector<std::byte> record(recordSize, std::byte{0});
-        Secondary::EncodeRecord(
-            std::span<std::byte>(record.data(), record.size()),
-            std::span<const std::byte>(reinterpret_cast<const std::byte*>(key.data()), key.size()), payload, type, source,
-            keyHash);
-        const auto previous = m_index.Peek(keyHash);
-        if (auto status = m_regions.Publish(reservation, std::span<const std::byte>(record.data(), record.size()), previous);
-            !status.ok()) {
+        Secondary::EncodeRecord(std::span<std::byte>(record.data(), record.size()),
+                                std::span<const std::byte>(reinterpret_cast<const std::byte*>(key.data()), key.size()),
+                                payload, type, source, keyHash);
+        const auto reservationRecord = std::span<const std::byte>(record.data(), record.size());
+        if (const auto status = m_regions.Publish(reservation, reservationRecord); !status.ok()) {
+            // Busy means the region was recycled between Reserve and Publish; that is a dropped
+            // insert, not a failure RocksDB should see.
+            if (status.IsBusy()) {
+                m_stats.insertsDroppedStale.value.fetch_add(1, std::memory_order_relaxed);
+                return rocksdb::Status::OK();
+            }
             return status;
         }
 
@@ -686,9 +748,19 @@ class RegionEngine final : public CacheEngine {
         newLocation.hitCount = 0;
         newLocation.flags = static_cast<uint8_t>(Secondary::LocationFlags::kNone);
 
-        const auto replaced = m_index.Upsert(keyHash, newLocation);
-        if (replaced) {
-            static_cast<void>(*replaced);
+        // Whoever removes a record from the index subtracts its bytes, so a replaced record is
+        // accounted exactly once even when several inserts of one key race.
+        if (const auto replaced = m_index.Upsert(keyHash, newLocation)) {
+            m_regions.AdjustLiveBytes(-static_cast<int64_t>(Secondary::LocationLengthBytes(*replaced)));
+        }
+        // A reclaim can sweep this region between Publish and Upsert, in which case it never saw
+        // this entry. Undo the publish instead of leaving a dangling index entry.
+        if (!m_regions.IsLive(newLocation)) {
+            if (const auto removed = m_index.RemoveIfMatches(keyHash, newLocation)) {
+                m_regions.AdjustLiveBytes(-static_cast<int64_t>(Secondary::LocationLengthBytes(*removed)));
+            }
+            m_stats.insertsDroppedStale.value.fetch_add(1, std::memory_order_relaxed);
+            return rocksdb::Status::OK();
         }
         m_admission.Forget(keyHash);
         m_stats.insertsAdmitted.value.fetch_add(1, std::memory_order_relaxed);
@@ -710,15 +782,18 @@ class FileBasedCompressedSecondaryCache::Impl {
                                 rocksdb::CacheTier source) noexcept {
         return m_engine->InsertSaved(key, saved, type, source);
     }
-    std::unique_ptr<rocksdb::SecondaryCacheResultHandle>
-    Lookup(const rocksdb::Slice& key, const rocksdb::Cache::CacheItemHelper* helper,
-           rocksdb::Cache::CreateContext* createContext, bool wait, bool adviseErase, rocksdb::Statistics* stats,
-           bool& keptInSecondaryCache) noexcept {
+    std::unique_ptr<rocksdb::SecondaryCacheResultHandle> Lookup(const rocksdb::Slice& key,
+                                                                const rocksdb::Cache::CacheItemHelper* helper,
+                                                                rocksdb::Cache::CreateContext* createContext, bool wait,
+                                                                bool adviseErase, rocksdb::Statistics* stats,
+                                                                bool& keptInSecondaryCache) noexcept {
         return m_engine->Lookup(key, helper, createContext, wait, adviseErase, stats, keptInSecondaryCache);
     }
     bool SupportForceErase() const noexcept { return m_engine->SupportForceErase(); }
     void Erase(const rocksdb::Slice& key) noexcept { m_engine->Erase(key); }
-    void WaitAll(std::vector<rocksdb::SecondaryCacheResultHandle*> handles) noexcept { m_engine->WaitAll(std::move(handles)); }
+    void WaitAll(std::vector<rocksdb::SecondaryCacheResultHandle*> handles) noexcept {
+        m_engine->WaitAll(std::move(handles));
+    }
     rocksdb::Status SetCapacity(size_t capacity) noexcept { return m_engine->SetCapacity(capacity); }
     rocksdb::Status GetCapacity(size_t& capacity) noexcept { return m_engine->GetCapacity(capacity); }
     rocksdb::Status Deflate(size_t decrease) noexcept { return m_engine->Deflate(decrease); }
@@ -729,17 +804,19 @@ class FileBasedCompressedSecondaryCache::Impl {
     std::unique_ptr<CacheEngine> m_engine;
 };
 
-FileBasedCompressedSecondaryCache::FileBasedCompressedSecondaryCache(
-    std::filesystem::path cacheDir, std::shared_ptr<Filesystem> fs, const size_t capacity,
-    std::shared_ptr<Logger> logger)
-    : m_impl(std::make_unique<Impl>(std::make_unique<LegacyEngine>(std::move(cacheDir), std::move(fs), capacity,
-                                                                  std::move(logger)))) {}
+FileBasedCompressedSecondaryCache::FileBasedCompressedSecondaryCache(std::filesystem::path cacheDir,
+                                                                     std::shared_ptr<Filesystem> fs,
+                                                                     const size_t capacity,
+                                                                     std::shared_ptr<Logger> logger)
+    : m_impl(std::make_unique<Impl>(
+          std::make_unique<LegacyEngine>(std::move(cacheDir), std::move(fs), capacity, std::move(logger)))) {}
 
 FileBasedCompressedSecondaryCache::FileBasedCompressedSecondaryCache(std::filesystem::path cacheDir,
                                                                      FileBasedSecondaryCacheOptions options,
                                                                      std::shared_ptr<Logger> logger) {
     if (options.engine == FileBasedSecondaryCacheEngine::kRegion) {
-        m_impl = std::make_unique<Impl>(std::make_unique<RegionEngine>(std::move(cacheDir), options, std::move(logger)));
+        m_impl =
+            std::make_unique<Impl>(std::make_unique<RegionEngine>(std::move(cacheDir), options, std::move(logger)));
     } else {
         m_impl = std::make_unique<Impl>(std::make_unique<LegacyEngine>(
             std::move(cacheDir), std::make_shared<LocalFilesystem>(), options.capacity, std::move(logger)));

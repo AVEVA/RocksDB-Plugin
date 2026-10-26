@@ -23,6 +23,8 @@ class AdmissionPolicy {
     void Clear() noexcept;
 
   private:
+    static constexpr size_t kMaxGhostsPerShard = 1U << 16;
+
     struct Shard {
         std::mutex mu;
         std::unordered_set<uint64_t> ghosts;

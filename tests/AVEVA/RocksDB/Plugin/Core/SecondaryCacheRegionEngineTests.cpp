@@ -29,6 +29,11 @@ TEST_F(RegionFileBasedCompressedSecondaryCacheTests, EraseRemovesEntry) {
 }
 
 TEST_F(RegionFileBasedCompressedSecondaryCacheTests, OverwriteExistingKeyReturnsNewestValue) {
+    // Dedupe would keep the first copy, so this opts out to exercise the replace path.
+    auto options = MakeOptions();
+    options.skipInsertIfPresent = false;
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir / "overwrite", options, MakeNullLogger());
+
     TestPayload original{"old"};
     ASSERT_TRUE(m_cache->Insert(MakeKey("overwrite-key"), &original, &m_helper, true).ok());
     TestPayload updated{"new"};
@@ -116,4 +121,196 @@ TEST_F(RegionFileBasedCompressedSecondaryCacheTests, ConcurrentReadersAndWriters
 
     TestPayload finalPayload{"final"};
     ASSERT_TRUE(m_cache->Insert(MakeKey("final-key"), &finalPayload, &m_helper, true).ok());
+}
+
+namespace {
+rocksdb::CacheTier g_capturedTier = rocksdb::CacheTier::kNonVolatileBlockTier;
+
+rocksdb::Status TierCapturingCreateCb(const rocksdb::Slice& data, rocksdb::CompressionType type,
+                                      rocksdb::CacheTier source, rocksdb::Cache::CreateContext* ctx,
+                                      rocksdb::MemoryAllocator* alloc, rocksdb::Cache::ObjectPtr* outObj,
+                                      size_t* outCharge) {
+    g_capturedTier = source;
+    return TestCreateCb(data, type, source, ctx, alloc, outObj, outCharge);
+}
+
+size_t UsageOf(FileBasedCompressedSecondaryCache& cache) {
+    size_t usage = 0;
+    EXPECT_TRUE(cache.GetUsage(usage).ok());
+    return usage;
+}
+} // namespace
+
+TEST_F(RegionFileBasedCompressedSecondaryCacheTests, LookupPassesVolatileTierToCreateCb) {
+    rocksdb::Cache::CacheItemHelper helper{rocksdb::CacheEntryRole::kDataBlock,
+                                           TestDeleteCb,
+                                           TestSizeCb,
+                                           TestSaveToCb,
+                                           TierCapturingCreateCb,
+                                           &m_helperNoSec};
+    TestPayload payload{"tier"};
+    ASSERT_TRUE(m_cache->Insert(MakeKey("tier-key"), &payload, &helper, true).ok());
+
+    bool kept = false;
+    auto handle = m_cache->Lookup(MakeKey("tier-key"), &helper, nullptr, true, false, nullptr, kept);
+    ASSERT_NE(handle, nullptr);
+    EXPECT_EQ(g_capturedTier, rocksdb::CacheTier::kVolatileTier);
+    delete static_cast<TestPayload*>(handle->Value());
+}
+
+TEST_F(RegionFileBasedCompressedSecondaryCacheTests, InsertSavedWithNonVolatileSourceStillHitsUnderStrictCreateCb) {
+    // RocksDB's typed cache helpers reject every tier but kVolatileTier in create_cb.
+    rocksdb::Cache::CacheItemHelper strictHelper{
+        rocksdb::CacheEntryRole::kDataBlock,
+        TestDeleteCb,
+        TestSizeCb,
+        TestSaveToCb,
+        [](const rocksdb::Slice& data, rocksdb::CompressionType type, rocksdb::CacheTier source,
+           rocksdb::Cache::CreateContext* ctx, rocksdb::MemoryAllocator* alloc, rocksdb::Cache::ObjectPtr* outObj,
+           size_t* outCharge) -> rocksdb::Status {
+            if (source != rocksdb::CacheTier::kVolatileTier) {
+                return rocksdb::Status::InvalidArgument("unexpected tier");
+            }
+            return TestCreateCb(data, type, source, ctx, alloc, outObj, outCharge);
+        },
+        &m_helperNoSec};
+
+    const std::string payload = "pre-serialised block";
+    ASSERT_TRUE(m_cache
+                    ->InsertSaved(MakeKey("saved-nv"), rocksdb::Slice(payload),
+                                  rocksdb::CompressionType::kNoCompression, rocksdb::CacheTier::kNonVolatileBlockTier)
+                    .ok());
+
+    bool kept = false;
+    auto handle = m_cache->Lookup(MakeKey("saved-nv"), &strictHelper, nullptr, true, false, nullptr, kept);
+    ASSERT_NE(handle, nullptr);
+    delete static_cast<TestPayload*>(handle->Value());
+}
+
+TEST_F(RegionFileBasedCompressedSecondaryCacheTests, ReinsertOfPresentKeyDoesNotConsumeLogSpace) {
+    TestPayload payload{std::string(1000, 'x')};
+    ASSERT_TRUE(m_cache->Insert(MakeKey("dup"), &payload, &m_helper, false).ok());
+    const size_t single = UsageOf(*m_cache);
+
+    // Far more re-inserts than the log could hold if each appended a copy.
+    for (int i = 0; i < 5000; ++i) {
+        ASSERT_TRUE(m_cache->Insert(MakeKey("dup"), &payload, &m_helper, false).ok());
+    }
+    EXPECT_EQ(UsageOf(*m_cache), single);
+
+    // Erasing makes the key absent again, so a later insert is admitted.
+    m_cache->Erase(MakeKey("dup"));
+    ASSERT_TRUE(m_cache->Insert(MakeKey("dup"), &payload, &m_helper, false).ok());
+    bool kept = false;
+    auto handle = m_cache->Lookup(MakeKey("dup"), &m_helper, nullptr, true, false, nullptr, kept);
+    ASSERT_NE(handle, nullptr);
+    delete static_cast<TestPayload*>(handle->Value());
+}
+
+TEST_F(RegionFileBasedCompressedSecondaryCacheTests, RepeatedOverwritesDoNotInflateUsage) {
+    TestPayload payload{std::string(1000, 'x')};
+    ASSERT_TRUE(m_cache->Insert(MakeKey("same"), &payload, &m_helper, true).ok());
+    const size_t single = UsageOf(*m_cache);
+    ASSERT_GT(single, 0U);
+
+    for (int i = 0; i < 50; ++i) {
+        ASSERT_TRUE(m_cache->Insert(MakeKey("same"), &payload, &m_helper, true).ok());
+    }
+    EXPECT_EQ(UsageOf(*m_cache), single);
+}
+
+TEST_F(RegionFileBasedCompressedSecondaryCacheTests, EraseAndAdviseEraseReleaseUsage) {
+    TestPayload payload{std::string(1000, 'x')};
+    ASSERT_TRUE(m_cache->Insert(MakeKey("a"), &payload, &m_helper, true).ok());
+    ASSERT_TRUE(m_cache->Insert(MakeKey("b"), &payload, &m_helper, true).ok());
+
+    m_cache->Erase(MakeKey("a"));
+    const size_t afterErase = UsageOf(*m_cache);
+
+    bool kept = true;
+    auto handle = m_cache->Lookup(MakeKey("b"), &m_helper, nullptr, true, true, nullptr, kept);
+    ASSERT_NE(handle, nullptr);
+    EXPECT_FALSE(kept);
+    delete static_cast<TestPayload*>(handle->Value());
+    EXPECT_LT(UsageOf(*m_cache), afterErase);
+    EXPECT_EQ(UsageOf(*m_cache), 0U);
+}
+
+TEST_F(RegionFileBasedCompressedSecondaryCacheTests, ConcurrentSameKeyInsertsAccountUsageOnce) {
+    TestPayload payload{std::string(1000, 'x')};
+    ASSERT_TRUE(m_cache->Insert(MakeKey("hot"), &payload, &m_helper, true).ok());
+    const size_t single = UsageOf(*m_cache);
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 8; ++t) {
+        threads.emplace_back([&] {
+            for (int i = 0; i < 100; ++i) {
+                m_cache->Insert(MakeKey("hot"), &payload, &m_helper, true);
+            }
+        });
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    EXPECT_EQ(UsageOf(*m_cache), single);
+}
+
+TEST_F(RegionFileBasedCompressedSecondaryCacheTests, SetCapacityCannotGrowPastPreallocatedRegions) {
+    size_t initial = 0;
+    ASSERT_TRUE(m_cache->GetCapacity(initial).ok());
+    ASSERT_TRUE(m_cache->SetCapacity(initial * 64).ok());
+
+    size_t after = 0;
+    ASSERT_TRUE(m_cache->GetCapacity(after).ok());
+    EXPECT_LE(after, initial + ((1 << 20) + (256 << 10)));
+
+    for (int i = 0; i < 200; ++i) {
+        TestPayload payload{std::string(100 * 1024, static_cast<char>('a' + i % 26))};
+        ASSERT_TRUE(m_cache->Insert(MakeKey("grow-" + std::to_string(i)), &payload, &m_helper, true).ok());
+    }
+    EXPECT_LE(UsageOf(*m_cache), after);
+}
+
+TEST_F(RegionFileBasedCompressedSecondaryCacheTests, ShrinkThenGrowReusesReclaimedRegions) {
+    m_cache.reset();
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(
+        m_cacheDir, MakeOptions(1024 * 1024, (1 << 20) + (256 << 10), 64 * 1024), MakeNullLogger());
+
+    const auto fill = [&](const std::string& prefix, int count) {
+        for (int i = 0; i < count; ++i) {
+            TestPayload payload{std::string(60 * 1024, 'z')};
+            ASSERT_TRUE(m_cache->Insert(MakeKey(prefix + std::to_string(i)), &payload, &m_helper, true).ok());
+        }
+    };
+    fill("a", 16);
+
+    ASSERT_TRUE(m_cache->SetCapacity(256 * 1024).ok());
+    EXPECT_LE(UsageOf(*m_cache), 256U * 1024U);
+
+    ASSERT_TRUE(m_cache->SetCapacity(1024 * 1024).ok());
+    fill("b", 16);
+    EXPECT_GT(UsageOf(*m_cache), 256U * 1024U);
+    EXPECT_LE(UsageOf(*m_cache), 1024U * 1024U);
+
+    bool kept = false;
+    auto handle = m_cache->Lookup(MakeKey("b15"), &m_helper, nullptr, true, false, nullptr, kept);
+    ASSERT_NE(handle, nullptr);
+    delete static_cast<TestPayload*>(handle->Value());
+}
+
+TEST_F(RegionFileBasedCompressedSecondaryCacheTests, ZeroCapacityDropsInsertsAndRecoversWhenRestored) {
+    size_t initial = 0;
+    ASSERT_TRUE(m_cache->GetCapacity(initial).ok());
+    ASSERT_TRUE(m_cache->SetCapacity(0).ok());
+
+    TestPayload payload{"dropped"};
+    ASSERT_TRUE(m_cache->Insert(MakeKey("zero"), &payload, &m_helper, true).ok());
+    EXPECT_EQ(UsageOf(*m_cache), 0U);
+
+    ASSERT_TRUE(m_cache->SetCapacity(initial).ok());
+    ASSERT_TRUE(m_cache->Insert(MakeKey("back"), &payload, &m_helper, true).ok());
+    bool kept = false;
+    auto handle = m_cache->Lookup(MakeKey("back"), &m_helper, nullptr, true, false, nullptr, kept);
+    ASSERT_NE(handle, nullptr);
+    delete static_cast<TestPayload*>(handle->Value());
 }

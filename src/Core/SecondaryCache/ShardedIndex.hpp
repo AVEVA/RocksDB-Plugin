@@ -64,15 +64,45 @@ class ShardedIndex {
         return it->second;
     }
 
+    /// Returns the location that was replaced, or nullopt if the key was new. The caller owns the
+    /// live-byte accounting for the returned record, so each record is subtracted exactly once.
     [[nodiscard]] std::optional<Location> Upsert(const uint64_t keyHash, const Location& loc) noexcept {
         auto& shard = ShardFor(keyHash);
         std::lock_guard lock(shard.mu);
-        auto [it, inserted] = shard.map.insert_or_assign(keyHash, loc);
-        if (inserted) {
+        const auto it = shard.map.find(keyHash);
+        if (it == shard.map.end()) {
+            shard.map.emplace(keyHash, loc);
             m_liveEntries.fetch_add(1, std::memory_order_relaxed);
             return std::nullopt;
         }
-        return it->second;
+        const Location replaced = it->second;
+        it->second = loc;
+        return replaced;
+    }
+
+    /// Removes the entry only if it still points at exactly `expected`, so a stale reader cannot
+    /// delete a fresher concurrent re-insert of the same key.
+    [[nodiscard]] std::optional<Location> RemoveIfMatches(const uint64_t keyHash, const Location& expected) noexcept {
+        auto& shard = ShardFor(keyHash);
+        std::lock_guard lock(shard.mu);
+        const auto it = shard.map.find(keyHash);
+        if (it == shard.map.end() || it->second.regionId != expected.regionId ||
+            it->second.generation != expected.generation ||
+            it->second.offsetInAlignUnits != expected.offsetInAlignUnits) {
+            return std::nullopt;
+        }
+        const Location removed = it->second;
+        shard.map.erase(it);
+        m_liveEntries.fetch_sub(1, std::memory_order_relaxed);
+        return removed;
+    }
+
+    void Clear() noexcept {
+        for (auto& shard : m_shards) {
+            std::lock_guard lock(shard.mu);
+            m_liveEntries.fetch_sub(shard.map.size(), std::memory_order_relaxed);
+            shard.map.clear();
+        }
     }
 
     [[nodiscard]] std::optional<Location> Remove(const uint64_t keyHash) noexcept {
@@ -138,9 +168,7 @@ class ShardedIndex {
         return x ^ (x >> 31u);
     }
 
-    [[nodiscard]] Shard& ShardFor(const uint64_t keyHash) noexcept {
-        return m_shards[Mix(keyHash) % m_shards.size()];
-    }
+    [[nodiscard]] Shard& ShardFor(const uint64_t keyHash) noexcept { return m_shards[Mix(keyHash) % m_shards.size()]; }
 
     [[nodiscard]] const Shard& ShardFor(const uint64_t keyHash) const noexcept {
         return m_shards[Mix(keyHash) % m_shards.size()];

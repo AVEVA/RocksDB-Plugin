@@ -26,6 +26,10 @@ bool AdmissionPolicy::ShouldAdmit(const uint64_t keyHash, const bool forceInsert
 
     auto& shard = ShardFor(keyHash);
     std::lock_guard lock(shard.mu);
+    // Ghosts are only a recency hint; dropping them all is cheaper than tracking age.
+    if (shard.ghosts.size() >= kMaxGhostsPerShard) {
+        shard.ghosts.clear();
+    }
     const auto [it, inserted] = shard.ghosts.insert(keyHash);
     if (inserted) {
         return false;

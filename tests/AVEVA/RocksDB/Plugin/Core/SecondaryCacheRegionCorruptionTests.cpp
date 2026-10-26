@@ -56,14 +56,14 @@ std::unique_ptr<FixtureState> MakeFixture() {
         std::span<const std::byte>(reinterpret_cast<const std::byte*>(state->key.data()), state->key.size()),
         std::span<const std::byte>(reinterpret_cast<const std::byte*>(payload.data()), payload.size()),
         rocksdb::CompressionType::kNoCompression, rocksdb::CacheTier::kVolatileTier, state->keyHash);
-    EXPECT_TRUE(state->manager->Publish(reservation, std::span<const std::byte>(encoded.data(), encoded.size()),
-                                        std::nullopt)
-                    .ok());
+    EXPECT_TRUE(state->manager->Publish(reservation, std::span<const std::byte>(encoded.data(), encoded.size())).ok());
 
     state->location = Secondary::Location{reservation.regionId,
                                           static_cast<uint32_t>(reservation.offset / Secondary::kRecordAlign),
                                           static_cast<uint32_t>(reservation.length / Secondary::kRecordAlign),
-                                          reservation.generation, 0, 0};
+                                          reservation.generation,
+                                          0,
+                                          0};
     const auto ignored = state->index.Upsert(state->keyHash, state->location);
     static_cast<void>(ignored);
     return state;
@@ -74,11 +74,9 @@ void ExpectDecodeFailureAndCleanup(FixtureState& fixture, const Secondary::Decod
     std::vector<std::byte> bytes;
     ASSERT_EQ(fixture.manager->Read(fixture.location, bytes), Secondary::RegionManager::ReadStatus::kOk);
     Secondary::DecodedRecordView decoded{};
-    const auto keyView =
-        lookupKey.empty() ? std::string_view{fixture.key} : lookupKey;
+    const auto keyView = lookupKey.empty() ? std::string_view{fixture.key} : lookupKey;
     const auto result = Secondary::DecodeRecord(
-        bytes, std::span<const std::byte>(reinterpret_cast<const std::byte*>(keyView.data()), keyView.size()),
-        decoded);
+        bytes, std::span<const std::byte>(reinterpret_cast<const std::byte*>(keyView.data()), keyView.size()), decoded);
     EXPECT_EQ(result, expected);
     if (removeIndex) {
         EXPECT_TRUE(fixture.index.Remove(fixture.keyHash).has_value());

@@ -32,5 +32,8 @@ struct CacheStats {
     PaddedAtomicU64 regionsReclaimed;
     PaddedAtomicU64 entriesEvictedByReclaim;
     PaddedAtomicU64 footerOverflowScans;
+    PaddedAtomicU64 deviceWriteFailures;
+    PaddedAtomicU64 insertsDroppedStale;
+    PaddedAtomicU64 insertsSkippedPresent;
 };
 } // namespace AVEVA::RocksDB::Plugin::Core::SecondaryCache

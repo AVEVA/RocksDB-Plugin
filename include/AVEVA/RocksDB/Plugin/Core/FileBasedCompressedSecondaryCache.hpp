@@ -36,6 +36,9 @@ struct FileBasedSecondaryCacheOptions {
     size_t flushBlockSize{1ULL * 1024 * 1024};
     uint32_t indexShards{64};
     size_t maxEntrySize{16ULL * 1024 * 1024};
+    // RocksDB block cache keys are immutable, so re-inserting a key already on disk only appends a
+    // dead duplicate to the log. Region engine only.
+    bool skipInsertIfPresent{true};
     FileBasedSecondaryCacheAdmissionPolicy admissionPolicy{FileBasedSecondaryCacheAdmissionPolicy::kAdmitAll};
     FileBasedSecondaryCacheEngine engine{FileBasedSecondaryCacheEngine::kLegacy};
 };

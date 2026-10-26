@@ -24,8 +24,8 @@ uint64_t HashForTest(const std::string& value) {
     return hash;
 }
 
-Secondary::Location InsertRecord(Secondary::RegionManager& manager, Secondary::ShardedIndex& index, const std::string& key,
-                                 const std::string& payload, bool forceInsert = true) {
+Secondary::Location InsertRecord(Secondary::RegionManager& manager, Secondary::ShardedIndex& index,
+                                 const std::string& key, const std::string& payload, bool forceInsert = true) {
     const uint64_t hash = HashForTest(key);
     const size_t recordSize = Secondary::RecordSize(key.size(), payload.size());
     Secondary::RegionManager::Reservation reservation{};
@@ -35,17 +35,19 @@ Secondary::Location InsertRecord(Secondary::RegionManager& manager, Secondary::S
 
     std::vector<std::byte> encoded(recordSize);
     Secondary::EncodeRecord(
-        encoded,
-        std::span<const std::byte>(reinterpret_cast<const std::byte*>(key.data()), key.size()),
+        encoded, std::span<const std::byte>(reinterpret_cast<const std::byte*>(key.data()), key.size()),
         std::span<const std::byte>(reinterpret_cast<const std::byte*>(payload.data()), payload.size()),
         rocksdb::CompressionType::kNoCompression, rocksdb::CacheTier::kVolatileTier, hash);
-    if (!manager.Publish(reservation, encoded, std::nullopt).ok()) {
+    if (!manager.Publish(reservation, encoded).ok()) {
         return {};
     }
 
-    Secondary::Location location{reservation.regionId, static_cast<uint32_t>(reservation.offset / Secondary::kRecordAlign),
+    Secondary::Location location{reservation.regionId,
+                                 static_cast<uint32_t>(reservation.offset / Secondary::kRecordAlign),
                                  static_cast<uint32_t>(reservation.length / Secondary::kRecordAlign),
-                                 reservation.generation, 0, 0};
+                                 reservation.generation,
+                                 0,
+                                 0};
     const auto ignored = index.Upsert(hash, location);
     static_cast<void>(ignored);
     return location;
@@ -57,9 +59,9 @@ TEST(SecondaryCacheRegionManagerTests, OpenSealReclaimCycleInvalidatesOldestRegi
     auto device = std::unique_ptr<Secondary::BlockDevice>(rawDevice);
     Secondary::ShardedIndex index(8);
     Secondary::CacheStats stats;
-    Secondary::RegionManager manager(std::move(device), index, stats,
-                                     Secondary::RegionManagerOptions{512 * 1024, (1 << 20) + (256 << 10), 64 * 1024,
-                                                                     64 * 1024});
+    Secondary::RegionManager manager(
+        std::move(device), index, stats,
+        Secondary::RegionManagerOptions{512 * 1024, (1 << 20) + (256 << 10), 64 * 1024, 64 * 1024});
 
     const auto first = InsertRecord(manager, index, "k1", std::string(60 * 1024, 'a'));
     for (int i = 2; i <= 12; ++i) {
@@ -76,9 +78,9 @@ TEST(SecondaryCacheRegionManagerTests, CorruptedFooterFallsBackToSafeScan) {
     auto device = std::unique_ptr<Secondary::BlockDevice>(rawDevice);
     Secondary::ShardedIndex index(4);
     Secondary::CacheStats stats;
-    Secondary::RegionManager manager(std::move(device), index, stats,
-                                     Secondary::RegionManagerOptions{256 * 1024, (1 << 20) + (256 << 10), 64 * 1024,
-                                                                     64 * 1024});
+    Secondary::RegionManager manager(
+        std::move(device), index, stats,
+        Secondary::RegionManagerOptions{256 * 1024, (1 << 20) + (256 << 10), 64 * 1024, 64 * 1024});
 
     const auto location = InsertRecord(manager, index, "footer-key", std::string(60 * 1024, 'x'));
     ASSERT_TRUE(manager.SetCapacity(0).ok());
