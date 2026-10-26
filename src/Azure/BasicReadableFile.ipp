@@ -181,7 +181,8 @@ BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& req, std::function<v
 // The default MultiRead issues one blocking round trip per request. Starting the downloads before waiting lets them
 // overlap on the host io_context, so a batch costs roughly one round trip. Requests that touch or overlap, or sit
 // within kMultiReadMaxGap of each other, are fetched with one GET and split back afterwards; at most
-// kMultiReadMaxInFlight GETs are outstanding, and a new one starts as soon as any finishes. Per-request failures are
+// kMultiReadMaxInFlight GETs and kMultiReadMaxInFlightBytes of backing memory are outstanding, and a new one starts
+// as soon as capacity frees up. Per-request failures are
 // reported in each request's status, as RocksDB expects; the returned status only covers batch-level problems.
 template <class TImpl>
 rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* reqs, const size_t num_reqs,
@@ -269,6 +270,15 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
         const auto deadline =
             Impl::ReadableFileDetail::DeadlineAfter(std::chrono::ceil<std::chrono::milliseconds>(opts.timeout));
 
+        // Bytes held by the outstanding downloads: the download lease's real capacity, plus the merge buffer.
+        uint64_t inFlightBytes = 0;
+        const auto chargeOf = [](const Group& group) {
+            const uint64_t length = group.End - group.Start;
+            const bool merged = group.EndMember - group.FirstMember > 1;
+            return static_cast<uint64_t>(Impl::DownloadBufferPool::CapacityFor(static_cast<size_t>(length))) +
+                   (merged ? length : 0);
+        };
+
         auto start = [&](Group& group) {
             const bool single = group.EndMember - group.FirstMember == 1;
             // A merged group is fetched into its own buffer; the callback then copies each member's slice out.
@@ -297,6 +307,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
                 return;
             }
             active.push_back(Active{handle, &group});
+            inFlightBytes += chargeOf(group);
         };
 
         // A single-member group read straight into its request's scratch; a merged one is split back out of its buffer.
@@ -325,7 +336,10 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
         };
 
         while (true) {
-            while (active.size() < kMultiReadMaxInFlight && nextGroup < groups.size()) {
+            // A group is admitted when nothing is outstanding even if it alone exceeds the byte budget, so it
+            // progresses.
+            while (active.size() < kMultiReadMaxInFlight && nextGroup < groups.size() &&
+                   (active.empty() || inFlightBytes + chargeOf(groups[nextGroup]) <= kMultiReadMaxInFlightBytes)) {
                 start(groups[nextGroup++]);
             }
             if (active.empty()) {
@@ -354,6 +368,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
                     }
                 }
                 DeleteAsyncReadHandle(it->Handle);
+                inFlightBytes -= chargeOf(*it->Owner);
                 // The handle is gone, so nothing can write the buffer; the slices are already copied out.
                 it->Owner->Buffer.reset();
                 it = active.erase(it);

@@ -32,6 +32,10 @@ template <class TImpl> class BasicReadableFile final : public rocksdb::FSRandomA
     // MultiRead keeps at most this many blob downloads outstanding, so a large batch cannot open unbounded
     // connections.
     static constexpr size_t kMultiReadMaxInFlight = 32;
+    // Also bounds the backing memory of the outstanding downloads (each group's download lease plus, when merged, its
+    // merge buffer), so large groups cannot multiply into hundreds of MiB. A group is always admitted when nothing
+    // else is outstanding, so one large request still makes progress.
+    static constexpr uint64_t kMultiReadMaxInFlightBytes = 64 * 1024 * 1024;
     // Requests separated by at most this many bytes are fetched with one GET; the few wasted bytes cost less than
     // another round trip.
     static constexpr uint64_t kMultiReadMaxGap = 4 * 1024;

@@ -935,6 +935,44 @@ TEST_F(AsyncReadTests, MultiRead_ManyMergedGroupsWithStalledOne_RetainsOnlyTheAc
         EXPECT_EQ(Expected(i * 30000 + 3000, 16), reqs[2 * i + 1].result.ToString()) << i;
     }
 }
+TEST_F(AsyncReadTests, MultiRead_LargeGroups_AreAdmittedByBytesNotJustByCount) {
+    constexpr size_t length = 4 * 1024 * 1024;
+    constexpr size_t count = 20;
+    constexpr size_t spacing = length + 1024 * 1024;
+    constexpr size_t admitted = FakeReadableFile::kMultiReadMaxInFlightBytes / length;
+    static_assert(admitted < count && admitted < FakeReadableFile::kMultiReadMaxInFlight);
+    FillPattern(m_deferredEnv, static_cast<int64_t>(count * spacing));
+    auto file = CreateFile(m_deferredEnv);
+    std::vector<std::vector<char>> scratch(count, std::vector<char>(length));
+    std::vector<rocksdb::FSReadRequest> reqs(count);
+    for (size_t i = 0; i < count; ++i) {
+        SetRequest(reqs[i], i * spacing, scratch[i]);
+    }
+
+    rocksdb::IOStatus status;
+    std::jthread reader([&] { status = file.MultiRead(reqs.data(), reqs.size(), rocksdb::IOOptions{}, nullptr); });
+
+    ASSERT_TRUE(m_deferredEnv.Blob->WaitForPendingDownloads(admitted));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_EQ(admitted, m_deferredEnv.Blob->PendingDownloads());
+
+    size_t served = 0;
+    while (served < count) {
+        ASSERT_TRUE(m_deferredEnv.Blob->WaitForPendingDownloads(1));
+        auto download = m_deferredEnv.Blob->TakeDownload();
+        EXPECT_LE(m_deferredEnv.Blob->PendingDownloads(), admitted);
+        download.Succeed(Expected(download.Request.Offset, length));
+        ++served;
+    }
+    reader.join();
+
+    EXPECT_TRUE(status.ok()) << status.ToString();
+    for (size_t i = 0; i < count; ++i) {
+        EXPECT_TRUE(reqs[i].status.ok()) << i;
+        EXPECT_EQ(length, reqs[i].result.size()) << i;
+    }
+}
+
 TEST_F(AsyncReadTests, MultiRead_TimeoutIsOneBudgetForTheBatch_ExpiredQueuedGroupsStartNoDownload) {
     FillPattern(m_deferredEnv, 1000000);
     auto file = CreateFile(m_deferredEnv);

@@ -200,7 +200,7 @@ candidates, and inherited issues. No implementation changes were made.
 
 ### R08 - Budget MultiRead by bytes as well as request count
 
-- [ ] **P2 | Source-confirmed memory amplification; tune with benchmarks**
+- [x] **P2 | Source-confirmed memory amplification; tune with benchmarks**
 - **Locations:** `src\Azure\BasicReadableFile.hpp:26-34`;
   `src\Azure\BasicReadableFile.ipp`, `Group`, `start`;
   `src\Azure\Impl\include\AVEVA\RocksDB\Plugin\Azure\Impl\BlobOperations.hpp:684-704`.
