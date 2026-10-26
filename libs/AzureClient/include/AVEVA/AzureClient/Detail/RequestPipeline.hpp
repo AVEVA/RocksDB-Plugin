@@ -106,8 +106,8 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
           m_request(std::move(request)), m_completion(std::move(completion)), m_requestOptions(requestOptions),
           m_retryNotFoundAndGone(retryNotFoundAndGone), m_rebuild(std::move(rebuild)),
           m_replaySafe(callerAbsorbsReplay || IsReplaySafe(m_request)),
-          m_parentSlot(m_requestOptions.GetCancellationSlot()), m_timer(httpClient.get_executor()),
-          m_totalDeadline(m_requestOptions.GetTotalDeadline()), m_start(std::chrono::steady_clock::now()),
+          m_parentSlot(m_requestOptions.GetCancellationSlot()), m_totalDeadline(m_requestOptions.GetTotalDeadline()),
+          m_start(std::chrono::steady_clock::now()),
           m_maxAttempts(ComputeMaxAttempts(m_requestOptions.GetMaxRetries().value_or(retry.MaxRetries))) {}
 
     void Start() {
@@ -256,7 +256,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         }
         m_internalError = std::make_error_code(std::errc::not_enough_memory);
         m_cancelled.store(true, std::memory_order_release);
-        m_timer.cancel();
+        CancelBackoff();
         m_attemptSignal.emit(boost::asio::cancellation_type::terminal);
         if (m_initiating.load(std::memory_order_acquire)) {
             // A completion never runs inside the initiating call; only if even the hop cannot be posted does it.
@@ -298,7 +298,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         m_internalError = error;
         m_cancelled.store(true, std::memory_order_release);
         // Stops any attempt or backoff already accepted; their completions report this error, not a cancellation.
-        m_timer.cancel();
+        CancelBackoff();
         m_attemptSignal.emit(boost::asio::cancellation_type::terminal);
         PostFinish(error);
     }
@@ -316,7 +316,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
             return;
         }
 
-        m_timer.cancel();
+        CancelBackoff();
         m_attemptSignal.emit(type);
 
         // Token credentials have no cancellation hook, so don't wait for a slow credential:
@@ -634,11 +634,22 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
                 return;
             }
         }
-        m_timer.expires_after(delay);
+        // Built on first use: most requests never back off, and construction takes the executor's service-registry
+        // mutex.
+        if (!m_timer) {
+            m_timer.emplace(m_httpClient.get_executor());
+        }
+        m_timer->expires_after(delay);
         auto self = this->shared_from_this();
-        m_timer.async_wait([self](const boost::system::error_code& waitError) {
+        m_timer->async_wait([self](const boost::system::error_code& waitError) {
             self->Run(BackoffElapsedEvent{static_cast<bool>(waitError)});
         });
+    }
+
+    void CancelBackoff() {
+        if (m_timer) {
+            m_timer->cancel();
+        }
     }
 
     void PostFinish(std::error_code error) {
@@ -674,7 +685,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     bool m_replaySafe;
     boost::asio::cancellation_slot m_parentSlot;
     boost::asio::cancellation_signal m_attemptSignal;
-    typename RetryTimerFor<THttp>::type m_timer;
+    std::optional<typename RetryTimerFor<THttp>::type> m_timer;
     std::optional<boost::asio::steady_timer> m_deadlineTimer;
     std::optional<std::chrono::milliseconds> m_totalDeadline;
     std::chrono::steady_clock::time_point m_start;

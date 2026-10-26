@@ -202,7 +202,9 @@ class FakeHttpClient final {
     // delay without sleeping.
     class RetryTimer {
       public:
-        explicit RetryTimer(executor_type executor) : m_executor(executor), m_real(executor) {}
+        explicit RetryTimer(executor_type executor) : m_executor(executor), m_real(executor) {
+            ConstructedCount().fetch_add(1, std::memory_order_relaxed);
+        }
         ~RetryTimer() { cancel(); }
         RetryTimer(const RetryTimer&) = delete;
         RetryTimer& operator=(const RetryTimer&) = delete;
@@ -258,6 +260,9 @@ class FakeHttpClient final {
         std::scoped_lock lock(DelayMutex());
         Delays().clear();
     }
+
+    // Number of retry timers ever constructed by any pipeline; tests compare before/after deltas.
+    static std::size_t RetryTimersConstructed() { return ConstructedCount().load(std::memory_order_relaxed); }
 
     // Clears the process-global knobs so one test cannot leak retry behaviour into the next (shuffle, repeat).
     static void ResetGlobalState() {
@@ -920,6 +925,10 @@ class FakeHttpClient final {
     static std::vector<std::chrono::milliseconds>& Delays() {
         static std::vector<std::chrono::milliseconds> delays;
         return delays;
+    }
+    static std::atomic<std::size_t>& ConstructedCount() {
+        static std::atomic<std::size_t> count{0};
+        return count;
     }
     static std::atomic<bool>& InstantRetryFlag() {
         static std::atomic<bool> flag{false};

@@ -305,7 +305,14 @@ candidates, and inherited issues. No implementation changes were made.
 
 ### R13 - Reduce unused retry machinery and tiny-download bookkeeping
 
-- [ ] **P2 | Benchmark candidate**
+- [x] **P2 | Benchmark candidate**
+- **Result:** Implemented lazy backoff-timer construction in `RetryOperation` (`std::optional` timer built on
+  first backoff; cancel is a no-op until then). Measured by construction count (the fake client's retry timer):
+  first-attempt success went from 1 timer to 0; a request that retries constructs exactly 1 (reused across
+  retries). The alternative only removes work, so there is no losing case to retain. Regression tests:
+  `RetryTests.FirstAttemptSuccessDoesNotConstructABackoffTimer`, `RetryTests.ARetryConstructsExactlyOneBackoffTimer`.
+  The `BlobDownload` tiny-download bookkeeping (direct delivery, inline first entry) was not changed and has no
+  benchmark yet; Linux allocation deltas were not measured.
 - **Locations:** `libs\AzureClient\include\AVEVA\AzureClient\Detail\RequestPipeline.hpp`,
   constructor and `m_timer`/`m_queue`;
   `libs\AzureClient\include\AVEVA\AzureClient\Detail\BlobDownload.hpp`,

@@ -149,6 +149,59 @@ TEST(RetryTests, Retries_OnTransientThenSucceeds) {
     EXPECT_FALSE(observedError.has_value());
 }
 
+TEST(RetryTests, FirstAttemptSuccessDoesNotConstructABackoffTimer) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{200, {}, ""});
+
+    BlobClientOptions options = MakeBlobClientOptions("container", "blob.txt");
+    options.Retry.MaxRetries = 3;
+
+    BlobClient client{httpClient, options};
+
+    CallbackExpectation cb;
+    std::optional<Response<Models::DeleteBlobResult>> success;
+    const auto before = FakeHttpClient::RetryTimersConstructed();
+    client.DeleteAsync([&](std::expected<Response<Models::DeleteBlobResult>, BlobStorageError> result) mutable {
+        if (result.has_value()) {
+            success = std::move(result).value();
+        }
+        cb.MarkInvoked();
+    });
+    ASSERT_TRUE(httpClient.WaitForRequest(1));
+    httpClient.Poll();
+
+    EXPECT_TRUE(success.has_value());
+    EXPECT_EQ(FakeHttpClient::RetryTimersConstructed(), before);
+}
+
+TEST(RetryTests, ARetryConstructsExactlyOneBackoffTimer) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
+    httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
+    httpClient.EnqueueResponse(HttpResponse{200, {}, ""});
+
+    BlobClientOptions options = MakeBlobClientOptions("container", "blob.txt");
+    options.Retry.MaxRetries = 2;
+    options.Retry.InitialDelay = std::chrono::milliseconds{0};
+
+    BlobClient client{httpClient, options};
+
+    CallbackExpectation cb;
+    std::optional<Response<Models::DeleteBlobResult>> success;
+    const auto before = FakeHttpClient::RetryTimersConstructed();
+    client.DeleteAsync([&](std::expected<Response<Models::DeleteBlobResult>, BlobStorageError> result) mutable {
+        if (result.has_value()) {
+            success = std::move(result).value();
+        }
+        cb.MarkInvoked();
+    });
+    ASSERT_TRUE(httpClient.WaitForRequest(3));
+    httpClient.Poll();
+
+    EXPECT_TRUE(success.has_value());
+    EXPECT_EQ(FakeHttpClient::RetryTimersConstructed(), before + 1U);
+}
+
 namespace {
 using DeleteResult = std::expected<Response<Models::DeleteBlobResult>, BlobStorageError>;
 
