@@ -31,11 +31,13 @@ thread_local std::size_t failureMinimumSize = 0;
 // Allocation counting for HttpClientAllocationTests.cpp, which cannot replace operator new a second time.
 thread_local bool counting = false;
 thread_local std::size_t allocationCount = 0;
+thread_local std::size_t allocationBytes = 0;
 } // namespace AllocationFailure
 
 void* operator new(std::size_t size) {
     if (AllocationFailure::counting) {
         ++AllocationFailure::allocationCount;
+        AllocationFailure::allocationBytes += size;
     }
     if (AllocationFailure::allocationsUntilFailure >= 0 && size >= AllocationFailure::failureMinimumSize &&
         AllocationFailure::allocationsUntilFailure-- == 0) {

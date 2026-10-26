@@ -34,10 +34,10 @@
       multiget-*        batched MultiGet (32 keys), async_io off/on (exercises MultiRead)
 
 .EXAMPLE
-    .\Compare-Backends.ps1 -BaselineExe D:\bench-main\...\db_bench.exe -CandidateExe D:\repo\build\WindowsRelease\tools\db_bench\db_bench.exe
+    .\Compare-Backends.ps1 -BaselineExe D:\bench-main\...\db_bench.exe -CandidateExe D:\repo\build\WindowsRelease\tools\db_bench\db_bench.exe -ConfirmLiveAzure
 
 .EXAMPLE
-    .\Compare-Backends.ps1 -BaselineExe ... -CandidateExe ... -Quick -Scenarios seek,multiget
+    .\Compare-Backends.ps1 -BaselineExe ... -CandidateExe ... -Quick -Scenarios seek,multiget -ConfirmLiveAzure
 #>
 [CmdletBinding()]
 param(
@@ -53,11 +53,20 @@ param(
     [string[]] $Scenarios = @('write', 'load', 'readrandom', 'seek', 'multiget'),
     # Smaller data set and fewer ops: a smoke run of a few minutes.
     [switch] $Quick,
+    # Live Azure runs spend cloud resources and are never started by default: pass this switch to confirm them.
+    [switch] $ConfirmLiveAzure,
+    # Revisions are recorded in run-metadata.json. They default to the repository's HEAD for the candidate and to
+    # 'unknown' for the baseline, which is usually built elsewhere.
+    [string] $BaselineRevision = 'unknown',
+    [string] $CandidateRevision,
     [string] $OutDir = (Join-Path ([IO.Path]::GetTempPath()) ("db_bench_compare_" + (Get-Date -Format yyyyMMdd_HHmmss)))
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if (-not $ConfirmLiveAzure) {
+    throw 'This script runs db_bench against live Azure Blob Storage and spends cloud resources. Pass -ConfirmLiveAzure to run it. For loopback CPU/allocation measurements that need no Azure account use Measure-Loopback.ps1.'
+}
 foreach ($exe in $BaselineExe, $CandidateExe) {
     if (-not (Test-Path $exe)) { throw "db_bench not found: $exe" }
 }
@@ -74,6 +83,19 @@ $scale = if ($Quick) { 0.2 } else { 1.0 }
 function Scaled([int]$n) { [Math]::Max(5, [int]($n * $scale)) }
 
 New-Item -ItemType Directory $OutDir -Force | Out-Null
+. (Join-Path $PSScriptRoot 'BenchmarkMetadata.ps1')
+$repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..')
+$hostInfo = Get-HostInfo $repoRoot
+if (-not $CandidateRevision) { $CandidateRevision = $hostInfo.repository.revision }
+$exeInfo = [ordered]@{
+    baseline = Get-ExecutableInfo $BaselineExe $BaselineRevision
+    candidate = Get-ExecutableInfo $CandidateExe $CandidateRevision
+}
+foreach ($side in $exeInfo.Keys) {
+    if ($exeInfo[$side].configuration -ne 'Release') {
+        Write-Warning "$side executable is not a Release build ($($exeInfo[$side].configuration)); timings are not comparable with Release results."
+    }
+}
 $env:AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL = "https://$Account.blob.core.windows.net"
 $env:AVEVA_DB_BENCH_TENANT_ID = $env:AZURE_TENANT_ID
 $env:AVEVA_DB_BENCH_CLIENT_ID = $env:AZURE_SERVICE_PRINCIPAL_ID
@@ -95,8 +117,22 @@ function Record($scenario, $backend, $value) {
     if (-not $results.Contains($scenario)) { $results[$scenario] = @{ baseline = @(); candidate = @() } }
     if ($null -ne $value) { $results[$scenario][$backend] += $value }
 }
+# Tail latency (db_bench histogram percentiles, ms) is informational: a missing histogram never makes a comparison
+# incomplete, because the throughput metric is what gates success.
+$tails = [ordered]@{}
+function RecordTail($scenario, $backend, $parsed, $metric) {
+    if (-not $parsed) { return }
+    foreach ($p in 'p50', 'p99') {
+        $key = "$metric.$p"
+        if (-not $parsed.ContainsKey($key)) { continue }
+        $name = "$scenario $p (ms)"
+        if (-not $tails.Contains($name)) { $tails[$name] = @{ baseline = @(); candidate = @() } }
+        $tails[$name][$backend] += $parsed[$key] / 1000
+    }
+}
 
 $script:logIndex = 0
+$script:runs = [System.Collections.Generic.List[object]]::new()
 # Defense in depth: db_bench output is not expected to contain the secret, but a log must never be able to leak it.
 function Remove-Secret([string]$path) {
     $secret = $env:AVEVA_DB_BENCH_CLIENT_SECRET
@@ -125,10 +161,24 @@ function Invoke-Bench($backend, $label, [string[]]$benchArgs, [string[]]$expect 
     if ($rc -ne 0) { Add-Failure $backend $label "exit code $rc (log: $log)"; return $null }
 
     $parsed = @{ Seconds = $sw.Elapsed.TotalSeconds }
-    # db_bench wraps long lines, so match the "<name> : <value> micros/op" prefix only.
-    foreach ($m in Select-String -Path $log -Pattern '^(\w+)\s+:\s+(\d+(?:\.\d+)?) micros/op') {
-        $parsed[$m.Matches[0].Groups[1].Value] = [double]$m.Matches[0].Groups[2].Value
+    # db_bench wraps long lines, so match the "<name> : <value> micros/op" prefix only. With --histogram=1 the
+    # "Percentiles:" line that follows belongs to the benchmark printed just before it.
+    $current = $null
+    foreach ($line in Get-Content -Path $log) {
+        if ($line -match '^(\w+)\s+:\s+(\d+(?:\.\d+)?) micros/op') {
+            $current = $Matches[1]
+            $parsed[$current] = [double]$Matches[2]
+        } elseif ($current -and $line -match 'Percentiles: P50: (\d+(?:\.\d+)?) P75: \d+(?:\.\d+)? P99: (\d+(?:\.\d+)?)') {
+            $parsed["$current.p50"] = [double]$Matches[1]
+            $parsed["$current.p99"] = [double]$Matches[2]
+            $current = $null
+        }
     }
+    $script:runs.Add([ordered]@{
+            index = $script:logIndex; backend = $backend; label = $label; arguments = @($benchArgs)
+            fsUri = (FsUri $backend); exitCode = $rc; wallSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 3)
+            log = (Split-Path -Leaf $log)
+        })
     $missing = @($expect | Where-Object { -not $parsed.ContainsKey($_) })
     if ($missing) { Add-Failure $backend $label "missing or malformed metric(s) $($missing -join ', ') (log: $log)"; return $null }
     $parsed
@@ -161,7 +211,7 @@ for ($rep = 1; $rep -le $Reps; $rep++) {
         foreach ($b in $order) {
             $r = Invoke-Bench $b 'write' (@('--benchmarks=fillseq,fillrandom,overwrite', "--num=$(Scaled 500)",
                     '--threads=1',                     '--statistics=0', '--disable_wal=0') + $common + "--db=$(NewDb $b 'write')") 'fillseq', 'fillrandom', 'overwrite'
-                                foreach ($k in 'fillseq', 'fillrandom', 'overwrite') { Record "write-$k (ms/op)" $b $(if ($r) { $r[$k] / 1000 }) }
+                                foreach ($k in 'fillseq', 'fillrandom', 'overwrite') { Record "write-$k (ms/op)" $b $(if ($r) { $r[$k] / 1000 }); RecordTail "write-$k" $b $r $k }
         }
     }
 
@@ -183,6 +233,7 @@ for ($rep = 1; $rep -le $Reps; $rep++) {
             $r = Invoke-Bench $b 'readrandom' ($readCommon + @('--benchmarks=readrandom', "--reads=$(Scaled 300)",
                     '--threads=1', "--db=$($dbs[$b])")) 'readrandom'
             Record 'readrandom-cold (ms/op)' $b $(if ($r) { $r['readrandom'] / 1000 })
+            RecordTail 'readrandom-cold' $b $r 'readrandom'
         }
     }
 
@@ -196,6 +247,7 @@ for ($rep = 1; $rep -le $Reps; $rep++) {
                             '--seek_nexts=1000', "--reads=$(Scaled 50)", "--threads=$threads", '--adaptive_readahead=1',
                             "--async_io=$async", "--db=$($dbs[$b])")) 'seekrandom'
                     Record $name $b $(if ($r) { $r['seekrandom'] / 1000 })
+                    RecordTail $name $b $r 'seekrandom'
                 }
             }
         }
@@ -210,6 +262,7 @@ for ($rep = 1; $rep -le $Reps; $rep++) {
                         '--multiread_batched=1', '--batch_size=32', "--reads=$(Scaled 1000)", '--threads=1',
                         "--async_io=$async", "--db=$($dbs[$b])")) 'multireadrandom'
                 Record $name $b $(if ($r) { $r['multireadrandom'] / 1000 })
+                RecordTail $name $b $r 'multireadrandom'
             }
         }
     }
@@ -240,6 +293,36 @@ $rows = foreach ($name in $results.Keys) {
 Write-Host "`n=== Results (mean of reps; lower is better; negative % = candidate faster) ==="
 $rows | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
 $rows | Export-Csv (Join-Path $OutDir 'summary.csv') -NoTypeInformation
+
+$tailRows = foreach ($name in $tails.Keys) {
+    $s = Mean $tails[$name].baseline
+    $a = Mean $tails[$name].candidate
+    [pscustomobject]@{
+        Scenario = $name
+        baseline = if ($null -ne $s) { '{0:N2}' -f $s } else { 'n/a' }
+        candidate = if ($null -ne $a) { '{0:N2}' -f $a } else { 'n/a' }
+    }
+}
+if ($tailRows) {
+    Write-Host "`n=== Tail latency from db_bench histograms (mean of reps, ms; informational) ==="
+    $tailRows | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
+    $tailRows | Export-Csv (Join-Path $OutDir 'tail-latency.csv') -NoTypeInformation
+}
+
+# Everything needed to reproduce the run and to tell a loopback CPU number from an Azure network number. The Azure
+# credentials are deliberately absent: only the account/tenant-independent settings are recorded.
+[ordered]@{
+    kind = 'live-azure'
+    host = $hostInfo
+    executables = $exeInfo
+    parameters = [ordered]@{
+        num = $Num; reps = $Reps; quick = [bool]$Quick; scenarios = $Scenarios; valueSize = 1024
+        containerPrefix = $ContainerPrefix; compression = 'zlib'; cacheSizeBytes = 8388608
+        state = 'cold block cache (8 MiB) over a freshly loaded DB; each rep uses a new blob path'
+    }
+    runs = $runs
+    elapsedSeconds = [math]::Round($sw0.Elapsed.TotalSeconds, 1)
+} | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $OutDir 'run-metadata.json')
 Write-Host ("Total time {0:N0} min. Logs and summary.csv: {1}" -f $sw0.Elapsed.TotalMinutes, $OutDir)
 Write-Host "Test blobs remain in containers $ContainerPrefix-baseline and $ContainerPrefix-candidate; delete them when finished."
 

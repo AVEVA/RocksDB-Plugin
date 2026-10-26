@@ -284,12 +284,38 @@ each one receives; `auto` means the plugin name the wrapper registered.
   `bench`), which must
   already exist.
 - **Outputs** go to `-OutDir` (default `db_bench_compare_<timestamp>` under your temp directory): one log per db_bench
-  run plus `summary.csv`. The script never deletes them, and it scrubs the client secret from every log. Delete the
-  folder, and the test blobs left in the two containers, when you finish.
+  run, `summary.csv`, `tail-latency.csv` (p50/p99 from the db_bench histograms) and `run-metadata.json` (repository
+  revision and dirty flag, executable hashes, configuration, build tree compiler/triplet, vcpkg baseline, host, scenario
+  parameters, the exact arguments of every run; never credentials). The script never deletes them, and it scrubs the
+  client secret from every log. Delete the folder, and the test blobs left in the two containers, when you finish.
+- **Live runs are opt-in.** The script spends cloud resources, so it refuses to start without `-ConfirmLiveAzure`.
+  Use Release builds; a warning is printed for any other configuration. Pass `-BaselineRevision` /
+  `-CandidateRevision` when the executables were not built from this checkout's HEAD.
 
 ```powershell
-.\tools\db_bench\Compare-Backends.ps1 -BaselineExe <main db_bench.exe> -CandidateExe .\build\WindowsRelease\tools\db_bench\Release\db_bench.exe -Quick
+.\tools\db_bench\Compare-Backends.ps1 -BaselineExe <main db_bench.exe> -CandidateExe .\build\WindowsRelease\tools\db_bench\Release\db_bench.exe -Quick -ConfirmLiveAzure
 ```
+
+### Loopback CPU and allocation measurements — `Measure-Loopback.ps1`
+
+These need no Azure account and are **not** Azure network results; they isolate the client's own CPU and allocation
+cost with the server on an independent thread (allocation counters are thread-local, so server work is excluded):
+
+- `aveva-http-client-tests --gtest_filter=HttpClientAllocations.PublicClientPooledRequestWithIndependentServer`:
+  the public `HttpClient::SendAsync` (including its final completion post) over a warm pooled connection, 0 B and
+  16 KiB bodies. The older `SubmitAllocationsPerRequest` test stays as a coarse regression check of the private core.
+- `aveva-azure-client-e2e-benchmark`: `BlobClient::DownloadToAsync` ranged reads through the request pipeline, the real
+  `HttpClient` and TCP to a loopback page-blob server (4 KiB and 64 KiB reads, 1 and 8 reads in flight).
+
+```powershell
+cmake --preset WindowsRelease
+cmake --build build\WindowsRelease --config Release --target aveva-http-client-tests aveva-azure-client-e2e-benchmark
+.\tools\db_bench\Measure-Loopback.ps1 -Label before   # then rebuild at the other revision and run with -Label after
+```
+
+Each `BENCH` line reports allocations and bytes per request, server request and connection counts, throughput and
+p50/p99/max latency; `loopback-metadata.json` records the revision, hashes, build tree and host. Compare allocation
+counts across revisions (they are stable); treat loopback timings as noisy and use `-Repeat`.
 
 ## Notes
 

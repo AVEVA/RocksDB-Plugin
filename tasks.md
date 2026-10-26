@@ -500,7 +500,7 @@ candidates, and inherited issues. No implementation changes were made.
 
 ### R22 - Make performance evidence isolate the production client and end-to-end path
 
-- [ ] **P2 | Source-confirmed measurement gap**
+- [x] **P2 | Source-confirmed measurement gap**
 - **Locations:** `libs\HttpClient\tests\HttpClientAllocationTests.cpp:25-105`;
   `tools\db_bench\Compare-Backends.ps1`; relevant read/write test suites.
 - **Evidence:** The submit allocation test intentionally excludes network work.

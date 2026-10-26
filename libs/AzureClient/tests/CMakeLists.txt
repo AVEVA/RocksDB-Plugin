@@ -93,6 +93,19 @@ if(WIN32)
 endif()
 gtest_discover_tests(aveva-azure-client-public-api-tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 30 LABELS "${aveva_azure_client_unit_test_labels}")
 
+# End-to-end loopback allocation/latency measurement (R22): the production BlobClient over the real HttpClient and a
+# page-blob server on its own thread. It replaces operator new, so it is its own executable. Label `benchmark`;
+# loopback CPU evidence only, never Azure network results.
+add_executable(aveva-azure-client-e2e-benchmark EndToEndAllocationBenchmark.cpp)
+target_link_libraries(aveva-azure-client-e2e-benchmark PRIVATE aveva::azure-client aveva::http-client Boost::asio OpenSSL::Crypto GTest::gtest_main)
+if(MSVC)
+    target_compile_options(aveva-azure-client-e2e-benchmark PRIVATE /bigobj)
+endif()
+if(WIN32)
+    target_link_libraries(aveva-azure-client-e2e-benchmark PRIVATE Crypt32)
+endif()
+gtest_discover_tests(aveva-azure-client-e2e-benchmark DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 120 LABELS "benchmark;azure-client")
+
 # Engines driven by a multi-threaded executor (T30). Label `concurrency`; run with AVEVA_AZURE_CLIENT_ENABLE_TSAN=ON.
 add_executable(aveva-azure-client-concurrency-tests MultiThreadedExecutorTests.cpp)
 target_include_directories(aveva-azure-client-concurrency-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)

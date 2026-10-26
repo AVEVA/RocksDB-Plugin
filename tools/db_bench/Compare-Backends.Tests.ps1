@@ -20,7 +20,7 @@ BeforeAll {
         $env:AZURE_SERVICE_PRINCIPAL_ID = 'c'
         $env:AZURE_SERVICE_PRINCIPAL_SECRET = 'fake-secret-value'
         $output = & pwsh -NoProfile -File $script:Script -BaselineExe $Baseline -CandidateExe $Candidate -Account fake `
-            -Scenarios $Scenarios -Reps 1 -Quick -OutDir $Out 2>&1 | Out-String
+            -Scenarios $Scenarios -Reps 1 -Quick -ConfirmLiveAzure -OutDir $Out 2>&1 | Out-String
         [pscustomobject]@{
             ExitCode = $LASTEXITCODE
             Output   = $output
@@ -98,5 +98,25 @@ Describe 'Compare-Backends.ps1 result validation' {
         $r = Invoke-Compare $bad $bad "$script:Dir\out"
         $r.ExitCode | Should -Not -Be 0
         $r.Csv.Count | Should -Be 3
+    }
+
+    It 'refuses to run against live Azure without -ConfirmLiveAzure' {
+        $out = & pwsh -NoProfile -File $script:Script -BaselineExe $script:Good1 -CandidateExe $script:Good1 -Account fake `
+            -OutDir "$script:Dir\out" 2>&1 | Out-String
+        $LASTEXITCODE | Should -Not -Be 0
+        $out | Should -Match 'ConfirmLiveAzure'
+        Test-Path "$script:Dir\out" | Should -BeFalse
+    }
+
+    It 'records run metadata and tail latency without the client secret' {
+        $withTail = New-FakeBench $script:Dir 'tail' (@($script:Good[0], 'Percentiles: P50: 90.00 P75: 95.00 P99: 400.00 P99.9: 500.00') + $script:Good[1..2])
+        $r = Invoke-Compare $withTail $withTail "$script:Dir\out"
+        $r.ExitCode | Should -Be 0
+        $meta = Get-Content "$script:Dir\out\run-metadata.json" -Raw
+        ($meta | ConvertFrom-Json).kind | Should -Be 'live-azure'
+        ($meta | ConvertFrom-Json).executables.candidate.sha256 | Should -Match '^[0-9A-F]{64}$'
+        $meta | Should -Not -Match 'fake-secret-value'
+        $tail = @(Import-Csv "$script:Dir\out\tail-latency.csv")
+        ($tail | Where-Object Scenario -eq 'write-fillseq p99 (ms)').baseline | Should -Be '0.40'
     }
 }
