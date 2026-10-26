@@ -7,6 +7,7 @@
 #include "SweeperNotifier.hpp"
 #include <boost/asio/post.hpp>
 #include <boost/beast/core/flat_buffer.hpp>
+#include <boost/container_hash/hash.hpp>
 #include <boost/intrusive/list.hpp>
 #include <boost/unordered/unordered_node_map.hpp>
 #include <openssl/ssl.h>
@@ -51,8 +52,9 @@ template <typename Stream> struct ConnectionKey {
 /// </summary>
 template <typename Stream> struct ConnectionKeyHash {
     std::size_t operator()(const ConnectionKey<Stream>& key) const noexcept {
-        std::size_t seed = std::hash<std::string>{}(key.host);
-        seed ^= std::hash<std::string>{}(key.service) + 0x9e3779b9U + (seed << 6) + (seed >> 2);
+        std::size_t seed = 0;
+        boost::hash_combine(seed, key.host);
+        boost::hash_combine(seed, key.service);
         return seed;
     }
 };

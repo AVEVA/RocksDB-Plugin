@@ -4,6 +4,7 @@
 #pragma once
 
 #include "StreamTypes.hpp"
+#include <boost/container_hash/hash.hpp>
 
 #include <chrono>
 #include <cstddef>
@@ -282,9 +283,11 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
         using is_transparent = void;
 
         static std::size_t Combine(std::string_view host, std::string_view service, const void* scope) noexcept {
-            std::size_t seed = std::hash<std::string_view>{}(host);
-            seed ^= std::hash<std::string_view>{}(service) + 0x9e3779b9U + (seed << 6) + (seed >> 2);
-            seed ^= std::hash<const void*>{}(scope) + 0x9e3779b9U + (seed << 6) + (seed >> 2);
+            // Both key forms funnel through string_view so owning and view keys hash identically.
+            std::size_t seed = 0;
+            boost::hash_combine(seed, host);
+            boost::hash_combine(seed, service);
+            boost::hash_combine(seed, scope);
             return seed;
         }
         std::size_t operator()(const Key& key) const noexcept { return Combine(key.host, key.service, key.scope); }

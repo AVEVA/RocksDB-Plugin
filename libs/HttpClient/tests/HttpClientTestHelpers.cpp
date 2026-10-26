@@ -14,6 +14,7 @@
 #include <openssl/pem.h>
 #include <openssl/x509v3.h>
 
+#include <algorithm>
 #include <fstream>
 #include <memory>
 #include <random>
@@ -139,11 +140,8 @@ void ScriptedServer::Stop() {
 }
 
 int ScriptedServer::Requests(http::verb method) const {
-    int count = 0;
-    for (const auto& request : m_requests) {
-        count += request.method() == method ? 1 : 0;
-    }
-    return count;
+    return static_cast<int>(
+        std::ranges::count_if(m_requests, [method](const auto& request) { return request.method() == method; }));
 }
 
 void ScriptedServer::RecordFailure(const std::string& what, boost::system::error_code error) {
