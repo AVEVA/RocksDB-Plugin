@@ -126,45 +126,104 @@ TEST_F(BlobOperationsTests, BlockingFromTheIoContextThreadThrowsInsteadOfDeadloc
 }
 
 TEST_F(BlobOperationsTests, StopBridgeEmitsAStopRequestedWhileTheHandlerIsBeingInstalled) {
-    using AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations::Detail::StopBridge;
-    auto bridge = std::make_shared<StopBridge>();
+    using Bridge = BlobOperations::Detail::StopBridge<boost::asio::io_context::executor_type>;
+    auto bridge = std::make_shared<Bridge>(m_httpClient.get_executor());
     std::atomic<int> emitted{0};
     std::thread requester;
 
-    bridge->Install([&] {
-        requester = std::thread([&] { StopBridge::Request(bridge, m_httpClient.get_executor()); });
+    bridge->Install(bridge, [&] {
+        requester = std::thread([&] { Bridge::Request(bridge); });
         // The request is made while the handler is not installed yet; it must not be lost or race the install.
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         bridge->Slot().assign([&](boost::asio::cancellation_type_t) { ++emitted; });
         return 0;
     });
     requester.join();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (emitted.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    bridge->Retire();
 
     EXPECT_EQ(1, emitted.load());
 }
 
-TEST_F(BlobOperationsTests, StopBridgeEmitsAfterInstallationExactlyOnce) {
-    using AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations::Detail::StopBridge;
-    auto bridge = std::make_shared<StopBridge>();
-    std::promise<void> fired;
+TEST_F(BlobOperationsTests, StopBridgeEmitsAfterInstallationExactlyOnceOnTheExecutorThread) {
+    using Bridge = BlobOperations::Detail::StopBridge<boost::asio::io_context::executor_type>;
+    auto bridge = std::make_shared<Bridge>(m_httpClient.get_executor());
+    std::promise<std::thread::id> fired;
     std::atomic<int> emitted{0};
-    bridge->Install([&] {
+    bridge->Install(bridge, [&] {
         bridge->Slot().assign([&](boost::asio::cancellation_type_t) {
             if (emitted.fetch_add(1) == 0) {
-                fired.set_value();
+                fired.set_value(std::this_thread::get_id());
             }
         });
         return 0;
     });
 
-    std::thread first([&] { StopBridge::Request(bridge, m_httpClient.get_executor()); });
-    std::thread second([&] { StopBridge::Request(bridge, m_httpClient.get_executor()); });
+    const auto requesterId = std::this_thread::get_id();
+    std::thread first([&] { Bridge::Request(bridge); });
+    std::thread second([&] { Bridge::Request(bridge); });
     first.join();
     second.join();
 
-    ASSERT_EQ(std::future_status::ready, fired.get_future().wait_for(std::chrono::seconds(10)));
+    auto firedOn = fired.get_future();
+    ASSERT_EQ(std::future_status::ready, firedOn.wait_for(std::chrono::seconds(10)));
+    EXPECT_NE(requesterId, firedOn.get());
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     EXPECT_EQ(1, emitted.load());
+    bridge->Retire();
+}
+
+TEST_F(BlobOperationsTests, RetiredStopBridgeDoesNotEmitAndReleasesItsWait) {
+    using Bridge = BlobOperations::Detail::StopBridge<boost::asio::io_context::executor_type>;
+    auto bridge = std::make_shared<Bridge>(m_httpClient.get_executor());
+    std::atomic<int> emitted{0};
+    bridge->Install(bridge, [&] {
+        bridge->Slot().assign([&](boost::asio::cancellation_type_t) { ++emitted; });
+        return 0;
+    });
+    const std::weak_ptr<Bridge> weak = bridge;
+
+    bridge->Retire();
+    Bridge::Request(bridge);
+    bridge.reset();
+
+    // The wait that Install left outstanding owns the bridge until the executor completes it.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!weak.expired() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    EXPECT_TRUE(weak.expired());
+    EXPECT_EQ(0, emitted.load());
+}
+
+TEST_F(BlobOperationsTests, StopRequestCancelsAnAcceptedStalledCall) {
+    m_httpClient.EnqueueDeferredResponse(HttpResponse{200, MakeCanonicalSuccessHeaders({}), std::string()});
+    std::stop_source stop;
+    std::promise<void> finished;
+    std::thread caller([&] {
+        EXPECT_ANY_THROW((void)BlobOperations::GetInfo(*m_blob, stop.get_token()));
+        finished.set_value();
+    });
+    auto done = finished.get_future();
+    // The call is stalled on the deferred response until the stop request reaches it.
+    EXPECT_EQ(std::future_status::timeout, done.wait_for(std::chrono::milliseconds(200)));
+    stop.request_stop();
+    EXPECT_EQ(std::future_status::ready, done.wait_for(std::chrono::seconds(10)));
+    if (done.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+        EXPECT_TRUE(m_httpClient.CompleteNext());
+    }
+    caller.join();
+}
+
+TEST_F(BlobOperationsTests, AlreadyStoppedTokenCancelsWithoutStartingARequest) {
+    std::stop_source stop;
+    stop.request_stop();
+
+    EXPECT_THROW((void)BlobOperations::GetInfo(*m_blob, stop.get_token()), std::system_error);
+    EXPECT_TRUE(m_httpClient.NoRequestMade());
 }
 
 TEST_F(BlobOperationsTests, DownloadToBufferWithZeroLengthReturnsZeroWithoutRequest) {

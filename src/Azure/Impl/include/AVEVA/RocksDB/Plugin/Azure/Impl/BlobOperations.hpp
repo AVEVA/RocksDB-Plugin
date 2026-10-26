@@ -10,13 +10,15 @@
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 #include <AVEVA/AzureClient/BlockOn.hpp>
 
+#include <boost/asio/basic_waitable_timer.hpp>
 #include <boost/asio/cancellation_signal.hpp>
-#include <boost/asio/post.hpp>
+#include <boost/asio/error.hpp>
 #include <boost/asio/use_future.hpp>
+#include <boost/asio/wait_traits.hpp>
 #include <boost/scope/scope_exit.hpp>
 
 #include <algorithm>
-#include <cassert>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -53,44 +55,84 @@ namespace Detail {
 // Posting the emission to the client's executor does not achieve that: another thread running the same io_context
 // can emit while the handler is being installed. A stop that arrives before installation is remembered and emitted as
 // soon as the handler is in place, so it is not lost.
-class StopBridge {
+//
+// Request runs inside a std::stop_callback, where an escaping exception terminates the process, so it must not
+// allocate. The executor hop is therefore prepared by Install, before the I/O is accepted: a wait on a timer that
+// never expires is left outstanding on the executor, and Request only cancels it, which completes the wait there.
+// Whoever accepted the I/O must call Retire once the operation has completed, which completes the wait unemitted.
+template <class Executor> class StopBridge {
+    using Wake = boost::asio::basic_waitable_timer<std::chrono::steady_clock,
+                                                   boost::asio::wait_traits<std::chrono::steady_clock>, Executor>;
+
     std::mutex m_mutex;
     boost::asio::cancellation_signal m_signal;
+    // Guards only the timer, and is never held while initiating, so Retire can run from a completion that races
+    // with an initiation still holding m_mutex.
+    std::mutex m_wakeMutex;
+    Wake m_wake;
     bool m_installed = false;
     bool m_emitted = false;
     bool m_requested = false;
+    std::atomic<bool> m_retired = false;
 
     void EmitLocked() {
         m_emitted = true;
         m_signal.emit(boost::asio::cancellation_type::terminal);
     }
 
+    void ArmWake(const std::shared_ptr<StopBridge>& self) {
+        const std::lock_guard lock(m_wakeMutex);
+        m_wake.expires_at(std::chrono::steady_clock::time_point::max());
+        m_wake.async_wait([self](const boost::system::error_code& error) {
+            if (error != boost::asio::error::operation_aborted || self->m_retired.load(std::memory_order_acquire)) {
+                return;
+            }
+            const std::lock_guard lock(self->m_mutex);
+            self->m_signal.emit(boost::asio::cancellation_type::terminal);
+        });
+    }
+
+    // Cancelling an outstanding wait cannot fail on the supported platforms; it does not allocate.
+    void CancelWake() noexcept {
+        const std::lock_guard lock(m_wakeMutex);
+        m_wake.cancel();
+    }
+
   public:
+    explicit StopBridge(const Executor& executor) : m_wake(executor) {}
+
     [[nodiscard]] boost::asio::cancellation_slot Slot() noexcept { return m_signal.slot(); }
 
     // Runs `initiate`, which must install the handler synchronously, and returns its result. Emission is excluded
-    // for the duration, so it cannot observe a half-installed handler.
-    template <class Initiate> decltype(auto) Install(Initiate&& initiate) {
-        const std::lock_guard lock(m_mutex);
-        const auto settle = [this] {
-            m_installed = true;
-            if (m_requested && !m_emitted) {
-                EmitLocked();
+    // for the duration, so it cannot observe a half-installed handler. Throws, with nothing left outstanding, if
+    // the delivery resources cannot be prepared or `initiate` throws.
+    template <class Initiate> decltype(auto) Install(const std::shared_ptr<StopBridge>& self, Initiate&& initiate) {
+        ArmWake(self);
+        try {
+            const std::lock_guard lock(m_mutex);
+            const auto settle = [this] {
+                m_installed = true;
+                if (m_requested && !m_emitted) {
+                    EmitLocked();
+                }
+            };
+            if constexpr (std::is_void_v<std::invoke_result_t<Initiate>>) {
+                std::forward<Initiate>(initiate)();
+                settle();
+            } else {
+                auto result = std::forward<Initiate>(initiate)();
+                settle();
+                return result;
             }
-        };
-        if constexpr (std::is_void_v<std::invoke_result_t<Initiate>>) {
-            std::forward<Initiate>(initiate)();
-            settle();
-        } else {
-            auto result = std::forward<Initiate>(initiate)();
-            settle();
-            return result;
+        } catch (...) {
+            Retire();
+            throw;
         }
     }
 
-    // Called from the stopping thread. The emission itself runs on the client's executor so the handler never runs on
-    // the stopping thread.
-    template <class Executor> static void Request(const std::shared_ptr<StopBridge>& self, const Executor& executor) {
+    // Called from the stopping thread; allocation-free. The emission itself runs on the client's executor so the
+    // handler never runs on the stopping thread.
+    static void Request(const std::shared_ptr<StopBridge>& self) noexcept {
         {
             const std::lock_guard lock(self->m_mutex);
             self->m_requested = true;
@@ -99,10 +141,13 @@ class StopBridge {
             }
             self->m_emitted = true;
         }
-        boost::asio::post(executor, [self] {
-            const std::lock_guard lock(self->m_mutex);
-            self->m_signal.emit(boost::asio::cancellation_type::terminal);
-        });
+        self->CancelWake();
+    }
+
+    // The operation has completed: releases the outstanding wait without emitting.
+    void Retire() noexcept {
+        m_retired.store(true, std::memory_order_release);
+        CancelWake();
     }
 };
 
@@ -110,20 +155,19 @@ class StopBridge {
 // wins, so a transfer that finished before arming never registers, and a registration is never left behind.
 template <class Executor> class StopLink {
     struct Forwarder {
-        std::shared_ptr<StopBridge> Bridge;
-        Executor Exec;
-        void operator()() const { StopBridge::Request(Bridge, Exec); }
+        std::shared_ptr<StopBridge<Executor>> Bridge;
+        void operator()() const noexcept { StopBridge<Executor>::Request(Bridge); }
     };
     std::mutex m_mutex;
     std::unique_ptr<std::stop_callback<Forwarder>> m_registration;
     bool m_released = false;
 
   public:
-    void Arm(std::stop_token token, std::shared_ptr<StopBridge> bridge, Executor executor) {
+    void Arm(std::stop_token token, std::shared_ptr<StopBridge<Executor>> bridge) {
         const std::lock_guard lock(m_mutex);
         if (!m_released) {
-            m_registration = std::make_unique<std::stop_callback<Forwarder>>(
-                std::move(token), Forwarder{std::move(bridge), std::move(executor)});
+            m_registration =
+                std::make_unique<std::stop_callback<Forwarder>>(std::move(token), Forwarder{std::move(bridge)});
         }
     }
 
@@ -142,16 +186,17 @@ template <class Executor> class StopLink {
 template <class TBlob, class Start>
 auto CallStoppable(TBlob& client, std::stop_token stopToken, const char* stoppedMessage, Start&& start) {
     AzureClient::ThrowIfRunningOn(client.get_executor());
-    auto bridge = std::make_shared<StopBridge>();
+    using Bridge = StopBridge<decltype(client.get_executor())>;
+    auto bridge = std::make_shared<Bridge>(client.get_executor());
     auto requestOptions = client.GetDefaultRequestOptions();
     requestOptions.SetCancellationSlot(bridge->Slot());
-    const std::stop_callback onStop(stopToken,
-                                    [&client, bridge] { StopBridge::Request(bridge, client.get_executor()); });
+    const std::stop_callback onStop(stopToken, [bridge]() noexcept { Bridge::Request(bridge); });
     if (stopToken.stop_requested()) {
         throw std::system_error(std::make_error_code(std::errc::operation_canceled), stoppedMessage);
     }
-    auto pending =
-        bridge->Install([&] { return std::forward<Start>(start)(boost::asio::use_future, std::move(requestOptions)); });
+    auto pending = bridge->Install(
+        bridge, [&] { return std::forward<Start>(start)(boost::asio::use_future, std::move(requestOptions)); });
+    const auto retire = boost::scope::make_scope_exit([&bridge]() noexcept { bridge->Retire(); });
     return Unwrap(pending.get());
 }
 
@@ -726,7 +771,8 @@ void DownloadAsync(TBlob& client, int64_t blobOffset, int64_t readLength, std::s
     // on another thread) never waits on the bridge mutex that initiation holds. A stop requested before arming
     // fires on arming.
     using Link = Detail::StopLink<decltype(client.get_executor())>;
-    const auto bridge = stopToken.stop_possible() ? std::make_shared<Detail::StopBridge>() : nullptr;
+    using Bridge = Detail::StopBridge<decltype(client.get_executor())>;
+    const auto bridge = stopToken.stop_possible() ? std::make_shared<Bridge>(client.get_executor()) : nullptr;
     const auto link = bridge ? std::make_shared<Link>() : nullptr;
     if (bridge) {
         requestOptions.SetCancellationSlot(bridge->Slot());
@@ -734,9 +780,10 @@ void DownloadAsync(TBlob& client, int64_t blobOffset, int64_t readLength, std::s
     auto start = [&] {
         client.DownloadToAsync(
             destination, std::move(options),
-            [buffer = std::move(buffer), callback = std::move(callback), link](auto result) mutable {
+            [buffer = std::move(buffer), callback = std::move(callback), link, bridge](auto result) mutable {
                 if (link) {
                     link->Release();
+                    bridge->Retire();
                 }
                 std::exception_ptr error;
                 unsigned int status = 0;
@@ -757,8 +804,8 @@ void DownloadAsync(TBlob& client, int64_t blobOffset, int64_t readLength, std::s
             std::move(requestOptions));
     };
     if (bridge) {
-        bridge->Install(start);
-        link->Arm(std::move(stopToken), bridge, client.get_executor());
+        bridge->Install(bridge, start);
+        link->Arm(std::move(stopToken), bridge);
     } else {
         start();
     }
