@@ -59,11 +59,22 @@ struct Route {
         // session keys are all derived from them and must not split one origin into several.
         route.Scheme = route.Tls ? "https" : "http";
         route.Host = parsed->host_address();
-        if (parsed->host_type() == urls::host_type::name) {
+        if (parsed->host_type() == urls::host_type::ipv6) {
+            const bool bracketed = route.Host.starts_with('[');
+            route.Host = parsed->host_ipv6_address().to_string();
+            if (bracketed) {
+                route.Host = '[' + route.Host + ']';
+            }
+        } else if (parsed->host_type() == urls::host_type::ipv4) {
+            route.Host = parsed->host_ipv4_address().to_string();
+        } else if (parsed->host_type() == urls::host_type::name) {
             std::ranges::transform(route.Host, route.Host.begin(),
                                    [](const unsigned char c) { return gsl::narrow_cast<char>(std::tolower(c)); });
         }
-        route.Port = parsed->has_port() ? std::string(parsed->port()) : (route.Tls ? "443" : "80");
+        // Keys use the numeric port and the canonical IP text so ":80" and ":080", or two spellings of one IPv6
+        // address, share pool and limiter state. The Host header (Authority) keeps the caller's spelling.
+        route.Port = parsed->has_port() && !parsed->port().empty() ? std::to_string(parsed->port_number())
+                                                                   : (route.Tls ? "443" : "80");
         route.HostIsName = parsed->host_type() == urls::host_type::name;
         route.Target = std::string(parsed->encoded_target());
         // With an authority the path is empty or absolute, so an empty path only needs the root slash.

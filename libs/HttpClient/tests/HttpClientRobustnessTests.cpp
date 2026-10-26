@@ -1321,6 +1321,26 @@ TEST(HttpClientRobustness, RouteFoldsSchemeAndDnsHostCaseButKeepsTheTarget) {
     EXPECT_EQ(route.Target, "/Path?Q=1");
 }
 
+TEST(HttpClientRobustness, RouteCanonicalizesEquivalentPortsAndIpLiteralsButKeepsHostHeaderSpelling) {
+    const AVEVA::HttpRequestOptions options;
+    const auto padded = AVEVA::Private::Route::Of(MakeRequest("http://example.com:080/a"), options);
+    const auto plain = AVEVA::Private::Route::Of(MakeRequest("http://example.com:80/a"), options);
+    const auto implicit = AVEVA::Private::Route::Of(MakeRequest("http://example.com/a"), options);
+    const auto other = AVEVA::Private::Route::Of(MakeRequest("http://example.com:81/a"), options);
+    ASSERT_TRUE(padded.Sendable());
+    EXPECT_EQ(padded.Origin(), plain.Origin());
+    EXPECT_EQ(padded.Origin(), implicit.Origin());
+    EXPECT_NE(padded.Origin(), other.Origin());
+    EXPECT_EQ(padded.Authority, "example.com:080");
+
+    const auto longForm = AVEVA::Private::Route::Of(MakeRequest("http://[0:0:0:0:0:0:0:1]:0080/"), options);
+    const auto shortForm = AVEVA::Private::Route::Of(MakeRequest("http://[::1]:80/"), options);
+    ASSERT_TRUE(longForm.Sendable());
+    EXPECT_EQ(longForm.Origin(), shortForm.Origin());
+    EXPECT_EQ(longForm.Host, shortForm.Host);
+    EXPECT_EQ(longForm.Authority, "[0:0:0:0:0:0:0:1]:0080");
+}
+
 TEST(HttpClientRobustness, ConnectingToAClosedPortFailsWithConnectFailed) {
     asio::io_context context;
     auto client = AVEVA::HttpClient::Create(context);
