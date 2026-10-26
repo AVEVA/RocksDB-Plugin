@@ -24,6 +24,7 @@
 #include <future>
 #include <memory>
 #include <random>
+#include <stop_token>
 #include <string>
 #include <thread>
 #include <vector>
@@ -826,4 +827,54 @@ TEST(DownloadBufferPoolTests, OversizedBuffersAreNotRetained) {
     }
 
     EXPECT_EQ(0U, pool->PooledCount());
+}
+
+TEST_F(BlobOperationsTests, ArmingAStopLinkAfterAcceptanceCannotThrow) {
+    using Link = BlobOperations::Detail::StopLink<boost::asio::io_context::executor_type>;
+    using Bridge = BlobOperations::Detail::StopBridge<boost::asio::io_context::executor_type>;
+    static_assert(noexcept(std::declval<Link&>().Arm(std::stop_token{}, std::shared_ptr<Bridge>{})));
+    static_assert(noexcept(std::declval<Link&>().Release()));
+}
+
+TEST_F(BlobOperationsTests, DownloadAsyncStopAfterAcceptanceCancelsTheDeferredTransferExactlyOnce) {
+    m_httpClient.EnqueueDeferredResponse(
+        HttpResponse{206, MakeCanonicalSuccessHeaders({{"Content-Range", "bytes 0-7/8"}}), std::string(8, 'z')});
+    std::stop_source source;
+    std::atomic<int> completions{0};
+    std::promise<std::exception_ptr> done;
+    BlobOperations::DownloadAsync(
+        *m_blob, 0, 8, std::string(), std::chrono::milliseconds(0),
+        [&](std::exception_ptr error, unsigned int, std::string_view, const std::shared_ptr<const void>&) {
+            if (completions.fetch_add(1) == 0) {
+                done.set_value(error);
+            }
+        },
+        source.get_token());
+    ASSERT_TRUE(m_httpClient.WaitForRequest(1));
+
+    source.request_stop();
+
+    auto result = done.get_future();
+    ASSERT_EQ(std::future_status::ready, result.wait_for(std::chrono::seconds(10)));
+    EXPECT_TRUE(result.get() != nullptr);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_EQ(1, completions.load());
+}
+
+TEST_F(BlobOperationsTests, DownloadAsyncCompletingBeforeTheStopIsRequestedLeavesNoRegistration) {
+    m_httpClient.EnqueueResponse(
+        HttpResponse{206, MakeCanonicalSuccessHeaders({{"Content-Range", "bytes 0-7/8"}}), std::string(8, 'z')});
+    std::stop_source source;
+    std::promise<std::exception_ptr> done;
+    BlobOperations::DownloadAsync(
+        *m_blob, 0, 8, std::string(), std::chrono::milliseconds(0),
+        [&](std::exception_ptr error, unsigned int, std::string_view, const std::shared_ptr<const void>&) {
+            done.set_value(error);
+        },
+        source.get_token());
+    auto result = done.get_future();
+    ASSERT_EQ(std::future_status::ready, result.wait_for(std::chrono::seconds(10)));
+    EXPECT_TRUE(result.get() == nullptr);
+
+    EXPECT_NO_THROW(source.request_stop());
 }

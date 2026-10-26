@@ -159,25 +159,25 @@ template <class Executor> class StopLink {
         void operator()() const noexcept { StopBridge<Executor>::Request(Bridge); }
     };
     std::mutex m_mutex;
-    std::unique_ptr<std::stop_callback<Forwarder>> m_registration;
+    // Held inline so that arming, which happens after the I/O has been accepted, cannot fail to allocate.
+    std::optional<std::stop_callback<Forwarder>> m_registration;
     bool m_released = false;
 
   public:
-    void Arm(std::stop_token token, std::shared_ptr<StopBridge<Executor>> bridge) {
+    // Does not throw: moving a stop_token or shared_ptr and registering a stop_callback never allocate.
+    void Arm(std::stop_token token, std::shared_ptr<StopBridge<Executor>> bridge) noexcept {
         const std::lock_guard lock(m_mutex);
         if (!m_released) {
-            m_registration =
-                std::make_unique<std::stop_callback<Forwarder>>(std::move(token), Forwarder{std::move(bridge)});
+            m_registration.emplace(std::move(token), Forwarder{std::move(bridge)});
         }
     }
 
-    void Release() {
-        std::unique_ptr<std::stop_callback<Forwarder>> registration;
-        {
-            const std::lock_guard lock(m_mutex);
-            m_released = true;
-            registration = std::move(m_registration);
-        }
+    // Destroying the registration waits for a running Forwarder, which only takes the bridge mutex. Initiation no
+    // longer holds that by the time of Arm, and Release before Arm finds no registration, so holding m_mutex is safe.
+    void Release() noexcept {
+        const std::lock_guard lock(m_mutex);
+        m_released = true;
+        m_registration.reset();
     }
 };
 
