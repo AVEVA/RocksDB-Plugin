@@ -58,9 +58,7 @@ constexpr std::array<int, 128> CultureTableLevel0{
 
 [[nodiscard]] constexpr std::array<int, 128> MakeCultureTableLevel2() {
     std::array<int, 128> table{};
-    for (std::size_t index = 0x41; index <= 0x5a; ++index) {
-        table.at(index) = 0x12;
-    }
+    std::fill_n(table.begin() + 0x41, 0x5a - 0x41 + 1, 0x12);
     return table;
 }
 

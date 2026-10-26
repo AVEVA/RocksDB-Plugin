@@ -206,13 +206,13 @@ void ParseExtendedBlobProperties(Models::BlobProperties& properties, const BlobP
 }
 
 [[nodiscard]] std::optional<unsigned int> ParseMonth(std::string_view value) noexcept {
-    for (std::size_t index = 0; index < MonthNames.size(); ++index) {
-        if (IEquals(MonthNames.at(index), value)) {
-            return static_cast<unsigned int>(index + 1U);
-        }
+    const auto found =
+        std::ranges::find_if(MonthNames, [value](std::string_view name) { return IEquals(name, value); });
+    if (found == MonthNames.end()) {
+        return std::nullopt;
     }
 
-    return std::nullopt;
+    return static_cast<unsigned int>(found - MonthNames.begin()) + 1U;
 }
 
 constexpr unsigned int MaxHourOfDay = 23U;

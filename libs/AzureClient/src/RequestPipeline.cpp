@@ -105,17 +105,17 @@ namespace RetryDetail {
 
 void ResolveCopySourceAuthorization(HttpRequest& request, std::string_view bearerToken) {
     auto& headers = request.GetHeaders();
-    for (auto it = headers.begin(); it != headers.end(); ++it) {
-        if (!IEquals(it->GetName(), XMsCopySourceAuthorizationHeaderName) ||
-            it->GetValue() != CopySourceClientCredentialMarker) {
-            continue;
-        }
-        if (bearerToken.empty()) {
-            headers.erase(it);
-        } else {
-            it->SetValue(MakeBearerValue(bearerToken));
-        }
+    const auto it = std::ranges::find_if(headers, [](const HttpHeader& header) {
+        return IEquals(header.GetName(), XMsCopySourceAuthorizationHeaderName) &&
+               header.GetValue() == CopySourceClientCredentialMarker;
+    });
+    if (it == headers.end()) {
         return;
+    }
+    if (bearerToken.empty()) {
+        headers.erase(it);
+    } else {
+        it->SetValue(MakeBearerValue(bearerToken));
     }
 }
 

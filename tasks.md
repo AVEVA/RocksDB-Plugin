@@ -424,7 +424,7 @@ candidates, and inherited issues. No implementation changes were made.
 
 ### R18 - Replace straightforward hand-written searches/fills, not protocol state machines
 
-- [ ] **P3 | Source-confirmed standard-library opportunities**
+- [x] **P3 | Source-confirmed standard-library opportunities**
 - **Locations and specific candidates:**
   - `libs\AzureClient\src\BlobResponseParsers.cpp`, `ParseMonth`: use
     `std::ranges::find_if`, then derive the month index.

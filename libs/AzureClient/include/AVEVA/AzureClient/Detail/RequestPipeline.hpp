@@ -368,12 +368,12 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         }
         if (!m_dateHeaderScanned) {
             m_dateHeaderScanned = true;
-            for (std::size_t index = 0; index < headers.size(); ++index) {
-                if (IEquals(headers[index].GetName(), XMsDateHeaderName)) {
-                    m_dateHeaderIndex = index;
-                    headers[index].SetValue(now);
-                    return;
-                }
+            const auto found = std::ranges::find_if(
+                headers, [](const HttpHeader& header) { return IEquals(header.GetName(), XMsDateHeaderName); });
+            if (found != headers.end()) {
+                m_dateHeaderIndex = static_cast<std::size_t>(found - headers.begin());
+                found->SetValue(now);
+                return;
             }
         }
         request.AddHeader(HttpHeader{std::string{XMsDateHeaderName}, now});

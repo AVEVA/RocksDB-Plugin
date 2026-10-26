@@ -286,11 +286,7 @@ void BasicReadableFileImpl<TBlob>::PrefetchState::Drop(const std::vector<Prefetc
     Slots.erase(slot);
 }
 
-template <typename TBlob> void BasicReadableFileImpl<TBlob>::PrefetchState::DropAll() {
-    while (!Slots.empty()) {
-        Drop(Slots.begin());
-    }
-}
+template <typename TBlob> void BasicReadableFileImpl<TBlob>::PrefetchState::DropAll() { Slots.clear(); }
 
 template <typename TBlob> void BasicReadableFileImpl<TBlob>::ClearPrefetch() const {
     {
