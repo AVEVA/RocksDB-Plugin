@@ -484,8 +484,12 @@ TEST(HttpClientRobustness, QueuedRequestStartsWhileThePreviousHandlerIsStillRunn
     // A pooled connection would put the queued request on the blocked handler's strand.
     options.SetMaxIdleConnectionsPerHost(0);
     auto client = AVEVA::HttpClient::Create(context, options);
-    ScriptedServer server(context,
+    // ScriptedServer is not thread-safe, so it gets its own single-threaded context.
+    asio::io_context serverContext;
+    ScriptedServer server(serverContext,
                           [](int, const http::request<http::string_body>&) -> ServerAction { return {OkResponse}; });
+    auto serverGuard = asio::make_work_guard(serverContext);
+    std::thread serverThread([&] { serverContext.run(); });
 
     std::promise<void> secondDone;
     auto secondFuture = secondDone.get_future();
@@ -503,11 +507,13 @@ TEST(HttpClientRobustness, QueuedRequestStartsWhileThePreviousHandlerIsStillRunn
     client->SendAsync(MakeRequest(server.Url("/b")), AVEVA::HttpRequestOptions{},
                       [&](std::error_code, AVEVA::HttpResponse) {
                           secondDone.set_value();
-                          server.Stop();
+                          asio::post(serverContext, [&] { server.Stop(); });
                       });
     std::thread helper([&context] { context.run_for(std::chrono::seconds(8)); });
     context.run_for(std::chrono::seconds(8));
     helper.join();
+    serverGuard.reset();
+    serverThread.join();
 
     EXPECT_TRUE(startedWhileBlocked);
 }
@@ -634,11 +640,15 @@ TEST(HttpClientRobustness, CompletionRunsWhenTheHandlerExecutorHasNoOtherWork) {
     asio::io_context clientContext;
     asio::io_context handlerContext;
     auto client = AVEVA::HttpClient::Create(clientContext);
-    ScriptedServer server(clientContext, [](int, const http::request<http::string_body>&) -> ServerAction {
+    // ScriptedServer is not thread-safe, so it gets its own single-threaded context.
+    asio::io_context serverContext;
+    ScriptedServer server(serverContext, [](int, const http::request<http::string_body>&) -> ServerAction {
         ServerAction action{OkResponse};
         action.Delay = std::chrono::milliseconds(150);
         return action;
     });
+    auto serverGuard = asio::make_work_guard(serverContext);
+    std::thread serverThread([&] { serverContext.run(); });
 
     std::atomic_bool completed = false;
     std::error_code result;
@@ -647,13 +657,15 @@ TEST(HttpClientRobustness, CompletionRunsWhenTheHandlerExecutorHasNoOtherWork) {
         asio::bind_executor(handlerContext.get_executor(), [&](std::error_code error, AVEVA::HttpResponse) {
             result = error;
             completed = true;
-            server.Stop();
+            asio::post(serverContext, [&] { server.Stop(); });
+            serverGuard.reset();
         }));
 
     std::thread clientThread([&] { clientContext.run(); });
     // Without outstanding work on the handler's executor this would return immediately.
     handlerContext.run();
     clientThread.join();
+    serverThread.join();
 
     EXPECT_TRUE(completed);
     EXPECT_FALSE(result);
