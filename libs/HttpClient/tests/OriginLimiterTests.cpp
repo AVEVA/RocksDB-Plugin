@@ -226,6 +226,85 @@ TEST(OriginLimiterTests, ExpiryThrowingCompletionDoesNotStrandLaterDeadlines) {
 }
 
 namespace {
+// A steady_timer whose next async_wait calls can be made to throw, like a failed handler allocation.
+class FaultTimer : public boost::asio::steady_timer {
+  public:
+    using boost::asio::steady_timer::steady_timer;
+    static inline int FailNext = 0;
+
+    template <typename Handler> void async_wait(Handler&& handler) {
+        if (FailNext > 0) {
+            --FailNext;
+            throw std::bad_alloc();
+        }
+        boost::asio::steady_timer::async_wait(std::forward<Handler>(handler));
+    }
+};
+
+using FaultLimiter = AVEVA::Private::OriginLimiter<int, RecordingSink, FaultTimer>;
+
+// Queues waiter 1 running, 2 (earliest deadline) and 3 behind it.
+struct FaultFixture {
+    boost::asio::io_context Context;
+    std::shared_ptr<Recorder> Rec = std::make_shared<Recorder>();
+    std::shared_ptr<FaultLimiter> Limiter = std::make_shared<FaultLimiter>(1, RecordingSink{Rec});
+    std::uint64_t Ticket2 = 0;
+
+    FaultFixture() {
+        using namespace std::chrono_literals;
+        FaultTimer::FailNext = 0;
+        Limiter->EnableDeadlines(Context, std::make_error_code(std::errc::timed_out));
+        const auto now = FaultLimiter::Clock::now();
+        Limiter->Run("origin", Limiter->NextTicket(), 1, now + 1h);
+        Ticket2 = Limiter->NextTicket();
+        Limiter->Run("origin", Ticket2, 2, now + 50ms);
+        Limiter->Run("origin", Limiter->NextTicket(), 3, now + 150ms);
+    }
+    ~FaultFixture() { FaultTimer::FailNext = 0; }
+};
+} // namespace
+
+TEST(OriginLimiterTests, ReleaseHandsOffAndKeepsTimeoutsWhenRearmingFailsOnce) {
+    using namespace std::chrono_literals;
+    FaultFixture fixture;
+
+    FaultTimer::FailNext = 1;
+    EXPECT_NO_THROW(fixture.Limiter->Release("origin"));
+
+    EXPECT_EQ(fixture.Rec->Started, (std::vector<int>{1, 2}));
+    EXPECT_EQ(fixture.Limiter->TimerFailures(), 1U);
+    fixture.Context.run_for(1s);
+    EXPECT_EQ(fixture.Rec->Aborted, std::vector<int>{3});
+}
+
+TEST(OriginLimiterTests, CancelKeepsRemainingTimeoutsWhenRearmingFailsOnce) {
+    using namespace std::chrono_literals;
+    FaultFixture fixture;
+
+    FaultTimer::FailNext = 1;
+    EXPECT_NO_THROW(fixture.Limiter->Cancel("origin", fixture.Ticket2));
+
+    EXPECT_EQ(fixture.Rec->Aborted, std::vector<int>{2});
+    fixture.Context.run_for(1s);
+    EXPECT_EQ(fixture.Rec->Aborted, (std::vector<int>{2, 3}));
+}
+
+TEST(OriginLimiterTests, PersistentRearmFailureIsRetriedByTheNextLimiterActivity) {
+    using namespace std::chrono_literals;
+    FaultFixture fixture;
+
+    FaultTimer::FailNext = 2;
+    fixture.Limiter->Release("origin");
+    EXPECT_EQ(fixture.Rec->Started, (std::vector<int>{1, 2}));
+    EXPECT_EQ(fixture.Limiter->TimerFailures(), 2U);
+
+    fixture.Limiter->Run("other", fixture.Limiter->NextTicket(), 9);
+    fixture.Context.run_for(1s);
+    EXPECT_EQ(fixture.Rec->Aborted, std::vector<int>{3});
+    EXPECT_EQ(fixture.Rec->Started, (std::vector<int>{1, 2, 9}));
+}
+
+namespace {
 struct StressState {
     std::atomic<int> Active{0};
     std::atomic<int> MaxActive{0};

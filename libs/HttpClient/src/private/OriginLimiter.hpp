@@ -35,8 +35,10 @@ namespace AVEVA::Private {
 /// <typeparam name="Sink">Decides what happens to a request: <c>Start(Pending&amp;&amp;)</c> begins one that
 /// has been given a slot, and <c>Abort(Pending&amp;&amp;, std::error_code)</c> fails one that never got a
 /// slot. Copyable, and called outside the lock.</typeparam>
-template <typename Pending, typename Sink>
-class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending, Sink>> {
+/// <typeparam name="Timer">The deadline timer type; <c>steady_timer</c> unless a test substitutes one that can
+/// fail.</typeparam>
+template <typename Pending, typename Sink, typename Timer = boost::asio::steady_timer>
+class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending, Sink, Timer>> {
   public:
     using Clock = std::chrono::steady_clock;
 
@@ -84,6 +86,9 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
             lock.unlock();
             m_sink.Abort(std::move(pending), std::make_error_code(std::errc::operation_canceled));
             return;
+        }
+        if (m_rearmPending) {
+            RearmAfterCommitLocked();
         }
         auto& state = m_origins[origin];
         if (state.active < m_max) {
@@ -144,9 +149,11 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
                 return;
             }
             auto& front = it->second.waiters.front();
-            ForgetExpiryLocked(front.deadline, front.ticket);
             next.emplace(std::move(front.pending));
+            m_expiries.erase(ExpiryKey{front.deadline, front.ticket});
             it->second.waiters.pop_front();
+            // The hand-off is committed; a timer failure must not undo it.
+            RearmAfterCommitLocked();
         }
         m_sink.Start(std::move(*next));
     }
@@ -173,11 +180,20 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
             if (waiter == waiters.end() || waiter->ticket != ticket) {
                 return;
             }
-            ForgetExpiryLocked(waiter->deadline, waiter->ticket);
             aborted.emplace(std::move(waiter->pending));
+            m_expiries.erase(ExpiryKey{waiter->deadline, waiter->ticket});
             waiters.erase(waiter);
+            RearmAfterCommitLocked();
         }
         m_sink.Abort(std::move(*aborted), std::make_error_code(std::errc::operation_canceled));
+    }
+
+    /// <summary>
+    /// How many times scheduling the deadline timer has failed after a waiter had already left the queue.
+    /// </summary>
+    std::uint64_t TimerFailures() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_timerFailures;
     }
 
     /// <summary>
@@ -220,12 +236,21 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
     using ExpiryKey = std::pair<Clock::time_point, std::uint64_t>;
 
     /// <summary>
-    /// Drops a waiter that is leaving the queue from the deadline index and re-aims the timer.
+    /// Re-aims the timer after a waiter has already left the queue. The queue change is committed and the
+    /// caller must still complete its request, so a scheduling failure cannot be thrown from here. It is retried
+    /// once at once, then remembered, counted, and retried by the next Run, Release or Cancel.
     /// </summary>
-    void ForgetExpiryLocked(Clock::time_point deadline, std::uint64_t ticket) {
-        if (m_timer && m_expiries.erase(ExpiryKey{deadline, ticket}) != 0) {
-            ArmTimerLocked();
+    void RearmAfterCommitLocked() noexcept {
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            try {
+                ArmTimerLocked();
+                m_rearmPending = false;
+                return;
+            } catch (...) {
+                ++m_timerFailures;
+            }
         }
+        m_rearmPending = true;
     }
 
     /// <summary>
@@ -348,8 +373,10 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
     bool m_closed = false;
     std::atomic<std::uint64_t> m_nextTicket{0};
     std::unordered_map<std::string, OriginState> m_origins;
-    std::optional<boost::asio::steady_timer> m_timer;
+    std::optional<Timer> m_timer;
     std::error_code m_expiredError;
+    bool m_rearmPending = false;
+    std::uint64_t m_timerFailures = 0;
     Clock::time_point m_armedFor = Clock::time_point::max();
     std::map<ExpiryKey, std::string> m_expiries; // Queued requests by (deadline, ticket), with their origin.
 };
