@@ -835,6 +835,66 @@ TEST_F(AsyncReadTests, MultiRead_AdjacentAndNearbyRanges_AreFetchedWithOneDownlo
     EXPECT_EQ(Expected(600, 100), reqs[2].result.ToString());
 }
 
+// Prefetch completions run on the client executor, so a test must wait before relying on them.
+static void WaitForPrefetches(const FakeReadableFileImpl& impl, std::initializer_list<int64_t> offsets) {
+    for (const auto offset : offsets) {
+        while (impl.HasPendingPrefetch(offset, 1)) {
+            std::this_thread::yield();
+        }
+    }
+}
+
+TEST_F(AsyncReadTests, MultiRead_AdjacentRequestsCoveredBySeparatePrefetches_StartNoNewDownload) {
+    FillPattern(m_inlineEnv, 100000);
+    auto impl =
+        std::make_shared<FakeReadableFileImpl>("test.sst", m_inlineEnv.Runtime, m_inlineEnv.Client, nullptr, m_logger);
+    FakeReadableFile file{impl};
+    ASSERT_TRUE(file.Prefetch(0, 256, rocksdb::IOOptions{}, nullptr).ok());
+    ASSERT_TRUE(file.Prefetch(256, 256, rocksdb::IOOptions{}, nullptr).ok());
+    WaitForPrefetches(*impl, {0, 256});
+    ASSERT_EQ(2U, m_inlineEnv.Blob->Downloads.size());
+    std::vector<char> scratchA(100);
+    std::vector<char> scratchB(100);
+    std::vector<rocksdb::FSReadRequest> reqs(2);
+    SetRequest(reqs[0], 100, scratchA);
+    SetRequest(reqs[1], 256, scratchB);
+
+    ASSERT_TRUE(file.MultiRead(reqs.data(), reqs.size(), rocksdb::IOOptions{}, nullptr).ok());
+
+    EXPECT_EQ(2U, m_inlineEnv.Blob->Downloads.size());
+    EXPECT_TRUE(reqs[0].status.ok());
+    EXPECT_TRUE(reqs[1].status.ok());
+}
+
+TEST_F(AsyncReadTests, MultiRead_MixedPrefetchHitsAndMisses_OnlyMissesAreDownloaded) {
+    FillPattern(m_inlineEnv, 100000);
+    auto impl =
+        std::make_shared<FakeReadableFileImpl>("test.sst", m_inlineEnv.Runtime, m_inlineEnv.Client, nullptr, m_logger);
+    FakeReadableFile file{impl};
+    ASSERT_TRUE(file.Prefetch(0, 256, rocksdb::IOOptions{}, nullptr).ok());
+    WaitForPrefetches(*impl, {0});
+    ASSERT_EQ(1U, m_inlineEnv.Blob->Downloads.size());
+    std::vector<char> hit(100);
+    std::vector<char> missA(100);
+    std::vector<char> missB(100);
+    std::vector<char> empty(1);
+    std::vector<rocksdb::FSReadRequest> reqs(4);
+    SetRequest(reqs[0], 20000, missA);
+    SetRequest(reqs[1], 50, hit);
+    SetRequest(reqs[2], 20100, missB);
+    SetRequest(reqs[3], 7, empty);
+    reqs[3].len = 0;
+
+    ASSERT_TRUE(file.MultiRead(reqs.data(), reqs.size(), rocksdb::IOOptions{}, nullptr).ok());
+
+    EXPECT_EQ(2U, m_inlineEnv.Blob->Downloads.size()) << "one merged download for both misses, none for the hit";
+    EXPECT_EQ(Expected(50, 100), reqs[1].result.ToString());
+    EXPECT_EQ(Expected(20000, 100), reqs[0].result.ToString());
+    EXPECT_EQ(Expected(20100, 100), reqs[2].result.ToString());
+    EXPECT_TRUE(reqs[3].status.ok());
+    EXPECT_EQ(0U, reqs[3].result.size());
+}
+
 TEST_F(AsyncReadTests, MultiRead_OverlappingRanges_EachGetsItsOwnBytes) {
     FillPattern(m_inlineEnv, 100000);
     auto file = CreateFile(m_inlineEnv);

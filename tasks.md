@@ -255,7 +255,16 @@ candidates, and inherited issues. No implementation changes were made.
 
 ### R11 - Give prefetch-hit and trivial MultiRead batches a cheaper path
 
-- [ ] **P2 | Benchmark candidate**
+- [x] **P2 | Benchmark candidate**
+- **Done:** MultiRead now serves requests covered by one completed in-memory prefetch slot
+  before sorting/merging (file cache untouched), and returns before the signal/handle setup when
+  nothing is left to fetch. Measured by test: two adjacent requests each covered by a separate
+  completed prefetch went from 3 downloads (2 prefetches + 1 merged-range miss) to 2 (no new
+  network request); all-hit batches now allocate only `resolved`/`order` and no signal, groups,
+  handles or sort. Cost on misses: one uncontended mutex acquisition per request, negligible next
+  to a GET. No wall-clock microbenchmark was run; the gain is the avoided request. Tests:
+  `AsyncReadTests.MultiRead_AdjacentRequestsCoveredBySeparatePrefetches_*`,
+  `MultiRead_MixedPrefetchHitsAndMisses_*`. Pending prefetches are still handled by StartRead.
 - **Location:** `src\Azure\BasicReadableFile.ipp:207-285`.
 - **Evidence:** MultiRead allocates the resolved/order/group/active structures,
   sorts, and plans merged ranges before consulting completed prefetches through

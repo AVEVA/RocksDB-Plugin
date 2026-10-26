@@ -220,16 +220,30 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
         }
 
         // A request whose range overflows cannot be merged or read; it fails on its own like any per-request error.
+        // Requests already covered by a completed in-memory prefetch are served here, before merging: merging
+        // requests that were prefetched separately would turn those hits into one merged-range miss and a download.
+        // Only the in-memory prefetch is consulted; the file cache keeps its existing role in StartRead.
         std::vector<size_t> order;
         order.reserve(num_reqs);
         for (size_t i = 0; i < num_reqs; ++i) {
             if (Impl::RangeCheck::IsValid(reqs[i].offset, reqs[i].len)) {
+                if (reqs[i].len > 0) {
+                    if (const auto hit = m_file->TryReadFromCompletedPrefetch(
+                            static_cast<int64_t>(reqs[i].offset), static_cast<int64_t>(reqs[i].len), reqs[i].scratch)) {
+                        reqs[i].result = rocksdb::Slice(reqs[i].scratch, *hit);
+                        resolved[i] = 1;
+                        continue;
+                    }
+                }
                 order.push_back(i);
             } else {
                 reqs[i].status = rocksdb::IOStatus::InvalidArgument("MultiRead offset or size is out of range");
                 reqs[i].result = rocksdb::Slice();
                 resolved[i] = 1;
             }
+        }
+        if (order.empty()) {
+            return rocksdb::IOStatus::OK();
         }
         std::ranges::sort(order, [&](const size_t a, const size_t b) { return reqs[a].offset < reqs[b].offset; });
 
