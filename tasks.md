@@ -397,7 +397,17 @@ candidates, and inherited issues. No implementation changes were made.
 
 ### R17 - Avoid DNS-cache wholesale eviction at the capacity boundary
 
-- [ ] **P3 | Source-confirmed policy; benchmark before changing**
+- [x] **P3 | Source-confirmed policy; benchmark before changing**
+- **Result:** Measured a standalone model of 2M lookups, all entries live, cap 256
+  (lookups that missed = DNS requests): clear-all vs evict-one-entry. Uniform 300
+  origins: 44.2% vs 14.7% requests; 80% hot 200 + cold churn: 57.0% vs 43.1%;
+  5000 origins: 97.4% vs 94.9%. Memory is bounded at 256 in both. Evict-one costs
+  more CPU per miss at the cap (about 0.2-0.4 us for the expired sweep, under the
+  lock), negligible against a DNS lookup; an oldest-expiry scan gave identical
+  requests at higher cost, so one arbitrary live entry is evicted. Refresh now
+  replaces in place before any eviction. No per-hit mutation added. Tests:
+  `RefreshingAKeyInAFullCacheKeepsEveryOtherEntry`,
+  `ChurnBeyondTheCapEvictsOneEntryAtATimeAndStaysBounded`.
 - **Location:** `libs\HttpClient\src\private\DnsCache.hpp:120-135`, `Store`.
 - **Evidence:** At 256 entries, Store sweeps expired entries and then clears all
   remaining live entries if still full. Even refreshing an existing key can

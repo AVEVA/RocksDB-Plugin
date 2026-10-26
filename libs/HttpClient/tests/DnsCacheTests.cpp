@@ -360,3 +360,43 @@ TEST(DnsCacheTests, LookupsInDifferentScopesNeverJoinEachOther) {
     cache.Finish("host", "80", boost::asio::error::operation_aborted, {}, &firstScope);
     EXPECT_EQ(delivered, 1);
 }
+
+TEST(DnsCacheTests, RefreshingAKeyInAFullCacheKeepsEveryOtherEntry) {
+    boost::asio::io_context io;
+    const auto results = Loopback(io);
+    TestDnsCache cache;
+    FakeClock::Current = {};
+    for (std::size_t i = 0; i < TestDnsCache::MaxEntries; ++i) {
+        cache.Store("host" + std::to_string(i), "80", results);
+    }
+
+    cache.Store("host0", "80", results);
+
+    for (std::size_t i = 0; i < TestDnsCache::MaxEntries; ++i) {
+        EXPECT_TRUE(cache.Find("host" + std::to_string(i), "80")) << i;
+    }
+}
+
+TEST(DnsCacheTests, ChurnBeyondTheCapEvictsOneEntryAtATimeAndStaysBounded) {
+    boost::asio::io_context io;
+    const auto results = Loopback(io);
+    TestDnsCache cache;
+    FakeClock::Current = {};
+    constexpr std::size_t Origins = TestDnsCache::MaxEntries * 4;
+    for (std::size_t i = 0; i < Origins; ++i) {
+        cache.Store("host" + std::to_string(i), "80", results);
+    }
+
+    std::size_t live = 0;
+    for (std::size_t i = 0; i < Origins; ++i) {
+        live += cache.Find("host" + std::to_string(i), "80") ? 1 : 0;
+    }
+    // Never above the cap, and never emptied by hitting it.
+    EXPECT_EQ(live, TestDnsCache::MaxEntries);
+    EXPECT_TRUE(cache.Find("host" + std::to_string(Origins - 1), "80"));
+
+    // Expired entries are swept first, so live ones survive a store at the cap.
+    FakeClock::Current += std::chrono::seconds{6};
+    cache.Store("fresh", "80", results);
+    EXPECT_TRUE(cache.Find("fresh", "80"));
+}
