@@ -345,6 +345,11 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     bool AbortIfNeeded();
 
     /// <summary>
+    /// Fails the request because a shared lookup's outcome could not be delivered to it. Strand only.
+    /// </summary>
+    void FailLostResolve();
+
+    /// <summary>
     /// Runs one stage of the operation so that nothing internal (allocation, timer, resolver or socket
     /// initiation) can escape onto the host's io_context thread and strand the completion. An exception thrown
     /// before the request finished completes it with the classified error; one thrown after that came from the
@@ -411,6 +416,8 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     HttpRequestPhase m_phase = HttpRequestPhase::Queued; // Where a timeout is reported to have happened.
     std::shared_ptr<const DiagnosticsSink> m_diagnostics;
     std::atomic_bool m_cancellationRequested = false;
+    // Set from the DNS leader's thread when a shared lookup outcome could not be posted; only the strand acts on it.
+    std::atomic_bool m_resolveDeliveryFailed = false;
     std::chrono::steady_clock::time_point m_deadline; // Taken at submission, so queueing counts against the timeout.
 };
 

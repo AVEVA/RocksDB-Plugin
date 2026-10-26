@@ -63,7 +63,7 @@ candidates, and inherited issues. No implementation changes were made.
 
 ### R02 - Do not run DNS failure recovery on another request's strand
 
-- [ ] **P1 | Source-confirmed | New HTTP client**
+- [x] **P1 | Source-confirmed | New HTTP client**
 - **Location:** `libs\HttpClient\src\private\RequestOperation.cpp:224-241`,
   `OnSharedResolve`, together with `Contain` and `Finish`.
 - **Evidence:** If posting a shared DNS outcome fails, the catch calls

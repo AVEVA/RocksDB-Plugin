@@ -149,9 +149,19 @@ template <typename Stream> void RequestOperation<Stream>::ArmTimer() {
     auto self = this->shared_from_this();
     m_timer.async_wait([self](boost::system::error_code error) {
         if (!error) {
-            self->Fail(HttpClientError::TimedOut);
+            if (self->m_resolveDeliveryFailed.load()) {
+                self->FailLostResolve();
+            } else {
+                self->Fail(HttpClientError::TimedOut);
+            }
         }
     });
+}
+
+// The shared lookup finished but its outcome could not be posted to this strand (an allocation failure), so
+// the request cannot continue; reported the way any other allocation failure inside the operation is.
+template <typename Stream> void RequestOperation<Stream>::FailLostResolve() {
+    Finish(std::make_error_code(std::errc::not_enough_memory), {});
 }
 
 template <typename Stream> bool RequestOperation<Stream>::ConfigureTlsForHost() {
@@ -235,9 +245,10 @@ void RequestOperation<Stream>::OnSharedResolve(boost::system::error_code error, 
             });
         });
     } catch (...) {
-        // The outcome cannot reach the request's executor, and the leader's delivery loop must not be where it is
-        // lost. As a last resort the request is failed from here; the rethrow inside Contain reuses this exception.
-        self->Contain([] { throw; });
+        // The outcome cannot reach the request's executor. This runs on the leader's thread, where touching the
+        // request's timer, socket or completion would race its own strand, so only an atomic mark is left; the
+        // strand acts on it at its next callback, and at the latest when the request's deadline timer fires.
+        self->m_resolveDeliveryFailed.store(true);
     }
 }
 
@@ -299,6 +310,10 @@ template <typename Stream> bool RequestOperation<Stream>::AbortIfNeeded() {
     }
     if (IsCancellationRequested()) {
         Cancel();
+        return true;
+    }
+    if (m_resolveDeliveryFailed.load()) {
+        FailLostResolve();
         return true;
     }
     return false;

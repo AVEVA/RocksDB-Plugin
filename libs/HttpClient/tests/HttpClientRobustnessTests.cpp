@@ -7,8 +7,10 @@
 
 #include <gtest/gtest.h>
 
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/bind_executor.hpp>
 #include <boost/asio/cancellation_signal.hpp>
+#include <boost/asio/execution.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/post.hpp>
@@ -910,6 +912,64 @@ struct ThrowOnFailPost : AVEVA::Private::NoFault {
     static void OnStartLimited() noexcept {}
     static void OnFailPost() { throw std::bad_alloc(); }
 };
+
+// Runs handlers on the context like its own executor, except that one armed failure makes execute() throw, the way
+// a handler allocation failure would during a post.
+struct FailingPostExecutor {
+    asio::io_context* Context;
+    std::atomic<bool>* FailNext;
+
+    template <typename F> void execute(F&& function) const {
+        if (FailNext->exchange(false)) {
+            throw std::bad_alloc();
+        }
+        Context->get_executor().execute(std::forward<F>(function));
+    }
+    [[nodiscard]] asio::execution_context& query(asio::execution::context_t) const noexcept { return *Context; }
+    [[nodiscard]] FailingPostExecutor require(asio::execution::blocking_t::never_t) const { return *this; }
+    friend bool operator==(const FailingPostExecutor& a, const FailingPostExecutor& b) noexcept {
+        return a.Context == b.Context;
+    }
+};
+
+TEST(HttpClientRobustness, FailedSharedResolvePostLeavesRecoveryToTheWaitersStrand) {
+    using Operation = AVEVA::Private::RequestOperation<AVEVA::Private::PlainStream>;
+    asio::io_context context;
+    std::atomic<bool> failNext{false};
+    const asio::any_io_executor executor{FailingPostExecutor{&context, &failNext}};
+    const std::string host = "lost-resolve.invalid";
+
+    int completions = 0;
+    std::error_code result;
+    AVEVA::HttpRequestOptions options;
+    auto request = MakeRequest("http://" + host + "/");
+    auto route = AVEVA::Private::Route::Of(request, options);
+    auto operation =
+        std::make_shared<Operation>(nullptr, std::make_unique<AVEVA::Private::PlainStream>(executor),
+                                    AVEVA::Detail::MakeCompletion([&](std::error_code error, AVEVA::HttpResponse) {
+                                        ++completions;
+                                        result = error;
+                                    }),
+                                    options, nullptr, AVEVA::Private::BasicConnectionKey{host, "80"},
+                                    std::chrono::steady_clock::now() + std::chrono::milliseconds(300));
+    operation->Prepare(std::move(request), std::move(route));
+
+    // Stand in for the DNS leader so the operation joins its lookup instead of resolving.
+    const void* const scope = &asio::query(executor, asio::execution::context);
+    auto& dns = AVEVA::Private::DnsCache::Shared();
+    ASSERT_TRUE(
+        dns.JoinOrLead(host, "80", [] { return AVEVA::Private::ResolveWaiter(std::shared_ptr<Operation>{}); }, scope));
+    operation->Start();
+
+    failNext = true;
+    dns.Finish(host, "80", asio::error::host_not_found, {}, scope);
+
+    // Recovery must not run on the leader's thread: the request's own strand has not run yet.
+    EXPECT_EQ(completions, 0);
+    RunBounded(context);
+    EXPECT_EQ(completions, 1);
+    EXPECT_EQ(result, std::make_error_code(std::errc::not_enough_memory));
+}
 
 TEST(HttpClientRobustness, LimiterAbortWhoseFailurePostThrowsStillCompletesTheHandlerOnce) {
     asio::io_context context;
