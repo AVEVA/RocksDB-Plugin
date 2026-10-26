@@ -477,12 +477,13 @@ TEST(HttpClientRobustness, MaxConnectionsPerHostQueuesExtraRequestsAndReusesTheC
     EXPECT_EQ(server.Accepted(), 1);
 }
 
-TEST(HttpClientRobustness, QueuedRequestStartsWhileThePreviousHandlerIsStillRunning) {
+static void RunQueuedRequestWhileHandlerBlocks(bool pooled) {
     asio::io_context context;
     AVEVA::HttpClientOptions options;
     options.SetMaxConnectionsPerHost(1);
-    // A pooled connection would put the queued request on the blocked handler's strand.
-    options.SetMaxIdleConnectionsPerHost(0);
+    if (!pooled) {
+        options.SetMaxIdleConnectionsPerHost(0);
+    }
     auto client = AVEVA::HttpClient::Create(context, options);
     // ScriptedServer is not thread-safe, so it gets its own single-threaded context.
     asio::io_context serverContext;
@@ -516,6 +517,15 @@ TEST(HttpClientRobustness, QueuedRequestStartsWhileThePreviousHandlerIsStillRunn
     serverThread.join();
 
     EXPECT_TRUE(startedWhileBlocked);
+}
+
+TEST(HttpClientRobustness, QueuedRequestStartsWhileThePreviousHandlerIsStillRunning) {
+    RunQueuedRequestWhileHandlerBlocks(false);
+}
+
+// The pooled connection's strand must not be held by the blocked handler of the request that released it.
+TEST(HttpClientRobustness, QueuedRequestOnAPooledConnectionStartsWhileThePreviousHandlerIsStillRunning) {
+    RunQueuedRequestWhileHandlerBlocks(true);
 }
 
 TEST(HttpClientRobustness, TimeSpentQueuedForASlotCountsAgainstTheRequestTimeout) {

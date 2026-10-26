@@ -15,9 +15,9 @@
 #include <boost/asio/associated_executor.hpp>
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/bind_allocator.hpp>
-#include <boost/asio/dispatch.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/thread_pool.hpp>
 
 #include <gsl/pointers>
@@ -118,7 +118,9 @@ class HttpClient {
                            [executor, allocator, work = std::move(work), cancellationSlot, ownsSlot,
                             handler = std::forward<decltype(handler)>(handler)](std::error_code ec,
                                                                                 HttpResponse response) mutable {
-                               boost::asio::dispatch(
+                               // Posted, not dispatched: an inline handler would run on the connection's strand,
+                               // which a pooled connection hands to the next queued request.
+                               boost::asio::post(
                                    executor,
                                    boost::asio::bind_allocator(
                                        allocator, [handler = std::move(handler), ec, response = std::move(response),
