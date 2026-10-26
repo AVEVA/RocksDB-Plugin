@@ -35,7 +35,8 @@
 
 namespace AllocationFailure {
 extern thread_local int allocationsUntilFailure; // Defined in ConnectionPoolTests.cpp.
-}
+extern thread_local std::size_t failureMinimumSize;
+} // namespace AllocationFailure
 namespace {
 namespace asio = boost::asio;
 using HttpClientTests::RunBounded;
@@ -183,6 +184,9 @@ class TlsTestServer {
 
     void SetOnClose(std::function<void()> onClose) { m_onClose = std::move(onClose); }
 
+    // Runs when a request has been read, just before the response is written.
+    void SetOnRequest(std::function<void()> onRequest) { m_onRequest = std::move(onRequest); }
+
     void Stop() {
         boost::system::error_code ignored;
         m_acceptor.close(ignored);
@@ -244,6 +248,9 @@ class TlsTestServer {
                 }
                 session->Buffer.consume(bytes);
                 ++m_requests;
+                if (m_onRequest) {
+                    m_onRequest();
+                }
                 auto response = std::make_shared<std::string>(
                     m_after == AfterResponse::ShortBodyAbort
                         ? std::string{"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nok"}
@@ -276,6 +283,7 @@ class TlsTestServer {
     std::string m_serverName;
     std::string m_negotiatedVersion;
     std::function<void()> m_onClose;
+    std::function<void()> m_onRequest;
     std::vector<std::shared_ptr<Session>> m_sessions;
     std::vector<boost::system::error_code> m_closeObservations;
     int m_handshakes = 0;
@@ -543,40 +551,73 @@ TEST(HttpClientTls, TimeoutOfAStalledRawViewUploadCompletesOnceAndLetsTheCallerF
     EXPECT_EQ(observed, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
 }
 
+// The pool never declines a connection it could take (it evicts instead), so the only way to reach the TLS shutdown
+// setup with a reusable connection is a release that really fails. The sweep makes an allocation during that release
+// fail; the resulting ConnectionNotPooled diagnostic then arms the next allocation, which is the shutdown setup's
+// shared stream holder.
 TEST(HttpClientTls, CompletionRunsOnceWhenTheTlsShutdownSetupThrows) {
-    asio::io_context context;
-    TlsTestServer server(context, "IP:127.0.0.1", TlsTestServer::AfterResponse::KeepOpen);
-    AVEVA::HttpClientOptions options;
-    options.SetCaPem(server.CertificatePem());
-    options.SetMaxIdleConnectionsPerHost(1);
-    // The second connection is declined by the full pool; the diagnostic fires just before the shutdown setup,
-    // so the next allocation (the shared stream holder) fails.
-    options.SetDiagnosticsCallback([](const AVEVA::HttpDiagnostic& event) {
-        if (event.Kind == AVEVA::HttpDiagnosticKind::ConnectionNotPooled) {
-            AllocationFailure::allocationsUntilFailure = 0;
-        }
-    });
-    auto client = AVEVA::HttpClient::Create(context, options);
+    constexpr int maxSweep = 64;
+    bool reached = false;
+    for (int failAt = 0; failAt < maxSweep && !reached; ++failAt) {
+        asio::io_context context;
+        TlsTestServer server(context, "IP:127.0.0.1", TlsTestServer::AfterResponse::KeepOpen);
+        server.SetOnRequest([failAt] {
+            // Skips the small allocations of the standard library's noexcept bookkeeping.
+            AllocationFailure::failureMinimumSize = 64;
+            AllocationFailure::allocationsUntilFailure = failAt;
+        });
+        int releaseFailures = 0;
+        int shutdownSetupFailures = 0;
+        int injections = 0;
+        AVEVA::HttpClientOptions options;
+        options.SetCaPem(server.CertificatePem());
+        options.SetDiagnosticsCallback([&](const AVEVA::HttpDiagnostic& event) {
+            if (event.Kind == AVEVA::HttpDiagnosticKind::SwallowedException) {
+                if (event.Message.starts_with("Returning the connection to the pool failed")) {
+                    ++releaseFailures;
+                } else if (event.Message.starts_with("Releasing the connection failed")) {
+                    ++shutdownSetupFailures;
+                }
+            } else if (event.Kind == AVEVA::HttpDiagnosticKind::ConnectionNotPooled && releaseFailures == 1) {
+                ++injections;
+                AllocationFailure::failureMinimumSize = 0;
+                AllocationFailure::allocationsUntilFailure = 0;
+            }
+        });
+        auto client = AVEVA::HttpClient::Create(context, options);
 
-    int completions = 0;
-    int failures = 0;
-    for (int i = 0; i < 2; ++i) {
+        int completions = 0;
+        std::error_code observed;
         AVEVA::HttpRequest request;
         request.SetUrl("https://127.0.0.1:" + std::to_string(server.Port()) + "/");
         client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{},
                           [&](std::error_code error, AVEVA::HttpResponse) {
                               ++completions;
-                              failures += error ? 1 : 0;
-                              if (completions == 2) {
-                                  server.Stop();
-                              }
+                              observed = error;
+                              AllocationFailure::allocationsUntilFailure = -1;
+                              server.Stop();
                           });
-    }
-    RunBounded(context);
-    AllocationFailure::allocationsUntilFailure = -1;
+        // An armed failure can also land in the test server's own handlers; that run says nothing about the client.
+        bool escaped = false;
+        try {
+            RunBounded(context);
+        } catch (const std::bad_alloc&) {
+            escaped = true;
+        }
+        AllocationFailure::allocationsUntilFailure = -1;
+        AllocationFailure::failureMinimumSize = 0;
+        if (escaped) {
+            continue;
+        }
 
-    EXPECT_EQ(completions, 2);
-    EXPECT_EQ(failures, 0);
+        ASSERT_EQ(completions, 1) << "failAt=" << failAt;
+        if (injections == 1) {
+            reached = true;
+            EXPECT_EQ(shutdownSetupFailures, 1);
+            EXPECT_FALSE(observed) << observed.message();
+        }
+    }
+    EXPECT_TRUE(reached) << "no failed release reached the TLS shutdown setup";
 }
 
 bool failIndexAllocation = false;
