@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <new>
@@ -20,6 +21,33 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+// Lets a test make the Nth upcoming large allocation on this thread throw; -1 means disarmed. Token strings are
+// copied inside the standard library, so a global replacement is the only way to reach those copies. Only
+// allocations of at least LargeAllocationBytes are counted, which keeps small bookkeeping allocations out of it.
+namespace AllocationFailure {
+constexpr std::size_t LargeAllocationBytes = 2048;
+thread_local int largeAllocationsUntilFailure = -1;
+thread_local int largeAllocationsSeen = 0;
+} // namespace AllocationFailure
+
+void* operator new(std::size_t size) {
+    if (size >= AllocationFailure::LargeAllocationBytes) {
+        ++AllocationFailure::largeAllocationsSeen;
+        if (AllocationFailure::largeAllocationsUntilFailure >= 0 &&
+            AllocationFailure::largeAllocationsUntilFailure-- == 0) {
+            throw std::bad_alloc();
+        }
+    }
+    if (void* memory = std::malloc(size != 0 ? size : 1)) {
+        return memory;
+    }
+    throw std::bad_alloc();
+}
+
+void operator delete(void* memory) noexcept { std::free(memory); }
+
+void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
 
 namespace {
 using AVEVA::AzureClient::AccessToken;
@@ -671,6 +699,79 @@ TEST(TokenCredentialTests, CachingTokenCredential_ThrowingFirstRecipientDoesNotS
 
 TEST(TokenCredentialTests, CachingTokenCredential_ThrowingMiddleRecipientDoesNotStrandOthersOnError) {
     ExpectFanOutSurvivesThrowingRecipient(2U, std::make_error_code(std::errc::connection_reset));
+}
+
+namespace {
+struct FanOutOutcome {
+    std::vector<int> Invocations;
+    std::vector<std::error_code> Errors;
+    std::vector<std::size_t> TokenSizes;
+    int LargeAllocationsDuringCompletion = 0;
+};
+
+// Three coalesced callers share one deferred inner completion carrying a long token. The `failingAllocation`-th
+// large allocation made while that completion is delivered throws (-1: none), then a later acquisition runs.
+FanOutOutcome RunFanOutWithFailingTokenCopy(int failingAllocation) {
+    constexpr std::size_t TokenLength = 4096;
+    constexpr std::size_t WaiterCount = 3;
+    auto inner = std::make_shared<ScriptedTokenCredential>();
+    inner->EnqueueDeferred({}, MakeToken(std::string(TokenLength, 'x'), std::chrono::hours(1)));
+    inner->EnqueueImmediate({}, MakeToken(std::string(TokenLength, 'y'), std::chrono::hours(1)));
+    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+
+    FanOutOutcome outcome;
+    outcome.Invocations.assign(WaiterCount, 0);
+    outcome.Errors.assign(WaiterCount, {});
+    outcome.TokenSizes.assign(WaiterCount, 0);
+    for (std::size_t i = 0; i < WaiterCount; ++i) {
+        credential->GetTokenAsync({"scope-a"}, [&, i](std::error_code error, AccessToken token) {
+            ++outcome.Invocations.at(i);
+            outcome.Errors.at(i) = error;
+            outcome.TokenSizes.at(i) = token.Token.size();
+        });
+    }
+
+    AllocationFailure::largeAllocationsSeen = 0;
+    AllocationFailure::largeAllocationsUntilFailure = failingAllocation;
+    try {
+        static_cast<void>(inner->CompleteNext());
+    } catch (...) {
+        // The outcome below is what matters; a surfaced exception must not strand any caller.
+    }
+    AllocationFailure::largeAllocationsUntilFailure = -1;
+    outcome.LargeAllocationsDuringCompletion = AllocationFailure::largeAllocationsSeen;
+
+    std::size_t laterSize = 0;
+    std::error_code laterError = std::make_error_code(std::errc::io_error);
+    credential->GetTokenAsync({"scope-a"}, [&](std::error_code error, AccessToken token) {
+        laterError = error;
+        laterSize = token.Token.size();
+    });
+    EXPECT_FALSE(laterError);
+    EXPECT_EQ(laterSize, TokenLength);
+    return outcome;
+}
+} // namespace
+
+TEST(TokenCredentialTests, CachingTokenCredential_FailedCachePublicationStillDeliversToAllWaiters) {
+    // Allocation 0 is the copy that publishes the token into the cache.
+    const auto outcome = RunFanOutWithFailingTokenCopy(0);
+    EXPECT_EQ(outcome.Invocations, std::vector<int>(3, 1));
+    for (std::size_t i = 0; i < 3; ++i) {
+        EXPECT_FALSE(outcome.Errors.at(i)) << i;
+        EXPECT_EQ(outcome.TokenSizes.at(i), 4096U) << i;
+    }
+}
+
+TEST(TokenCredentialTests, CachingTokenCredential_FailedRecipientCopyFailsOnlyThatRecipient) {
+    // Allocation 1 is the copy handed to the first recipient, 2 the copy for the middle one.
+    const auto outcome = RunFanOutWithFailingTokenCopy(2);
+    EXPECT_EQ(outcome.Invocations, std::vector<int>(3, 1));
+    EXPECT_FALSE(outcome.Errors.at(0));
+    EXPECT_EQ(outcome.Errors.at(1), std::make_error_code(std::errc::not_enough_memory));
+    EXPECT_FALSE(outcome.Errors.at(2));
+    EXPECT_EQ(outcome.TokenSizes.at(0), 4096U);
+    EXPECT_EQ(outcome.TokenSizes.at(2), 4096U);
 }
 
 TEST(TokenCredentialTests, CachingTokenCredential_CompletesOutstandingRequestAfterDestruction) {

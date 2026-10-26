@@ -109,7 +109,7 @@ candidates, and inherited issues. No implementation changes were made.
 
 ### R04 - Include token copies and cache publication in fan-out failure handling
 
-- [ ] **P2 | Source-confirmed | New credential cache**
+- [x] **P2 | Source-confirmed | New credential cache**
 - **Location:** `libs\AzureClient\include\AVEVA\AzureClient\TokenCredential.hpp:212-243,340-363`.
 - **Evidence:** `CompleteAll` constructs `AccessToken{token}` as an argument
   *outside* `deliver`'s try block. A token-string allocation failure abandons the

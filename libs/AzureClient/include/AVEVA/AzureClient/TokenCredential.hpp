@@ -220,9 +220,9 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         // With no completion executor the handlers run inline. A throwing recipient must not strand the ones
         // behind it, so every recipient is invoked and the first exception is rethrown afterwards.
         std::exception_ptr firstFailure;
-        const auto deliver = [&](Waiter&& pending, AccessToken&& value) {
+        const auto deliver = [&](Waiter&& pending, std::error_code outcome, AccessToken&& value) {
             try {
-                Private::CompleteOnExecutorIfSet(executor, std::move(pending), error, std::move(value));
+                Private::CompleteOnExecutorIfSet(executor, std::move(pending), outcome, std::move(value));
             } catch (...) {
                 if (!firstFailure) {
                     firstFailure = std::current_exception();
@@ -233,9 +233,20 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         Waiter last = std::move(completions.back());
         completions.pop_back();
         for (auto& pending : completions) {
-            deliver(std::move(pending), AccessToken{token});
+            // The copy can throw while `pending` is still owned here, so that recipient is failed instead of
+            // being dropped, and the remaining recipients are still served.
+            std::optional<AccessToken> copy;
+            try {
+                copy.emplace(token);
+            } catch (...) {
+            }
+            if (copy.has_value()) {
+                deliver(std::move(pending), error, std::move(*copy));
+            } else {
+                deliver(std::move(pending), std::make_error_code(std::errc::not_enough_memory), AccessToken{});
+            }
         }
-        deliver(std::move(last), std::move(token));
+        deliver(std::move(last), error, std::move(token));
         if (firstFailure) {
             std::rethrow_exception(firstFailure);
         }
@@ -344,21 +355,30 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
                                 const std::shared_ptr<RefreshState>& refreshState,
                                 const std::vector<std::string>& scopes) {
         const auto now = m_clock();
-        {
-            std::scoped_lock const lock(m_mutex);
+        // The copies are made before taking the lock and published by (noexcept) moves, so a failed copy leaves
+        // the cache untouched. Publishing is an optimisation: the waiters below must get their outcome regardless.
+        try {
             if (!error) {
-                m_cachedScopes = scopes;
-                m_cachedToken = token;
+                auto cachedScopes = scopes;
+                auto cachedToken = token;
+                std::scoped_lock const lock(m_mutex);
+                m_cachedScopes = std::move(cachedScopes);
+                m_cachedToken = std::move(cachedToken);
                 m_hasToken = true;
                 m_nextRefreshRetryAfter.reset();
                 m_failureRetryAfter.reset();
-            } else if (m_hasToken && m_cachedScopes == scopes && m_cachedToken.ExpiresOn > now) {
-                m_nextRefreshRetryAfter = now + DefaultTokenCredentialFailedRefreshBackoff;
             } else {
-                m_failureRetryAfter = now + DefaultTokenCredentialNegativeCacheWindow;
-                m_lastFailure = error;
-                m_failedScopes = scopes;
+                auto failedScopes = scopes;
+                std::scoped_lock const lock(m_mutex);
+                if (m_hasToken && m_cachedScopes == scopes && m_cachedToken.ExpiresOn > now) {
+                    m_nextRefreshRetryAfter = now + DefaultTokenCredentialFailedRefreshBackoff;
+                } else {
+                    m_failureRetryAfter = now + DefaultTokenCredentialNegativeCacheWindow;
+                    m_lastFailure = error;
+                    m_failedScopes = std::move(failedScopes);
+                }
             }
+        } catch (...) {
         }
 
         std::vector<Waiter> completions = DrainAndReset(refreshState);
