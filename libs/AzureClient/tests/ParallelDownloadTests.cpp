@@ -1250,8 +1250,9 @@ class FlakyHttpClient {
 };
 
 // Runs a one-chunk file download over an existing destination with the given post failures armed, and checks what
-// every such failure must leave behind.
-void ExpectFaultedFileDownloadFailsCleanly(int failWriterPost, int failWriterThreadPost) {
+// every such failure must leave behind: one completion and no partial file, with the destination either replaced
+// (xpectDownloaded, for a failure after the download succeeded) or untouched.
+void ExpectFaultedFileDownloadCompletesOnce(int failWriterPost, int failWriterThreadPost, bool expectDownloaded) {
     using AVEVA::AzureClient::NoTokenCredential;
     using AVEVA::AzureClient::Private::BasicBlobTarget;
 
@@ -1287,9 +1288,13 @@ void ExpectFaultedFileDownloadFailsCleanly(int failWriterPost, int failWriterThr
 
     ASSERT_EQ(callbackCount, 1);
     ASSERT_TRUE(result.has_value());
-    ASSERT_FALSE(result->has_value());
-    EXPECT_EQ(ReadFile(out.Path), "old");
+    ASSERT_EQ(result->has_value(), expectDownloaded);
+    EXPECT_EQ(ReadFile(out.Path) == "old", !expectDownloaded);
     EXPECT_FALSE(HasPartialFiles(out.Path));
+}
+
+void ExpectFaultedFileDownloadFailsCleanly(int failWriterPost, int failWriterThreadPost) {
+    ExpectFaultedFileDownloadCompletesOnce(failWriterPost, failWriterThreadPost, false);
 }
 } // namespace
 
@@ -1303,4 +1308,9 @@ TEST(T114_DownloadWriterHandoffTests, FailureOfTheFileStartHandoffFailsTheDownlo
 
 TEST(T114_DownloadWriterHandoffTests, FailureToScheduleFinalizationFailsTheDownloadOnceAndCleansUp) {
     ExpectFaultedFileDownloadFailsCleanly(3, 0);
+}
+
+// The final hand-off back to the caller's executor is the last place a failed post used to lose the completion.
+TEST(T114_DownloadWriterHandoffTests, FailureOfTheFinalCompletionPostStillDeliversTheResultOnce) {
+    ExpectFaultedFileDownloadCompletesOnce(0, 3, true);
 }

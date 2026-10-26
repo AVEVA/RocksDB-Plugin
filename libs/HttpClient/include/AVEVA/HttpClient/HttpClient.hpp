@@ -22,9 +22,71 @@
 
 #include <gsl/pointers>
 
+#include <atomic>
 #include <memory>
 #include <system_error>
+#include <type_traits>
 #include <utility>
+
+namespace AVEVA::Detail {
+/// <summary>
+/// Owns a request's handler, work guard and outcome until the handler has run, so that a failure to schedule the
+/// final delivery cannot take the handler down with the discarded task.
+/// </summary>
+template <class Handler, class Work, class Slot> class FinalDelivery {
+  public:
+    template <class H>
+    FinalDelivery(Work work, Slot slot, bool ownsSlot, H&& handler)
+        : m_handler(std::forward<H>(handler)), m_work(std::move(work)), m_slot(slot), m_ownsSlot(ownsSlot) {}
+
+    void SetOutcome(std::error_code error, HttpResponse response) {
+        m_error = error;
+        m_response = std::move(response);
+    }
+
+    /// <summary>
+    /// Runs the handler on the thread that calls it, once; later calls do nothing.
+    /// </summary>
+    void Deliver() {
+        if (m_delivered.exchange(true, std::memory_order_acq_rel)) {
+            return;
+        }
+        // Cleared here, on the handler's executor, so that it is serialized with emissions from the caller;
+        // clearing on the transport thread would race.
+        if (m_ownsSlot) {
+            m_slot.clear();
+        }
+        std::move(m_handler)(m_error, std::move(m_response));
+    }
+
+    /// <summary>
+    /// As <c>Deliver</c>, for the last resort of an executor that cannot accept work: an exception from the
+    /// handler must not unwind into the transport's completion path.
+    /// </summary>
+    void DeliverInline() noexcept {
+        try {
+            Deliver();
+        } catch (...) {
+        }
+    }
+
+  private:
+    Handler m_handler;
+    Work m_work;
+    Slot m_slot;
+    bool m_ownsSlot;
+    std::error_code m_error;
+    HttpResponse m_response;
+    std::atomic<bool> m_delivered{false};
+};
+
+template <class Allocator, class Work, class Slot, class Handler>
+auto MakeFinalDelivery(const Allocator& allocator, Work&& work, Slot slot, bool ownsSlot, Handler&& handler) {
+    using Delivery = FinalDelivery<std::decay_t<Handler>, std::decay_t<Work>, Slot>;
+    return std::allocate_shared<Delivery>(allocator, std::forward<Work>(work), slot, ownsSlot,
+                                          std::forward<Handler>(handler));
+}
+} // namespace AVEVA::Detail
 
 namespace AVEVA {
 /// <summary>
@@ -90,7 +152,9 @@ class HttpClient {
     /// once, later, with <c>std::errc::not_enough_memory</c> for <c>std::bad_alloc</c> and
     /// <c>HttpClientError::InvalidRequest</c> for rejected input, and <c>std::errc::state_not_recoverable</c> for
     /// anything else. Only building the completion handler itself (the
-    /// token's allocation) can still throw <c>std::bad_alloc</c> out of this call.
+    /// token's allocation) can still throw <c>std::bad_alloc</c> out of this call. Once initiated, the handler is
+    /// delivered through a post to its executor; if that post cannot be scheduled (allocation failure) the handler
+    /// runs once on the completing thread instead of being dropped.
     /// </summary>
     /// <param name="request">The request to send.</param>
     /// <param name="options">The per-request settings to apply.</param>
@@ -115,23 +179,23 @@ class HttpClient {
 
                 Submit(std::move(req), std::move(opts),
                        Detail::MakeCompletion(
-                           [executor, allocator, work = std::move(work), cancellationSlot, ownsSlot,
-                            handler = std::forward<decltype(handler)>(handler)](std::error_code ec,
-                                                                                HttpResponse response) mutable {
+                           [executor, allocator,
+                            state = Detail::MakeFinalDelivery(allocator, std::move(work), cancellationSlot, ownsSlot,
+                                                              std::forward<decltype(handler)>(handler))](
+                               std::error_code ec, HttpResponse response) mutable {
                                // Posted, not dispatched: an inline handler would run on the connection's strand,
-                               // which a pooled connection hands to the next queued request.
-                               boost::asio::post(
-                                   executor,
-                                   boost::asio::bind_allocator(
-                                       allocator, [handler = std::move(handler), ec, response = std::move(response),
-                                                   work = std::move(work), cancellationSlot, ownsSlot]() mutable {
-                                           // Cleared here, on the handler's executor, so that it is serialized with
-                                           // emissions from the caller; clearing on the transport thread would race.
-                                           if (ownsSlot) {
-                                               cancellationSlot.clear();
-                                           }
-                                           std::move(handler)(ec, std::move(response));
-                                       }));
+                               // which a pooled connection hands to the next queued request. The handler stays in
+                               // `state` rather than in the posted task, so a post that cannot be scheduled does
+                               // not take it down with the discarded task.
+                               state->SetOutcome(ec, std::move(response));
+                               try {
+                                   boost::asio::post(executor, boost::asio::bind_allocator(
+                                                                   allocator, [state]() { state->Deliver(); }));
+                               } catch (...) {
+                                   // The result is the caller's even when its executor cannot accept work, so
+                                   // the handler runs here, once, instead of never.
+                                   state->DeliverInline();
+                               }
                            },
                            allocator));
             },

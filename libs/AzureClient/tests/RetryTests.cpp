@@ -28,12 +28,35 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <functional>
+#include <future>
 #include <limits>
+#include <new>
 #include <optional>
 #include <system_error>
 #include <thread>
 #include <utility>
+
+// Lets a test make the Nth upcoming allocation on this thread throw; -1 means disarmed. The retry runner's queue
+// allocates inside the standard library, so a global replacement is the only way to reach it.
+namespace AllocationFailure {
+thread_local int allocationsUntilFailure = -1;
+} // namespace AllocationFailure
+
+void* operator new(std::size_t size) {
+    if (AllocationFailure::allocationsUntilFailure >= 0 && AllocationFailure::allocationsUntilFailure-- == 0) {
+        throw std::bad_alloc();
+    }
+    if (void* memory = std::malloc(size != 0 ? size : 1)) {
+        return memory;
+    }
+    throw std::bad_alloc();
+}
+
+void operator delete(void* memory) noexcept { std::free(memory); }
+
+void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
 
 namespace AVEVA::AzureClient::Tests {
 using AVEVA::HttpResponse;
@@ -818,6 +841,51 @@ TEST(RetryTests, CancellationFromAnotherThreadWhileRetryTimerIsPending) {
     ASSERT_FALSE(ValueOrFail(observed).has_value());
     EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::operation_canceled));
     EXPECT_EQ(httpClient.RequestCount(), 1U);
+}
+
+TEST(RetryTests, CancellationWhoseQueueAdmissionFailsStillCompletesTheRequestOnceWithTheFailure) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
+    BlobClient client{httpClient, MakeRetryOptions(0)};
+
+    boost::asio::cancellation_signal signal;
+    std::promise<void> entered;
+    std::promise<void> release;
+    // Holds the runner busy inside its first dispatch, so the cancellation below is queued behind it.
+    httpClient.SetResponder(
+        [&,
+         once = false](const FakeHttpClient::RequestRecord&) mutable -> std::optional<FakeHttpClient::ScriptedResult> {
+            if (!once) {
+                once = true;
+                entered.set_value();
+                release.get_future().wait();
+            }
+            return std::nullopt;
+        });
+
+    std::thread canceller([&] {
+        entered.get_future().wait();
+        AllocationFailure::allocationsUntilFailure = 0;
+        try {
+            signal.emit(boost::asio::cancellation_type::terminal);
+        } catch (const std::bad_alloc&) {
+        }
+        AllocationFailure::allocationsUntilFailure = -1;
+        release.set_value();
+    });
+
+    int completions = 0;
+    std::optional<DeleteResult> observed;
+    client.DeleteAsync(boost::asio::bind_cancellation_slot(signal.slot(), [&](DeleteResult result) {
+        ++completions;
+        observed = std::move(result);
+    }));
+    canceller.join();
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}));
+    EXPECT_EQ(completions, 1);
+    ASSERT_FALSE(ValueOrFail(observed).has_value());
+    EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::not_enough_memory));
 }
 
 TEST(RetryTests, CancellationOfInFlightAttemptIsNotRetried) {

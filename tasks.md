@@ -82,7 +82,7 @@ candidates, and inherited issues. No implementation changes were made.
 
 ### R03 - Close the remaining allocation-failure holes in async event delivery
 
-- [ ] **P1 | Source-confirmed | New Azure client and HTTP completion path**
+- [x] **P1 | Source-confirmed | New Azure client and HTTP completion path**
 - **Locations:** `libs\AzureClient\include\AVEVA\AzureClient\Detail\RequestPipeline.hpp:193-235`;
   `libs\AzureClient\include\AVEVA\AzureClient\Detail\BlobDownload.hpp:204-223,607-627,811-821`;
   `libs\HttpClient\include\AVEVA\HttpClient\HttpClient.hpp`, `SendAsync`'s final post.

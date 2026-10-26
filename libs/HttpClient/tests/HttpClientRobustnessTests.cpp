@@ -971,6 +971,29 @@ TEST(HttpClientRobustness, FailedSharedResolvePostLeavesRecoveryToTheWaitersStra
     EXPECT_EQ(result, std::make_error_code(std::errc::not_enough_memory));
 }
 
+TEST(HttpClientRobustness, FailedFinalPostStillDeliversTheResultToTheHandlerExactlyOnce) {
+    asio::io_context context;
+    auto client = AVEVA::HttpClient::Create(context);
+    std::atomic<bool> failNext{true};
+
+    int completions = 0;
+    std::error_code result;
+    AVEVA::HttpRequest request;
+    request.SetUrl("ftp://example.com/file");
+    // The failing executor is the handler's own, so only the final delivery post can hit it.
+    client->SendAsync(
+        std::move(request), AVEVA::HttpRequestOptions{},
+        asio::bind_executor(FailingPostExecutor{&context, &failNext}, [&](std::error_code error, AVEVA::HttpResponse) {
+            ++completions;
+            result = error;
+        }));
+
+    EXPECT_NO_THROW(RunBounded(context));
+    EXPECT_FALSE(failNext.load());
+    EXPECT_EQ(completions, 1);
+    EXPECT_EQ(result, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidUrl));
+}
+
 TEST(HttpClientRobustness, LimiterAbortWhoseFailurePostThrowsStillCompletesTheHandlerOnce) {
     asio::io_context context;
     AVEVA::HttpClientOptions clientOptions;

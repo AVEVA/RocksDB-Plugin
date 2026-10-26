@@ -29,7 +29,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <deque>
 #include <exception>
 #include <expected>
 #include <filesystem>
@@ -49,6 +48,7 @@
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace AVEVA::AzureClient::Private {
 namespace DownloadDetail {
@@ -145,6 +145,8 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
                                  std::max<std::size_t>(1U, MaxBufferedDownloadBytes / m_chunkSize))) {}
 
     void Start() {
+        // Must precede everything that can queue an event: queueing is then allocation-free (see ReserveEvents).
+        ReserveEvents(2U);
         std::unique_lock lock(m_mutex);
         m_processing = true;
         m_initiating = true;
@@ -201,8 +203,31 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         std::optional<BlobStorageError> WriteError;
     };
 
+    // Queueing an event must not fail: a lost completion, write-done or cancellation would strand the download. The
+    // pending events are bounded (one per in-flight request, one write-done, one cancel), so room for them is
+    // reserved up front, on a path that can still fail the download, and Enqueue only ever fills it.
+    void ReserveEvents(std::size_t extra) {
+        std::lock_guard lock(m_mutex);
+        CompactEvents();
+        const std::size_t needed = m_events.size() + extra;
+        if (m_events.capacity() < needed) {
+            m_events.reserve(needed);
+        }
+    }
+
+    // Reclaims the consumed prefix without allocating.
+    void CompactEvents() {
+        if (m_head != 0U) {
+            m_events.erase(m_events.begin(), m_events.begin() + static_cast<std::ptrdiff_t>(m_head));
+            m_head = 0U;
+        }
+    }
+
     void Enqueue(Event event) {
         std::unique_lock lock(m_mutex);
+        if (m_events.size() == m_events.capacity()) {
+            CompactEvents();
+        }
         m_events.push_back(std::move(event));
         if (m_processing) {
             return;
@@ -212,13 +237,15 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
     }
 
     void Drain(std::unique_lock<std::mutex>& lock) {
-        while (!m_events.empty()) {
-            Event event = std::move(m_events.front());
-            m_events.pop_front();
+        while (m_head < m_events.size()) {
+            Event event = std::move(m_events[m_head]);
+            ++m_head;
             lock.unlock();
             Guarded([&] { Handle(std::move(event)); });
             lock.lock();
         }
+        m_events.clear();
+        m_head = 0U;
         m_processing = false;
     }
 
@@ -241,6 +268,10 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
             // reach the transport: it keeps a copy of the executor and checks the operation first.
             m_parentSlot.assign([weak, executor = m_httpClient.get_executor()](boost::asio::cancellation_type_t type) {
                 if (!IsAbortingCancellation(type) || weak.expired()) {
+                    return;
+                }
+                // One queued cancel is enough, and it keeps the bound on pending events.
+                if (const auto self = weak.lock(); !self || self->m_cancelPosted.exchange(true)) {
                     return;
                 }
                 boost::asio::post(executor, [weak]() {
@@ -284,6 +315,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
 
         auto signal = std::make_unique<boost::asio::cancellation_signal>();
         requestOptions.SetCancellationSlot(signal->slot());
+        ReserveEvents(m_inFlight.size() + 3U);
         const std::uint64_t id = m_nextRequestId++;
         m_inFlight.emplace(
             id, InFlightRequest{.Kind = kind, .Offset = offset, .Length = length, .Signal = std::move(signal)});
@@ -729,7 +761,9 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
     std::size_t m_concurrency;
 
     std::mutex m_mutex;
-    std::deque<Event> m_events;
+    std::vector<Event> m_events;
+    std::size_t m_head = 0;
+    std::atomic<bool> m_cancelPosted{false};
     bool m_processing = false;
     bool m_initiating = false;
 
@@ -788,6 +822,7 @@ template <class TCompletion> struct FileDownloadState {
     TCompletion Completion;
     std::optional<FileSink> Sink;
     std::optional<SummaryResult> Result;
+    std::optional<FileResult> Final;
     std::atomic<bool> Completed{false};
 
     // The caller's slot is owned here for the whole operation. The inner download listens to `Signal` instead, and
@@ -807,15 +842,25 @@ template <class TCompletion> struct FileDownloadState {
     }
 }
 
-// Delivers the user's completion once, on its associated executor. If even that post fails the handler has been
-// consumed by it and nobody is left to tell.
+// Delivers the user's completion once, on its associated executor. The handler stays owned by `state` until it is
+// invoked, so a post that cannot be scheduled falls back to invoking it on this thread rather than losing it.
 template <HttpClientLike THttp, class TState>
-void CompleteFileDownload(THttp& httpClient, TState& state, FileResult result) noexcept {
-    if (state.Completed.exchange(true)) {
+void CompleteFileDownload(THttp& httpClient, const std::shared_ptr<TState>& state, FileResult result) noexcept {
+    if (state->Completed.exchange(true)) {
+        return;
+    }
+    const auto deliver = [state]() { std::move(state->Completion)(std::move(*state->Final)); };
+    try {
+        state->Final.emplace(std::move(result));
+        boost::asio::post(boost::asio::get_associated_executor(state->Completion, httpClient.get_executor()), deliver);
+        return;
+    } catch (...) {
+    }
+    if (!state->Final.has_value()) {
         return;
     }
     try {
-        PostCompletion(httpClient, std::move(state.Completion), std::move(result));
+        deliver();
     } catch (...) {
     }
 }
@@ -829,7 +874,7 @@ void AbandonFileDownload(THttp& httpClient, const std::shared_ptr<TState>& state
         std::error_code ignored;
         std::filesystem::remove(state->TempPath, ignored);
     }
-    CompleteFileDownload(httpClient, *state, FileResult{std::unexpect, std::move(error)});
+    CompleteFileDownload(httpClient, state, FileResult{std::unexpect, std::move(error)});
 }
 
 // As AbandonFileDownload, for a thread that must not block: it hops to a writer. Only when that hop fails too does
@@ -864,7 +909,7 @@ void FinishFileDownloadOnWriter(THttp& httpClient, const std::shared_ptr<TState>
         auto result =
             FinalizeFileDownload(state->Sink->File(), state->TempPath, state->Target, std::move(*state->Result));
         state->Sink.reset();
-        CompleteFileDownload(httpClient, *state, std::move(result));
+        CompleteFileDownload(httpClient, state, std::move(result));
     } catch (...) {
         AbandonFileDownload(httpClient, state, CurrentFailure());
     }
@@ -965,7 +1010,7 @@ void DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobT
                 try {
                     if (state->Canceled.load()) {
                         DownloadDetail::CompleteFileDownload(
-                            httpClient, *state,
+                            httpClient, state,
                             DownloadDetail::FileResult{std::unexpect,
                                                        DownloadDetail::MakeFailure(std::errc::operation_canceled,
                                                                                    "The operation was canceled.")});
@@ -974,7 +1019,7 @@ void DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobT
                     std::error_code statusError;
                     if (std::filesystem::is_directory(state->Target, statusError)) {
                         DownloadDetail::CompleteFileDownload(
-                            httpClient, *state,
+                            httpClient, state,
                             DownloadDetail::FileResult{
                                 std::unexpect,
                                 DownloadDetail::MakeFailure(std::make_error_code(std::errc::is_a_directory),
@@ -990,7 +1035,7 @@ void DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobT
                     std::ofstream file(state->TempPath, std::ios::binary | std::ios::trunc);
                     if (!file) {
                         DownloadDetail::CompleteFileDownload(
-                            httpClient, *state,
+                            httpClient, state,
                             DownloadDetail::FileResult{
                                 std::unexpect, DownloadDetail::MakeFailure(DownloadDetail::LastOpenError(),
                                                                            "Failed to open destination file.")});

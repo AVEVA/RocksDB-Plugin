@@ -192,11 +192,18 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     // Serializes all state mutation: transport, timer, token and cancellation callbacks may
     // arrive from different threads. Runs inline when idle (so initiation stays synchronous)
     // and queues work that arrives while another thread, or an outer call, is running.
+    // Queueing allocates. When it fails the event cannot be kept, so the failure is recorded in a flag that needs no
+    // allocation and the active runner fails the request with it; otherwise an arrived completion would vanish
+    // on a transport thread and leave the request waiting forever.
     void Run(Event event) {
         {
             const std::scoped_lock lock(m_queueMutex);
             if (m_draining) {
-                m_queue.push_back(std::move(event));
+                try {
+                    m_queue.push_back(std::move(event));
+                } catch (...) {
+                    m_queueOverflowed = true;
+                }
                 return;
             }
             m_draining = true;
@@ -206,16 +213,25 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         try {
             DispatchGuarded(event);
             for (;;) {
+                bool overflowed = false;
                 {
                     const std::scoped_lock lock(m_queueMutex);
-                    if (m_queue.empty()) {
+                    if (m_queueOverflowed) {
+                        m_queueOverflowed = false;
+                        overflowed = true;
+                    } else if (m_queue.empty()) {
                         m_draining = false;
                         return;
+                    } else {
+                        event = std::move(m_queue.front());
+                        m_queue.pop_front();
                     }
-                    event = std::move(m_queue.front());
-                    m_queue.pop_front();
                 }
-                DispatchGuarded(event);
+                if (overflowed) {
+                    FailOverflowedQueue();
+                } else {
+                    DispatchGuarded(event);
+                }
             }
         } catch (...) {
             // Only a throwing user completion reaches here; never leave the runner marked active.
@@ -225,6 +241,28 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
             }
             throw;
         }
+    }
+
+    // Ends the request inline, on the runner: posting the failure would allocate again. Whatever event was lost,
+    // stopping the accepted attempt or backoff and reporting the allocation failure is the only outcome that
+    // cannot leave the request waiting for it.
+    void FailOverflowedQueue() {
+        if (m_finished.load(std::memory_order_acquire)) {
+            return;
+        }
+        m_internalError = std::make_error_code(std::errc::not_enough_memory);
+        m_cancelled.store(true, std::memory_order_release);
+        m_timer.cancel();
+        m_attemptSignal.emit(boost::asio::cancellation_type::terminal);
+        if (m_initiating.load(std::memory_order_acquire)) {
+            // A completion never runs inside the initiating call; only if even the hop cannot be posted does it.
+            try {
+                PostFinish(m_internalError);
+                return;
+            } catch (...) {
+            }
+        }
+        Finish(m_internalError, HttpResponse{});
     }
 
     // An internal throw (allocation, request building, transport initiation) after initiation must not escape onto
@@ -639,6 +677,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     std::mutex m_queueMutex;
     std::deque<Event> m_queue;
     bool m_draining = false;
+    bool m_queueOverflowed = false;
     int m_maxAttempts = 1;
     int m_attempt = 0;
     std::atomic<bool> m_initiating{false};
