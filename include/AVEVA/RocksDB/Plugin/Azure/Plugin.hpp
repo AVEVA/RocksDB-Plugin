@@ -3,6 +3,7 @@
 
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Defaults.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp" // main's Plugin.hpp provided it; consumers use PageBlob::Default*
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ChainedCredentialInfo.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ServicePrincipalStorageInfo.hpp"
 

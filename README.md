@@ -161,6 +161,35 @@ The Azure client is now trimmed and in-tree, which changed the public surface:
 * `AzureClient` options and models trimmed to what the plugin uses: `ListBlobsOptions` keeps only `IncludeMetadata` of the `Include*` flags and lost `Delimiter`; `CreatePageBlobOptions::HttpHeaders` and `AccessTier`, `UploadPagesOptions::ContentMd5`, `UploadPagesFromUrlOptions::SourceAuthorization` and `GetPageRangesOptions::Range`/`MaxResults` were removed, as were `BlobHttpHeaders`, `AccessTier`, `BlobTags`, `ListBlobsResult::BlobPrefixes`/`Delimiter` and `BlobItem::Snapshot`/`Deleted`/`Tags`.
 * Token endpoint failures now carry the HTTP status and OAuth error code (`TokenEndpointErrorCategory()`, `GetTokenEndpointFailure()` in `AVEVA/AzureClient/TokenEndpointError.hpp`) instead of mapping to `BlobStorageErrorCode::AuthenticationFailed`.
 * `HttpClientOptions::SetDiagnosticsCallback()` (new, additive) reports stale-connection retries, connections that could not be pooled, swallowed exceptions, DNS cache invalidations and timeouts with the request phase. The plugin logs these through Boost.Log.
+## Source and binary compatibility
+
+**Compatibility with `main` is source-only. Binary (ABI) compatibility is not provided: rebuild every consumer
+against this version.** No requirement for binary compatibility is recorded (the library already changes
+`BlobFilesystem`'s layout, see above), and the executor injection cannot be hidden behind the old symbols, so the
+exact old `Plugin::Register` signatures are not kept as separate entry points. The deprecated overloads gained a
+trailing defaulted `maxPrefetchBytes` parameter, which changes their function type and mangled name.
+
+Supported (checked by `tests/consumer`, built in-tree by `SourceCompatTests` and against the installed package by the
+`install-consume` CI job):
+
+* `Plugin::Register(configOptions, &env, &guard, primary, backup, logger, bufferSize, initialSize, cachePath,
+  maxCacheSize)` for both `ServicePrincipalStorageInfo` and `ChainedCredentialInfo`, with or without the trailing
+  arguments. It compiles with a deprecation warning and runs on a plugin-owned `io_context` thread. Migrate by
+  inserting your `io_context` (or `std::shared_ptr<io_context>`) after `guard`.
+* `Impl::Configuration::PageBlob::DefaultBufferSize` / `DefaultSize` (also available as `Defaults::*`).
+* Normal RocksDB use of the registered filesystem through `rocksdb::FileSystem`
+  (`NewWritableFile`, `NewRandomAccessFile`, `NewSequentialFile`, `NewRandomRWFile`).
+* `ReadableFile`, `ReadWriteFile` and `WriteableFile` as `FSRandomAccessFile`, `FSRandomRWFile` and `FSWritableFile`.
+
+Intentional breaks (no compatibility shim; use the replacement):
+
+| Removed or changed | Replacement |
+| --- | --- |
+| `ReadableFile` was both `FSSequentialFile` and `FSRandomAccessFile` | `ReadableFile` is random access only; sequential reads use `SequentialFile` (obtain either through `rocksdb::FileSystem`) |
+| Public constructors of `ReadableFile`, `ReadWriteFile`, `WriteableFile`, `SequentialFile` taking `Impl::*` objects | Not constructible by consumers; create them through `Plugin::Register` and RocksDB |
+| `Impl/*` headers other than `Impl/Configuration.hpp` (`ReadableFileImpl.hpp`, `BlobFilesystemImpl.hpp`, `PageBlob.hpp`, ...) and `Core/BlobClient.hpp` | Not installed and unsupported; use the public API, `Core::ContainerClient`, or the `aveva-azure-client` package |
+| Azure SDK types in public headers | The in-tree `AVEVA::AzureClient` library |
+
 ## Building
 
 1. Ensure that vcpkg is installed and in the PATH

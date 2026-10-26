@@ -374,3 +374,14 @@ jobs:
       - name: Build external consumer
         shell: bash
         run: cmake --build consumer/out --config Release
+
+      # Source compatibility with consumers written against main: old-style Plugin::Register calls and normal
+      # rocksdb::FileSystem usage, compiled and linked against the installed package (tests/consumer).
+      - name: Configure and build main-API consumer
+        shell: bash
+        run: |
+          cmake -S tests/consumer -B consumer-main-api -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/stage" \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} \
+            -DVCPKG_INSTALLED_DIR="$GITHUB_WORKSPACE/build/${{ matrix.preset }}/vcpkg_installed"
+          cmake --build consumer-main-api --config Release

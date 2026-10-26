@@ -24,6 +24,7 @@ add_executable(aveva-rocksdb-plugin-azure-impl-tests
     BlobHelpersTests.cpp
     TokenCredentialsTests.cpp
     PublicHeadersTests.cpp
+    SourceCompatTests.cpp
     FakeInstantiations.cpp
 )
 
