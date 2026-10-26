@@ -334,7 +334,26 @@ candidates, and inherited issues. No implementation changes were made.
 
 ### R14 - Measure and remove avoidable download copies without exposing scratch to late I/O
 
-- [ ] **P2 | Source-confirmed copies; benchmark/design candidate**
+- [x] **P2 | Source-confirmed copies; benchmark/design candidate**
+- **Result:** Measured first; the alternative lost on cost/benefit, so the current implementation is retained and no
+  production code changed. A scratch MSVC `/O2` microbenchmark (not committed; global `operator new` counting, 8
+  threads for concurrency) modelled the chain: transport body string filled in 16 KiB steps, then `SpanSink` copy into
+  a warm reused pooled lease, then the guarded `Complete` copy into scratch ("current"), against a `StringSink`-style
+  move of the transport string followed only by the `Complete` copy ("alt", i.e. one copy fewer). Per read, 1 thread /
+  8 threads, allocations (1.0 vs 1.0 in every case) and bytes (equal within 0.3%) did not change:
+  4 KiB 0.15 vs 0.09 us / 0.44 vs 0.44 us; 64 KiB 3.35 vs 4.02 us / 11.9 vs 10.0 us (noise-level, sign flips);
+  4 MiB 1.34 vs 1.10 ms / 3.46 vs 2.73 ms. The saving is at most ~0.25 ms CPU for a 4 MiB read (~20%) and
+  sub-microsecond for small reads, against a network transfer of milliseconds, with no allocation or peak-byte win
+  because the transport already allocates the body string and the pool lease is reused. The alternative would also
+  drop the bounded, charged `DownloadBufferPool` lease that prefetch retains as `owner` (budget accounting uses
+  `CapacityFor`) and `SpanSink`'s hard cap on a response larger than the requested range. Merged-MultiRead split
+  copy (`applyOutcome`) was not changed: it is required because members have separate caller scratch buffers.
+  Not done: a typed transport destination in the HTTP client (reading the body straight into the lease). It needs a
+  body-sink hook in `RequestOperation`; given the measured gain it was not justified, and R08 (byte budgeting) shares
+  the same buffer ownership. Lifetime guarantees (handle deletion, abort, timeout, stale-read retry) are unchanged and
+  covered by existing `AsyncReadTests` (e.g. `DeleteHandle_BeforeCompletion_NeverCallsBackOrWritesScratch`,
+  `AbortIO_WhileInFlight_ReturnsImmediatelyAndLateDataIsDropped`, `ReadAsync_PreconditionFailed_RefreshesMetadataAndRetries`).
+  Linux was not measured.
 - **Locations:** `libs\HttpClient\src\private\RequestOperation.cpp`, `BuildResponse`;
   `libs\AzureClient\include\AVEVA\AzureClient\Detail\DownloadSinks.hpp`, `SpanSink::Write`;
   `src\Azure\Impl\AsyncReadRequest.cpp`, `Complete`;
