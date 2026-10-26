@@ -19,6 +19,12 @@ bool IsTransportTimeout(const std::error_code& code) {
     return code == std::errc::timed_out || code == HttpClientError::TimedOut;
 }
 
+// The HTTP client's category has no portable invalid_argument condition, so its input-rejection codes are named here.
+bool IsInvalidInput(const std::error_code& code) {
+    return code == std::errc::invalid_argument || code == HttpClientError::InvalidUrl ||
+           code == HttpClientError::InvalidRequest;
+}
+
 // The Azure error code, message and request id are always part of the text so that logs identify the failure.
 std::string DescribeFailure(const RequestFailedException& error) {
     return error.StatusCode != 0 ? "HTTP " + error.Describe() : error.Describe();
@@ -46,6 +52,13 @@ template <class TLog> rocksdb::IOStatus ClassifyCurrentException(TLog&& log, std
         // Cancellation comes from AbortIO or shutdown, so it is not a storage failure.
         if (ex.code() == std::errc::operation_canceled) {
             return rocksdb::IOStatus::Aborted(ex.what());
+        }
+        // Same conditions as the RequestFailedException path, so wrapped and raw errors classify identically.
+        if (IsTransportTimeout(ex.code())) {
+            return Retryable(rocksdb::IOStatus::TimedOut(ex.what()));
+        }
+        if (IsInvalidInput(ex.code())) {
+            return rocksdb::IOStatus::InvalidArgument(ex.what());
         }
         return rocksdb::IOStatus::IOError(ex.what());
     } catch (const std::exception& ex) {
@@ -113,16 +126,19 @@ rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const RequestFailedExc
         return IOStatus::IOError("Authorization failed: " + text);
     }
 
+    // A service-side OperationTimedOut arrives as HTTP 500 but is still a timeout, so it is classified before the
+    // status.
+    if (IsTransportTimeout(code)) {
+        return Retryable(IOStatus::TimedOut(text));
+    }
+
     switch (error.StatusCode) {
     case 0:
-        if (IsTransportTimeout(code)) {
-            return Retryable(IOStatus::TimedOut(text));
-        }
         // Raised by AbortIO or shutdown, so retrying would only fight the cancellation.
         if (code == std::errc::operation_canceled) {
             return IOStatus::Aborted(text);
         }
-        if (code == std::errc::invalid_argument) {
+        if (IsInvalidInput(code)) {
             return IOStatus::InvalidArgument("Invalid request or configuration: " + text);
         }
         if (code == std::errc::permission_denied) {
@@ -151,6 +167,7 @@ bool AzureErrorTranslator::IsLeaseLost(const std::error_code& code) {
                                             BlobStorageErrorCode::LeaseNotPresentWithBlobOperation,
                                             BlobStorageErrorCode::LeaseIdMissing,
                                             BlobStorageErrorCode::LeaseIdMismatchWithLeaseOperation,
+                                            BlobStorageErrorCode::LeaseNotPresentWithLeaseOperation,
                                             BlobStorageErrorCode::LeaseIsBrokenAndCannotBeRenewed,
                                             BlobStorageErrorCode::LeaseAlreadyBroken,
                                             BlobStorageErrorCode::LeaseIsBreakingAndCannotBeAcquired,

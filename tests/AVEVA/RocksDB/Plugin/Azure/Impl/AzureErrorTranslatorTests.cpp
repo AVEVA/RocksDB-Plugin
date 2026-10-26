@@ -12,7 +12,9 @@
 #include <boost/log/trivial.hpp>
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cerrno>
+#include <cstdint>
 #include <memory>
 #include <sstream>
 #include <system_error>
@@ -267,6 +269,7 @@ TEST(AzureErrorTranslatorTests, IsLeaseLost_MatchesEveryLeaseCodeAndNoOtherCateg
          {BlobStorageErrorCode::LeaseLost, BlobStorageErrorCode::LeaseIdMismatchWithBlobOperation,
           BlobStorageErrorCode::LeaseNotPresentWithBlobOperation, BlobStorageErrorCode::LeaseIdMissing,
           BlobStorageErrorCode::LeaseIdMismatchWithLeaseOperation,
+          BlobStorageErrorCode::LeaseNotPresentWithLeaseOperation,
           BlobStorageErrorCode::LeaseIsBrokenAndCannotBeRenewed, BlobStorageErrorCode::LeaseAlreadyBroken,
           BlobStorageErrorCode::LeaseIsBreakingAndCannotBeAcquired, BlobStorageErrorCode::LeaseAlreadyPresent}) {
         EXPECT_TRUE(AzureErrorTranslator::IsLeaseLost(::AVEVA::AzureClient::make_error_code(lost)));
@@ -319,6 +322,167 @@ TEST(AzureErrorTranslatorTests, SystemErrorCancellationIsAborted) {
     EXPECT_TRUE(AzureErrorTranslator::FromException(cancelled).IsAborted());
     const auto other = std::make_exception_ptr(std::system_error(std::make_error_code(std::errc::io_error)));
     EXPECT_TRUE(AzureErrorTranslator::FromException(logger, other, "Read").IsIOError());
+}
+
+namespace {
+enum class Expected : std::uint8_t {
+    NotFound,
+    Corruption,
+    Fenced,
+    InvalidArgument,
+    IOError,
+    RetryableBusy,
+    RetryableTimedOut,
+    RetryableIOError
+};
+
+struct PolicyEntry {
+    ::AVEVA::AzureClient::BlobStorageErrorCode Code;
+    unsigned int Status;
+    Expected Result;
+};
+
+void ExpectPolicy(const rocksdb::IOStatus& status, Expected expected, const std::string& label) {
+    switch (expected) {
+    case Expected::NotFound:
+        EXPECT_TRUE(status.IsNotFound()) << label;
+        break;
+    case Expected::Corruption:
+        EXPECT_TRUE(status.IsCorruption()) << label;
+        break;
+    case Expected::Fenced:
+        EXPECT_TRUE(status.IsIOFenced()) << label;
+        break;
+    case Expected::InvalidArgument:
+        EXPECT_TRUE(status.IsInvalidArgument()) << label;
+        break;
+    case Expected::IOError:
+    case Expected::RetryableIOError:
+        EXPECT_TRUE(status.IsIOError()) << label;
+        break;
+    case Expected::RetryableBusy:
+        EXPECT_TRUE(status.IsBusy()) << label;
+        break;
+    case Expected::RetryableTimedOut:
+        EXPECT_TRUE(status.IsTimedOut()) << label;
+        break;
+    }
+    const bool retryable = expected == Expected::RetryableBusy || expected == Expected::RetryableTimedOut ||
+                           expected == Expected::RetryableIOError;
+    EXPECT_EQ(status.GetRetryable(), retryable) << label;
+}
+} // namespace
+
+// One row per client enumerator; the size assertion forces a new enumerator to be given a deliberate mapping.
+TEST(AzureErrorTranslatorTests, EveryBlobStorageErrorCodeHasADeliberateMapping) {
+    using ::AVEVA::AzureClient::BlobStorageErrorCode;
+    static constexpr std::array table{
+        PolicyEntry{BlobStorageErrorCode::ContainerAlreadyExists, 409, Expected::IOError},
+        PolicyEntry{BlobStorageErrorCode::ContainerNotFound, 404, Expected::NotFound},
+        PolicyEntry{BlobStorageErrorCode::ContainerBeingDeleted, 409, Expected::IOError},
+        PolicyEntry{BlobStorageErrorCode::ContainerDisabled, 403, Expected::IOError},
+        PolicyEntry{BlobStorageErrorCode::InvalidResourceName, 400, Expected::InvalidArgument},
+        PolicyEntry{BlobStorageErrorCode::ResourceNotFound, 404, Expected::NotFound},
+        PolicyEntry{BlobStorageErrorCode::AuthenticationFailed, 403, Expected::IOError},
+        PolicyEntry{BlobStorageErrorCode::AuthorizationFailure, 403, Expected::IOError},
+        PolicyEntry{BlobStorageErrorCode::InvalidAuthenticationInfo, 401, Expected::IOError},
+        PolicyEntry{BlobStorageErrorCode::ConditionNotMet, 412, Expected::IOError},
+        PolicyEntry{BlobStorageErrorCode::BlobNotFound, 404, Expected::NotFound},
+        PolicyEntry{BlobStorageErrorCode::BlobAlreadyExists, 409, Expected::IOError},
+        PolicyEntry{BlobStorageErrorCode::InvalidBlobOrBlock, 400, Expected::InvalidArgument},
+        PolicyEntry{BlobStorageErrorCode::InvalidBlockList, 400, Expected::InvalidArgument},
+        PolicyEntry{BlobStorageErrorCode::ServiceError, 418, Expected::IOError},
+        PolicyEntry{BlobStorageErrorCode::LeaseIdMissing, 412, Expected::Fenced},
+        PolicyEntry{BlobStorageErrorCode::LeaseAlreadyPresent, 409, Expected::Fenced},
+        PolicyEntry{BlobStorageErrorCode::LeaseIdMismatchWithBlobOperation, 412, Expected::Fenced},
+        PolicyEntry{BlobStorageErrorCode::LeaseNotPresentWithBlobOperation, 409, Expected::Fenced},
+        PolicyEntry{BlobStorageErrorCode::LeaseLost, 412, Expected::Fenced},
+        PolicyEntry{BlobStorageErrorCode::ServerBusy, 503, Expected::RetryableBusy},
+        PolicyEntry{BlobStorageErrorCode::OperationTimedOut, 500, Expected::RetryableTimedOut},
+        PolicyEntry{BlobStorageErrorCode::InternalError, 500, Expected::RetryableIOError},
+        PolicyEntry{BlobStorageErrorCode::InvalidRange, 416, Expected::IOError},
+        PolicyEntry{BlobStorageErrorCode::TargetConditionNotMet, 412, Expected::IOError},
+        PolicyEntry{BlobStorageErrorCode::AppendPositionConditionNotMet, 412, Expected::IOError},
+        PolicyEntry{BlobStorageErrorCode::MaxBlobSizeConditionNotMet, 412, Expected::IOError},
+        PolicyEntry{BlobStorageErrorCode::BlobArchived, 409, Expected::IOError},
+        PolicyEntry{BlobStorageErrorCode::Md5Mismatch, 400, Expected::InvalidArgument},
+        PolicyEntry{BlobStorageErrorCode::InvalidHeaderValue, 400, Expected::InvalidArgument},
+        PolicyEntry{BlobStorageErrorCode::InvalidQueryParameterValue, 400, Expected::InvalidArgument},
+        PolicyEntry{BlobStorageErrorCode::RequestBodyTooLarge, 413, Expected::IOError},
+        PolicyEntry{BlobStorageErrorCode::BlobTierInadequateForContentLength, 409, Expected::IOError},
+        PolicyEntry{BlobStorageErrorCode::InvalidMetadata, 0, Expected::InvalidArgument},
+        PolicyEntry{BlobStorageErrorCode::InvalidResponse, 200, Expected::Corruption},
+        PolicyEntry{BlobStorageErrorCode::LeaseNotPresentWithLeaseOperation, 409, Expected::Fenced},
+        PolicyEntry{BlobStorageErrorCode::LeaseIdMismatchWithLeaseOperation, 409, Expected::Fenced},
+        PolicyEntry{BlobStorageErrorCode::LeaseIsBrokenAndCannotBeRenewed, 409, Expected::Fenced},
+        PolicyEntry{BlobStorageErrorCode::LeaseAlreadyBroken, 409, Expected::Fenced},
+        PolicyEntry{BlobStorageErrorCode::LeaseIsBreakingAndCannotBeAcquired, 409, Expected::Fenced},
+        PolicyEntry{BlobStorageErrorCode::SequenceNumberConditionNotMet, 412, Expected::IOError},
+        PolicyEntry{BlobStorageErrorCode::InvalidPageRange, 416, Expected::InvalidArgument},
+        PolicyEntry{BlobStorageErrorCode::AuthorizationPermissionMismatch, 403, Expected::IOError}};
+    static_assert(table.size() == static_cast<std::size_t>(BlobStorageErrorCode::AuthorizationPermissionMismatch));
+
+    for (std::size_t i = 0; i < table.size(); ++i) {
+        const auto& entry = table[i];
+        EXPECT_EQ(static_cast<std::size_t>(entry.Code), i + 1);
+        const auto code = ::AVEVA::AzureClient::make_error_code(entry.Code);
+        const auto status = AzureErrorTranslator::IOStatusFromError(Failure(entry.Status, "Azure", code));
+        ExpectPolicy(status, entry.Result, code.message());
+        EXPECT_NE(status.ToString().find("req-1"), std::string::npos) << code.message();
+        EXPECT_NE(status.ToString().find("boom"), std::string::npos) << code.message();
+        EXPECT_EQ(AzureErrorTranslator::IsLeaseLost(code), entry.Result == Expected::Fenced) << code.message();
+    }
+}
+
+TEST(AzureErrorTranslatorTests, EveryHttpClientErrorHasADeliberateMapping) {
+    using ::AVEVA::HttpClientError;
+    struct Row {
+        HttpClientError Error;
+        Expected Result;
+    };
+    static constexpr std::array table{Row{HttpClientError::InvalidUrl, Expected::InvalidArgument},
+                                      Row{HttpClientError::InvalidRequest, Expected::InvalidArgument},
+                                      Row{HttpClientError::ResolveFailed, Expected::RetryableIOError},
+                                      Row{HttpClientError::ConnectFailed, Expected::RetryableIOError},
+                                      Row{HttpClientError::TlsFailed, Expected::IOError},
+                                      Row{HttpClientError::WriteFailed, Expected::RetryableIOError},
+                                      Row{HttpClientError::ReadFailed, Expected::RetryableIOError},
+                                      Row{HttpClientError::TimedOut, Expected::RetryableTimedOut},
+                                      Row{HttpClientError::ResponseTooLarge, Expected::IOError},
+                                      Row{HttpClientError::ProtocolError, Expected::IOError}};
+    static_assert(table.size() == static_cast<std::size_t>(HttpClientError::ProtocolError));
+
+    for (const auto& row : table) {
+        const std::error_code code = row.Error;
+        ExpectPolicy(AzureErrorTranslator::IOStatusFromError(Failure(0, "", code)), row.Result, code.message());
+    }
+}
+
+TEST(AzureErrorTranslatorTests, RawSystemErrorsMatchTheWrappedClassification) {
+    using ::AVEVA::HttpClientError;
+    for (const std::error_code code :
+         {std::error_code{std::make_error_code(std::errc::timed_out)}, std::error_code{HttpClientError::TimedOut}}) {
+        const auto wrapped = AzureErrorTranslator::IOStatusFromError(Failure(0, "", code));
+        const auto raw = AzureErrorTranslator::FromException(std::make_exception_ptr(std::system_error(code, "ctx")));
+        EXPECT_TRUE(raw.IsTimedOut()) << code.message();
+        EXPECT_TRUE(raw.GetRetryable()) << code.message();
+        EXPECT_EQ(raw.IsTimedOut(), wrapped.IsTimedOut());
+        EXPECT_EQ(raw.GetRetryable(), wrapped.GetRetryable());
+        EXPECT_NE(raw.ToString().find("ctx"), std::string::npos);
+    }
+
+    for (const std::error_code code :
+         {std::error_code{HttpClientError::InvalidUrl}, std::error_code{HttpClientError::InvalidRequest},
+          std::error_code{std::make_error_code(std::errc::invalid_argument)}}) {
+        const auto raw = AzureErrorTranslator::FromException(std::make_exception_ptr(std::system_error(code, "ctx")));
+        EXPECT_TRUE(raw.IsInvalidArgument()) << code.message();
+        EXPECT_FALSE(raw.GetRetryable()) << code.message();
+    }
+
+    const auto cancelled = AzureErrorTranslator::FromException(
+        std::make_exception_ptr(std::system_error(std::make_error_code(std::errc::operation_canceled), "ctx")));
+    EXPECT_TRUE(cancelled.IsAborted());
+    EXPECT_FALSE(cancelled.GetRetryable());
 }
 
 TEST(AzureErrorTranslatorTests, CapturedExceptionIsLoggedWithTheRequestIdAndTranslated) {

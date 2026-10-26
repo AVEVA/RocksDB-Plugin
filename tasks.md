@@ -177,7 +177,7 @@ candidates, and inherited issues. No implementation changes were made.
 
 ### R07 - Complete and explicitly test the error-to-IOStatus mapping policy
 
-- [ ] **P2 | Source-confirmed omissions | New error translation**
+- [x] **P2 | Source-confirmed omissions | New error translation**
 - **Locations:** `src\Azure\AzureErrorTranslator.cpp`, `IsLeaseLost`,
   `IOStatusFromError`, `ClassifyCurrentException`;
   `libs\AzureClient\src\BlobStorageErrorCategory.cpp`;
