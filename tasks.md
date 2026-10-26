@@ -373,7 +373,12 @@ candidates, and inherited issues. No implementation changes were made.
 
 ### R15 - Use fixed-capacity containers for genuinely fixed-capacity buffer free lists
 
-- [ ] **P3 | Concrete Boost simplification**
+- [x] **P3 | Concrete Boost simplification**
+- **Result:** Implemented with `boost::container::static_vector` (boost-container already in `vcpkg.json`): the
+  download free lists (cap 8), a per-class eviction batch (cap 8, destroyed after the class lock is released) and
+  the upload free list (cap 4). Return/eviction no longer need `try/catch` for `bad_alloc`. Per-class cost is
+  8 pointers inline inside the already 64-byte-aligned `SizeClass`; the upload tracker grows by four vectors inline.
+  The change removes allocations rather than trading them, so no timing benchmark was run.
 - **Locations:** `src\Azure\Impl\include\AVEVA\RocksDB\Plugin\Azure\Impl\DownloadBufferPool.hpp`,
   `SizeClass::Free`, `Return`, `EvictLargestWhileOverCap`;
   `src\Azure\Impl\include\AVEVA\RocksDB\Plugin\Azure\Impl\WriteableFileImpl.hpp`,

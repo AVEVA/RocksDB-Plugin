@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <boost/container/static_vector.hpp>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -117,7 +119,7 @@ class BasicDownloadBufferPool : public std::enable_shared_from_this<BasicDownloa
 #endif
     struct alignas(64) SizeClass {
         mutable std::mutex Mutex;
-        std::vector<std::unique_ptr<char[]>> Free;
+        boost::container::static_vector<std::unique_ptr<char[]>, MaxPooledBuffersPerClass> Free;
     };
 #ifdef _MSC_VER
 #pragma warning(pop)
@@ -128,7 +130,7 @@ class BasicDownloadBufferPool : public std::enable_shared_from_this<BasicDownloa
         return static_cast<std::size_t>(std::countr_zero(capacity / MinBufferBytes));
     }
 
-    // Called from ~Lease, so it must not throw: if the free list cannot grow the buffer is simply freed.
+    // Called from ~Lease, so it must not throw: the free list has fixed capacity, so publishing never allocates.
     void Return(std::unique_ptr<char[]> buffer, const std::size_t capacity) noexcept {
         if (capacity > MaxPooledBufferBytes) {
             return;
@@ -140,34 +142,27 @@ class BasicDownloadBufferPool : public std::enable_shared_from_this<BasicDownloa
             if (sizeClass.Free.size() >= MaxPooledBuffersPerClass) {
                 return;
             }
-            try {
-                sizeClass.Free.push_back(std::move(buffer));
-            } catch (const std::bad_alloc&) {
-                return;
-            }
+            sizeClass.Free.push_back(std::move(buffer));
             // Accounted in the same critical section that makes the buffer visible, so an Acquire that takes it
             // can never subtract bytes that were not yet added.
             total = m_pooledBytes.fetch_add(capacity, std::memory_order_relaxed) + capacity;
         }
         Hooks::AfterPublish();
         if (total > MaxPooledTotalBytes) {
-            try {
-                EvictLargestWhileOverCap();
-            } catch (const std::bad_alloc&) {
-                // Eviction is best effort; the pool just stays over its cap until the next return.
-            }
+            EvictLargestWhileOverCap();
         }
     }
 
     // Largest buffers go first: they free the most memory per eviction and are the costliest to keep for the rare big
     // read. Evicted buffers are collected under each class lock and freed after it is released, so a free never
-    // stalls other threads.
-    void EvictLargestWhileOverCap() {
-        std::vector<std::unique_ptr<char[]>> evicted;
+    // stalls other threads. The batch is per class and fixed-capacity, so eviction never allocates.
+    void EvictLargestWhileOverCap() noexcept {
         for (std::size_t index = ClassCount;
              index-- > 0 && m_pooledBytes.load(std::memory_order_relaxed) > MaxPooledTotalBytes;) {
             auto& sizeClass = m_classes[index];
             const std::size_t bytes = MinBufferBytes << index;
+            // Declared before the lock so it is destroyed (freeing the buffers) after the lock is released.
+            boost::container::static_vector<std::unique_ptr<char[]>, MaxPooledBuffersPerClass> evicted;
             std::scoped_lock lock(sizeClass.Mutex);
             while (!sizeClass.Free.empty() && m_pooledBytes.load(std::memory_order_relaxed) > MaxPooledTotalBytes) {
                 evicted.push_back(std::move(sizeClass.Free.back()));

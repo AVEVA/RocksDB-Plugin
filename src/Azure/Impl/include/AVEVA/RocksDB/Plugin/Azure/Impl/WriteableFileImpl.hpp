@@ -12,6 +12,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 
+#include <boost/container/static_vector.hpp>
 #include <boost/log/trivial.hpp>
 
 #include <condition_variable>
@@ -35,6 +36,9 @@ template <typename TBlob> class BasicWriteableFileImpl {
     bool m_unsyncedSize = false;
     std::vector<char> m_buffer;
 
+    // Upper bound on concurrent page uploads per file; bounds memory to this many buffer copies.
+    static constexpr size_t MaxInFlightUploads = 4;
+
     // Shared with in-flight upload completions, which run on the host io_context and may outlive a move of this file.
     struct UploadTracker {
         std::mutex Mutex;
@@ -42,15 +46,10 @@ template <typename TBlob> class BasicWriteableFileImpl {
         size_t InFlight = 0;
         std::exception_ptr Error;
         // Buffers of finished uploads, reused so a flush does not allocate and copy a full buffer each time.
-        // Capacity is reserved up front so returning a buffer from a payload destructor can never allocate or throw.
-        std::vector<std::vector<char>> Free;
-
-        UploadTracker() { Free.reserve(MaxInFlightUploads); }
+        // Fixed capacity, so returning a buffer from a payload destructor can never allocate or throw.
+        boost::container::static_vector<std::vector<char>, MaxInFlightUploads> Free;
     };
     std::shared_ptr<UploadTracker> m_uploads = std::make_shared<UploadTracker>();
-
-    // Upper bound on concurrent page uploads per file; bounds memory to this many buffer copies.
-    static constexpr size_t MaxInFlightUploads = 4;
 
   public:
     // Size and capacity of the blob when the caller already knows them, which saves two GetProperties round trips.
