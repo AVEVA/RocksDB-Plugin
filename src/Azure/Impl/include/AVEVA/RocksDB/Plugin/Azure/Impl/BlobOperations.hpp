@@ -69,14 +69,22 @@ class StopBridge {
 
     // Runs `initiate`, which must install the handler synchronously, and returns its result. Emission is excluded
     // for the duration, so it cannot observe a half-installed handler.
-    template <class Initiate> auto Install(Initiate&& initiate) {
+    template <class Initiate> decltype(auto) Install(Initiate&& initiate) {
         const std::lock_guard lock(m_mutex);
-        auto result = std::forward<Initiate>(initiate)();
-        m_installed = true;
-        if (m_requested && !m_emitted) {
-            EmitLocked();
+        const auto settle = [this] {
+            m_installed = true;
+            if (m_requested && !m_emitted) {
+                EmitLocked();
+            }
+        };
+        if constexpr (std::is_void_v<std::invoke_result_t<Initiate>>) {
+            std::forward<Initiate>(initiate)();
+            settle();
+        } else {
+            auto result = std::forward<Initiate>(initiate)();
+            settle();
+            return result;
         }
-        return result;
     }
 
     // Called from the stopping thread. The emission itself runs on the client's executor so the handler never runs on
@@ -94,6 +102,37 @@ class StopBridge {
             const std::lock_guard lock(self->m_mutex);
             self->m_signal.emit(boost::asio::cancellation_type::terminal);
         });
+    }
+};
+
+// Keeps a stop_callback registered for the life of one transfer. Arm and Release may race: whichever comes second
+// wins, so a transfer that finished before arming never registers, and a registration is never left behind.
+template <class Executor> class StopLink {
+    struct Forwarder {
+        std::shared_ptr<StopBridge> Bridge;
+        Executor Exec;
+        void operator()() const { StopBridge::Request(Bridge, Exec); }
+    };
+    std::mutex m_mutex;
+    std::unique_ptr<std::stop_callback<Forwarder>> m_registration;
+    bool m_released = false;
+
+  public:
+    void Arm(std::stop_token token, std::shared_ptr<StopBridge> bridge, Executor executor) {
+        const std::lock_guard lock(m_mutex);
+        if (!m_released) {
+            m_registration = std::make_unique<std::stop_callback<Forwarder>>(
+                std::move(token), Forwarder{std::move(bridge), std::move(executor)});
+        }
+    }
+
+    void Release() {
+        std::unique_ptr<std::stop_callback<Forwarder>> registration;
+        {
+            const std::lock_guard lock(m_mutex);
+            m_released = true;
+            registration = std::move(m_registration);
+        }
     }
 };
 
@@ -664,10 +703,12 @@ void UploadPagesAsync(const ClientRuntimeBase& runtime, TBlob& client, std::shar
 /// keep `owner` to retain the bytes without copying.
 /// A non-zero `timeout` caps how long the request may take, retries included; it only ever shortens the
 /// transfer-scaled default.
+/// A stop request on `stopToken` cancels the transfer, transport retries included; the callback then receives the
+/// cancellation error. The request is not cancelled by anything else, so a shared download simply passes no token.
 /// </summary>
 template <typename TBlob, typename TCallback>
 void DownloadAsync(TBlob& client, int64_t blobOffset, int64_t readLength, std::string ifMatch,
-                   std::chrono::milliseconds timeout, TCallback callback) {
+                   std::chrono::milliseconds timeout, TCallback callback, std::stop_token stopToken = {}) {
     AzureClient::DownloadBlobOptions options;
     options.Range = Detail::ToRange(blobOffset, readLength);
     options.Conditions.IfMatch = std::move(ifMatch);
@@ -683,26 +724,46 @@ void DownloadAsync(TBlob& client, int64_t blobOffset, int64_t readLength, std::s
     // The lease is owned by the completion, so the transfer can never write into freed memory.
     auto buffer = DownloadBufferPool::Shared()->Acquire(static_cast<size_t>(readLength));
     const std::span<char> destination(buffer->Data(), buffer->Size());
-    client.DownloadToAsync(
-        destination, std::move(options),
-        [buffer = std::move(buffer), callback = std::move(callback)](auto result) mutable {
-            std::exception_ptr error;
-            unsigned int status = 0;
-            size_t written = 0;
-            try {
-                const auto downloaded = Unwrap(std::move(result));
-                Detail::CheckDownloadLength(downloaded);
-                written = static_cast<size_t>(downloaded.BytesWritten);
-            } catch (const RequestFailedException& e) {
-                status = e.StatusCode;
-                error = std::current_exception();
-            } catch (...) {
-                error = std::current_exception();
-            }
-            const std::string_view data(buffer->Data(), std::min(written, buffer->Size()));
-            callback(error, status, data, std::shared_ptr<const void>(std::move(buffer)));
-        },
-        std::move(requestOptions));
+    // The stop registration is armed after the request is initiated, so destroying it (by the completion, possibly
+    // on another thread) never waits on the bridge mutex that initiation holds. A stop requested before arming
+    // fires on arming.
+    using Link = Detail::StopLink<decltype(client.get_executor())>;
+    const auto bridge = stopToken.stop_possible() ? std::make_shared<Detail::StopBridge>() : nullptr;
+    const auto link = bridge ? std::make_shared<Link>() : nullptr;
+    if (bridge) {
+        requestOptions.SetCancellationSlot(bridge->Slot());
+    }
+    auto start = [&] {
+        client.DownloadToAsync(
+            destination, std::move(options),
+            [buffer = std::move(buffer), callback = std::move(callback), link](auto result) mutable {
+                if (link) {
+                    link->Release();
+                }
+                std::exception_ptr error;
+                unsigned int status = 0;
+                size_t written = 0;
+                try {
+                    const auto downloaded = Unwrap(std::move(result));
+                    Detail::CheckDownloadLength(downloaded);
+                    written = static_cast<size_t>(downloaded.BytesWritten);
+                } catch (const RequestFailedException& e) {
+                    status = e.StatusCode;
+                    error = std::current_exception();
+                } catch (...) {
+                    error = std::current_exception();
+                }
+                const std::string_view data(buffer->Data(), std::min(written, buffer->Size()));
+                callback(error, status, data, std::shared_ptr<const void>(std::move(buffer)));
+            },
+            std::move(requestOptions));
+    };
+    if (bridge) {
+        bridge->Install(start);
+        link->Arm(std::move(stopToken), bridge, client.get_executor());
+    } else {
+        start();
+    }
 }
 
 /// <summary>

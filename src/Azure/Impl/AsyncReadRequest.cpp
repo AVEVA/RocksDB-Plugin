@@ -82,6 +82,8 @@ void AsyncReadRequest::Abort() {
         m_status = rocksdb::IOStatus::Aborted("Async read aborted");
         m_bytesRead = 0;
     }
+    // Outside the lock: the stop callback may run arbitrary code (it only posts to the client executor).
+    m_stop.request_stop();
     NotifyFinished();
 }
 

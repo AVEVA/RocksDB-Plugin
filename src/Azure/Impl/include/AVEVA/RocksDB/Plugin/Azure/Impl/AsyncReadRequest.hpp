@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stop_token>
 #include <string_view>
 #include <vector>
 
@@ -107,10 +108,17 @@ class AsyncReadRequest {
     [[nodiscard]] bool TryGetOutcome(rocksdb::FSReadRequest& outcome);
 
     /// <summary>
-    /// Stops the request from touching the scratch buffer. Does not block: an in-flight download is left to finish
-    /// and its result is dropped. The filesystem waits for such downloads before it is destroyed.
+    /// Stops the request from touching the scratch buffer and cancels its private download. Does not block: the
+    /// cancelled download finishes on its own and its result is dropped. The filesystem waits for such downloads
+    /// before it is destroyed.
     /// </summary>
     void Abort();
+
+    /// <summary>
+    /// Signalled by Abort, so a private download started for this request can be cancelled instead of running on
+    /// until its result is dropped.
+    /// </summary>
+    [[nodiscard]] std::stop_token StopToken() const noexcept { return m_stop.get_token(); }
 
     /// <summary>
     /// Invokes RocksDB's callback with the outcome, at most once. Does nothing until completed or aborted.
@@ -130,6 +138,7 @@ class AsyncReadRequest {
     void* const m_callbackArg;
     std::shared_ptr<AsyncReadSignal> m_signal;
     const std::optional<Executor> m_completionExecutor;
+    std::stop_source m_stop;
 
     std::mutex m_mutex;
     // Written under m_mutex; atomic so Finished() is lock-free and Wait() can block on the atomic itself.

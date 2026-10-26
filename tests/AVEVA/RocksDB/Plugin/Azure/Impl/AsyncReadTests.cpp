@@ -1083,6 +1083,82 @@ TEST_F(AsyncReadTests, ReadAsync_PausedPrefetchWithShortTimeout_TimesOutLeavesSc
     EXPECT_EQ(std::string(64, 'x'), std::string(scratch.begin(), scratch.end()));
 }
 
+TEST_F(AsyncReadTests, ReadAsync_DeletingHandlesOfStalledPrivateReads_CancelsTheirDownloadsWithoutRetrying) {
+    constexpr size_t Reads = 8;
+    auto file = CreateFile(m_deferredEnv);
+    std::vector<std::vector<char>> scratches(Reads, std::vector<char>(64, 'x'));
+    std::vector<CallbackRecord> records(Reads);
+    std::vector<IoHandle> handles(Reads);
+    for (size_t i = 0; i < Reads; ++i) {
+        auto req = MakeRequest(i * 128, scratches[i]);
+        ASSERT_TRUE(Submit(file, req, records[i], handles[i]).ok());
+    }
+    ASSERT_TRUE(m_deferredEnv.Blob->WaitForPendingDownloads(Reads));
+    const auto downloadsBefore = m_deferredEnv.Blob->Downloads.size();
+
+    for (auto& handle : handles) {
+        handle.Reset();
+    }
+
+    // Nothing completes the held requests: only cancelling the transfers can drain them.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (m_deferredEnv.Blob->PendingDownloads() > 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    EXPECT_EQ(0U, m_deferredEnv.Blob->PendingDownloads());
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_EQ(downloadsBefore, m_deferredEnv.Blob->Downloads.size());
+    for (size_t i = 0; i < Reads; ++i) {
+        EXPECT_EQ(0, records[i].Calls.load());
+        EXPECT_EQ(std::string(64, 'x'), std::string(scratches[i].begin(), scratches[i].end()));
+    }
+}
+
+TEST_F(AsyncReadTests, AbortIO_CancelsThePrivateDownloadAndDeliversTheCallbackOnce) {
+    auto file = CreateFile(m_deferredEnv);
+    std::vector<char> scratch(64, 'x');
+    auto req = MakeRequest(0, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+    ASSERT_TRUE(Submit(file, req, record, handle).ok());
+    ASSERT_TRUE(m_deferredEnv.Blob->WaitForPendingDownloads(1));
+
+    std::vector<void*> handles{handle.Handle};
+    ASSERT_TRUE(AbortAsyncReads(handles).ok());
+    ASSERT_TRUE(PollAsyncReads(handles).ok());
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (m_deferredEnv.Blob->PendingDownloads() > 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    EXPECT_EQ(0U, m_deferredEnv.Blob->PendingDownloads());
+    EXPECT_EQ(1, record.Calls.load());
+    EXPECT_TRUE(record.Status.IsAborted()) << record.Status.ToString();
+    EXPECT_EQ(1U, m_deferredEnv.Blob->Downloads.size());
+}
+
+TEST_F(AsyncReadTests, ReadAsync_AbortedWaiterOfAFailedPrefetch_DoesNotStartAFallbackDownloadAndKeepsThePrefetch) {
+    auto file = CreateFile(m_deferredEnv);
+    ASSERT_TRUE(file.Prefetch(1024, 2048, rocksdb::IOOptions{}, nullptr).ok());
+    std::vector<char> scratch(64, 'x');
+    auto req = MakeRequest(1100, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+    ASSERT_TRUE(Submit(file, req, record, handle).ok());
+    ASSERT_EQ(1U, m_deferredEnv.Blob->PendingDownloads());
+
+    handle.Reset();
+    // Abandoning one waiter must not cancel the shared prefetch.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    ASSERT_EQ(1U, m_deferredEnv.Blob->PendingDownloads());
+    m_deferredEnv.Blob->TakeDownload().Fail(FakeBlobServer::Error(400, "InvalidInput"));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_EQ(0U, m_deferredEnv.Blob->PendingDownloads());
+    EXPECT_EQ(1U, m_deferredEnv.Blob->Downloads.size());
+    EXPECT_EQ(std::string(64, 'x'), std::string(scratch.begin(), scratch.end()));
+}
+
 TEST_F(AsyncReadTests, ReadAsync_DelayedMetadataWithShortTimeout_TimesOutWithoutCancellingTheRefresh) {
     auto file = CreateFile(m_deferredEnv);
     m_deferredEnv.Blob->DeferProperties = true;
@@ -1566,7 +1642,7 @@ TEST_F(AsyncReadTests, Tracker_DrainWithNothingInFlightReturnsImmediately) {
     tracker->Drain();
 }
 
-TEST_F(AsyncReadTests, ReadAsync_HandleAndFilesystemDroppedMidRead_DrainWaitsUntilFileReleased) {
+TEST_F(AsyncReadTests, ReadAsync_FilesystemDroppedMidRead_DrainWaitsUntilFileReleased) {
     HostIoContext host;
     auto tracker = std::make_shared<AsyncReadTracker>(host.Context().get_executor());
     FakeBlobEnvironment standalone;
@@ -1584,10 +1660,11 @@ TEST_F(AsyncReadTests, ReadAsync_HandleAndFilesystemDroppedMidRead_DrainWaitsUnt
     std::vector<char> scratch(32, 'x');
     auto req = MakeRequest(0, scratch);
     CallbackRecord record;
+    // The handle outlives the file: deleting it would cancel the download, which is covered by its own tests.
+    IoHandle handle;
     {
         FakeReadableFile file{
             std::make_shared<FakeReadableFileImpl>("test.sst", standalone.Runtime, client, nullptr, m_logger, tracker)};
-        IoHandle handle;
         ASSERT_TRUE(Submit(file, req, record, handle).ok());
     }
     auto download = server.TakeDownload();
@@ -1610,7 +1687,7 @@ TEST_F(AsyncReadTests, ReadAsync_HandleAndFilesystemDroppedMidRead_DrainWaitsUnt
     EXPECT_TRUE(fileReleasedWhenDrained.load());
     EXPECT_EQ(0U, tracker->InFlight());
     EXPECT_EQ(0, record.Calls.load());
-    EXPECT_EQ(std::string(32, 'x'), std::string(scratch.begin(), scratch.end()));
+    EXPECT_EQ(std::string(32, 'G'), std::string(scratch.begin(), scratch.end()));
 }
 
 TEST_F(AsyncReadTests, ReadAsync_TrackedReadEndsAfterCompletionAndPoll) {

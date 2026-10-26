@@ -102,6 +102,9 @@ BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& req, std::function<v
         } else {
             auto makeDownload = [&] {
                 return [file = m_file, offset, length, deadline, request, logger = m_logger] {
+                    if (request->Finished()) {
+                        return;
+                    }
                     if (Impl::ReadableFileDetail::Expired(deadline)) {
                         request->Complete(
                             AzureErrorTranslator::FromException(Impl::ReadableFileDetail::ReadTimedOutError()), {});
@@ -115,7 +118,8 @@ BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& req, std::function<v
                                                     : rocksdb::IOStatus::OK(),
                                               data);
                         },
-                        TImpl::kMaxStaleReadRetries, Impl::ReadableFileDetail::Remaining(deadline));
+                        TImpl::kMaxStaleReadRetries, Impl::ReadableFileDetail::Remaining(deadline),
+                        request->StopToken());
                 };
             };
 

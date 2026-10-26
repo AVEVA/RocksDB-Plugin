@@ -219,7 +219,7 @@ candidates, and inherited issues. No implementation changes were made.
 
 ### R09 - Cancel abandoned private downloads rather than only suppressing their results
 
-- [ ] **P2 | Source-confirmed resource retention; optimization**
+- [x] **P2 | Source-confirmed resource retention; optimization**
 - **Locations:** `src\Azure\Impl\AsyncReadRequest.cpp:74-87,123-139`;
   `src\Azure\BasicReadableFile.ipp`, `StartRead`;
   `src\Azure\Impl\include\AVEVA\RocksDB\Plugin\Azure\Impl\BlobOperations.hpp:669-705`.

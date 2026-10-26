@@ -549,7 +549,8 @@ template <typename TBlob>
 template <ReadCompletion TCallback>
 void BasicReadableFileImpl<TBlob>::ReadAsync(std::shared_ptr<const BasicReadableFileImpl<TBlob>> self,
                                              const int64_t offset, const int64_t bytesToRead, TCallback callback,
-                                             const int attemptsLeft, const std::chrono::milliseconds timeout) {
+                                             const int attemptsLeft, const std::chrono::milliseconds timeout,
+                                             std::stop_token stopToken) {
     ReadableFileDetail::ReadCompletionGuard<TCallback> guarded(std::move(callback));
     const auto deadline = ReadableFileDetail::DeadlineAfter(timeout);
     if (self->m_asyncReads) {
@@ -558,10 +559,12 @@ void BasicReadableFileImpl<TBlob>::ReadAsync(std::shared_ptr<const BasicReadable
                            std::exception_ptr error, std::string_view data, std::shared_ptr<const void> owner) mutable {
             callback(std::move(error), data, std::move(owner));
         };
-        ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(tracked), attemptsLeft, deadline);
+        ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(tracked), attemptsLeft, deadline,
+                         std::move(stopToken));
         return;
     }
-    ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(guarded), attemptsLeft, deadline);
+    ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(guarded), attemptsLeft, deadline,
+                     std::move(stopToken));
 }
 
 // Async counterpart of DownloadWithRetry: every step (ETag check, conditional download, metadata refresh) is chained
@@ -571,9 +574,15 @@ template <typename TBlob>
 template <ReadCompletion TCallback>
 void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicReadableFileImpl<TBlob>> self,
                                                     const int64_t offset, const int64_t bytesToRead, TCallback callback,
-                                                    const int attemptsLeft, const ReadDeadline deadline) {
+                                                    const int attemptsLeft, const ReadDeadline deadline,
+                                                    std::stop_token stopToken) {
     if (offset < 0 || bytesToRead <= 0) {
         ReadableFileDetail::FinishRead(self, callback, nullptr, {});
+        return;
+    }
+    // An abandoned read must not start another metadata call, download or restart.
+    if (stopToken.stop_requested()) {
+        ReadableFileDetail::FinishRead(self, callback, ReadableFileDetail::ReadAbandonedError(), {});
         return;
     }
     if (ReadableFileDetail::Expired(deadline)) {
@@ -589,8 +598,8 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
         WaitForMetadataAsync(
             file, deadline,
             [self = std::move(self), offset, bytesToRead, callback = std::move(callback), etag = std::move(etag),
-             attemptsLeft,
-             deadline](std::exception_ptr error, int64_t latestSize, std::string latestEtag, uint64_t epoch) mutable {
+             attemptsLeft, deadline,
+             stopToken](std::exception_ptr error, int64_t latestSize, std::string latestEtag, uint64_t epoch) mutable {
                 if (error) {
                     ReadableFileDetail::FinishRead(self, callback, error, {});
                     return;
@@ -607,7 +616,8 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
                     return;
                 }
                 self->ApplyRefreshedMetadata(latestSize, std::move(latestEtag), epoch);
-                ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(callback), left, deadline);
+                ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(callback), left, deadline,
+                                 std::move(stopToken));
             });
         return;
     }
@@ -616,11 +626,11 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
     auto& blob = *self->m_h.Blob;
     BlobOperations::DownloadAsync(
         blob, offset, toRead, std::move(etag), ReadableFileDetail::Remaining(deadline),
-        [self = std::move(self), offset, bytesToRead, remaining, callback = std::move(callback), attemptsLeft,
-         deadline](std::exception_ptr error, unsigned int status, std::string_view data,
-                   std::shared_ptr<const void> owner) mutable {
+        [self = std::move(self), offset, bytesToRead, remaining, callback = std::move(callback), attemptsLeft, deadline,
+         stopToken](std::exception_ptr error, unsigned int status, std::string_view data,
+                    std::shared_ptr<const void> owner) mutable {
             if (error) {
-                if (status == HttpStatus::PreconditionFailed) {
+                if (status == HttpStatus::PreconditionFailed && !stopToken.stop_requested()) {
                     auto left = attemptsLeft;
                     if (!ReadableFileDetail::StaleReadPolicy::TrySpendRefresh(left)) {
                         ReadableFileDetail::FinishRead(self, callback, ReadableFileDetail::StaleReadError(), {});
@@ -631,7 +641,7 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
                     const auto logger = self->m_h.Logger;
                     try {
                         RefreshMetadataAndReadAsync(std::move(self), offset, bytesToRead, std::move(callback), left,
-                                                    deadline);
+                                                    deadline, std::move(stopToken));
                     } catch (...) {
                         if (logger) {
                             BOOST_LOG_SEV(*logger, boost::log::trivial::error) << "Restarting a stale read failed";
@@ -647,7 +657,8 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
                 data = data.substr(0, static_cast<size_t>(remaining));
             }
             ReadableFileDetail::FinishRead(self, callback, nullptr, data, std::move(owner));
-        });
+        },
+        stopToken);
 }
 
 template <typename TBlob>
@@ -655,7 +666,7 @@ template <ReadCompletion TCallback>
 void BasicReadableFileImpl<TBlob>::RefreshMetadataAndReadAsync(std::shared_ptr<const BasicReadableFileImpl<TBlob>> self,
                                                                const int64_t offset, const int64_t bytesToRead,
                                                                TCallback callback, const int attemptsLeft,
-                                                               const ReadDeadline deadline) {
+                                                               const ReadDeadline deadline, std::stop_token stopToken) {
     // Skip the properties call when the budget is already spent; the restart would only time out afterwards.
     if (ReadableFileDetail::Expired(deadline)) {
         ReadableFileDetail::FinishRead(self, callback, ReadableFileDetail::ReadTimedOutError(), {});
@@ -664,7 +675,8 @@ void BasicReadableFileImpl<TBlob>::RefreshMetadataAndReadAsync(std::shared_ptr<c
     const auto file = self;
     WaitForMetadataAsync(file, deadline,
                          [self = std::move(self), offset, bytesToRead, callback = std::move(callback), attemptsLeft,
-                          deadline](std::exception_ptr error, int64_t size, std::string etag, uint64_t epoch) mutable {
+                          deadline, stopToken = std::move(stopToken)](std::exception_ptr error, int64_t size,
+                                                                      std::string etag, uint64_t epoch) mutable {
                              if (error) {
                                  ReadableFileDetail::FinishRead(self, callback, error, {});
                                  return;
@@ -672,7 +684,7 @@ void BasicReadableFileImpl<TBlob>::RefreshMetadataAndReadAsync(std::shared_ptr<c
 
                              self->ApplyRefreshedMetadata(size, std::move(etag), epoch);
                              ReadAsyncAttempt(std::move(self), offset, bytesToRead, std::move(callback), attemptsLeft,
-                                              deadline);
+                                              deadline, std::move(stopToken));
                          });
 }
 

@@ -24,6 +24,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -49,6 +50,12 @@ namespace ReadableFileDetail {
 inline std::exception_ptr ReadTimedOutError() {
     return std::make_exception_ptr(RequestFailedException(0, "ReadTimedOut", "The read deadline was exceeded", "",
                                                           std::make_error_code(std::errc::timed_out)));
+}
+
+// The read's owner went away; translates to an aborted status.
+inline std::exception_ptr ReadAbandonedError() {
+    return std::make_exception_ptr(RequestFailedException(0, "ReadAbandoned", "Read abandoned before it completed", "",
+                                                          std::make_error_code(std::errc::operation_canceled)));
 }
 
 inline ReadDeadline DeadlineAfter(const std::chrono::milliseconds timeout) {
@@ -170,11 +177,12 @@ template <typename TBlob> class BasicReadableFileImpl {
     void ApplyRefreshedMetadata(int64_t size, std::string etag, uint64_t epoch) const;
     template <ReadCompletion TCallback>
     static void ReadAsyncAttempt(std::shared_ptr<const BasicReadableFileImpl> self, int64_t offset, int64_t bytesToRead,
-                                 TCallback callback, int attemptsLeft, ReadDeadline deadline);
+                                 TCallback callback, int attemptsLeft, ReadDeadline deadline,
+                                 std::stop_token stopToken);
     template <ReadCompletion TCallback>
     static void RefreshMetadataAndReadAsync(std::shared_ptr<const BasicReadableFileImpl> self, int64_t offset,
                                             int64_t bytesToRead, TCallback callback, int attemptsLeft,
-                                            ReadDeadline deadline);
+                                            ReadDeadline deadline, std::stop_token stopToken);
 
   public:
     // A blob that keeps changing underneath the reader fails with an IOError after this many metadata refreshes.
@@ -213,10 +221,14 @@ template <typename TBlob> class BasicReadableFileImpl {
     // A non-zero `timeout` bounds the whole read, measured from this call: metadata refreshes, downloads (including
     // their transport retries) and stale-read restarts all draw on it, and the read completes with a TimedOut error
     // once it is spent.
+    // A stop request on `stopToken` cancels this read's own download (including its transport retries), starts no
+    // restart or further download, and completes the read with a cancelled error. It never touches a shared
+    // metadata refresh or prefetch that the read may be waiting on.
     template <ReadCompletion TCallback>
     static void ReadAsync(std::shared_ptr<const BasicReadableFileImpl> self, int64_t offset, int64_t bytesToRead,
                           TCallback callback, int attemptsLeft = kMaxStaleReadRetries,
-                          std::chrono::milliseconds timeout = std::chrono::milliseconds::zero());
+                          std::chrono::milliseconds timeout = std::chrono::milliseconds::zero(),
+                          std::stop_token stopToken = {});
 
     // Upper bound of a single prefetched range, to keep per-file memory bounded.
     static constexpr int64_t kMaxPrefetchBytes = 8 * 1024 * 1024;
