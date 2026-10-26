@@ -441,30 +441,6 @@ candidates, and inherited issues. No implementation changes were made.
   Distinguish loopback CPU measurements from Azure network results. Live Azure
   runs must be explicitly configured; do not spend cloud resources by default.
 
-### R23 - Document the precise source/ABI compatibility boundary
-
-- [ ] **P2 | Source-confirmed interface changes; compatibility decision**
-- **Locations:** `include\AVEVA\RocksDB\Plugin\Azure\Plugin.hpp`;
-  `include\AVEVA\RocksDB\Plugin\Azure\ReadableFile.hpp`,
-  `ReadWriteFile.hpp`, `WriteableFile.hpp`;
-  moved/deleted `include\AVEVA\RocksDB\Plugin\Azure\Impl\*` headers;
-  installed-package consumer tests in `.github\workflows\build-and-test.yml`.
-- **Evidence:** Deprecated Register overloads preserve ordinary source calls,
-  but appending a defaulted parameter changes their function type and mangled
-  symbol. The old ReadableFile sequential/random combined interface has been
-  split, constructors have been restricted, and implementation headers moved
-  out of the old include tree. New-header self-containment tests do not prove
-  compatibility with consumers written against main.
-- **Action:** Add small consumer fixtures based on the supported main API and
-  publish a migration/compatibility note. State whether compatibility is source
-  only and which formerly exposed implementation APIs are intentionally
-  unsupported. If binary compatibility is required, retain exact old overload
-  signatures as forwarding entry points. Do not restore the removed Azure SDK,
-  introduce new type erasure, or silently undo the intended executor injection.
-- **Acceptance:** Build supported old-style registration calls and normal
-  RocksDB file usage against the installed package. Explicitly document
-  intentional breaks and test supported replacements.
-
 ## Review validation and implementation checks
 
 The following existing targeted tests were executed during this review:
