@@ -935,6 +935,60 @@ TEST_F(AsyncReadTests, MultiRead_ManyMergedGroupsWithStalledOne_RetainsOnlyTheAc
         EXPECT_EQ(Expected(i * 30000 + 3000, 16), reqs[2 * i + 1].result.ToString()) << i;
     }
 }
+TEST_F(AsyncReadTests, MultiRead_TimeoutIsOneBudgetForTheBatch_ExpiredQueuedGroupsStartNoDownload) {
+    FillPattern(m_deferredEnv, 1000000);
+    auto file = CreateFile(m_deferredEnv);
+    constexpr size_t count = 40;
+    std::vector<std::vector<char>> scratch(count, std::vector<char>(16));
+    std::vector<rocksdb::FSReadRequest> reqs(count);
+    for (size_t i = 0; i < count; ++i) {
+        SetRequest(reqs[i], i * 20000, scratch[i]);
+    }
+    rocksdb::IOOptions options;
+    options.timeout = std::chrono::milliseconds(300);
+
+    std::atomic<bool> done = false;
+    rocksdb::IOStatus status;
+    std::jthread reader([&] {
+        status = file.MultiRead(reqs.data(), reqs.size(), options, nullptr);
+        done = true;
+    });
+
+    ASSERT_TRUE(m_deferredEnv.Blob->WaitForPendingDownloads(32));
+    auto first = m_deferredEnv.Blob->TakeDownload();
+    const size_t firstIndex = static_cast<size_t>(first.Request.Offset) / 20000;
+    first.Succeed(Expected(first.Request.Offset, 16));
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+    // Finishing the first wave after the deadline frees the window; the queued groups must not start new reads.
+    size_t served = 1;
+    size_t startedAfterExpiry = 0;
+    while (!done) {
+        if (m_deferredEnv.Blob->PendingDownloads() == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        auto download = m_deferredEnv.Blob->TakeDownload();
+        download.Succeed(Expected(download.Request.Offset, 16));
+        if (++served > 32) {
+            ++startedAfterExpiry;
+        }
+    }
+    reader.join();
+
+    EXPECT_EQ(0U, startedAfterExpiry);
+    EXPECT_TRUE(status.ok()) << status.ToString();
+    for (size_t i = 0; i < count; ++i) {
+        if (i == firstIndex) {
+            EXPECT_TRUE(reqs[i].status.ok()) << i;
+            EXPECT_EQ(Expected(i * 20000, 16), reqs[i].result.ToString()) << i;
+        } else {
+            // Reads that finish after the deadline, and groups still queued at it, time out.
+            EXPECT_TRUE(reqs[i].status.IsTimedOut()) << i << ": " << reqs[i].status.ToString();
+        }
+    }
+}
+
 TEST_F(AsyncReadTests, ReadAsync_PassesIoOptionsTimeoutToTheDownload) {
     auto file = CreateFile(m_deferredEnv);
     std::vector<char> scratch(64);

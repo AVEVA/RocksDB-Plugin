@@ -3,6 +3,7 @@
 
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadRequest.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
 
 #include <boost/log/sources/severity_logger.hpp>
@@ -22,9 +23,10 @@ template <class TImpl> class BasicReadableFile final : public rocksdb::FSRandomA
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
 
     // ReadAsync's body; `signal`, when set, is notified as the read finishes (used by MultiRead's sliding window).
-    rocksdb::IOStatus StartRead(rocksdb::FSReadRequest& req, const rocksdb::IOOptions& opts,
-                                std::function<void(rocksdb::FSReadRequest&, void*)> cb, void* cb_arg, void** io_handle,
-                                rocksdb::IOHandleDeleter* del_fn, std::shared_ptr<Impl::AsyncReadSignal> signal);
+    // `deadline` is the absolute time the read must finish by, so a batch can share one budget across its reads.
+    rocksdb::IOStatus StartRead(rocksdb::FSReadRequest& req, std::function<void(rocksdb::FSReadRequest&, void*)> cb,
+                                void* cb_arg, void** io_handle, rocksdb::IOHandleDeleter* del_fn,
+                                std::shared_ptr<Impl::AsyncReadSignal> signal, Impl::ReadDeadline deadline);
 
   public:
     // MultiRead keeps at most this many blob downloads outstanding, so a large batch cannot open unbounded
@@ -40,6 +42,9 @@ template <class TImpl> class BasicReadableFile final : public rocksdb::FSRandomA
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger = nullptr);
     ~BasicReadableFile() override;
 
+    // Synchronous reads do not honour IOOptions::timeout (a hint in RocksDB): they block until the read completes or
+    // fails, bounded only by the blob client's own request timeouts and retries. ReadAsync and MultiRead are
+    // deadline-aware.
     rocksdb::IOStatus Read(uint64_t offset, size_t n, const rocksdb::IOOptions& options, rocksdb::Slice* result,
                            char* scratch, rocksdb::IODebugContext* dbg) const override;
     rocksdb::IOStatus ReadAsync(rocksdb::FSReadRequest& req, const rocksdb::IOOptions& opts,

@@ -153,7 +153,7 @@ candidates, and inherited issues. No implementation changes were made.
 
 ### R06 - Apply one timeout budget to a MultiRead batch; document synchronous behavior
 
-- [ ] **P2 | Source-confirmed behavior gap | New MultiRead; inherited sync omission**
+- [x] **P2 | Source-confirmed behavior gap | New MultiRead; inherited sync omission**
 - **Locations:** `src\Azure\BasicReadableFile.ipp:41-47,90-94,177-358`;
   `src\Azure\Impl\ReadableFileImpl.ipp`, `RandomRead`, `TryReadFromPrefetch`,
   `DownloadWithRetry`.

@@ -43,6 +43,8 @@ template <class TImpl>
 rocksdb::IOStatus BasicReadableFile<TImpl>::Read(const uint64_t offset, const size_t n, const rocksdb::IOOptions&,
                                                  rocksdb::Slice* result, char* scratch,
                                                  rocksdb::IODebugContext*) const {
+    // IOOptions::timeout is deliberately ignored: it is only a hint, and a synchronous read blocks until it completes
+    // or fails under the blob client's own timeouts.
     try {
         if (!Impl::RangeCheck::IsValid(offset, n)) {
             return rocksdb::IOStatus::InvalidArgument("Read offset or size is out of range");
@@ -71,14 +73,17 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::ReadAsync(rocksdb::FSReadRequest& re
     if (!cb) {
         return rocksdb::IOStatus::InvalidArgument("ReadAsync requires a callback");
     }
-    return StartRead(req, opts, std::move(cb), cb_arg, io_handle, del_fn, nullptr);
+    // IOOptions::timeout is in microseconds; zero means "no deadline". Round up so a tiny deadline is not lost.
+    return StartRead(
+        req, std::move(cb), cb_arg, io_handle, del_fn, nullptr,
+        Impl::ReadableFileDetail::DeadlineAfter(std::chrono::ceil<std::chrono::milliseconds>(opts.timeout)));
 }
 
 template <class TImpl>
-rocksdb::IOStatus BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& req, const rocksdb::IOOptions& opts,
-                                                      std::function<void(rocksdb::FSReadRequest&, void*)> cb,
-                                                      void* cb_arg, void** io_handle, rocksdb::IOHandleDeleter* del_fn,
-                                                      std::shared_ptr<Impl::AsyncReadSignal> signal) {
+rocksdb::IOStatus
+BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& req, std::function<void(rocksdb::FSReadRequest&, void*)> cb,
+                                    void* cb_arg, void** io_handle, rocksdb::IOHandleDeleter* del_fn,
+                                    std::shared_ptr<Impl::AsyncReadSignal> signal, const Impl::ReadDeadline deadline) {
     if (!Impl::RangeCheck::IsValid(req.offset, req.len)) {
         return rocksdb::IOStatus::InvalidArgument("ReadAsync offset or size is out of range");
     }
@@ -88,10 +93,8 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& re
         auto handle = std::make_unique<AsyncReadHandle>(AsyncReadHandle{request});
         const auto offset = static_cast<int64_t>(req.offset);
         const auto length = static_cast<int64_t>(req.len);
-        // IOOptions::timeout is in microseconds; zero means "no deadline". Round up so a tiny deadline is not lost.
-        // The deadline is fixed here so that waiting for a prefetch and the download itself share one budget.
-        const auto deadline =
-            Impl::ReadableFileDetail::DeadlineAfter(std::chrono::ceil<std::chrono::milliseconds>(opts.timeout));
+        // The deadline is fixed by the caller so that waiting for a prefetch, the download itself and, for MultiRead,
+        // the other reads of the batch share one budget.
 
         if (const auto cached = m_file->TryReadFromCache(offset, length, req.scratch)) {
             // The cache wrote straight into scratch; Complete only records the length.
@@ -174,6 +177,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& re
     }
 }
 
+// IOOptions::timeout is a single budget for the whole batch, measured from the start of the call.
 // The default MultiRead issues one blocking round trip per request. Starting the downloads before waiting lets them
 // overlap on the host io_context, so a batch costs roughly one round trip. Requests that touch or overlap, or sit
 // within kMultiReadMaxGap of each other, are fetched with one GET and split back afterwards; at most
@@ -261,6 +265,9 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
 
         auto signal = std::make_shared<Impl::AsyncReadSignal>();
         size_t nextGroup = 0;
+        // One absolute deadline for the whole batch, so reads admitted later do not each get a fresh timeout.
+        const auto deadline =
+            Impl::ReadableFileDetail::DeadlineAfter(std::chrono::ceil<std::chrono::milliseconds>(opts.timeout));
 
         auto start = [&](Group& group) {
             const bool single = group.EndMember - group.FirstMember == 1;
@@ -278,7 +285,8 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
             void* handle = nullptr;
             rocksdb::IOHandleDeleter deleter = nullptr;
             // No callback: MultiRead reads the outcome straight from the finished request.
-            auto started = StartRead(*target, opts, nullptr, nullptr, &handle, &deleter, signal);
+            // Groups admitted after the batch deadline fail with TimedOut without starting a download.
+            auto started = StartRead(*target, nullptr, nullptr, &handle, &deleter, signal, deadline);
             if (!started.ok()) {
                 for (size_t position = group.FirstMember; position < group.EndMember; ++position) {
                     reqs[order[position]].status = started;
