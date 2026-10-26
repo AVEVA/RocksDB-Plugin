@@ -353,6 +353,46 @@ TEST(ConnectionPool, RepeatedAcquireReleaseCyclesStayConsistent) {
     EXPECT_TRUE(pool.Acquire(second).has_value());
 }
 
+// Counts allocations the pool itself makes on this thread; the connection is built outside the counted region.
+std::size_t CountSerialCycleAllocations(Pool& pool, const Key& key, int cycles, int& live) {
+    auto connection = MakeConnection(0, live);
+    AllocationFailure::allocationCount = 0;
+    AllocationFailure::counting = true;
+    for (int cycle = 0; cycle < cycles; ++cycle) {
+        pool.Release(key, std::move(connection));
+        auto acquired = pool.Acquire(key);
+        connection = std::move(*acquired);
+    }
+    AllocationFailure::counting = false;
+    return AllocationFailure::allocationCount;
+}
+
+TEST(ConnectionPool, SerialKeepAliveRequestsDoNotAllocateAfterWarmUp) {
+    int live = 0;
+    Pool pool(4, LongTimeout);
+    const auto key = MakeKey("a-host-name-too-long-for-small-string-optimisation.example.com");
+    CountSerialCycleAllocations(pool, key, 2, live);
+
+    EXPECT_EQ(CountSerialCycleAllocations(pool, key, 100, live), 0U);
+}
+
+TEST(ConnectionPool, DormantOriginsAreBoundedWhenManyOriginsAreTouched) {
+    int live = 0;
+    Pool pool(4, LongTimeout);
+    for (int origin = 0; origin < 1000; ++origin) {
+        const auto key = MakeKey("origin-" + std::to_string(origin) + ".example.com");
+        pool.Release(key, MakeConnection(origin, live));
+        ASSERT_TRUE(pool.Acquire(key).has_value());
+    }
+    EXPECT_EQ(pool.IdleCount(), 0U);
+    EXPECT_LE(pool.OriginCount(), 64U);
+
+    // A dormant origin must not make a later acquire hand out a connection that is not there.
+    EXPECT_FALSE(pool.Acquire(MakeKey("origin-999.example.com")).has_value());
+    pool.Release(MakeKey("origin-999.example.com"), MakeConnection(1, live));
+    EXPECT_EQ(pool.Acquire(MakeKey("origin-999.example.com"))->stream->identity, 1);
+}
+
 TEST(ConnectionPool, ReleasingAnEmptyConnectionIsIgnored) {
     Pool pool(4, LongTimeout);
     const auto key = MakeKey("example.com");

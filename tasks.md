@@ -280,7 +280,15 @@ candidates, and inherited issues. No implementation changes were made.
 
 ### R12 - Avoid recreating connection-pool origin entries on every serial request
 
-- [ ] **P2 | Source-confirmed churn; benchmark alternative**
+- [x] **P2 | Source-confirmed churn; benchmark alternative**
+- **Result:** Implemented (the alternative won on allocations). Serial Release/Acquire on one
+  origin with a long host name: 400 pool allocations per 100 cycles before (4 per cycle: node
+  entry, key strings, bucket), 0 after warm-up. Bytes follow the same drop. An emptied origin
+  stays in the map as a dormant entry on an intrusive list capped at 32
+  (`MaxDormantOrigins`); older ones are erased, so 1000 unique hosts leave at most 32 empty
+  entries. Concurrency is unchanged (same single mutex, a few pointer writes more). Regression tests:
+  `SerialKeepAliveRequestsDoNotAllocateAfterWarmUp`, `DormantOriginsAreBoundedWhenManyOriginsAreTouched`;
+  the existing expiry, global-cap and allocation-failure tests still pass.
 - **Location:** `libs\HttpClient\src\private\ConnectionPool.hpp`, `AcquireAged`,
   `Release`, `Recycle`.
 - **Evidence:** Acquiring the last idle connection erases its origin map entry.

@@ -116,11 +116,13 @@ namespace intrusive = boost::intrusive;
 
 struct IdleTag;
 struct LruTag;
+struct DormantTag;
 
 // normal_link keeps the hooks pointer-sized and makes list::clear() O(1); the pool never
 // needs to ask a node whether it is currently linked.
 using IdleHook = intrusive::list_base_hook<intrusive::tag<IdleTag>, intrusive::link_mode<intrusive::normal_link>>;
 using LruHook = intrusive::list_base_hook<intrusive::tag<LruTag>, intrusive::link_mode<intrusive::normal_link>>;
+using DormantHook = intrusive::list_base_hook<intrusive::tag<DormantTag>, intrusive::link_mode<intrusive::normal_link>>;
 } // namespace ConnectionPoolDetail
 
 /// <summary>
@@ -221,6 +223,15 @@ class ConnectionPool {
         return m_lru.size();
     }
 
+    /// <summary>
+    /// The number of origin entries currently retained, including dormant ones that hold no connection.
+    /// </summary>
+    /// <returns>The origin entry count.</returns>
+    std::size_t OriginCount() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_origins.size();
+    }
+
     ConnectionPool(const ConnectionPool&) = delete;
     ConnectionPool& operator=(const ConnectionPool&) = delete;
 
@@ -234,6 +245,7 @@ class ConnectionPool {
         LruList retired;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
+            m_dormant.clear();
             m_origins.clear();
             retired.swap(m_lru);
             m_recycled.clear_and_dispose(NodeDisposer{});
@@ -278,9 +290,9 @@ class ConnectionPool {
             const auto now = Clock::now();
             DropExpired(now, retired);
             auto it = m_origins.find(key);
-            if (it != m_origins.end()) {
-                // Origins are erased as soon as they run dry and DropExpired has already
-                // removed every timed-out node, so this list holds only usable connections.
+            if (it != m_origins.end() && !it->second.idle.empty()) {
+                // DropExpired has already removed every timed-out node, so this list holds only usable
+                // connections. A dormant origin (empty list) has nothing to hand out.
                 Origin& origin = it->second;
                 Node& node = origin.idle.back(); // Newest, and least likely to have been closed by the peer.
                 origin.idle.pop_back();
@@ -289,7 +301,7 @@ class ConnectionPool {
                 connection.emplace(std::move(node.connection));
                 Recycle(node);
                 if (origin.idle.empty()) {
-                    m_origins.erase(it);
+                    MakeDormant(origin);
                 }
             }
         }
@@ -342,6 +354,9 @@ class ConnectionPool {
                 // unordered_node_map keeps elements at stable addresses (but not iterators), so the origin
                 // remembers its own key for a fresh lookup when it is erased.
                 origin.key = &it->first;
+            } else if (origin.dormant) {
+                m_dormant.erase(m_dormant.iterator_to(origin));
+                origin.dormant = false;
             } else if (origin.idle.size() >= m_maxIdlePerKey) {
                 Node& oldest = origin.idle.front();
                 origin.idle.pop_front();
@@ -461,10 +476,36 @@ class ConnectionPool {
     /// One origin's idle connections, oldest first, plus a pointer to its own map key so a node can find
     /// and erase its origin (the key lives inside the element, whose address is stable).
     /// </summary>
-    struct Origin {
+    struct Origin : ConnectionPoolDetail::DormantHook {
         IdleList idle;
         const ConnectionKey<Stream>* key = nullptr;
+        bool dormant = false;
     };
+
+    using DormantList = boost::intrusive::list<Origin, boost::intrusive::base_hook<ConnectionPoolDetail::DormantHook>,
+                                               boost::intrusive::constant_time_size<true>>;
+
+    /// <summary>
+    /// Keeps an origin whose last connection was just taken, so a serial request stream releasing that
+    /// connection again finds the map entry (and its key) instead of allocating them anew. Only the newest
+    /// <see cref="MaxDormantOrigins"/> are kept so touching many hosts cannot grow the map without bound.
+    /// </summary>
+    /// <param name="origin">The origin, still in the map, whose idle list is now empty.</param>
+    void MakeDormant(Origin& origin) {
+        origin.dormant = true;
+        m_dormant.push_back(origin);
+        if (m_dormant.size() > MaxDormantOrigins) {
+            Origin& oldest = m_dormant.front();
+            m_dormant.pop_front();
+            oldest.dormant = false;
+            EraseOrigin(oldest);
+        }
+    }
+
+    /// <summary>
+    /// How many empty origin entries are retained for reuse before the oldest is erased.
+    /// </summary>
+    static constexpr std::size_t MaxDormantOrigins = 32;
 
     /// <summary>
     /// Erases an origin's map entry. Map iterators do not survive a rehash, so the entry is looked up afresh;
@@ -556,6 +597,7 @@ class ConnectionPool {
     std::chrono::milliseconds m_probeThreshold;
     mutable std::mutex m_mutex;
     OriginMap m_origins;
+    DormantList m_dormant;
     LruList m_lru;
     IdleList m_recycled;
 };
