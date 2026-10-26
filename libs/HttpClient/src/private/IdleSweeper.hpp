@@ -17,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <stop_token>
 #include <thread>
 #include <utility>
@@ -74,6 +75,12 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
                       probeThreshold, DefaultMinInterval);
     }
 
+    /// <summary>
+    /// Removes any pending registration so a destroyed sweeper does not linger in the scheduler queue until its
+    /// (possibly very distant) deadline.
+    /// </summary>
+    ~IdleSweeper() { m_scheduler->Cancel(*this); }
+
     IdleSweeper(const IdleSweeper&) = delete;
     IdleSweeper& operator=(const IdleSweeper&) = delete;
 
@@ -123,6 +130,7 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
             std::lock_guard<std::mutex> sweepLock(m_sweepMutex);
             m_stopped = true;
         }
+        m_scheduler->Cancel(*this);
         m_plainPool->Clear();
         m_tlsPool->Clear();
     }
@@ -149,6 +157,11 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
     /// </summary>
     static void FailNextSchedules(int count) noexcept { SweepScheduler::FailureBudget().store(count); }
 
+    /// <summary>
+    /// Test hook: how many registrations the process-wide scheduler currently holds; zero when it does not exist.
+    /// </summary>
+    static std::size_t SchedulerQueueSize() { return SweepScheduler::QueueSize(); }
+
   private:
     class SweepScheduler;
 
@@ -158,7 +171,7 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
     /// </summary>
     void ScheduleSweep() noexcept {
         try {
-            m_scheduler->Schedule(weak_from_this(), m_interval);
+            m_scheduler->Schedule(*this, m_interval);
         } catch (...) {
             m_scheduled = false;
             DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::SwallowedException, HttpRequestPhase::Queued, {},
@@ -208,6 +221,19 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
             return !Registered().expired();
         }
 
+        static std::size_t QueueSize() {
+            std::shared_ptr<SweepScheduler> scheduler;
+            {
+                std::lock_guard<std::mutex> lock(RegistryMutex());
+                scheduler = Registered().lock();
+            }
+            if (!scheduler) {
+                return 0;
+            }
+            std::lock_guard<std::mutex> lock(scheduler->m_state->mutex);
+            return scheduler->m_state->queue.size();
+        }
+
         static std::atomic<std::uint64_t>& WaitCount() noexcept {
             static std::atomic<std::uint64_t> count{0};
             return count;
@@ -223,22 +249,47 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
 
         /// <summary>
         /// Queues a sweeper to run after a delay, starting the thread if it is not yet running. The weak
-        /// reference means a sweeper destroyed in the meantime is skipped.
+        /// reference means a sweeper destroyed in the meantime is skipped. Nothing is queued once the sweeper
+        /// has been stopped; the stop flag is checked under the queue lock so it cannot race with Cancel.
         /// </summary>
-        /// <param name="sweeper">The sweeper to run.</param>
+        /// <param name="sweeper">The sweeper to run; it records its queue deadline so it can be cancelled.</param>
         /// <param name="delay">How long to wait before running it.</param>
-        void Schedule(const std::weak_ptr<IdleSweeper>& sweeper, std::chrono::milliseconds delay) {
+        void Schedule(IdleSweeper& sweeper, std::chrono::milliseconds delay) {
             if (FailureBudget().fetch_sub(1) > 0) {
                 throw std::bad_alloc();
             }
             {
                 std::lock_guard<std::mutex> lock(m_state->mutex);
-                m_state->queue.emplace(Clock::now() + delay, sweeper);
+                if (sweeper.m_stopped.load()) {
+                    return;
+                }
+                const auto due = Clock::now() + delay;
+                m_state->queue.emplace(due, Entry{&sweeper, sweeper.weak_from_this()});
+                sweeper.m_queuedDue = due;
                 if (!m_thread.joinable()) {
                     m_thread = std::jthread([state = m_state](std::stop_token stop) { Run(*state, stop); });
                 }
             }
             m_state->wake.notify_all();
+        }
+
+        /// <summary>
+        /// Drops the sweeper's pending registration, if any. It is found by deadline and owner, so this costs
+        /// O(log n) rather than a scan of the queue.
+        /// </summary>
+        void Cancel(IdleSweeper& sweeper) {
+            std::lock_guard<std::mutex> lock(m_state->mutex);
+            if (!sweeper.m_queuedDue) {
+                return;
+            }
+            auto [first, last] = m_state->queue.equal_range(*sweeper.m_queuedDue);
+            for (; first != last; ++first) {
+                if (first->second.owner == &sweeper) {
+                    m_state->queue.erase(first);
+                    break;
+                }
+            }
+            sweeper.m_queuedDue.reset();
         }
 
         /// <summary>
@@ -258,10 +309,15 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
 
         SweepScheduler() : m_state(std::make_shared<State>()) {}
 
+        struct Entry {
+            const IdleSweeper* owner; // Identity for Cancel; never dereferenced.
+            std::weak_ptr<IdleSweeper> sweeper;
+        };
+
         struct State {
             std::mutex mutex;
             std::condition_variable_any wake;
-            std::multimap<Clock::time_point, std::weak_ptr<IdleSweeper>> queue;
+            std::multimap<Clock::time_point, Entry> queue;
         };
 
         static std::mutex& RegistryMutex() {
@@ -295,11 +351,12 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
                     });
                     continue;
                 }
-                auto sweeper = state.queue.begin()->second.lock();
+                auto sweeper = state.queue.begin()->second.sweeper.lock();
                 state.queue.erase(state.queue.begin());
                 if (!sweeper) {
                     continue;
                 }
+                sweeper->m_queuedDue.reset();
                 lock.unlock();
                 try {
                     sweeper->RunSweep();
@@ -322,7 +379,8 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
     std::shared_ptr<const DiagnosticsSink> m_diagnostics;
     std::atomic<bool> m_scheduled{false};
     std::mutex m_sweepMutex;
-    bool m_stopped = false;
+    std::atomic<bool> m_stopped{false};
+    std::optional<std::chrono::steady_clock::time_point> m_queuedDue; // Guarded by the scheduler queue mutex.
     std::shared_ptr<SweepScheduler> m_scheduler = SweepScheduler::Acquire();
 };
 } // namespace AVEVA::Private

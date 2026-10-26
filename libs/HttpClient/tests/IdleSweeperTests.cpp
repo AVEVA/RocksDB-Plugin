@@ -118,6 +118,26 @@ TEST(IdleSweeper, SchedulerStopsWhenTheLastSweeperIsDestroyed) {
     EXPECT_TRUE(WaitUntil([&] { return again.plain->IdleCount() == 0; }));
 }
 
+// Short-lived sweepers with a year-long timeout must not accumulate in a scheduler a persistent sweeper keeps alive.
+TEST(IdleSweeper, DestroyedAndStoppedSweepersLeaveNoRegistrations) {
+    asio::io_context context;
+    SweeperFixture persistent(context, std::chrono::hours(24 * 365));
+    persistent.AddIdleConnection();
+    const auto baseline = IdleSweeper::SchedulerQueueSize();
+    ASSERT_GE(baseline, 1U);
+
+    for (int i = 0; i < 100; ++i) {
+        SweeperFixture shortLived(context, std::chrono::hours(24 * 365));
+        shortLived.AddIdleConnection();
+        if (i % 2 == 0) {
+            shortLived.sweeper->Stop();
+            EXPECT_EQ(IdleSweeper::SchedulerQueueSize(), baseline);
+        }
+    }
+    EXPECT_EQ(IdleSweeper::SchedulerQueueSize(), baseline);
+    EXPECT_EQ(persistent.plain->IdleCount(), 1U);
+}
+
 // The scheduler thread may hold the last reference to the sweeper; Stop must have drained the pools on the caller's
 // thread by then, so no disposal is posted to an io_context that has already been destroyed.
 TEST(IdleSweeper, StopDrainsThePoolsBeforeTheIoContextGoesAway) {
