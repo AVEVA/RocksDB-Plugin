@@ -246,15 +246,21 @@ template <typename TBlob> BasicReadableFileImpl<TBlob>::PrefetchState::~Prefetch
 template <typename TBlob>
 void BasicReadableFileImpl<TBlob>::PrefetchState::AddWaiter(const uint64_t id,
                                                             std::move_only_function<void()>& waiter) {
+    // Grows geometrically, and only when full: reserving size() + 1 each time would reallocate on every insertion.
+    const auto reserveOne = [](auto& vector) {
+        if (vector.size() == vector.capacity()) {
+            vector.reserve(std::max<size_t>(vector.capacity() * 2, 4));
+        }
+    };
     auto group = std::ranges::find(Waiters, id, &WaiterGroup::Id);
     if (group == Waiters.end()) {
-        Waiters.reserve(Waiters.size() + 1);
+        reserveOne(Waiters);
         group = Waiters.emplace(Waiters.end());
         group->Id = id;
     }
     // Reserved first so the move below cannot fail and strand the caller's callback.
     try {
-        group->Callbacks.reserve(group->Callbacks.size() + 1);
+        reserveOne(group->Callbacks);
     } catch (...) {
         if (group->Callbacks.empty()) {
             Waiters.erase(group);

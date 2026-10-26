@@ -239,7 +239,7 @@ candidates, and inherited issues. No implementation changes were made.
 
 ### R10 - Remove quadratic allocation growth from prefetch waiter registration
 
-- [ ] **P2 | Source-confirmed complexity | New prefetch code**
+- [x] **P2 | Source-confirmed complexity | New prefetch code**
 - **Location:** `src\Azure\Impl\ReadableFileImpl.ipp:247-264`, `PrefetchState::AddWaiter`.
 - **Evidence:** `Callbacks.reserve(Callbacks.size() + 1)` before every insertion
   defeats vector's geometric growth. A popular stalled prefetch with N readers

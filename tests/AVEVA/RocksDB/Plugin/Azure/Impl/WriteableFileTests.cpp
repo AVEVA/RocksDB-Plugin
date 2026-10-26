@@ -40,6 +40,9 @@ using boost::log::trivial::severity_level;
 // AsyncReadTests, which lives in the same executable and so the same replaced operator new.
 thread_local size_t g_failLargeAllocationIn = 0;
 constexpr size_t LargeAllocationMin = 64;
+// Counts the allocations of at least LargeAllocationMin bytes made by this thread while armed (shared like the above).
+thread_local bool g_countLargeAllocations = false;
+thread_local size_t g_largeAllocationCount = 0;
 
 namespace {
 // Lets a test fail one small allocation on its own thread, which is how the shared payload owner in StartFlush is
@@ -58,6 +61,9 @@ thread_local bool g_failAllAllocations = false;
 bool ShouldFailAllocation(const size_t size) {
     if (g_failAllAllocations) {
         return true;
+    }
+    if (g_countLargeAllocations && size >= LargeAllocationMin) {
+        ++g_largeAllocationCount;
     }
     if (g_failLargeAllocationIn != 0 && size >= LargeAllocationMin && --g_failLargeAllocationIn == 0) {
         return true;

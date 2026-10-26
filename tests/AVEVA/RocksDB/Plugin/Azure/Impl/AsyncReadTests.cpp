@@ -43,6 +43,8 @@ using boost::log::trivial::severity_level;
 
 // Defined next to the replaced operator new in WriteableFileTests.cpp.
 extern thread_local size_t g_failLargeAllocationIn;
+extern thread_local bool g_countLargeAllocations;
+extern thread_local size_t g_largeAllocationCount;
 // Live and peak count of allocations of exactly g_trackedAllocationSize bytes; 0 disarms the tracking.
 extern std::atomic<size_t> g_trackedAllocationSize;
 extern std::atomic<size_t> g_liveTrackedAllocations;
@@ -389,6 +391,57 @@ TEST_F(AsyncReadTests, PrefetchCompletion_ManyInterleavedWaiters_EachRunsOnceAnd
     ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return ranB.back() == 1; }));
     EXPECT_EQ(std::vector<int>(kWaitersPerSlot, 1), ranA);
     EXPECT_EQ(std::vector<int>(kWaitersPerSlot, 1), ranB);
+}
+
+TEST_F(AsyncReadTests, PrefetchChain_ManyWaiters_GrowsStorageGeometrically) {
+    auto file = std::make_shared<FakeReadableFileImpl>("test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
+                                                       m_logger);
+    ASSERT_TRUE(FakeReadableFileImpl::Prefetch(file, 0, 512));
+    constexpr int kWaiters = 2000;
+    std::vector<std::move_only_function<void()>> waiters;
+    waiters.reserve(kWaiters);
+    for (int i = 0; i < kWaiters; ++i) {
+        waiters.emplace_back([] {});
+    }
+
+    g_largeAllocationCount = 0;
+    g_countLargeAllocations = true;
+    for (auto& waiter : waiters) {
+        ASSERT_TRUE(file->ChainOntoPendingPrefetch(100, 64, waiter));
+    }
+    g_countLargeAllocations = false;
+
+    EXPECT_LT(g_largeAllocationCount, 40U);
+}
+
+TEST_F(AsyncReadTests, PrefetchChain_GrowthFailure_LeavesCallbackUsableAndKeepsEarlierWaiters) {
+    auto file = std::make_shared<FakeReadableFileImpl>("test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
+                                                       m_logger);
+    ASSERT_TRUE(FakeReadableFileImpl::Prefetch(file, 0, 512));
+    int ran = 0;
+    int queued = 0;
+    std::move_only_function<void()> waiter = [&ran] { ++ran; };
+    g_failLargeAllocationIn = 1;
+    bool failed = false;
+    for (int i = 0; i < 100 && !failed; ++i) {
+        try {
+            ASSERT_TRUE(file->ChainOntoPendingPrefetch(100, 64, waiter));
+            ++queued;
+            waiter = [&ran] { ++ran; };
+        } catch (const std::bad_alloc&) {
+            failed = true;
+        }
+    }
+    g_failLargeAllocationIn = 0;
+
+    ASSERT_TRUE(failed);
+    ASSERT_TRUE(static_cast<bool>(waiter));
+    ASSERT_TRUE(file->ChainOntoPendingPrefetch(100, 64, waiter));
+    ++queued;
+
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'P'));
+    ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return ran == queued; }));
+    EXPECT_EQ(queued, ran);
 }
 
 TEST_F(AsyncReadTests, PrefetchCompletion_SlotInvalidatedDuringDownload_StillReleasesWaiters) {
