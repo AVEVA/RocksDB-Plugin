@@ -9,6 +9,8 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 
+#include <AVEVA/AzureClient/AzureRequestOptions.hpp>
+
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 
 #include <boost/log/trivial.hpp>
@@ -53,7 +55,9 @@ inline ReadDeadline DeadlineAfter(const std::chrono::milliseconds timeout) {
     if (timeout.count() <= 0) {
         return std::nullopt;
     }
-    return std::chrono::steady_clock::now() + timeout;
+    // Saturate in milliseconds first: the clock's finer unit would overflow when converting an extreme timeout.
+    return std::chrono::steady_clock::now() +
+           std::min(timeout, AVEVA::AzureClient::AzureRequestOptions::MaxTotalDeadline);
 }
 
 inline bool Expired(const ReadDeadline& deadline) { return deadline && std::chrono::steady_clock::now() >= *deadline; }

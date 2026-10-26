@@ -1129,3 +1129,31 @@ TEST(BackoffTests, InjectedGeneratorMakesTheJitterDeterministic) {
     EXPECT_EQ(first, std::chrono::milliseconds{80});   // 100 ms * lowest jitter (0.8)
     EXPECT_EQ(second, std::chrono::milliseconds{160}); // doubled per retry
 }
+TEST(BackoffTests, ExtremeDelaysAreClampedBeforeFloatingPointConversion) {
+    AVEVA::AzureClient::RetryOptions retry;
+    retry.InitialDelay = std::chrono::milliseconds::max();
+    retry.MaxDelay = std::chrono::milliseconds::max();
+    FixedGenerator generator;
+
+    for (const int retryNumber : {1, 2, 64, std::numeric_limits<int>::max()}) {
+        const auto delay = AVEVA::AzureClient::Private::RetryDetail::ComputeBackoff(retry, retryNumber, generator);
+        EXPECT_GE(delay, std::chrono::milliseconds{0}) << retryNumber;
+        EXPECT_LE(delay, AVEVA::AzureClient::AzureRequestOptions::MaxTotalDeadline) << retryNumber;
+    }
+
+    retry.InitialDelay = std::chrono::milliseconds::min();
+    retry.MaxDelay = std::chrono::milliseconds::min();
+    EXPECT_EQ(AVEVA::AzureClient::Private::RetryDetail::ComputeBackoff(retry, 3, generator),
+              std::chrono::milliseconds{0});
+}
+
+TEST(RetryTests, WidelySeparatedRetryAfterAndServerDatesAreBounded) {
+    constexpr std::chrono::milliseconds Day{std::chrono::hours{24}};
+    const AVEVA::HttpResponse farFuture{
+        503, {{"Retry-After", "Wed, 01 Jan 2200 00:00:00 GMT"}, {"Date", "Fri, 01 Jan 1700 00:00:00 GMT"}}, ""};
+    const AVEVA::HttpResponse farPast{
+        503, {{"Retry-After", "Fri, 01 Jan 1700 00:00:00 GMT"}, {"Date", "Wed, 01 Jan 2200 00:00:00 GMT"}}, ""};
+
+    EXPECT_EQ(AVEVA::AzureClient::Private::ParseRetryAfter(farFuture), std::optional{Day});
+    EXPECT_EQ(AVEVA::AzureClient::Private::ParseRetryAfter(farPast), std::optional{std::chrono::milliseconds{0}});
+}

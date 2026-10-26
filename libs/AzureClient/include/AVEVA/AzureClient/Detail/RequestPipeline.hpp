@@ -57,8 +57,12 @@ template <typename Generator>
                                                        Generator& generator) {
     std::uniform_real_distribution<double> jitter(MinBackoffJitter, MaxBackoffJitter);
 
-    const double maxDelay = static_cast<double>(std::max<std::int64_t>(0, retry.MaxDelay.count()));
-    const double initial = static_cast<double>(std::max<std::int64_t>(0, retry.InitialDelay.count()));
+    // Bound the delays in integers first: int64 max rounds up to 2^63 as a double, which llround cannot convert.
+    constexpr auto maxBound = AzureRequestOptions::MaxTotalDeadline;
+    const double maxDelay =
+        static_cast<double>(std::clamp(retry.MaxDelay, std::chrono::milliseconds{0}, maxBound).count());
+    const double initial =
+        static_cast<double>(std::clamp(retry.InitialDelay, std::chrono::milliseconds{0}, maxBound).count());
     const double exponential = initial * std::ldexp(1.0, std::clamp(retryNumber - 1, 0, MaxBackoffExponent));
     const double delay = std::min(exponential * jitter(generator), maxDelay);
     return std::chrono::milliseconds{static_cast<std::int64_t>(std::llround(delay))};

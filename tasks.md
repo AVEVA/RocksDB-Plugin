@@ -128,7 +128,7 @@ candidates, and inherited issues. No implementation changes were made.
 
 ### R05 - Saturate duration arithmetic before conversion, subtraction, or rounding
 
-- [ ] **P2 | Source-confirmed | New timeout/retry code**
+- [x] **P2 | Source-confirmed | New timeout/retry code**
 - **Locations:**
   `src\Azure\Impl\include\AVEVA\RocksDB\Plugin\Azure\Impl\ReadableFileImpl.hpp:52-65`;
   `src\Azure\BasicReadableFile.ipp:90-94`;
