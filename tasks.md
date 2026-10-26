@@ -446,7 +446,7 @@ candidates, and inherited issues. No implementation changes were made.
 
 ### R20 - Reuse Boost.Scope for simple local cleanup guards
 
-- [ ] **P3 | Concrete Boost simplification**
+- [x] **P3 | Concrete Boost simplification**
 - **Locations:** `src\Azure\Impl\ReadWriteFileImpl.ipp`, `ReleaseWave`, `TrimOnExit`;
   `src\Azure\Impl\include\AVEVA\RocksDB\Plugin\Azure\Impl\BlobOperations.hpp`,
   `WaitForPending`.

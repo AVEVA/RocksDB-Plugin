@@ -8,6 +8,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/RangeCheck.hpp"
 #include <algorithm>
 #include <boost/log/trivial.hpp>
+#include <boost/scope/scope_exit.hpp>
 
 #include <exception>
 #include <numeric>
@@ -206,16 +207,11 @@ void BasicReadWriteFileImpl<TBlob>::RunWave(std::vector<Extent>& extents, size_t
 
     // Runs on every exit, after the reads and uploads above have drained, so the wave's buffers go back to the pool
     // for the next wave instead of staying owned until the whole flush ends.
-    struct ReleaseWave {
-        std::vector<Extent>& Extents;
-        size_t Begin;
-        size_t End;
-        ~ReleaseWave() {
-            for (auto i = Begin; i < End; ++i) {
-                Extents[i].Data.reset();
-            }
+    const boost::scope::scope_exit releaseWave{[&] noexcept {
+        for (auto i = begin; i < end; ++i) {
+            extents[i].Data.reset();
         }
-    } releaseWave{extents, begin, end};
+    }};
 
     std::deque<GapRead> reads;
     try {
@@ -281,10 +277,7 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
 
     auto extents = BuildExtents();
     // Trims on failure too, once each wave has released its buffers; the buffered writes stay for a retry.
-    struct TrimOnExit {
-        BasicReadWriteFileImpl& File;
-        ~TrimOnExit() { File.TrimExtentPool(); }
-    } trimOnExit{*this};
+    const boost::scope::scope_exit trimOnExit{[this] { TrimExtentPool(); }};
     for (size_t begin = 0; begin < extents.size(); begin += Configuration::Transfer::MaxConcurrentPageCopies) {
         const auto end = std::min(extents.size(), begin + Configuration::Transfer::MaxConcurrentPageCopies);
         RunWave(extents, begin, end, m_size);

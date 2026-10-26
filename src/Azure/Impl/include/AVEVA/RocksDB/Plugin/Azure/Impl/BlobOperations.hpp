@@ -13,6 +13,7 @@
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/use_future.hpp>
+#include <boost/scope/scope_exit.hpp>
 
 #include <algorithm>
 #include <cassert>
@@ -525,14 +526,11 @@ void CopyPages(const ClientRuntimeBase& runtime, TBlob& source, TBlob& destinati
     // so on failure wait for it before the buffer is released.
     Buffer downloading;
     std::optional<PendingDownload<TBlob>> pending;
-    struct WaitForPending {
-        std::optional<PendingDownload<TBlob>>& Pending;
-        ~WaitForPending() {
-            if (Pending && Pending->Result.valid()) {
-                Pending->Result.wait();
-            }
+    const boost::scope::scope_exit waitForPending{[&pending] {
+        if (pending && pending->Result.valid()) {
+            pending->Result.wait();
         }
-    } waitForPending{pending};
+    }};
 
     const auto startDownload = [&](const PageChunk& chunk) {
         downloading = acquire(paddedLength(chunk.Length));

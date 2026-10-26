@@ -37,6 +37,7 @@ target_include_directories(aveva-rocksdb-plugin-azure-impl PUBLIC
 find_package(boost_asio CONFIG REQUIRED)
 find_package(boost_log CONFIG REQUIRED)
 find_package(boost_json CONFIG REQUIRED)
+find_package(boost_scope CONFIG REQUIRED)
 find_package(aveva-install-library CONFIG REQUIRED)
 target_link_libraries(aveva-rocksdb-plugin-azure-impl PUBLIC
     aveva-rocksdb-plugin-core
@@ -46,6 +47,7 @@ target_link_libraries(aveva-rocksdb-plugin-azure-impl PUBLIC
     Boost::asio
     Boost::log
     Boost::json
+    Boost::scope
 )
 target_link_libraries(aveva-rocksdb-plugin-azure-impl PRIVATE
     $<$<PLATFORM_ID:Windows>:crypt32>
