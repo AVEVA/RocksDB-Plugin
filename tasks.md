@@ -462,7 +462,27 @@ candidates, and inherited issues. No implementation changes were made.
 
 ### R21 - Evaluate Boost.MultiIndex for the TLS session cache
 
-- [ ] **P3 | Optional design experiment, not a blanket rewrite**
+- [x] **P3 | Optional design experiment, not a blanket rewrite**
+- **Result (experiment run; current implementation retained):** A standalone
+  prototype (MSVC /O2, Boost.MultiIndex sequenced + hashed_unique on the origin
+  member, `relocate` for LRU, strong guarantee on `push_front`) was compared with
+  the list + `unordered_map` implementation, 128-entry bound, 200 origins
+  (~30-char keys), 40M mixed Store/Take operations.
+  - Allocations/bytes: filling 128 entries took 645 allocations / 36.6 KB (list
+    node, map node, duplicated origin string) versus 392 / 21.1 KB (one node, one
+    string): about 40% fewer allocations and bytes, roughly 15 KB per client at
+    the bound. Steady-state churn dropped from 30.3M to 20.1M allocations.
+  - Latency/locality: 73-143 ns/op (old, noisy between runs) versus ~81 ns/op
+    (new); no reproducible lookup or relocation win, only parity.
+  - Heterogeneous lookup: the current code looks up by `const std::string&`, so
+    nothing is gained; MultiIndex would need `compatible_key` for string_view.
+  - Retained because the gain is a few KB on a cold path (once per handshake) and
+    adoption is not behavior-neutral: the single node allocation makes the
+    existing failure-injection seam (`MapAllocator`, list/index rollback, and
+    `ListSize`/`IndexSize` assertions in `HttpClientTlsTests.cpp`) meaningless,
+    so the "tests remain unchanged" acceptance cannot hold, and it adds a
+    `boost-multi-index` manifest dependency. Revisit only if the cache bound or
+    per-origin footprint grows.
 - **Location:** `libs\HttpClient\src\private\TlsSessionCache.hpp`.
 - **Evidence:** The TLS cache manually synchronizes an owning list and a lookup
   index, duplicates the origin string in the list and map, and now has explicit
