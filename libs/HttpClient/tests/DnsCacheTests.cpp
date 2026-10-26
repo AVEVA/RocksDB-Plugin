@@ -296,6 +296,39 @@ TEST(DnsCacheTests, InvalidateDropsOnlyTheNamedEntry) {
     cache.Invalidate("missing", "80"); // Dropping an absent entry is a no-op.
 }
 
+TEST(DnsCacheTests, AcquireNeverLeadsAgainOnceTheLeaderHasPublished) {
+    boost::asio::io_context io;
+    const auto results = Loopback(io);
+    TestDnsCache cache;
+    const auto makeWaiter = [] { return RecordingWaiter{}; };
+    using Admission = TestDnsCache::Admission;
+
+    EXPECT_EQ(cache.Acquire("host", "80", makeWaiter).Kind, Admission::Leader);
+    EXPECT_EQ(cache.Acquire("host", "80", makeWaiter).Kind, Admission::Joined);
+
+    cache.Finish("host", "80", {}, results);
+    // The publication a separate Find/JoinOrLead pair could miss: the entry is cached and the claim is free.
+    const auto late = cache.Acquire("host", "80", makeWaiter);
+    ASSERT_EQ(late.Kind, Admission::Cached);
+    EXPECT_EQ(late.Results.begin()->endpoint(), results.begin()->endpoint());
+
+    // An aborted leader caches nothing, so the next caller leads again.
+    cache.Invalidate("host", "80");
+    ASSERT_EQ(cache.Acquire("host", "80", makeWaiter).Kind, Admission::Leader);
+    cache.Finish("host", "80", boost::asio::error::operation_aborted, {});
+    EXPECT_EQ(cache.Acquire("host", "80", makeWaiter).Kind, Admission::Leader);
+    cache.Finish("host", "80", boost::asio::error::operation_aborted, {});
+
+    // Scopes still isolate in-flight lookups but share cached results.
+    int firstScope = 0;
+    int secondScope = 0;
+    EXPECT_EQ(cache.Acquire("h2", "80", makeWaiter, &firstScope).Kind, Admission::Leader);
+    EXPECT_EQ(cache.Acquire("h2", "80", makeWaiter, &secondScope).Kind, Admission::Leader);
+    cache.Finish("h2", "80", {}, results, &secondScope);
+    EXPECT_EQ(cache.Acquire("h2", "80", makeWaiter, &firstScope).Kind, Admission::Cached);
+    cache.Finish("h2", "80", boost::asio::error::operation_aborted, {}, &firstScope);
+}
+
 TEST(DnsCacheTests, EmptyResultsAreNotCached) {
     TestDnsCache cache;
     cache.Store("host", "80", Tcp::resolver::results_type{});

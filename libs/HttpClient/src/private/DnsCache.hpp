@@ -66,15 +66,42 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     /// <returns>The cached endpoints, or nothing if there is no entry or it has expired.</returns>
     std::optional<ResolveResults> Find(std::string_view host, std::string_view service) {
         std::lock_guard<std::mutex> lock(m_mutex);
-        const auto it = m_entries.find(KeyView{host, service});
-        if (it == m_entries.end()) {
-            return std::nullopt;
+        return FindUnsafe(host, service);
+    }
+
+    /// <summary>
+    /// The decision <see cref="Acquire"/> reached.
+    /// </summary>
+    enum class Admission { Cached, Joined, Leader };
+
+    /// <summary>
+    /// A cache hit, a queued waiter, or a leader claim, decided under one lock.
+    /// </summary>
+    struct AcquireResult {
+        Admission Kind = Admission::Leader;
+        ResolveResults Results; // Only set for <see cref="Admission::Cached"/>.
+    };
+
+    /// <summary>
+    /// Checks the cache and then joins or leads the lookup in one critical section. Doing the two steps
+    /// separately lets a leader publish in between, so a late caller would start a redundant resolve.
+    /// </summary>
+    /// <param name="host">The host to resolve.</param>
+    /// <param name="service">The port or service name to resolve.</param>
+    /// <param name="makeWaiter">Called (under the cache lock, so it must be cheap) to produce the waiter only
+    /// when the caller joins a lookup in flight.</param>
+    /// <param name="scope">See <see cref="JoinOrLead"/>.</param>
+    /// <returns>Cached: use the results. Joined: the waiter will be called. Leader: the caller must perform
+    /// the lookup and then call <see cref="Finish"/>.</returns>
+    template <typename MakeWaiter>
+        requires std::is_invocable_r_v<Waiter, MakeWaiter>
+    AcquireResult Acquire(std::string_view host, std::string_view service, MakeWaiter&& makeWaiter,
+                          const void* scope = nullptr) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (auto cached = FindUnsafe(host, service)) {
+            return {Admission::Cached, std::move(*cached)};
         }
-        if (Clock::now() >= it->second.expires) {
-            m_entries.erase(it);
-            return std::nullopt;
-        }
-        return it->second.results;
+        return {JoinOrLeadUnsafe(host, service, makeWaiter, scope) ? Admission::Leader : Admission::Joined, {}};
     }
 
     /// <summary>
@@ -154,13 +181,7 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     bool JoinOrLead(std::string_view host, std::string_view service, MakeWaiter&& makeWaiter,
                     const void* scope = nullptr) {
         std::lock_guard<std::mutex> lock(m_mutex);
-        // Probe with views: heterogeneous try_emplace needs C++26, and a join must not allocate an owning key.
-        if (const auto it = m_pending.find(KeyView{host, service, scope}); it != m_pending.end()) {
-            it->second.push_back(makeWaiter());
-            return false;
-        }
-        m_pending.emplace(Key{std::string(host), std::string(service), scope}, std::vector<Waiter>{});
-        return true;
+        return JoinOrLeadUnsafe(host, service, makeWaiter, scope);
     }
 
     /// <summary>
@@ -202,6 +223,31 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     }
 
   private:
+    // Callers hold m_mutex.
+    std::optional<ResolveResults> FindUnsafe(std::string_view host, std::string_view service) {
+        const auto it = m_entries.find(KeyView{host, service});
+        if (it == m_entries.end()) {
+            return std::nullopt;
+        }
+        if (Clock::now() >= it->second.expires) {
+            m_entries.erase(it);
+            return std::nullopt;
+        }
+        return it->second.results;
+    }
+
+    // Callers hold m_mutex.
+    template <typename MakeWaiter>
+    bool JoinOrLeadUnsafe(std::string_view host, std::string_view service, MakeWaiter& makeWaiter, const void* scope) {
+        // Probe with views: heterogeneous try_emplace needs C++26, and a join must not allocate an owning key.
+        if (const auto it = m_pending.find(KeyView{host, service, scope}); it != m_pending.end()) {
+            it->second.push_back(makeWaiter());
+            return false;
+        }
+        m_pending.emplace(Key{std::string(host), std::string(service), scope}, std::vector<Waiter>{});
+        return true;
+    }
+
     /// <summary>
     /// A cached resolution and the point in time it stops being usable.
     /// </summary>

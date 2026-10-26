@@ -245,13 +245,14 @@ template <typename Stream> void RequestOperation<Stream>::Resolve() {
     m_phase = HttpRequestPhase::Resolve;
     m_resolvedFromCache = false;
     auto& cache = DnsCache::Shared();
-    if (auto cached = cache.Find(m_key.host, m_key.service)) {
-        m_resolvedFromCache = true;
-        return OnResolve({}, *cached);
-    }
     const void* const scope = m_lookupScope;
-    if (!cache.JoinOrLead(
-            m_key.host, m_key.service, [this] { return ResolveWaiter(this->shared_from_this()); }, scope)) {
+    auto admission =
+        cache.Acquire(m_key.host, m_key.service, [this] { return ResolveWaiter(this->shared_from_this()); }, scope);
+    if (admission.Kind == DnsCache::Admission::Cached) {
+        m_resolvedFromCache = true;
+        return OnResolve({}, admission.Results);
+    }
+    if (admission.Kind == DnsCache::Admission::Joined) {
         return;
     }
     // If the handler is destroyed unrun (io_context torn down), the guard still releases the waiters.
