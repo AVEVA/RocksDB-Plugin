@@ -93,7 +93,14 @@ class BatchDeleteOperation final
                 });
             });
         }
-        Pump();
+        m_initiating.store(true, std::memory_order_release);
+        try {
+            Pump();
+        } catch (...) {
+            m_initiating.store(false, std::memory_order_release);
+            throw;
+        }
+        m_initiating.store(false, std::memory_order_release);
     }
 
   private:
@@ -318,14 +325,20 @@ class BatchDeleteOperation final
 
     void Finish() {
         // No other thread can touch the state any more: every chunk has completed and none will start.
+        using Result = std::expected<Response<Models::DeleteBlobsResult>, BlobStorageError>;
+        Result outcome = std::unexpected(BlobStorageError{});
         if (m_failure) {
-            m_completion(std::expected<Response<Models::DeleteBlobsResult>, BlobStorageError>{
-                std::unexpected(std::move(*m_failure))});
+            outcome = std::unexpected(std::move(*m_failure));
+        } else {
+            Models::DeleteBlobsResult result{.Items = std::move(m_items)};
+            outcome = Response<Models::DeleteBlobsResult>{std::move(result), m_rawResponse.value_or(HttpResponse{})};
+        }
+        // A failure found while still inside the initiating call must not run the handler re-entrantly.
+        if (m_initiating.load(std::memory_order_acquire)) {
+            PostCompletion(m_httpClient, std::move(m_completion), std::move(outcome));
             return;
         }
-        Models::DeleteBlobsResult result{.Items = std::move(m_items)};
-        m_completion(std::expected<Response<Models::DeleteBlobsResult>, BlobStorageError>{
-            Response<Models::DeleteBlobsResult>{std::move(result), m_rawResponse.value_or(HttpResponse{})}});
+        m_completion(std::move(outcome));
     }
 
     THttp& m_httpClient;
@@ -347,6 +360,7 @@ class BatchDeleteOperation final
     std::size_t m_inFlight = 0;
     bool m_finished = false;
     std::atomic<bool> m_cancelled{false};
+    std::atomic<bool> m_initiating{false};
     std::map<std::size_t, std::shared_ptr<boost::asio::cancellation_signal>> m_signals;
 };
 
