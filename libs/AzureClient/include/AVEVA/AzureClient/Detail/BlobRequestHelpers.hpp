@@ -412,7 +412,7 @@ template <class T>
     }
 
     if (response.Error().has_value()) {
-        BlobStorageError details = *response.Error();
+        BlobStorageError details = std::move(*response.Error());
         details.Code = error;
         return std::unexpected(std::move(details));
     }
@@ -547,14 +547,14 @@ void SendAuthorizedRequestAsync(THttp& httpClient, const BasicContainerTarget<TC
                                 THandler completion, AzureRequestOptions requestOptions, TRebuild rebuild = {},
                                 bool replaySafe = false) {
     SendAuthorizedRequestAsync(httpClient, *target.Connection, target.Credential, std::move(request),
-                               std::move(completion), requestOptions, std::move(rebuild), replaySafe);
+                               std::move(completion), std::move(requestOptions), std::move(rebuild), replaySafe);
 }
 
 template <HttpClientLike THttp, class TCred, class THandler>
 void SendAuthorizedRequestAsync(THttp& httpClient, const BasicBlobTarget<TCred>& target, HttpRequest request,
                                 THandler completion, AzureRequestOptions requestOptions, bool replaySafe = false) {
     SendAuthorizedRequestAsync(httpClient, *target.Connection, target.Credential, std::move(request),
-                               std::move(completion), requestOptions, NoRebuild{}, replaySafe);
+                               std::move(completion), std::move(requestOptions), NoRebuild{}, replaySafe);
 }
 
 // Maps the single-request download options onto the chunked engine's options (default chunk

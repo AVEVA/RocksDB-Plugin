@@ -382,7 +382,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
                 [self = this->shared_from_this(), id](std::error_code error, HttpResponse response) mutable {
                     self->Enqueue(Event{.RequestId = id, .Error = error, .Response = std::move(response)});
                 },
-                requestOptions);
+                std::move(requestOptions));
         } catch (...) {
             // The request was not accepted, so no completion will ever drain this entry.
             if (ReleaseInFlight(id) && kind == RequestKind::Chunk) {

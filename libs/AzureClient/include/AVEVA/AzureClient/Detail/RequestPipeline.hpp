@@ -103,9 +103,9 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
                    HttpRequest request, THandler completion, AzureRequestOptions requestOptions,
                    bool retryNotFoundAndGone, TRebuild rebuild, bool callerAbsorbsReplay = false)
         : m_httpClient(httpClient), m_auth(std::move(auth)), m_credential(std::move(credential)), m_retry(retry),
-          m_request(std::move(request)), m_completion(std::move(completion)), m_requestOptions(requestOptions),
-          m_retryNotFoundAndGone(retryNotFoundAndGone), m_rebuild(std::move(rebuild)),
-          m_replaySafe(callerAbsorbsReplay || IsReplaySafe(m_request)),
+          m_request(std::move(request)), m_completion(std::move(completion)),
+          m_requestOptions(std::move(requestOptions)), m_retryNotFoundAndGone(retryNotFoundAndGone),
+          m_rebuild(std::move(rebuild)), m_replaySafe(callerAbsorbsReplay || IsReplaySafe(m_request)),
           m_parentSlot(m_requestOptions.GetCancellationSlot()), m_totalDeadline(m_requestOptions.GetTotalDeadline()),
           m_start(std::chrono::steady_clock::now()),
           m_maxAttempts(ComputeMaxAttempts(m_requestOptions.GetMaxRetries().value_or(retry.MaxRetries))) {}
@@ -757,7 +757,7 @@ void SendWithRetryAsync(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCr
                         bool retryNotFoundAndGone, TRebuild rebuild, bool replaySafe) {
     auto operation = std::make_shared<RetryDetail::RetryOperation<THttp, TCred, THandler, TRebuild>>(
         httpClient, std::move(auth), std::move(credential), retry, std::move(request), std::move(completion),
-        requestOptions, retryNotFoundAndGone, std::move(rebuild), replaySafe);
+        std::move(requestOptions), retryNotFoundAndGone, std::move(rebuild), replaySafe);
     operation->Start();
 }
 
@@ -785,7 +785,7 @@ void SendAuthorizedRequestAsync(THttp& httpClient, const ConnectionState& connec
     }
     const bool hasCredential = credential != nullptr;
     SendWithRetryAsync(httpClient, MakeRequestAuth(connection, hasCredential), std::move(credential), connection.Retry,
-                       std::move(request), std::move(completion), requestOptions, false, std::move(rebuild),
+                       std::move(request), std::move(completion), std::move(requestOptions), false, std::move(rebuild),
                        replaySafe);
 }
 } // namespace AVEVA::AzureClient::Private
