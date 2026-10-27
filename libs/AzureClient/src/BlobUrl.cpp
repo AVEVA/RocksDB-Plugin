@@ -4,6 +4,7 @@
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 
 #include <boost/url/encode.hpp> // IWYU pragma: keep (symbol is defined in a Boost impl/ header)
+#include <boost/url/grammar/string_token.hpp>
 #include <boost/url/rfc/unreserved_chars.hpp>
 
 #include <string>
@@ -37,8 +38,15 @@ std::string_view TrimLeadingQuestionMark(std::string_view value) noexcept {
     return value;
 }
 
+void UrlEncodeAppend(std::string& out, std::string_view value, std::string_view extraSafeChars) {
+    boost::urls::encode(value, ExtraSafeCharacters{extraSafeChars}, {}, boost::urls::string_token::append_to(out));
+}
+
 std::string UrlEncode(std::string_view value, std::string_view extraSafeChars) {
-    return boost::urls::encode(value, ExtraSafeCharacters{extraSafeChars});
+    std::string encoded;
+    encoded.reserve(value.size());
+    UrlEncodeAppend(encoded, value, extraSafeChars);
+    return encoded;
 }
 
 std::string BuildQueryString(const std::vector<std::pair<std::string, std::string>>& parameters) {
@@ -47,9 +55,9 @@ std::string BuildQueryString(const std::vector<std::pair<std::string, std::strin
         if (!query.empty()) {
             query.push_back('&');
         }
-        query.append(UrlEncode(name, {}));
+        UrlEncodeAppend(query, name, {});
         query.push_back('=');
-        query.append(UrlEncode(value, {}));
+        UrlEncodeAppend(query, value, {});
     }
     return query;
 }

@@ -137,6 +137,8 @@ struct ConnectionState {
 struct ContainerTarget {
     std::shared_ptr<const ConnectionState> Connection;
     std::string ContainerName;
+    // "<scheme://host[:port]><basePath>/<encoded container>", built once so each request only appends its query.
+    std::string EncodedResource;
 };
 
 struct BlobTarget {
@@ -315,6 +317,8 @@ inline constexpr std::array<std::string_view, 7> LongWeekdayNames{"Sunday",   "M
 [[nodiscard]] std::string BytesToString(std::span<const std::byte> bytes);
 [[nodiscard]] std::string Base64Encode(std::span<const std::byte> bytes);
 [[nodiscard]] std::string UrlEncode(std::string_view value, std::string_view extraSafeChars);
+// Appends the percent-encoded `value` to `out` without an intermediate string.
+void UrlEncodeAppend(std::string& out, std::string_view value, std::string_view extraSafeChars);
 [[nodiscard]] std::string BuildQueryString(const std::vector<std::pair<std::string, std::string>>& parameters);
 [[nodiscard]] std::string BuildRangeHeaderValue(const Models::BlobByteRange& range);
 

@@ -585,7 +585,15 @@ std::shared_ptr<const ConnectionState> MakeConnectionState(BlobClientOptions opt
 
 ContainerTarget MakeContainerTarget(std::shared_ptr<const ConnectionState> connection, std::string containerName) {
     ValidateContainerName(containerName);
-    return ContainerTarget{.Connection = std::move(connection), .ContainerName = std::move(containerName)};
+    std::string encodedResource;
+    encodedResource.reserve(connection->BasePrefix.size() + connection->BasePath.size() + containerName.size() + 1U);
+    encodedResource += connection->BasePrefix;
+    encodedResource += connection->BasePath;
+    encodedResource += '/';
+    UrlEncodeAppend(encodedResource, containerName, {});
+    return ContainerTarget{.Connection = std::move(connection),
+                           .ContainerName = std::move(containerName),
+                           .EncodedResource = std::move(encodedResource)};
 }
 
 BlobTarget MakeBlobTarget(std::shared_ptr<const ConnectionState> connection, std::string containerName,
@@ -594,8 +602,15 @@ BlobTarget MakeBlobTarget(std::shared_ptr<const ConnectionState> connection, std
     if (blobName.empty()) {
         throw std::invalid_argument("BlobName must not be empty.");
     }
-    std::string encodedResource = connection->BasePrefix + connection->BasePath + '/' + UrlEncode(containerName, {}) +
-                                  '/' + UrlEncode(blobName, "/");
+    std::string encodedResource;
+    encodedResource.reserve(connection->BasePrefix.size() + connection->BasePath.size() + containerName.size() +
+                            blobName.size() + 2U);
+    encodedResource += connection->BasePrefix;
+    encodedResource += connection->BasePath;
+    encodedResource += '/';
+    UrlEncodeAppend(encodedResource, containerName, {});
+    encodedResource += '/';
+    UrlEncodeAppend(encodedResource, blobName, "/");
     return BlobTarget{.Connection = std::move(connection),
                       .ContainerName = std::move(containerName),
                       .BlobName = std::move(blobName),
@@ -667,7 +682,12 @@ std::string BuildBlobUrl(const BlobTarget& target, std::string_view queryString)
 std::string BuildContainerUrl(const ContainerTarget& target, std::string_view queryString) {
     std::string query = "restype=container";
     AppendQueryParts(query, *target.Connection, queryString);
-    return ComposeUrl(*target.Connection, {UrlEncode(target.ContainerName, {})}, query);
+    std::string url;
+    url.reserve(target.EncodedResource.size() + query.size() + 1U);
+    url += target.EncodedResource;
+    url += '?';
+    url += query;
+    return url;
 }
 
 std::string BuildServiceUrl(const ConnectionState& connection, std::string_view queryString) {
