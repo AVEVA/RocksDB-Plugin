@@ -15,6 +15,7 @@
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/asio/write.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
@@ -992,6 +993,74 @@ TEST(HttpClientRobustness, FailedFinalPostStillDeliversTheResultToTheHandlerExac
     EXPECT_FALSE(failNext.load());
     EXPECT_EQ(completions, 1);
     EXPECT_EQ(result, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidUrl));
+}
+
+// A strand executor whose next `Failures` execute() calls throw, like FailingPostExecutor but serialized.
+struct FailingStrandExecutor {
+    asio::strand<asio::io_context::executor_type> Strand;
+    std::atomic<int>* Failures;
+
+    template <typename F> void execute(F&& function) const {
+        if (Failures->fetch_sub(1) > 0) {
+            throw std::bad_alloc();
+        }
+        Strand.execute(std::forward<F>(function));
+    }
+    [[nodiscard]] asio::execution_context& query(asio::execution::context_t) const noexcept {
+        return asio::query(Strand, asio::execution::context);
+    }
+    [[nodiscard]] FailingStrandExecutor require(asio::execution::blocking_t::never_t) const { return *this; }
+    friend bool operator==(const FailingStrandExecutor& a, const FailingStrandExecutor& b) noexcept {
+        return a.Strand == b.Strand;
+    }
+};
+
+TEST(HttpClientRobustness, FailedFinalPostIsRetriedOnTheHandlersStrandInsteadOfRunningInline) {
+    asio::io_context context;
+    auto client = AVEVA::HttpClient::Create(context);
+    auto work = asio::make_work_guard(context);
+    std::vector<std::jthread> threads;
+    for (int i = 0; i < 3; ++i) {
+        threads.emplace_back([&] { context.run(); });
+    }
+    asio::strand<asio::io_context::executor_type> strand{context.get_executor()};
+    std::atomic<int> failures{1};
+
+    std::promise<void> done;
+    std::atomic<int> completions{0};
+    std::atomic<bool> onStrand{false};
+    AVEVA::HttpRequest request;
+    request.SetUrl("ftp://example.com/file");
+    client->SendAsync(
+        std::move(request), AVEVA::HttpRequestOptions{},
+        asio::bind_executor(FailingStrandExecutor{strand, &failures}, [&](std::error_code, AVEVA::HttpResponse) {
+            onStrand = strand.running_in_this_thread();
+            ++completions;
+            done.set_value();
+        }));
+
+    ASSERT_EQ(done.get_future().wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    EXPECT_LE(failures.load(), 0);
+    EXPECT_TRUE(onStrand.load());
+    EXPECT_EQ(completions.load(), 1);
+    work.reset();
+}
+
+TEST(HttpClientRobustness, FinalPostThatKeepsFailingStillDeliversExactlyOnce) {
+    asio::io_context context;
+    auto client = AVEVA::HttpClient::Create(context);
+    asio::strand<asio::io_context::executor_type> strand{context.get_executor()};
+    std::atomic<int> failures{1000};
+
+    int completions = 0;
+    AVEVA::HttpRequest request;
+    request.SetUrl("ftp://example.com/file");
+    client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{},
+                      asio::bind_executor(FailingStrandExecutor{strand, &failures},
+                                          [&](std::error_code, AVEVA::HttpResponse) { ++completions; }));
+
+    EXPECT_NO_THROW(RunBounded(context));
+    EXPECT_EQ(completions, 1);
 }
 
 TEST(HttpClientRobustness, LimiterAbortWhoseFailurePostThrowsStillCompletesTheHandlerOnce) {

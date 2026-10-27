@@ -47,30 +47,32 @@ template <class Handler, class Work, class Slot> class FinalDelivery {
     /// <summary>
     /// Runs the handler on the thread that calls it, once; later calls do nothing.
     /// </summary>
-    void Deliver() {
-        if (m_delivered.exchange(true, std::memory_order_acq_rel)) {
-            return;
-        }
-        // Cleared here, on the handler's executor, so that it is serialized with emissions from the caller;
-        // clearing on the transport thread would race.
-        if (m_ownsSlot) {
-            m_slot.clear();
-        }
-        std::move(m_handler)(m_error, std::move(m_response));
-    }
+    void Deliver() { Run(m_ownsSlot); }
 
     /// <summary>
-    /// As <c>Deliver</c>, for the last resort of an executor that cannot accept work: an exception from the
-    /// handler must not unwind into the transport's completion path.
+    /// As <c>Deliver</c>, for the last resort of an executor that keeps rejecting work: an exception from the
+    /// handler must not unwind into the transport's completion path. Off the handler's executor the adopted
+    /// cancellation slot is left alone, since clearing it here would race with emissions serialized there.
     /// </summary>
     void DeliverInline() noexcept {
         try {
-            Deliver();
+            Run(false);
         } catch (...) {
         }
     }
 
   private:
+    void Run(bool clearSlot) {
+        if (m_delivered.exchange(true, std::memory_order_acq_rel)) {
+            return;
+        }
+        // Cleared on the handler's executor, so that it is serialized with emissions from the caller.
+        if (clearSlot) {
+            m_slot.clear();
+        }
+        std::move(m_handler)(m_error, std::move(m_response));
+    }
+
     Handler m_handler;
     Work m_work;
     Slot m_slot;
@@ -79,6 +81,11 @@ template <class Handler, class Work, class Slot> class FinalDelivery {
     HttpResponse m_response;
     std::atomic<bool> m_delivered{false};
 };
+
+/// <summary>
+/// How many times the final post is attempted before the handler is run off its executor.
+/// </summary>
+inline constexpr int FinalPostAttempts = 3;
 
 template <class Allocator, class Work, class Slot, class Handler>
 auto MakeFinalDelivery(const Allocator& allocator, Work&& work, Slot slot, bool ownsSlot, Handler&& handler) {
@@ -153,8 +160,9 @@ class HttpClient {
     /// <c>HttpClientError::InvalidRequest</c> for rejected input, and <c>std::errc::state_not_recoverable</c> for
     /// anything else. Only building the completion handler itself (the
     /// token's allocation) can still throw <c>std::bad_alloc</c> out of this call. Once initiated, the handler is
-    /// delivered through a post to its executor; if that post cannot be scheduled (allocation failure) the handler
-    /// runs once on the completing thread instead of being dropped.
+    /// delivered through a post to its executor; a post that fails is retried a few times, so a transient allocation
+    /// failure still runs the handler on its executor. Only if the executor keeps rejecting work does the handler
+    /// run once on the completing thread instead of being dropped (without touching its cancellation slot).
     /// </summary>
     /// <param name="request">The request to send.</param>
     /// <param name="options">The per-request settings to apply.</param>
@@ -188,14 +196,19 @@ class HttpClient {
                                // `state` rather than in the posted task, so a post that cannot be scheduled does
                                // not take it down with the discarded task.
                                state->SetOutcome(ec, std::move(response));
-                               try {
-                                   boost::asio::post(executor, boost::asio::bind_allocator(
-                                                                   allocator, [state]() { state->Deliver(); }));
-                               } catch (...) {
-                                   // The result is the caller's even when its executor cannot accept work, so
-                                   // the handler runs here, once, instead of never.
-                                   state->DeliverInline();
+                               // A failed post is usually a transient allocation failure, so retry it to keep the
+                               // handler on its own executor (strand serialization, cancellation slot).
+                               for (int attempt = 0; attempt < Detail::FinalPostAttempts; ++attempt) {
+                                   try {
+                                       boost::asio::post(executor, boost::asio::bind_allocator(
+                                                                       allocator, [state]() { state->Deliver(); }));
+                                       return;
+                                   } catch (...) {
+                                   }
                                }
+                               // The executor keeps rejecting work. The result is still the caller's, so the
+                               // handler runs here, once, instead of never.
+                               state->DeliverInline();
                            },
                            allocator));
             },
