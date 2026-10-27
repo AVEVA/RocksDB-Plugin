@@ -147,7 +147,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
     //   (span, DownloadBlobOptions) - the range straight into caller memory.
     // File writes never run on the threads completing HTTP requests: they go to DownloadToOptions::WriteScheduler,
     // else the HTTP client's     GetDownloadWriter() if it has one (::AVEVA::HttpClient's is a bounded, client-owned
-    // pool), else a short-lived thread per task for custom transports without one. To cancel, emit the signal from the
+    // pool), else the download fails with operation_not_supported. To cancel, emit the signal from the
     // handler's executor/strand.
 
     // Chunked download into `path`, via a temporary sibling file that replaces `path` only on success.

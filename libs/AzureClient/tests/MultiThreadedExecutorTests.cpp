@@ -276,11 +276,27 @@ TEST(MultiThreadedExecutorTests, ConcurrentChunkedDownloadsOnAThreadPool) {
         service.Seed("blob-" + std::to_string(i), data.Contents.at(i));
     }
 
+    boost::asio::thread_pool writers{2};
     DownloadToOptions downloadOptions;
+    downloadOptions.WriteScheduler = writers.get_executor();
     downloadOptions.ChunkSize = 4096U;
     downloadOptions.Concurrency = 4U;
     DownloadAndVerifyAllBlobs(data.Clients, data.Contents, downloadOptions);
+    writers.join();
     EXPECT_GT(service.Throttled(), 0U) << "the retry path was not exercised";
+}
+
+TEST(MultiThreadedExecutorTests, FileDownloadWithoutAWriterFailsAsNotSupported) {
+    ThreadPoolBlobService service;
+    const PoolBlobContainerClient container{service, SharedKeyContainerOptions()};
+    service.Seed("blob-0", "payload");
+    auto client = container.GetPageBlobClient("blob-0");
+
+    const AVEVA::AzureClient::Tests::ScopedTestDirectory scratch{"mt-executor-no-writer"};
+    const auto result =
+        client.DownloadToAsync(scratch.Path() / "blob-0", DownloadToOptions{}, boost::asio::use_future).get();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::operation_not_supported));
 }
 
 TEST(MultiThreadedExecutorTests, ClientsAreSafeToInitiateFromManyThreads) {

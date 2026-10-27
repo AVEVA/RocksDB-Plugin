@@ -46,14 +46,13 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
-#include <thread>
 #include <utility>
 #include <vector>
 
 namespace AVEVA::AzureClient::Private {
 namespace DownloadDetail {
-// Runs a blocking task off the I/O thread: on the caller's scheduler, else the HTTP client's, else a short-lived
-// thread for custom transports without one (so no process-wide pool outlives the clients).
+// Runs a blocking task off the I/O thread: on the caller's scheduler, else the HTTP client's. Throws
+// std::errc::operation_not_supported for a transport with neither.
 template <class THttp, class TTask>
 void RunOnWriter(THttp& httpClient, const std::optional<DownloadWriteScheduler>& scheduler, TTask task) {
     if (scheduler) {
@@ -61,7 +60,9 @@ void RunOnWriter(THttp& httpClient, const std::optional<DownloadWriteScheduler>&
     } else if constexpr (requires { boost::asio::post(httpClient.GetDownloadWriter(), std::move(task)); }) {
         boost::asio::post(httpClient.GetDownloadWriter(), std::move(task));
     } else {
-        std::thread(std::move(task)).detach();
+        // A detached thread could outlive the client, so refuse; callers map the throw to the download's error.
+        throw std::system_error(std::make_error_code(std::errc::operation_not_supported),
+                                "The HTTP client has no download writer and no write scheduler was supplied.");
     }
 }
 
