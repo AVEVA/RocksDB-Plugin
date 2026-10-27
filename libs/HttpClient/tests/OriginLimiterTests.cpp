@@ -57,6 +57,24 @@ TEST(OriginLimiterTests, RunAfterCloseAbortsInsteadOfQueueingForever) {
     EXPECT_EQ(recorder->Errors.front(), std::make_error_code(std::errc::operation_canceled));
 }
 
+TEST(OriginLimiterTests, HandleSurvivesTheOriginGoingIdleAndStillCancelsAndReleases) {
+    auto recorder = std::make_shared<Recorder>();
+    Limiter limiter{1, RecordingSink{recorder}};
+
+    const auto handle = limiter.Run("origin", limiter.NextTicket(), 1);
+    const auto queued = limiter.NextTicket();
+    EXPECT_EQ(limiter.Run("origin", queued, 2), handle);
+    limiter.Cancel(handle, queued);
+    limiter.Release(handle);
+    // The origin is idle now; a stale cancel through the handle is a no-op and a new run reuses the state.
+    limiter.Cancel(handle, queued);
+    EXPECT_EQ(limiter.Run("origin", limiter.NextTicket(), 3), handle);
+    limiter.Release(handle);
+
+    EXPECT_EQ(recorder->Started, (std::vector<int>{1, 3}));
+    EXPECT_EQ(recorder->Aborted, (std::vector<int>{2}));
+}
+
 TEST(OriginLimiterTests, CloseAbortsQueuedWaitersAndLeavesRunningOnesAlone) {
     auto recorder = std::make_shared<Recorder>();
     Limiter limiter{1, RecordingSink{recorder}};

@@ -92,6 +92,11 @@ struct Route {
     /// <summary>
     /// The "scheme://host:port" the limiter counts against.
     /// </summary>
-    std::string Origin() const { return Scheme + "://" + Host + ':' + Port; }
+    std::string Origin() const {
+        std::string origin;
+        origin.reserve(Scheme.size() + 3 + Host.size() + 1 + Port.size());
+        origin.append(Scheme).append("://").append(Host).append(1, ':').append(Port);
+        return origin;
+    }
 };
 } // namespace AVEVA::Private

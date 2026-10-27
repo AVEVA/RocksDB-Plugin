@@ -31,12 +31,12 @@ template <typename Stream> class RequestOperation;
 template <typename Core> class CancelState {
   public:
     /// <summary>
-    /// A request waiting in the per-origin limiter. The origin is shared so that the copy <see cref="Cancel"/>
-    /// takes under the lock stays cheap.
+    /// A request waiting in the per-origin limiter. The origin handle is the one the limiter resolved when the
+    /// request was queued, so cancelling needs no origin string.
     /// </summary>
     struct LimiterTarget {
         std::weak_ptr<typename Core::Limiter> Limiter;
-        std::shared_ptr<const std::string> Origin;
+        typename Core::Limiter::Handle Origin;
         std::uint64_t Ticket;
     };
 
@@ -75,6 +75,27 @@ template <typename Core> class CancelState {
     }
 
     /// <summary>
+    /// Sets the target only if none has been set yet, so a request that already started and made itself the
+    /// target is not pointed back at the queue it just left. A cancel that already happened is delivered to
+    /// the new target right away.
+    /// </summary>
+    /// <param name="target">What to call on cancellation.</param>
+    void SetTargetIfUnset(Target target) {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (!std::holds_alternative<std::monostate>(m_target)) {
+                return;
+            }
+            if (!m_cancelled.load()) {
+                m_target = std::move(target);
+                return;
+            }
+            m_target = target;
+        }
+        Deliver(target);
+    }
+
+    /// <summary>
     /// Whether cancellation has been signalled.
     /// </summary>
     [[nodiscard]] bool IsCancelled() const noexcept { return m_cancelled.load(); }
@@ -88,7 +109,7 @@ template <typename Core> class CancelState {
                 using Held = std::decay_t<decltype(held)>;
                 if constexpr (std::is_same_v<Held, LimiterTarget>) {
                     if (auto limiter = held.Limiter.lock()) {
-                        limiter->Cancel(*held.Origin, held.Ticket);
+                        limiter->Cancel(held.Origin, held.Ticket);
                     }
                 } else if constexpr (!std::is_same_v<Held, std::monostate>) {
                     if (auto operation = held.lock()) {

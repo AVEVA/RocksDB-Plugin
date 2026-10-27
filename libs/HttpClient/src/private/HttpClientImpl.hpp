@@ -78,7 +78,6 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// A request waiting in the per-origin limiter for a slot.
     /// </summary>
     struct PendingRequest {
-        std::string origin;
         Route route;
         HttpRequest request;
         HttpRequestOptions options;
@@ -100,9 +99,10 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         /// Sends a request that was given a slot, releasing the slot when it completes.
         /// </summary>
         /// <param name="pending">The request to send.</param>
-        void Start(PendingRequest&& pending) const {
+        /// <param name="origin">The limiter's handle for the request's origin, which the slot is returned to.</param>
+        template <typename OriginHandle> void Start(PendingRequest&& pending, const OriginHandle& origin) const {
             if (auto core = m_core.lock()) {
-                core->StartLimited(std::move(pending));
+                core->StartLimited(std::move(pending), origin);
                 return;
             }
             // The client is gone; there is nothing left to post to, so fail the request directly.
@@ -148,10 +148,10 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
 
         CompletionCell cell;
         std::shared_ptr<Limiter> limiter;
-        std::string origin;
+        typename Limiter::Handle origin;
         std::atomic<bool> holdsSlot{false};
 
-        void HoldSlot(std::shared_ptr<Limiter> limiterIn, std::string originIn) noexcept {
+        void HoldSlot(std::shared_ptr<Limiter> limiterIn, typename Limiter::Handle originIn) noexcept {
             limiter = std::move(limiterIn);
             origin = std::move(originIn);
             holdsSlot.store(true);
@@ -262,10 +262,10 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
             auto cancellation = BindCallerSlot(options);
             // The deadline covers time spent queued behind the per-origin cap, not just the network exchange.
             const auto deadline = DeadlineFor(options);
-            auto origin = route.Origin();
+            const auto origin = route.Origin();
             // `cell` is copied, not moved: the catch below still needs it if admission throws.
-            return SendLimited(std::move(origin), std::move(route), std::move(request), std::move(guarded),
-                               std::move(options), std::move(cancellation), deadline, cell);
+            return SendLimited(origin, std::move(route), std::move(request), std::move(guarded), std::move(options),
+                               std::move(cancellation), deadline, cell);
         } catch (...) {
             FailLater(cell, ClassifyBuildFailure(std::current_exception()));
         }
@@ -406,20 +406,20 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// <param name="request">The request to send.</param>
     /// <param name="completion">Invoked exactly once with the outcome.</param>
     /// <param name="options">The timeout, response limits, and cancellation slot for this request.</param>
-    void SendLimited(std::string origin, Route route, HttpRequest request, Detail::CompletionPointer completion,
+    void SendLimited(const std::string& origin, Route route, HttpRequest request, Detail::CompletionPointer completion,
                      HttpRequestOptions options, std::shared_ptr<Cancellation> cancellation,
                      std::chrono::steady_clock::time_point deadline, std::shared_ptr<RequestState> state) {
         const auto ticket = m_limiter->NextTicket();
-        // Set before queueing so a cancellation cannot slip in between; a started request retargets it.
-        if (cancellation) {
-            cancellation->SetTarget(typename Cancellation::LimiterTarget{
-                std::weak_ptr{m_limiter}, std::make_shared<const std::string>(origin), ticket});
-        }
-        PendingRequest pending{std::move(origin),     std::move(route), std::move(request), std::move(options),
-                               std::move(completion), cancellation,     deadline,           std::move(state)};
+        PendingRequest pending{std::move(route), std::move(request), std::move(options), std::move(completion),
+                               cancellation,     deadline,           std::move(state)};
         FaultPolicy::OnAdmit();
-        // Run reads the origin from the request before it consumes it.
-        m_limiter->Run(pending.origin, ticket, std::move(pending), deadline);
+        const auto handle = m_limiter->Run(origin, ticket, std::move(pending), deadline);
+        // Targeted after Run, because only then is the origin's handle known; a request that already started
+        // has made its operation the target, which this must not replace.
+        if (cancellation && handle) {
+            cancellation->SetTargetIfUnset(
+                typename Cancellation::LimiterTarget{std::weak_ptr{m_limiter}, handle, ticket});
+        }
         // A cancel that fired before the request was queued found nothing to remove; deliver it again to
         // whichever target is current (the queue entry, or the operation if it has already started).
         if (cancellation && cancellation->IsCancelled()) {
@@ -430,11 +430,12 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// Sends a request the limiter has given a slot, and hands the slot back when it completes.
     /// </summary>
     /// <param name="pending">The request to send.</param>
-    void StartLimited(PendingRequest&& pending) noexcept {
+    /// <param name="origin">The limiter's handle for the request's origin.</param>
+    void StartLimited(PendingRequest&& pending, typename Limiter::Handle origin) noexcept {
         // The state was allocated at submission, so starting cannot fail for lack of tracking memory: the slot
         // is handed to it first, and from here its Finish returns the slot whichever path completes the request.
         auto state = std::move(pending.state);
-        state->HoldSlot(m_limiter, std::move(pending.origin));
+        state->HoldSlot(m_limiter, std::move(origin));
         try {
             FaultPolicy::OnStartLimited();
             SendUnlimited(std::move(pending.route), std::move(pending.request), pending.completion,
