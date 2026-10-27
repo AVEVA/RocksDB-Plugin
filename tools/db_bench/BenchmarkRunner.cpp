@@ -21,7 +21,6 @@
 //
 // See tools/db_bench/README.md for concrete invocation examples.
 
-#include <AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp>
 #include <AVEVA/RocksDB/Plugin/Azure/Models/ServicePrincipalStorageInfo.hpp>
 #include <AVEVA/RocksDB/Plugin/Azure/Plugin.hpp>
 
@@ -67,7 +66,7 @@ std::string Require(const char* name, const std::optional<std::string>& value) {
 
 int main(int argc, char** argv) {
     using AVEVA::RocksDB::Plugin::Azure::Plugin;
-    using AVEVA::RocksDB::Plugin::Azure::Impl::StorageAccount;
+
     using AVEVA::RocksDB::Plugin::Azure::Models::ServicePrincipalStorageInfo;
 
     const auto storageAccountUrl =
@@ -111,7 +110,7 @@ int main(int argc, char** argv) {
     }
 
     const auto fsUri = Plugin::NameFor(primary);
-    const auto dbPath = StorageAccount::UniquePrefix(storageAccountUrl, container);
+    const auto dbPath = Plugin::UniquePrefix(storageAccountUrl, container);
 
     std::cerr << "aveva_db_bench: Azure plugin registered.\n"
               << "  Suggested flags:\n"

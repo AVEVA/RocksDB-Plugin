@@ -44,7 +44,6 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
 1. **Register the Plugin**: Initialize the Azure filesystem plugin in your application:
     ```cpp
     #include <AVEVA/RocksDB/Plugin/Azure/Plugin.hpp>
-    #include <AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp>
     #include <boost/asio/executor_work_guard.hpp>
     #include <boost/asio/io_context.hpp>
     #include <boost/log/sources/severity_logger.hpp>
@@ -92,14 +91,14 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
 
 2. **Open RocksDB with Azure Storage**: 
     ```cpp
-    using AVEVA::RocksDB::Plugin::Azure::Impl::StorageAccount;
+    using AVEVA::RocksDB::Plugin::Azure::Plugin;
 
     rocksdb::Options options;
     options.env = env; /* From step 1. */
    
     std::unique_ptr<rocksdb::DB> db;
     rocksdb::Status status = rocksdb::DB::Open(options,
-        StorageAccount::UniquePrefix("azureAccountURL", "blobContainerName"),
+        Plugin::UniquePrefix("azureAccountURL", "blobContainerName"),
         &db);
    ```
 

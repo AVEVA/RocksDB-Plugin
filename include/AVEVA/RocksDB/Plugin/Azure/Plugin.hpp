@@ -131,6 +131,12 @@ struct Plugin {
                                const std::optional<Models::ChainedCredentialInfo>& backup = std::nullopt);
 
     /// <summary>
+    /// Returns the database path prefix (`<account>+<container>`) to pass to rocksdb::DB::Open together with the
+    /// filesystem registered for that storage account. `accountUrl` is e.g. "https://account.blob.core.windows.net".
+    /// </summary>
+    [[nodiscard]] static std::string UniquePrefix(const std::string& accountUrl, const std::string& container);
+
+    /// <summary>
     /// Source-compatible overload from before the io_context was injected. The plugin creates its own io_context and
     /// one worker thread, shared by every filesystem created through the deprecated overloads and released when the
     /// last of them is destroyed. Prefer the overload that takes the host's io_context.

@@ -4,6 +4,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Plugin.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
 #include "PluginRegistry.hpp"
 #include <rocksdb/file_system.h>
 
@@ -129,6 +130,10 @@ std::string Plugin::NameFor(const Models::ServicePrincipalStorageInfo& primary,
 std::string Plugin::NameFor(const Models::ChainedCredentialInfo& primary,
                             const std::optional<Models::ChainedCredentialInfo>& backup) {
     return PluginNameFor(primary, backup);
+}
+
+std::string Plugin::UniquePrefix(const std::string& accountUrl, const std::string& container) {
+    return Impl::StorageAccount::UniquePrefix(accountUrl, container);
 }
 
 rocksdb::Status

@@ -331,23 +331,14 @@ jobs:
               return 0;
           }
           EOF
-          # The only installed impl header declares no functions, so the symbol is declared here to match the
-          # (uninstalled) StorageAccount.hpp; the link still has to resolve it from the installed library.
+          # Plugin::UniquePrefix is a public API; the link has to resolve it from the installed library.
           cat > azure_impl.cpp <<'EOF'
           #include <AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp>
-
-          #include <string>
-
-          namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-          struct StorageAccount {
-              static std::string UniquePrefix(const std::string& storageAccountUrl, const std::string& dbName);
-          };
-          } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
+          #include <AVEVA/RocksDB/Plugin/Azure/Plugin.hpp>
 
           int main(int argc, char**) {
               if (argc > 100) {
-                  return static_cast<int>(
-                      AVEVA::RocksDB::Plugin::Azure::Impl::StorageAccount::UniquePrefix("https://a.b/", "c").size());
+                  return static_cast<int>(AVEVA::RocksDB::Plugin::Azure::Plugin::UniquePrefix("https://a.b/", "c").size());
               }
               return AVEVA::RocksDB::Plugin::Azure::Impl::Configuration::MaxClientRetries > 0 ? 0 : 1;
           }
