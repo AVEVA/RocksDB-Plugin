@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #pragma once
+#include <AVEVA/AzureClient/Detail/ProtocolConstants.hpp>
 #include <AVEVA/AzureClient/Models/BlobContainerModels.hpp>
 #include <AVEVA/AzureClient/Models/BlobModels.hpp>
 
@@ -10,7 +11,6 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <optional>
 #include <string>
 
@@ -97,7 +97,7 @@ struct DownloadBlobOptions {
 // ConditionNotMet instead of producing a torn result. Each request's response-body limit is raised
 // to at least ChunkSize plus a small margin.
 // Default per-request chunk size used by the chunked download/upload helpers.
-inline constexpr std::size_t DefaultChunkSize = std::size_t{4} * 1024U * 1024U; // 4 MiB
+inline constexpr std::size_t DefaultChunkSize = Private::BlobTransferLimits::DefaultDownloadChunkSize; // 4 MiB
 
 struct DownloadToOptions {
     std::optional<Models::BlobByteRange> Range;

@@ -23,14 +23,8 @@
 #include <boost/asio/associated_cancellation_slot.hpp>
 #include <boost/asio/associated_executor.hpp>
 #include <boost/asio/async_result.hpp>
-#include <boost/asio/bind_allocator.hpp>
-#include <boost/asio/bind_executor.hpp>
 #include <boost/asio/cancellation_signal.hpp>
-#include <boost/asio/dispatch.hpp>
-#include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/post.hpp>
-#include <boost/asio/steady_timer.hpp>
-#include <cstdlib>
 
 #include <AVEVA/HttpClient/Detail/Lifetime.hpp>
 #include <array>
@@ -42,7 +36,6 @@
 #include <filesystem>
 #include <functional>
 #include <gsl/zstring>
-#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <span>
