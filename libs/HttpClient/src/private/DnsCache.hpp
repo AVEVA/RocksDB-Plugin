@@ -5,6 +5,8 @@
 
 #include "StreamTypes.hpp"
 #include <boost/container_hash/hash.hpp>
+#include <boost/unordered/unordered_flat_map.hpp>
+#include <boost/unordered/unordered_node_map.hpp>
 
 #include <chrono>
 #include <cstddef>
@@ -16,7 +18,6 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -113,10 +114,7 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     /// <param name="service">The port or service name whose entry to drop.</param>
     void Invalidate(std::string_view host, std::string_view service) {
         std::lock_guard<std::mutex> lock(m_mutex);
-        const auto it = m_entries.find(KeyView{host, service});
-        if (it != m_entries.end()) {
-            m_entries.erase(it);
-        }
+        m_entries.erase(KeyView{host, service});
     }
 
     /// <summary>
@@ -137,7 +135,7 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
             return;
         }
         if (m_entries.size() >= MaxEntries) {
-            std::erase_if(m_entries, [now](const auto& entry) { return now >= entry.second.expires; });
+            boost::unordered::erase_if(m_entries, [now](const auto& entry) { return now >= entry.second.expires; });
             if (m_entries.size() >= MaxEntries) {
                 // Dropping one arbitrary live entry keeps the rest; clearing everything made a burst of
                 // origins re-resolve the whole working set (measured: 44% vs 15% lookups just over the cap).
@@ -247,13 +245,12 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     // Callers hold m_mutex.
     template <typename MakeWaiter>
     bool JoinOrLeadUnsafe(std::string_view host, std::string_view service, MakeWaiter& makeWaiter, const void* scope) {
-        // Probe with views: heterogeneous try_emplace needs C++26, and a join must not allocate an owning key.
-        if (const auto it = m_pending.find(KeyView{host, service, scope}); it != m_pending.end()) {
+        // A join probes with a view and allocates no owning key; only the leader materialises one.
+        const auto [it, inserted] = m_pending.try_emplace(KeyView{host, service, scope});
+        if (!inserted) {
             it->second.push_back(makeWaiter());
-            return false;
         }
-        m_pending.emplace(Key{std::string(host), std::string(service), scope}, std::vector<Waiter>{});
-        return true;
+        return inserted;
     }
 
     /// <summary>
@@ -265,21 +262,25 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
     };
 
     /// <summary>
-    /// The owning (host, service) key stored in the maps.
-    /// </summary>
-    struct Key {
-        std::string host;
-        std::string service;
-        const void* scope = nullptr; // Only used by pending lookups; cached entries are shared.
-    };
-
-    /// <summary>
     /// Lookups use views so a hit does not build a temporary key string.
     /// </summary>
     struct KeyView {
         std::string_view host;
         std::string_view service;
         const void* scope = nullptr;
+    };
+
+    /// <summary>
+    /// The owning (host, service) key stored in the maps.
+    /// </summary>
+    struct Key {
+        std::string host;
+        std::string service;
+        const void* scope = nullptr; // Only used by pending lookups; cached entries are shared.
+
+        Key(std::string host, std::string service, const void* scope = nullptr)
+            : host(std::move(host)), service(std::move(service)), scope(scope) {}
+        explicit Key(const KeyView& view) : host(view.host), service(view.service), scope(view.scope) {}
     };
 
     /// <summary>
@@ -318,7 +319,7 @@ template <typename Clock, typename Waiter> class BasicDnsCache {
 
     std::chrono::seconds m_ttl;
     std::mutex m_mutex;
-    std::unordered_map<Key, Entry, KeyHash, KeyEqual> m_entries;
-    std::unordered_map<Key, std::vector<Waiter>, KeyHash, KeyEqual> m_pending;
+    boost::unordered_flat_map<Key, Entry, KeyHash, KeyEqual> m_entries;
+    boost::unordered_node_map<Key, std::vector<Waiter>, KeyHash, KeyEqual> m_pending;
 };
 } // namespace AVEVA::Private
