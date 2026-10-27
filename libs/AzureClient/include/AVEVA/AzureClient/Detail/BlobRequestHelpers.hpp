@@ -285,15 +285,7 @@ template <class THttp> THttp& RequireHttpClient(const std::shared_ptr<THttp>& ht
 }
 
 [[nodiscard]] constexpr bool IEquals(std::string_view lhs, std::string_view rhs) noexcept {
-    if (lhs.size() != rhs.size()) {
-        return false;
-    }
-    for (std::size_t index = 0; index < lhs.size(); ++index) {
-        if (FoldAscii(lhs[index]) != FoldAscii(rhs[index])) {
-            return false;
-        }
-    }
-    return true;
+    return std::ranges::equal(lhs, rhs, {}, FoldAscii, FoldAscii);
 }
 
 [[nodiscard]] constexpr bool IStartsWith(std::string_view value, std::string_view prefix) noexcept {
@@ -427,7 +419,7 @@ template <class TModel, class TCompletion, std::same_as<BlobStorageErrorCode>...
     return [completion = std::move(completion),
             codes = std::array<BlobStorageErrorCode, sizeof...(TCodes)>{suppressed...}](
                std::error_code error, Response<TModel> response) mutable {
-        if (error && std::ranges::any_of(codes, [&error](BlobStorageErrorCode code) { return error == code; })) {
+        if (error && std::ranges::contains(codes, error)) {
             error.clear();
         }
         completion(ToExpected(error, std::move(response)));

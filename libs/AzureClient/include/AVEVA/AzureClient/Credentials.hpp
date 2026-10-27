@@ -31,6 +31,7 @@
 #include <gsl/zstring>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -175,12 +176,7 @@ void SendTokenRequest(THttp& httpClient, HttpRequest request, AzureRequestOption
 [[nodiscard]] inline std::string FormEncode(std::string_view value) { return Private::UrlEncode(value, {}); }
 
 [[nodiscard]] inline std::string JoinScopes(const std::vector<std::string>& scopes) {
-    std::string joined;
-    for (const std::string& scope : scopes) {
-        joined += joined.empty() ? "" : " ";
-        joined += scope;
-    }
-    return joined;
+    return scopes | std::views::join_with(' ') | std::ranges::to<std::string>();
 }
 
 [[nodiscard]] inline std::string BuildClientAssertionBody(std::string_view clientId, std::string_view assertion,
