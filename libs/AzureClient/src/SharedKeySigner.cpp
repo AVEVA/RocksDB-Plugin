@@ -37,10 +37,35 @@ namespace AVEVA::AzureClient::Private {
 namespace {
 constexpr std::size_t MaxHmacDigestBytes = EVP_MAX_MD_SIZE;
 
+// Path views into the request URL. Query names and values are decoded into one shared arena and referenced
+// by offset/length, so parsing costs a fixed number of allocations regardless of the parameter count.
 struct ParsedUrl {
-    std::string Path;
-    std::vector<std::pair<std::string, std::string>> Query;
+    struct QueryParameter {
+        std::size_t NameOffset;
+        std::size_t NameLength;
+        std::size_t ValueOffset;
+        std::size_t ValueLength;
+    };
+    std::string_view Path;
+    std::string Arena;
+    std::vector<QueryParameter> Query;
+
+    [[nodiscard]] std::string_view Name(const QueryParameter& parameter) const noexcept {
+        return std::string_view{Arena}.substr(parameter.NameOffset, parameter.NameLength);
+    }
+    [[nodiscard]] std::string_view Value(const QueryParameter& parameter) const noexcept {
+        return std::string_view{Arena}.substr(parameter.ValueOffset, parameter.ValueLength);
+    }
 };
+
+// Appends the percent-decoded ('+' as space) form of `text` to `arena`; allocates only when an escape is present.
+void AppendDecoded(std::string& arena, boost::urls::pct_string_view text) {
+    if (text.find_first_of("%+") == std::string_view::npos) {
+        arena.append(text.data(), text.size());
+        return;
+    }
+    arena.append(text.decode({true}));
+}
 
 // The storage service sorts canonicalized x-ms-* headers with .NET en-US culture-aware ordering, which
 // is not byte order ('-' is ignored at the primary level, '_' sorts before digits). These sort-key
@@ -110,6 +135,10 @@ constexpr std::array<int, 128> CultureTableLevel4 = MakeCultureTableLevel4();
     return false;
 }
 
+[[nodiscard]] char ToLowerAsciiChar(char character) noexcept {
+    return character >= 'A' && character <= 'Z' ? static_cast<char>(character - 'A' + 'a') : character;
+}
+
 [[nodiscard]] ParsedUrl ParseUrl(std::string_view url) {
     ParsedUrl parsed;
     const auto parseResult = boost::urls::parse_uri(url);
@@ -119,10 +148,23 @@ constexpr std::array<int, 128> CultureTableLevel4 = MakeCultureTableLevel4();
     }
 
     const boost::urls::url_view& parsedUrl = parseResult.value();
-    parsed.Path = parsedUrl.encoded_path().empty() ? "/" : std::string{parsedUrl.encoded_path()};
+    const std::string_view encodedPath = parsedUrl.encoded_path();
+    parsed.Path = encodedPath.empty() ? std::string_view{"/"} : encodedPath;
+    parsed.Arena.reserve(url.size());
     for (const auto& parameter : parsedUrl.encoded_params()) {
-        parsed.Query.emplace_back(ToLowerAscii(parameter.key.decode({true})),
-                                  parameter.has_value ? parameter.value.decode({true}) : std::string{});
+        ParsedUrl::QueryParameter entry{};
+        entry.NameOffset = parsed.Arena.size();
+        AppendDecoded(parsed.Arena, parameter.key);
+        entry.NameLength = parsed.Arena.size() - entry.NameOffset;
+        std::ranges::transform(std::string_view{parsed.Arena}.substr(entry.NameOffset),
+                               parsed.Arena.begin() + static_cast<std::ptrdiff_t>(entry.NameOffset),
+                               [](char character) { return ToLowerAsciiChar(character); });
+        entry.ValueOffset = parsed.Arena.size();
+        if (parameter.has_value) {
+            AppendDecoded(parsed.Arena, parameter.value);
+        }
+        entry.ValueLength = parsed.Arena.size() - entry.ValueOffset;
+        parsed.Query.push_back(entry);
     }
     return parsed;
 }
@@ -194,10 +236,6 @@ void AppendCollapsedWhitespace(std::string& out, std::string_view value) {
     }
 }
 
-[[nodiscard]] char ToLowerAsciiChar(char character) noexcept {
-    return character >= 'A' && character <= 'Z' ? static_cast<char>(character - 'A' + 'a') : character;
-}
-
 [[nodiscard]] bool IsSignableHeader(const HttpHeader& header) noexcept {
     const std::string_view name = header.GetName();
     const auto clean = [](std::string_view text) {
@@ -237,6 +275,7 @@ std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpR
         std::size_t Index;
     };
     std::string lowercaseNames;
+    lowercaseNames.reserve(headers.size() * EstimatedCanonicalizedHeaderLength);
     std::vector<CanonicalizedHeader> entries;
     entries.reserve(headers.size());
     for (std::size_t index = 0; index < headers.size(); ++index) {
@@ -269,54 +308,22 @@ std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpR
         return CultureAwareLess(nameOf(lhs), nameOf(rhs));
     });
 
-    std::string canonicalizedHeadersText;
-    canonicalizedHeadersText.reserve(entries.size() * EstimatedCanonicalizedHeaderLength);
-    // Repeated header names are combined into one `name:v1,v2` line, in their original order.
-    for (std::size_t position = 0; position < entries.size(); ++position) {
-        const CanonicalizedHeader& entry = entries.at(position);
-        const std::string_view lowercaseName = nameOf(entry);
-        if (position == 0 || nameOf(entries.at(position - 1)) != lowercaseName) {
-            if (position != 0) {
-                canonicalizedHeadersText.push_back('\n');
-            }
-            canonicalizedHeadersText.append(lowercaseName).push_back(':');
-        } else {
-            canonicalizedHeadersText.push_back(',');
-        }
-        AppendCollapsedWhitespace(canonicalizedHeadersText, headers.at(entry.Index).GetValue());
-    }
-    if (!canonicalizedHeadersText.empty()) {
-        canonicalizedHeadersText.push_back('\n');
-    }
-
-    std::ranges::sort(parsedUrl.Query);
-
-    std::string canonicalizedResource;
-    canonicalizedResource.reserve(accountName.size() + parsedUrl.Path.size() +
-                                  (parsedUrl.Query.size() * EstimatedCanonicalizedQueryLength) + 1U);
-    canonicalizedResource.push_back('/');
-    canonicalizedResource.append(accountName).append(parsedUrl.Path);
-    // Repeated query parameters are combined into one `name:v1,v2` line with sorted values.
-    for (std::size_t position = 0; position < parsedUrl.Query.size(); ++position) {
-        const auto& [name, value] = parsedUrl.Query.at(position);
-        if (position != 0 && parsedUrl.Query.at(position - 1).first == name) {
-            canonicalizedResource.push_back(',');
-            canonicalizedResource.append(value);
-        } else {
-            canonicalizedResource.push_back('\n');
-            canonicalizedResource.append(name).push_back(':');
-            canonicalizedResource.append(value);
-        }
-    }
+    std::ranges::sort(parsedUrl.Query, [&parsedUrl](const auto& lhs, const auto& rhs) {
+        const std::string_view lhsName = parsedUrl.Name(lhs);
+        const std::string_view rhsName = parsedUrl.Name(rhs);
+        return lhsName != rhsName ? lhsName < rhsName : parsedUrl.Value(lhs) < parsedUrl.Value(rhs);
+    });
 
     const std::size_t bodySize = request.GetBodySize();
     const std::string_view method = MethodToString(request.GetMethod());
     constexpr std::size_t ContentLengthField = 2;
 
-    // The string-to-sign is assembled in one reserved buffer rather than through intermediate strings.
+    // The string-to-sign is assembled directly in one reserved buffer rather than through intermediate strings.
     std::string stringToSign;
-    std::size_t reservedSize = method.size() + 1U + canonicalizedHeadersText.size() + canonicalizedResource.size() +
-                               20U /* decimal Content-Length digits */ + fields.size() + 1U;
+    std::size_t reservedSize = method.size() + 1U + (entries.size() * EstimatedCanonicalizedHeaderLength) +
+                               accountName.size() + parsedUrl.Path.size() +
+                               (parsedUrl.Query.size() * EstimatedCanonicalizedQueryLength) +
+                               20U /* decimal Content-Length digits */ + fields.size() + 2U;
     for (const std::string_view field : fields) {
         reservedSize += field.size();
     }
@@ -334,7 +341,37 @@ std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpR
         }
         stringToSign.push_back('\n');
     }
-    stringToSign.append(canonicalizedHeadersText).append(canonicalizedResource);
+    // Repeated header names are combined into one `name:v1,v2` line, in their original order.
+    for (std::size_t position = 0; position < entries.size(); ++position) {
+        const CanonicalizedHeader& entry = entries.at(position);
+        const std::string_view lowercaseName = nameOf(entry);
+        if (position == 0 || nameOf(entries.at(position - 1)) != lowercaseName) {
+            if (position != 0) {
+                stringToSign.push_back('\n');
+            }
+            stringToSign.append(lowercaseName).push_back(':');
+        } else {
+            stringToSign.push_back(',');
+        }
+        AppendCollapsedWhitespace(stringToSign, headers.at(entry.Index).GetValue());
+    }
+    if (!entries.empty()) {
+        stringToSign.push_back('\n');
+    }
+
+    stringToSign.push_back('/');
+    stringToSign.append(accountName).append(parsedUrl.Path);
+    // Repeated query parameters are combined into one `name:v1,v2` line with sorted values.
+    for (std::size_t position = 0; position < parsedUrl.Query.size(); ++position) {
+        const ParsedUrl::QueryParameter& parameter = parsedUrl.Query.at(position);
+        if (position != 0 && parsedUrl.Name(parsedUrl.Query.at(position - 1)) == parsedUrl.Name(parameter)) {
+            stringToSign.push_back(',');
+        } else {
+            stringToSign.push_back('\n');
+            stringToSign.append(parsedUrl.Name(parameter)).push_back(':');
+        }
+        stringToSign.append(parsedUrl.Value(parameter));
+    }
     return stringToSign;
 }
 
@@ -369,30 +406,49 @@ SharedKeySigner::SharedKeySigner(std::string accountName, std::string_view accou
 
 SharedKeySigner::~SharedKeySigner() = default;
 
-std::string SharedKeySigner::Sign(std::string_view stringToSign) const {
-    // The keyed template context is never updated, so concurrent EVP_MAC_CTX_dup calls are safe.
-    std::unique_ptr<EVP_MAC_CTX, decltype(&EVP_MAC_CTX_free)> const context(EVP_MAC_CTX_dup(m_impl->KeyedContext.get()),
+namespace {
+// The keyed template context is never updated, so concurrent EVP_MAC_CTX_dup calls are safe.
+[[nodiscard]] std::size_t ComputeHmac(EVP_MAC_CTX* keyedContext, std::string_view stringToSign,
+                                      std::array<unsigned char, MaxHmacDigestBytes>& digest) {
+    std::unique_ptr<EVP_MAC_CTX, decltype(&EVP_MAC_CTX_free)> const context(EVP_MAC_CTX_dup(keyedContext),
                                                                             &EVP_MAC_CTX_free);
     if (!context || EVP_MAC_update(context.get(), reinterpret_cast<const unsigned char*>(stringToSign.data()),
                                    stringToSign.size()) != 1) {
         throw std::runtime_error("Failed to compute Shared Key authorization signature.");
     }
 
-    std::array<unsigned char, MaxHmacDigestBytes> digest{};
     std::size_t digestLength = 0;
     if (EVP_MAC_final(context.get(), digest.data(), &digestLength, digest.size()) != 1) {
         throw std::runtime_error("Failed to compute Shared Key authorization signature.");
     }
+    return digestLength;
+}
+} // namespace
+
+std::string SharedKeySigner::Sign(std::string_view stringToSign) const {
+    std::array<unsigned char, MaxHmacDigestBytes> digest{};
+    const std::size_t digestLength = ComputeHmac(m_impl->KeyedContext.get(), stringToSign, digest);
     return Base64Encode(std::as_bytes(std::span{digest.data(), digestLength}));
 }
 
 std::string SharedKeySigner::Authorize(const HttpRequest& request) const {
-    const std::string signature = Sign(BuildSharedKeyStringToSign(m_accountName, request));
+    std::array<unsigned char, MaxHmacDigestBytes> digest{};
+    const std::size_t digestLength =
+        ComputeHmac(m_impl->KeyedContext.get(), BuildSharedKeyStringToSign(m_accountName, request), digest);
+
     constexpr std::string_view Scheme = "SharedKey ";
+    // EVP_EncodeBlock writes 4 chars per 3 input bytes plus a trailing NUL.
+    const std::size_t encodedLength = ((digestLength + 2U) / 3U) * 4U;
+    const std::size_t prefixLength = Scheme.size() + m_accountName.size() + 1U;
     std::string authorization;
-    authorization.reserve(Scheme.size() + m_accountName.size() + 1U + signature.size());
+    authorization.reserve(prefixLength + encodedLength);
     authorization.append(Scheme).append(m_accountName).push_back(':');
-    authorization.append(signature);
+    authorization.resize(prefixLength + encodedLength);
+    const int written = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(authorization.data()) + prefixLength,
+                                        digest.data(), gsl::narrow_cast<int>(digestLength));
+    if (written < 0 || static_cast<std::size_t>(written) != encodedLength) {
+        throw std::runtime_error("Failed to encode Shared Key authorization signature.");
+    }
     return authorization;
 }
 } // namespace AVEVA::AzureClient::Private
