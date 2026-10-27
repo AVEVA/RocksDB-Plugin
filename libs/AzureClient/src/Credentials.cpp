@@ -186,7 +186,8 @@ std::optional<std::string> ReadTokenFile(const std::string& path) {
         return std::nullopt;
     }
     const std::size_t last = content.find_last_not_of(Whitespace);
-    content = content.substr(first, last - first + 1);
+    content.erase(last + 1U);
+    content.erase(0U, first);
     if (content.find_first_of(Whitespace) != std::string::npos) {
         return std::nullopt;
     }

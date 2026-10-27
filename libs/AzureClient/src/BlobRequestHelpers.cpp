@@ -76,20 +76,6 @@ namespace {
 constexpr std::size_t MinContainerNameLength = 3U;
 constexpr std::size_t MaxContainerNameLength = 63U;
 
-[[nodiscard]] constexpr bool IsAsciiWhitespace(char value) noexcept {
-    switch (value) {
-    case ' ':
-    case '\t':
-    case '\n':
-    case '\v':
-    case '\f':
-    case '\r':
-        return true;
-    default:
-        return false;
-    }
-}
-
 [[nodiscard]] constexpr bool IsAsciiAlphaNumeric(char value) noexcept {
     return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9');
 }
@@ -125,13 +111,12 @@ std::string ToLowerAscii(std::string_view value) {
 }
 
 [[nodiscard]] std::string_view TrimWhitespace(std::string_view value) noexcept {
-    while (!value.empty() && IsAsciiWhitespace(value.front())) {
-        value.remove_prefix(1U);
+    constexpr std::string_view Whitespace = " \t\n\v\f\r";
+    const std::size_t first = value.find_first_not_of(Whitespace);
+    if (first == std::string_view::npos) {
+        return {};
     }
-    while (!value.empty() && IsAsciiWhitespace(value.back())) {
-        value.remove_suffix(1U);
-    }
-    return value;
+    return value.substr(first, value.find_last_not_of(Whitespace) - first + 1U);
 }
 
 bool HasHeaderControlCharacters(std::string_view value) noexcept {

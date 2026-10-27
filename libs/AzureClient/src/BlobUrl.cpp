@@ -25,10 +25,8 @@ struct ExtraSafeCharacters {
 } // namespace
 
 std::string_view TrimTrailingSlashes(std::string_view value) noexcept {
-    while (!value.empty() && value.back() == '/') {
-        value.remove_suffix(1U);
-    }
-    return value;
+    // npos + 1 wraps to 0, which yields the empty view for an all-slash input.
+    return value.substr(0U, value.find_last_not_of('/') + 1U);
 }
 
 std::string_view TrimLeadingQuestionMark(std::string_view value) noexcept {
