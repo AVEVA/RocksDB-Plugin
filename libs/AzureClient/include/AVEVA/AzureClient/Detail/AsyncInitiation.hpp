@@ -56,9 +56,8 @@ struct ClientSnapshotAccess {
 // through PostCompletion). Completions are produced by the transport, so "not inline" does not mean "not
 // concurrent": they may run on another I/O thread before the initiating thread returns. `Direct` is the fast path
 // where the handler already runs on the default executor and no slot was adopted: it is invoked in place on that
-// executor's thread. Otherwise the handler, result and guards live in shared state across a dispatch to the
-// associated executor, retried if scheduling throws; only if the executor keeps rejecting work does it run once on
-// the completing thread, without clearing an adopted slot. Work always holds the executor busy until delivery.
+// executor's thread. Otherwise the handler, result and guards are moved into a concrete function object
+// dispatched to the associated executor. Work always holds the executor busy until delivery.
 // Concrete (non-erased) wrapper produced by BindAssociationsAndAdoptCancellation.
 template <class TArg, class THandler, class TExecutor, class TIoExecutor, class TAllocator, class TSlot>
 struct BoundHandler {
@@ -95,63 +94,31 @@ struct BoundHandler {
     }
 
   private:
-    // The handler, result and work guards live in shared state until the dispatched task actually runs. A task moved
-    // into a dispatch that throws is destroyed with everything it captured, which would lose the completion and
-    // release the guards even though the operation succeeded; sharing the state lets the dispatch be retried.
-    struct Delivery {
-        Delivery(BoundHandler& source, TArg&& value)
-            : Handler(std::move(source.Handler)), Result(std::move(value)), Work(std::move(source.Work)),
-              IoWork(std::move(source.IoWork)), Slot(source.Slot), Adopted(source.AdoptedSlot) {}
-
-        // Exactly once, however the dispatch and the fallback interleave. The adopted slot is only cleared on the
-        // handler's executor, where it is serialized with the caller's emissions.
-        void Run(bool onHandlerExecutor) {
-            if (Done.exchange(true, std::memory_order_acq_rel)) {
-                return;
-            }
-            if (Adopted && onHandlerExecutor) {
-                Slot.clear();
-            }
-            std::move(Handler)(std::move(Result));
-        }
-
+    // Owns the handler, result and work guards for the hop to the handler's executor; the guards are released only
+    // after the handler has run. The adopted slot is cleared on the handler's executor, where it is serialized with
+    // the caller's emissions.
+    struct Deliver {
         THandler Handler;
         TArg Result;
         std::optional<boost::asio::executor_work_guard<TExecutor>> Work;
         std::optional<boost::asio::executor_work_guard<TIoExecutor>> IoWork;
         TSlot Slot;
         bool Adopted;
-        std::atomic<bool> Done{false};
+
+        void operator()() {
+            if (Adopted) {
+                Slot.clear();
+            }
+            std::move(Handler)(std::move(Result));
+        }
     };
 
-    static constexpr int DispatchAttempts = 3;
-
     void DispatchOwned(TArg&& result) {
-        std::shared_ptr<Delivery> delivery;
-        for (int attempt = 0; attempt < DispatchAttempts && !delivery; ++attempt) {
-            try {
-                delivery = std::allocate_shared<Delivery>(Allocator, *this, std::move(result));
-            } catch (...) {
-            }
-        }
-        if (!delivery) {
-            // Nothing was moved from yet, so the handler can still be run (once) rather than lost.
-            std::move(Handler)(std::move(result));
-            return;
-        }
-        for (int attempt = 0; attempt < DispatchAttempts; ++attempt) {
-            try {
-                boost::asio::dispatch(Executor,
-                                      boost::asio::bind_allocator(Allocator, [delivery]() { delivery->Run(true); }));
-                return;
-            } catch (...) {
-            }
-        }
-        // The executor keeps rejecting work; the result is still the caller's, so it runs here, once.
-        delivery->Run(false);
+        boost::asio::dispatch(Executor, boost::asio::bind_allocator(
+                                            Allocator, Deliver{std::move(Handler), std::move(result), std::move(Work),
+                                                               std::move(IoWork), Slot, AdoptedSlot}));
     }
 };
-
 template <class TArg, class RawHandler, class TExecutor>
 [[nodiscard]] auto BindAssociationsAndAdoptCancellationOn(RawHandler& handler, const TExecutor& defaultExecutor,
                                                           AzureRequestOptions& requestOptions) {
