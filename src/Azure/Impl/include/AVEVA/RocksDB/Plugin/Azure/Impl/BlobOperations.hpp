@@ -75,6 +75,14 @@ template <class Executor> class StopBridge {
     bool m_requested = false;
     std::atomic<bool> m_retired = false;
 
+    struct Forwarder {
+        std::shared_ptr<StopBridge> Bridge;
+        void operator()() const noexcept { StopBridge::Request(Bridge); }
+    };
+    std::mutex m_linkMutex;
+    std::optional<std::stop_callback<Forwarder>> m_registration;
+    bool m_released = false;
+
     void EmitLocked() {
         m_emitted = true;
         m_signal.emit(boost::asio::cancellation_type::terminal);
@@ -149,33 +157,24 @@ template <class Executor> class StopBridge {
         m_retired.store(true, std::memory_order_release);
         CancelWake();
     }
-};
 
-// Keeps a stop_callback registered for the life of one transfer. Arm and Release may race: whichever comes second
-// wins, so a transfer that finished before arming never registers, and a registration is never left behind.
-template <class Executor> class StopLink {
-    struct Forwarder {
-        std::shared_ptr<StopBridge<Executor>> Bridge;
-        void operator()() const noexcept { StopBridge<Executor>::Request(Bridge); }
-    };
-    std::mutex m_mutex;
-    // Held inline so that arming, which happens after the I/O has been accepted, cannot fail to allocate.
-    std::optional<std::stop_callback<Forwarder>> m_registration;
-    bool m_released = false;
-
-  public:
-    // Does not throw: moving a stop_token or shared_ptr and registering a stop_callback never allocate.
-    void Arm(std::stop_token token, std::shared_ptr<StopBridge<Executor>> bridge) noexcept {
-        const std::lock_guard lock(m_mutex);
+    // Registers `token` to request a stop for the life of one transfer, held inline so the bridge is the only
+    // allocation. Arm and Release may race: whichever comes second wins, so a transfer that finished before arming
+    // never registers, and a registration is never left behind. The registration owns a reference to the bridge
+    // until Release, which the completion must call. Does not throw: moving a stop_token or shared_ptr and
+    // registering a stop_callback never allocate.
+    void Arm(std::stop_token token, const std::shared_ptr<StopBridge>& self) noexcept {
+        const std::lock_guard lock(m_linkMutex);
         if (!m_released) {
-            m_registration.emplace(std::move(token), Forwarder{std::move(bridge)});
+            m_registration.emplace(std::move(token), Forwarder{self});
         }
     }
 
-    // Destroying the registration waits for a running Forwarder, which only takes the bridge mutex. Initiation no
-    // longer holds that by the time of Arm, and Release before Arm finds no registration, so holding m_mutex is safe.
+    // Destroying the registration waits for a running Forwarder, which only takes m_mutex. Initiation no longer
+    // holds that by the time of Arm, and Release before Arm finds no registration, so holding m_linkMutex is safe.
+    // The caller holds its own reference, so dropping the Forwarder's cannot destroy the bridge here.
     void Release() noexcept {
-        const std::lock_guard lock(m_mutex);
+        const std::lock_guard lock(m_linkMutex);
         m_released = true;
         m_registration.reset();
     }
@@ -766,25 +765,31 @@ void DownloadAsync(TBlob& client, int64_t blobOffset, int64_t readLength, std::s
         // The timeout is per attempt; the total deadline is what stops transport retries from outliving the caller.
         requestOptions.SetTotalDeadline(timeout);
     }
+    // An already-abandoned transfer completes without allocating a buffer or a bridge.
+    if (stopToken.stop_requested()) {
+        callback(
+            std::make_exception_ptr(RequestFailedException(0, "ReadAbandoned", "Read abandoned before it completed", "",
+                                                           std::make_error_code(std::errc::operation_canceled))),
+            0U, std::string_view{}, std::shared_ptr<const void>{});
+        return;
+    }
     // The lease is owned by the completion, so the transfer can never write into freed memory.
     auto buffer = DownloadBufferPool::Shared()->Acquire(static_cast<size_t>(readLength));
     const std::span<char> destination(buffer->Data(), buffer->Size());
     // The stop registration is armed after the request is initiated, so destroying it (by the completion, possibly
     // on another thread) never waits on the bridge mutex that initiation holds. A stop requested before arming
     // fires on arming.
-    using Link = Detail::StopLink<decltype(client.get_executor())>;
     using Bridge = Detail::StopBridge<decltype(client.get_executor())>;
     const auto bridge = stopToken.stop_possible() ? std::make_shared<Bridge>(client.get_executor()) : nullptr;
-    const auto link = bridge ? std::make_shared<Link>() : nullptr;
     if (bridge) {
         requestOptions.SetCancellationSlot(bridge->Slot());
     }
     auto start = [&] {
         client.DownloadToAsync(
             destination, std::move(options),
-            [buffer = std::move(buffer), callback = std::move(callback), link, bridge](auto result) mutable {
-                if (link) {
-                    link->Release();
+            [buffer = std::move(buffer), callback = std::move(callback), bridge](auto result) mutable {
+                if (bridge) {
+                    bridge->Release();
                     bridge->Retire();
                 }
                 std::exception_ptr error;
@@ -807,7 +812,7 @@ void DownloadAsync(TBlob& client, int64_t blobOffset, int64_t readLength, std::s
     };
     if (bridge) {
         bridge->Install(bridge, start);
-        link->Arm(std::move(stopToken), bridge);
+        bridge->Arm(std::move(stopToken), bridge);
     } else {
         start();
     }

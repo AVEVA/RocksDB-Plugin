@@ -829,11 +829,10 @@ TEST(DownloadBufferPoolTests, OversizedBuffersAreNotRetained) {
     EXPECT_EQ(0U, pool->PooledCount());
 }
 
-TEST_F(BlobOperationsTests, ArmingAStopLinkAfterAcceptanceCannotThrow) {
-    using Link = BlobOperations::Detail::StopLink<boost::asio::io_context::executor_type>;
+TEST_F(BlobOperationsTests, ArmingAStopBridgeAfterAcceptanceCannotThrow) {
     using Bridge = BlobOperations::Detail::StopBridge<boost::asio::io_context::executor_type>;
-    static_assert(noexcept(std::declval<Link&>().Arm(std::stop_token{}, std::shared_ptr<Bridge>{})));
-    static_assert(noexcept(std::declval<Link&>().Release()));
+    static_assert(noexcept(std::declval<Bridge&>().Arm(std::stop_token{}, std::shared_ptr<Bridge>{})));
+    static_assert(noexcept(std::declval<Bridge&>().Release()));
 }
 
 TEST_F(BlobOperationsTests, DownloadAsyncStopAfterAcceptanceCancelsTheDeferredTransferExactlyOnce) {
