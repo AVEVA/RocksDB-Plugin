@@ -125,6 +125,43 @@ TEST(OriginLimiterTests, CancelRemovesOnlyTheQueuedTicketAndTheRestKeepTheirOrde
     EXPECT_EQ(recorder->Aborted, std::vector<int>{3});
 }
 
+TEST(OriginLimiterTests, MassOutOfOrderCancellationKeepsTheSurvivorsInFifoOrder) {
+    auto recorder = std::make_shared<Recorder>();
+    Limiter limiter{1, RecordingSink{recorder}};
+    limiter.Run("origin", limiter.NextTicket(), 0);
+
+    constexpr int kQueued = 2000;
+    std::vector<std::uint64_t> tickets;
+    for (int id = 1; id <= kQueued; ++id) {
+        tickets.push_back(limiter.NextTicket());
+        limiter.Run("origin", tickets.back(), int{id});
+    }
+    // Cancel every id that is not a multiple of 7, from the middle outwards and then the rest backwards.
+    std::vector<int> expectedAborted;
+    for (int id = kQueued / 2; id >= 1; --id) {
+        if (id % 7 != 0) {
+            limiter.Cancel("origin", tickets[id - 1]);
+            expectedAborted.push_back(id);
+        }
+    }
+    for (int id = kQueued; id > kQueued / 2; --id) {
+        if (id % 7 != 0) {
+            limiter.Cancel("origin", tickets[id - 1]);
+            expectedAborted.push_back(id);
+        }
+    }
+    EXPECT_EQ(recorder->Aborted, expectedAborted);
+
+    std::vector<int> expectedStarted{0};
+    for (int id = 7; id <= kQueued; id += 7) {
+        expectedStarted.push_back(id);
+    }
+    for (std::size_t i = 0; i < expectedStarted.size(); ++i) {
+        limiter.Release("origin");
+    }
+    EXPECT_EQ(recorder->Started, expectedStarted);
+}
+
 TEST(OriginLimiterTests, QueuedWaitersAreAbortedAtTheirDeadlineInDeadlineOrder) {
     using namespace std::chrono_literals;
     boost::asio::io_context context;

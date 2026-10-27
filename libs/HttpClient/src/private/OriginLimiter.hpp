@@ -11,7 +11,6 @@
 #include <cassert>
 #include <chrono>
 #include <cstdint>
-#include <deque>
 #include <exception>
 #include <map>
 #include <memory>
@@ -19,6 +18,7 @@
 #include <optional>
 #include <string>
 #include <system_error>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -94,10 +94,10 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
             m_sink.Start(std::move(pending));
             return;
         }
-        // Tickets are issued outside the lock, so two racing submitters can arrive out of order. Keeping the queue
-        // sorted by ticket (an insertion that is almost always at the back) lets Cancel binary-search it.
+        // Tickets are issued outside the lock, so two racing submitters can arrive out of order. The queue is
+        // ordered by ticket (an insertion that is almost always at the back) and node-based, so Cancel and expiry
+        // remove from the middle in logarithmic time without moving the other waiters.
         auto& waiters = state.waiters;
-        const auto position = std::ranges::upper_bound(waiters, ticket, {}, &Waiter::ticket);
         // Indexed before the move below, which may empty the string `origin` refers to. If anything after the
         // index entry throws, the entry is dropped again so a request the caller is told failed cannot also
         // be woken or started later.
@@ -109,7 +109,8 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
             if (indexed) {
                 ArmTimerLocked();
             }
-            waiters.insert(position, Waiter{ticket, deadline, std::move(pending)});
+            waiters.emplace_hint(waiters.end(), std::piecewise_construct, std::forward_as_tuple(ticket),
+                                 std::forward_as_tuple(deadline, std::move(pending)));
         } catch (...) {
             if (indexed) {
                 m_expiries.erase(ExpiryKey{deadline, ticket});
@@ -146,10 +147,10 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
                 }
                 return;
             }
-            auto& front = it->second.waiters.front();
-            next.emplace(std::move(front.pending));
-            m_expiries.erase(ExpiryKey{front.deadline, front.ticket});
-            it->second.waiters.pop_front();
+            const auto front = it->second.waiters.begin();
+            next.emplace(std::move(front->second.pending));
+            m_expiries.erase(ExpiryKey{front->second.deadline, front->first});
+            it->second.waiters.erase(front);
             // The hand-off is committed; a timer failure must not undo it.
             rearmFailed = RearmAfterCommitLocked();
         }
@@ -179,12 +180,12 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
                 return;
             }
             auto& waiters = it->second.waiters;
-            const auto waiter = std::ranges::lower_bound(waiters, ticket, {}, &Waiter::ticket);
-            if (waiter == waiters.end() || waiter->ticket != ticket) {
+            const auto waiter = waiters.find(ticket);
+            if (waiter == waiters.end()) {
                 return;
             }
-            aborted.emplace(std::move(waiter->pending));
-            m_expiries.erase(ExpiryKey{waiter->deadline, waiter->ticket});
+            aborted.emplace(std::move(waiter->second.pending));
+            m_expiries.erase(ExpiryKey{waiter->second.deadline, ticket});
             waiters.erase(waiter);
             rearmFailed = RearmAfterCommitLocked();
         }
@@ -224,7 +225,7 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
         // A throwing completion must not abandon the remaining requests; the first failure is rethrown at the end.
         std::exception_ptr failure;
         for (auto& [origin, state] : drained) {
-            for (auto& waiter : state.waiters) {
+            for (auto& [ticket, waiter] : state.waiters) {
                 try {
                     m_sink.Abort(std::move(waiter.pending), canceled);
                 } catch (...) {
@@ -315,9 +316,8 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
             const auto& [key, origin] = *m_expiries.begin();
             if (const auto it = m_origins.find(origin); it != m_origins.end()) {
                 auto& waiters = it->second.waiters;
-                const auto waiter = std::ranges::lower_bound(waiters, key.second, {}, &Waiter::ticket);
-                if (waiter != waiters.end() && waiter->ticket == key.second) {
-                    expired.emplace(std::move(waiter->pending));
+                if (const auto waiter = waiters.find(key.second); waiter != waiters.end()) {
+                    expired.emplace(std::move(waiter->second.pending));
                     waiters.erase(waiter);
                 }
             }
@@ -426,10 +426,10 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
     }
 
     /// <summary>
-    /// A request waiting for a slot, identified by its ticket so it can be cancelled before it starts.
+    /// A request waiting for a slot; its ticket, the key it is queued under, lets it be cancelled before it
+    /// starts.
     /// </summary>
     struct Waiter {
-        std::uint64_t ticket;
         Clock::time_point deadline;
         Pending pending;
     };
@@ -439,7 +439,7 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
     /// </summary>
     struct OriginState {
         std::size_t active = 0;
-        std::deque<Waiter> waiters;
+        std::map<std::uint64_t, Waiter> waiters;
     };
 
     std::size_t m_max;
