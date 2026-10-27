@@ -207,6 +207,11 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
                     m_queue.push_back(std::move(event));
                 } catch (...) {
                     m_queueOverflowed = true;
+                    // The dropped completion is the one event that proves the transport has finished with the
+                    // request body, so remember that it arrived even though its payload is lost.
+                    if (std::holds_alternative<AttemptCompleteEvent>(event)) {
+                        m_attemptInFlight.store(false, std::memory_order_release);
+                    }
                 }
                 return;
             }
@@ -249,7 +254,9 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
 
     // Ends the request inline, on the runner: posting the failure would allocate again. Whatever event was lost,
     // stopping the accepted attempt or backoff and reporting the allocation failure is the only outcome that
-    // cannot leave the request waiting for it.
+    // cannot leave the request waiting for it. Cancellation only asks the transport to stop: while an accepted
+    // attempt is still outstanding (its completion was not the lost event) the transport may still be reading the
+    // request body, so the request ends when that completion arrives and reports this error instead.
     void FailOverflowedQueue() {
         if (m_finished.load(std::memory_order_acquire)) {
             return;
@@ -258,6 +265,9 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         m_cancelled.store(true, std::memory_order_release);
         CancelBackoff();
         m_attemptSignal.emit(boost::asio::cancellation_type::terminal);
+        if (m_attemptInFlight.load(std::memory_order_acquire)) {
+            return;
+        }
         if (m_initiating.load(std::memory_order_acquire)) {
             // A completion never runs inside the initiating call; only if even the hop cannot be posted does it.
             try {
@@ -300,6 +310,10 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         // Stops any attempt or backoff already accepted; their completions report this error, not a cancellation.
         CancelBackoff();
         m_attemptSignal.emit(boost::asio::cancellation_type::terminal);
+        if (m_attemptInFlight.load(std::memory_order_acquire)) {
+            // The transport may still be using the request body; its completion ends the request with this error.
+            return;
+        }
         PostFinish(error);
     }
 
@@ -534,19 +548,26 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
                                                                                    : boost::asio::cancellation_slot{});
 
         auto self = this->shared_from_this();
-        m_httpClient.SendAsync(std::move(attempt), std::move(options),
-                               [self](std::error_code error, HttpResponse response) {
-                                   // A transport that completes inside SendAsync must not complete the caller's
-                                   // operation inside its initiating function.
-                                   if (self->m_initiating.load(std::memory_order_acquire)) {
-                                       boost::asio::post(self->m_httpClient.get_executor(),
-                                                         [self, error, response = std::move(response)]() mutable {
-                                                             self->OnAttemptComplete(error, std::move(response));
-                                                         });
-                                       return;
-                                   }
-                                   self->OnAttemptComplete(error, std::move(response));
-                               });
+        m_attemptInFlight.store(true, std::memory_order_release);
+        try {
+            m_httpClient.SendAsync(std::move(attempt), std::move(options),
+                                   [self](std::error_code error, HttpResponse response) {
+                                       // A transport that completes inside SendAsync must not complete the caller's
+                                       // operation inside its initiating function.
+                                       if (self->m_initiating.load(std::memory_order_acquire)) {
+                                           boost::asio::post(self->m_httpClient.get_executor(),
+                                                             [self, error, response = std::move(response)]() mutable {
+                                                                 self->OnAttemptComplete(error, std::move(response));
+                                                             });
+                                           return;
+                                       }
+                                       self->OnAttemptComplete(error, std::move(response));
+                                   });
+        } catch (...) {
+            // A SendAsync that throws has not accepted the attempt.
+            m_attemptInFlight.store(false, std::memory_order_release);
+            throw;
+        }
     }
 
     void OnAttemptComplete(std::error_code error, HttpResponse response) {
@@ -574,6 +595,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     }
 
     void OnAttemptCompleteOnStrand(std::error_code error, HttpResponse response) {
+        m_attemptInFlight.store(false, std::memory_order_release);
         if (m_cancelled) {
             Finish(CancelError(), std::move(response));
             return;
@@ -696,6 +718,8 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     int m_maxAttempts = 1;
     int m_attempt = 0;
     std::atomic<bool> m_initiating{false};
+    // True from handing an attempt to the transport until its completion is consumed (or dropped by a full queue).
+    std::atomic<bool> m_attemptInFlight{false};
     std::atomic<bool> m_awaitingToken{false};
     std::atomic<bool> m_cancelled{false};
     std::atomic<bool> m_finished{false};

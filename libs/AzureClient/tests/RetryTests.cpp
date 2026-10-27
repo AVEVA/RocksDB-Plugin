@@ -32,20 +32,26 @@
 #include <functional>
 #include <future>
 #include <limits>
+#include <memory>
 #include <new>
 #include <optional>
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 
 // Lets a test make the Nth upcoming allocation on this thread throw; -1 means disarmed. The retry runner's queue
 // allocates inside the standard library, so a global replacement is the only way to reach it.
 namespace AllocationFailure {
 thread_local int allocationsUntilFailure = -1;
+// Only allocations at least this large count, so a test can target the retry queue's event storage and not the// small
+// allocations of the standard containers around it.
+thread_local std::size_t minimumFailingSize = 0;
 } // namespace AllocationFailure
 
 void* operator new(std::size_t size) {
-    if (AllocationFailure::allocationsUntilFailure >= 0 && AllocationFailure::allocationsUntilFailure-- == 0) {
+    if (size >= AllocationFailure::minimumFailingSize && AllocationFailure::allocationsUntilFailure >= 0 &&
+        AllocationFailure::allocationsUntilFailure-- == 0) {
         throw std::bad_alloc();
     }
     if (void* memory = std::malloc(size != 0 ? size : 1)) {
@@ -936,6 +942,95 @@ TEST(RetryTests, CancellationWhoseQueueAdmissionFailsStillCompletesTheRequestOnc
     canceller.join();
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}));
+    EXPECT_EQ(completions, 1);
+    ASSERT_FALSE(ValueOrFail(observed).has_value());
+    EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::not_enough_memory));
+}
+
+TEST(RetryTests, CancellationWhoseAdmissionFailsWaitsForTheTransportToReleaseTheSharedUploadBuffer) {
+    FakeHttpClient httpClient;
+    PageBlobClient client{httpClient, MakeRetryOptions(0)};
+    auto content = std::make_shared<std::vector<char>>(512, 'p');
+
+    boost::asio::cancellation_signal signal;
+    std::promise<void> entered;
+    std::promise<void> release;
+    // Holds the runner busy inside the first dispatch, with the upload already handed to a transport that keeps
+    // reading its body after being asked to stop.
+    httpClient.SetResponder(
+        [&,
+         once = false](const FakeHttpClient::RequestRecord&) mutable -> std::optional<FakeHttpClient::ScriptedResult> {
+            if (once) {
+                return std::nullopt;
+            }
+            once = true;
+            entered.set_value();
+            release.get_future().wait();
+            return FakeHttpClient::ScriptedResult{.Deferred = true, .IgnoreCancellation = true};
+        });
+
+    std::thread canceller([&] {
+        entered.get_future().wait();
+        AllocationFailure::allocationsUntilFailure = 0;
+        try {
+            signal.emit(boost::asio::cancellation_type::terminal);
+        } catch (const std::bad_alloc&) {
+        }
+        AllocationFailure::allocationsUntilFailure = -1;
+        release.set_value();
+    });
+
+    int completions = 0;
+    std::optional<std::expected<Response<Models::UploadPagesResult>, BlobStorageError>> observed;
+    client.UploadPagesAsync(
+        0, std::shared_ptr<const std::vector<char>>{content},
+        boost::asio::bind_cancellation_slot(
+            signal.slot(), [&](std::expected<Response<Models::UploadPagesResult>, BlobStorageError> result) {
+                ++completions;
+                observed = std::move(result);
+            }));
+    canceller.join();
+
+    httpClient.Poll();
+    ASSERT_TRUE(httpClient.IsPending(0));
+    EXPECT_FALSE(observed.has_value());
+    EXPECT_GT(content.use_count(), 1);
+
+    ASSERT_TRUE(httpClient.CompleteRequest(0));
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}));
+    EXPECT_EQ(completions, 1);
+    EXPECT_EQ(content.use_count(), 1);
+    ASSERT_FALSE(observed->has_value());
+    EXPECT_EQ(observed->error().Code, std::make_error_code(std::errc::not_enough_memory));
+}
+
+TEST(RetryTests, AttemptCompletionWhoseAdmissionFailsStillCompletesTheRequestOnce) {
+    FakeHttpClient httpClient;
+    httpClient.CompleteInline() = true;
+    BlobClient client{httpClient, MakeRetryOptions(1)};
+
+    // The second attempt's completion arrives on the runner, behind the dispatch that sent it, and cannot be queued.
+    httpClient.SetResponder(
+        [](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
+            if (record.Index == 0U) {
+                return FakeHttpClient::ScriptedResult{.Response = HttpResponse{503, {}, ""}};
+            }
+            return FakeHttpClient::ScriptedResult{.OnComplete = [](HttpResponse&) {
+                AllocationFailure::minimumFailingSize = sizeof(HttpRequest);
+                AllocationFailure::allocationsUntilFailure = 0;
+            }};
+        });
+
+    int completions = 0;
+    std::optional<DeleteResult> observed;
+    client.DeleteAsync([&](DeleteResult result) {
+        ++completions;
+        observed = std::move(result);
+    });
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}));
+    AllocationFailure::allocationsUntilFailure = -1;
+    AllocationFailure::minimumFailingSize = 0;
     EXPECT_EQ(completions, 1);
     ASSERT_FALSE(ValueOrFail(observed).has_value());
     EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::not_enough_memory));
