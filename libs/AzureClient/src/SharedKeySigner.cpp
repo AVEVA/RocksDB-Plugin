@@ -235,14 +235,6 @@ void AppendCollapsedWhitespace(std::string& out, std::string_view value) {
         out.push_back(space ? ' ' : character);
     }
 }
-
-[[nodiscard]] bool IsSignableHeader(const HttpHeader& header) noexcept {
-    const std::string_view name = header.GetName();
-    const auto clean = [](std::string_view text) {
-        return text.find_first_of(std::string_view{"\r\n\0", 3}) == std::string_view::npos;
-    };
-    return !name.empty() && name.find(':') == std::string_view::npos && clean(name) && clean(header.GetValue());
-}
 } // namespace
 
 std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpRequest& request) {
@@ -282,7 +274,7 @@ std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpR
         const HttpHeader& header = headers.at(index);
         if (IStartsWith(header.GetName(), "x-ms-")) {
             // Sign only what will be sent: a CR, LF or NUL here could make the signed text differ from the wire form.
-            if (!IsSignableHeader(header)) {
+            if (!IsWireSafeHeader(header)) {
                 throw std::invalid_argument("Cannot sign a request with a malformed x-ms-* header.");
             }
             entries.push_back({lowercaseNames.size(), header.GetName().size(), index});

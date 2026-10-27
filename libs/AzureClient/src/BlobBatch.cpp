@@ -20,7 +20,6 @@
 #include <utility>
 #include <vector>
 
-using namespace std::string_view_literals;
 namespace AVEVA::AzureClient::Private {
 namespace {
 constexpr std::string_view LineBreak = "\r\n";
@@ -187,15 +186,6 @@ struct BatchPart {
 }
 } // namespace
 
-namespace {
-[[nodiscard]] bool IsSafeSubrequestHeader(const HttpHeader& header) noexcept {
-    // CR, LF and NUL would let a header value smuggle extra lines into the multipart body.
-    const auto clean = [](std::string_view text) { return text.find_first_of("\r\n\0"sv) == std::string_view::npos; };
-    const std::string_view name = header.GetName();
-    return !name.empty() && name.find(':') == std::string_view::npos && clean(name) && clean(header.GetValue());
-}
-} // namespace
-
 void AppendBatchDeletePart(std::string& body, std::string_view boundary, std::size_t contentId,
                            const HttpRequest& subrequest) {
     // Validate before appending anything, so a bad URL leaves `body` untouched.
@@ -209,7 +199,7 @@ void AppendBatchDeletePart(std::string& body, std::string_view boundary, std::si
     if (pathStart == std::string_view::npos) {
         throw std::invalid_argument("Batch sub-request URL must be absolute and include a path.");
     }
-    if (!std::ranges::all_of(subrequest.GetHeaders(), IsSafeSubrequestHeader)) {
+    if (!std::ranges::all_of(subrequest.GetHeaders(), IsWireSafeHeader)) {
         throw std::invalid_argument("Batch sub-request header contains forbidden characters.");
     }
     body.append("--").append(boundary).append(LineBreak);

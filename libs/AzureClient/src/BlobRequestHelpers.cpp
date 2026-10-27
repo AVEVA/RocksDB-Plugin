@@ -142,6 +142,12 @@ bool HasHeaderControlCharacters(std::string_view value) noexcept {
     });
 }
 
+bool IsWireSafeHeader(const HttpHeader& header) noexcept {
+    const std::string_view name = header.GetName();
+    return !name.empty() && name.find(':') == std::string_view::npos && !HasHeaderControlCharacters(name) &&
+           !HasHeaderControlCharacters(header.GetValue());
+}
+
 [[nodiscard]] constexpr bool IsBase64Character(char value) noexcept {
     return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9') ||
            value == '+' || value == '/';

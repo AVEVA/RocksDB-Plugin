@@ -306,6 +306,9 @@ template <class THttp> THttp& RequireHttpClient(const std::shared_ptr<THttp>& ht
 [[nodiscard]] std::string_view TrimWhitespace(std::string_view value AVEVA_LIFETIMEBOUND) noexcept;
 // True if `value` contains CR, LF or NUL (header injection / truncation).
 [[nodiscard]] bool HasHeaderControlCharacters(std::string_view value) noexcept;
+// True if the header has a non-empty name without ':' and neither name nor value has control characters, so it
+// cannot be re-parsed differently on the wire, in a signature or in a multipart body.
+[[nodiscard]] bool IsWireSafeHeader(const HttpHeader& header) noexcept;
 // Throws std::invalid_argument unless `value` is canonical padded base64; returns the decoded length.
 // An empty value is accepted only when `allowEmpty` is set.
 [[nodiscard]] std::size_t ValidateBase64AndGetDecodedLength(std::string_view value, bool allowEmpty);
