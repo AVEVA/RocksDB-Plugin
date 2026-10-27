@@ -55,10 +55,10 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
         std::shared_ptr<IdleSweeper> sweeper(new IdleSweeper(idleTimeout, minInterval));
         sweeper->m_plainPool =
             std::make_shared<PlainConnectionPool>(maxIdlePerKey, idleTimeout, PlainConnectionPool::DefaultMaxTotalIdle,
-                                                  SweeperNotifier(sweeper), probeThreshold);
+                                                  SweeperNotifier(sweeper, sweeper->m_scheduledFlag), probeThreshold);
         sweeper->m_tlsPool =
             std::make_shared<TlsConnectionPool>(maxIdlePerKey, idleTimeout, TlsConnectionPool::DefaultMaxTotalIdle,
-                                                SweeperNotifier(sweeper), probeThreshold);
+                                                SweeperNotifier(sweeper, sweeper->m_scheduledFlag), probeThreshold);
         return sweeper;
     }
 
@@ -377,7 +377,9 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
     std::shared_ptr<TlsConnectionPool> m_tlsPool;
     std::chrono::milliseconds m_interval;
     std::shared_ptr<const DiagnosticsSink> m_diagnostics;
-    std::atomic<bool> m_scheduled{false};
+    // Shared with the notifiers so a release can see a pending sweep without locking the weak_ptr.
+    std::shared_ptr<std::atomic<bool>> m_scheduledFlag = std::make_shared<std::atomic<bool>>(false);
+    std::atomic<bool>& m_scheduled = *m_scheduledFlag;
     std::mutex m_sweepMutex;
     std::atomic<bool> m_stopped{false};
     std::optional<std::chrono::steady_clock::time_point> m_queuedDue; // Guarded by the scheduler queue mutex.
