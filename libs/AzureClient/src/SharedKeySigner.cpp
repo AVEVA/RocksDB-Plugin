@@ -18,11 +18,8 @@
 #include <array>
 #include <charconv>
 #include <cstddef>
-#include <format>
 #include <gsl/util>
-#include <iterator>
 #include <limits>
-#include <locale>
 #include <memory>
 #include <span>
 #include <stdexcept>

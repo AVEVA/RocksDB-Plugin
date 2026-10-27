@@ -50,7 +50,6 @@
 #include <gsl/narrow>
 #include <gsl/util>
 #include <limits>
-#include <locale>
 #include <memory>
 #include <optional>
 #include <ranges>

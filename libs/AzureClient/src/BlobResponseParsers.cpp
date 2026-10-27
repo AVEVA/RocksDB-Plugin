@@ -29,11 +29,8 @@
 #include <bitset>
 #include <charconv>
 #include <chrono>
-#include <cstring>
 #include <limits>
-#include <locale>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <ranges>
 #include <span>
@@ -953,10 +950,7 @@ Models::GetPageRangesResult ParseGetPageRangesResult(const HttpResponse& respons
             .value_or(0U);
 
     const auto tree = TryReadXmlOrThrow(response.GetBody(), "Get page ranges response", "PageList");
-    const XmlNode* root = tree ? tree->Root() : nullptr;
-    if (root == nullptr) {
-        return result;
-    }
+    const XmlNode* root = tree->Root();
 
     result.NextMarker = GetChildTextOrEmpty(*root, "NextMarker");
     ForEachElement(*root, [&result](const XmlNode& range) {
@@ -999,10 +993,7 @@ namespace {
 Models::ListBlobsResult ParseListBlobsResultXml(std::string_view xml) {
     Models::ListBlobsResult result;
     const auto tree = TryReadXmlOrThrow(xml, "List blobs response", "EnumerationResults");
-    const XmlNode* root = tree ? tree->Root() : nullptr;
-    if (root == nullptr) {
-        return result;
-    }
+    const XmlNode* root = tree->Root();
 
     result.Prefix = GetChildTextOrEmpty(*root, "Prefix");
     result.Marker = GetChildTextOrEmpty(*root, "Marker");

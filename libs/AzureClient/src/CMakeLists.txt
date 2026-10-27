@@ -35,9 +35,6 @@ if(BUILD_SHARED_LIBS)
 endif()
 # Lets the static library link into shared plugins on Linux.
 set_target_properties(aveva-azure-client PROPERTIES POSITION_INDEPENDENT_CODE ON)
-if(AVEVA_AZURE_CLIENT_TESTS)
-    target_compile_definitions(aveva-azure-client PRIVATE AVEVA_AZURE_CLIENT_TESTING)
-endif()
 aveva_azure_client_enable_clang_tidy(aveva-azure-client)
 aveva_azure_client_instrument(aveva-azure-client)
 target_sources(aveva-azure-client
