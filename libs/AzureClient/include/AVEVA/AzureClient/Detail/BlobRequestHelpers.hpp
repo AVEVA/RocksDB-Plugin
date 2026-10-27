@@ -25,6 +25,7 @@
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/post.hpp>
+#include <boost/url/url_view_base.hpp>
 
 #include <AVEVA/HttpClient/Detail/Lifetime.hpp>
 #include <array>
@@ -288,6 +289,8 @@ template <class THttp> THttp& RequireHttpClient(const std::shared_ptr<THttp>& ht
 }
 
 [[nodiscard]] std::string ToLowerAscii(std::string_view value);
+// True for "localhost", any 127.0.0.0/8 address and ::1.
+[[nodiscard]] bool IsLoopbackHost(const boost::urls::url_view_base& url) noexcept;
 [[nodiscard]] std::string_view TrimWhitespace(std::string_view value AVEVA_LIFETIMEBOUND) noexcept;
 // True if `value` contains CR, LF or NUL (header injection / truncation).
 [[nodiscard]] bool HasHeaderControlCharacters(std::string_view value) noexcept;

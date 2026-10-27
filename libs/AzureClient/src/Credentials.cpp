@@ -70,18 +70,15 @@ bool IsAcceptableIdentityEndpoint(std::string_view endpoint) noexcept {
     if (url.scheme_id() != boost::urls::scheme::http) {
         return false;
     }
-    switch (url.host_type()) {
-    case boost::urls::host_type::ipv4: {
+    if (IsLoopbackHost(url)) {
+        return true;
+    }
+    // Link-local, for the IMDS endpoint.
+    if (url.host_type() == boost::urls::host_type::ipv4) {
         const auto bytes = url.host_ipv4_address().to_bytes();
-        return bytes[0] == 127 || (bytes[0] == 169 && bytes[1] == 254);
+        return bytes[0] == 169 && bytes[1] == 254;
     }
-    case boost::urls::host_type::ipv6:
-        return url.host_ipv6_address().is_loopback();
-    case boost::urls::host_type::name:
-        return url.encoded_host_name() == "localhost";
-    default:
-        return false;
-    }
+    return false;
 }
 
 namespace {

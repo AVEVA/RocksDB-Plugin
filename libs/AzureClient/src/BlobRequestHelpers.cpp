@@ -28,6 +28,7 @@
 #include <boost/url/parse.hpp>
 #include <boost/url/pct_string_view.hpp>
 #include <boost/url/rfc/unreserved_chars.hpp>
+#include <boost/url/scheme.hpp>
 #include <boost/url/url.hpp>
 #include <boost/url/url_view.hpp>
 #include <boost/uuid/random_generator.hpp>
@@ -96,13 +97,26 @@ constexpr std::size_t MaxContainerNameLength = 63U;
 [[nodiscard]] boost::urls::url ParseAbsoluteUrl(std::string_view url) {
     const auto parseResult = boost::urls::parse_uri(url);
     if (!parseResult.has_value()) {
-        throw std::invalid_argument("ServiceEndpoint must be a valid absolute URL.");
+        throw std::invalid_argument("ServiceEndpoint must be an absolute http or https URL.");
     }
 
     return {parseResult.value()};
 }
 
 } // end anonymous namespace
+
+bool IsLoopbackHost(const boost::urls::url_view_base& url) noexcept {
+    switch (url.host_type()) {
+    case boost::urls::host_type::ipv4:
+        return url.host_ipv4_address().to_bytes()[0] == 127;
+    case boost::urls::host_type::ipv6:
+        return url.host_ipv6_address().is_loopback();
+    case boost::urls::host_type::name:
+        return url.encoded_host_name() == "localhost";
+    default:
+        return false;
+    }
+}
 
 std::string ToLowerAscii(std::string_view value) {
     std::string result{value};
@@ -206,8 +220,7 @@ struct SplitEndpointParts {
     std::string BasePath;
 };
 
-[[nodiscard]] SplitEndpointParts SplitEndpoint(std::string_view endpoint) {
-    const boost::urls::url parsed = ParseAbsoluteUrl(endpoint);
+[[nodiscard]] SplitEndpointParts SplitEndpoint(const boost::urls::url& parsed) {
     SplitEndpointParts parts;
     parts.BasePrefix = std::string(parsed.scheme()) + "://" + std::string(parsed.encoded_host());
     if (parsed.has_port()) {
@@ -219,31 +232,25 @@ struct SplitEndpointParts {
     return parts;
 }
 
-void ValidateEndpoint(std::string_view endpoint) {
+// Parses the endpoint once; the result also feeds the loopback check and SplitEndpoint. A path is allowed (Azurite or
+// proxy endpoints), but not userinfo, a query or a fragment.
+[[nodiscard]] boost::urls::url ValidateEndpoint(std::string_view endpoint) {
     if (endpoint.empty()) {
         throw std::invalid_argument("ServiceEndpoint must not be empty.");
     }
 
-    const std::size_t schemePos = endpoint.find("://");
-    if (schemePos == std::string_view::npos || schemePos == 0U) {
-        throw std::invalid_argument("ServiceEndpoint must be an absolute http or https URL.");
-    }
-
-    const std::string scheme = ToLowerAscii(endpoint.substr(0, schemePos));
-    if (scheme != "http" && scheme != "https") {
+    boost::urls::url parsed = ParseAbsoluteUrl(endpoint);
+    if (parsed.scheme_id() != boost::urls::scheme::http && parsed.scheme_id() != boost::urls::scheme::https) {
         throw std::invalid_argument("ServiceEndpoint must use http or https.");
     }
-
-    // Allow an optional path component (for Azurite or proxy endpoints), but reject query/fragment.
-    const std::string_view remainder = endpoint.substr(schemePos + 3U);
-    const std::string_view authority = remainder.substr(0, remainder.find('/'));
-    if (authority.empty() || authority.front() == ':' || authority.front() == '@') {
+    if (parsed.encoded_host().empty()) {
         throw std::invalid_argument("ServiceEndpoint must contain a host.");
     }
-    if (remainder.empty() || remainder.contains('?') || remainder.contains('#')) {
+    if (parsed.has_userinfo() || parsed.has_query() || parsed.has_fragment()) {
         throw std::invalid_argument("ServiceEndpoint must contain at least a host and may include a path but "
-                                    "must not contain query or fragment.");
+                                    "must not contain userinfo, query or fragment.");
     }
+    return parsed;
 }
 
 void ValidateContainerName(std::string_view name) {
@@ -281,29 +288,10 @@ void ValidateSharedKey(const SharedKeyCredentialOptions& sharedKey) {
     // The key itself is decoded (and rejected if malformed) once, by the SharedKeySigner.
 }
 
-// Host of an already-validated endpoint, without userinfo, port or brackets-stripped IPv6 form kept as-is.
-[[nodiscard]] std::string EndpointHost(std::string_view endpoint) {
-    std::string_view authority = endpoint.substr(endpoint.find("://") + 3U);
-    authority = authority.substr(0, authority.find('/'));
-    if (const std::size_t at = authority.rfind('@'); at != std::string_view::npos) {
-        authority.remove_prefix(at + 1U);
-    }
-    if (authority.starts_with('[')) {
-        return ToLowerAscii(authority.substr(0, authority.find(']') + 1U));
-    }
-    return ToLowerAscii(authority.substr(0, authority.find(':')));
-}
-
-[[nodiscard]] bool IsLoopbackEndpoint(std::string_view endpoint) {
-    const std::string host = EndpointHost(endpoint);
-    return host == "localhost" || host == "127.0.0.1" || host == "[::1]";
-}
-
 // Credentials (bearer tokens, SAS and SharedKey signatures) must not travel in clear text, except to a loopback
 // emulator/proxy.
-void ValidateTokenTransport(std::string_view endpoint) {
-    const std::string scheme = ToLowerAscii(endpoint.substr(0, endpoint.find("://")));
-    if (scheme == "http" && !IsLoopbackEndpoint(endpoint)) {
+void ValidateTokenTransport(const boost::urls::url& endpoint) {
+    if (endpoint.scheme_id() == boost::urls::scheme::http && !IsLoopbackHost(endpoint)) {
         throw std::invalid_argument(
             "Credentials require an https ServiceEndpoint (http is only allowed for loopback).");
     }
@@ -336,11 +324,12 @@ void ValidateSasToken(std::string_view sasToken) {
     }
 }
 
-template <class TOptions> void ValidateConnectionOptions(const TOptions& options, bool hasTokenCredential) {
-    ValidateEndpoint(options.ServiceEndpoint);
+template <class TOptions>
+[[nodiscard]] boost::urls::url ValidateConnectionOptions(const TOptions& options, bool hasTokenCredential) {
+    const boost::urls::url endpoint = ValidateEndpoint(options.ServiceEndpoint);
     ValidateSharedKey(options.SharedKey);
     ValidateSasToken(options.SasToken);
-    if (!options.AllowInsecureHttp && ToLowerAscii(options.ServiceEndpoint.substr(0, 5U)) == "http:") {
+    if (!options.AllowInsecureHttp && endpoint.scheme_id() == boost::urls::scheme::http) {
         throw std::invalid_argument("ServiceEndpoint must use https unless AllowInsecureHttp is set.");
     }
 
@@ -352,8 +341,9 @@ template <class TOptions> void ValidateConnectionOptions(const TOptions& options
         throw std::invalid_argument("Specify at most one credential type: SasToken, SharedKey, or TokenCredential.");
     }
     if (credentialCount > 0U) {
-        ValidateTokenTransport(options.ServiceEndpoint);
+        ValidateTokenTransport(endpoint);
     }
+    return endpoint;
 }
 
 template <class TOptions>
@@ -366,7 +356,7 @@ template <class TOptions>
     // Trim in place: re-assigning from a view would copy the SAS token into a fresh string.
     options.ServiceEndpoint.resize(TrimTrailingSlashes(options.ServiceEndpoint).size());
     options.SasToken.erase(0, options.SasToken.size() - TrimLeadingQuestionMark(options.SasToken).size());
-    ValidateConnectionOptions(options, hasTokenCredential);
+    const boost::urls::url endpoint = ValidateConnectionOptions(options, hasTokenCredential);
 
     auto state = std::make_shared<ConnectionState>();
     state->ServiceEndpoint = std::move(options.ServiceEndpoint);
@@ -378,7 +368,7 @@ template <class TOptions>
         state->Signer = std::make_shared<const SharedKeySigner>(std::move(options.SharedKey.AccountName),
                                                                 options.SharedKey.AccountKey);
     }
-    SplitEndpointParts endpointParts = SplitEndpoint(state->ServiceEndpoint);
+    SplitEndpointParts endpointParts = SplitEndpoint(endpoint);
     state->BasePrefix = std::move(endpointParts.BasePrefix);
     state->BasePath = std::move(endpointParts.BasePath);
     state->Retry = options.Retry;
