@@ -9,6 +9,7 @@
 #include <boost/beast/core/flat_buffer.hpp>
 #include <boost/container_hash/hash.hpp>
 #include <boost/intrusive/list.hpp>
+#include <boost/scope/scope_exit.hpp>
 #include <boost/unordered/unordered_node_map.hpp>
 #include <openssl/ssl.h>
 
@@ -329,10 +330,7 @@ class ConnectionPool {
         }
         LruList retired;
         // Closes retired sockets after the lock is released on every path, including a throwing allocation.
-        struct DisposeOnExit {
-            LruList& list;
-            ~DisposeOnExit() { list.clear_and_dispose(ExecutorDisposer{}); }
-        } disposeRetired{retired};
+        const boost::scope::scope_exit disposeRetired{[&retired] { retired.clear_and_dispose(ExecutorDisposer{}); }};
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             const auto now = Clock::now();

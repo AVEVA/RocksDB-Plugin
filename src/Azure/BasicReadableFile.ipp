@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/container/static_vector.hpp>
+#include <boost/scope/scope_exit.hpp>
 #include <cassert>
 #include <chrono>
 #include <cstring>
@@ -291,14 +292,11 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
         boost::container::static_vector<Active, kMultiReadMaxInFlight> active;
         // Deleting a handle aborts a request still in flight, so the handles are released even on an early exit.
         // Declared after `groups` so it runs first: an aborted request never touches its group's buffer afterwards.
-        struct HandleCleanup {
-            boost::container::static_vector<Active, kMultiReadMaxInFlight>& Handles;
-            ~HandleCleanup() {
-                for (auto& entry : Handles) {
-                    DeleteAsyncReadHandle(entry.Handle);
-                }
+        const boost::scope::scope_exit cleanup{[&active] {
+            for (auto& entry : active) {
+                DeleteAsyncReadHandle(entry.Handle);
             }
-        } cleanup{active};
+        }};
 
         auto signal = std::make_shared<Impl::AsyncReadSignal>();
         size_t nextGroup = 0;

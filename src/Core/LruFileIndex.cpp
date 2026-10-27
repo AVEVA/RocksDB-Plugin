@@ -4,6 +4,7 @@
 #include "LruFileIndex.hpp"
 
 #include <boost/container/small_vector.hpp>
+#include <boost/scope/scope_exit.hpp>
 
 #include <algorithm>
 #include <filesystem>
@@ -73,17 +74,12 @@ std::optional<LruFileIndex::EvictList> LruFileIndex::ReserveCapacity(const std::
     // existing entry is never evicted meanwhile, so its iterator stays valid.
     m_currentSize -= existingSize;
     const bool pinned = indexIt != m_index.end();
-    struct Restore {
-        LruFileIndex& self;
-        LruIterator entry;
-        bool pinned;
-        size_t size;
-        ~Restore() {
-            if (pinned)
-                --entry->pinCount;
-            self.m_currentSize += size;
-        }
-    } restore{*this, pinned ? *indexIt : LruIterator{}, pinned, existingSize};
+    const LruIterator pinnedEntry = pinned ? *indexIt : LruIterator{};
+    const boost::scope::scope_exit restore{[this, pinned, pinnedEntry, existingSize] {
+        if (pinned)
+            --pinnedEntry->pinCount;
+        m_currentSize += existingSize;
+    }};
 
     // If a single entry is larger than the entire capacity it can never fit,
     // even after evicting everything.
