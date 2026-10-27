@@ -732,11 +732,12 @@ void ReleaseLeaseAsync(THttp& httpClient, const TTarget& target, ReleaseLeaseOpt
     AddHeader(request, XMsLeaseIdHeaderName, operationOptions.LeaseId);
     ApplyLeaseRequestConditions(request, std::move(operationOptions.Conditions));
     // A release replayed after the first attempt's outcome was lost may find the lease already gone; counting
-    // attempts lets that 409 be told apart from a genuine one on the first attempt.
-    auto attempts = std::make_shared<int>(0);
-    auto absorb = [attempts, completion = std::forward<TCompletion>(completion)](
+    // replay after an ambiguous outcome lets that 409 be told apart from a genuine one (including one that follows
+    // a plain token-refresh repeat).
+    auto replayed = std::make_shared<bool>(false);
+    auto absorb = [replayed, completion = std::forward<TCompletion>(completion)](
                       std::error_code error, Response<Models::ReleaseBlobLeaseResult> response) mutable {
-        if (error && *attempts > 1 && error == BlobStorageErrorCode::LeaseNotPresentWithLeaseOperation) {
+        if (error && *replayed && error == BlobStorageErrorCode::LeaseNotPresentWithLeaseOperation) {
             error.clear();
         }
         completion(ToExpected(error, std::move(response)));
@@ -747,7 +748,9 @@ void ReleaseLeaseAsync(THttp& httpClient, const TTarget& target, ReleaseLeaseOpt
             CompleteParsed<Models::ReleaseBlobLeaseResult>(error, std::move(response), ParseReleaseBlobLeaseResult,
                                                            absorb);
         },
-        std::move(requestOptions), [attempts](HttpRequest&, std::string_view) { ++*attempts; }, true);
+        std::move(requestOptions),
+        [replayed](HttpRequest&, std::string_view, bool replayAfterAmbiguous) { *replayed = replayAfterAmbiguous; },
+        true);
 }
 
 template <HttpClientLike THttp, class TCred, class TCompletion>

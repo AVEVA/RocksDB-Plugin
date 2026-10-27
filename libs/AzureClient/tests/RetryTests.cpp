@@ -489,6 +489,28 @@ TEST(RetryTests, ReleaseLeaseFirstAttempt409StillFails) {
     EXPECT_FALSE(ValueOrFail(observed).has_value());
 }
 
+TEST(RetryTests, ReleaseLease409AfterATokenRefreshRepeatStillFails) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{401, {{"x-ms-error-code", "InvalidAuthenticationInfo"}}, ""});
+    httpClient.EnqueueResponse(HttpResponse{409, {{"x-ms-error-code", "LeaseNotPresentWithLeaseOperation"}}, ""});
+    auto credential = std::make_shared<ScriptedTokenCredential>();
+    credential->EnqueueImmediate({}, MakeToken("old-token", std::chrono::hours(1)));
+    credential->EnqueueImmediate({}, MakeToken("new-token", std::chrono::hours(1)));
+
+    BlobClientOptions options = MakeRetryOptions(3);
+    options.SasToken.clear();
+    BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{httpClient, std::move(options), credential};
+
+    std::optional<ReleaseResult> observed;
+    client.ReleaseLeaseAsync(ReleaseLeaseOptions{.LeaseId = "lease"},
+                             [&](ReleaseResult result) { observed = std::move(result); });
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
+    EXPECT_EQ(httpClient.RequestCount(), 2U);
+    ASSERT_FALSE(ValueOrFail(observed).has_value());
+    EXPECT_EQ(ValueOrFail(observed).error().StatusCode, 409U);
+}
+
 TEST(RetryTests, RenewLeaseReplayedAfterAnAmbiguousErrorSurfacesTheSubsequent409) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ReadFailed);

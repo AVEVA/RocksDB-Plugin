@@ -515,7 +515,11 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
             return true;
         } else {
             try {
-                m_rebuild(attempt, bearerToken);
+                if constexpr (std::invocable<TRebuild&, HttpRequest&, std::string_view, bool>) {
+                    m_rebuild(attempt, bearerToken, m_replayAfterAmbiguous);
+                } else {
+                    m_rebuild(attempt, bearerToken);
+                }
             } catch (const std::bad_alloc&) {
                 PostFinish(std::make_error_code(std::errc::not_enough_memory));
                 return false;
@@ -635,6 +639,15 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
             return;
         }
 
+        constexpr unsigned int RequestTimeout = 408;
+        constexpr unsigned int ServerErrorFloor = 500;
+        // Remembered for the rebuild hook: only a replay that follows an unknown outcome can see its own earlier
+        // effect (a token-refresh repeat after a 401 cannot).
+        if (error ? IsAmbiguousTransportError(error)
+                  : (response.GetStatus() >= ServerErrorFloor || response.GetStatus() == RequestTimeout)) {
+            m_replayAfterAmbiguous = true;
+        }
+
         // A server hint may exceed MaxDelay (the service knows when it will recover) but is capped so a
         // bogus value cannot stall a request for hours.
         constexpr std::chrono::milliseconds maxHint{std::chrono::minutes{1}};
@@ -726,6 +739,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
     bool m_timedOut = false;
     std::error_code m_internalError;
     bool m_tokenRefreshed = false;
+    bool m_replayAfterAmbiguous = false;
     // Token the latest attempt was sent with; a 401 invalidates the cache only if it still holds this one.
     std::string m_attemptToken;
     std::size_t m_dateHeaderIndex = std::numeric_limits<std::size_t>::max();
