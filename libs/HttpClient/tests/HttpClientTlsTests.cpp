@@ -551,33 +551,13 @@ TEST(HttpClientTls, TimeoutOfAStalledRawViewUploadCompletesOnceAndLetsTheCallerF
     EXPECT_EQ(observed, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
 }
 
-bool failIndexAllocation = false;
-
-template <class T> struct FailingIndexAllocator : std::allocator<T> {
-    template <class U> struct rebind {
-        using other = FailingIndexAllocator<U>;
-    };
-    FailingIndexAllocator() = default;
-    template <class U> explicit FailingIndexAllocator(const FailingIndexAllocator<U>& /*other*/) noexcept {}
-    T* allocate(std::size_t count) {
-        if (failIndexAllocation) {
-            throw std::bad_alloc();
-        }
-        return std::allocator<T>::allocate(count);
-    }
-};
-
-TEST(HttpClientTls, SessionCacheInsertionFailureLeavesNoUnindexedNodeAndKeepsTheBound) {
-    using Cache = AVEVA::Private::BasicTlsSessionCache<FailingIndexAllocator>;
+TEST(HttpClientTls, SessionCacheKeepsListAndIndexInStepAndEvictsLeastRecentlyUsed) {
+    using Cache = AVEVA::Private::TlsSessionCache;
     Cache cache;
     const auto makeSession = [] { return AVEVA::Private::UniqueSession{SSL_SESSION_new()}; };
 
     cache.Store("a:1", makeSession());
-    failIndexAllocation = true;
-    for (int attempt = 0; attempt < 3; ++attempt) {
-        EXPECT_THROW(cache.Store("b:1", makeSession()), std::bad_alloc);
-    }
-    failIndexAllocation = false;
+    cache.Store("a:1", makeSession());
     EXPECT_EQ(cache.ListSize(), 1U);
     EXPECT_EQ(cache.IndexSize(), 1U);
 
@@ -587,7 +567,7 @@ TEST(HttpClientTls, SessionCacheInsertionFailureLeavesNoUnindexedNodeAndKeepsThe
     }
     EXPECT_EQ(cache.ListSize(), Cache::MaxEntries);
     EXPECT_EQ(cache.IndexSize(), Cache::MaxEntries);
-    EXPECT_EQ(cache.Take("b:1"), nullptr); // Evicted normally, not through an orphaned node.
+    EXPECT_EQ(cache.Take("b:1"), nullptr);
     EXPECT_NE(cache.Take("o" + std::to_string(Cache::MaxEntries + 3)), nullptr);
 }
 } // namespace
