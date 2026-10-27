@@ -32,15 +32,12 @@ void HttpRequest::SetBody(std::string body) {
     m_body = std::move(body);
     m_bodyView = {};
     m_bodyKeepAlive.reset();
-    m_hasBodyView = false;
 }
 
 void HttpRequest::SetBodyView(std::span<const std::byte> content) noexcept {
     m_body.clear();
     m_bodyKeepAlive.reset();
-    // An empty view is the same as an empty owned body, so HasBodyView never reports a view of nothing.
-    m_hasBodyView = !content.empty();
-    m_bodyView = m_hasBodyView ? content : std::span<const std::byte>{};
+    m_bodyView = content;
 }
 
 void HttpRequest::SetBodyView(std::span<const std::byte> content, std::shared_ptr<const void> keepAlive) noexcept {
@@ -52,9 +49,9 @@ const std::shared_ptr<const void>& HttpRequest::GetBodyKeepAlive() const noexcep
 
 std::string HttpRequest::ReleaseBody() noexcept { return std::exchange(m_body, std::string{}); }
 
-bool HttpRequest::HasBodyView() const noexcept { return m_hasBodyView; }
+bool HttpRequest::HasBodyView() const noexcept { return !m_bodyView.empty(); }
 
 std::span<const std::byte> HttpRequest::GetBodyView() const noexcept { return m_bodyView; }
 
-std::size_t HttpRequest::GetBodySize() const noexcept { return m_hasBodyView ? m_bodyView.size() : m_body.size(); }
+std::size_t HttpRequest::GetBodySize() const noexcept { return HasBodyView() ? m_bodyView.size() : m_body.size(); }
 } // namespace AVEVA

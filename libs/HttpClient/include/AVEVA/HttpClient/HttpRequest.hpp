@@ -159,6 +159,5 @@ class HttpRequest {
     std::string m_body;
     std::span<const std::byte> m_bodyView;
     std::shared_ptr<const void> m_bodyKeepAlive;
-    bool m_hasBodyView = false;
 };
 } // namespace AVEVA
