@@ -288,38 +288,32 @@ template <typename Stream> void RequestOperation<Stream>::Resolve() {
     }
     // If the handler is destroyed unrun (io_context torn down), the guard still releases the waiters.
     struct LeaderGuard {
-        std::string host;
-        std::string service;
+        std::shared_ptr<RequestOperation> owner;
         const void* scope;
-        bool finished = false;
 
-        LeaderGuard(std::string hostName, std::string serviceName, const void* lookupScope)
-            : host(std::move(hostName)), service(std::move(serviceName)), scope(lookupScope) {}
-        // Copies or moves would leave a second owner of the leader claim.
+        LeaderGuard(std::shared_ptr<RequestOperation> operation, const void* lookupScope)
+            : owner(std::move(operation)), scope(lookupScope) {}
+        // A move transfers the leader claim; a copy would leave a second owner of it.
+        LeaderGuard(LeaderGuard&&) noexcept = default;
+        LeaderGuard& operator=(LeaderGuard&&) = delete;
         LeaderGuard(const LeaderGuard&) = delete;
         LeaderGuard& operator=(const LeaderGuard&) = delete;
 
         ~LeaderGuard() {
-            if (!finished) {
-                DnsCache::Shared().Finish(host, service, asio::error::operation_aborted, {}, scope);
+            if (owner) {
+                DnsCache::Shared().Finish(owner->m_key.host, owner->m_key.service, asio::error::operation_aborted, {},
+                                          scope);
             }
         }
     };
-    std::shared_ptr<LeaderGuard> guard;
-    try {
-        guard = std::make_shared<LeaderGuard>(m_key.host, m_key.service, scope);
-    } catch (...) {
-        // No guard exists yet to release the claim.
-        DnsCache::Shared().Finish(m_key.host, m_key.service, asio::error::operation_aborted, {}, scope);
-        throw;
-    }
-    m_resolver.async_resolve(
-        m_key.host, m_key.service,
-        [self = this->shared_from_this(), guard](boost::system::error_code error, Tcp::resolver::results_type results) {
-            guard->finished = true;
-            DnsCache::Shared().Finish(self->m_key.host, self->m_key.service, error, results, guard->scope);
-            self->OnResolve(error, results);
-        });
+    m_resolver.async_resolve(m_key.host, m_key.service,
+                             [guard = LeaderGuard(this->shared_from_this(), scope)](
+                                 boost::system::error_code error, Tcp::resolver::results_type results) mutable {
+                                 auto self = std::move(guard.owner);
+                                 DnsCache::Shared().Finish(self->m_key.host, self->m_key.service, error, results,
+                                                           guard.scope);
+                                 self->OnResolve(error, results);
+                             });
 }
 
 // Every asynchronous callback starts here: a finished request has nothing left to do, and a requested
