@@ -10,12 +10,40 @@ function Get-RepoState([string]$RepoRoot) {
     [ordered]@{ revision = "$revision".Trim(); uncommittedChanges = $dirty }
 }
 
-# The build configuration of a multi-config build is a folder in the executable's path (…\Release\x.exe).
-function Get-ExecutableConfiguration([string]$Path) {
-    foreach ($name in 'Release', 'RelWithDebInfo', 'MinSizeRel', 'Debug') {
+$script:BuildConfigurations = 'Release', 'RelWithDebInfo', 'MinSizeRel', 'Debug'
+
+# A multi-config build (Visual Studio, Ninja Multi-Config) puts the configuration in a folder of the executable's path
+# (...\Release\x.exe). A single-config build (Ninja, Makefiles) has no such folder, so fall back to the build type
+# the cache recorded; an empty or unrecognised build type stays 'unknown' rather than being guessed.
+function Get-ExecutableConfiguration([string]$Path, [string]$BuildType) {
+    foreach ($name in $script:BuildConfigurations) {
         if ($Path -match "[\\/]$name[\\/]") { return $name }
     }
+    if ($BuildType -and $BuildType -in $script:BuildConfigurations) { return $BuildType }
     'unknown'
+}
+
+# Finds the output of a CMake target below a build tree: <dir>/<Configuration>/<name> for multi-config generators,
+# <dir>/<name> for single-config ones. Without -Configuration every layout is probed and more than one hit is an error,
+# so a stale binary from another configuration is never picked silently. Only the Windows '.exe' suffix is probed on
+# Windows; elsewhere the bare name is used (Linux execution of this helper is untested).
+function Resolve-BenchmarkExecutable([string]$BuildDir, [string]$RelativeDir, [string]$Name, [string]$Configuration) {
+    $file = if ($IsWindows) { "$Name.exe" } else { $Name }
+    $dir = Join-Path $BuildDir $RelativeDir
+    $candidates = if ($Configuration) {
+        @((Join-Path $dir "$Configuration/$file"), (Join-Path $dir $file))
+    }
+    else {
+        @(Join-Path $dir $file) + @($script:BuildConfigurations | ForEach-Object { Join-Path $dir "$_/$file" })
+    }
+    $found = @($candidates | Where-Object { Test-Path -PathType Leaf $_ })
+    if ($found.Count -eq 0) {
+        throw "Benchmark executable '$file' not found under '$dir' (looked for: $($candidates -join ', ')). Build it first, or pass its path explicitly."
+    }
+    if ($found.Count -gt 1 -and -not $Configuration) {
+        throw "Several builds of '$file' exist ($($found -join ', ')); pass -Configuration or an explicit executable path."
+    }
+    (Resolve-Path $found[0]).Path
 }
 
 # Compiler and triplet come from the CMakeCache of the build tree that produced the executable, when one is found
@@ -37,15 +65,19 @@ function Get-BuildTreeInfo([string]$ExePath) {
     [ordered]@{ buildTree = 'not found' }
 }
 
+# $Revision is only what the caller can vouch for the binary being built from; leave it empty when unknown (the default)
+# instead of passing the repository's current HEAD, which says nothing about when the binary was built.
 function Get-ExecutableInfo([string]$Path, [string]$Revision) {
     $item = Get-Item $Path
+    $build = Get-BuildTreeInfo $item.FullName
     [ordered]@{
         path = $item.FullName
-        revision = $Revision
-        configuration = Get-ExecutableConfiguration $item.FullName
+        revision = if ($Revision) { $Revision } else { 'unknown' }
+        configuration = Get-ExecutableConfiguration $item.FullName $build['CMAKE_BUILD_TYPE']
         sizeBytes = $item.Length
+        lastWriteUtc = $item.LastWriteTimeUtc.ToString('o')
         sha256 = (Get-FileHash -Algorithm SHA256 $item.FullName).Hash
-        build = Get-BuildTreeInfo $item.FullName
+        build = $build
     }
 }
 

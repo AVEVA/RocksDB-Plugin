@@ -335,6 +335,15 @@ cmake --build build\WindowsRelease --config Release --target aveva-http-client-t
 .\tools\db_bench\Measure-Loopback.ps1 -Label before   # then rebuild at the other revision and run with -Label after
 ```
 
+The script finds the binaries for either layout: multi-config trees (`...\Release\x.exe`, Visual Studio) and
+single-config trees (`...\x.exe`, Ninja, as `WindowsRelease` is). If several configurations of one target exist it
+asks for `-Configuration`; `-HttpClientExe`, `-AzureClientExe` and `-PluginExe` take explicit paths. The recorded
+configuration comes from the path or else the build tree's `CMAKE_BUILD_TYPE` (so `RelWithDebInfo` is reported as such).
+The metadata records the repository HEAD at run time but the executables' own revision as `unknown`: HEAD is not proof
+the binary was built from it, so rebuild before measuring and check `lastWriteUtc`. Only Windows has been exercised;
+the helper looks up suffix-less names elsewhere, but that is untested and not cross-platform evidence.
+Script tests: `Invoke-Pester tools\db_bench\BenchmarkMetadata.Tests.ps1`.
+
 Each `BENCH` line reports its counters per request or operation; `loopback-metadata.json` records the revision,
 hashes, build tree and host. Compare allocation counts across revisions (they are stable); treat timings as noisy
 and use `-Repeat`.

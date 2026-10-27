@@ -22,8 +22,12 @@
     and timings are not comparable.
 
     Run it once per revision under test (for example before and after an R08-R17 change) with a different -Label and
-    compare the BENCH lines in the output folders. loopback-metadata.json records the revision, whether the tree had
-    uncommitted changes, the executables' hashes and build trees, and the host.
+    compare the BENCH lines in the output folders. loopback-metadata.json records the repository HEAD and dirty state at
+    run time, and each executable's path, configuration, hash and build tree. The executable's own revision is recorded as
+    'unknown': HEAD at run time is not proof that the binary was built from it (compare lastWriteUtc and rebuild first).
+    Binaries are found for single-config (Ninja) and multi-config (Visual Studio) trees; pass -Configuration if several
+    configurations are built, or -HttpClientExe/-AzureClientExe/-PluginExe for explicit paths. Only Windows has been
+    exercised; on other platforms the suffix-less name is looked up but this is untested.
 
 .EXAMPLE
     cmake --preset WindowsRelease
@@ -33,7 +37,12 @@
 [CmdletBinding()]
 param(
     [string] $BuildDir = (Join-Path $PSScriptRoot '..\..\build\WindowsRelease'),
-    [string] $Configuration = 'Release',
+    # Empty: discover the build layout (single-config, e.g. Ninja, or a single multi-config folder such as Release).
+    [string] $Configuration = '',
+    # Explicit executables override discovery under -BuildDir.
+    [string] $HttpClientExe,
+    [string] $AzureClientExe,
+    [string] $PluginExe,
     [string] $Label = 'run',
     # Runs the measurement N times; repeat runs show how much the timings (not the allocation counts) vary.
     [int] $Repeat = 1,
@@ -45,25 +54,27 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'BenchmarkMetadata.ps1')
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 
+function Resolve-Target([string]$Explicit, [string]$RelativeDir, [string]$Name) {
+    if ($Explicit) {
+        if (-not (Test-Path -PathType Leaf $Explicit)) { throw "Benchmark executable not found: $Explicit" }
+        return (Resolve-Path $Explicit).Path
+    }
+    Resolve-BenchmarkExecutable $BuildDir $RelativeDir $Name $Configuration
+}
+
 $targets = [ordered]@{
     'http-client' = @{
-        Exe = Join-Path $BuildDir "libs\HttpClient\tests\$Configuration\aveva-http-client-tests.exe"
+        Exe = Resolve-Target $HttpClientExe 'libs\HttpClient\tests' 'aveva-http-client-tests'
         Args = @('--gtest_filter=HttpClientAllocations.PublicClientPooledRequestWithIndependentServer')
     }
     'azure-client' = @{
-        Exe = Join-Path $BuildDir "libs\AzureClient\tests\$Configuration\aveva-azure-client-e2e-benchmark.exe"
+        Exe = Resolve-Target $AzureClientExe 'libs\AzureClient\tests' 'aveva-azure-client-e2e-benchmark'
         Args = @()
     }
     'plugin' = @{
-        Exe = Join-Path $BuildDir "tests\AVEVA\RocksDB\Plugin\Azure\Impl\$Configuration\aveva-rocksdb-plugin-azure-impl-benchmark.exe"
+        Exe = Resolve-Target $PluginExe 'tests\AVEVA\RocksDB\Plugin\Azure\Impl' 'aveva-rocksdb-plugin-azure-impl-benchmark'
         Args = @()
     }
-}
-foreach ($t in $targets.Values) {
-    if (-not (Test-Path $t.Exe)) { throw "Benchmark executable not found: $($t.Exe). Build it first (see Get-Help)." }
-}
-if ($Configuration -ne 'Release') {
-    Write-Warning "$Configuration build: allocation counts and timings are not comparable with Release results."
 }
 
 New-Item -ItemType Directory $OutDir -Force | Out-Null
@@ -71,7 +82,10 @@ $failed = $false
 $exes = [ordered]@{}
 foreach ($name in $targets.Keys) {
     $t = $targets[$name]
-    $exes[$name] = Get-ExecutableInfo $t.Exe (Get-RepoState $repoRoot).revision
+    $exes[$name] = Get-ExecutableInfo $t.Exe
+    if ($exes[$name].configuration -notin 'Release', 'RelWithDebInfo', 'MinSizeRel') {
+        Write-Warning "$name is a $($exes[$name].configuration) build: allocation counts and timings are not comparable with Release results."
+    }
     for ($i = 1; $i -le $Repeat; $i++) {
         $log = Join-Path $OutDir "$name-$i.txt"
         & $t.Exe @($t.Args) *> $log
