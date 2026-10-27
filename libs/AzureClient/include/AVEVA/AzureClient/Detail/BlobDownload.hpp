@@ -37,7 +37,6 @@
 #include <gsl/util>
 #include <ios>
 #include <limits>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -143,7 +142,8 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
           m_completion(std::move(completion)), m_parentSlot(m_requestOptions.GetCancellationSlot()),
           m_chunkSize(m_options.ChunkSize == 0U ? DefaultDownloadChunkSize : m_options.ChunkSize),
           m_concurrency(std::min(std::max<std::size_t>(1U, m_options.Concurrency),
-                                 std::max<std::size_t>(1U, MaxBufferedDownloadBytes / m_chunkSize))) {}
+                                 std::max<std::size_t>(1U, MaxBufferedDownloadBytes / m_chunkSize))),
+          m_inFlight(m_concurrency), m_ready(m_concurrency) {}
 
     void Start() {
         // Must precede everything that can queue an event: queueing is then allocation-free (see ReserveEvents).
@@ -190,8 +190,40 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         RequestKind Kind = RequestKind::Chunk;
         std::uint64_t Offset = 0;
         std::uint64_t Length = 0;
-        std::unique_ptr<boost::asio::cancellation_signal> Signal;
+        bool Active = false;
+        boost::asio::cancellation_signal Signal;
     };
+
+    // A chunk that arrived ahead of the write cursor. The slot is chosen by chunk number modulo the concurrency, which
+    // cannot collide: in-flight, ready and writing chunks together never exceed the concurrency.
+    struct ReadyChunk {
+        bool Filled = false;
+        std::uint64_t Offset = 0;
+        std::string Data;
+    };
+
+    [[nodiscard]] ReadyChunk& ReadySlot(std::uint64_t offset) {
+        return m_ready[gsl::narrow_cast<std::size_t>(((offset - m_begin) / m_chunkSize) % m_ready.size())];
+    }
+
+    // Removes and returns the chunk that starts at `offset`, if it has arrived.
+    [[nodiscard]] std::optional<std::string> TakeReady(std::uint64_t offset) {
+        ReadyChunk& slot = ReadySlot(offset);
+        if (!slot.Filled || slot.Offset != offset) {
+            return std::nullopt;
+        }
+        slot.Filled = false;
+        --m_readyCount;
+        return std::move(slot.Data);
+    }
+
+    void ClearReady() {
+        for (auto& slot : m_ready) {
+            slot.Filled = false;
+            slot.Data = std::string{};
+        }
+        m_readyCount = 0U;
+    }
 
     struct Event {
         bool Cancel = false;
@@ -289,6 +321,18 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         MaybeFinish();
     }
 
+    // Frees the slot and detaches any handler the finished request left on its signal; false if it was already free.
+    bool ReleaseInFlight(std::uint64_t id) {
+        InFlightRequest& slot = m_inFlight[gsl::narrow_cast<std::size_t>(id)];
+        if (!slot.Active) {
+            return false;
+        }
+        slot.Active = false;
+        slot.Signal.slot().clear();
+        --m_inFlightCount;
+        return true;
+    }
+
     void Send(RequestKind kind, std::uint64_t offset, std::uint64_t length,
               const Models::BlobRequestConditions& conditions) {
         HttpRequest request;
@@ -314,12 +358,20 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
             return;
         }
 
-        auto signal = std::make_unique<boost::asio::cancellation_signal>();
-        requestOptions.SetCancellationSlot(signal->slot());
-        ReserveEvents(m_inFlight.size() + 3U);
-        const std::uint64_t id = m_nextRequestId++;
-        m_inFlight.emplace(
-            id, InFlightRequest{.Kind = kind, .Offset = offset, .Length = length, .Signal = std::move(signal)});
+        const auto free = std::ranges::find_if(m_inFlight, [](const InFlightRequest& slot) { return !slot.Active; });
+        if (free == m_inFlight.end()) {
+            Fail(MakeFailure(std::errc::resource_unavailable_try_again, "Too many concurrent download requests."));
+            return;
+        }
+        InFlightRequest& entry = *free;
+        const auto id = static_cast<std::uint64_t>(free - m_inFlight.begin());
+        requestOptions.SetCancellationSlot(entry.Signal.slot());
+        ReserveEvents(m_inFlightCount + 3U);
+        entry.Kind = kind;
+        entry.Offset = offset;
+        entry.Length = length;
+        entry.Active = true;
+        ++m_inFlightCount;
         if (kind == RequestKind::Chunk) {
             ++m_chunksInFlight;
         }
@@ -333,7 +385,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
                 requestOptions);
         } catch (...) {
             // The request was not accepted, so no completion will ever drain this entry.
-            if (m_inFlight.erase(id) != 0U && kind == RequestKind::Chunk) {
+            if (ReleaseInFlight(id) && kind == RequestKind::Chunk) {
                 --m_chunksInFlight;
             }
             Fail(MakeFailureFromCurrentException());
@@ -356,11 +408,17 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
             return;
         }
 
-        auto node = m_inFlight.extract(event.RequestId);
-        if (node.empty()) {
+        if (event.RequestId >= m_inFlight.size() ||
+            !m_inFlight[gsl::narrow_cast<std::size_t>(event.RequestId)].Active) {
             return;
         }
-        const InFlightRequest& request = node.mapped();
+        const InFlightRequest& entry = m_inFlight[gsl::narrow_cast<std::size_t>(event.RequestId)];
+        const struct {
+            RequestKind Kind;
+            std::uint64_t Offset;
+            std::uint64_t Length;
+        } request{entry.Kind, entry.Offset, entry.Length};
+        ReleaseInFlight(event.RequestId);
         if (request.Kind == RequestKind::Chunk) {
             --m_chunksInFlight;
         }
@@ -558,7 +616,15 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
 
     // Writes `data` (or queues it behind earlier gaps), then everything that has become contiguous.
     void Deliver(std::uint64_t offset, std::string data) {
-        m_ready.emplace(offset, std::move(data));
+        ReadyChunk& slot = ReadySlot(offset);
+        if (slot.Filled) {
+            Fail(MakeInvalidResponse("The download reorder window overflowed."));
+            return;
+        }
+        slot.Filled = true;
+        slot.Offset = offset;
+        slot.Data = std::move(data);
+        ++m_readyCount;
         WriteReady();
     }
 
@@ -572,12 +638,11 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
                 Fail(MakeInvalidResponse("The download write offset overflows."));
                 return;
             }
-            const auto it = m_ready.find(*cursor);
-            if (it == m_ready.end()) {
+            auto taken = TakeReady(*cursor);
+            if (!taken.has_value()) {
                 return;
             }
-            std::string data = std::move(it->second);
-            m_ready.erase(it);
+            std::string data = std::move(*taken);
 
             if constexpr (TSink::WritesInline) {
                 if (!WriteToSink(std::move(data))) {
@@ -588,7 +653,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
                 // Take every chunk that is already contiguous so one writer task (and one hop back to the
                 // I/O executor) covers the whole run instead of one pair of hops per chunk.
                 std::vector<std::string> batch;
-                batch.reserve(m_ready.size() + 1U);
+                batch.reserve(m_readyCount + 1U);
                 batch.push_back(std::move(data));
                 std::uint64_t next = *cursor;
                 while (true) {
@@ -598,12 +663,11 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
                         return;
                     }
                     next = *advanced;
-                    const auto following = m_ready.find(next);
-                    if (following == m_ready.end()) {
+                    auto following = TakeReady(next);
+                    if (!following.has_value()) {
                         break;
                     }
-                    batch.push_back(std::move(following->second));
-                    m_ready.erase(following);
+                    batch.push_back(std::move(*following));
                 }
 
                 m_writing = true;
@@ -684,7 +748,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         if (m_failure.has_value() || m_done || !m_ranged) {
             return;
         }
-        while (m_next < *m_end && m_chunksInFlight + m_ready.size() + m_writingChunks < m_concurrency &&
+        while (m_next < *m_end && m_chunksInFlight + m_readyCount + m_writingChunks < m_concurrency &&
                !m_failure.has_value()) {
             const std::uint64_t length = std::min<std::uint64_t>(m_chunkSize, *m_end - m_next);
             const std::uint64_t offset = m_next;
@@ -700,14 +764,16 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
             return;
         }
         m_failure = std::move(error);
-        m_ready.clear();
-        for (auto& [id, request] : m_inFlight) {
-            request.Signal->emit(boost::asio::cancellation_type::terminal);
+        ClearReady();
+        for (auto& request : m_inFlight) {
+            if (request.Active) {
+                request.Signal.emit(boost::asio::cancellation_type::terminal);
+            }
         }
     }
 
     void MaybeFinish() {
-        if (m_done || !m_inFlight.empty() || m_writing) {
+        if (m_done || m_inFlightCount != 0U || m_writing) {
             return;
         }
         if (!m_failure.has_value() && (!m_end.has_value() || *m_end < m_begin || m_written != *m_end - m_begin)) {
@@ -769,10 +835,11 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
     bool m_initiating = false;
 
     // Only touched by the thread currently draining events.
-    std::map<std::uint64_t, InFlightRequest> m_inFlight;
-    std::uint64_t m_nextRequestId = 0;
+    std::vector<InFlightRequest> m_inFlight;
+    std::size_t m_inFlightCount = 0;
     std::size_t m_chunksInFlight = 0;
-    std::map<std::uint64_t, std::string> m_ready;
+    std::vector<ReadyChunk> m_ready;
+    std::size_t m_readyCount = 0;
     Models::BlobRequestConditions m_chunkConditions;
     std::string m_etag;
     std::uint64_t m_begin = 0;
