@@ -6,6 +6,7 @@
 #include "ConnectionPool.hpp"
 #include "DiagnosticsSink.hpp"
 #include "DnsCache.hpp"
+#include "HeaderArena.hpp"
 #include "RequestValidation.hpp"
 #include "Route.hpp"
 #include "StreamTypes.hpp"
@@ -33,6 +34,9 @@
 #include <variant>
 
 namespace AVEVA::Private {
+using ArenaFields = boost::beast::http::basic_fields<ArenaAllocator<char>>;
+using RequestMessage = boost::beast::http::message<true, boost::beast::http::buffer_body, ArenaFields>;
+
 template <typename Stream> class RequestOperation;
 
 /// <summary>
@@ -396,9 +400,13 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     std::shared_ptr<ConnectionPool<Stream>> m_pool;
     ConnectionKey<Stream> m_key;
     beast::flat_buffer m_buffer;
-    http::request<http::buffer_body> m_request;
+    // Header storage for the request and the response. Declared before the messages that allocate from them
+    // so they are destroyed last; each is reset only while no message using it is alive.
+    HeaderArena m_requestArena;
+    HeaderArena m_responseArena;
+    std::optional<RequestMessage> m_request;
     // Held as a member so async_write uses the non-stable write_op instead of heap-allocating a serializer.
-    std::optional<http::request_serializer<http::buffer_body>> m_serializer;
+    std::optional<http::request_serializer<http::buffer_body, ArenaFields>> m_serializer;
     // Backing storage for an owned (SetBody()) request body. buffer_body's writer only
     // stores a pointer/size pair, so something must own the bytes for the lifetime of the
     // write; for a SetBodyView() body the caller owns that storage instead (see the
@@ -406,7 +414,7 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     std::string m_ownedBodyStorage;
     // Keeps a shared body view alive for as long as this operation can still read it.
     std::shared_ptr<const void> m_bodyKeepAlive;
-    std::optional<http::response_parser<http::string_body>> m_parser;
+    std::optional<http::response_parser<http::string_body, ArenaAllocator<char>>> m_parser;
     bool m_finished = false;
     bool m_writeInFlight = false;
     std::optional<std::pair<std::error_code, HttpResponse>> m_deferredCompletion;

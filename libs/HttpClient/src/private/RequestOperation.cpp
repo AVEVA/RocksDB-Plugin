@@ -100,46 +100,50 @@ void RequestOperation<Stream>::BuildRequestUnchecked(HttpRequest& request, const
 
     const auto verb = Private::ToBeastVerb(request.GetMethod());
 
-    // Each build starts from an empty message, so no field of an earlier attempt can survive.
+    // Each build starts from an empty message, so no field of an earlier attempt can survive. The serializer and
+    // the message are gone before the arena they allocated from is reset.
     m_serializer.reset();
-    m_request = {};
-    m_request.version(11);
-    m_request.method(verb);
-    m_request.target(route.Target);
+    m_request.reset();
+    m_requestArena.Reset();
+    auto& req = m_request.emplace(std::piecewise_construct, std::forward_as_tuple(),
+                                  std::forward_as_tuple(ArenaAllocator<char>(m_requestArena)));
+    req.version(11);
+    req.method(verb);
+    req.target(route.Target);
     for (const auto& header : request.GetHeaders()) {
         if (beast::iequals(header.GetName(), "Host") || beast::iequals(header.GetName(), "Content-Length") ||
             beast::iequals(header.GetName(), "Transfer-Encoding") || beast::iequals(header.GetName(), "Connection")) {
             continue;
         }
-        m_request.insert(header.GetName(), header.GetValue());
+        req.insert(header.GetName(), header.GetValue());
     }
-    m_request.set(http::field::host, route.Authority);
-    m_request.keep_alive(true);
+    req.set(http::field::host, route.Authority);
+    req.keep_alive(true);
     if (request.HasBodyView()) {
         const auto view = request.GetBodyView();
         m_ownedBodyStorage.clear();
         m_bodyKeepAlive = request.GetBodyKeepAlive();
         // Beast's buffer_body wants a mutable pointer but only reads it when sending.
         GSL_SUPPRESS(type.3)
-        m_request.body().data = const_cast<void*>(static_cast<const void*>(view.data()));
-        m_request.body().size = view.size();
+        req.body().data = const_cast<void*>(static_cast<const void*>(view.data()));
+        req.body().size = view.size();
     } else {
         m_bodyKeepAlive.reset();
         m_ownedBodyStorage = request.ReleaseBody();
         GSL_SUPPRESS(type.3)
-        m_request.body().data = m_ownedBodyStorage.empty()
-                                    ? nullptr
-                                    : const_cast<void*>(static_cast<const void*>(m_ownedBodyStorage.data()));
-        m_request.body().size = m_ownedBodyStorage.size();
+        req.body().data = m_ownedBodyStorage.empty()
+                              ? nullptr
+                              : const_cast<void*>(static_cast<const void*>(m_ownedBodyStorage.data()));
+        req.body().size = m_ownedBodyStorage.size();
     }
-    m_request.body().more = false;
+    req.body().more = false;
     // buffer_body has no BodyWriter::size(), so message::prepare_payload() cannot be used;
     // set Content-Length manually instead (the same value it would have computed). A bodyless GET, HEAD or
     // DELETE carries none, but a bodyless POST, PUT or PATCH must state an explicit zero.
-    const auto method = m_request.method();
-    if (m_request.body().size != 0 || method == http::verb::post || method == http::verb::put ||
+    const auto method = req.method();
+    if (req.body().size != 0 || method == http::verb::post || method == http::verb::put ||
         method == http::verb::patch) {
-        m_request.set(http::field::content_length, std::to_string(m_request.body().size));
+        req.set(http::field::content_length, std::to_string(req.body().size));
     }
     ResetParser();
     m_hostIsName = route.HostIsName;
@@ -186,7 +190,7 @@ template <typename Stream> bool RequestOperation<Stream>::ConfigureTlsForHost() 
 
 template <typename Stream> bool RequestOperation<Stream>::MaybeRetryAfterReuseFailure(bool requestMayHaveBeenSent) {
     if (IsCancellationRequested() || !m_reused || m_retried || m_receivedAnyResponse || m_parser->got_some() ||
-        (requestMayHaveBeenSent && !IsIdempotentMethod(m_request.method()))) {
+        (requestMayHaveBeenSent && !IsIdempotentMethod(m_request->method()))) {
         return false;
     }
     m_retried = true;
@@ -226,10 +230,13 @@ template <typename Stream> bool RequestOperation<Stream>::IsIdempotentMethod(htt
 }
 
 template <typename Stream> void RequestOperation<Stream>::ResetParser() {
-    m_parser.emplace();
+    m_parser.reset();
+    m_responseArena.Reset();
+    m_parser.emplace(std::piecewise_construct, std::forward_as_tuple(),
+                     std::forward_as_tuple(ArenaAllocator<char>(m_responseArena)));
     m_parser->body_limit(m_options.GetResponseBodyLimit());
     m_parser->header_limit(m_options.GetResponseHeaderLimit());
-    m_parser->skip(m_request.method() == http::verb::head);
+    m_parser->skip(m_request->method() == http::verb::head);
 }
 
 template <typename Stream>
@@ -378,7 +385,7 @@ template <typename Stream> void RequestOperation<Stream>::Write() {
     m_phase = HttpRequestPhase::Write;
     m_writeInFlight = true;
     try {
-        m_serializer.emplace(m_request);
+        m_serializer.emplace(*m_request);
         http::async_write(*m_stream, *m_serializer,
                           [self = this->shared_from_this()](boost::system::error_code error, std::size_t bytesWritten) {
                               self->m_writeInFlight = false;
