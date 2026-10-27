@@ -449,6 +449,11 @@ TEST(CredentialsTests, BadRequestTokenFailureIsNotRetried) {
     EXPECT_EQ(httpClient.RequestCount(), 1U);
 }
 
+TEST(CredentialsTests, TokenEndpointErrorIsNeverFalsy) {
+    EXPECT_TRUE(static_cast<bool>(MakeTokenEndpointError(0, "")));
+    EXPECT_TRUE(static_cast<bool>(MakeTokenEndpointError(0, "invalid_request")));
+}
+
 TEST(CredentialsTests, ManagedIdentityRetriesNotFoundAndGone) {
     FakeHttpClient httpClient;
     ManagedIdentityCredentialOptions options = ManagedOptions({}, {});

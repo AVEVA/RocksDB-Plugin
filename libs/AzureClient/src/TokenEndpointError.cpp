@@ -67,7 +67,8 @@ const std::error_category& TokenEndpointErrorCategory() noexcept {
 std::error_code MakeTokenEndpointError(const unsigned int statusCode, const std::string_view oauthError) noexcept {
     const auto found = std::ranges::find(KnownErrors, oauthError);
     const auto index = found == KnownErrors.end() ? 0 : gsl::narrow_cast<int>(found - KnownErrors.begin());
-    const int status = gsl::narrow_cast<int>(std::min(statusCode, 999U));
+    // Status 0 with no recognised error would encode to value 0, which std::error_code treats as success.
+    const int status = gsl::narrow_cast<int>(std::clamp(statusCode, 1U, 999U));
     return {status * Stride + index, TokenEndpointErrorCategory()};
 }
 
