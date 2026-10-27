@@ -40,9 +40,35 @@ bool IsValidRequestUrl(const boost::urls::url_view& url) {
         (url.has_port() && url.port_number() == 0)) {
         return false;
     }
-    const std::string host = url.host_address();
-    return std::none_of(host.begin(), host.end(),
-                        [](unsigned char character) { return character <= 32 || character >= 127; });
+    // Scan the encoded form in place, decoding "%XX" on the fly, so an escaped control byte is rejected as before.
+    const std::string_view host = url.encoded_host_address();
+    const auto hexValue = [](const char c) {
+        if (c >= '0' && c <= '9') {
+            return c - '0';
+        }
+        if (c >= 'a' && c <= 'f') {
+            return c - 'a' + 10;
+        }
+        if (c >= 'A' && c <= 'F') {
+            return c - 'A' + 10;
+        }
+        return -1;
+    };
+    for (std::size_t i = 0; i < host.size(); ++i) {
+        auto character = static_cast<unsigned char>(host[i]);
+        if (character == '%' && i + 2 < host.size()) {
+            const int high = hexValue(host[i + 1]);
+            const int low = hexValue(host[i + 2]);
+            if (high >= 0 && low >= 0) {
+                character = static_cast<unsigned char>((high << 4) | low);
+                i += 2;
+            }
+        }
+        if (character <= 32 || character >= 127) {
+            return false;
+        }
+    }
+    return true;
 }
 
 std::error_code ValidateRequest(const HttpRequest& request, const HttpRequestOptions& options,

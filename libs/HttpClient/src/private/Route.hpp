@@ -14,8 +14,8 @@
 #include <gsl/util>
 
 #include <algorithm>
-#include <cctype>
 #include <string>
+#include <string_view>
 #include <system_error>
 
 namespace AVEVA::Private {
@@ -28,7 +28,6 @@ struct Route {
     std::error_code Error; // Set when the parsed request failed validation; otherwise empty.
     bool Tls = false;
     bool HostIsName = false;
-    std::string Scheme;
     std::string Host;
     std::string Port;
     std::string Target;    // Request target, always starting with '/'.
@@ -57,7 +56,6 @@ struct Route {
         route.Tls = parsed->scheme_id() == urls::scheme::https;
         // Scheme and DNS host names are case-insensitive, so they are folded here: the pool, limiter, DNS cache and TLS
         // session keys are all derived from them and must not split one origin into several.
-        route.Scheme = route.Tls ? "https" : "http";
         route.Host = parsed->host_address();
         if (parsed->host_type() == urls::host_type::ipv6) {
             const bool bracketed = route.Host.starts_with('[');
@@ -68,8 +66,10 @@ struct Route {
         } else if (parsed->host_type() == urls::host_type::ipv4) {
             route.Host = parsed->host_ipv4_address().to_string();
         } else if (parsed->host_type() == urls::host_type::name) {
-            std::ranges::transform(route.Host, route.Host.begin(),
-                                   [](const unsigned char c) { return gsl::narrow_cast<char>(std::tolower(c)); });
+            // ASCII-only fold: std::tolower follows the process locale.
+            std::ranges::transform(route.Host, route.Host.begin(), [](const char c) {
+                return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+            });
         }
         // Keys use the numeric port and the canonical IP text so ":80" and ":080", or two spellings of one IPv6
         // address, share pool and limiter state. The Host header (Authority) keeps the caller's spelling.
@@ -90,12 +90,18 @@ struct Route {
     }
 
     /// <summary>
+    /// The URL scheme this route uses; only http and https routes are ever sendable.
+    /// </summary>
+    std::string_view SchemeName() const noexcept { return Tls ? "https" : "http"; }
+
+    /// <summary>
     /// The "scheme://host:port" the limiter counts against.
     /// </summary>
     std::string Origin() const {
+        const std::string_view scheme = SchemeName();
         std::string origin;
-        origin.reserve(Scheme.size() + 3 + Host.size() + 1 + Port.size());
-        origin.append(Scheme).append("://").append(Host).append(1, ':').append(Port);
+        origin.reserve(scheme.size() + 3 + Host.size() + 1 + Port.size());
+        origin.append(scheme).append("://").append(Host).append(1, ':').append(Port);
         return origin;
     }
 };
