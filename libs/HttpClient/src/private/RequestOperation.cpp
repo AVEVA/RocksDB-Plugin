@@ -555,12 +555,11 @@ template <typename Stream> void RequestOperation<Stream>::ReleaseOrClose(bool ke
         // silent peer from holding the stream open. The stream moves into the handler so the operation (request,
         // body owner, buffers) ends with the completion instead of lingering until the shutdown finishes.
         if constexpr (std::is_same_v<Stream, TlsStream>) {
-            auto stream = std::make_shared<std::unique_ptr<TlsStream>>(std::move(m_stream));
-            TlsStream& tls = **stream;
+            TlsStream& tls = *m_stream;
             beast::get_lowest_layer(tls).expires_after(TlsShutdownGrace);
-            tls.async_shutdown([stream](boost::system::error_code) {
+            tls.async_shutdown([stream = std::move(m_stream)](boost::system::error_code) {
                 boost::system::error_code ignored;
-                auto& socket = beast::get_lowest_layer(**stream).socket();
+                auto& socket = beast::get_lowest_layer(*stream).socket();
                 socket.shutdown(Tcp::socket::shutdown_both, ignored);
                 socket.close(ignored);
             });
