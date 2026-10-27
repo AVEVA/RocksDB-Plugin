@@ -87,9 +87,6 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
             m_sink.Abort(std::move(pending), std::make_error_code(std::errc::operation_canceled));
             return;
         }
-        if (m_rearmPending) {
-            RearmAfterCommitLocked();
-        }
         auto& state = m_origins[origin];
         if (state.active < m_max) {
             ++state.active;
@@ -128,6 +125,7 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
     /// <param name="origin">The origin the finished request counted against.</param>
     void Release(const std::string& origin) {
         std::optional<Pending> next;
+        bool rearmFailed = false;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             const auto it = m_origins.find(origin);
@@ -153,9 +151,13 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
             m_expiries.erase(ExpiryKey{front.deadline, front.ticket});
             it->second.waiters.pop_front();
             // The hand-off is committed; a timer failure must not undo it.
-            RearmAfterCommitLocked();
+            rearmFailed = RearmAfterCommitLocked();
         }
+        const auto failure = rearmFailed ? FailUnarmedExpiries() : std::exception_ptr{};
         m_sink.Start(std::move(*next));
+        if (failure) {
+            std::rethrow_exception(failure);
+        }
     }
 
     /// <summary>
@@ -166,6 +168,7 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
     /// <param name="ticket">The ticket the request was queued with.</param>
     void Cancel(const std::string& origin, std::uint64_t ticket) {
         std::optional<Pending> aborted;
+        bool rearmFailed = false;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             if (m_closed) {
@@ -183,9 +186,13 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
             aborted.emplace(std::move(waiter->pending));
             m_expiries.erase(ExpiryKey{waiter->deadline, waiter->ticket});
             waiters.erase(waiter);
-            RearmAfterCommitLocked();
+            rearmFailed = RearmAfterCommitLocked();
         }
+        const auto failure = rearmFailed ? FailUnarmedExpiries() : std::exception_ptr{};
         m_sink.Abort(std::move(*aborted), std::make_error_code(std::errc::operation_canceled));
+        if (failure) {
+            std::rethrow_exception(failure);
+        }
     }
 
     /// <summary>
@@ -236,21 +243,86 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
     using ExpiryKey = std::pair<Clock::time_point, std::uint64_t>;
 
     /// <summary>
-    /// Re-aims the timer after a waiter has already left the queue. The queue change is committed and the
-    /// caller must still complete its request, so a scheduling failure cannot be thrown from here. It is retried
-    /// once at once, then remembered, counted, and retried by the next Run, Release or Cancel.
+    /// Re-aims the timer after the queue has already changed. The change is committed and the caller must
+    /// still complete its request, so a scheduling failure cannot be thrown from here. It is retried once at
+    /// once and counted.
     /// </summary>
-    void RearmAfterCommitLocked() noexcept {
+    /// <returns>True if both attempts failed, so no timer covers the queued deadlines; the caller must then
+    /// call <see cref="FailUnarmedExpiries"/> outside the lock.</returns>
+    [[nodiscard]] bool RearmAfterCommitLocked() noexcept {
         for (int attempt = 0; attempt < 2; ++attempt) {
             try {
                 ArmTimerLocked();
-                m_rearmPending = false;
-                return;
+                return false;
             } catch (...) {
                 ++m_timerFailures;
             }
         }
-        m_rearmPending = true;
+        return true;
+    }
+
+    /// <summary>
+    /// Terminal recovery when no timer can be scheduled: every deadline-bearing waiter is failed with the
+    /// expiry error now, because nothing else would wake it before a slot frees, which may be long after its
+    /// deadline. Failing early beats missing the deadline silently. Never throws; the first exception from a
+    /// completion is returned so the caller can rethrow it after finishing its own work.
+    /// </summary>
+    [[nodiscard]] std::exception_ptr FailUnarmedExpiries() noexcept {
+        ReportTimerFailure();
+        std::exception_ptr failure;
+        for (;;) {
+            std::optional<Pending> doomed;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_closed) {
+                    break;
+                }
+                ExtractExpiredLocked(doomed, Clock::time_point::max());
+                if (!doomed) {
+                    break;
+                }
+            }
+            try {
+                m_sink.Abort(std::move(*doomed), m_expiredError);
+            } catch (...) {
+                if (!failure) {
+                    failure = std::current_exception();
+                }
+            }
+        }
+        return failure;
+    }
+
+    /// <summary>
+    /// Tells the owner, when its sink listens, that deadlines lost their timer, so production runs see it and
+    /// not only the test-readable counter.
+    /// </summary>
+    void ReportTimerFailure() noexcept {
+        if constexpr (requires { m_sink.TimerFailed(); }) {
+            try {
+                m_sink.TimerFailed();
+            } catch (...) {
+            }
+        }
+    }
+
+    /// <summary>
+    /// Removes the earliest waiter whose deadline is at or before <paramref name="limit"/> from the queue and
+    /// the index, skipping index entries whose waiter is already gone.
+    /// </summary>
+    void ExtractExpiredLocked(std::optional<Pending>& expired, Clock::time_point limit) {
+        while (!expired && !m_expiries.empty() && m_expiries.begin()->first.first <= limit) {
+            const auto& [key, origin] = *m_expiries.begin();
+            if (const auto it = m_origins.find(origin); it != m_origins.end()) {
+                auto& waiters = it->second.waiters;
+                const auto waiter = std::ranges::lower_bound(waiters, key.second, {}, &Waiter::ticket);
+                if (waiter != waiters.end() && waiter->ticket == key.second) {
+                    expired.emplace(std::move(waiter->pending));
+                    waiters.erase(waiter);
+                }
+            }
+            m_expiries.erase(m_expiries.begin());
+        }
     }
 
     /// <summary>
@@ -311,29 +383,32 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
                 if (m_closed) {
                     return;
                 }
-                while (!expired && !m_expiries.empty() && m_expiries.begin()->first.first <= now) {
-                    const auto& [key, origin] = *m_expiries.begin();
-                    if (const auto it = m_origins.find(origin); it != m_origins.end()) {
-                        auto& waiters = it->second.waiters;
-                        const auto waiter = std::ranges::lower_bound(waiters, key.second, {}, &Waiter::ticket);
-                        if (waiter != waiters.end() && waiter->ticket == key.second) {
-                            expired.emplace(std::move(waiter->pending));
-                            waiters.erase(waiter);
-                        }
-                    }
-                    m_expiries.erase(m_expiries.begin());
-                }
+                ExtractExpiredLocked(expired, now);
                 if (!expired) {
-                    RearmQuietlyLocked();
-                    return;
+                    if (!RearmAfterCommitLocked()) {
+                        return;
+                    }
                 }
+            }
+            if (!expired) {
+                // No timer could be scheduled for the remaining waiters, and nothing else would wake them.
+                if (const auto failure = FailUnarmedExpiries()) {
+                    std::rethrow_exception(failure);
+                }
+                return;
             }
             try {
                 m_sink.Abort(std::move(*expired), m_expiredError);
             } catch (...) {
                 // Later deadlines must not be stranded by a throwing completion handler.
-                std::lock_guard<std::mutex> lock(m_mutex);
-                RearmQuietlyLocked();
+                bool rearmFailed = false;
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    rearmFailed = RearmAfterCommitLocked();
+                }
+                if (rearmFailed) {
+                    static_cast<void>(FailUnarmedExpiries());
+                }
                 throw;
             }
         }
@@ -375,7 +450,6 @@ class OriginLimiter : public std::enable_shared_from_this<OriginLimiter<Pending,
     std::unordered_map<std::string, OriginState> m_origins;
     std::optional<Timer> m_timer;
     std::error_code m_expiredError;
-    bool m_rearmPending = false;
     std::uint64_t m_timerFailures = 0;
     Clock::time_point m_armedFor = Clock::time_point::max();
     std::map<ExpiryKey, std::string> m_expiries; // Queued requests by (deadline, ticket), with their origin.

@@ -123,6 +123,15 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
             Detail::Complete(std::move(pending.completion), error, HttpResponse{});
         }
 
+        /// <summary>
+        /// Reports that queued deadlines lost their timer and the affected requests were failed early.
+        /// </summary>
+        void TimerFailed() const noexcept {
+            if (auto core = m_core.lock()) {
+                core->ReportLimiterTimerFailed();
+            }
+        }
+
       private:
         std::weak_ptr<BasicHttpClientCore> m_core;
     };
@@ -256,6 +265,12 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     }
 
   private:
+    void ReportLimiterTimerFailed() const noexcept {
+        DiagnosticsSink::Report(
+            m_diagnostics, HttpDiagnosticKind::SwallowedException, HttpRequestPhase::Queued, {}, {}, {},
+            "The per-origin queue could not schedule its deadline timer; queued requests were failed");
+    }
+
     void ReportHandlerThrew() const noexcept {
         DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::SwallowedException, HttpRequestPhase::Queued, {}, {},
                                 {}, "A completion handler threw while the client was failing a request");

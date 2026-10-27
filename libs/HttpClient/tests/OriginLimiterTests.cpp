@@ -24,12 +24,14 @@ struct Recorder {
     std::vector<int> Started;
     std::vector<int> Aborted;
     std::vector<std::error_code> Errors;
+    int TimerReports = 0;
 };
 
 class RecordingSink {
   public:
     explicit RecordingSink(std::shared_ptr<Recorder> recorder) : m_recorder(std::move(recorder)) {}
 
+    void TimerFailed() const noexcept { ++m_recorder->TimerReports; }
     void Start(int&& pending) const { m_recorder->Started.push_back(pending); }
     void Abort(int&& pending, std::error_code error) const {
         m_recorder->Aborted.push_back(pending);
@@ -289,7 +291,7 @@ TEST(OriginLimiterTests, CancelKeepsRemainingTimeoutsWhenRearmingFailsOnce) {
     EXPECT_EQ(fixture.Rec->Aborted, (std::vector<int>{2, 3}));
 }
 
-TEST(OriginLimiterTests, PersistentRearmFailureIsRetriedByTheNextLimiterActivity) {
+TEST(OriginLimiterTests, PersistentRearmFailureAfterReleaseFailsQueuedWaitersWithoutOtherTraffic) {
     using namespace std::chrono_literals;
     FaultFixture fixture;
 
@@ -297,11 +299,49 @@ TEST(OriginLimiterTests, PersistentRearmFailureIsRetriedByTheNextLimiterActivity
     fixture.Limiter->Release("origin");
     EXPECT_EQ(fixture.Rec->Started, (std::vector<int>{1, 2}));
     EXPECT_EQ(fixture.Limiter->TimerFailures(), 2U);
+    EXPECT_EQ(fixture.Rec->TimerReports, 1);
 
-    fixture.Limiter->Run("other", fixture.Limiter->NextTicket(), 9);
-    fixture.Context.run_for(1s);
+    // Waiter 3 settles at once through the expiry policy; nothing else is submitted and waiter 1's slot stays held.
     EXPECT_EQ(fixture.Rec->Aborted, std::vector<int>{3});
-    EXPECT_EQ(fixture.Rec->Started, (std::vector<int>{1, 2, 9}));
+    EXPECT_EQ(fixture.Rec->Errors.back(), std::make_error_code(std::errc::timed_out));
+    fixture.Context.run_for(200ms);
+    EXPECT_EQ(fixture.Rec->Aborted, std::vector<int>{3});
+}
+
+TEST(OriginLimiterTests, PersistentRearmFailureAfterCancelFailsQueuedWaitersWithoutOtherTraffic) {
+    FaultFixture fixture;
+
+    FaultTimer::FailNext = 2;
+    fixture.Limiter->Cancel("origin", fixture.Ticket2);
+
+    EXPECT_EQ(fixture.Rec->Aborted, (std::vector<int>{3, 2}));
+    EXPECT_EQ(fixture.Rec->Errors.front(), std::make_error_code(std::errc::timed_out));
+    EXPECT_EQ(fixture.Rec->Errors.back(), std::make_error_code(std::errc::operation_canceled));
+    EXPECT_EQ(fixture.Rec->TimerReports, 1);
+}
+
+TEST(OriginLimiterTests, RearmFailureInTheTimerCallbackIsRetriedAndStillSettlesWaiters) {
+    using namespace std::chrono_literals;
+    FaultFixture fixture;
+
+    FaultTimer::FailNext = 1;
+    fixture.Context.run_for(1s);
+
+    EXPECT_EQ(fixture.Rec->Aborted, (std::vector<int>{2, 3}));
+    EXPECT_EQ(fixture.Rec->Started, std::vector<int>{1});
+    EXPECT_EQ(fixture.Limiter->TimerFailures(), 1U);
+}
+
+TEST(OriginLimiterTests, PersistentRearmFailureInTheTimerCallbackFailsRemainingWaiters) {
+    using namespace std::chrono_literals;
+    FaultFixture fixture;
+
+    FaultTimer::FailNext = 2;
+    fixture.Context.run_for(100ms);
+
+    EXPECT_EQ(fixture.Rec->Aborted, (std::vector<int>{2, 3}));
+    EXPECT_EQ(fixture.Rec->Started, std::vector<int>{1});
+    EXPECT_EQ(fixture.Rec->TimerReports, 1);
 }
 
 namespace {
