@@ -298,24 +298,46 @@ each one receives; `auto` means the plugin name the wrapper registered.
 
 ### Loopback CPU and allocation measurements — `Measure-Loopback.ps1`
 
-These need no Azure account and are **not** Azure network results; they isolate the client's own CPU and allocation
-cost with the server on an independent thread (allocation counters are thread-local, so server work is excluded):
+These need no Azure account and are **not** Azure network results. Three benchmarks cover three different scopes; do not
+compare numbers across them, and none of them is a live Azure measurement:
+
+| Scope | Executable | Path exercised | Not included |
+|-------|------------|----------------|--------------|
+| HTTP only | `aveva-http-client-tests` | `HttpClient::SendAsync` over a warm pooled loopback TCP connection | Azure client, plugin, TLS |
+| Azure client | `aveva-azure-client-e2e-benchmark` | `BlobClient` request pipeline, real `HttpClient`, loopback TCP to a page-blob server on its own thread, into caller-owned spans | plugin (`AsyncReadRequest`, download pool, prefetch, MultiRead merge/split, write pipeline), TLS (plain HTTP, fake SAS) |
+| Plugin | `aveva-rocksdb-plugin-azure-impl-benchmark` | the plugin's readable/writeable file classes over the real `BlobClient` and an in-process `FakeBlobServer` through the fake HTTP transport | sockets, TLS, `HttpClient`, network latency |
+| Live Azure | `Compare-Backends.ps1 -ConfirmLiveAzure` | `db_bench` against a real account | explicit opt-in only |
+
+What the allocation counters mean: every benchmark replaces scalar `operator new` only. They do not see aligned new,
+direct `malloc`, OpenSSL/TLS allocations (OpenSSL uses its own allocator), the OS, or peak process memory. The HTTP and
+Azure-client benchmarks count the client thread only (thread-local, so the server and any worker thread are excluded).
+The plugin benchmark reports `thread_*` (the threads issuing the operations, summed) and `process_*` (all threads,
+including the fake transport's pump and plugin workers); because the fake service runs inline, its response-body
+copies are inside both, so use plugin numbers for before/after comparison on one build rather than as absolute plugin
+cost. `peak_live_bytes` and `retained_bytes` are growth of the process-wide live heap (allocator usable sizes) relative
+to the start of the measured window: peak while it ran, and what was still held when it ended (pooled buffers, caches,
+prefetch results); a negative value means memory that existed before the window, such as consumed prefetch slots, was
+released. Timings (`p50_us`/`p99_us`, `mib_per_second`) are reported, never asserted.
 
 - `aveva-http-client-tests --gtest_filter=HttpClientAllocations.PublicClientPooledRequestWithIndependentServer`:
   the public `HttpClient::SendAsync` (including its final completion post) over a warm pooled connection, 0 B and
   16 KiB bodies. The older `SubmitAllocationsPerRequest` test stays as a coarse regression check of the private core.
 - `aveva-azure-client-e2e-benchmark`: `BlobClient::DownloadToAsync` ranged reads through the request pipeline, the real
   `HttpClient` and TCP to a loopback page-blob server (4 KiB and 64 KiB reads, 1 and 8 reads in flight).
+- `aveva-rocksdb-plugin-azure-impl-benchmark`: 4 MiB random reads, 16 merged 4 KiB `MultiRead` requests, 4 MiB
+  prefetch-hit reads and 4 KiB append+`Sync` writes, at 1 and 4 threads where that is meaningful. It reports requests
+  the service saw (`downloads`, `uploads`, `properties`), allocations and bytes per operation, peak/retained live heap,
+  throughput and p50/p99 latency. Its tests assert only request counts and correctness, not timings.
 
 ```powershell
 cmake --preset WindowsRelease
-cmake --build build\WindowsRelease --config Release --target aveva-http-client-tests aveva-azure-client-e2e-benchmark
+cmake --build build\WindowsRelease --config Release --target aveva-http-client-tests aveva-azure-client-e2e-benchmark aveva-rocksdb-plugin-azure-impl-benchmark
 .\tools\db_bench\Measure-Loopback.ps1 -Label before   # then rebuild at the other revision and run with -Label after
 ```
 
-Each `BENCH` line reports allocations and bytes per request, server request and connection counts, throughput and
-p50/p99/max latency; `loopback-metadata.json` records the revision, hashes, build tree and host. Compare allocation
-counts across revisions (they are stable); treat loopback timings as noisy and use `-Repeat`.
+Each `BENCH` line reports its counters per request or operation; `loopback-metadata.json` records the revision,
+hashes, build tree and host. Compare allocation counts across revisions (they are stable); treat timings as noisy
+and use `-Repeat`.
 
 ## Notes
 

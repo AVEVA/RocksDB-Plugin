@@ -77,6 +77,23 @@ gtest_discover_tests(aveva-rocksdb-plugin-azure-impl-tests DISCOVERY_TIMEOUT 60
     TEST_FILTER "-${aveva_impl_file_io_filter}:${aveva_impl_filesystem_filter}:${aveva_impl_lock_filter}"
     PROPERTIES TIMEOUT 300 LABELS "unit;runtime")
 
+# Plugin-level allocation/latency measurement (T20): the real file classes over the fake service. It replaces
+# operator new, so it is its own executable. Label `benchmark`; in-process CPU evidence only, never Azure results.
+find_package(OpenSSL REQUIRED)
+add_executable(aveva-rocksdb-plugin-azure-impl-benchmark
+    PluginPathBenchmark.cpp
+    FakeBlobServer.cpp
+    FakeInstantiations.cpp
+)
+target_link_libraries(aveva-rocksdb-plugin-azure-impl-benchmark PRIVATE GTest::gtest_main GTest::gmock aveva-rocksdb-plugin-azure aveva-rocksdb-plugin-azure-impl aveva-rocksdb-plugin-core-mocks aveva::azure-client-testing OpenSSL::Crypto)
+if(MSVC)
+    target_compile_options(aveva-rocksdb-plugin-azure-impl-benchmark PRIVATE /bigobj)
+endif()
+target_include_directories(aveva-rocksdb-plugin-azure-impl-benchmark PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../src/Azure"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../src/Azure/Impl")
+gtest_discover_tests(aveva-rocksdb-plugin-azure-impl-benchmark DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 300 LABELS "benchmark;plugin")
+
 # Live-Azure tests skip themselves unless AVEVA_RUN_AZURE_INTEGRATION_TESTS=1, so they live in their own executable.
 add_executable(aveva-rocksdb-plugin-azure-impl-integration-tests
     IntegrationTestHelpers.cpp

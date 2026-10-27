@@ -6,12 +6,16 @@
     Runs the loopback allocation/latency benchmarks of the production HTTP and Azure clients and records what they ran on.
 
 .DESCRIPTION
-    Needs no Azure account and spends no cloud resources. It runs two gtest executables that talk to an in-process
-    loopback server on its own thread:
+    Needs no Azure account and spends no cloud resources.     It runs three gtest executables that talk to an in-process
+        or loopback server:
       aveva-http-client-tests  (HttpClientAllocations.PublicClientPooledRequestWithIndependentServer)
           the public HttpClient::SendAsync, including its final completion hand-off.
       aveva-azure-client-e2e-benchmark
           BlobClient ranged reads -> request pipeline -> HttpClient -> TCP -> loopback page-blob server.
+      aveva-rocksdb-plugin-azure-impl-benchmark
+          the plugin's file classes (4 MiB reads, merged MultiRead, prefetch hits, small append+Sync) over the real
+          BlobClient and an in-process fake service; no sockets or TLS. Its counters cover the issuing threads and
+          the whole process, including the inline fake service; see tools/db_bench/README.md for what they exclude.
     Each prints 'BENCH ...' lines with allocations and bytes per request, requests/connections the server saw,
     throughput and p50/p99/max latency. These are loopback CPU and allocation numbers; they are NOT Azure network
     results (use Compare-Backends.ps1 -ConfirmLiveAzure for those). Use a Release build: Debug allocation counts
@@ -23,7 +27,7 @@
 
 .EXAMPLE
     cmake --preset WindowsRelease
-    cmake --build build\WindowsRelease --config Release --target aveva-http-client-tests aveva-azure-client-e2e-benchmark
+    cmake --build build\WindowsRelease --config Release --target aveva-http-client-tests aveva-azure-client-e2e-benchmark aveva-rocksdb-plugin-azure-impl-benchmark
     .\Measure-Loopback.ps1 -Label before
 #>
 [CmdletBinding()]
@@ -48,6 +52,10 @@ $targets = [ordered]@{
     }
     'azure-client' = @{
         Exe = Join-Path $BuildDir "libs\AzureClient\tests\$Configuration\aveva-azure-client-e2e-benchmark.exe"
+        Args = @()
+    }
+    'plugin' = @{
+        Exe = Join-Path $BuildDir "tests\AVEVA\RocksDB\Plugin\Azure\Impl\$Configuration\aveva-rocksdb-plugin-azure-impl-benchmark.exe"
         Args = @()
     }
 }
@@ -80,7 +88,7 @@ foreach ($name in $targets.Keys) {
     parameters = [ordered]@{
         repeat = $Repeat; network = 'loopback only (not Azure)'; server = 'independent thread'
         state = 'warm: connections opened by a warm-up request, measured requests reuse the pooled keep-alive connection'
-        counted = 'operator new on the client thread only; the server thread is excluded'
+        counted = 'scalar operator new only (no aligned new, malloc, OpenSSL or OS allocations). http-client/azure-client: client thread only, server thread excluded. plugin: issuing threads and whole process, including the inline fake service'
     }
 } | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $OutDir 'loopback-metadata.json')
 
