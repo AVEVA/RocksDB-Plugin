@@ -214,9 +214,7 @@ struct SplitEndpointParts {
         parts.BasePrefix += std::string(parsed.port());
     }
     parts.BasePath.assign(parsed.encoded_path().begin(), parsed.encoded_path().end());
-    while (!parts.BasePath.empty() && parts.BasePath.back() == '/') {
-        parts.BasePath.pop_back();
-    }
+    parts.BasePath.resize(TrimTrailingSlashes(parts.BasePath).size());
     return parts;
 }
 

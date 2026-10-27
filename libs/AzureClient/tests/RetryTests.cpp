@@ -797,6 +797,20 @@ TEST(RetryTests, MalformedOrNegativeRetryAfterHintsAreTreatedAsAbsent) {
     EXPECT_FALSE(AVEVA::AzureClient::Private::ParseRetryAfter(negativeMs).has_value());
 }
 
+TEST(RetryTests, RetryAfterTrimsOnlySpaceAndTab) {
+    using AVEVA::AzureClient::Private::ParseRetryAfter;
+    for (const std::string_view value : {" \t7\t ", "7", "\t7"}) {
+        const HttpResponse response{503, {{"Retry-After", std::string{value}}}, ""};
+        const auto hint = ParseRetryAfter(response);
+        ASSERT_TRUE(hint.has_value()) << value;
+        EXPECT_EQ(*hint, std::chrono::seconds{7});
+    }
+    for (const std::string_view value : {"\v7", "7\f", "\r7", "7\n", " \t ", "\t"}) {
+        const HttpResponse response{503, {{"Retry-After", std::string{value}}}, ""};
+        EXPECT_FALSE(ParseRetryAfter(response).has_value()) << value;
+    }
+}
+
 TEST(RetryTests, RetryAfterHintsAreNeverNegative) {
     const HttpResponse pastDate{503, {{"Retry-After", "Wed, 21 Oct 2015 07:28:00 GMT"}}, ""};
     const auto hint = AVEVA::AzureClient::Private::ParseRetryAfter(pastDate);

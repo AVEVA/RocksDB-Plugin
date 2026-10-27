@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include <AVEVA/AzureClient/Credentials.hpp>
+#include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 
 #include <boost/json/parse.hpp>
 #include <boost/json/serialize.hpp>
@@ -149,10 +150,7 @@ bool IsValidTenantId(std::string_view tenantId) noexcept {
 }
 
 std::string NormalizeAuthorityHost(std::string_view authorityHost) {
-    std::string_view host = authorityHost;
-    while (host.ends_with('/')) {
-        host.remove_suffix(1);
-    }
+    const std::string_view host = TrimTrailingSlashes(authorityHost);
     const auto parsed = boost::urls::parse_uri(host);
     if (!parsed || parsed->scheme_id() != boost::urls::scheme::https || !parsed->has_authority() ||
         parsed->host().empty()) {

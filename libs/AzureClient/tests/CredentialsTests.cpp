@@ -470,11 +470,12 @@ TEST(CredentialsTests, ManagedIdentityRetriesNotFoundAndGone) {
 
 TEST(CredentialsTests, InvalidAuthorityHostThrowsFromConstructor) {
     FakeHttpClient httpClient;
-    for (const std::string host : {"http://login.microsoftonline.com", "https://login.microsoftonline.com?x=1",
-                                   "https://login.microsoftonline.com#f", "https://login.microsoftonline.com/path",
-                                   "https://login.microsoftonline.com@evil.example", "https://a:b:c",
-                                   "https://host:99999", "https://[::1", "https://user:pw@login.microsoftonline.com",
-                                   "https://login.microsoftonline.com\\@evil.example", "https://", ""}) {
+    for (const std::string host :
+         {"http://login.microsoftonline.com", "https://login.microsoftonline.com?x=1",
+          "https://login.microsoftonline.com#f", "https://login.microsoftonline.com/path",
+          "https://login.microsoftonline.com@evil.example", "https://a:b:c", "https://host:99999", "https://[::1",
+          "https://user:pw@login.microsoftonline.com", "https://login.microsoftonline.com\\@evil.example", "https://",
+          "", "/", "///", "https://login.microsoftonline.com/x/"}) {
         ClientSecretCredentialOptions options = SecretOptions();
         options.AuthorityHost = host;
         EXPECT_THROW((ClientSecretCredential{httpClient, options}), std::invalid_argument) << host;
@@ -483,7 +484,8 @@ TEST(CredentialsTests, InvalidAuthorityHostThrowsFromConstructor) {
         EXPECT_THROW((WorkloadIdentityCredential{httpClient, workload}), std::invalid_argument) << host;
     }
     EXPECT_NO_THROW((ClientSecretCredential{httpClient, SecretOptions()}));
-    for (const std::string host : {"https://login.microsoftonline.com:8443", "HTTPS://LOGIN.MicrosoftOnline.com"}) {
+    for (const std::string host : {"https://login.microsoftonline.com:8443", "https://login.microsoftonline.com//",
+                                   "HTTPS://LOGIN.MicrosoftOnline.com"}) {
         ClientSecretCredentialOptions options = SecretOptions();
         options.AuthorityHost = host;
         EXPECT_NO_THROW((ClientSecretCredential{httpClient, options})) << host;

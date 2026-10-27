@@ -24,12 +24,12 @@
 namespace AVEVA::AzureClient::Private {
 namespace {
 [[nodiscard]] std::optional<std::uint64_t> ParseHeaderUnsigned(std::string_view value) noexcept {
-    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
-        value.remove_prefix(1);
-    }
-    while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) {
-        value.remove_suffix(1);
-    }
+    // Only SP/HTAB are optional whitespace around a header field value (RFC 9110); other controls must fail.
+    constexpr std::string_view OptionalWhitespace = " \t";
+    const std::size_t first = value.find_first_not_of(OptionalWhitespace);
+    value = first == std::string_view::npos
+                ? std::string_view{}
+                : value.substr(first, value.find_last_not_of(OptionalWhitespace) - first + 1U);
     std::uint64_t parsed = 0;
     const auto [ptr, ec] = std::from_chars(std::to_address(value.begin()), std::to_address(value.end()), parsed);
     if (value.empty() || ec != std::errc{} || ptr != std::to_address(value.end())) {

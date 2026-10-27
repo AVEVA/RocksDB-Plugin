@@ -325,6 +325,9 @@ TEST(BlobRequestHelpersTests, StringHelpers_AreCaseInsensitiveAndTrimAsExpected)
 
     EXPECT_EQ(TrimTrailingSlashes("https://example.com///"), "https://example.com");
     EXPECT_EQ(TrimTrailingSlashes("plain"), "plain");
+    EXPECT_EQ(TrimTrailingSlashes(""), "");
+    EXPECT_EQ(TrimTrailingSlashes("///"), "");
+    EXPECT_EQ(TrimTrailingSlashes("/a/b/"), "/a/b");
 
     EXPECT_EQ(TrimLeadingQuestionMark("?sv=1&sig=2"), "sv=1&sig=2");
     EXPECT_EQ(TrimLeadingQuestionMark("sv=1&sig=2"), "sv=1&sig=2");
