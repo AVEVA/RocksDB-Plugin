@@ -518,6 +518,10 @@ TEST(HttpClientRequest, BuildFailuresAreNotAllReportedAsInvalidRequests) {
     EXPECT_EQ(classify(std::length_error("header too long")), AVEVA::HttpClientError::InvalidRequest);
     EXPECT_EQ(classify(std::invalid_argument("bad")), AVEVA::HttpClientError::InvalidRequest);
     EXPECT_EQ(classify(boost::system::system_error(http::error::bad_field)), AVEVA::HttpClientError::InvalidRequest);
+    EXPECT_EQ(classify(boost::system::system_error(boost::asio::error::no_memory)),
+              std::make_error_code(std::errc::not_enough_memory));
+    EXPECT_EQ(classify(boost::system::system_error(boost::asio::error::connection_reset)),
+              std::make_error_code(std::errc::state_not_recoverable));
     EXPECT_EQ(classify(std::bad_alloc()), std::make_error_code(std::errc::not_enough_memory));
     EXPECT_EQ(classify(std::runtime_error("unexpected")), std::make_error_code(std::errc::state_not_recoverable));
     EXPECT_EQ(classify(42), std::make_error_code(std::errc::state_not_recoverable));

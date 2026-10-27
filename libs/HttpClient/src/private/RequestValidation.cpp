@@ -7,10 +7,13 @@
 #include "AVEVA/HttpClient/HttpClientError.hpp"
 
 #include <algorithm>
+#include <boost/asio/error.hpp>
+#include <boost/asio/ssl/error.hpp>
 #include <boost/beast/http/fields.hpp>
 #include <boost/system/system_error.hpp>
 #include <boost/url/scheme.hpp>
 #include <new>
+#include <openssl/err.h>
 #include <stdexcept>
 #include <string_view>
 
@@ -69,8 +72,16 @@ std::error_code ClassifyBuildFailure(std::exception_ptr failure) noexcept {
         return HttpClientError::InvalidRequest;
     } catch (const std::invalid_argument&) {
         return HttpClientError::InvalidRequest;
-    } catch (const boost::system::system_error&) {
-        return HttpClientError::InvalidRequest;
+    } catch (const boost::system::system_error& e) {
+        // Only Beast's own errors describe unrepresentable input; asio/SSL errors are transport or resource failures.
+        if (IsBeastHttpError(e.code())) {
+            return HttpClientError::InvalidRequest;
+        }
+        const auto& code = e.code();
+        const bool outOfMemory =
+            code == boost::asio::error::no_memory || (code.category() == boost::asio::error::get_ssl_category() &&
+                                                      ERR_GET_REASON(code.value()) == ERR_R_MALLOC_FAILURE);
+        return std::make_error_code(outOfMemory ? std::errc::not_enough_memory : std::errc::state_not_recoverable);
     } catch (...) {
         return std::make_error_code(std::errc::state_not_recoverable);
     }

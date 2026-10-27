@@ -6,6 +6,7 @@
 #include "ConnectionPool.hpp"
 #include "DiagnosticsSink.hpp"
 #include "DnsCache.hpp"
+#include "RequestValidation.hpp"
 #include "Route.hpp"
 #include "StreamTypes.hpp"
 
@@ -32,16 +33,6 @@
 #include <variant>
 
 namespace AVEVA::Private {
-/// <summary>
-/// Any error raised by Beast's HTTP parser (bad status line, bad header, bad chunk, ...) means the peer sent
-/// something that is not valid HTTP, as opposed to a transport failure.
-/// </summary>
-/// <param name="error">The error to classify.</param>
-/// <returns>True if it came from the HTTP parser.</returns>
-inline bool IsBeastHttpError(const boost::system::error_code& error) noexcept {
-    return error.category() == boost::beast::http::make_error_code(boost::beast::http::error{}).category();
-}
-
 template <typename Stream> class RequestOperation;
 
 /// <summary>

@@ -6,6 +6,8 @@
 #include "AVEVA/HttpClient/HttpRequest.hpp"
 #include "AVEVA/HttpClient/HttpRequestOptions.hpp"
 
+#include <boost/beast/http/error.hpp>
+#include <boost/system/error_code.hpp>
 #include <boost/url/url_view.hpp>
 
 #include <exception>
@@ -13,6 +15,16 @@
 #include <system_error>
 
 namespace AVEVA::Private {
+/// <summary>
+/// Any error raised by Beast's HTTP parser (bad status line, bad header, bad chunk, ...) means the peer sent
+/// something that is not valid HTTP, as opposed to a transport failure.
+/// </summary>
+/// <param name="error">The error to classify.</param>
+/// <returns>True if it came from the HTTP parser.</returns>
+inline bool IsBeastHttpError(const boost::system::error_code& error) noexcept {
+    return error.category() == boost::beast::http::make_error_code(boost::beast::http::error{}).category();
+}
+
 /// <summary>
 /// Checks whether a value is a valid HTTP token (RFC 7230 section 3.2.6), as required for header names.
 /// </summary>
