@@ -111,11 +111,20 @@ void RequestOperation<Stream>::BuildRequestUnchecked(HttpRequest& request, const
     req.method(verb);
     req.target(route.Target);
     for (const auto& header : request.GetHeaders()) {
-        if (beast::iequals(header.GetName(), "Host") || beast::iequals(header.GetName(), "Content-Length") ||
-            beast::iequals(header.GetName(), "Transfer-Encoding") || beast::iequals(header.GetName(), "Connection")) {
+        const auto field = http::string_to_field(header.GetName());
+        switch (field) {
+        case http::field::host:
+        case http::field::content_length:
+        case http::field::transfer_encoding:
+        case http::field::connection:
             continue;
+        case http::field::unknown:
+            req.insert(header.GetName(), header.GetValue());
+            break;
+        default:
+            req.insert(field, header.GetValue());
+            break;
         }
-        req.insert(header.GetName(), header.GetValue());
     }
     req.set(http::field::host, route.Authority);
     req.keep_alive(true);
@@ -143,7 +152,7 @@ void RequestOperation<Stream>::BuildRequestUnchecked(HttpRequest& request, const
     const auto method = req.method();
     if (req.body().size != 0 || method == http::verb::post || method == http::verb::put ||
         method == http::verb::patch) {
-        req.set(http::field::content_length, std::to_string(req.body().size));
+        req.content_length(req.body().size);
     }
     ResetParser();
     m_hostIsName = route.HostIsName;

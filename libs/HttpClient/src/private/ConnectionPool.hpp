@@ -15,6 +15,7 @@
 
 #include "Timeouts.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <functional>
@@ -46,26 +47,13 @@ template <typename Stream> struct ConnectionKey {
     bool operator==(const ConnectionKey& other) const noexcept {
         return host == other.host && service == other.service;
     }
-};
 
-/// <summary>
-/// Hashes a <see cref="ConnectionKey"/> by combining its host and service.
-/// </summary>
-template <typename Stream> struct ConnectionKeyHash {
-    std::size_t operator()(const ConnectionKey<Stream>& key) const noexcept {
+    /// <summary>Hashes the key by combining its host and service; found by boost::hash via ADL.</summary>
+    friend std::size_t hash_value(const ConnectionKey& key) noexcept {
         std::size_t seed = 0;
         boost::hash_combine(seed, key.host);
         boost::hash_combine(seed, key.service);
         return seed;
-    }
-};
-
-/// <summary>
-/// Compares two <see cref="ConnectionKey"/> values for equality.
-/// </summary>
-template <typename Stream> struct ConnectionKeyEqual {
-    bool operator()(const ConnectionKey<Stream>& lhs, const ConnectionKey<Stream>& rhs) const noexcept {
-        return lhs == rhs;
     }
 };
 
@@ -454,7 +442,7 @@ class ConnectionPool {
     struct Origin;
 
     using OriginMap =
-        boost::unordered_node_map<ConnectionKey<Stream>, Origin, ConnectionKeyHash<Stream>, ConnectionKeyEqual<Stream>>;
+        boost::unordered_node_map<ConnectionKey<Stream>, Origin, boost::hash<ConnectionKey<Stream>>, std::equal_to<>>;
 
     /// <summary>
     /// A cached connection, linked into both its origin's idle list and the pool-wide LRU list.

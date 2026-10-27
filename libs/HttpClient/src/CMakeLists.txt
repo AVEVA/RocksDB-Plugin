@@ -36,6 +36,7 @@ target_sources(aveva-http-client
 find_package(boost_asio CONFIG REQUIRED)
 find_package(boost_beast CONFIG REQUIRED)
 find_package(boost_intrusive CONFIG REQUIRED)
+find_package(boost_scope CONFIG REQUIRED)
 find_package(boost_unordered CONFIG REQUIRED)
 find_package(boost_url CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
@@ -48,6 +49,6 @@ if(MSVC)
 endif()
 target_link_libraries(aveva-http-client
     PUBLIC Boost::asio Microsoft.GSL::GSL
-    PRIVATE Boost::beast Boost::intrusive Boost::unordered Boost::url OpenSSL::SSL OpenSSL::Crypto
+    PRIVATE Boost::beast Boost::intrusive Boost::scope Boost::unordered Boost::url OpenSSL::SSL OpenSSL::Crypto
 )
 aveva_install_library(aveva-http-client)
