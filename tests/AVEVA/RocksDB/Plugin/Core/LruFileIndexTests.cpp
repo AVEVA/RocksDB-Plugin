@@ -65,8 +65,12 @@ constexpr size_t kMinFailedAllocation = 64;
 } // namespace
 // Shared with the other tests of this executable, which see the same replaced operator new.
 thread_local size_t g_failAllocationIn = 0;
+// When non-zero, every allocation of at least this many bytes throws.
+thread_local size_t g_failAllocationsAtLeast = 0;
 
 void* operator new(const size_t size) {
+    if (g_failAllocationsAtLeast != 0 && size >= g_failAllocationsAtLeast)
+        throw std::bad_alloc();
     if (size >= kMinFailedAllocation && g_failAllocationIn != 0 && --g_failAllocationIn == 0)
         throw std::bad_alloc();
     if (void* p = std::malloc(size ? size : 1))
@@ -173,4 +177,26 @@ TEST(LruFileIndexTests, EvictionSkipsPinnedTailAndKeepsLruOrder) {
     ASSERT_EQ(kFree, evicted.size());
     EXPECT_NE(std::string::npos, evicted.front().first.find("f0"));
     EXPECT_EQ(kPinned, index.GetUsage());
+}
+
+// Replacing one victim must not allocate storage proportional to the index size.
+TEST(LruFileIndexTests, SingleVictimEvictionDoesNotAllocateInProportionToIndexSize) {
+    constexpr size_t kEntries = 20000;
+    LruFileIndex index("cache", kEntries);
+    for (size_t i = 0; i < kEntries; ++i)
+        (void)index.RegisterEntry("e" + std::to_string(i), 1);
+
+    g_failAllocationsAtLeast = 4096;
+    LruFileIndex::EvictList evicted;
+    try {
+        evicted = index.RegisterEntry("new", 1);
+    } catch (const std::bad_alloc&) {
+        g_failAllocationsAtLeast = 0;
+        FAIL() << "a single-victim eviction allocated a large block";
+    }
+    g_failAllocationsAtLeast = 0;
+
+    ASSERT_EQ(1U, evicted.size());
+    EXPECT_NE(std::string::npos, evicted.front().first.find("e0"));
+    EXPECT_EQ(kEntries, index.GetUsage());
 }

@@ -3,6 +3,8 @@
 
 #include "LruFileIndex.hpp"
 
+#include <boost/container/small_vector.hpp>
+
 #include <algorithm>
 #include <filesystem>
 #include <limits>
@@ -198,9 +200,10 @@ void LruFileIndex::EvictUntilSizeLocked(const size_t targetSize, EvictList& evic
     // Phase 1 selects victims and builds all their paths without mutating the index, so a throw (e.g. bad_alloc while
     // building the path of a later victim) cannot strand earlier victims: they are still tracked, not half-removed.
     const size_t pairsBefore = evictPairs.size();
-    std::vector<LruIterator> victims;
+    // The result vector grows geometrically instead of reserving room for every entry, so evicting one victim does not
+    // allocate O(index size); growth is safe because nothing has been mutated yet.
+    boost::container::small_vector<LruIterator, 4> victims;
     try {
-        evictPairs.reserve(pairsBefore + m_lruList.size());
         size_t projectedSize = m_currentSize;
         // The cursor only moves towards the front, so entries found pinned are skipped once per pass instead of once
         // per eviction.
