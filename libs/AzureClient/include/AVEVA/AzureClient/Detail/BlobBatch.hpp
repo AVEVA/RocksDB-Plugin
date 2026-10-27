@@ -218,15 +218,23 @@ class BatchDeleteOperation final
             urls.reserve(end - begin);
             for (std::size_t index = begin; index < end; ++index) {
                 urls.push_back(
-                    BuildBlobUrl(MakeBlobTarget(m_target->Connection, m_target->ContainerName, m_names.at(index))));
+                    BuildBlobUrl(MakeBlobTarget(m_target->Connection, m_target->ContainerName, m_names[index])));
             }
         }
+        // One date per body: sub-requests are built within the same instant, well inside the allowed clock skew.
+        const std::string date = BuildDateHeaderValue(std::chrono::system_clock::now());
+        constexpr std::size_t PerPartOverhead = 512U;
+        std::size_t reserveSize = boundary.size() + PerPartOverhead;
+        for (const auto& url : urls) {
+            reserveSize += url.size() + PerPartOverhead;
+        }
         std::string body;
+        body.reserve(reserveSize);
         for (std::size_t index = begin; index < end; ++index) {
             HttpRequest subrequest;
             subrequest.SetMethod(HttpMethod::Delete);
             subrequest.SetUrl(urls[index - begin]);
-            AddHeader(subrequest, XMsDateHeaderName, BuildDateHeaderValue(std::chrono::system_clock::now()));
+            AddHeader(subrequest, XMsDateHeaderName, date);
             AuthorizeSubrequest(subrequest, token);
             AddHeader(subrequest, ContentLengthHeaderName, "0");
             AppendBatchDeletePart(body, boundary, index - begin, subrequest);
