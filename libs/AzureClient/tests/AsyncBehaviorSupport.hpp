@@ -37,12 +37,14 @@
 #include <boost/asio/strand.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <gtest/gtest.h>
 #include <ios>
 #include <istream>
+#include <new>
 #include <stdexcept>
 
 #include <chrono>
@@ -123,6 +125,27 @@ template <class T> class CountingAllocator {
 
     std::shared_ptr<int> m_allocateCount;
     std::shared_ptr<int> m_deallocateCount;
+};
+
+// A strand executor whose next `Failures` execute() calls throw, to fail the final hand-off to a handler's executor.
+struct FailingStrandExecutor {
+    boost::asio::strand<boost::asio::io_context::executor_type> Strand;
+    std::shared_ptr<std::atomic<int>> Failures;
+
+    template <typename F> void execute(F&& function) const {
+        if (Failures->fetch_sub(1) > 0) {
+            throw std::bad_alloc();
+        }
+        Strand.execute(std::forward<F>(function));
+    }
+    [[nodiscard]] boost::asio::execution_context& query(boost::asio::execution::context_t) const noexcept {
+        return boost::asio::query(Strand, boost::asio::execution::context);
+    }
+    [[nodiscard]] FailingStrandExecutor require(boost::asio::execution::blocking_t::never_t) const { return *this; }
+    [[nodiscard]] bool running_in_this_thread() const noexcept { return Strand.running_in_this_thread(); }
+    friend bool operator==(const FailingStrandExecutor& a, const FailingStrandExecutor& b) noexcept {
+        return a.Strand == b.Strand;
+    }
 };
 
 [[nodiscard]] inline BlobClientOptions MakePageBlobOptions() { return MakeBlobClientOptions("images", "page.bin"); }

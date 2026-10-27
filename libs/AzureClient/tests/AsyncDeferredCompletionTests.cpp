@@ -385,6 +385,91 @@ TEST(AsyncBehaviorTests, ExplicitAssociatedExecutorReceivesTheCompletionInsteadO
     EXPECT_TRUE(completedOnStrand);
 }
 
+// The final dispatch to the handler's executor failing must not lose the completion: it is retried so the handler still
+// runs once on its strand, and falls back to running once (not lost) if the executor keeps rejecting work.
+TEST(AsyncBehaviorTests, FailedFinalDispatchOfABlobCompletionIsRetriedOnTheHandlersStrand) {
+    FakeHttpClient httpClient;
+    httpClient.DeferByDefault() = true;
+    BlobClient client{httpClient, MakeBlobClientOptions()};
+
+    boost::asio::io_context strandContext;
+    boost::asio::strand<boost::asio::io_context::executor_type> strand{strandContext.get_executor()};
+    auto failures = std::make_shared<std::atomic<int>>(1);
+
+    int completions = 0;
+    bool onStrand = false;
+    bool succeeded = false;
+    client.DeleteAsync(boost::asio::bind_executor(FailingStrandExecutor{strand, failures}, [&](DeleteResult result) {
+        ++completions;
+        onStrand = strand.running_in_this_thread();
+        succeeded = result.has_value();
+    }));
+
+    ASSERT_TRUE(httpClient.CompleteNext());
+    EXPECT_LE(failures->load(), 0);
+    EXPECT_EQ(completions, 0);
+    strandContext.poll();
+    EXPECT_EQ(completions, 1);
+    EXPECT_TRUE(onStrand);
+    EXPECT_TRUE(succeeded);
+}
+
+TEST(AsyncBehaviorTests, BlobCompletionWhoseExecutorKeepsRejectingTheFinalDispatchStillRunsOnce) {
+    FakeHttpClient httpClient;
+    httpClient.DeferByDefault() = true;
+    BlobClient client{httpClient, MakeBlobClientOptions()};
+
+    boost::asio::io_context strandContext;
+    boost::asio::strand<boost::asio::io_context::executor_type> strand{strandContext.get_executor()};
+    auto failures = std::make_shared<std::atomic<int>>(1000);
+
+    int completions = 0;
+    bool succeeded = false;
+    client.DeleteAsync(boost::asio::bind_executor(FailingStrandExecutor{strand, failures}, [&](DeleteResult result) {
+        ++completions;
+        succeeded = result.has_value();
+    }));
+
+    EXPECT_NO_THROW(ASSERT_TRUE(httpClient.CompleteNext()));
+    strandContext.poll();
+    EXPECT_EQ(completions, 1);
+    EXPECT_TRUE(succeeded);
+}
+
+// The file-download path posts to the client's executor first and then performs the same final dispatch; a failure
+// there must still deliver the documented (successful) result once, on the handler's strand.
+TEST(AsyncBehaviorTests, FailedFinalDispatchOfAFileDownloadCompletionStillDeliversTheResultOnTheStrand) {
+    FakeHttpClient httpClient;
+    httpClient.DefaultResponse() =
+        HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "10"}}), "downloaded"};
+    PageBlobClient client{httpClient, MakeBlobClientOptions("logs", "t05.txt")};
+
+    boost::asio::io_context strandContext;
+    boost::asio::strand<boost::asio::io_context::executor_type> strand{strandContext.get_executor()};
+    auto failures = std::make_shared<std::atomic<int>>(1);
+
+    const AVEVA::AzureClient::Tests::ScopedTestDirectory scratch{"t05-final-dispatch"};
+    const std::filesystem::path path = scratch.Path() / "download-output.txt";
+
+    int completions = 0;
+    bool onStrand = false;
+    std::uint64_t bytesWritten = 0;
+    client.DownloadToAsync(
+        path, boost::asio::bind_executor(FailingStrandExecutor{strand, failures}, [&](DownloadBlobToResult result) {
+            ++completions;
+            onStrand = strand.running_in_this_thread();
+            ASSERT_TRUE(result.has_value());
+            bytesWritten = result->Value().BytesWritten;
+        }));
+
+    httpClient.Poll();
+    strandContext.poll();
+    EXPECT_LE(failures->load(), 0);
+    EXPECT_EQ(completions, 1);
+    EXPECT_TRUE(onStrand);
+    EXPECT_EQ(bytesWritten, 10U);
+}
+
 // The handler's executor must be kept busy from initiation, so run() on a separate io_context does not return
 // before the (still pending) operation completes.
 TEST(AsyncBehaviorTests, HandlerExecutorWorkGuardIsTakenAtInitiation) {
