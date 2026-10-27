@@ -53,11 +53,13 @@ struct ConnectionState;
 
 // Container operations, and the factory for clients of the blobs it contains.
 //
-// Thread safety: concurrent ...Async calls on one instance are supported. Completion
-// handlers are not serialized with each other and may run inline, before the initiating call returns.
+// Thread safety: concurrent ...Async calls on one instance are supported. Completion handlers are never
+// invoked from inside the initiating call (see BlobClient.hpp for the full completion contract) and are not
+// serialized with each other unless their executor is a strand.
 //
-// Lifetime: stores a non-owning reference to the HTTP client, which must outlive this client and every
-// in-flight ...Async operation; destroying either before a completion handler runs is undefined behavior.
+// Lifetime: operations borrow the HTTP client and never own it, unless this client was built from a
+// std::shared_ptr to it (then this client and everything made from it shares ownership). The HTTP client must
+// outlive every in-flight ...Async operation, so keep it or a shared owner alive until the handler has run.
 // A deferred operation (omitted token) snapshots this client's state when created, so it stays valid if the
 // client is moved from or destroyed before the operation is started.
 //
