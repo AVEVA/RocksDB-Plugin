@@ -139,6 +139,16 @@ TEST(CredentialsTests, ClientSecretCredentialPostsClientCredentialsGrant) {
               "&scope=https%3A%2F%2Fstorage.azure.com%2F.default%20offline_access");
 }
 
+TEST(CredentialsTests, ClientSecretCredentialAcceptsFloatingPointExpiresIn) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(Json(200, R"({"expires_in":3599.0,"access_token":"tok"})"));
+    ClientSecretCredential credential{httpClient, SecretOptions()};
+
+    const TokenResult result = GetToken(httpClient, credential);
+    ASSERT_FALSE(result.Error) << result.Error.message();
+    EXPECT_GE(result.Token.ExpiresOn, Clock::now() + std::chrono::seconds{3500});
+}
+
 TEST(CredentialsTests, ClientSecretCredentialHonoursAuthorityHost) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(Json(200, R"({"expires_in":"60","access_token":"tok"})"));

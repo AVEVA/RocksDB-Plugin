@@ -18,6 +18,7 @@
 #include <fstream>
 #include <ios>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 
 namespace AVEVA::AzureClient {
@@ -86,6 +87,38 @@ std::string JsonText(const boost::json::object& object, std::string_view key) {
     }
     return {};
 }
+
+// Reads an integer that identity endpoints send as a JSON integer, a double (3599.0) or a string.
+std::optional<std::int64_t> JsonInt(const boost::json::object& object, std::string_view key) {
+    const auto it = object.find(key);
+    if (it == object.end()) {
+        return std::nullopt;
+    }
+    const boost::json::value& value = it->value();
+    if (value.is_int64()) {
+        return value.as_int64();
+    }
+    if (value.is_uint64()) {
+        const auto unsignedValue = value.as_uint64();
+        if (unsignedValue > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+            return std::nullopt;
+        }
+        return static_cast<std::int64_t>(unsignedValue);
+    }
+    if (value.is_double()) {
+        const double number = value.as_double();
+        // 2^63 is the first double above int64 max; the cast is only defined below it.
+        constexpr double Limit = 9223372036854775808.0;
+        if (!(number >= -Limit && number < Limit)) {
+            return std::nullopt;
+        }
+        return static_cast<std::int64_t>(number);
+    }
+    if (value.is_string()) {
+        return ParseInteger(std::string_view{value.as_string()});
+    }
+    return std::nullopt;
+}
 } // namespace
 
 std::expected<AccessToken, std::error_code> ParseTokenResponse(std::error_code error, const HttpResponse& response) {
@@ -115,13 +148,12 @@ std::expected<AccessToken, std::error_code> ParseTokenResponse(std::error_code e
     if (token.Token.empty()) {
         return invalid;
     }
-    if (const auto expiresIn = ParseInteger(JsonText(tree, "expires_in"));
+    if (const auto expiresIn = JsonInt(tree, "expires_in");
         expiresIn.has_value() && *expiresIn >= MinTokenLifetimeSeconds) {
         // Tokens living longer than the cap are accepted but refreshed at the cap.
         const auto lifetime = std::min(*expiresIn, MaxTokenLifetimeSeconds);
         token.ExpiresOn = std::chrono::time_point_cast<Clock::duration>(Clock::now() + std::chrono::seconds{lifetime});
-    } else if (const auto expiresOn = ParseInteger(JsonText(tree, "expires_on"));
-               expiresOn.has_value() && *expiresOn >= 0) {
+    } else if (const auto expiresOn = JsonInt(tree, "expires_on"); expiresOn.has_value() && *expiresOn >= 0) {
         const auto now = Clock::now();
         const std::int64_t nowSeconds =
             std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
