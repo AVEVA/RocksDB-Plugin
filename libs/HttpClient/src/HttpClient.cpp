@@ -28,21 +28,34 @@ HttpClient::HttpClient(boost::asio::io_context& context, HttpClientOptions optio
 
 HttpClient::~HttpClient() {
     if (!m_impl->writerPool) {
+        m_impl->Shutdown();
         return;
     }
     if (m_impl->writerPool->get_executor().running_in_this_thread()) {
-        // The last owner was released on a writer thread, which cannot join itself. A helper takes over the whole
-        // implementation, joins the pool once the current task returns (queued writes still finish) and only then
-        // tears the transport down, so no worker ever touches destroyed state.
-        std::thread([impl = std::move(m_impl)]() mutable {
-            impl->writerPool->join();
-            impl.reset();
-        }).detach();
+        // The last owner was released on a writer thread, which cannot join itself. The transport is torn down
+        // here, synchronously, because the caller may destroy the io_context as soon as we return. Only the pool
+        // goes to a helper thread, which joins it once the current task returns (queued writes still finish).
+        const auto diagnostics = m_impl->Shutdown();
+        // The pool travels as a raw pointer so a failed thread start cannot destroy it (a destructor join from one
+        // of its own workers would deadlock); on failure it is deliberately leaked.
+        auto* const rawPool = m_impl->writerPool.release();
+        try {
+            std::thread([rawPool] {
+                const std::unique_ptr<boost::asio::thread_pool> pool(rawPool);
+                pool->join();
+            }).detach();
+        } catch (...) {
+            Private::DiagnosticsSink::Report(
+                diagnostics, HttpDiagnosticKind::SwallowedException, HttpRequestPhase::Queued, {}, {}, {},
+                "The download writer pool could not be joined on a helper thread; it was leaked");
+            rawPool->stop();
+        }
         return;
     }
     // join() lets queued sink writes finish instead of abandoning them, which would strand their downloads.
-    // It runs before m_impl is destroyed, so the pool is joined ahead of the transport teardown.
+    // It runs before the transport teardown so no worker touches destroyed state.
     m_impl->writerPool->join();
+    m_impl->Shutdown();
 }
 boost::asio::thread_pool::executor_type HttpClient::GetDownloadWriter() {
     const std::scoped_lock lock(m_impl->writerMutex);

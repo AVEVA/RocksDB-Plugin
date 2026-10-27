@@ -216,10 +216,18 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         }
     }
 
-    ~BasicHttpClientCore() {
+    /// <summary>
+    /// Fails queued requests and disposes idle connections now, while the caller's io_context is still alive.
+    /// Safe to repeat; the destructor runs it again.
+    /// </summary>
+    void Shutdown() {
         Close();
         m_sweeper->Stop();
     }
+
+    const std::shared_ptr<const DiagnosticsSink>& Diagnostics() const noexcept { return m_diagnostics; }
+
+    ~BasicHttpClientCore() { Shutdown(); }
 
     /// <summary>
     /// Sends a request, routing it through the per-origin limiter when one is configured.
@@ -552,7 +560,26 @@ template <typename FaultPolicy = NoFault> class BasicHttpClientImpl {
     /// Fails every request still waiting for a slot; requests already running keep the state they need
     /// alive on their own.
     /// </summary>
-    ~BasicHttpClientImpl() { m_core->Close(); }
+    ~BasicHttpClientImpl() {
+        if (m_core) {
+            m_core->Close();
+        }
+    }
+
+    /// <summary>
+    /// Synchronously tears the transport down (queued requests failed, idle connections disposed) and releases
+    /// the core, so nothing is left to post to the io_context afterwards. Returns the diagnostics sink for
+    /// reporting later teardown problems.
+    /// </summary>
+    std::shared_ptr<const DiagnosticsSink> Shutdown() noexcept {
+        if (!m_core) {
+            return nullptr;
+        }
+        m_core->Shutdown();
+        auto diagnostics = m_core->Diagnostics();
+        m_core.reset();
+        return diagnostics;
+    }
 
     /// <summary>
     /// Sends a request, routing it through the per-origin limiter when one is configured.
