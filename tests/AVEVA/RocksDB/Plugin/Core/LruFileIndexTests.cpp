@@ -97,6 +97,63 @@ TEST(LruFileIndexTests, ReserveCapacity_ThrowingEvictionReleasesPinAndSizeDiscou
     }
 }
 
+// A throw while registering (list node or index growth) must leave usage, lookup, touch, remove and shrink consistent.
+TEST(LruFileIndexTests, RegisterEntry_ThrowLeavesIndexConsistent) {
+    for (size_t existing = 0; existing <= 40; ++existing) {
+        for (size_t failAt = 1; failAt <= 4; ++failAt) {
+            LruFileIndex index("cache", 1'000'000);
+            for (size_t i = 0; i < existing; ++i)
+                (void)index.RegisterEntry("e" + std::to_string(i), 10);
+
+            g_failAllocationIn = failAt;
+            bool threw = false;
+            try {
+                (void)index.RegisterEntry("new", 7);
+            } catch (const std::bad_alloc&) {
+                threw = true;
+            }
+            g_failAllocationIn = 0;
+
+            const size_t expected = existing * 10 + (threw ? 0 : 7);
+            ASSERT_EQ(expected, index.GetUsage()) << existing << "/" << failAt;
+            EXPECT_EQ(!threw, index.Touch("new"));
+            EXPECT_EQ(!threw, index.TryPin("new").has_value());
+            EXPECT_EQ(threw, index.Remove("new").first.empty());
+            ASSERT_EQ(existing * 10, index.GetUsage());
+            EXPECT_EQ(existing, index.SetCapacity(0).size());
+            EXPECT_EQ(0U, index.GetUsage());
+        }
+    }
+}
+
+// If building the path of a later victim throws, no entry may be half-removed: earlier victims stay tracked so a
+// retry still returns every file to retire.
+TEST(LruFileIndexTests, SetCapacity_ThrowWhileBuildingLaterVictimKeepsAllEntriesTracked) {
+    const std::string longDir(64, 'd');
+    for (size_t failAt = 1; failAt <= 8; ++failAt) {
+        LruFileIndex index(longDir, 1000);
+        (void)index.RegisterEntry("a", 10);
+        (void)index.RegisterEntry("b", 10);
+        (void)index.RegisterEntry("c", 10);
+
+        g_failAllocationIn = failAt;
+        bool threw = false;
+        LruFileIndex::EvictList first;
+        try {
+            first = index.SetCapacity(0);
+        } catch (const std::bad_alloc&) {
+            threw = true;
+        }
+        g_failAllocationIn = 0;
+
+        if (threw) {
+            ASSERT_EQ(30U, index.GetUsage()) << "failAt=" << failAt;
+            first = index.SetCapacity(0);
+        }
+        EXPECT_EQ(3U, first.size()) << "failAt=" << failAt;
+        EXPECT_EQ(0U, index.GetUsage()) << "failAt=" << failAt;
+    }
+}
 // Pinned entries at the LRU tail must be skipped without disturbing eviction order of the unpinned ones.
 TEST(LruFileIndexTests, EvictionSkipsPinnedTailAndKeepsLruOrder) {
     constexpr size_t kPinned = 3000;

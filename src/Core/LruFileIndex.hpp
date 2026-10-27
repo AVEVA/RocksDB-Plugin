@@ -218,6 +218,12 @@ class LruFileIndex {
     /// </summary>
     [[nodiscard]] std::pair<std::string, std::string> RemoveEntryLocked(LruIterator it);
 
+    /// <summary>Builds {origPath, graveyardPath} for an entry without mutating the index.</summary>
+    [[nodiscard]] std::pair<std::string, std::string> BuildEvictionPair(const Entry& entry) const;
+
+    /// <summary>Drops an entry from the index, list and byte count.  Cannot throw; m_mutex must be held.</summary>
+    void EraseEntryLocked(LruIterator it) noexcept;
+
     std::string m_cacheDirStr;
     size_t m_capacity;
     size_t m_currentSize{0};
