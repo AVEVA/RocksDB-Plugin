@@ -29,6 +29,7 @@
 #include <filesystem>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -187,6 +188,66 @@ TEST_F(BlobFilesystemFakeTests, DirectoryWithChildrenExistsAndDeleteDirRemovesTh
     EXPECT_EQ(m_fs->DeleteDir(Path("dir")), 0U);
     EXPECT_FALSE(m_fs->FileExists(Path("dir/a.log")));
     EXPECT_FALSE(m_fs->FileExists(Path("dir")));
+}
+
+TEST_F(BlobFilesystemFakeTests, DeleteDirDeletesEachListingPageBeforeRequestingTheNext) {
+    for (int i = 0; i < 5200; ++i) {
+        (void)m_server->AddBlob("big/" + std::to_string(i), 1);
+    }
+    std::mutex mutex;
+    std::vector<FakeBlobServer::Operation> events;
+    m_server->Fault = [&](const auto operation) -> std::optional<AzureClient::BlobStorageError> {
+        const std::scoped_lock lock(mutex);
+        if (events.empty() || events.back() != operation || operation == FakeBlobServer::Operation::ListBlobs) {
+            events.push_back(operation);
+        }
+        return std::nullopt;
+    };
+
+    EXPECT_EQ(m_fs->DeleteDir(Path("big")), 0U);
+    m_server->Fault = nullptr;
+
+    // List, delete the first page, then list the second page, delete it, and the final "anything left" list.
+    using Operation = FakeBlobServer::Operation;
+    EXPECT_EQ(events, (std::vector<Operation>{Operation::ListBlobs, Operation::DeleteBlob, Operation::ListBlobs,
+                                              Operation::DeleteBlob, Operation::ListBlobs}));
+    EXPECT_TRUE(m_fs->GetChildren(Path("big")).empty());
+}
+
+TEST_F(BlobFilesystemFakeTests, DeleteDirKeepsDeletingLaterPagesAfterAPerBlobFailureThenThrows) {
+    for (int i = 0; i < 5200; ++i) {
+        (void)m_server->AddBlob("big/" + std::to_string(i), 1);
+    }
+    std::atomic<int> deletes = 0;
+    m_server->Fault = [&](const auto operation) -> std::optional<AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::DeleteBlob && deletes++ == 2) {
+            return FakeBlobServer::Error(403U, "AuthorizationFailure");
+        }
+        return std::nullopt;
+    };
+
+    EXPECT_THROW((void)m_fs->DeleteDir(Path("big")), RequestFailedException);
+    m_server->Fault = nullptr;
+
+    EXPECT_EQ(m_fs->GetChildren(Path("big")).size(), 1U);
+}
+
+TEST_F(BlobFilesystemFakeTests, DeleteDirListingFailureKeepsEarlierPagesDeletedAndLaterPagesUntouched) {
+    for (int i = 0; i < 5200; ++i) {
+        (void)m_server->AddBlob("big/" + std::to_string(i), 1);
+    }
+    std::atomic<int> lists = 0;
+    m_server->Fault = [&](const auto operation) -> std::optional<AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::ListBlobs && lists++ == 1) {
+            return FakeBlobServer::Error(400U, "InvalidInput");
+        }
+        return std::nullopt;
+    };
+
+    EXPECT_THROW((void)m_fs->DeleteDir(Path("big")), RequestFailedException);
+    m_server->Fault = nullptr;
+
+    EXPECT_EQ(m_fs->GetChildren(Path("big")).size(), 200U);
 }
 
 TEST_F(BlobFilesystemFakeTests, DeleteFileReportsWhetherAnythingWasDeleted) {

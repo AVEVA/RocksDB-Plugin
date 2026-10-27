@@ -36,40 +36,49 @@ template <typename THttp> size_t BasicBlobFilesystemImpl<THttp>::DeleteDir(const
     AzureClient::ListBlobsOptions options;
     options.Prefix = BlobFilesystemDetail::DirectoryPrefix(realPath);
 
-    std::vector<std::string> blobs;
-    BlobFilesystemDetail::ForEachBlob(
-        *container, options, [&blobs](const AzureClient::Models::BlobItem& blob) { blobs.push_back(blob.Name); });
+    // Each listing page is deleted before the next one is requested, so planning memory is bounded by one page
+    // instead of the whole directory. Batched deletes still cut the request count by up to 256x. Every listed blob
+    // is attempted and the first per-blob failure is thrown at the end, so callers never mistake a partial delete
+    // for success. A chunk-level failure (or a listing failure) propagates immediately: pages already deleted stay
+    // deleted and later pages are not attempted, where before a listing failure deleted nothing.
+    AzureClient::DeleteBlobsOptions deleteOptions;
+    deleteOptions.MaxConcurrentRequests = Configuration::Transfer::MaxConcurrentDeleteBatches;
+    std::optional<AzureClient::BlobStorageError> firstFailure;
 
-    // Dropped whether or not every delete succeeds: a blob recreated under the same name must never be served the
-    // old bytes from the cache. Removing a name that is not cached is a no-op.
-    const boost::scope::scope_exit dropCached{[&] {
-        if (const auto cache = m_fileCaches.find(prefix); cache != m_fileCaches.end()) {
-            for (const auto& name : blobs) {
-                cache->second->RemoveFile(name);
+    BlobFilesystemDetail::ForEachBlobPage(
+        *container, options, [&](const std::vector<AzureClient::Models::BlobItem>& page) {
+            if (page.empty()) {
+                return;
             }
-        }
-    }};
+            std::vector<std::string> names;
+            names.reserve(page.size());
+            for (const auto& blob : page) {
+                names.push_back(blob.Name);
+            }
 
-    if (!blobs.empty()) {
-        // Batched deletes cut the request count by up to 256x. Every blob is attempted, then the first failure (if
-        // any) is thrown so callers never mistake a partial delete for success.
-        AzureClient::DeleteBlobsOptions deleteOptions;
-        deleteOptions.MaxConcurrentRequests = Configuration::Transfer::MaxConcurrentDeleteBatches;
-        const auto result = BlobOperations::DeleteBatch(*m_runtime, *container, blobs, deleteOptions);
+            // Dropped whether or not every delete succeeds: a blob recreated under the same name must never be
+            // served the old bytes from the cache. Removing a name that is not cached is a no-op.
+            const boost::scope::scope_exit dropCached{[&] {
+                if (const auto cache = m_fileCaches.find(prefix); cache != m_fileCaches.end()) {
+                    for (const auto& name : names) {
+                        cache->second->RemoveFile(name);
+                    }
+                }
+            }};
 
-        std::optional<AzureClient::BlobStorageError> firstFailure;
-        for (const auto& item : result.Items) {
-            if (item.Error) {
-                BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
-                    << "Failed to delete blob '" << item.Name << "': " << item.Error->Message;
-                if (!firstFailure) {
-                    firstFailure = item.Error;
+            const auto result = BlobOperations::DeleteBatch(*m_runtime, *container, names, deleteOptions);
+            for (const auto& item : result.Items) {
+                if (item.Error) {
+                    BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
+                        << "Failed to delete blob '" << item.Name << "': " << item.Error->Message;
+                    if (!firstFailure) {
+                        firstFailure = item.Error;
+                    }
                 }
             }
-        }
-        if (firstFailure) {
-            ThrowRequestFailed(*firstFailure);
-        }
+        });
+    if (firstFailure) {
+        ThrowRequestFailed(*firstFailure);
     }
 
     // Only "is anything left" matters to callers (a delete that raced with a create), so one result is enough

@@ -59,6 +59,24 @@ void ForEachBlobUntil(TContainer& container, AzureClient::ListBlobsOptions optio
     }
 }
 
+/// <summary>
+/// Lists the blobs under `options.Prefix` one page at a time and invokes `onPage` with each page's blobs before
+/// the next page is requested, so a caller can act on a page and let it go instead of holding the whole listing.
+/// </summary>
+template <typename TContainer, typename TOnPage>
+void ForEachBlobPage(TContainer& container, AzureClient::ListBlobsOptions options, TOnPage&& onPage) {
+    while (true) {
+        auto page = Call([&](auto token) { return container.ListBlobsAsync(options, token); });
+        onPage(std::as_const(page.Blobs));
+
+        if (page.NextMarker.empty()) {
+            break;
+        }
+
+        options.Marker = std::move(page.NextMarker);
+    }
+}
+
 template <typename TContainer, std::invocable<const AzureClient::Models::BlobItem&> TOnBlob>
 void ForEachBlob(TContainer& container, AzureClient::ListBlobsOptions options, TOnBlob&& onBlob) {
     ForEachBlobUntil(container, std::move(options), [&onBlob](const AzureClient::Models::BlobItem& blob) {
