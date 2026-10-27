@@ -10,6 +10,7 @@
 #include <AVEVA/AzureClient/ClientForwardDeclarations.hpp>
 #include <AVEVA/AzureClient/Detail/BlobDownload.hpp>
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
+#include <AVEVA/AzureClient/Detail/ClientCore.hpp>
 #include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
 #include <AVEVA/AzureClient/HttpClientLike.hpp>
 #include <AVEVA/AzureClient/Models/BlobModels.hpp>
@@ -75,19 +76,21 @@ namespace AVEVA::AzureClient {
 // use_future, use_awaitable, ...) and completes with std::expected<Response<T>, BlobStorageError>.
 // Omitting the token yields a deferred, directly co_await-able operation (DefaultCompletionToken).
 // Overloads that also take an options struct exclude it from the defaulted token via `requires`.
-template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCred>> {
+    using Core = Private::ClientCore<THttp, Private::BasicBlobTarget<TCred>>;
+
   public:
     BasicBlobClient(THttp& httpClient, const BlobClientOptions& options, std::shared_ptr<TCred> credential = nullptr)
-        : m_httpClient(&httpClient), m_target(std::make_shared<const Private::BasicBlobTarget<TCred>>(
-                                         Private::MakeBlobTarget(options, std::move(credential)))) {}
+        : Core(httpClient, std::make_shared<const Private::BasicBlobTarget<TCred>>(
+                               Private::MakeBlobTarget(options, std::move(credential)))) {}
     // Shares ownership of the HTTP client for as long as this client or any client made from it exists. Operations
     // already in flight borrow the HTTP client without owning it, so keep a client (or the shared_ptr) alive until they
     // complete.
     BasicBlobClient(std::shared_ptr<THttp> httpClient, const BlobClientOptions& options,
                     std::shared_ptr<TCred> credential = nullptr)
-        : BasicBlobClient(Private::RequireHttpClient(httpClient), options, std::move(credential)) {
-        m_httpOwner = std::move(httpClient);
-    }
+        : Core(std::move(httpClient), std::make_shared<const Private::BasicBlobTarget<TCred>>(
+                                          Private::MakeBlobTarget(options, std::move(credential)))) {}
     BasicBlobClient(const BasicBlobClient&) = delete;
     BasicBlobClient& operator=(const BasicBlobClient&) = delete;
     BasicBlobClient(BasicBlobClient&&) noexcept = default;
@@ -96,8 +99,8 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
 
     // The executor of the underlying HTTP client (the default executor for completions).
     using executor_type = typename THttp::executor_type;
-
-    [[nodiscard]] executor_type get_executor() const { return m_httpClient->get_executor(); }
+    using Core::get_executor;
+    using Core::GetDefaultRequestOptions;
 
     // The blob's URL carrying the client's SAS token when it has one, so it is a secret: use it as the source of a
     // server-side copy, never as a key or in a log line (use ResourceUrl() for those).
@@ -116,12 +119,6 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
     // AuthorizeSourceWithClientCredential can forward to the service. A SAS or Shared Key client cannot forward
     // anything, so a copy from a source without a SAS is bound to be refused.
     [[nodiscard]] bool CanForwardCredential() const noexcept { return m_target->Credential != nullptr; }
-
-    // Request options (timeout, response body limit, cancellation slot) applied to every operation
-    // that is not given its own via WithRequestOptions(...) or the trailing requestOptions argument.
-    [[nodiscard]] const AzureRequestOptions& GetDefaultRequestOptions() const noexcept AVEVA_LIFETIMEBOUND {
-        return m_target->Connection->DefaultRequestOptions;
-    }
 
     using DefaultCompletionToken = boost::asio::default_completion_token<executor_type>::type;
 
@@ -311,7 +308,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
     // Shares the container client's validated connection state (no re-normalisation).
     BasicBlobClient(THttp& httpClient, std::shared_ptr<const Private::BasicBlobTarget<TCred>> target,
                     std::shared_ptr<THttp> owner = nullptr)
-        : m_httpClient(&httpClient), m_httpOwner(std::move(owner)), m_target(std::move(target)) {}
+        : Core(httpClient, std::move(target), std::move(owner)) {}
 
     // Connection state owned by this client; derived blob-type clients read it to build requests.
     [[nodiscard]] THttp& Http() const noexcept AVEVA_LIFETIMEBOUND { return *m_httpClient; }
@@ -331,10 +328,9 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
     }
 
   private:
-    gsl::not_null<THttp*> m_httpClient;
-    // Set when the client was given shared ownership of the HTTP client; null when it only borrows it.
-    std::shared_ptr<THttp> m_httpOwner;
-    std::shared_ptr<const Private::BasicBlobTarget<TCred>> m_target;
+    using Core::m_httpClient;
+    using Core::m_httpOwner;
+    using Core::m_target;
 
     // Operation entry points, templated on the completion handler so it is never type-erased.
     template <class THandler>

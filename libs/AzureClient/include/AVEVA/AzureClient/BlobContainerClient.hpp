@@ -12,6 +12,7 @@
 #include <AVEVA/AzureClient/ClientForwardDeclarations.hpp>
 #include <AVEVA/AzureClient/Detail/BlobBatch.hpp>
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
+#include <AVEVA/AzureClient/Detail/ClientCore.hpp>
 #include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
 #include <AVEVA/AzureClient/Models/BlobContainerModels.hpp>
 #include <AVEVA/AzureClient/Models/BlobModels.hpp>
@@ -68,22 +69,24 @@ struct ConnectionState;
 // use_future, use_awaitable, ...) and completes with std::expected<Response<T>, BlobStorageError>.
 // Omitting the token yields a deferred, directly co_await-able operation, e.g. `co_await client.ListBlobsAsync();`.
 // Overloads that also take an options struct exclude it from the defaulted token via `requires`.
-template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContainerClient {
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+class BasicBlobContainerClient : Private::ClientCore<THttp, Private::BasicContainerTarget<TCred>> {
+    using Core = Private::ClientCore<THttp, Private::BasicContainerTarget<TCred>>;
+
   public:
     using PageBlobClientType = BasicPageBlobClient<THttp, TCred>;
 
     BasicBlobContainerClient(THttp& httpClient, const BlobContainerClientOptions& options,
                              std::shared_ptr<TCred> credential = nullptr)
-        : m_httpClient(&httpClient), m_target(std::make_shared<const Private::BasicContainerTarget<TCred>>(
-                                         Private::MakeContainerTarget(options, std::move(credential)))) {}
+        : Core(httpClient, std::make_shared<const Private::BasicContainerTarget<TCred>>(
+                               Private::MakeContainerTarget(options, std::move(credential)))) {}
     // Shares ownership of the HTTP client for as long as this client or any client made from it exists. Operations
     // already in flight borrow the HTTP client without owning it, so keep a client (or the shared_ptr) alive until they
     // complete.
     BasicBlobContainerClient(std::shared_ptr<THttp> httpClient, const BlobContainerClientOptions& options,
                              std::shared_ptr<TCred> credential = nullptr)
-        : BasicBlobContainerClient(Private::RequireHttpClient(httpClient), options, std::move(credential)) {
-        m_httpOwner = std::move(httpClient);
-    }
+        : Core(std::move(httpClient), std::make_shared<const Private::BasicContainerTarget<TCred>>(
+                                          Private::MakeContainerTarget(options, std::move(credential)))) {}
     BasicBlobContainerClient(const BasicBlobContainerClient&) = delete;
     BasicBlobContainerClient& operator=(const BasicBlobContainerClient&) = delete;
     BasicBlobContainerClient(BasicBlobContainerClient&&) noexcept = default;
@@ -94,14 +97,8 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContai
     // executor argument for a boost::asio::default_completion_token_t, or to schedule work that
     // must run on the same executor as this client's completions.
     using executor_type = typename THttp::executor_type;
-
-    [[nodiscard]] executor_type get_executor() const { return m_httpClient->get_executor(); }
-
-    // Request options (timeout, response body limit, cancellation slot) applied to every operation
-    // that is not given its own via WithRequestOptions(...) or the trailing requestOptions argument.
-    [[nodiscard]] const AzureRequestOptions& GetDefaultRequestOptions() const noexcept AVEVA_LIFETIMEBOUND {
-        return m_target->Connection->DefaultRequestOptions;
-    }
+    using Core::get_executor;
+    using Core::GetDefaultRequestOptions;
 
     // The default completion token used when a ...Async call omits an explicit token
     // (matching this client's executor_type, per boost::asio::default_completion_token).
@@ -183,7 +180,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContai
     friend struct Private::ClientSnapshotAccess;
     BasicBlobContainerClient(THttp& httpClient, std::shared_ptr<const Private::BasicContainerTarget<TCred>> target,
                              std::shared_ptr<THttp> owner)
-        : m_httpClient(&httpClient), m_httpOwner(std::move(owner)), m_target(std::move(target)) {}
+        : Core(httpClient, std::move(target), std::move(owner)) {}
 
     // A client sharing this one's state, owned by a deferred operation so it survives the original being moved from.
     [[nodiscard]] BasicBlobContainerClient MakeSnapshot() const {
@@ -194,9 +191,10 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContai
     BasicBlobContainerClient(THttp& httpClient, std::shared_ptr<const Private::ConnectionState> connection,
                              std::shared_ptr<CachedTokenCredential<TCred>> credential, std::string containerName,
                              std::shared_ptr<THttp> owner = nullptr)
-        : m_httpClient(&httpClient), m_httpOwner(std::move(owner)),
-          m_target(std::make_shared<const Private::BasicContainerTarget<TCred>>(Private::MakeContainerTarget<TCred>(
-              std::move(connection), std::move(credential), std::move(containerName)))) {}
+        : Core(httpClient,
+               std::make_shared<const Private::BasicContainerTarget<TCred>>(Private::MakeContainerTarget<TCred>(
+                   std::move(connection), std::move(credential), std::move(containerName))),
+               std::move(owner)) {}
 
     [[nodiscard]] std::shared_ptr<const Private::BasicBlobTarget<TCred>> MakeBlobTarget(std::string blobName) const {
         return std::make_shared<const Private::BasicBlobTarget<TCred>>(Private::MakeBlobTarget<TCred>(
@@ -258,10 +256,9 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobContai
                                   requestOptions);
     }
 
-    gsl::not_null<THttp*> m_httpClient;
-    // Set when the client was given shared ownership of the HTTP client; null when it only borrows it.
-    std::shared_ptr<THttp> m_httpOwner;
-    std::shared_ptr<const Private::BasicContainerTarget<TCred>> m_target;
+    using Core::m_httpClient;
+    using Core::m_httpOwner;
+    using Core::m_target;
 };
 
 // The production client type.

@@ -578,56 +578,6 @@ void DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobT
                              DownloadToOptions operationOptions, const std::filesystem::path& path,
                              TCompletion completion, AzureRequestOptions requestOptions);
 
-template <HttpClientLike THttp, class TCred, class TCompletion>
-void DeleteBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
-                     const DeleteBlobOptions& operationOptions, TCompletion&& completion,
-                     AzureRequestOptions requestOptions, bool replaySafe = false) {
-    HttpRequest request = BuildBlobRequest(options, HttpMethod::Delete);
-    ApplyBlobRequestConditions(request, operationOptions.Conditions);
-
-    SendAuthorizedRequestAsync(
-        httpClient, options, std::move(request),
-        [completion = std::forward<TCompletion>(completion)](std::error_code error, HttpResponse response) mutable {
-            CompleteParsed<Models::DeleteBlobResult>(error, std::move(response), ParseDeleteBlobResult,
-                                                     std::move(completion));
-        },
-        std::move(requestOptions), replaySafe);
-}
-
-template <HttpClientLike THttp, class TCred, class TCompletion>
-void GetBlobPropertiesAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
-                            const GetBlobPropertiesOptions& operationOptions, TCompletion&& completion,
-                            AzureRequestOptions requestOptions) {
-    HttpRequest request = BuildBlobRequest(options, HttpMethod::Head);
-    ApplyBlobRequestConditions(request, operationOptions.Conditions);
-
-    SendAuthorizedRequestAsync(
-        httpClient, options, std::move(request),
-        [completion = std::forward<TCompletion>(completion)](std::error_code error, HttpResponse response) mutable {
-            CompleteParsed<Models::BlobProperties>(error, std::move(response), ParseBlobProperties,
-                                                   std::move(completion));
-        },
-        std::move(requestOptions));
-}
-
-template <HttpClientLike THttp, class TCred, class TCompletion>
-void SetBlobMetadataAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
-                          const SetBlobMetadataOptions& operationOptions, TCompletion&& completion,
-                          AzureRequestOptions requestOptions) {
-    HttpRequest request = BuildBlobRequest(options, HttpMethod::Put, "comp=metadata");
-    ApplyMetadata(request, operationOptions.Metadata);
-    ApplyBlobRequestConditions(request, operationOptions.Conditions);
-
-    SendAuthorizedRequestAsync(
-        httpClient, options, std::move(request),
-        [completion = std::forward<TCompletion>(completion)](std::error_code error, HttpResponse response) mutable {
-            CompleteParsed<Models::SetBlobMetadataResult>(error, std::move(response),
-                                                          ParseETagAndLastModified<Models::SetBlobMetadataResult>,
-                                                          std::move(completion));
-        },
-        std::move(requestOptions));
-}
-
 // Sends `request` to `target` and completes with the TModel produced by `parser`. `extra` is forwarded to
 // SendAuthorizedRequestAsync (for a blob target, the replay-safety flag).
 template <class TModel, HttpClientLike THttp, class TTarget, class TParser, class TCompletion, class... TExtra>
@@ -640,6 +590,42 @@ void SendAndParse(THttp& httpClient, const TTarget& target, HttpRequest request,
             CompleteParsed<TModel>(error, std::move(response), parser, std::move(completion));
         },
         std::move(requestOptions), std::forward<TExtra>(extra)...);
+}
+
+template <HttpClientLike THttp, class TCred, class TCompletion>
+void DeleteBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
+                     const DeleteBlobOptions& operationOptions, TCompletion&& completion,
+                     AzureRequestOptions requestOptions, bool replaySafe = false) {
+    HttpRequest request = BuildBlobRequest(options, HttpMethod::Delete);
+    ApplyBlobRequestConditions(request, operationOptions.Conditions);
+
+    SendAndParse<Models::DeleteBlobResult>(httpClient, options, std::move(request), ParseDeleteBlobResult,
+                                           std::forward<TCompletion>(completion), std::move(requestOptions),
+                                           replaySafe);
+}
+
+template <HttpClientLike THttp, class TCred, class TCompletion>
+void GetBlobPropertiesAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
+                            const GetBlobPropertiesOptions& operationOptions, TCompletion&& completion,
+                            AzureRequestOptions requestOptions) {
+    HttpRequest request = BuildBlobRequest(options, HttpMethod::Head);
+    ApplyBlobRequestConditions(request, operationOptions.Conditions);
+
+    SendAndParse<Models::BlobProperties>(httpClient, options, std::move(request), ParseBlobProperties,
+                                         std::forward<TCompletion>(completion), std::move(requestOptions));
+}
+
+template <HttpClientLike THttp, class TCred, class TCompletion>
+void SetBlobMetadataAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
+                          const SetBlobMetadataOptions& operationOptions, TCompletion&& completion,
+                          AzureRequestOptions requestOptions) {
+    HttpRequest request = BuildBlobRequest(options, HttpMethod::Put, "comp=metadata");
+    ApplyMetadata(request, operationOptions.Metadata);
+    ApplyBlobRequestConditions(request, operationOptions.Conditions);
+
+    SendAndParse<Models::SetBlobMetadataResult>(httpClient, options, std::move(request),
+                                                ParseETagAndLastModified<Models::SetBlobMetadataResult>,
+                                                std::forward<TCompletion>(completion), std::move(requestOptions));
 }
 
 // Completes `completion` with an invalid_argument failure carrying `message`.
