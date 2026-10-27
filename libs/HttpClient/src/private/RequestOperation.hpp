@@ -397,6 +397,8 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     ConnectionKey<Stream> m_key;
     beast::flat_buffer m_buffer;
     http::request<http::buffer_body> m_request;
+    // Held as a member so async_write uses the non-stable write_op instead of heap-allocating a serializer.
+    std::optional<http::request_serializer<http::buffer_body>> m_serializer;
     // Backing storage for an owned (SetBody()) request body. buffer_body's writer only
     // stores a pointer/size pair, so something must own the bytes for the lifetime of the
     // write; for a SetBodyView() body the caller owns that storage instead (see the

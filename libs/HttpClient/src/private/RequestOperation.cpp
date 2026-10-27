@@ -101,6 +101,7 @@ void RequestOperation<Stream>::BuildRequestUnchecked(HttpRequest& request, const
     const auto verb = Private::ToBeastVerb(request.GetMethod());
 
     // Each build starts from an empty message, so no field of an earlier attempt can survive.
+    m_serializer.reset();
     m_request = {};
     m_request.version(11);
     m_request.method(verb);
@@ -377,7 +378,8 @@ template <typename Stream> void RequestOperation<Stream>::Write() {
     m_phase = HttpRequestPhase::Write;
     m_writeInFlight = true;
     try {
-        http::async_write(*m_stream, m_request,
+        m_serializer.emplace(m_request);
+        http::async_write(*m_stream, *m_serializer,
                           [self = this->shared_from_this()](boost::system::error_code error, std::size_t bytesWritten) {
                               self->m_writeInFlight = false;
                               if (self->DeliverDeferredCompletion()) {
