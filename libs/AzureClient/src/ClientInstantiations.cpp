@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
-// Explicit instantiations matching the extern template declarations in the client headers.
+// Explicit instantiations matching the extern template declarations in the client headers. These cover non-template
+// members only; handler-typed member function templates are instantiated by their callers.
 
 #include <AVEVA/AzureClient/BlobClient.hpp>
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>

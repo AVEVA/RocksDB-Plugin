@@ -412,6 +412,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobClient
 
 // The production client type.
 using BlobClient = BasicBlobClient<HttpClient>;
-// Instantiated once in the library so consumers do not recompile the client for the production transport.
+// Covers only non-template members; member function templates (the handler-typed Async operations) are still
+// instantiated in each consumer because their handler types are not known here.
 extern template class BasicBlobClient<HttpClient>;
 } // namespace AVEVA::AzureClient
