@@ -93,14 +93,23 @@ class RequestOperation final : public std::enable_shared_from_this<RequestOperat
     /// per-origin cap counts against its timeout.</param>
     /// <param name="buffer">The read buffer carried over from a reused connection; empty otherwise.</param>
     RequestOperation(std::shared_ptr<asio::ssl::context> tlsContext, std::unique_ptr<Stream> stream,
-                     Detail::CompletionPointer completion, HttpRequestOptions options,
+                     Detail::CompletionPointer&& completion, HttpRequestOptions options,
                      std::shared_ptr<ConnectionPool<Stream>> pool, ConnectionKey<Stream> key,
                      std::chrono::steady_clock::time_point deadline, beast::flat_buffer buffer = {})
         : m_tlsContext(std::move(tlsContext)), m_executor(stream->get_executor()),
           m_lookupScope(static_cast<const void*>(&asio::query(m_executor, asio::execution::context))),
-          m_stream(std::move(stream)), m_resolver(m_executor), m_timer(m_executor), m_completion(std::move(completion)),
-          m_options(std::move(options)), m_pool(std::move(pool)), m_key(std::move(key)), m_buffer(std::move(buffer)),
-          m_deadline(deadline) {}
+          m_stream(std::move(stream)), m_resolver(m_executor), m_timer(m_executor), m_options(std::move(options)),
+          m_pool(std::move(pool)), m_key(std::move(key)), m_buffer(std::move(buffer)), m_deadline(deadline) {
+        // Taken last, after everything that can throw, so a failed construction leaves the caller's completion
+        // with the caller.
+        m_completion = std::move(completion);
+    }
+
+    /// <summary>
+    /// Hands the completion back to the submitter when the operation could not be launched, so the caller can
+    /// fail it. Only valid before the operation has been started.
+    /// </summary>
+    Detail::CompletionPointer TakeCompletion() noexcept { return std::move(m_completion); }
 
     /// <summary>
     /// Makes this operation the target of the request's cancellation state, so a cancel (including one that

@@ -1265,7 +1265,9 @@ TEST(HttpClientRobustness, QueuedAdmissionFailureWithCancellationCompletesOnce) 
 TEST(HttpClientRobustness, FailedStateAllocationStillCompletesTheOriginalHandlerOnceAndNeverInline) {
     ThrowOnStateAlloc::Calls = 0;
     asio::io_context context;
-    AVEVA::Private::BasicHttpClientImpl<ThrowOnStateAlloc> impl(context, AVEVA::HttpClientOptions{});
+    AVEVA::HttpClientOptions clientOptions;
+    clientOptions.SetMaxConnectionsPerHost(1);
+    AVEVA::Private::BasicHttpClientImpl<ThrowOnStateAlloc> impl(context, clientOptions);
 
     int completions = 0;
     std::error_code result;

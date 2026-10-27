@@ -236,6 +236,9 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// <param name="options">The timeout, response limits, and cancellation slot for this request.</param>
     /// <param name="completion">Completed exactly once with the outcome.</param>
     void Submit(HttpRequest request, HttpRequestOptions options, Detail::CompletionPointer completion) {
+        if (!m_limiter) {
+            return SubmitUnlimited(std::move(request), std::move(options), std::move(completion));
+        }
         // Initiation must never throw into the caller with the handler lost: the handler is parked in a cell
         // so that, if anything throws (in practice std::bad_alloc), it is failed exactly once and, as always,
         // never from inside this call.
@@ -259,20 +262,40 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
             auto cancellation = BindCallerSlot(options);
             // The deadline covers time spent queued behind the per-origin cap, not just the network exchange.
             const auto deadline = DeadlineFor(options);
-            if (m_limiter) {
-                auto origin = route.Origin();
-                // `cell` is copied, not moved: the catch below still needs it if admission throws.
-                return SendLimited(std::move(origin), std::move(route), std::move(request), std::move(guarded),
-                                   std::move(options), std::move(cancellation), deadline, cell);
-            }
-            SendUnlimited(std::move(route), std::move(request), std::move(guarded), std::move(options),
-                          std::move(cancellation), deadline);
+            auto origin = route.Origin();
+            // `cell` is copied, not moved: the catch below still needs it if admission throws.
+            return SendLimited(std::move(origin), std::move(route), std::move(request), std::move(guarded),
+                               std::move(options), std::move(cancellation), deadline, cell);
         } catch (...) {
             FailLater(cell, ClassifyBuildFailure(std::current_exception()));
         }
     }
 
   private:
+    /// <summary>
+    /// The path without a per-origin cap: no shared state or wrapper completion is needed, because the
+    /// operation owns the handler directly and hands it back if it could not be launched.
+    /// </summary>
+    void SubmitUnlimited(HttpRequest request, HttpRequestOptions options, Detail::CompletionPointer completion) {
+        try {
+            FaultPolicy::OnSubmit();
+            auto route = Route::Of(request, options);
+            // A request that can never be sent fails without building a strand, stream or operation.
+            if (!route.Sendable()) {
+                return FailWithoutState(std::move(completion),
+                                        route.Parsed ? route.Error : make_error_code(HttpClientError::InvalidUrl));
+            }
+            auto cancellation = BindCallerSlot(options);
+            const auto deadline = DeadlineFor(options);
+            SendUnlimited(std::move(route), std::move(request), completion, std::move(options), std::move(cancellation),
+                          deadline);
+        } catch (...) {
+            // Nothing past a successful post can throw, so here the completion is either still ours or was
+            // handed back by SendOver.
+            FailWithoutState(std::move(completion), ClassifyBuildFailure(std::current_exception()));
+        }
+    }
+
     void ReportLimiterTimerFailed() const noexcept {
         DiagnosticsSink::Report(
             m_diagnostics, HttpDiagnosticKind::SwallowedException, HttpRequestPhase::Queued, {}, {}, {},
@@ -321,6 +344,9 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
             void operator()() { Detail::Complete(std::move(completion), error, HttpResponse{}); }
         };
         Holder holder{std::move(completion), error};
+        if (!holder.completion) {
+            return;
+        }
         try {
             FaultPolicy::OnFailPost();
             asio::post(m_context, std::move(holder));
@@ -411,7 +437,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         state->HoldSlot(m_limiter, std::move(pending.origin));
         try {
             FaultPolicy::OnStartLimited();
-            SendUnlimited(std::move(pending.route), std::move(pending.request), std::move(pending.completion),
+            SendUnlimited(std::move(pending.route), std::move(pending.request), pending.completion,
                           std::move(pending.options), std::move(pending.cancellation), pending.deadline);
         } catch (...) {
             // Whatever threw, the slot must come back and the handler must be completed exactly once. `state`
@@ -440,15 +466,15 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// <param name="cancellation">The state the caller's cancellation slot is wired to; the operation makes itself
     /// its target. Null when the caller has no slot.</param>
     /// <param name="deadline">When the request times out, measured from submission.</param>
-    void SendUnlimited(Route route, HttpRequest request, Detail::CompletionPointer completion,
+    void SendUnlimited(Route route, HttpRequest request, Detail::CompletionPointer& completion,
                        HttpRequestOptions options, std::shared_ptr<Cancellation> cancellation,
                        std::chrono::steady_clock::time_point deadline) {
         if (route.Tls) {
-            SendOver<TlsStream>(std::move(route), m_tlsPool, std::move(request), std::move(completion),
-                                std::move(options), std::move(cancellation), deadline);
+            SendOver<TlsStream>(std::move(route), m_tlsPool, std::move(request), completion, std::move(options),
+                                std::move(cancellation), deadline);
         } else {
-            SendOver<PlainStream>(std::move(route), m_plainPool, std::move(request), std::move(completion),
-                                  std::move(options), std::move(cancellation), deadline);
+            SendOver<PlainStream>(std::move(route), m_plainPool, std::move(request), completion, std::move(options),
+                                  std::move(cancellation), deadline);
         }
     }
 
@@ -458,7 +484,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// </summary>
     template <typename Stream>
     void SendOver(Route route, const std::shared_ptr<ConnectionPool<Stream>>& pool, HttpRequest request,
-                  Detail::CompletionPointer completion, HttpRequestOptions options,
+                  Detail::CompletionPointer& completion, HttpRequestOptions options,
                   std::shared_ptr<Cancellation> cancellation, std::chrono::steady_clock::time_point deadline) {
         // Submit has already failed every route that cannot be sent, so a pooled connection is never risked on a
         // request that validation would reject.
@@ -467,8 +493,8 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
 
         if (auto pooled = pool->Acquire(key)) {
             return ResumeWithPooledConnection<Stream>(std::move(route), std::move(*pooled), std::move(key),
-                                                      std::move(request), std::move(completion), std::move(options),
-                                                      pool, std::move(cancellation), deadline);
+                                                      std::move(request), completion, std::move(options), pool,
+                                                      std::move(cancellation), deadline);
         }
 
         auto executor = asio::make_strand(m_context);
@@ -482,7 +508,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
         auto operation = std::make_shared<RequestOperation<Stream>>(
             m_tlsContext, std::move(stream), std::move(completion), std::move(options), pool, std::move(key), deadline);
         operation->SetDiagnostics(m_diagnostics);
-        Launch(operation, executor, cancellation, std::move(request), std::move(route), false);
+        Launch(operation, executor, cancellation, std::move(request), std::move(route), false, completion);
     }
 
     /// <summary>
@@ -499,7 +525,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// <param name="cancellation">See <see cref="SendUnlimited"/>.</param>
     template <typename Stream>
     void ResumeWithPooledConnection(Route route, PooledConnection<Stream> pooled, ConnectionKey<Stream> key,
-                                    HttpRequest request, Detail::CompletionPointer completion,
+                                    HttpRequest request, Detail::CompletionPointer& completion,
                                     HttpRequestOptions options, std::shared_ptr<ConnectionPool<Stream>> pool,
                                     std::shared_ptr<Cancellation> cancellation,
                                     std::chrono::steady_clock::time_point deadline) {
@@ -508,7 +534,7 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
             m_tlsContext, std::move(pooled.stream), std::move(completion), std::move(options), std::move(pool),
             std::move(key), deadline, std::move(pooled.buffer));
         operation->SetDiagnostics(m_diagnostics);
-        Launch(operation, executor, cancellation, std::move(request), std::move(route), true);
+        Launch(operation, executor, cancellation, std::move(request), std::move(route), true, completion);
     }
 
     /// <summary>
@@ -517,17 +543,23 @@ class BasicHttpClientCore : public std::enable_shared_from_this<BasicHttpClientC
     /// </summary>
     template <typename Stream, typename Executor>
     static void Launch(const std::shared_ptr<RequestOperation<Stream>>& operation, const Executor& executor,
-                       const std::shared_ptr<Cancellation>& cancellation, HttpRequest request, Route route,
-                       bool reused) {
-        operation->BindCancellation(cancellation);
-        operation->Prepare(std::move(request), std::move(route));
-        asio::post(executor, [operation, reused] {
-            if (reused) {
-                operation->StartReused();
-            } else {
-                operation->Start();
-            }
-        });
+                       const std::shared_ptr<Cancellation>& cancellation, HttpRequest request, Route route, bool reused,
+                       Detail::CompletionPointer& completion) {
+        try {
+            operation->BindCancellation(cancellation);
+            operation->Prepare(std::move(request), std::move(route));
+            asio::post(executor, [operation, reused] {
+                if (reused) {
+                    operation->StartReused();
+                } else {
+                    operation->Start();
+                }
+            });
+        } catch (...) {
+            // Not started, so the operation still holds the handler; give it back for the caller to fail.
+            completion = operation->TakeCompletion();
+            throw;
+        }
     }
 
     asio::io_context& m_context;
