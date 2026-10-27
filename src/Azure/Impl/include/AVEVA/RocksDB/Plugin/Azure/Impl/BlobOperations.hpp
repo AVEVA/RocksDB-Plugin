@@ -560,6 +560,8 @@ void CopyPages(const ClientRuntimeBase& runtime, TBlob& source, TBlob& destinati
     const auto acquire = [&buffers](size_t size) {
         for (auto& buffer : buffers) {
             if (buffer.use_count() == 1) {
+                // Orders the relaxed use_count() read before reuse of memory the last other owner wrote.
+                std::atomic_thread_fence(std::memory_order_acquire);
                 buffer->resize(size);
                 return buffer;
             }

@@ -7,6 +7,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/RangeCheck.hpp"
 #include <algorithm>
+#include <atomic>
 #include <boost/log/trivial.hpp>
 #include <boost/scope/scope_exit.hpp>
 
@@ -19,6 +20,17 @@
 #include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
+namespace {
+// use_count() is a relaxed load; the fence orders it before our reuse of memory the last other owner just wrote, so
+// the reuse does not race with that owner's release.
+bool IsIdle(const std::shared_ptr<std::vector<char>>& buffer) {
+    if (buffer.use_count() != 1) {
+        return false;
+    }
+    std::atomic_thread_fence(std::memory_order_acquire);
+    return true;
+}
+} // namespace
 template <typename TBlob>
 BasicReadWriteFileImpl<TBlob>::BasicReadWriteFileImpl(
     std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
@@ -292,9 +304,7 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
 // not idle, so it is never rewritten while in use. The contents are unspecified: callers set every byte.
 template <typename TBlob>
 std::shared_ptr<std::vector<char>> BasicReadWriteFileImpl<TBlob>::AcquireExtentBuffer(size_t size) {
-    if (const auto idle =
-            std::ranges::find_if(m_extentPool, [](const auto& buffer) { return buffer.use_count() == 1; });
-        idle != m_extentPool.end()) {
+    if (const auto idle = std::ranges::find_if(m_extentPool, IsIdle); idle != m_extentPool.end()) {
         (*idle)->resize(size);
         return *idle;
     }
@@ -305,7 +315,7 @@ std::shared_ptr<std::vector<char>> BasicReadWriteFileImpl<TBlob>::AcquireExtentB
 template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::TrimExtentPool() {
     for (auto it = m_extentPool.begin();
          it != m_extentPool.end() && m_extentPool.size() > Configuration::Transfer::MaxConcurrentPageCopies;) {
-        it = it->use_count() == 1 ? m_extentPool.erase(it) : it + 1;
+        it = IsIdle(*it) ? m_extentPool.erase(it) : it + 1;
     }
 }
 // Buffers a write at its page-aligned slot with room around it, so Flush can merge the existing bytes of partially
