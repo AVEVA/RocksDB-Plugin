@@ -485,7 +485,7 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         Run(TokenEvent{error, std::move(token), std::move(attempt)});
     }
 
-    void OnTokenOnStrand(std::error_code error, const AccessToken& token, HttpRequest attempt) {
+    void OnTokenOnStrand(std::error_code error, AccessToken& token, HttpRequest attempt) {
         m_awaitingToken.store(false, std::memory_order_release);
         if (m_finished.load(std::memory_order_acquire)) {
             return;
@@ -499,12 +499,13 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
             return;
         }
 
-        m_attemptToken = token.Token;
-        if (!RebuildAttempt(attempt, token.Token)) {
+        // The event owns the token, so it is moved rather than copied; m_attemptToken is what the 401 path needs.
+        m_attemptToken = std::move(token.Token);
+        if (!RebuildAttempt(attempt, m_attemptToken)) {
             return;
         }
-        ResolveCopySourceAuthorization(attempt, token.Token);
-        SetBearerAuthorization(attempt, token.Token);
+        ResolveCopySourceAuthorization(attempt, m_attemptToken);
+        SetBearerAuthorization(attempt, m_attemptToken);
         Send(std::move(attempt));
     }
 

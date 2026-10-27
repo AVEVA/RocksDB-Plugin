@@ -175,22 +175,30 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
   private:
     void InvalidateIf(const ScopeList& scopes, const std::string_view* rejectedToken) {
         std::scoped_lock const lock(m_mutex);
-        const std::vector<std::string> empty;
-        const auto& requested = scopes ? *scopes : empty;
-        if (m_hasToken && m_cachedScopes == requested &&
+        if (m_hasToken && SameScopes(m_cachedScopes, scopes) &&
             (rejectedToken == nullptr || m_cachedToken.Token == *rejectedToken)) {
             m_hasToken = false;
             m_cachedToken = {};
             m_nextRefreshRetryAfter.reset();
         }
-        if (m_failedScopes == requested) {
+        if (SameScopes(m_failedScopes, scopes)) {
             m_failureRetryAfter.reset();
         }
     }
 
   private:
+    // Callers normally share one list, so pointer identity answers the common case and the element-wise
+    // comparison only runs when two distinct lists are compared. A null list is an empty one.
+    static bool SameScopes(const ScopeList& left, const ScopeList& right) {
+        if (left == right) {
+            return true;
+        }
+        static const std::vector<std::string> empty;
+        return (left ? *left : empty) == (right ? *right : empty);
+    }
+
     struct RefreshState {
-        std::vector<std::string> Scopes;
+        ScopeList Scopes;
         std::optional<boost::asio::io_context::executor_type> Executor;
         std::vector<Waiter> Completions;
         // Guards Completions; the state can outlive the credential that created it.
@@ -254,10 +262,10 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
 
     // `completion` is only erased into a Waiter when it has to queue behind a refresh; otherwise the caller keeps it.
     template <class THandler>
-    LookupResult LookUpCachedTokenOrStartRefresh(const std::vector<std::string>& scopes, THandler& completion) {
+    LookupResult LookUpCachedTokenOrStartRefresh(const ScopeList& scopes, THandler& completion) {
         std::scoped_lock const lock(m_mutex);
         const auto now = m_clock();
-        const bool hasMatchingToken = m_hasToken && m_cachedScopes == scopes;
+        const bool hasMatchingToken = m_hasToken && SameScopes(m_cachedScopes, scopes);
         const bool tokenStillValid = hasMatchingToken && m_cachedToken.ExpiresOn > now;
         const bool outsideRefreshWindow = tokenStillValid && (m_cachedToken.ExpiresOn - now) > m_refreshWindow;
         const bool refreshBackoffActive =
@@ -270,7 +278,7 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         }
 
         if (!tokenStillValid && m_failureRetryAfter.has_value() && now < *m_failureRetryAfter &&
-            m_failedScopes == scopes) {
+            SameScopes(m_failedScopes, scopes)) {
             LookupResult result;
             result.CachedFailure = m_lastFailure;
             return result;
@@ -281,7 +289,7 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
             // (joining a refresh that is already running).
             LookupResult result;
             result.CachedToken = m_cachedToken;
-            if (!m_inFlightRefresh || m_inFlightRefresh->Scopes != scopes) {
+            if (!m_inFlightRefresh || !SameScopes(m_inFlightRefresh->Scopes, scopes)) {
                 result.RefreshToStart = std::make_shared<RefreshState>();
                 result.RefreshToStart->Scopes = scopes;
                 result.RefreshToStart->Executor = m_executor;
@@ -290,7 +298,7 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
             return result;
         }
 
-        if (m_inFlightRefresh && m_inFlightRefresh->Scopes == scopes) {
+        if (m_inFlightRefresh && SameScopes(m_inFlightRefresh->Scopes, scopes)) {
             std::scoped_lock const stateLock(m_inFlightRefresh->Mutex);
             m_inFlightRefresh->Completions.push_back(Waiter{std::move(completion)});
             return {};
@@ -352,30 +360,27 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
     }
 
     void HandleInnerTokenResult(std::error_code error, AccessToken token,
-                                const std::shared_ptr<RefreshState>& refreshState,
-                                const std::vector<std::string>& scopes) {
+                                const std::shared_ptr<RefreshState>& refreshState, const ScopeList& scopes) {
         const auto now = m_clock();
         // The copies are made before taking the lock and published by (noexcept) moves, so a failed copy leaves
         // the cache untouched. Publishing is an optimisation: the waiters below must get their outcome regardless.
         try {
             if (!error) {
-                auto cachedScopes = scopes;
                 auto cachedToken = token;
                 std::scoped_lock const lock(m_mutex);
-                m_cachedScopes = std::move(cachedScopes);
+                m_cachedScopes = scopes;
                 m_cachedToken = std::move(cachedToken);
                 m_hasToken = true;
                 m_nextRefreshRetryAfter.reset();
                 m_failureRetryAfter.reset();
             } else {
-                auto failedScopes = scopes;
                 std::scoped_lock const lock(m_mutex);
-                if (m_hasToken && m_cachedScopes == scopes && m_cachedToken.ExpiresOn > now) {
+                if (m_hasToken && SameScopes(m_cachedScopes, scopes) && m_cachedToken.ExpiresOn > now) {
                     m_nextRefreshRetryAfter = now + DefaultTokenCredentialFailedRefreshBackoff;
                 } else {
                     m_failureRetryAfter = now + DefaultTokenCredentialNegativeCacheWindow;
                     m_lastFailure = error;
-                    m_failedScopes = std::move(failedScopes);
+                    m_failedScopes = scopes;
                 }
             }
         } catch (...) {
@@ -390,7 +395,7 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
             scopes = std::make_shared<const std::vector<std::string>>();
         }
         const std::optional<boost::asio::io_context::executor_type> completionExecutor = m_executor;
-        LookupResult lookup = LookUpCachedTokenOrStartRefresh(*scopes, completion);
+        LookupResult lookup = LookUpCachedTokenOrStartRefresh(scopes, completion);
         if (lookup.CachedFailure.has_value()) {
             Private::CompleteOnExecutorIfSet(completionExecutor, std::move(completion), *lookup.CachedFailure,
                                              AccessToken{});
@@ -418,7 +423,7 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
                               [weakSelf = this->weak_from_this(), refreshState = lookup.RefreshToStart,
                                scopes](std::error_code error, AccessToken token) mutable {
                                   if (const auto self = weakSelf.lock()) {
-                                      self->HandleInnerTokenResult(error, std::move(token), refreshState, *scopes);
+                                      self->HandleInnerTokenResult(error, std::move(token), refreshState, scopes);
                                       return;
                                   }
 
@@ -459,13 +464,13 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
     TClock m_clock;
     std::mutex m_mutex;
     std::shared_ptr<RefreshState> m_inFlightRefresh;
-    std::vector<std::string> m_cachedScopes;
+    ScopeList m_cachedScopes;
     AccessToken m_cachedToken;
     bool m_hasToken = false;
     std::optional<std::chrono::system_clock::time_point> m_nextRefreshRetryAfter;
     std::optional<std::chrono::system_clock::time_point> m_failureRetryAfter;
     std::error_code m_lastFailure;
-    std::vector<std::string> m_failedScopes;
+    ScopeList m_failedScopes;
 };
 
 // Deduces the inner credential and clock types.
