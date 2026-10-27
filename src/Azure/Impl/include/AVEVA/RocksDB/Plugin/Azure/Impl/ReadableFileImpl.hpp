@@ -167,7 +167,8 @@ template <typename TBlob> class BasicReadableFileImpl {
     // With `allowPartial`, a range that only starts inside a slot is served up to the slot's end and the caller
     // fetches the remainder; the result is then the number of bytes copied, which may be less than requested.
     [[nodiscard]] std::optional<size_t> TryReadFromPrefetch(int64_t offset, int64_t bytesToRead, char* buffer,
-                                                            bool wait, bool allowPartial = false) const;
+                                                            bool wait, bool allowPartial = false,
+                                                            uint64_t* deferredRetire = nullptr) const;
     void ClearPrefetch() const;
     int64_t DownloadWithRetry(const int64_t offset, const int64_t bytesToRead, char* buffer, int& refreshesLeft) const;
     [[nodiscard]] std::pair<int64_t, std::string> GetMetadata() const;
@@ -204,8 +205,12 @@ template <typename TBlob> class BasicReadableFileImpl {
     [[nodiscard]] std::optional<size_t> TryReadFromCache(int64_t offset, int64_t bytesToRead, char* buffer) const;
     // Serves a read from a completed in-memory prefetch only; never waits and never touches the file cache, so it is
     // safe on a host io_context thread (FileCache reads are blocking disk I/O).
-    [[nodiscard]] std::optional<size_t> TryReadFromCompletedPrefetch(int64_t offset, int64_t bytesToRead,
-                                                                     char* buffer) const;
+    // With deferredRetire, a hit that reaches the slot's end does not drop it: the slot's id is stored there instead
+    // (left untouched otherwise) and the caller drops it with RetirePrefetch once its whole batch has been served.
+    [[nodiscard]] std::optional<size_t> TryReadFromCompletedPrefetch(int64_t offset, int64_t bytesToRead, char* buffer,
+                                                                     uint64_t* deferredRetire = nullptr) const;
+    // Drops the slot with this id if it is still present; a replaced or already dropped slot is left alone.
+    void RetirePrefetch(uint64_t id) const;
     // True when a still-downloading prefetch fully covers the range. Advisory: the answer may change before the caller
     // acts, so ChainOntoPendingPrefetch remains the authority.
     [[nodiscard]] bool HasPendingPrefetch(int64_t offset, int64_t bytesToRead) const;

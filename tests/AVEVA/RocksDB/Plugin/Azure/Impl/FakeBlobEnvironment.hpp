@@ -35,8 +35,10 @@ struct SlowProbeReadableFileImpl : FakeReadableFileImpl {
     std::chrono::milliseconds ProbeDelay{0};
 
     [[nodiscard]] std::optional<size_t> TryReadFromCompletedPrefetch(const int64_t offset, const int64_t bytesToRead,
-                                                                     char* buffer) const {
-        const auto result = FakeReadableFileImpl::TryReadFromCompletedPrefetch(offset, bytesToRead, buffer);
+                                                                     char* buffer,
+                                                                     uint64_t* const deferredRetire = nullptr) const {
+        const auto result =
+            FakeReadableFileImpl::TryReadFromCompletedPrefetch(offset, bytesToRead, buffer, deferredRetire);
         std::this_thread::sleep_for(ProbeDelay);
         return result;
     }

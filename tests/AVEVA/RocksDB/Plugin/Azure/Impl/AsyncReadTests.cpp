@@ -895,6 +895,41 @@ TEST_F(AsyncReadTests, MultiRead_MixedPrefetchHitsAndMisses_OnlyMissesAreDownloa
     EXPECT_EQ(0U, reqs[3].result.size());
 }
 
+TEST_F(AsyncReadTests, MultiRead_EndAlignedHitsInReverseDuplicateAndOverlappingOrder_ShareOnePrefetchWithoutDownloads) {
+    FillPattern(m_inlineEnv, 100000);
+    auto budget = std::make_shared<std::atomic<int64_t>>(0);
+    auto impl = std::make_shared<FakeReadableFileImpl>("test.sst", m_inlineEnv.Runtime, m_inlineEnv.Client, nullptr,
+                                                       m_logger, nullptr, budget);
+    FakeReadableFile file{impl};
+    ASSERT_TRUE(file.Prefetch(0, 8192, rocksdb::IOOptions{}, nullptr).ok());
+    WaitForPrefetches(*impl, {0});
+    ASSERT_EQ(1U, m_inlineEnv.Blob->Downloads.size());
+    ASSERT_EQ(8192, budget->load());
+
+    std::vector<char> tail(4096);
+    std::vector<char> head(4096);
+    std::vector<char> tailAgain(4096);
+    std::vector<char> overlap(6000);
+    std::vector<char> miss(100);
+    std::vector<rocksdb::FSReadRequest> reqs(5);
+    SetRequest(reqs[0], 4096, tail);
+    SetRequest(reqs[1], 0, head);
+    SetRequest(reqs[2], 4096, tailAgain);
+    SetRequest(reqs[3], 2192, overlap);
+    SetRequest(reqs[4], 50000, miss);
+
+    ASSERT_TRUE(file.MultiRead(reqs.data(), reqs.size(), rocksdb::IOOptions{}, nullptr).ok());
+
+    EXPECT_EQ(2U, m_inlineEnv.Blob->Downloads.size()) << "only the miss may download";
+    EXPECT_EQ(Expected(4096, 4096), reqs[0].result.ToString());
+    EXPECT_EQ(Expected(0, 4096), reqs[1].result.ToString());
+    EXPECT_EQ(Expected(4096, 4096), reqs[2].result.ToString());
+    EXPECT_EQ(Expected(2192, 6000), reqs[3].result.ToString());
+    EXPECT_EQ(Expected(50000, 100), reqs[4].result.ToString());
+    // The batch retires the exhausted slot once it is done, so its budget is released.
+    EXPECT_EQ(0, budget->load());
+}
+
 TEST_F(AsyncReadTests, MultiRead_OverlappingRanges_EachGetsItsOwnBytes) {
     FillPattern(m_inlineEnv, 100000);
     auto file = CreateFile(m_inlineEnv);

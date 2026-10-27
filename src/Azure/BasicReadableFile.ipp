@@ -229,13 +229,21 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
         // copies of data already in memory and cost no network budget, so they are served even after the deadline has
         // passed; every miss is then admitted against the same absolute deadline and times out without starting a
         // download.
+        // Slots a hit consumed to their end are retired only after the whole pass, so a later member (reverse order,
+        // duplicate or overlapping range) can still be served from them instead of downloading resident bytes.
+        std::vector<uint64_t> exhausted;
         std::vector<size_t> order;
         order.reserve(num_reqs);
         for (size_t i = 0; i < num_reqs; ++i) {
             if (Impl::RangeCheck::IsValid(reqs[i].offset, reqs[i].len)) {
                 if (reqs[i].len > 0) {
-                    if (const auto hit = m_file->TryReadFromCompletedPrefetch(
-                            static_cast<int64_t>(reqs[i].offset), static_cast<int64_t>(reqs[i].len), reqs[i].scratch)) {
+                    uint64_t retireId = 0;
+                    if (const auto hit = m_file->TryReadFromCompletedPrefetch(static_cast<int64_t>(reqs[i].offset),
+                                                                              static_cast<int64_t>(reqs[i].len),
+                                                                              reqs[i].scratch, &retireId)) {
+                        if (retireId != 0 && std::ranges::find(exhausted, retireId) == exhausted.end()) {
+                            exhausted.push_back(retireId);
+                        }
                         reqs[i].result = rocksdb::Slice(reqs[i].scratch, *hit);
                         resolved[i] = 1;
                         continue;
@@ -247,6 +255,9 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
                 reqs[i].result = rocksdb::Slice();
                 resolved[i] = 1;
             }
+        }
+        for (const auto id : exhausted) {
+            m_file->RetirePrefetch(id);
         }
         if (order.empty()) {
             return rocksdb::IOStatus::OK();

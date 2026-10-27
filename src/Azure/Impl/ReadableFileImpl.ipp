@@ -425,7 +425,8 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
 template <typename TBlob>
 std::optional<size_t> BasicReadableFileImpl<TBlob>::TryReadFromPrefetch(const int64_t offset, const int64_t bytesToRead,
                                                                         char* buffer, const bool wait,
-                                                                        const bool allowPartial) const {
+                                                                        const bool allowPartial,
+                                                                        uint64_t* const deferredRetire) const {
     if (offset < 0 || bytesToRead <= 0) {
         return std::nullopt;
     }
@@ -485,8 +486,11 @@ std::optional<size_t> BasicReadableFileImpl<TBlob>::TryReadFromPrefetch(const in
     lock.unlock();
 
     std::copy_n(source, length, buffer);
-    // Reading up to or past the end of the range means the scan has moved on; free the memory.
-    if (reachedEnd) {
+    // Reading up to or past the end of the range means the scan has moved on; free the memory. A batch reader defers
+    // that, because its other members may still need this range.
+    if (reachedEnd && deferredRetire) {
+        *deferredRetire = id;
+    } else if (reachedEnd) {
         std::scoped_lock relock(state.Mutex);
         if (const auto current = std::ranges::find(state.Slots, id, &PrefetchSlot::Id); current != state.Slots.end()) {
             state.Drop(current);
@@ -541,10 +545,17 @@ std::optional<size_t> BasicReadableFileImpl<TBlob>::TryReadFromCache(const int64
 }
 
 template <typename TBlob>
-std::optional<size_t> BasicReadableFileImpl<TBlob>::TryReadFromCompletedPrefetch(const int64_t offset,
-                                                                                 const int64_t bytesToRead,
-                                                                                 char* buffer) const {
-    return TryReadFromPrefetch(offset, bytesToRead, buffer, false);
+std::optional<size_t>
+BasicReadableFileImpl<TBlob>::TryReadFromCompletedPrefetch(const int64_t offset, const int64_t bytesToRead,
+                                                           char* buffer, uint64_t* const deferredRetire) const {
+    return TryReadFromPrefetch(offset, bytesToRead, buffer, false, false, deferredRetire);
+}
+
+template <typename TBlob> void BasicReadableFileImpl<TBlob>::RetirePrefetch(const uint64_t id) const {
+    std::scoped_lock lock(m_prefetch.Mutex);
+    if (const auto slot = std::ranges::find(m_prefetch.Slots, id, &PrefetchSlot::Id); slot != m_prefetch.Slots.end()) {
+        m_prefetch.Drop(slot);
+    }
 }
 
 template <typename TBlob>
