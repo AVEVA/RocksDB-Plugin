@@ -46,7 +46,8 @@ void InitializeXmlParser() {
 // responses never carry one, so refusing it removes DTD processing (entity declarations, external subsets)
 // entirely.
 [[nodiscard]] std::unique_ptr<XmlDocument> TryReadXml(std::string_view xml) {
-    if (xml.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    // An empty body (e.g. a HEAD 404) is never a document; skip creating a parser context.
+    if (xml.empty() || xml.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         return nullptr;
     }
 
