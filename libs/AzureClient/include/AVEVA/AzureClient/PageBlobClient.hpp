@@ -308,9 +308,9 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     void CreateIfNotExistsAsyncImpl(std::uint64_t contentLength, CreatePageBlobOptions options, THandler completion,
                                     AzureRequestOptions requestOptions) {
         if (Private::ValidateOrFail<Models::CreatePageBlobResult>(
-                this->Http(), completion, Private::ValidatePageAligned(contentLength, "contentLength")) ||
+                this->Http(), std::move(completion), Private::ValidatePageAligned(contentLength, "contentLength")) ||
             Private::ValidateOrFail<Models::CreatePageBlobResult>(
-                this->Http(), completion, ValidateCreateIfNotExistsConditions(options.Conditions))) {
+                this->Http(), std::move(completion), ValidateCreateIfNotExistsConditions(options.Conditions))) {
             return;
         }
         if (options.Conditions.IfNoneMatch.empty()) {
@@ -328,7 +328,7 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     void CreateAsyncImpl(std::uint64_t contentLength, const CreatePageBlobOptions& options, THandler completion,
                          AzureRequestOptions requestOptions) {
         if (Private::ValidateOrFail<Models::CreatePageBlobResult>(
-                this->Http(), completion, Private::ValidatePageAligned(contentLength, "contentLength"))) {
+                this->Http(), std::move(completion), Private::ValidatePageAligned(contentLength, "contentLength"))) {
             return;
         }
         Private::SendAndParse<Models::CreatePageBlobResult>(
@@ -391,10 +391,10 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     template <class THandler>
     [[nodiscard]] std::optional<HttpRequest> BuildUploadPagesRequest(std::uint64_t offset, std::size_t contentSize,
                                                                      THandler& completion) {
-        if (Private::ValidateOrFail<Models::UploadPagesResult>(this->Http(), completion,
+        if (Private::ValidateOrFail<Models::UploadPagesResult>(this->Http(), std::move(completion),
                                                                Private::ValidatePageAligned(offset, "offset")) ||
             Private::ValidateOrFail<Models::UploadPagesResult>(
-                this->Http(), completion, Private::ValidatePageAligned(contentSize, "content size"))) {
+                this->Http(), std::move(completion), Private::ValidatePageAligned(contentSize, "content size"))) {
             return std::nullopt;
         }
         const auto rangeHeader = Private::BuildPageWriteRangeHeaderValue(offset, contentSize);
@@ -428,11 +428,11 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
             Private::FailInvalidArgument<Models::UploadPagesResult>(this->Http(), std::move(completion),
                                                                     std::move(message));
         };
-        if (Private::ValidateOrFail<Models::UploadPagesResult>(this->Http(), completion,
+        if (Private::ValidateOrFail<Models::UploadPagesResult>(this->Http(), std::move(completion),
                                                                Private::ValidatePageAligned(offset, "offset")) ||
             Private::ValidateOrFail<Models::UploadPagesResult>(
-                this->Http(), completion, Private::ValidatePageAligned(sourceOffset, "sourceOffset")) ||
-            Private::ValidateOrFail<Models::UploadPagesResult>(this->Http(), completion,
+                this->Http(), std::move(completion), Private::ValidatePageAligned(sourceOffset, "sourceOffset")) ||
+            Private::ValidateOrFail<Models::UploadPagesResult>(this->Http(), std::move(completion),
                                                                Private::ValidatePageAligned(length, "length"))) {
             return;
         }
@@ -471,7 +471,7 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     template <class THandler>
     void ResizeAsyncImpl(std::uint64_t newSize, const ResizePageBlobOptions& options, THandler completion,
                          AzureRequestOptions requestOptions) {
-        if (Private::ValidateOrFail<Models::ResizePageBlobResult>(this->Http(), completion,
+        if (Private::ValidateOrFail<Models::ResizePageBlobResult>(this->Http(), std::move(completion),
                                                                   Private::ValidatePageAligned(newSize, "newSize"))) {
             return;
         }

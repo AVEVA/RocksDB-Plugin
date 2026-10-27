@@ -658,14 +658,14 @@ void FailInvalidArgument(THttp& httpClient, THandler&& completion, std::string m
 }
 
 // If `validationError` is set, completes `completion` with it as an invalid_argument failure.
-// Returns true when the caller must stop.
+// Returns true when the caller must stop. `completion` is only consumed on failure, so pass it as std::move(...).
 template <class TModel, HttpClientLike THttp, class THandler>
-[[nodiscard]] bool ValidateOrFail(THttp& httpClient, THandler& completion,
+[[nodiscard]] bool ValidateOrFail(THttp& httpClient, THandler&& completion,
                                   const std::optional<std::string>& validationError) {
     if (!validationError.has_value()) {
         return false;
     }
-    FailInvalidArgument<TModel>(httpClient, std::move(completion), *validationError);
+    FailInvalidArgument<TModel>(httpClient, std::forward<THandler>(completion), *validationError);
     return true;
 }
 
