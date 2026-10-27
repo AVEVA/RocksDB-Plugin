@@ -25,4 +25,5 @@ template class BasicLockFileImpl<FakeBlobServer::BlobClientType>;
 
 namespace AVEVA::RocksDB::Plugin::Azure {
 template class BasicReadableFile<Impl::Tests::FakeReadableFileImpl>;
-}
+template class BasicReadableFile<Impl::Tests::SlowProbeReadableFileImpl>;
+} // namespace AVEVA::RocksDB::Plugin::Azure

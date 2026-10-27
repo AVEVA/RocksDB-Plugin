@@ -1140,6 +1140,36 @@ TEST_F(AsyncReadTests, MultiRead_TimeoutIsOneBudgetForTheBatch_ExpiredQueuedGrou
     }
 }
 
+TEST_F(AsyncReadTests, MultiRead_SlowPlanningSpendsTheBudget_MissStartsNoDownloadButPrefetchHitIsServed) {
+    using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::SlowProbeReadableFile;
+    using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::SlowProbeReadableFileImpl;
+    FillPattern(m_inlineEnv, 100000);
+    auto impl = std::make_shared<SlowProbeReadableFileImpl>("test.sst", m_inlineEnv.Runtime, m_inlineEnv.Client,
+                                                            nullptr, m_logger);
+    SlowProbeReadableFile file{impl};
+    ASSERT_TRUE(file.Prefetch(0, 256, rocksdb::IOOptions{}, nullptr).ok());
+    WaitForPrefetches(*impl, {0});
+    ASSERT_EQ(1U, m_inlineEnv.Blob->Downloads.size());
+    impl->ProbeDelay = std::chrono::milliseconds(150);
+    std::vector<char> hit(100);
+    std::vector<char> miss(100);
+    std::vector<char> invalid(8);
+    std::vector<rocksdb::FSReadRequest> reqs(3);
+    SetRequest(reqs[0], 50, hit);
+    SetRequest(reqs[1], 20000, miss);
+    SetRequest(reqs[2], std::numeric_limits<uint64_t>::max() - 1, invalid);
+    rocksdb::IOOptions options;
+    options.timeout = std::chrono::milliseconds(50);
+
+    ASSERT_TRUE(file.MultiRead(reqs.data(), reqs.size(), options, nullptr).ok());
+
+    EXPECT_EQ(1U, m_inlineEnv.Blob->Downloads.size()) << "the late miss must not start a download";
+    EXPECT_TRUE(reqs[0].status.ok());
+    EXPECT_EQ(Expected(50, 100), reqs[0].result.ToString());
+    EXPECT_TRUE(reqs[1].status.IsTimedOut()) << reqs[1].status.ToString();
+    EXPECT_TRUE(reqs[2].status.IsInvalidArgument()) << reqs[2].status.ToString();
+}
+
 TEST_F(AsyncReadTests, ReadAsync_PassesIoOptionsTimeoutToTheDownload) {
     auto file = CreateFile(m_deferredEnv);
     std::vector<char> scratch(64);

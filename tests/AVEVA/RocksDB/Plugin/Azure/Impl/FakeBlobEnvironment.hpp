@@ -19,6 +19,8 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <thread>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl::Tests {
 using FakeReadableFileImpl = BasicReadableFileImpl<FakeBlobServer::BlobClientType>;
@@ -26,6 +28,20 @@ using FakeWriteableFileImpl = BasicWriteableFileImpl<FakeBlobServer::BlobClientT
 using FakeReadWriteFileImpl = BasicReadWriteFileImpl<FakeBlobServer::BlobClientType>;
 using FakeSequentialFileImpl = BasicSequentialFileImpl<FakeBlobServer::BlobClientType>;
 using FakeReadableFile = BasicReadableFile<FakeReadableFileImpl>;
+
+// A static-dispatch seam for MultiRead's planning phase: every completed-prefetch probe takes `ProbeDelay`.
+struct SlowProbeReadableFileImpl : FakeReadableFileImpl {
+    using FakeReadableFileImpl::FakeReadableFileImpl;
+    std::chrono::milliseconds ProbeDelay{0};
+
+    [[nodiscard]] std::optional<size_t> TryReadFromCompletedPrefetch(const int64_t offset, const int64_t bytesToRead,
+                                                                     char* buffer) const {
+        const auto result = FakeReadableFileImpl::TryReadFromCompletedPrefetch(offset, bytesToRead, buffer);
+        std::this_thread::sleep_for(ProbeDelay);
+        return result;
+    }
+};
+using SlowProbeReadableFile = BasicReadableFile<SlowProbeReadableFileImpl>;
 
 // Everything a file object needs to run against an in-memory blob: the library's real page blob client talking to a
 // FakeBlobServer through the fake HTTP transport. `Blob` is the server (the blob's state and the requests it saw);

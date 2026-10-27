@@ -194,6 +194,9 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
     // Tracks which requests have an outcome, kept outside the try so the batch-level handler can still read it. It
     // is sized inside the try; if that allocation fails it stays empty and every request counts as unresolved.
     std::vector<char> resolved;
+    // Fixed before any planning or cache probing, so slow setup spends the caller's budget instead of extending it.
+    const auto deadline =
+        Impl::ReadableFileDetail::DeadlineAfter(std::chrono::ceil<std::chrono::milliseconds>(opts.timeout));
     try {
         // The waits below need completions that run on the host io_context, so they would hang on one of its threads.
         try {
@@ -222,7 +225,10 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
         // A request whose range overflows cannot be merged or read; it fails on its own like any per-request error.
         // Requests already covered by a completed in-memory prefetch are served here, before merging: merging
         // requests that were prefetched separately would turn those hits into one merged-range miss and a download.
-        // Only the in-memory prefetch is consulted; the file cache keeps its existing role in StartRead.
+        // Only the in-memory prefetch is consulted; the file cache keeps its existing role in StartRead. Hits are
+        // copies of data already in memory and cost no network budget, so they are served even after the deadline has
+        // passed; every miss is then admitted against the same absolute deadline and times out without starting a
+        // download.
         std::vector<size_t> order;
         order.reserve(num_reqs);
         for (size_t i = 0; i < num_reqs; ++i) {
@@ -284,10 +290,6 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
 
         auto signal = std::make_shared<Impl::AsyncReadSignal>();
         size_t nextGroup = 0;
-        // One absolute deadline for the whole batch, so reads admitted later do not each get a fresh timeout.
-        const auto deadline =
-            Impl::ReadableFileDetail::DeadlineAfter(std::chrono::ceil<std::chrono::milliseconds>(opts.timeout));
-
         // Bytes held by the outstanding downloads: the download lease's real capacity, plus the merge buffer.
         uint64_t inFlightBytes = 0;
         const auto chargeOf = [](const Group& group) {
