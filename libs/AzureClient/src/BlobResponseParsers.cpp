@@ -750,35 +750,44 @@ enum class BlobHeader : std::uint8_t {
 
 // Dispatches on the name length first so most headers (and every header we do not care about) cost one or two
 // case-insensitive compares instead of one full scan per property.
+// Case labels derive from the name constants so a renamed header cannot silently desynchronise; a duplicate length
+// label is a compile error, and lengths shared by several names are handled by the compares inside the case.
+constexpr std::string_view ContentRangeHeaderName = "Content-Range";
+constexpr std::string_view VersionIdHeaderName = "x-ms-version-id";
+constexpr std::string_view IsCurrentVersionHeaderName = "x-ms-is-current-version";
+
 [[nodiscard]] BlobHeader ClassifyBlobHeader(std::string_view name) noexcept {
     switch (name.size()) {
-    case 4:
+    case ETagHeaderName.size():
         if (IEquals(name, ETagHeaderName)) {
             return BlobHeader::ETag;
         }
         break;
-    case 11:
+    case ContentMd5HeaderName.size():
         if (IEquals(name, ContentMd5HeaderName)) {
             return BlobHeader::ContentMd5;
         }
         break;
-    case 12:
+    case ContentTypeHeaderName.size():
         if (IEquals(name, ContentTypeHeaderName)) {
             return BlobHeader::ContentType;
         }
         break;
-    case 13:
+    case CacheControlHeaderName.size():
+        static_assert(CacheControlHeaderName.size() == ContentRangeHeaderName.size() &&
+                      CacheControlHeaderName.size() == LastModifiedHeaderName.size());
         if (IEquals(name, CacheControlHeaderName)) {
             return BlobHeader::CacheControl;
         }
-        if (IEquals(name, "Content-Range")) {
+        if (IEquals(name, ContentRangeHeaderName)) {
             return BlobHeader::ContentRange;
         }
         if (IEquals(name, LastModifiedHeaderName)) {
             return BlobHeader::LastModified;
         }
         break;
-    case 14:
+    case ContentLengthHeaderName.size():
+        static_assert(ContentLengthHeaderName.size() == XMsBlobTypeHeaderName.size());
         if (IEquals(name, ContentLengthHeaderName)) {
             return BlobHeader::ContentLength;
         }
@@ -786,12 +795,14 @@ enum class BlobHeader : std::uint8_t {
             return BlobHeader::BlobType;
         }
         break;
-    case 15:
-        if (IEquals(name, "x-ms-version-id")) {
+    case VersionIdHeaderName.size():
+        if (IEquals(name, VersionIdHeaderName)) {
             return BlobHeader::VersionId;
         }
         break;
-    case 16:
+    case HeaderPropertyNames.ContentEncoding.size():
+        static_assert(HeaderPropertyNames.ContentEncoding.size() == HeaderPropertyNames.ContentLanguage.size() &&
+                      HeaderPropertyNames.ContentEncoding.size() == HeaderPropertyNames.LeaseState.size());
         if (IEquals(name, HeaderPropertyNames.ContentEncoding)) {
             return BlobHeader::ContentEncoding;
         }
@@ -802,17 +813,18 @@ enum class BlobHeader : std::uint8_t {
             return BlobHeader::LeaseState;
         }
         break;
-    case 17:
+    case HeaderPropertyNames.LeaseStatus.size():
         if (IEquals(name, HeaderPropertyNames.LeaseStatus)) {
             return BlobHeader::LeaseStatus;
         }
         break;
-    case 18:
+    case HeaderPropertyNames.CreatedOn.size():
         if (IEquals(name, HeaderPropertyNames.CreatedOn)) {
             return BlobHeader::CreatedOn;
         }
         break;
-    case 19:
+    case HeaderPropertyNames.LeaseDuration.size():
+        static_assert(HeaderPropertyNames.LeaseDuration.size() == HeaderPropertyNames.ContentDisposition.size());
         if (IEquals(name, HeaderPropertyNames.LeaseDuration)) {
             return BlobHeader::LeaseDuration;
         }
@@ -820,17 +832,17 @@ enum class BlobHeader : std::uint8_t {
             return BlobHeader::ContentDisposition;
         }
         break;
-    case 21:
+    case HeaderPropertyNames.ServerEncrypted.size():
         if (IEquals(name, HeaderPropertyNames.ServerEncrypted)) {
             return BlobHeader::ServerEncrypted;
         }
         break;
-    case 23:
-        if (IEquals(name, "x-ms-is-current-version")) {
+    case IsCurrentVersionHeaderName.size():
+        if (IEquals(name, IsCurrentVersionHeaderName)) {
             return BlobHeader::IsCurrentVersion;
         }
         break;
-    case 25:
+    case HeaderPropertyNames.SequenceNumber.size():
         if (IEquals(name, HeaderPropertyNames.SequenceNumber)) {
             return BlobHeader::SequenceNumber;
         }
