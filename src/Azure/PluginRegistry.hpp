@@ -25,14 +25,16 @@ using FileSystemFactory = std::function<std::unique_ptr<rocksdb::FileSystem>()>;
 /// Records `create` as the factory for `pluginName`, adding the RocksDB factory that reads it on first use. RocksDB
 /// keeps the first factory added under a name, so later registrations only replace the recorded settings.
 /// </summary>
-void SetFactory(const std::string& pluginName, FileSystemFactory create);
+/// `owner` identifies the registration that set it, so a shared name can later be cleared only by that owner.
+void SetFactory(const std::string& pluginName, FileSystemFactory create, std::string owner = {});
 
 /// <summary>
 /// Drops the factory settings (and with them the io_context reference or ownership) for `pluginName`. The RocksDB
 /// factory itself stays in the ObjectLibrary, which cannot remove entries, and reports "not registered" until a
-/// later SetFactory call fills the state again.
+/// later SetFactory call fills the state again. When `owner` is given, the state is cleared only if it was last set
+/// by that owner.
 /// </summary>
-void ClearRegistration(const std::string& pluginName);
+void ClearRegistration(const std::string& pluginName, const std::string* owner = nullptr);
 
 /// <summary>
 /// Builds the RocksDB registry name for a primary/backup pair. Each part is length-prefixed and the whole is

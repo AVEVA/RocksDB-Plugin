@@ -88,7 +88,7 @@ rocksdb::Status RegisterImpl(rocksdb::ConfigOptions& configOptions, rocksdb::Env
     };
 
     for (const auto& name : {pluginName, legacyName}) {
-        Registry::SetFactory(name, create);
+        Registry::SetFactory(name, create, pluginName);
     }
 
     return rocksdb::Env::CreateFromUri(configOptions, "", pluginName, env, guard);
@@ -187,14 +187,16 @@ void Plugin::Unregister(const std::string& name) { Registry::ClearRegistration(n
 
 void Plugin::Unregister(const Models::ServicePrincipalStorageInfo& primary,
                         const std::optional<Models::ServicePrincipalStorageInfo>& backup) {
-    Registry::ClearRegistration(PluginNameFor(primary, backup));
-    Registry::ClearRegistration(LegacyPluginNameFor(primary, backup));
+    const auto name = PluginNameFor(primary, backup);
+    Registry::ClearRegistration(name);
+    Registry::ClearRegistration(LegacyPluginNameFor(primary, backup), &name);
 }
 
 void Plugin::Unregister(const Models::ChainedCredentialInfo& primary,
                         const std::optional<Models::ChainedCredentialInfo>& backup) {
-    Registry::ClearRegistration(PluginNameFor(primary, backup));
-    Registry::ClearRegistration(LegacyPluginNameFor(primary, backup));
+    const auto name = PluginNameFor(primary, backup);
+    Registry::ClearRegistration(name);
+    Registry::ClearRegistration(LegacyPluginNameFor(primary, backup), &name);
 }
 
 rocksdb::Status

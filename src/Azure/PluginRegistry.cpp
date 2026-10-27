@@ -20,6 +20,7 @@ namespace {
 struct Registration {
     std::mutex Mutex;
     FileSystemFactory Create;
+    std::string Owner;
 };
 
 struct RegistrationTable {
@@ -78,16 +79,17 @@ std::shared_ptr<Registration> GetOrAddRegistration(const std::string& pluginName
 }
 } // namespace
 
-void SetFactory(const std::string& pluginName, FileSystemFactory create) {
+void SetFactory(const std::string& pluginName, FileSystemFactory create, std::string owner) {
     auto registration = GetOrAddRegistration(pluginName);
     // Declared before the lock so the old factory is destroyed after unlocking: it may own an io_context whose
     // destructor joins a thread.
     FileSystemFactory replaced;
     std::scoped_lock lock(registration->Mutex);
     replaced = std::exchange(registration->Create, std::move(create));
+    registration->Owner = std::move(owner);
 }
 
-void ClearRegistration(const std::string& pluginName) {
+void ClearRegistration(const std::string& pluginName, const std::string* owner) {
     std::shared_ptr<Registration> registration;
     {
         std::scoped_lock lock(Table().Mutex);
@@ -99,8 +101,13 @@ void ClearRegistration(const std::string& pluginName) {
         // Destroy the old factory outside the lock: releasing an owned io_context may join its thread.
         FileSystemFactory released;
         std::scoped_lock lock(registration->Mutex);
+        // A shared name (the legacy alias) may have been re-registered by another owner since; leave it alone.
+        if (owner != nullptr && registration->Owner != *owner) {
+            return;
+        }
         released = std::move(registration->Create);
         registration->Create = nullptr;
+        registration->Owner.clear();
     }
 }
 

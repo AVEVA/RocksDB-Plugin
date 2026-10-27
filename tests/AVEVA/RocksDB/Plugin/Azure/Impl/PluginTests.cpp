@@ -189,3 +189,31 @@ TEST(PluginRegistryTests, SetFactory_ReplacingAFactory_DestroysTheOldOneOutsideT
     EXPECT_TRUE(*lockWasFree);
     ClearRegistration(name);
 }
+TEST(PluginRegistryTests, ClearRegistration_WithAnotherOwner_KeepsTheSharedName) {
+    using AVEVA::RocksDB::Plugin::Azure::Registry::ClearRegistration;
+    using AVEVA::RocksDB::Plugin::Azure::Registry::SetFactory;
+    const std::string name = "registry-owner-test";
+    const std::string first = "first";
+    const std::string second = "second";
+    auto calls = std::make_shared<int>(0);
+    SetFactory(name, [] { return std::unique_ptr<rocksdb::FileSystem>(); }, first);
+    SetFactory(
+        name,
+        [calls] {
+            ++*calls;
+            return std::unique_ptr<rocksdb::FileSystem>();
+        },
+        second);
+
+    ClearRegistration(name, &first);
+
+    rocksdb::ConfigOptions configOptions;
+    rocksdb::Env* env = nullptr;
+    std::shared_ptr<rocksdb::Env> guard;
+    [[maybe_unused]] const auto status = rocksdb::Env::CreateFromUri(configOptions, "", name, &env, &guard);
+    EXPECT_EQ(1, *calls);
+
+    ClearRegistration(name, &second);
+    [[maybe_unused]] const auto cleared = rocksdb::Env::CreateFromUri(configOptions, "", name, &env, &guard);
+    EXPECT_EQ(1, *calls);
+}
