@@ -9,8 +9,8 @@
 
 #include <atomic>
 #include <concepts>
-#include <future>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <type_traits>
@@ -67,9 +67,21 @@ template <class Executor> void ThrowIfRunningOn(const Executor& executor) {
 }
 
 namespace Private {
+// The rendezvous lives on the blocked caller's stack, which outlives the handler because the caller waits for Done.
+template <class TResult> struct BlockOnState {
+    std::optional<TResult> Value;
+    std::atomic<bool> Done{false};
+};
+
 template <class TResult> struct BlockOnHandler {
-    std::shared_ptr<std::promise<TResult>> Promise;
-    void operator()(TResult result) { Promise->set_value(std::move(result)); }
+    BlockOnState<TResult>* State;
+    void operator()(TResult result) {
+        auto* state = State;
+        state->Value.emplace(std::move(result));
+        state->Done.store(true, std::memory_order_release);
+        // Must be the last access: the waiter may destroy the state as soon as it observes Done.
+        state->Done.notify_one();
+    }
 };
 } // namespace Private
 } // namespace AVEVA::AzureClient
@@ -80,11 +92,11 @@ template <class TResult> struct async_result<AVEVA::AzureClient::BlockOnToken, v
 
     template <class Initiation, class... Args>
     static return_type initiate(Initiation&& initiation, AVEVA::AzureClient::BlockOnToken, Args&&... args) {
-        auto promise = std::make_shared<std::promise<TResult>>();
-        auto future = promise->get_future();
-        std::forward<Initiation>(initiation)(AVEVA::AzureClient::Private::BlockOnHandler<TResult>{std::move(promise)},
+        AVEVA::AzureClient::Private::BlockOnState<TResult> state;
+        std::forward<Initiation>(initiation)(AVEVA::AzureClient::Private::BlockOnHandler<TResult>{&state},
                                              std::forward<Args>(args)...);
-        return future.get();
+        state.Done.wait(false, std::memory_order_acquire);
+        return std::move(*state.Value);
     }
 };
 } // namespace boost::asio
