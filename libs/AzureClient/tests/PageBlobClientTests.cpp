@@ -76,7 +76,7 @@ using AVEVA::AzureClient::Tests::PageBlobClient;
 void VerifyMalformedDeleteServiceErrorResult(
     const std::expected<Response<DeleteBlobResult>, BlobStorageError>& result) {
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().Code, BlobStorageErrorCode::ServiceError);
+    EXPECT_EQ(result.error().Code, BlobStorageErrorCode::InternalError);
     EXPECT_EQ(result.error().StatusCode, 500U);
     EXPECT_TRUE(result.error().ErrorCode.empty());
     EXPECT_TRUE(result.error().Message.empty());

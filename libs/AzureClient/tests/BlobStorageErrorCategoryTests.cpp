@@ -233,8 +233,49 @@ TEST(BlobStorageErrorCategoryTests, ErrorCodes_MapToPortableConditions) {
     EXPECT_NE(make_error_code(BlobStorageErrorCode::ConditionNotMet), std::errc::no_such_file_or_directory);
     EXPECT_NE(make_error_code(BlobStorageErrorCode::ServiceError), std::errc::file_exists);
     // Unmapped codes keep their own category as the default condition.
-    EXPECT_EQ(make_error_code(BlobStorageErrorCode::LeaseLost).default_error_condition().category().name(),
+    EXPECT_EQ(make_error_code(BlobStorageErrorCode::BlobTierInadequateForContentLength)
+                  .default_error_condition()
+                  .category()
+                  .name(),
               std::string{"aveva.azure-client.blob-storage"});
+}
+
+TEST(BlobStorageErrorCategoryTests, ExtendedErrorCodes_MapToPortableConditions) {
+    using std::errc;
+    const std::array<std::pair<BlobStorageErrorCode, errc>, 29> cases{{
+        {BlobStorageErrorCode::InternalError, errc::resource_unavailable_try_again},
+        {BlobStorageErrorCode::ContainerBeingDeleted, errc::resource_unavailable_try_again},
+        {BlobStorageErrorCode::ServerBusy, errc::resource_unavailable_try_again},
+        {BlobStorageErrorCode::LeaseIdMissing, errc::device_or_resource_busy},
+        {BlobStorageErrorCode::LeaseAlreadyPresent, errc::device_or_resource_busy},
+        {BlobStorageErrorCode::LeaseIdMismatchWithBlobOperation, errc::device_or_resource_busy},
+        {BlobStorageErrorCode::LeaseNotPresentWithBlobOperation, errc::device_or_resource_busy},
+        {BlobStorageErrorCode::LeaseLost, errc::device_or_resource_busy},
+        {BlobStorageErrorCode::LeaseNotPresentWithLeaseOperation, errc::device_or_resource_busy},
+        {BlobStorageErrorCode::LeaseIdMismatchWithLeaseOperation, errc::device_or_resource_busy},
+        {BlobStorageErrorCode::LeaseIsBrokenAndCannotBeRenewed, errc::device_or_resource_busy},
+        {BlobStorageErrorCode::LeaseAlreadyBroken, errc::device_or_resource_busy},
+        {BlobStorageErrorCode::LeaseIsBreakingAndCannotBeAcquired, errc::device_or_resource_busy},
+        {BlobStorageErrorCode::ConditionNotMet, errc::operation_not_permitted},
+        {BlobStorageErrorCode::TargetConditionNotMet, errc::operation_not_permitted},
+        {BlobStorageErrorCode::AppendPositionConditionNotMet, errc::operation_not_permitted},
+        {BlobStorageErrorCode::MaxBlobSizeConditionNotMet, errc::operation_not_permitted},
+        {BlobStorageErrorCode::SequenceNumberConditionNotMet, errc::operation_not_permitted},
+        {BlobStorageErrorCode::InvalidRange, errc::result_out_of_range},
+        {BlobStorageErrorCode::InvalidPageRange, errc::result_out_of_range},
+        {BlobStorageErrorCode::InvalidHeaderValue, errc::invalid_argument},
+        {BlobStorageErrorCode::InvalidQueryParameterValue, errc::invalid_argument},
+        {BlobStorageErrorCode::InvalidResourceName, errc::invalid_argument},
+        {BlobStorageErrorCode::InvalidBlockList, errc::invalid_argument},
+        {BlobStorageErrorCode::InvalidBlobOrBlock, errc::invalid_argument},
+        {BlobStorageErrorCode::ContainerDisabled, errc::permission_denied},
+        {BlobStorageErrorCode::BlobArchived, errc::permission_denied},
+        {BlobStorageErrorCode::Md5Mismatch, errc::io_error},
+        {BlobStorageErrorCode::RequestBodyTooLarge, errc::file_too_large},
+    }};
+    for (const auto& [code, condition] : cases) {
+        EXPECT_EQ(make_error_code(code), condition) << static_cast<int>(code);
+    }
 }
 
 TEST(BlobStorageErrorCategoryTests, EnumeratorValuesArePinned) {
@@ -276,6 +317,19 @@ TEST(BlobStorageErrorCategoryTests, DetermineFailure_Maps304WithoutErrorCodeToCo
 
     const auto redirect = DetermineBlobStorageFailure({}, AVEVA::HttpResponse{302, {}, ""});
     EXPECT_EQ(redirect.Error, BlobStorageErrorCode::ServiceError);
+
+    EXPECT_EQ(DetermineBlobStorageFailure({}, AVEVA::HttpResponse{404, {}, ""}).Error,
+              BlobStorageErrorCode::ResourceNotFound);
+    EXPECT_EQ(DetermineBlobStorageFailure({}, AVEVA::HttpResponse{403, {{"x-ms-error-code", "Unknown"}}, ""}).Error,
+              BlobStorageErrorCode::AuthorizationFailure);
+    EXPECT_EQ(DetermineBlobStorageFailure({}, AVEVA::HttpResponse{412, {}, ""}).Error,
+              BlobStorageErrorCode::ConditionNotMet);
+    EXPECT_EQ(DetermineBlobStorageFailure({}, AVEVA::HttpResponse{500, {}, ""}).Error,
+              BlobStorageErrorCode::InternalError);
+    EXPECT_EQ(DetermineBlobStorageFailure({}, AVEVA::HttpResponse{503, {}, ""}).Error,
+              BlobStorageErrorCode::ServerBusy);
+    EXPECT_EQ(DetermineBlobStorageFailure({}, AVEVA::HttpResponse{418, {}, ""}).Error,
+              BlobStorageErrorCode::ServiceError);
 
     const auto newCode =
         DetermineBlobStorageFailure({}, AVEVA::HttpResponse{409, {{"x-ms-error-code", "LeaseAlreadyPresent"}}, ""});

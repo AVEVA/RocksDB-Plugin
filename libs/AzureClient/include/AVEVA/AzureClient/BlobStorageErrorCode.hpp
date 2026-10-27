@@ -14,7 +14,11 @@ namespace AVEVA::AzureClient {
 // The category maps codes onto portable conditions, so callers can write for example
 // `error == std::errc::no_such_file_or_directory` for any not-found code,
 // `std::errc::file_exists` for already-exists codes and `std::errc::permission_denied` for
-// authentication/authorization failures.
+// authentication/authorization failures. Also: `resource_unavailable_try_again` (InternalError, ServerBusy,
+// ContainerBeingDeleted), `device_or_resource_busy` (Lease* codes), `operation_not_permitted` (*ConditionNotMet),
+// `result_out_of_range` (InvalidRange, InvalidPageRange), `invalid_argument` (Invalid* header/query/name/block codes)
+// and `io_error` (Md5Mismatch). A response with a missing or unrecognized error code is classified from its HTTP
+// status (403, 404, 412, 500, 503); other statuses yield ServiceError.
 enum class BlobStorageErrorCode : std::uint8_t {
     ContainerAlreadyExists = 1,
     ContainerNotFound,

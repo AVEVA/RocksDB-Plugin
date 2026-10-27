@@ -521,6 +521,27 @@ RequestFailure DetermineBlobStorageFailure(std::error_code transportError, const
     if (errorCode.empty() && response.GetStatus() == HttpStatusNotModified) {
         // A conditional GET/HEAD whose If-None-Match / If-Modified-Since condition failed.
         code = BlobStorageErrorCode::ConditionNotMet;
+    } else if (code == BlobStorageErrorCode::ServiceError) {
+        // An absent or unrecognized error code still carries a meaningful HTTP status.
+        switch (response.GetStatus()) {
+        case 403:
+            code = BlobStorageErrorCode::AuthorizationFailure;
+            break;
+        case 404:
+            code = BlobStorageErrorCode::ResourceNotFound;
+            break;
+        case 412:
+            code = BlobStorageErrorCode::ConditionNotMet;
+            break;
+        case 500:
+            code = BlobStorageErrorCode::InternalError;
+            break;
+        case 503:
+            code = BlobStorageErrorCode::ServerBusy;
+            break;
+        default:
+            break;
+        }
     }
     return {.Error = make_error_code(code), .Details = std::move(details)};
 }

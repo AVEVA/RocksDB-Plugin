@@ -179,8 +179,41 @@ std::error_condition BlobStorageErrorCategory::default_error_condition(int value
     case BlobStorageErrorCode::InvalidAuthenticationInfo:
     case BlobStorageErrorCode::AuthorizationPermissionMismatch:
         return std::errc::permission_denied;
+    case BlobStorageErrorCode::ContainerDisabled:
+    case BlobStorageErrorCode::BlobArchived:
+        return std::errc::permission_denied;
     case BlobStorageErrorCode::ServerBusy:
+    case BlobStorageErrorCode::InternalError:
+    case BlobStorageErrorCode::ContainerBeingDeleted:
         return std::errc::resource_unavailable_try_again;
+    case BlobStorageErrorCode::LeaseIdMissing:
+    case BlobStorageErrorCode::LeaseAlreadyPresent:
+    case BlobStorageErrorCode::LeaseIdMismatchWithBlobOperation:
+    case BlobStorageErrorCode::LeaseNotPresentWithBlobOperation:
+    case BlobStorageErrorCode::LeaseLost:
+    case BlobStorageErrorCode::LeaseNotPresentWithLeaseOperation:
+    case BlobStorageErrorCode::LeaseIdMismatchWithLeaseOperation:
+    case BlobStorageErrorCode::LeaseIsBrokenAndCannotBeRenewed:
+    case BlobStorageErrorCode::LeaseAlreadyBroken:
+    case BlobStorageErrorCode::LeaseIsBreakingAndCannotBeAcquired:
+        return std::errc::device_or_resource_busy;
+    case BlobStorageErrorCode::ConditionNotMet:
+    case BlobStorageErrorCode::TargetConditionNotMet:
+    case BlobStorageErrorCode::AppendPositionConditionNotMet:
+    case BlobStorageErrorCode::MaxBlobSizeConditionNotMet:
+    case BlobStorageErrorCode::SequenceNumberConditionNotMet:
+        return std::errc::operation_not_permitted;
+    case BlobStorageErrorCode::InvalidRange:
+    case BlobStorageErrorCode::InvalidPageRange:
+        return std::errc::result_out_of_range;
+    case BlobStorageErrorCode::InvalidHeaderValue:
+    case BlobStorageErrorCode::InvalidQueryParameterValue:
+    case BlobStorageErrorCode::InvalidResourceName:
+    case BlobStorageErrorCode::InvalidBlockList:
+    case BlobStorageErrorCode::InvalidBlobOrBlock:
+        return std::errc::invalid_argument;
+    case BlobStorageErrorCode::Md5Mismatch:
+        return std::errc::io_error;
     case BlobStorageErrorCode::OperationTimedOut:
         return std::errc::timed_out;
     case BlobStorageErrorCode::RequestBodyTooLarge:
