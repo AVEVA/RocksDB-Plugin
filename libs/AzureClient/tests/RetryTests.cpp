@@ -155,6 +155,32 @@ TEST(RetryTests, Retries_OnTransientThenSucceeds) {
     EXPECT_FALSE(observedError.has_value());
 }
 
+TEST(RetryTests, RetryStartFailureCompletesWithErrorInsteadOfEscapingTheEventLoop) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
+
+    BlobClientOptions options = MakeBlobClientOptions("container", "blob.txt");
+    options.Retry.MaxRetries = 1;
+    options.Retry.InitialDelay = std::chrono::milliseconds{0};
+
+    BlobClient client{httpClient, options};
+
+    CallbackExpectation cb;
+    std::optional<BlobStorageError> observedError;
+    client.DeleteAsync([&](std::expected<Response<Models::DeleteBlobResult>, BlobStorageError> result) mutable {
+        if (!result.has_value()) {
+            observedError = std::move(result).error();
+        }
+        cb.MarkInvoked();
+    });
+
+    // The retry's SendAsync runs on the event loop, not inside the initiating call.
+    httpClient.FailNextInitiation(std::make_exception_ptr(std::bad_alloc{}));
+    EXPECT_NO_THROW(ASSERT_TRUE(httpClient.RunUntil([&] { return observedError.has_value(); })));
+
+    EXPECT_TRUE(observedError.has_value());
+}
+
 TEST(RetryTests, FirstAttemptSuccessDoesNotConstructABackoffTimer) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{200, {}, ""});

@@ -136,14 +136,16 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         }
 
         m_initiating.store(true, std::memory_order_release);
-        Run(StartAttemptEvent{});
+        Run(StartAttemptEvent{true});
         m_initiating.store(false, std::memory_order_release);
     }
 
   private:
     // The units of work serialized by Run. They are plain data rather than closures so the queue needs
     // no type erasure.
-    struct StartAttemptEvent {};
+    struct StartAttemptEvent {
+        bool Initial = false;
+    };
     struct CancelEvent {
         boost::asio::cancellation_type_t Type;
     };
@@ -288,7 +290,8 @@ class RetryOperation final : public std::enable_shared_from_this<RetryOperation<
         try {
             Dispatch(event);
         } catch (...) {
-            if (m_finished.load(std::memory_order_acquire) || std::holds_alternative<StartAttemptEvent>(event)) {
+            const auto* start = std::get_if<StartAttemptEvent>(&event);
+            if (m_finished.load(std::memory_order_acquire) || (start != nullptr && start->Initial)) {
                 throw;
             }
             FailInternal(std::current_exception());
