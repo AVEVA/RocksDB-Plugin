@@ -255,8 +255,13 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
         /// <param name="sweeper">The sweeper to run; it records its queue deadline so it can be cancelled.</param>
         /// <param name="delay">How long to wait before running it.</param>
         void Schedule(IdleSweeper& sweeper, std::chrono::milliseconds delay) {
-            if (FailureBudget().fetch_sub(1) > 0) {
-                throw std::bad_alloc();
+            // Only decrement while positive so the test hook never wraps; the plain load keeps the
+            // production path (budget zero) free of read-modify-write traffic.
+            auto& budget = FailureBudget();
+            for (int remaining = budget.load(std::memory_order_relaxed); remaining > 0;) {
+                if (budget.compare_exchange_weak(remaining, remaining - 1)) {
+                    throw std::bad_alloc();
+                }
             }
             {
                 std::lock_guard<std::mutex> lock(m_state->mutex);
