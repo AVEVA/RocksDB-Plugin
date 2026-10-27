@@ -8,6 +8,7 @@
 #include <AVEVA/HttpClient/HttpHeader.hpp>
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cstddef>
 #include <optional>
@@ -217,7 +218,9 @@ void AppendBatchDeletePart(std::string& body, std::string_view boundary, std::si
     body.append("--").append(boundary).append(LineBreak);
     body.append("Content-Type: application/http").append(LineBreak);
     body.append("Content-Transfer-Encoding: binary").append(LineBreak);
-    body.append("Content-ID: ").append(std::to_string(contentId)).append(LineBreak);
+    std::array<char, 24> idBuffer{};
+    const auto idEnd = std::to_chars(idBuffer.data(), idBuffer.data() + idBuffer.size(), contentId).ptr;
+    body.append("Content-ID: ").append(idBuffer.data(), idEnd).append(LineBreak);
     body.append(LineBreak);
     // The service rejects absolute-form targets inside a batch part, so send path and query only.
     body.append("DELETE ").append(url.substr(pathStart)).append(" HTTP/1.1").append(LineBreak);

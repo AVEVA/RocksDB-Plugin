@@ -405,6 +405,22 @@ template <class TOptions>
     AddHeader(request, XMsClientRequestIdHeaderName, CreateClientRequestId());
     return request;
 }
+
+// Formats "bytes=<first>-[<last>]" into a stack buffer so only the returned string allocates.
+std::string FormatBytesRange(std::uint64_t first, std::optional<std::uint64_t> last) {
+    // "bytes=" + two 20-digit uint64 values + '-'.
+    std::array<char, 48> buffer{};
+    constexpr std::string_view prefix = "bytes=";
+    char* const begin = buffer.data();
+    char* const end = begin + buffer.size();
+    char* out = std::ranges::copy(prefix, begin).out;
+    out = std::to_chars(out, end, first).ptr;
+    *out++ = '-';
+    if (last.has_value()) {
+        out = std::to_chars(out, end, *last).ptr;
+    }
+    return std::string{begin, out};
+}
 } // namespace
 
 std::string BuildDateHeaderValue(std::chrono::system_clock::time_point now) {
@@ -484,10 +500,10 @@ std::string BuildRangeHeaderValue(const Models::BlobByteRange& range) {
         if ((*range.Length - 1U) > (std::numeric_limits<std::uint64_t>::max() - range.Offset)) {
             throw std::invalid_argument("Range exceeds the maximum representable blob offset.");
         }
-        return "bytes=" + std::to_string(range.Offset) + '-' + std::to_string(range.Offset + *range.Length - 1U);
+        return FormatBytesRange(range.Offset, range.Offset + *range.Length - 1U);
     }
 
-    return "bytes=" + std::to_string(range.Offset) + '-';
+    return FormatBytesRange(range.Offset, std::nullopt);
 }
 
 RequestFailure DetermineBlobStorageFailure(std::error_code transportError, const HttpResponse& response) {
@@ -787,7 +803,7 @@ std::expected<std::string, std::string> BuildPageWriteRangeHeaderValue(std::uint
         return std::unexpected("offset + length exceeds the maximum representable page range.");
     }
 
-    return "bytes=" + std::to_string(offset) + "-" + std::to_string(offset + length - 1U);
+    return FormatBytesRange(offset, offset + length - 1U);
 }
 
 void ApplyLeaseRequestConditions(HttpRequest& request, Models::BlobRequestConditions conditions) {
