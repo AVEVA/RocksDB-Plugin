@@ -62,17 +62,7 @@ namespace {
 }
 
 [[nodiscard]] std::optional<std::uint64_t> ParseUnsigned(std::string_view value) noexcept {
-    if (value.empty()) {
-        return std::nullopt;
-    }
-
-    std::uint64_t parsed = 0;
-    const auto result = std::from_chars(std::to_address(value.begin()), std::to_address(value.end()), parsed);
-    if (result.ec != std::errc{} || result.ptr != std::to_address(value.end())) {
-        return std::nullopt;
-    }
-
-    return parsed;
+    return ParseExact<std::uint64_t>(value);
 }
 
 // Tags the error-message field name with its own type so it's never adjacent-and-same-type
@@ -178,31 +168,10 @@ void ParseExtendedBlobProperties(Models::BlobProperties& properties, const BlobP
     properties.SequenceNumber = ParseOptionalUnsigned(values.SequenceNumber, names.SequenceNumber);
 }
 
-[[nodiscard]] std::optional<int> ParseInt(std::string_view value) noexcept {
-    if (value.empty()) {
-        return std::nullopt;
-    }
-
-    int parsed = 0;
-    const auto result = std::from_chars(std::to_address(value.begin()), std::to_address(value.end()), parsed);
-    if (result.ec != std::errc{} || result.ptr != std::to_address(value.end())) {
-        return std::nullopt;
-    }
-    return parsed;
-}
+[[nodiscard]] std::optional<int> ParseInt(std::string_view value) noexcept { return ParseExact<int>(value); }
 
 [[nodiscard]] std::optional<unsigned int> ParseUnsignedComponent(std::string_view value) noexcept {
-    if (value.empty()) {
-        return std::nullopt;
-    }
-
-    unsigned int parsed = 0;
-    const auto result = std::from_chars(std::to_address(value.begin()), std::to_address(value.end()), parsed);
-    if (result.ec != std::errc{} || result.ptr != std::to_address(value.end())) {
-        return std::nullopt;
-    }
-
-    return parsed;
+    return ParseExact<unsigned int>(value);
 }
 
 [[nodiscard]] std::optional<unsigned int> ParseMonth(std::string_view value) noexcept {
@@ -717,12 +686,10 @@ std::optional<ParsedContentRange> ParseContentRange(std::string_view header) noe
 
     std::optional<std::uint64_t> total;
     if (!totalPart.empty() && totalPart != "*") {
-        std::uint64_t t = 0;
-        const auto r = std::from_chars(std::to_address(totalPart.begin()), std::to_address(totalPart.end()), t);
-        if (r.ec != std::errc{} || r.ptr != std::to_address(totalPart.end())) {
+        total = ParseExact<std::uint64_t>(totalPart);
+        if (!total) {
             return std::nullopt;
         }
-        total = t;
     }
 
     if (rangePart == "*") {
@@ -744,14 +711,13 @@ std::optional<ParsedContentRange> ParseContentRange(std::string_view header) noe
         return std::nullopt;
     }
 
-    std::uint64_t start = 0;
-    std::uint64_t end = 0;
-    const auto rs = std::from_chars(std::to_address(startPart.begin()), std::to_address(startPart.end()), start);
-    const auto re = std::from_chars(std::to_address(endPart.begin()), std::to_address(endPart.end()), end);
-    if (rs.ec != std::errc{} || rs.ptr != std::to_address(startPart.end()) || re.ec != std::errc{} ||
-        re.ptr != std::to_address(endPart.end())) {
+    const auto parsedStart = ParseExact<std::uint64_t>(startPart);
+    const auto parsedEnd = ParseExact<std::uint64_t>(endPart);
+    if (!parsedStart || !parsedEnd) {
         return std::nullopt;
     }
+    const std::uint64_t start = *parsedStart;
+    const std::uint64_t end = *parsedEnd;
 
     // RFC 9110 14.4: invalid if last < first, or if the complete length is not greater than last.
     if (end < start || (total.has_value() && *total <= end)) {

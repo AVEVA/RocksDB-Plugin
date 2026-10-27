@@ -30,12 +30,7 @@ namespace {
     value = first == std::string_view::npos
                 ? std::string_view{}
                 : value.substr(first, value.find_last_not_of(OptionalWhitespace) - first + 1U);
-    std::uint64_t parsed = 0;
-    const auto [ptr, ec] = std::from_chars(std::to_address(value.begin()), std::to_address(value.end()), parsed);
-    if (value.empty() || ec != std::errc{} || ptr != std::to_address(value.end())) {
-        return std::nullopt;
-    }
-    return parsed;
+    return ParseExact<std::uint64_t>(value);
 }
 } // namespace
 

@@ -42,16 +42,7 @@ std::string GetEnvironmentValue(gsl::not_null<gsl::czstring> name) {
 #endif
 }
 
-std::optional<std::int64_t> ParseInteger(std::string_view text) noexcept {
-    std::int64_t value = 0;
-    const auto* const end = std::to_address(text.end());
-    // Bounded by `end`, so null termination is not required.
-    const auto [ptr, ec] = std::from_chars(std::to_address(text.begin()), end, value);
-    if (ec != std::errc{} || ptr != end) {
-        return std::nullopt;
-    }
-    return value;
-}
+std::optional<std::int64_t> ParseInteger(std::string_view text) noexcept { return ParseExact<std::int64_t>(text); }
 
 bool IsAcceptableIdentityEndpoint(std::string_view endpoint) noexcept {
     // Parse rather than prefix-match: prefixes accept hosts such as "127.evil.com" and userinfo tricks

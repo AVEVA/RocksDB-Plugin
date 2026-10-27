@@ -30,6 +30,7 @@
 #include <AVEVA/HttpClient/Detail/Lifetime.hpp>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <concepts>
 #include <cstddef>
@@ -60,6 +61,17 @@ inline constexpr unsigned int HttpStatusInternalServerError = 500U;
 inline constexpr unsigned int HttpStatusBadGateway = 502U;
 inline constexpr unsigned int HttpStatusServiceUnavailable = 503U;
 inline constexpr unsigned int HttpStatusGatewayTimeout = 504U;
+
+// Parses a base-10 integer that must span the whole text (no sign for unsigned types, no padding, no trailing data).
+template <std::integral T> [[nodiscard]] constexpr std::optional<T> ParseExact(std::string_view text) noexcept {
+    T value{};
+    const char* const end = text.data() + text.size();
+    const auto [ptr, ec] = std::from_chars(text.data(), end, value);
+    if (ec != std::errc{} || ptr != end) {
+        return std::nullopt;
+    }
+    return value;
+}
 
 // Lease duration limits defined by the Blob service.
 inline constexpr std::chrono::seconds MinFixedLeaseDuration{15};

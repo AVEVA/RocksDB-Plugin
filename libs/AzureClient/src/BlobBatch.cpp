@@ -125,12 +125,10 @@ struct BatchPart {
     std::optional<std::size_t> contentId;
     VisitHeaders(part, pos, [&contentId](std::string_view name, std::string_view text) {
         if (IEquals(name, "Content-ID")) {
-            std::size_t value = 0;
-            const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
-            if (error != std::errc{} || end != text.data() + text.size()) {
+            contentId = ParseExact<std::size_t>(text);
+            if (!contentId) {
                 throw std::invalid_argument("Batch response part has an invalid Content-ID.");
             }
-            contentId = value;
         }
     });
     if (!contentId) {
@@ -150,12 +148,11 @@ struct BatchPart {
     if (statusText.size() < StatusDigits || (statusText.size() > StatusDigits && statusText[StatusDigits] != ' ')) {
         throw std::invalid_argument("Batch response part has a malformed status code.");
     }
-    unsigned int status = 0;
-    const auto [statusEnd, statusError] = std::from_chars(statusText.data(), statusText.data() + StatusDigits, status);
-    if (statusError != std::errc{} || statusEnd != statusText.data() + StatusDigits || status < MinStatus ||
-        status > MaxStatus) {
+    const auto parsedStatus = ParseExact<unsigned int>(statusText.substr(0, StatusDigits));
+    if (!parsedStatus || *parsedStatus < MinStatus || *parsedStatus > MaxStatus) {
         throw std::invalid_argument("Batch response part has a malformed status code.");
     }
+    const unsigned int status = *parsedStatus;
 
     return BatchPart{.ContentId = *contentId, .Status = status, .HeaderBlock = part.substr(pos)};
 }
