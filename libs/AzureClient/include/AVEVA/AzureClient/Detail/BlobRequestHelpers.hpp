@@ -364,7 +364,9 @@ struct ParsedContentRange {
 [[nodiscard]] std::string BuildServiceUrl(const BlobServiceClientOptions& options, std::string_view queryString = {});
 
 void AddHeader(HttpRequest& request, std::string_view name, std::string_view value);
+void AddHeader(HttpRequest& request, std::string_view name, std::string&& value);
 void AddHeaderIfNotEmpty(HttpRequest& request, std::string_view name, std::string_view value);
+void AddHeaderIfNotEmpty(HttpRequest& request, std::string_view name, std::string&& value);
 void ApplyBlobRequestConditions(HttpRequest& request, const Models::BlobRequestConditions& conditions);
 void ApplyMetadata(HttpRequest& request, const Models::MetadataMap& metadata);
 // Azure requires metadata names to be C# identifiers: [A-Za-z_][A-Za-z0-9_]*.

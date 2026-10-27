@@ -694,9 +694,19 @@ void AddHeader(HttpRequest& request, std::string_view name, std::string_view val
     request.AddHeader(HttpHeader{std::string{name}, std::string{value}});
 }
 
+void AddHeader(HttpRequest& request, std::string_view name, std::string&& value) {
+    request.AddHeader(HttpHeader{std::string{name}, std::move(value)});
+}
+
 void AddHeaderIfNotEmpty(HttpRequest& request, std::string_view name, std::string_view value) {
     if (!value.empty()) {
         AddHeader(request, name, value);
+    }
+}
+
+void AddHeaderIfNotEmpty(HttpRequest& request, std::string_view name, std::string&& value) {
+    if (!value.empty()) {
+        AddHeader(request, name, std::move(value));
     }
 }
 

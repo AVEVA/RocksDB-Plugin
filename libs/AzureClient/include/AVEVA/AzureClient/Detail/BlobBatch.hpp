@@ -236,7 +236,7 @@ class BatchDeleteOperation final
             subrequest.SetUrl(urls[index - begin]);
             AddHeader(subrequest, XMsDateHeaderName, date);
             AuthorizeSubrequest(subrequest, token);
-            AddHeader(subrequest, ContentLengthHeaderName, "0");
+            AddHeader(subrequest, ContentLengthHeaderName, std::string_view{"0"});
             AppendBatchDeletePart(body, boundary, index - begin, subrequest);
         }
         AppendBatchClosingBoundary(body, boundary);
