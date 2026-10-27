@@ -60,7 +60,11 @@ rocksdb::Status RegisterImpl(rocksdb::ConfigOptions& configOptions, rocksdb::Env
     if (options.MaxCacheSize > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
         return rocksdb::Status::InvalidArgument("maxCacheSize cannot exceed INT64_MAX");
     }
-    if (options.CachePath && options.MaxCacheSize == 0 && options.Log) {
+    // Every downstream error path dereferences the logger unconditionally, so a null one is replaced here, once.
+    if (!options.Log) {
+        options.Log = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
+    }
+    if (options.CachePath && options.MaxCacheSize == 0) {
         BOOST_LOG_SEV(*options.Log, boost::log::trivial::warning)
             << "cachePath is set but maxCacheSize is 0: nothing will ever be cached";
     }

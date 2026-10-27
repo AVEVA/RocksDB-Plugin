@@ -68,6 +68,20 @@ TEST(PluginTests, Register_WithCacheSizeAboveInt64Max_IsRejected) {
     EXPECT_TRUE(status.IsInvalidArgument()) << status.ToString();
 }
 
+// A null logger is replaced at registration, so the warning path and every filesystem created afterwards can log.
+TEST(PluginTests, Register_WithNullLogger_CreatesUsableEnv) {
+    rocksdb::ConfigOptions configOptions;
+    rocksdb::Env* env = nullptr;
+    std::shared_ptr<rocksdb::Env> guard;
+    boost::asio::io_context context;
+
+    const auto status = Plugin::Register(configOptions, &env, &guard, context, BadInfo(), std::nullopt, nullptr, 4096,
+                                         4096, "cache", 0);
+
+    EXPECT_FALSE(status.ok());
+    Plugin::Unregister(BadInfo());
+}
+
 TEST(PluginTests, NameFor_DistinguishesAccountsDatabasesAndBackup) {
     const auto base = Plugin::NameFor(MakeInfo("db"));
 
