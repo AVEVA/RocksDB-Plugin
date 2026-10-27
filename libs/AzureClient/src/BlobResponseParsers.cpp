@@ -440,9 +440,82 @@ ParseAsctimeHttpDate(std::string_view value) noexcept {
 }
 
 [[nodiscard]] Models::BlobProperties ParseBlobPropertiesXml(const XmlNode& node) {
+    enum class Slot : std::size_t {
+        ETag,
+        LastModified,
+        ContentLength,
+        ContentType,
+        ContentMd5,
+        CacheControl,
+        BlobType,
+        ContentEncoding,
+        ContentLanguage,
+        ContentDisposition,
+        CreatedOn,
+        LeaseStatus,
+        LeaseState,
+        LeaseDuration,
+        ServerEncrypted,
+        SequenceNumber,
+        Count
+    };
+    struct SlotName {
+        std::string_view Name;
+        Slot Value;
+    };
+    static constexpr std::array<SlotName, static_cast<std::size_t>(Slot::Count)> SlotNames{{
+        {"Etag", Slot::ETag},
+        {"Last-Modified", Slot::LastModified},
+        {"Content-Length", Slot::ContentLength},
+        {"Content-Type", Slot::ContentType},
+        {"Content-MD5", Slot::ContentMd5},
+        {"Cache-Control", Slot::CacheControl},
+        {"BlobType", Slot::BlobType},
+        {XmlPropertyNames.ContentEncoding, Slot::ContentEncoding},
+        {XmlPropertyNames.ContentLanguage, Slot::ContentLanguage},
+        {XmlPropertyNames.ContentDisposition, Slot::ContentDisposition},
+        {XmlPropertyNames.CreatedOn, Slot::CreatedOn},
+        {XmlPropertyNames.LeaseStatus, Slot::LeaseStatus},
+        {XmlPropertyNames.LeaseState, Slot::LeaseState},
+        {XmlPropertyNames.LeaseDuration, Slot::LeaseDuration},
+        {XmlPropertyNames.ServerEncrypted, Slot::ServerEncrypted},
+        {XmlPropertyNames.SequenceNumber, Slot::SequenceNumber},
+    }};
+
+    // One pass over the children; the first element with a given name wins, as with a name lookup.
+    std::array<std::string_view, static_cast<std::size_t>(Slot::Count)> values{};
+    std::array<std::string, static_cast<std::size_t>(Slot::Count)> joined; // only used when text spans nodes
+    std::bitset<static_cast<std::size_t>(Slot::Count)> seen;
+    const XmlNode* metadata = nullptr;
+    ForEachElement(node, [&](const XmlNode& child) {
+        const std::string_view name = GetLocalName(NodeName(child));
+        if (name == "Metadata") {
+            if (metadata == nullptr) {
+                metadata = &child;
+            }
+            return;
+        }
+        const auto match = std::ranges::find(SlotNames, name, &SlotName::Name);
+        if (match == SlotNames.end()) {
+            return;
+        }
+        const auto index = static_cast<std::size_t>(match->Value);
+        if (seen.test(index)) {
+            return;
+        }
+        seen.set(index);
+        if (const auto view = GetNodeTextView(child); view.has_value()) {
+            values.at(index) = *view;
+        } else {
+            joined.at(index) = GetNodeText(child);
+            values.at(index) = joined.at(index);
+        }
+    });
+    const auto value = [&values](Slot slot) { return values.at(static_cast<std::size_t>(slot)); };
+
     Models::BlobProperties properties;
-    properties.ETag = GetChildTextOrEmpty(node, "Etag");
-    if (const std::string lastModified = GetChildTextOrEmpty(node, "Last-Modified"); !lastModified.empty()) {
+    properties.ETag = std::string{value(Slot::ETag)};
+    if (const std::string_view lastModified = value(Slot::LastModified); !lastModified.empty()) {
         const auto parsed = ParseHttpDateHeader(lastModified);
         if (!parsed.has_value()) {
             throw std::invalid_argument("Blob Properties Last-Modified must contain a valid HTTP-date.");
@@ -451,7 +524,7 @@ ParseAsctimeHttpDate(std::string_view value) noexcept {
         properties.LastModified = *parsed;
     }
 
-    if (const std::string contentLength = GetChildTextOrEmpty(node, "Content-Length"); !contentLength.empty()) {
+    if (const std::string_view contentLength = value(Slot::ContentLength); !contentLength.empty()) {
         const auto parsed = ParseUnsigned(contentLength);
         if (!parsed.has_value()) {
             throw std::invalid_argument("Blob Properties Content-Length must be an unsigned integer.");
@@ -459,22 +532,21 @@ ParseAsctimeHttpDate(std::string_view value) noexcept {
 
         properties.ContentLength = *parsed;
     }
-    properties.ContentType = GetChildTextOrEmpty(node, "Content-Type");
-    properties.ContentMd5 = GetChildTextOrEmpty(node, "Content-MD5");
-    properties.CacheControl = GetChildTextOrEmpty(node, "Cache-Control");
-    properties.Type = ParseBlobTypeValue(GetChildTextOrEmpty(node, "BlobType"));
-    ParseExtendedBlobProperties(
-        properties, XmlPropertyNames,
-        ExtendedBlobValues{.ContentEncoding = GetChildTextOrEmpty(node, XmlPropertyNames.ContentEncoding),
-                           .ContentLanguage = GetChildTextOrEmpty(node, XmlPropertyNames.ContentLanguage),
-                           .ContentDisposition = GetChildTextOrEmpty(node, XmlPropertyNames.ContentDisposition),
-                           .CreatedOn = GetChildTextOrEmpty(node, XmlPropertyNames.CreatedOn),
-                           .LeaseStatus = GetChildTextOrEmpty(node, XmlPropertyNames.LeaseStatus),
-                           .LeaseState = GetChildTextOrEmpty(node, XmlPropertyNames.LeaseState),
-                           .LeaseDuration = GetChildTextOrEmpty(node, XmlPropertyNames.LeaseDuration),
-                           .ServerEncrypted = GetChildTextOrEmpty(node, XmlPropertyNames.ServerEncrypted),
-                           .SequenceNumber = GetChildTextOrEmpty(node, XmlPropertyNames.SequenceNumber)});
-    if (const XmlNode* metadata = FindChildByLocalName(node, "Metadata"); metadata != nullptr) {
+    properties.ContentType = std::string{value(Slot::ContentType)};
+    properties.ContentMd5 = std::string{value(Slot::ContentMd5)};
+    properties.CacheControl = std::string{value(Slot::CacheControl)};
+    properties.Type = ParseBlobTypeValue(value(Slot::BlobType));
+    ParseExtendedBlobProperties(properties, XmlPropertyNames,
+                                ExtendedBlobValues{.ContentEncoding = value(Slot::ContentEncoding),
+                                                   .ContentLanguage = value(Slot::ContentLanguage),
+                                                   .ContentDisposition = value(Slot::ContentDisposition),
+                                                   .CreatedOn = value(Slot::CreatedOn),
+                                                   .LeaseStatus = value(Slot::LeaseStatus),
+                                                   .LeaseState = value(Slot::LeaseState),
+                                                   .LeaseDuration = value(Slot::LeaseDuration),
+                                                   .ServerEncrypted = value(Slot::ServerEncrypted),
+                                                   .SequenceNumber = value(Slot::SequenceNumber)});
+    if (metadata != nullptr) {
         properties.Metadata = ParseMetadataXml(*metadata);
     }
     return properties;
@@ -921,15 +993,18 @@ Models::GetPageRangesResult ParseGetPageRangesResult(const HttpResponse& respons
     }
 
     result.NextMarker = GetChildTextOrEmpty(*root, "NextMarker");
-    for (const XmlNode* range : GetChildrenByLocalName(*root, "PageRange")) {
-        const auto start = ParseUnsigned(GetChildTextOrEmpty(*range, "Start"));
-        const auto end = ParseUnsigned(GetChildTextOrEmpty(*range, "End"));
+    ForEachElement(*root, [&result](const XmlNode& range) {
+        if (!MatchesLocalName(NodeName(range), "PageRange")) {
+            return;
+        }
+        const auto start = ParseUnsigned(GetChildTextOrEmpty(range, "Start"));
+        const auto end = ParseUnsigned(GetChildTextOrEmpty(range, "End"));
         if (!start.has_value() || !end.has_value() || *end < *start ||
             *end - *start == std::numeric_limits<std::uint64_t>::max()) {
             throw std::invalid_argument("PageRange must have unsigned Start and End with End >= Start.");
         }
         result.Ranges.push_back({.Offset = *start, .Length = *end - *start + 1U});
-    }
+    });
     return result;
 }
 
@@ -968,22 +1043,25 @@ Models::ListBlobsResult ParseListBlobsResultXml(std::string_view xml) {
     result.NextMarker = GetChildTextOrEmpty(*root, "NextMarker");
 
     if (const XmlNode* blobs = FindChildByLocalName(*root, "Blobs"); blobs != nullptr) {
-        for (const XmlNode* block : GetChildrenByLocalName(*blobs, "Blob")) {
+        ForEachElement(*blobs, [&result](const XmlNode& block) {
+            if (!MatchesLocalName(NodeName(block), "Blob")) {
+                return;
+            }
             Models::BlobItem item;
-            item.Name = GetBlobItemName(*block);
-            if (const XmlNode* properties = FindChildByLocalName(*block, "Properties"); properties != nullptr) {
+            item.Name = GetBlobItemName(block);
+            if (const XmlNode* properties = FindChildByLocalName(block, "Properties"); properties != nullptr) {
                 item.Properties = ParseBlobPropertiesXml(*properties);
             }
             // VersionId and IsCurrentVersion are siblings of <Properties>.
-            item.Properties.VersionId = GetChildTextOrEmpty(*block, "VersionId");
+            item.Properties.VersionId = GetChildTextOrEmpty(block, "VersionId");
             item.Properties.IsCurrentVersion =
-                ParseOptionalBool(GetChildTextOrEmpty(*block, "IsCurrentVersion"), "IsCurrentVersion");
+                ParseOptionalBool(GetChildTextOrEmpty(block, "IsCurrentVersion"), "IsCurrentVersion");
             // The service returns <Metadata> as a sibling of <Properties>.
-            if (const XmlNode* metadata = FindChildByLocalName(*block, "Metadata"); metadata != nullptr) {
+            if (const XmlNode* metadata = FindChildByLocalName(block, "Metadata"); metadata != nullptr) {
                 item.Properties.Metadata = ParseMetadataXml(*metadata);
             }
             result.Blobs.push_back(std::move(item));
-        }
+        });
     }
 
     return result;

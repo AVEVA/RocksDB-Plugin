@@ -102,6 +102,23 @@ void InitializeXmlParser() {
     return text;
 }
 
+// Zero-copy form of GetNodeText for the common case of at most one text/CDATA child; nullopt when the text is split
+// across several children and must be concatenated with GetNodeText. The view lives as long as the document.
+[[nodiscard]] std::optional<std::string_view> GetNodeTextView(const XmlNode& node) noexcept {
+    std::string_view text;
+    bool found = false;
+    for (const XmlNode* child = node.children; child != nullptr; child = child->next) {
+        if (child->type == XML_TEXT_NODE || child->type == XML_CDATA_SECTION_NODE) {
+            if (found) {
+                return std::nullopt;
+            }
+            text = XmlText(child->content);
+            found = true;
+        }
+    }
+    return text;
+}
+
 [[nodiscard]] std::optional<std::string> GetAttribute(const XmlNode& node, std::string_view localName) {
     for (const xmlAttr* attribute = node.properties; attribute != nullptr; attribute = attribute->next) {
         if (MatchesLocalName(XmlText(attribute->name), localName)) {
@@ -120,15 +137,5 @@ void InitializeXmlParser() {
 [[nodiscard]] std::string GetChildTextOrEmpty(const XmlNode& node, std::string_view tag) {
     const XmlNode* child = FindChildByLocalName(node, tag);
     return child != nullptr ? GetNodeText(*child) : std::string{};
-}
-
-[[nodiscard]] std::vector<const XmlNode*> GetChildrenByLocalName(const XmlNode& node, std::string_view localName) {
-    std::vector<const XmlNode*> children;
-    ForEachElement(node, [&](const XmlNode& child) {
-        if (MatchesLocalName(NodeName(child), localName)) {
-            children.push_back(&child);
-        }
-    });
-    return children;
 }
 } // namespace AVEVA::AzureClient::Private

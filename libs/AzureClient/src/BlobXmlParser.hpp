@@ -69,7 +69,8 @@ using XmlRootName = StringLabel<XmlRootNameTag>;
 [[nodiscard]] const XmlNode* FindChildByLocalName(const XmlNode& node, std::string_view localName) noexcept;
 // The concatenated text and CDATA children of `node` (entity and character references already decoded).
 [[nodiscard]] std::string GetNodeText(const XmlNode& node);
+// Zero-copy variant of GetNodeText; nullopt when the text spans several children.
+[[nodiscard]] std::optional<std::string_view> GetNodeTextView(const XmlNode& node) noexcept;
 [[nodiscard]] std::optional<std::string> GetAttribute(const XmlNode& node, std::string_view localName);
 [[nodiscard]] std::string GetChildTextOrEmpty(const XmlNode& node, std::string_view tag);
-[[nodiscard]] std::vector<const XmlNode*> GetChildrenByLocalName(const XmlNode& node, std::string_view localName);
 } // namespace AVEVA::AzureClient::Private
