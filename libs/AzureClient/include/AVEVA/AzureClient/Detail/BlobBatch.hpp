@@ -331,7 +331,8 @@ class BatchDeleteOperation final
             outcome = std::unexpected(std::move(*m_failure));
         } else {
             Models::DeleteBlobsResult result{.Items = std::move(m_items)};
-            outcome = Response<Models::DeleteBlobsResult>{std::move(result), m_rawResponse.value_or(HttpResponse{})};
+            outcome = Response<Models::DeleteBlobsResult>{std::move(result),
+                                                          std::move(m_rawResponse).value_or(HttpResponse{})};
         }
         // A failure found while still inside the initiating call must not run the handler re-entrantly.
         if (m_initiating.load(std::memory_order_acquire)) {
