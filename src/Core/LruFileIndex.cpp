@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <iterator>
 #include <limits>
 #include <string>
 
@@ -209,17 +210,12 @@ void LruFileIndex::EvictUntilSizeLocked(const size_t targetSize, EvictList& evic
         // per eviction.
         auto cursor = m_lruList.end();
         while (projectedSize > targetSize) {
-            auto candidate = cursor;
-            do {
-                if (candidate == m_lruList.begin()) {
-                    candidate = m_lruList.end(); // all remaining entries are pinned; cannot evict further
-                    break;
-                }
-                cursor = candidate;
-                --candidate;
-            } while (candidate->pinCount != 0);
-            if (candidate == m_lruList.end())
-                break;
+            const std::reverse_iterator<LruIterator> scanEnd{m_lruList.begin()};
+            const auto found = std::find_if(std::reverse_iterator<LruIterator>{cursor}, scanEnd,
+                                            [](const Entry& entry) { return entry.pinCount == 0; });
+            if (found == scanEnd)
+                break; // all remaining entries are pinned; cannot evict further
+            const LruIterator candidate = std::prev(found.base());
             cursor = candidate; // nothing is erased yet, so resume scanning before this victim
             victims.push_back(candidate);
             evictPairs.push_back(BuildEvictionPair(*candidate));

@@ -292,11 +292,11 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
 // not idle, so it is never rewritten while in use. The contents are unspecified: callers set every byte.
 template <typename TBlob>
 std::shared_ptr<std::vector<char>> BasicReadWriteFileImpl<TBlob>::AcquireExtentBuffer(size_t size) {
-    for (auto& buffer : m_extentPool) {
-        if (buffer.use_count() == 1) {
-            buffer->resize(size);
-            return buffer;
-        }
+    if (const auto idle =
+            std::ranges::find_if(m_extentPool, [](const auto& buffer) { return buffer.use_count() == 1; });
+        idle != m_extentPool.end()) {
+        (*idle)->resize(size);
+        return *idle;
     }
     return m_extentPool.emplace_back(std::make_shared<std::vector<char>>(size));
 }

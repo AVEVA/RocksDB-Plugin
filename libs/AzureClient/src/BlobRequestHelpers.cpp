@@ -313,11 +313,12 @@ void ValidateTokenTransport(std::string_view endpoint) {
 // A SAS token / query string is spliced verbatim into the URL, so control characters, fragments or an embedded
 // '?' would change what is requested or signed. It must also be already URL-encoded `key=value` pairs joined by '&'.
 void ValidateSasToken(std::string_view sasToken) {
-    for (const char value : sasToken) {
+    const bool hasForbidden = std::ranges::any_of(sasToken, [](const char value) {
         const auto code = static_cast<unsigned char>(value);
-        if (code < 0x20U || code == 0x7FU || value == ' ' || value == '#' || value == '?') {
-            throw std::invalid_argument("SasToken must not contain control characters, spaces, '#' or '?'.");
-        }
+        return code < 0x20U || code == 0x7FU || value == ' ' || value == '#' || value == '?';
+    });
+    if (hasForbidden) {
+        throw std::invalid_argument("SasToken must not contain control characters, spaces, '#' or '?'.");
     }
     if (sasToken.empty()) {
         return;
