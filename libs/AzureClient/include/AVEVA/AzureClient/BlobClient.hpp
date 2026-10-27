@@ -46,13 +46,25 @@ namespace AVEVA::AzureClient {
 // Thread safety: distinct instances are independent; concurrent ...Async calls on one instance are
 // supported (connection state is immutable once constructed). Span arguments are not
 // synchronized by the library and must not be touched by the caller until the operation completes.
-// Completion handlers are not serialized with each other and may run inline, before the initiating
-// call returns, or on any thread that drives the HTTP client.
 //
-// Lifetime: stores a non-owning reference to the HTTP client, which must outlive this client and every
-// in-flight ...Async operation; destroying either before a completion handler runs is undefined behavior.
-// A deferred operation (omitted token) snapshots this client's state when created, so it stays valid if the
-// client is moved from or destroyed before the operation is started.
+// Completion contract: a handler is invoked exactly once and never from inside the initiating call, including
+// when the arguments are invalid or the operation fails before any request is sent: such failures are reported
+// through the handler (a BlobStorageError), later, rather than thrown. That is a statement about the initiating
+// call stack only: a request can complete on another I/O thread while the initiating thread has not yet returned,
+// so shared state must be synchronized by the caller. The handler runs on its associated executor (else the HTTP
+// client's executor); when that executor is a strand or belongs to another io_context, the handler and an adopted
+// cancellation slot are only touched on it, and the client keeps both contexts' work alive until delivery. If an
+// executor keeps rejecting work, the handler still runs once on the completing thread instead of being lost.
+// Handlers are not serialized with each other unless their executor is a strand.
+//
+// Lifetime: operations borrow the HTTP client and never own it, unless this client was built from a
+// std::shared_ptr to it (then this client, and every client or deferred operation made from it, shares ownership).
+// The HTTP client (and its io_context) must outlive every in-flight ...Async operation, so keep it, or a shared
+// owner, alive until the completion handler has run. In-flight operations snapshot what they need from this
+// client, so destroying or moving from this BlobClient itself after initiating is fine. A deferred operation
+// (omitted token) likewise snapshots this client's state when created, so it stays valid if the client is moved
+// from or destroyed before the operation is started. Span arguments and caller-owned objects passed by
+// reference must still outlive the operation.
 //
 // Cancellation: AzureRequestOptions carries a boost::asio::cancellation_slot that aborts in-flight work
 // (completing with an operation_aborted-flavored BlobStorageError); a slot associated with the

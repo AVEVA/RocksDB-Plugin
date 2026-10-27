@@ -45,6 +45,17 @@ Treat the Asio version as part of the API/ABI contract: consumers must build aga
 libraries were built with, and changing it is a breaking change. The libraries never own or run an `io_context`; the
 host injects one. Redesigning the API to hide Asio is deliberately out of scope.
 
+### Completion contract
+
+Every `...Async` operation (both libraries) completes its handler exactly once and never from inside the initiating
+call; failures detected at initiation are delivered through the handler, not thrown. This does not mean the
+completion cannot run on another I/O thread before the initiating thread returns, so synchronize shared state. The
+handler runs on its associated executor (else the client's); a strand or a different `io_context` is honoured, and
+the client holds work on both until delivery. If an executor keeps rejecting work, the handler runs once on the
+completing thread rather than being lost. The HTTP client and its `io_context` must outlive every in-flight
+operation (or be shared through the `std::shared_ptr` constructors); the blob client object itself may be moved from
+or destroyed after initiating, since operations snapshot its state.
+
 ## Local modifications
 
 Both libraries have diverged from the imported 0.0.1 tree. The changes are in the commit range

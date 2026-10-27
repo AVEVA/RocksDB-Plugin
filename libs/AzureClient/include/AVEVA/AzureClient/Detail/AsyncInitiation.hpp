@@ -51,9 +51,15 @@ struct ClientSnapshotAccess {
 // different io_context, its run() could otherwise return before the completion is dispatched. An adopted
 // slot is cleared on the handler's executor, immediately before the handler runs, so the clear is serialized
 // with the caller emitting on that executor instead of racing on the transport thread.
-// Concrete (non-erased) wrapper produced by BindAssociationsAndAdoptCancellation. `Direct` is the fast path
-// where the handler already runs on the default executor and no slot was adopted: it is invoked in place.
-// Work always holds the executor busy until the completion has been delivered.
+//
+// Completion contract: the handler runs exactly once and never from inside the initiating call (early failures go
+// through PostCompletion). Completions are produced by the transport, so "not inline" does not mean "not
+// concurrent": they may run on another I/O thread before the initiating thread returns. `Direct` is the fast path
+// where the handler already runs on the default executor and no slot was adopted: it is invoked in place on that
+// executor's thread. Otherwise the handler, result and guards live in shared state across a dispatch to the
+// associated executor, retried if scheduling throws; only if the executor keeps rejecting work does it run once on
+// the completing thread, without clearing an adopted slot. Work always holds the executor busy until delivery.
+// Concrete (non-erased) wrapper produced by BindAssociationsAndAdoptCancellation.
 template <class TArg, class THandler, class TExecutor, class TIoExecutor, class TAllocator, class TSlot>
 struct BoundHandler {
     THandler Handler;
