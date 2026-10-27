@@ -10,10 +10,10 @@
 #include <boost/asio/dispatch.hpp>
 #include <boost/asio/execution/context.hpp>
 #include <boost/asio/post.hpp>
-#include <boost/asio/ssl/host_name_verification.hpp>
 
 #include <gsl/util>
 #include <openssl/ssl.h>
+#include <openssl/x509_vfy.h>
 
 #include <algorithm>
 #include <cassert>
@@ -173,7 +173,19 @@ template <typename Stream> bool RequestOperation<Stream>::ConfigureTlsForHost() 
     if constexpr (std::is_same_v<Stream, TlsStream>) {
         PrepareTlsSessionResumption(m_stream->native_handle(), m_key.host, m_key.service);
         if (SSL_get_verify_mode(m_stream->native_handle()) != SSL_VERIFY_NONE) {
-            m_stream->set_verify_callback(asio::ssl::host_name_verification(m_key.host));
+            // Native OpenSSL host/IP checks run inside the built-in verifier, avoiding a type-erased callback.
+            SSL* const ssl = m_stream->native_handle();
+            int verifyHostResult = 0;
+            if (m_hostIsName) {
+                SSL_set_hostflags(ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+                verifyHostResult = SSL_set1_host(ssl, m_key.host.c_str());
+            } else {
+                verifyHostResult = X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl), m_key.host.c_str());
+            }
+            if (verifyHostResult != 1) {
+                Fail(HttpClientError::TlsFailed);
+                return false;
+            }
         }
         // SSL_set_tlsext_host_name is a macro with an old-style cast, so call SSL_ctrl directly.
         // SSL_ctrl takes the name as void* but only reads it.
