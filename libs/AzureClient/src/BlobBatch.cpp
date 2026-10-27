@@ -230,19 +230,22 @@ std::vector<Models::DeleteBlobItemResult> ParseBatchDeleteResponse(const HttpRes
     if (boundary.empty()) {
         throw std::invalid_argument("Batch response has no multipart boundary.");
     }
-    const std::string delimiter = "--" + std::string{boundary};
+    constexpr std::string_view DashDash = "--";
+    const std::size_t delimiterSize = DashDash.size() + boundary.size();
     const std::string_view body = response.GetBody();
 
     std::vector<std::optional<BatchPart>> byContentId(names.size());
     // Delimiters only count at the start of a line, so a boundary-like string inside a part is not a split point.
     const auto findDelimiter = [&](std::size_t from) {
-        for (std::size_t pos = body.find(delimiter, from); pos != std::string_view::npos;
-             pos = body.find(delimiter, pos + 1U)) {
-            if (pos != 0U && body[pos - 1U] != '\n') {
+        // Search for the bare boundary and verify the leading "--" so no delimiter string is allocated.
+        for (std::size_t found = body.find(boundary, from + DashDash.size()); found != std::string_view::npos;
+             found = body.find(boundary, found + 1U)) {
+            const std::size_t pos = found - DashDash.size();
+            if (!body.substr(pos).starts_with(DashDash) || (pos != 0U && body[pos - 1U] != '\n')) {
                 continue;
             }
             // "--b" must be followed by "--", transport padding or a line break; "--bb" is another boundary.
-            const std::string_view rest = body.substr(pos + delimiter.size());
+            const std::string_view rest = body.substr(pos + delimiterSize);
             if (rest.empty() || rest.starts_with("--") ||
                 std::string_view{" \t\r\n"}.find(rest.front()) != std::string_view::npos) {
                 return pos;
@@ -254,7 +257,7 @@ std::vector<Models::DeleteBlobItemResult> ParseBatchDeleteResponse(const HttpRes
     std::size_t delimiterPos = findDelimiter(0);
     bool closed = false;
     while (delimiterPos != std::string_view::npos && !closed) {
-        std::size_t partStart = delimiterPos + delimiter.size();
+        std::size_t partStart = delimiterPos + delimiterSize;
         if (const std::string_view tail = body.substr(partStart); tail.starts_with("--")) {
             // Only transport padding may follow the closing delimiter on its line.
             const std::string_view afterClose = tail.substr(2U);
