@@ -38,6 +38,7 @@
 #include <initializer_list>
 #include <iterator>
 
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
 
 #include <algorithm>
@@ -357,6 +358,11 @@ template <class TOptions> void ValidateConnectionOptions(const TOptions& options
 
 template <class TOptions>
 [[nodiscard]] std::shared_ptr<const ConnectionState> BuildConnection(TOptions& options, bool hasTokenCredential) {
+    // `options` is the caller's by-value copy; wipe the key on every exit path, including validation throws.
+    const auto wipeKey = gsl::finally([&options] {
+        auto& key = options.SharedKey.AccountKey;
+        OPENSSL_cleanse(key.data(), key.capacity());
+    });
     // Trim in place: re-assigning from a view would copy the SAS token into a fresh string.
     options.ServiceEndpoint.resize(TrimTrailingSlashes(options.ServiceEndpoint).size());
     options.SasToken.erase(0, options.SasToken.size() - TrimLeadingQuestionMark(options.SasToken).size());

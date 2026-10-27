@@ -384,7 +384,7 @@ SharedKeySigner::SharedKeySigner(std::string accountName, std::string_view accou
     std::vector<unsigned char> key = Base64Decode(accountKeyBase64);
     // Wipes the decoded key on every exit path, including the throws below.
     const std::unique_ptr<std::vector<unsigned char>, void (*)(std::vector<unsigned char>*)> keyWipe(
-        &key, [](std::vector<unsigned char>* secret) { OPENSSL_cleanse(secret->data(), secret->size()); });
+        &key, [](std::vector<unsigned char>* secret) { OPENSSL_cleanse(secret->data(), secret->capacity()); });
 
     std::unique_ptr<EVP_MAC, decltype(&EVP_MAC_free)> const mac(EVP_MAC_fetch(nullptr, "HMAC", nullptr), &EVP_MAC_free);
     if (!mac) {

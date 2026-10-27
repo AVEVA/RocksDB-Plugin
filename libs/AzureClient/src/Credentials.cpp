@@ -10,6 +10,7 @@
 #include <boost/url/parse.hpp>
 #include <boost/url/scheme.hpp>
 #include <boost/url/url_view.hpp>
+#include <openssl/crypto.h>
 
 #include <algorithm>
 #include <charconv>
@@ -28,7 +29,12 @@ std::string GetEnvironmentValue(gsl::not_null<gsl::czstring> name) {
     if (_dupenv_s(&buffer, &size, name.get()) != 0 || buffer == nullptr) {
         return {};
     }
-    const std::unique_ptr<char, decltype(&std::free)> owner{buffer, &std::free};
+    // `size` includes the terminating NUL; wipe the secret before the CRT buffer is released.
+    const auto wipe = [size](char* secret) {
+        OPENSSL_cleanse(secret, size);
+        std::free(secret);
+    };
+    const std::unique_ptr<char, decltype(wipe)> owner{buffer, wipe};
     return std::string{buffer};
 #else
     const char* value = std::getenv(name.get());
