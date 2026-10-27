@@ -281,8 +281,7 @@ BasicReadableFileImpl<TBlob>::PrefetchState::TakeWaiters(const uint64_t id) noex
     return taken;
 }
 
-template <typename TBlob>
-void BasicReadableFileImpl<TBlob>::PrefetchState::Drop(const std::vector<PrefetchSlot>::iterator slot) {
+template <typename TBlob> void BasicReadableFileImpl<TBlob>::PrefetchState::Drop(const SlotList::iterator slot) {
     Slots.erase(slot);
 }
 
@@ -317,8 +316,8 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
         }
 
         // Everything fallible is prepared before budget or slot state changes, so a failure leaves both untouched and
-        // the admission below cannot throw. Done before locating the victim because reserving can invalidate iterators.
-        state->Slots.reserve(state->Slots.size() + 1);
+        // the admission below cannot throw. The slots are inline, so the push below needs no allocation and a full list
+        // is only ever appended to after its victim is dropped.
         name = self->m_h.Name;
         if (state->Budget) {
             charge = std::make_shared<PrefetchCharge>();

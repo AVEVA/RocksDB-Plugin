@@ -13,6 +13,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 
+#include <boost/container/static_vector.hpp>
 #include <boost/log/trivial.hpp>
 
 #include <atomic>
@@ -110,6 +111,8 @@ template <typename TBlob> class BasicReadableFileImpl {
             }
         }
     };
+    // Fixed so the visible slots live inline in the file object; waiter groups are not bounded by it.
+    static constexpr size_t kMaxPrefetchSlots = 2;
     struct PrefetchSlot {
         uint64_t Id = 0;
         int64_t Offset = 0;
@@ -123,7 +126,8 @@ template <typename TBlob> class BasicReadableFileImpl {
         std::mutex Mutex;
         std::condition_variable Done;
         uint64_t NextId = 0;
-        std::vector<PrefetchSlot> Slots; // Oldest first.
+        using SlotList = boost::container::static_vector<PrefetchSlot, kMaxPrefetchSlots>;
+        SlotList Slots; // Oldest first.
         // Reads waiting for a pending slot (by id) to settle. Kept outside the slots so a slot that is cleared while
         // downloading still releases its waiters when its download finishes.
         // Grouped per slot id so completion detaches one group with a non-throwing move instead of allocating.
@@ -141,7 +145,7 @@ template <typename TBlob> class BasicReadableFileImpl {
         [[nodiscard]] std::vector<std::move_only_function<void()>> TakeWaiters(uint64_t id) noexcept;
         // Removes a slot; its budget charge is returned once no download or reader still holds the buffer. Caller
         // holds Mutex.
-        void Drop(std::vector<PrefetchSlot>::iterator slot);
+        void Drop(SlotList::iterator slot);
         void DropAll();
     };
     mutable PrefetchState m_prefetch;
@@ -245,7 +249,6 @@ template <typename TBlob> class BasicReadableFileImpl {
     // or the shared byte budget would be exceeded, so the caller can let RocksDB fall back to its own readahead.
     [[nodiscard]] static bool Prefetch(std::shared_ptr<const BasicReadableFileImpl> self, int64_t offset, int64_t n);
 
-    static constexpr size_t kMaxPrefetchSlots = 2;
     // Default process-wide cap on prefetched bytes across all files sharing a budget.
     static constexpr int64_t kDefaultPrefetchBudgetBytes = Configuration::DefaultPrefetchBudgetBytes;
 

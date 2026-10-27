@@ -13,6 +13,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include <algorithm>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/container/static_vector.hpp>
 #include <cassert>
 #include <chrono>
 #include <cstring>
@@ -285,13 +286,13 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
             void* Handle;
             Group* Owner;
         };
-        std::vector<Active> active;
-        // Reserved up front so push_back cannot throw after a read has started and orphan its handle.
-        active.reserve(std::min<size_t>(kMultiReadMaxInFlight, groups.size()));
+        // Inline and bounded by the admission loop, so push_back cannot throw after a read has started and orphan its
+        // handle.
+        boost::container::static_vector<Active, kMultiReadMaxInFlight> active;
         // Deleting a handle aborts a request still in flight, so the handles are released even on an early exit.
         // Declared after `groups` so it runs first: an aborted request never touches its group's buffer afterwards.
         struct HandleCleanup {
-            std::vector<Active>& Handles;
+            boost::container::static_vector<Active, kMultiReadMaxInFlight>& Handles;
             ~HandleCleanup() {
                 for (auto& entry : Handles) {
                     DeleteAsyncReadHandle(entry.Handle);
