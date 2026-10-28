@@ -20,8 +20,6 @@ void FileCacheEntry::SetState(State state) noexcept { m_state = state; }
 
 uint64_t FileCacheEntry::GetGeneration() const noexcept { return m_generation; }
 
-void FileCacheEntry::BumpGeneration() noexcept { ++m_generation; }
-
 void FileCacheEntry::SetGeneration(uint64_t generation) noexcept { m_generation = generation; }
 
 std::shared_ptr<detail::CachedReadHandle> FileCacheEntry::GetOrCreateReadHandle() {

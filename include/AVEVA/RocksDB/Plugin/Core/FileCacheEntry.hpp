@@ -72,7 +72,6 @@ class FileCacheEntry
     // Bumped every time the blob is replaced, whatever state the entry is in, so a download that began
     // before the replacement can tell its bytes are out of date.
     uint64_t GetGeneration() const noexcept;
-    void BumpGeneration() noexcept;
     void SetGeneration(uint64_t generation) noexcept;
 
     // The handle readers share; created on first use. Callers must hold the owning cache's mutex.
