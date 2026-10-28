@@ -205,14 +205,21 @@ inline AzureClient::Models::BlobByteRange ToRange(int64_t offset, int64_t length
 
 // A body that disagrees with the server's Content-Range would otherwise surface as a silent short read.
 // InvalidResponse translates to Corruption.
-template <typename TResult> void CheckDownloadLength(const TResult& result) {
+template <typename TResult> std::optional<RequestFailedException> DownloadLengthError(const TResult& result) {
     if (result.ContentRange.has_value() && result.ContentRange->Length.has_value() &&
         *result.ContentRange->Length != result.BytesWritten) {
-        throw RequestFailedException(
+        return RequestFailedException(
             200, "",
             "Downloaded " + std::to_string(result.BytesWritten) + " bytes but the server reported " +
                 std::to_string(*result.ContentRange->Length),
             "", AzureClient::make_error_code(AzureClient::BlobStorageErrorCode::InvalidResponse));
+    }
+    return std::nullopt;
+}
+
+template <typename TResult> void CheckDownloadLength(const TResult& result) {
+    if (auto error = DownloadLengthError(result)) {
+        throw *std::move(error);
     }
 }
 } // namespace Detail
@@ -730,10 +737,8 @@ void UploadPagesAsync(const ClientRuntimeBase& runtime, TBlob& client, std::shar
         static_cast<uint64_t>(blobOffset), std::move(data),
         [callback = std::move(callback)](auto result) mutable {
             std::exception_ptr error;
-            try {
-                Unwrap(std::move(result));
-            } catch (...) {
-                error = std::current_exception();
+            if (!result.has_value()) {
+                error = std::make_exception_ptr(MakeRequestFailed(result.error()));
             }
             callback(error);
         },
@@ -797,15 +802,15 @@ void DownloadAsync(TBlob& client, int64_t blobOffset, int64_t readLength, std::s
                 std::exception_ptr error;
                 unsigned int status = 0;
                 size_t written = 0;
-                try {
-                    const auto downloaded = Unwrap(std::move(result));
-                    Detail::CheckDownloadLength(downloaded);
+                if (!result.has_value()) {
+                    status = result.error().StatusCode;
+                    error = std::make_exception_ptr(MakeRequestFailed(result.error()));
+                } else if (const auto& downloaded = std::move(*result).Value();
+                           auto lengthError = Detail::DownloadLengthError(downloaded)) {
+                    status = lengthError->StatusCode;
+                    error = std::make_exception_ptr(*std::move(lengthError));
+                } else {
                     written = static_cast<size_t>(downloaded.BytesWritten);
-                } catch (const RequestFailedException& e) {
-                    status = e.StatusCode;
-                    error = std::current_exception();
-                } catch (...) {
-                    error = std::current_exception();
                 }
                 const std::string_view data(buffer->Data(), std::min(written, buffer->Size()));
                 callback(error, status, data, std::shared_ptr<const void>(std::move(buffer)));
@@ -829,12 +834,16 @@ template <typename TBlob, typename TCallback> void GetMetadataAsync(TBlob& clien
         std::exception_ptr error;
         int64_t size = 0;
         std::string etag;
-        try {
-            auto properties = Unwrap(std::move(result));
-            size = BlobHelpers::FileSizeFromProperties(properties);
-            etag = std::move(properties.ETag);
-        } catch (...) {
-            error = std::current_exception();
+        if (!result.has_value()) {
+            error = std::make_exception_ptr(MakeRequestFailed(result.error()));
+        } else {
+            try {
+                auto properties = std::move(*result).Value();
+                size = BlobHelpers::FileSizeFromProperties(properties);
+                etag = std::move(properties.ETag);
+            } catch (...) {
+                error = std::current_exception();
+            }
         }
         callback(error, size, std::move(etag));
     });

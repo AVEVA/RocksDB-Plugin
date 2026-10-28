@@ -14,6 +14,10 @@
 #include <utility>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
+/// <summary>Builds the exception ThrowRequestFailed would throw, for error paths that hand it on as an
+/// exception_ptr without throwing.</summary>
+[[nodiscard]] RequestFailedException MakeRequestFailed(const AzureClient::BlobStorageError& error);
+
 [[noreturn]] void ThrowRequestFailed(const AzureClient::BlobStorageError& error);
 
 /// <summary>

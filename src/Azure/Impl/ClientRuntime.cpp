@@ -144,11 +144,13 @@ BoundByWriteDeadline(const std::optional<std::chrono::steady_clock::duration> re
     return options;
 }
 
-void ThrowRequestFailed(const AzureClient::BlobStorageError& error) {
-    throw RequestFailedException(error.StatusCode, error.ErrorCode,
-                                 error.Message.empty() ? error.Code.message() : error.Message, error.RequestId,
-                                 error.Code, error.AuthenticationDetail, error.RetryAfter);
+RequestFailedException MakeRequestFailed(const AzureClient::BlobStorageError& error) {
+    return RequestFailedException(error.StatusCode, error.ErrorCode,
+                                  error.Message.empty() ? error.Code.message() : error.Message, error.RequestId,
+                                  error.Code, error.AuthenticationDetail, error.RetryAfter);
 }
+
+void ThrowRequestFailed(const AzureClient::BlobStorageError& error) { throw MakeRequestFailed(error); }
 
 AVEVA::AzureClient::AzureRequestOptions
 RequestOptionsForTransfer(const AVEVA::AzureClient::AzureRequestOptions& defaults, uint64_t bytes) {
