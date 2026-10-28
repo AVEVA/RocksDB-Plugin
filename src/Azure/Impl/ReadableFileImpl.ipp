@@ -540,9 +540,9 @@ void BasicReadableFileImpl<TBlob>::StartTracked(const std::shared_ptr<const Basi
                    });
 }
 
-// Async counterpart of DownloadWithRetry, written as straight-line code: nothing blocks a thread, every wait is a
-// co_await. The deadline is checked before each step and bounds each wait, so a short caller timeout cannot be
-// stretched by restarts. Failures are thrown rather than reported through a status.
+// Download-only counterpart of DownloadWithRetryAsync (zero-copy into a pooled buffer), written as straight-line code:
+// nothing blocks a thread, every wait is a co_await. The deadline is checked before each step and bounds each wait, so
+// a short caller timeout cannot be stretched by restarts. Failures are thrown rather than reported through a status.
 template <typename TBlob>
 BlobOperations::Task<typename BasicReadableFileImpl<TBlob>::ReadResult>
 BasicReadableFileImpl<TBlob>::ReadAsync(std::shared_ptr<const BasicReadableFileImpl<TBlob>> self, const int64_t offset,
