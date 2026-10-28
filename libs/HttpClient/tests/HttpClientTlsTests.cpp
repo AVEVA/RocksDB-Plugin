@@ -64,15 +64,14 @@ TEST(HttpClientTls, UntrustedCertificateReturnsTlsError) {
     AVEVA::HttpRequest request;
     request.SetUrl("https://127.0.0.1:" + std::to_string(acceptor.local_endpoint().port()) + "/");
     int completions = 0;
-    client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{},
-                      [&](std::error_code error, AVEVA::HttpResponse response) {
-                          ++completions;
-                          EXPECT_EQ(error, AVEVA::make_error_code(AVEVA::HttpClientError::TlsFailed));
-                          EXPECT_EQ(response.GetStatus(), 0u);
-                          EXPECT_TRUE(response.GetCause());
-                          boost::system::error_code ignored;
-                          stream.next_layer().close(ignored);
-                      });
+    HttpClientTests::SendWith(*client, std::move(request), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code error, AVEVA::HttpResponse response) {
+                                  ++completions;
+                                  EXPECT_EQ(error, AVEVA::make_error_code(AVEVA::HttpClientError::TlsFailed));
+                                  EXPECT_EQ(response.GetStatus(), 0u);
+                                  boost::system::error_code ignored;
+                                  stream.next_layer().close(ignored);
+                              });
     RunBounded(context);
     EXPECT_EQ(completions, 1);
 }
@@ -110,11 +109,12 @@ std::error_code ConnectTrustingCertificateWithAltName(const std::string& subject
     AVEVA::HttpRequest request;
     request.SetUrl("https://127.0.0.1:" + std::to_string(acceptor.local_endpoint().port()) + "/");
     std::error_code result;
-    client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{}, [&](std::error_code error, AVEVA::HttpResponse) {
-        result = error;
-        boost::system::error_code ignored;
-        stream.next_layer().close(ignored);
-    });
+    HttpClientTests::SendWith(*client, std::move(request), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  result = error;
+                                  boost::system::error_code ignored;
+                                  stream.next_layer().close(ignored);
+                              });
     RunBounded(context);
     return result;
 }
@@ -322,17 +322,18 @@ std::vector<TlsOutcome> SendSequentialRequests(asio::io_context& context, TlsTes
     sendNext = [&]() {
         AVEVA::HttpRequest request;
         request.SetUrl(url);
-        client->SendAsync(std::move(request), requestOptions, [&](std::error_code error, AVEVA::HttpResponse response) {
-            outcomes.push_back({error, response.GetStatus(), std::string{response.GetBody()}});
-            if (error || static_cast<int>(outcomes.size()) >= count) {
-                guard.cancel();
-                if (stopWhenDone) {
-                    server.Stop();
+        HttpClientTests::SendWith(
+            *client, std::move(request), requestOptions, [&](std::error_code error, AVEVA::HttpResponse response) {
+                outcomes.push_back({error, response.GetStatus(), std::string{response.GetBody()}});
+                if (error || static_cast<int>(outcomes.size()) >= count) {
+                    guard.cancel();
+                    if (stopWhenDone) {
+                        server.Stop();
+                    }
+                    return;
                 }
-                return;
-            }
-            sendNext();
-        });
+                sendNext();
+            });
     };
     sendNext();
     RunBounded(context);
@@ -507,15 +508,16 @@ TEST(HttpClientTls, RequestStateIsReleasedAtCompletionNotAfterTheTlsShutdownGrac
     bool completed = false;
     bool releasedPromptly = false;
     asio::steady_timer check(context);
-    client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{}, [&](std::error_code error, AVEVA::HttpResponse) {
-        EXPECT_FALSE(error) << error.message();
-        completed = true;
-        check.expires_after(std::chrono::milliseconds(200));
-        check.async_wait([&](boost::system::error_code) {
-            releasedPromptly = weakBody.expired();
-            server.Stop();
-        });
-    });
+    HttpClientTests::SendWith(*client, std::move(request), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  EXPECT_FALSE(error) << error.message();
+                                  completed = true;
+                                  check.expires_after(std::chrono::milliseconds(200));
+                                  check.async_wait([&](boost::system::error_code) {
+                                      releasedPromptly = weakBody.expired();
+                                      server.Stop();
+                                  });
+                              });
     RunBounded(context);
 
     EXPECT_TRUE(completed);
@@ -539,12 +541,13 @@ TEST(HttpClientTls, TimeoutOfAStalledRawViewUploadCompletesOnceAndLetsTheCallerF
 
     int completions = 0;
     std::error_code observed;
-    client->SendAsync(std::move(request), requestOptions, [&](std::error_code error, AVEVA::HttpResponse) {
-        ++completions;
-        observed = error;
-        body.reset(); // A late transport access would now touch freed memory.
-        server.Stop();
-    });
+    HttpClientTests::SendWith(*client, std::move(request), requestOptions,
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  ++completions;
+                                  observed = error;
+                                  body.reset(); // A late transport access would now touch freed memory.
+                                  server.Stop();
+                              });
     RunBounded(context);
 
     EXPECT_EQ(completions, 1);

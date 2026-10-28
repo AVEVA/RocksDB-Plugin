@@ -6,8 +6,9 @@
 
 #include <gtest/gtest.h>
 
-#include <boost/asio/bind_executor.hpp>
 #include <boost/asio/cancellation_signal.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
@@ -35,6 +36,7 @@ using HttpClientTests::Exchange;
 using HttpClientTests::RunBounded;
 using HttpClientTests::ScriptedServer;
 using HttpClientTests::ServerAction;
+using HttpResult = AVEVA::HttpResult;
 using Tcp = asio::ip::tcp;
 
 constexpr const char* const OkNoBody = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
@@ -54,38 +56,40 @@ TEST(HttpClientRequest, InvalidRequestCompletesAsynchronously) {
     for (const auto& url : invalidUrls) {
         AVEVA::HttpRequest request;
         request.SetUrl(url);
-        client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{},
-                          [&](std::error_code error, AVEVA::HttpResponse response) {
-                              ++completions;
-                              EXPECT_EQ(error, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidUrl));
-                              EXPECT_EQ(response.GetStatus(), 0u);
-                              EXPECT_TRUE(response.GetBody().empty());
-                              EXPECT_TRUE(response.GetHeaders().empty());
-                          });
+        HttpClientTests::SendWith(*client, std::move(request), AVEVA::HttpRequestOptions{},
+                                  [&](std::error_code error, AVEVA::HttpResponse response) {
+                                      ++completions;
+                                      EXPECT_EQ(error, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidUrl));
+                                      EXPECT_EQ(response.GetStatus(), 0u);
+                                      EXPECT_TRUE(response.GetBody().empty());
+                                      EXPECT_TRUE(response.GetHeaders().empty());
+                                  });
     }
 
     AVEVA::HttpRequest request;
     request.SetUrl("http://127.0.0.1/");
     request.AddHeader({"X-Test", "value\r\nInjected: true"});
-    client->SendAsync(request, AVEVA::HttpRequestOptions{}, [&](std::error_code error, AVEVA::HttpResponse) {
-        ++completions;
-        EXPECT_EQ(error, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidRequest));
-    });
+    HttpClientTests::SendWith(*client, request, AVEVA::HttpRequestOptions{},
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  ++completions;
+                                  EXPECT_EQ(error, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidRequest));
+                              });
     request.GetHeaders().clear();
 
     AVEVA::HttpRequestOptions options;
     options.SetTimeout(std::chrono::milliseconds(0));
-    client->SendAsync(request, options, [&](std::error_code error, AVEVA::HttpResponse) {
+    HttpClientTests::SendWith(*client, request, options, [&](std::error_code error, AVEVA::HttpResponse) {
         ++completions;
         EXPECT_EQ(error, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidRequest));
     });
 
     request.SetMethod(AVEVA::HttpMethod::Trace);
     request.SetBody("not-allowed");
-    client->SendAsync(request, AVEVA::HttpRequestOptions{}, [&](std::error_code error, AVEVA::HttpResponse) {
-        ++completions;
-        EXPECT_EQ(error, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidRequest));
-    });
+    HttpClientTests::SendWith(*client, request, AVEVA::HttpRequestOptions{},
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  ++completions;
+                                  EXPECT_EQ(error, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidRequest));
+                              });
 
     EXPECT_EQ(completions, 0u);
     RunBounded(context);
@@ -104,11 +108,11 @@ TEST(HttpClientRequest, OversizedHeadersFailWithInvalidRequest) {
     longName.SetUrl("http://127.0.0.1/");
     longName.AddHeader({std::string(70000, 'a'), "value"});
     for (auto* request : {&longValue, &longName}) {
-        client->SendAsync(std::move(*request), AVEVA::HttpRequestOptions{},
-                          [&](std::error_code error, AVEVA::HttpResponse) {
-                              ++completions;
-                              EXPECT_EQ(error, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidRequest));
-                          });
+        HttpClientTests::SendWith(*client, std::move(*request), AVEVA::HttpRequestOptions{},
+                                  [&](std::error_code error, AVEVA::HttpResponse) {
+                                      ++completions;
+                                      EXPECT_EQ(error, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidRequest));
+                                  });
     }
 
     RunBounded(context);
@@ -125,46 +129,54 @@ TEST(HttpClientRequest, HeaderControlCharactersFailWithInvalidRequest) {
         AVEVA::HttpRequest request;
         request.SetUrl("http://127.0.0.1/");
         request.AddHeader({"X-Test", value});
-        client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{},
-                          [&](std::error_code error, AVEVA::HttpResponse) {
-                              ++completions;
-                              EXPECT_EQ(error, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidRequest));
-                          });
+        HttpClientTests::SendWith(*client, std::move(request), AVEVA::HttpRequestOptions{},
+                                  [&](std::error_code error, AVEVA::HttpResponse) {
+                                      ++completions;
+                                      EXPECT_EQ(error, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidRequest));
+                                  });
     }
 
     RunBounded(context);
     EXPECT_EQ(completions, 3u);
 }
 
-TEST(HttpClientRequest, TokenBasedSendAsyncSupportsUseFutureAndReportsErrors) {
+asio::awaitable<HttpResult> SendInvalid(AVEVA::HttpClient& client) {
+    AVEVA::HttpRequest request;
+    request.SetUrl("ftp://example.com/file");
+    co_return co_await client.SendAsync(std::move(request), AVEVA::HttpRequestOptions{});
+}
+
+TEST(HttpClientRequest, CoroutineSendAsyncReportsErrorsThroughUseFuture) {
     boost::asio::io_context context;
     auto client = AVEVA::HttpClient::Create(context);
 
-    AVEVA::HttpRequest request;
-    request.SetUrl("ftp://example.com/file");
-    auto future = client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{}, asio::use_future);
+    auto future = asio::co_spawn(context, SendInvalid(*client), asio::use_future);
 
     RunBounded(context);
 
-    auto [error, response] = future.get();
-    EXPECT_EQ(error, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidUrl));
-    EXPECT_EQ(response.GetStatus(), 0u);
+    auto result = future.get();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), AVEVA::make_error_code(AVEVA::HttpClientError::InvalidUrl));
 }
 
-TEST(HttpClientRequest, TokenBasedSendAsyncDispatchesCompletionOnTheBoundStrand) {
+asio::awaitable<void> SendInvalidOnStrand(AVEVA::HttpClient& client,
+                                          asio::strand<asio::io_context::executor_type> strand, bool& ranOnStrand,
+                                          bool& completed) {
+    AVEVA::HttpRequest request;
+    request.SetUrl("ftp://example.com/file");
+    (void)co_await client.SendAsync(std::move(request), AVEVA::HttpRequestOptions{});
+    ranOnStrand = strand.running_in_this_thread();
+    completed = true;
+}
+
+TEST(HttpClientRequest, CoroutineResumesOnTheAwaitingStrand) {
     boost::asio::io_context context;
     auto client = AVEVA::HttpClient::Create(context);
     auto strand = asio::make_strand(context);
 
-    AVEVA::HttpRequest request;
-    request.SetUrl("ftp://example.com/file");
     bool ranOnStrand = false;
     bool completed = false;
-    client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{},
-                      asio::bind_executor(strand, [&](std::error_code, AVEVA::HttpResponse) {
-                          ranOnStrand = strand.running_in_this_thread();
-                          completed = true;
-                      }));
+    asio::co_spawn(strand, SendInvalidOnStrand(*client, strand, ranOnStrand, completed), asio::detached);
 
     RunBounded(context);
 
@@ -258,10 +270,11 @@ TEST(HttpClientRequest, IPv6LiteralHostHeaderKeepsBrackets) {
     const auto authority = server.Authority(); // the acceptor is closed by the time the test checks
     request.SetUrl(server.Url("/ipv6"));
     std::error_code result;
-    client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{}, [&](std::error_code error, AVEVA::HttpResponse) {
-        result = error;
-        server.Stop();
-    });
+    HttpClientTests::SendWith(*client, std::move(request), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  result = error;
+                                  server.Stop();
+                              });
 
     RunBounded(context);
     EXPECT_FALSE(result);
@@ -292,10 +305,11 @@ TEST(HttpClientRequest, SetBodyViewReadsTheBufferLazilyNotAtCallTime) {
     request.SetBodyView(mutableBuffer);
 
     bool completed = false;
-    client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{}, [&](std::error_code, AVEVA::HttpResponse) {
-        completed = true;
-        server.Stop();
-    });
+    HttpClientTests::SendWith(*client, std::move(request), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code, AVEVA::HttpResponse) {
+                                  completed = true;
+                                  server.Stop();
+                              });
 
     // Not yet run: proves the send is asynchronous and nothing has been read/copied yet.
     EXPECT_FALSE(completed);
@@ -333,21 +347,22 @@ TEST(HttpClientRequest, ReusesConnectionForKeepAliveRequests) {
 
     AVEVA::HttpRequest request1;
     request1.SetUrl("http://" + authority + "/first");
-    client->SendAsync(request1, AVEVA::HttpRequestOptions{}, [&](std::error_code error, AVEVA::HttpResponse response) {
-        ++completions;
-        EXPECT_FALSE(error);
-        EXPECT_EQ(response.GetStatus(), 200u);
+    HttpClientTests::SendWith(*client, request1, AVEVA::HttpRequestOptions{},
+                              [&](std::error_code error, AVEVA::HttpResponse response) {
+                                  ++completions;
+                                  EXPECT_FALSE(error);
+                                  EXPECT_EQ(response.GetStatus(), 200u);
 
-        AVEVA::HttpRequest request2;
-        request2.SetUrl("http://" + authority + "/second");
-        client->SendAsync(request2, AVEVA::HttpRequestOptions{},
-                          [&](std::error_code error2, AVEVA::HttpResponse response2) {
-                              ++completions;
-                              EXPECT_FALSE(error2);
-                              EXPECT_EQ(response2.GetStatus(), 200u);
-                              server.Stop();
-                          });
-    });
+                                  AVEVA::HttpRequest request2;
+                                  request2.SetUrl("http://" + authority + "/second");
+                                  HttpClientTests::SendWith(*client, request2, AVEVA::HttpRequestOptions{},
+                                                            [&](std::error_code error2, AVEVA::HttpResponse response2) {
+                                                                ++completions;
+                                                                EXPECT_FALSE(error2);
+                                                                EXPECT_EQ(response2.GetStatus(), 200u);
+                                                                server.Stop();
+                                                            });
+                              });
 
     RunBounded(context);
     EXPECT_EQ(completions, 2);
@@ -367,7 +382,7 @@ TEST(HttpClientRequest, ReadsLargeBodyIntact) {
     EXPECT_EQ(result.response.GetBody().size(), body.size());
 }
 
-TEST(HttpClientRequest, CancellationBeforeStartCompletesWithOperationCanceled) {
+TEST(HttpClientRequest, CancellationRightAfterStartCompletesWithOperationCanceled) {
     asio::io_context context;
     auto client = AVEVA::HttpClient::Create(context);
     asio::cancellation_signal cancellation;
@@ -378,7 +393,7 @@ TEST(HttpClientRequest, CancellationBeforeStartCompletesWithOperationCanceled) {
     request.SetUrl(HttpClientTests::ClosedLocalUrl());
 
     int completions = 0;
-    client->SendAsync(request, options, [&](std::error_code error, AVEVA::HttpResponse response) {
+    HttpClientTests::SendWith(*client, request, options, [&](std::error_code error, AVEVA::HttpResponse response) {
         ++completions;
         EXPECT_EQ(error, std::make_error_code(std::errc::operation_canceled));
         EXPECT_EQ(response.GetStatus(), 0u);
@@ -386,6 +401,8 @@ TEST(HttpClientRequest, CancellationBeforeStartCompletesWithOperationCanceled) {
         EXPECT_TRUE(response.GetHeaders().empty());
     });
 
+    // The slot is only connected once the coroutine has started the request, so run that first.
+    context.run_one();
     cancellation.emit(asio::cancellation_type::terminal);
     RunBounded(context);
     EXPECT_EQ(completions, 1);
@@ -413,7 +430,7 @@ TEST(HttpClientRequest, CancellationMidFlightCompletesWithOperationCanceled) {
     request.SetUrl(server.Url());
 
     int completions = 0;
-    client->SendAsync(request, options, [&](std::error_code error, AVEVA::HttpResponse response) {
+    HttpClientTests::SendWith(*client, request, options, [&](std::error_code error, AVEVA::HttpResponse response) {
         ++completions;
         EXPECT_EQ(error, std::make_error_code(std::errc::operation_canceled));
         EXPECT_EQ(response.GetStatus(), 0u);
@@ -451,7 +468,7 @@ TEST(HttpClientRequest, CancellingAfterCompletionIsANoop) {
     request.SetUrl(server.Url());
 
     int completions = 0;
-    client->SendAsync(request, options, [&](std::error_code error, AVEVA::HttpResponse response) {
+    HttpClientTests::SendWith(*client, request, options, [&](std::error_code error, AVEVA::HttpResponse response) {
         ++completions;
         EXPECT_FALSE(error);
         EXPECT_EQ(response.GetStatus(), 200u);

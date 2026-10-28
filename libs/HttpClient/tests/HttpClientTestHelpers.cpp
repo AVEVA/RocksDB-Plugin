@@ -242,12 +242,13 @@ ExchangeResult Exchange(AVEVA::HttpRequest request, std::string wireResponse, AV
     result.authority = server.Authority();
     request.SetUrl("http://" + result.authority + request.GetUrl());
     int completions = 0;
-    client->SendAsync(std::move(request), options, [&](std::error_code error, AVEVA::HttpResponse response) {
-        ++completions;
-        result.error = error;
-        result.response = std::move(response);
-        server.Stop();
-    });
+    HttpClientTests::SendWith(*client, std::move(request), options,
+                              [&](std::error_code error, AVEVA::HttpResponse response) {
+                                  ++completions;
+                                  result.error = error;
+                                  result.response = std::move(response);
+                                  server.Stop();
+                              });
     if (completions != 0) {
         throw std::runtime_error("Completion must not run inline");
     }

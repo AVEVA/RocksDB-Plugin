@@ -8,7 +8,6 @@
 #include <gtest/gtest.h>
 
 #include <boost/asio/any_io_executor.hpp>
-#include <boost/asio/bind_executor.hpp>
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/execution.hpp>
 #include <boost/asio/io_context.hpp>
@@ -71,19 +70,21 @@ TEST(HttpClientRobustness, EofDelimitedResponseIsNotReturnedToThePool) {
 
     std::vector<std::error_code> errors;
     std::vector<std::string> bodies;
-    client->SendAsync(MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
-                      [&](std::error_code error, AVEVA::HttpResponse response) {
-                          errors.push_back(error);
-                          bodies.push_back(response.GetBody());
-                          // A POST is never silently re-sent, so it only succeeds if it gets a fresh connection.
-                          client->SendAsync(MakeRequest(server.Url("/second"), AVEVA::HttpMethod::Post),
-                                            AVEVA::HttpRequestOptions{},
-                                            [&](std::error_code secondError, AVEVA::HttpResponse secondResponse) {
-                                                errors.push_back(secondError);
-                                                bodies.push_back(secondResponse.GetBody());
-                                                server.Stop();
-                                            });
-                      });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code error, AVEVA::HttpResponse response) {
+                                  errors.push_back(error);
+                                  bodies.push_back(response.GetBody());
+                                  // A POST is never silently re-sent, so it only succeeds if it gets a fresh
+                                  // connection.
+                                  HttpClientTests::SendWith(
+                                      *client, MakeRequest(server.Url("/second"), AVEVA::HttpMethod::Post),
+                                      AVEVA::HttpRequestOptions{},
+                                      [&](std::error_code secondError, AVEVA::HttpResponse secondResponse) {
+                                          errors.push_back(secondError);
+                                          bodies.push_back(secondResponse.GetBody());
+                                          server.Stop();
+                                      });
+                              });
     RunBounded(context);
 
     ASSERT_EQ(errors.size(), 2u);
@@ -106,17 +107,18 @@ TEST(HttpClientRobustness, ExtraBytesAfterACompleteResponseKeepTheConnectionOutO
     });
 
     std::vector<std::error_code> errors;
-    client->SendAsync(MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
-                      [&](std::error_code error, AVEVA::HttpResponse) {
-                          errors.push_back(error);
-                          client->SendAsync(MakeRequest(server.Url("/second"), AVEVA::HttpMethod::Post),
-                                            AVEVA::HttpRequestOptions{},
-                                            [&](std::error_code secondError, AVEVA::HttpResponse secondResponse) {
-                                                errors.push_back(secondError);
-                                                EXPECT_EQ(secondResponse.GetStatus(), 200U);
-                                                server.Stop();
-                                            });
-                      });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  errors.push_back(error);
+                                  HttpClientTests::SendWith(
+                                      *client, MakeRequest(server.Url("/second"), AVEVA::HttpMethod::Post),
+                                      AVEVA::HttpRequestOptions{},
+                                      [&](std::error_code secondError, AVEVA::HttpResponse secondResponse) {
+                                          errors.push_back(secondError);
+                                          EXPECT_EQ(secondResponse.GetStatus(), 200U);
+                                          server.Stop();
+                                      });
+                              });
     RunBounded(context);
 
     ASSERT_EQ(errors.size(), 2U);
@@ -135,20 +137,21 @@ TEST(HttpClientRobustness, IdempotentRequestIsRetriedOnAStalePooledConnection) {
     });
 
     std::vector<std::error_code> errors;
-    client->SendAsync(MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
-                      [&](std::error_code error, AVEVA::HttpResponse) {
-                          errors.push_back(error);
-                          // Give the server time to close its end before the pooled connection is reused.
-                          auto timer = std::make_shared<asio::steady_timer>(context, std::chrono::milliseconds(100));
-                          timer->async_wait([&, timer](boost::system::error_code) {
-                              client->SendAsync(MakeRequest(server.Url("/second")), AVEVA::HttpRequestOptions{},
-                                                [&](std::error_code secondError, AVEVA::HttpResponse secondResponse) {
-                                                    errors.push_back(secondError);
-                                                    EXPECT_EQ(secondResponse.GetStatus(), 200u);
-                                                    server.Stop();
-                                                });
-                          });
-                      });
+    HttpClientTests::SendWith(
+        *client, MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
+        [&](std::error_code error, AVEVA::HttpResponse) {
+            errors.push_back(error);
+            // Give the server time to close its end before the pooled connection is reused.
+            auto timer = std::make_shared<asio::steady_timer>(context, std::chrono::milliseconds(100));
+            timer->async_wait([&, timer](boost::system::error_code) {
+                HttpClientTests::SendWith(*client, MakeRequest(server.Url("/second")), AVEVA::HttpRequestOptions{},
+                                          [&](std::error_code secondError, AVEVA::HttpResponse secondResponse) {
+                                              errors.push_back(secondError);
+                                              EXPECT_EQ(secondResponse.GetStatus(), 200u);
+                                              server.Stop();
+                                          });
+            });
+        });
     RunBounded(context);
 
     ASSERT_EQ(errors.size(), 2u);
@@ -168,17 +171,19 @@ TEST(HttpClientRobustness, PostLostOnAReusedConnectionIsNotSentAgain) {
     });
 
     std::error_code postError;
-    client->SendAsync(
-        MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{}, [&](std::error_code, AVEVA::HttpResponse) {
-            client->SendAsync(MakeRequest(server.Url("/second"), AVEVA::HttpMethod::Post), AVEVA::HttpRequestOptions{},
-                              [&](std::error_code error, AVEVA::HttpResponse) {
-                                  postError = error;
-                                  // Let a (wrong) resend arrive on a new connection before the server is stopped.
-                                  auto settle =
-                                      std::make_shared<asio::steady_timer>(context, std::chrono::milliseconds(200));
-                                  settle->async_wait([&, settle](boost::system::error_code) { server.Stop(); });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code, AVEVA::HttpResponse) {
+                                  HttpClientTests::SendWith(
+                                      *client, MakeRequest(server.Url("/second"), AVEVA::HttpMethod::Post),
+                                      AVEVA::HttpRequestOptions{}, [&](std::error_code error, AVEVA::HttpResponse) {
+                                          postError = error;
+                                          // Let a (wrong) resend arrive on a new connection before the server is
+                                          // stopped.
+                                          auto settle = std::make_shared<asio::steady_timer>(
+                                              context, std::chrono::milliseconds(200));
+                                          settle->async_wait([&, settle](boost::system::error_code) { server.Stop(); });
+                                      });
                               });
-        });
     RunBounded(context);
 
     EXPECT_TRUE(postError);
@@ -198,16 +203,17 @@ void ExpectMutationLostOnAReusedConnectionIsNotSentAgain(AVEVA::HttpMethod metho
                           });
 
     std::error_code mutationError;
-    client->SendAsync(
-        MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{}, [&](std::error_code, AVEVA::HttpResponse) {
-            client->SendAsync(MakeRequest(server.Url("/second"), method), AVEVA::HttpRequestOptions{},
-                              [&](std::error_code error, AVEVA::HttpResponse) {
-                                  mutationError = error;
-                                  auto settle =
-                                      std::make_shared<asio::steady_timer>(context, std::chrono::milliseconds(200));
-                                  settle->async_wait([&, settle](boost::system::error_code) { server.Stop(); });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code, AVEVA::HttpResponse) {
+                                  HttpClientTests::SendWith(
+                                      *client, MakeRequest(server.Url("/second"), method), AVEVA::HttpRequestOptions{},
+                                      [&](std::error_code error, AVEVA::HttpResponse) {
+                                          mutationError = error;
+                                          auto settle = std::make_shared<asio::steady_timer>(
+                                              context, std::chrono::milliseconds(200));
+                                          settle->async_wait([&, settle](boost::system::error_code) { server.Stop(); });
+                                      });
                               });
-        });
     RunBounded(context);
 
     EXPECT_TRUE(mutationError);
@@ -233,14 +239,15 @@ TEST(HttpClientRobustness, GetLostOnAReusedConnectionIsRetried) {
     });
 
     std::error_code secondError;
-    client->SendAsync(MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
-                      [&](std::error_code, AVEVA::HttpResponse) {
-                          client->SendAsync(MakeRequest(server.Url("/second")), AVEVA::HttpRequestOptions{},
-                                            [&](std::error_code error, AVEVA::HttpResponse) {
-                                                secondError = error;
-                                                server.Stop();
-                                            });
-                      });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code, AVEVA::HttpResponse) {
+                                  HttpClientTests::SendWith(*client, MakeRequest(server.Url("/second")),
+                                                            AVEVA::HttpRequestOptions{},
+                                                            [&](std::error_code error, AVEVA::HttpResponse) {
+                                                                secondError = error;
+                                                                server.Stop();
+                                                            });
+                              });
     RunBounded(context);
 
     EXPECT_FALSE(secondError);
@@ -259,16 +266,17 @@ TEST(HttpClientRobustness, GetIsNotRetriedOnceResponseBytesWereReceivedOnAReused
     });
 
     std::error_code secondError;
-    client->SendAsync(
-        MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{}, [&](std::error_code, AVEVA::HttpResponse) {
-            client->SendAsync(MakeRequest(server.Url("/second")), AVEVA::HttpRequestOptions{},
-                              [&](std::error_code error, AVEVA::HttpResponse) {
-                                  secondError = error;
-                                  auto settle =
-                                      std::make_shared<asio::steady_timer>(context, std::chrono::milliseconds(200));
-                                  settle->async_wait([&, settle](boost::system::error_code) { server.Stop(); });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code, AVEVA::HttpResponse) {
+                                  HttpClientTests::SendWith(
+                                      *client, MakeRequest(server.Url("/second")), AVEVA::HttpRequestOptions{},
+                                      [&](std::error_code error, AVEVA::HttpResponse) {
+                                          secondError = error;
+                                          auto settle = std::make_shared<asio::steady_timer>(
+                                              context, std::chrono::milliseconds(200));
+                                          settle->async_wait([&, settle](boost::system::error_code) { server.Stop(); });
+                                      });
                               });
-        });
     RunBounded(context);
 
     EXPECT_TRUE(secondError);
@@ -294,10 +302,11 @@ TEST(HttpClientRobustness, PlainHttpRequestTimesOut) {
     options.SetTimeout(std::chrono::milliseconds(100));
 
     std::error_code observed;
-    client->SendAsync(MakeRequest(server.Url("/timeout")), options, [&](std::error_code error, AVEVA::HttpResponse) {
-        observed = error;
-        server.Stop();
-    });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/timeout")), options,
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  observed = error;
+                                  server.Stop();
+                              });
     RunBounded(context);
 
     EXPECT_EQ(observed, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
@@ -322,7 +331,7 @@ TEST(HttpClientRobustness, TimeoutOfAStalledRawViewUploadCompletesOnceAndLetsThe
 
     int completions = 0;
     std::error_code observed;
-    client->SendAsync(std::move(request), options, [&](std::error_code error, AVEVA::HttpResponse) {
+    HttpClientTests::SendWith(*client, std::move(request), options, [&](std::error_code error, AVEVA::HttpResponse) {
         ++completions;
         observed = error;
         body.reset(); // A late transport access would now touch freed memory.
@@ -353,7 +362,7 @@ TEST(HttpClientRobustness, CancellingAStalledRawViewUploadCompletesOnceAndLetsTh
 
     int completions = 0;
     std::error_code observed;
-    client->SendAsync(std::move(request), options, [&](std::error_code error, AVEVA::HttpResponse) {
+    HttpClientTests::SendWith(*client, std::move(request), options, [&](std::error_code error, AVEVA::HttpResponse) {
         ++completions;
         observed = error;
         body.reset();
@@ -382,15 +391,15 @@ TEST(HttpClientRobustness, ReusedConnectionRequestTimesOut) {
     timeoutOptions.SetTimeout(std::chrono::milliseconds(100));
 
     std::vector<std::error_code> errors;
-    client->SendAsync(MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
-                      [&](std::error_code error, AVEVA::HttpResponse) {
-                          errors.push_back(error);
-                          client->SendAsync(MakeRequest(server.Url("/second")), timeoutOptions,
-                                            [&](std::error_code secondError, AVEVA::HttpResponse) {
-                                                errors.push_back(secondError);
-                                                server.Stop();
-                                            });
-                      });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  errors.push_back(error);
+                                  HttpClientTests::SendWith(*client, MakeRequest(server.Url("/second")), timeoutOptions,
+                                                            [&](std::error_code secondError, AVEVA::HttpResponse) {
+                                                                errors.push_back(secondError);
+                                                                server.Stop();
+                                                            });
+                              });
     RunBounded(context);
 
     ASSERT_EQ(errors.size(), 2U);
@@ -411,12 +420,12 @@ TEST(HttpClientRobustness, MaximumRequestTimeoutDoesNotExpireImmediately) {
 
     std::error_code observed;
     unsigned int status = 0;
-    client->SendAsync(MakeRequest(server.Url("/max-timeout")), options,
-                      [&](std::error_code error, AVEVA::HttpResponse response) {
-                          observed = error;
-                          status = response.GetStatus();
-                          server.Stop();
-                      });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/max-timeout")), options,
+                              [&](std::error_code error, AVEVA::HttpResponse response) {
+                                  observed = error;
+                                  status = response.GetStatus();
+                                  server.Stop();
+                              });
     RunBounded(context);
 
     EXPECT_FALSE(observed);
@@ -432,19 +441,20 @@ TEST(HttpClientRobustness, IdleTimeoutExpiryClosesThePooledConnection) {
                           [](int, const http::request<http::string_body>&) -> ServerAction { return {OkResponse}; });
 
     std::vector<std::error_code> errors;
-    client->SendAsync(MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
-                      [&](std::error_code error, AVEVA::HttpResponse) {
-                          errors.push_back(error);
-                          auto timer = std::make_shared<asio::steady_timer>(context, std::chrono::milliseconds(1200));
-                          timer->async_wait([&, timer](boost::system::error_code waitError) {
-                              ASSERT_FALSE(waitError);
-                              client->SendAsync(MakeRequest(server.Url("/second")), AVEVA::HttpRequestOptions{},
-                                                [&](std::error_code secondError, AVEVA::HttpResponse) {
-                                                    errors.push_back(secondError);
-                                                    server.Stop();
-                                                });
-                          });
-                      });
+    HttpClientTests::SendWith(
+        *client, MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
+        [&](std::error_code error, AVEVA::HttpResponse) {
+            errors.push_back(error);
+            auto timer = std::make_shared<asio::steady_timer>(context, std::chrono::milliseconds(1200));
+            timer->async_wait([&, timer](boost::system::error_code waitError) {
+                ASSERT_FALSE(waitError);
+                HttpClientTests::SendWith(*client, MakeRequest(server.Url("/second")), AVEVA::HttpRequestOptions{},
+                                          [&](std::error_code secondError, AVEVA::HttpResponse) {
+                                              errors.push_back(secondError);
+                                              server.Stop();
+                                          });
+            });
+        });
     RunBounded(context);
 
     ASSERT_EQ(errors.size(), 2U);
@@ -463,13 +473,13 @@ TEST(HttpClientRobustness, MaxConnectionsPerHostQueuesExtraRequestsAndReusesTheC
 
     std::vector<std::error_code> errors;
     for (int i = 0; i < 4; ++i) {
-        client->SendAsync(MakeRequest(server.Url("/" + std::to_string(i))), AVEVA::HttpRequestOptions{},
-                          [&](std::error_code error, AVEVA::HttpResponse) {
-                              errors.push_back(error);
-                              if (errors.size() == 4) {
-                                  server.Stop();
-                              }
-                          });
+        HttpClientTests::SendWith(*client, MakeRequest(server.Url("/" + std::to_string(i))),
+                                  AVEVA::HttpRequestOptions{}, [&](std::error_code error, AVEVA::HttpResponse) {
+                                      errors.push_back(error);
+                                      if (errors.size() == 4) {
+                                          server.Stop();
+                                      }
+                                  });
     }
     RunBounded(context);
 
@@ -500,19 +510,19 @@ static void RunQueuedRequestWhileHandlerBlocks(bool pooled) {
     std::atomic<bool> startedWhileBlocked = false;
     std::atomic<int> completed = 0;
     auto guard = asio::make_work_guard(context);
-    client->SendAsync(
-        MakeRequest(server.Url("/a")), AVEVA::HttpRequestOptions{}, [&](std::error_code, AVEVA::HttpResponse) {
+    HttpClientTests::SendWith(
+        *client, MakeRequest(server.Url("/a")), AVEVA::HttpRequestOptions{}, [&](std::error_code, AVEVA::HttpResponse) {
             // The slot must already be free here, so the queued request can finish on another thread
             // while this handler is still blocked.
             startedWhileBlocked = secondFuture.wait_for(std::chrono::seconds(4)) == std::future_status::ready;
             ++completed;
             guard.reset();
         });
-    client->SendAsync(MakeRequest(server.Url("/b")), AVEVA::HttpRequestOptions{},
-                      [&](std::error_code, AVEVA::HttpResponse) {
-                          secondDone.set_value();
-                          asio::post(serverContext, [&] { server.Stop(); });
-                      });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/b")), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code, AVEVA::HttpResponse) {
+                                  secondDone.set_value();
+                                  asio::post(serverContext, [&] { server.Stop(); });
+                              });
     std::thread helper([&context] { context.run_for(std::chrono::seconds(8)); });
     context.run_for(std::chrono::seconds(8));
     helper.join();
@@ -554,17 +564,17 @@ TEST(HttpClientRobustness, TimeSpentQueuedForASlotCountsAgainstTheRequestTimeout
             server.Stop();
         }
     };
-    client->SendAsync(MakeRequest(server.Url("/held")), holdingOptions,
-                      [&](std::error_code error, AVEVA::HttpResponse) {
-                          firstResult = error;
-                          finishWhenBothDone();
-                      });
-    client->SendAsync(MakeRequest(server.Url("/queued")), queuedOptions,
-                      [&](std::error_code error, AVEVA::HttpResponse) {
-                          queuedResult = error;
-                          queuedElapsed = std::chrono::steady_clock::now() - submitted;
-                          finishWhenBothDone();
-                      });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/held")), holdingOptions,
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  firstResult = error;
+                                  finishWhenBothDone();
+                              });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/queued")), queuedOptions,
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  queuedResult = error;
+                                  queuedElapsed = std::chrono::steady_clock::now() - submitted;
+                                  finishWhenBothDone();
+                              });
     RunBounded(context);
 
     EXPECT_EQ(firstResult, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
@@ -604,17 +614,22 @@ TEST(HttpClientRobustness, CancellingAQueuedRequestFailsItWithoutStartingIt) {
             server.Stop();
         }
     };
-    client->SendAsync(MakeRequest(server.Url("/held")), firstOptions, [&](std::error_code error, AVEVA::HttpResponse) {
-        firstResult = error;
-        finishWhenBothDone();
-    });
-    client->SendAsync(MakeRequest(server.Url("/queued")), queuedOptions,
-                      [&](std::error_code error, AVEVA::HttpResponse) {
-                          queuedResult = error;
-                          // The queued request is cancelled first; the held one is released only after that completion.
-                          firstCancel.emit(asio::cancellation_type::terminal);
-                          finishWhenBothDone();
-                      });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/held")), firstOptions,
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  firstResult = error;
+                                  finishWhenBothDone();
+                              });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/queued")), queuedOptions,
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  queuedResult = error;
+                                  // The queued request is cancelled first; the held one is released only after that
+                                  // completion.
+                                  firstCancel.emit(asio::cancellation_type::terminal);
+                                  finishWhenBothDone();
+                              });
+    // Both coroutines must have started so the queued request's cancellation slot is connected.
+    context.run_one();
+    context.run_one();
     queuedCancel.emit(asio::cancellation_type::terminal);
     RunBounded(context);
 
@@ -632,56 +647,22 @@ TEST(HttpClientRobustness, MaximumIdleTimeoutStillAllowsPooling) {
                           [](int, const http::request<http::string_body>&) -> ServerAction { return {OkResponse}; });
 
     std::vector<std::error_code> errors;
-    client->SendAsync(MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
-                      [&](std::error_code error, AVEVA::HttpResponse) {
-                          errors.push_back(error);
-                          client->SendAsync(MakeRequest(server.Url("/second")), AVEVA::HttpRequestOptions{},
-                                            [&](std::error_code secondError, AVEVA::HttpResponse) {
-                                                errors.push_back(secondError);
-                                                server.Stop();
-                                            });
-                      });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  errors.push_back(error);
+                                  HttpClientTests::SendWith(*client, MakeRequest(server.Url("/second")),
+                                                            AVEVA::HttpRequestOptions{},
+                                                            [&](std::error_code secondError, AVEVA::HttpResponse) {
+                                                                errors.push_back(secondError);
+                                                                server.Stop();
+                                                            });
+                              });
     RunBounded(context);
 
     ASSERT_EQ(errors.size(), 2U);
     EXPECT_FALSE(errors[0]);
     EXPECT_FALSE(errors[1]);
     EXPECT_EQ(server.Accepted(), 1);
-}
-
-TEST(HttpClientRobustness, CompletionRunsWhenTheHandlerExecutorHasNoOtherWork) {
-    asio::io_context clientContext;
-    asio::io_context handlerContext;
-    auto client = AVEVA::HttpClient::Create(clientContext);
-    // ScriptedServer is not thread-safe, so it gets its own single-threaded context.
-    asio::io_context serverContext;
-    ScriptedServer server(serverContext, [](int, const http::request<http::string_body>&) -> ServerAction {
-        ServerAction action{OkResponse};
-        action.Delay = std::chrono::milliseconds(150);
-        return action;
-    });
-    auto serverGuard = asio::make_work_guard(serverContext);
-    std::thread serverThread([&] { serverContext.run(); });
-
-    std::atomic_bool completed = false;
-    std::error_code result;
-    client->SendAsync(
-        MakeRequest(server.Url()), AVEVA::HttpRequestOptions{},
-        asio::bind_executor(handlerContext.get_executor(), [&](std::error_code error, AVEVA::HttpResponse) {
-            result = error;
-            completed = true;
-            asio::post(serverContext, [&] { server.Stop(); });
-            serverGuard.reset();
-        }));
-
-    std::thread clientThread([&] { clientContext.run(); });
-    // Without outstanding work on the handler's executor this would return immediately.
-    handlerContext.run();
-    clientThread.join();
-    serverThread.join();
-
-    EXPECT_TRUE(completed);
-    EXPECT_FALSE(result);
 }
 
 TEST(HttpClientRobustness, CancellationAtVaryingStagesCompletesExactlyOnce) {
@@ -701,11 +682,12 @@ TEST(HttpClientRobustness, CancellationAtVaryingStagesCompletesExactlyOnce) {
 
         int completions = 0;
         std::error_code result;
-        client->SendAsync(MakeRequest(server.Url()), options, [&](std::error_code error, AVEVA::HttpResponse) {
-            ++completions;
-            result = error;
-            server.Stop();
-        });
+        HttpClientTests::SendWith(*client, MakeRequest(server.Url()), options,
+                                  [&](std::error_code error, AVEVA::HttpResponse) {
+                                      ++completions;
+                                      result = error;
+                                      server.Stop();
+                                  });
 
         // Emit from the context rather than another thread: a slot's handler may only be reached by whoever
         // owns the slot, and re-posting a varying number of times lands the cancel at different stages.
@@ -735,18 +717,19 @@ TEST(HttpClientRobustness, CancellationDuringStaleConnectionRetryCompletesExactl
         asio::cancellation_signal cancellation;
         int completions = 0;
         std::error_code secondResult;
-        client->SendAsync(
-            MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{}, [&](std::error_code, AVEVA::HttpResponse) {
+        HttpClientTests::SendWith(
+            *client, MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
+            [&](std::error_code, AVEVA::HttpResponse) {
                 auto timer = std::make_shared<asio::steady_timer>(context, std::chrono::milliseconds(50));
                 timer->async_wait([&, timer](boost::system::error_code) {
                     AVEVA::HttpRequestOptions options;
                     options.SetCancellationSlot(cancellation.slot());
-                    client->SendAsync(MakeRequest(server.Url("/second")), options,
-                                      [&](std::error_code error, AVEVA::HttpResponse) {
-                                          ++completions;
-                                          secondResult = error;
-                                          server.Stop();
-                                      });
+                    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/second")), options,
+                                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                                  ++completions;
+                                                  secondResult = error;
+                                                  server.Stop();
+                                              });
                     // Lands while the reuse failure and the replacement connection are being processed.
                     auto cancelTimer =
                         std::make_shared<asio::steady_timer>(context, std::chrono::microseconds(iteration * 200));
@@ -769,10 +752,11 @@ std::error_code SendOnce(const std::string& wire, AVEVA::HttpRequestOptions opti
     ScriptedServer server(context,
                           [&](int, const http::request<http::string_body>&) -> ServerAction { return {wire, true}; });
     std::error_code result;
-    client->SendAsync(MakeRequest(server.Url()), options, [&](std::error_code error, AVEVA::HttpResponse) {
-        result = error;
-        server.Stop();
-    });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url()), options,
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  result = error;
+                                  server.Stop();
+                              });
     RunBounded(context);
     return result;
 }
@@ -793,14 +777,15 @@ TEST(HttpClientRobustness, DestroyingTheClientWithPooledIdleConnectionsClosesThe
                           [](int, const http::request<http::string_body>&) -> ServerAction { return {OkResponse}; });
 
     std::error_code result;
-    client->SendAsync(MakeRequest(server.Url("/")), AVEVA::HttpRequestOptions{},
-                      [&](std::error_code error, AVEVA::HttpResponse) {
-                          result = error;
-                          // The connection is now idle in the pool; tear the client down with it inside.
-                          client.reset();
-                          auto settle = std::make_shared<asio::steady_timer>(context, std::chrono::milliseconds(100));
-                          settle->async_wait([&, settle](boost::system::error_code) { server.Stop(); });
-                      });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/")), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  result = error;
+                                  // The connection is now idle in the pool; tear the client down with it inside.
+                                  client.reset();
+                                  auto settle =
+                                      std::make_shared<asio::steady_timer>(context, std::chrono::milliseconds(100));
+                                  settle->async_wait([&, settle](boost::system::error_code) { server.Stop(); });
+                              });
     RunBounded(context);
 
     EXPECT_FALSE(result);
@@ -812,12 +797,16 @@ TEST(HttpClientRobustness, DestroyingTheClientWhileLeadingASharedLookupCompletes
     auto client = AVEVA::HttpClient::Create(context);
     int completions = 0;
     for (int i = 0; i < 2; ++i) {
-        client->SendAsync(MakeRequest("http://shared-lookup.invalid/" + std::to_string(i)), AVEVA::HttpRequestOptions{},
-                          [&](std::error_code error, AVEVA::HttpResponse) {
-                              EXPECT_TRUE(error);
-                              ++completions;
-                          });
+        HttpClientTests::SendWith(*client, MakeRequest("http://shared-lookup.invalid/" + std::to_string(i)),
+                                  AVEVA::HttpRequestOptions{}, [&](std::error_code error, AVEVA::HttpResponse) {
+                                      EXPECT_TRUE(error);
+                                      ++completions;
+                                  });
     }
+    // Let both coroutines start (and reach the lookup) before the client goes away; a not-yet-started coroutine
+    // would otherwise touch a destroyed client.
+    context.run_one();
+    context.run_one();
     client.reset();
     RunBounded(context);
 
@@ -827,8 +816,11 @@ TEST(HttpClientRobustness, DestroyingTheClientWhileLeadingASharedLookupCompletes
 TEST(HttpClientRobustness, StartedDnsLeaderKeepsItsPendingEntryWhileTheLookupIsInFlight) {
     asio::io_context context;
     auto client = AVEVA::HttpClient::Create(context);
-    client->SendAsync(MakeRequest("http://leader-guard.invalid/"), AVEVA::HttpRequestOptions{},
-                      [](std::error_code, AVEVA::HttpResponse) {});
+    HttpClientTests::SendWith(*client, MakeRequest("http://leader-guard.invalid/"), AVEVA::HttpRequestOptions{},
+                              [](std::error_code, AVEVA::HttpResponse) {});
+    // Run the coroutine's start so the request has been submitted; the probe below is then queued behind the
+    // request's own start.
+    context.run_one();
 
     bool probedAsLeader = true;
     // Queued behind the request's start, before the resolver thread can post its completion.
@@ -877,11 +869,11 @@ TEST(HttpClientRobustness, RequestTargetIsBuiltFromPathAndQuery) {
             server.Stop();
             return;
         }
-        client->SendAsync(MakeRequest("http://127.0.0.1:" + port + paths[next++]), AVEVA::HttpRequestOptions{},
-                          [&](std::error_code error, AVEVA::HttpResponse) {
-                              EXPECT_FALSE(error);
-                              sendNext();
-                          });
+        HttpClientTests::SendWith(*client, MakeRequest("http://127.0.0.1:" + port + paths[next++]),
+                                  AVEVA::HttpRequestOptions{}, [&](std::error_code error, AVEVA::HttpResponse) {
+                                      EXPECT_FALSE(error);
+                                      sendNext();
+                                  });
     };
     sendNext();
     RunBounded(context);
@@ -972,97 +964,7 @@ TEST(HttpClientRobustness, FailedSharedResolvePostLeavesRecoveryToTheWaitersStra
     EXPECT_EQ(result, std::make_error_code(std::errc::not_enough_memory));
 }
 
-TEST(HttpClientRobustness, FailedFinalPostStillDeliversTheResultToTheHandlerExactlyOnce) {
-    asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
-    std::atomic<bool> failNext{true};
-
-    int completions = 0;
-    std::error_code result;
-    AVEVA::HttpRequest request;
-    request.SetUrl("ftp://example.com/file");
-    // The failing executor is the handler's own, so only the final delivery post can hit it.
-    client->SendAsync(
-        std::move(request), AVEVA::HttpRequestOptions{},
-        asio::bind_executor(FailingPostExecutor{&context, &failNext}, [&](std::error_code error, AVEVA::HttpResponse) {
-            ++completions;
-            result = error;
-        }));
-
-    EXPECT_NO_THROW(RunBounded(context));
-    EXPECT_FALSE(failNext.load());
-    EXPECT_EQ(completions, 1);
-    EXPECT_EQ(result, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidUrl));
-}
-
-// A strand executor whose next `Failures` execute() calls throw, like FailingPostExecutor but serialized.
-struct FailingStrandExecutor {
-    asio::strand<asio::io_context::executor_type> Strand;
-    std::atomic<int>* Failures;
-
-    template <typename F> void execute(F&& function) const {
-        if (Failures->fetch_sub(1) > 0) {
-            throw std::bad_alloc();
-        }
-        Strand.execute(std::forward<F>(function));
-    }
-    [[nodiscard]] asio::execution_context& query(asio::execution::context_t) const noexcept {
-        return asio::query(Strand, asio::execution::context);
-    }
-    [[nodiscard]] FailingStrandExecutor require(asio::execution::blocking_t::never_t) const { return *this; }
-    friend bool operator==(const FailingStrandExecutor& a, const FailingStrandExecutor& b) noexcept {
-        return a.Strand == b.Strand;
-    }
-};
-
-TEST(HttpClientRobustness, FailedFinalPostIsRetriedOnTheHandlersStrandInsteadOfRunningInline) {
-    asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
-    auto work = asio::make_work_guard(context);
-    std::vector<std::jthread> threads;
-    for (int i = 0; i < 3; ++i) {
-        threads.emplace_back([&] { context.run(); });
-    }
-    asio::strand<asio::io_context::executor_type> strand{context.get_executor()};
-    std::atomic<int> failures{1};
-
-    std::promise<void> done;
-    std::atomic<int> completions{0};
-    std::atomic<bool> onStrand{false};
-    AVEVA::HttpRequest request;
-    request.SetUrl("ftp://example.com/file");
-    client->SendAsync(
-        std::move(request), AVEVA::HttpRequestOptions{},
-        asio::bind_executor(FailingStrandExecutor{strand, &failures}, [&](std::error_code, AVEVA::HttpResponse) {
-            onStrand = strand.running_in_this_thread();
-            ++completions;
-            done.set_value();
-        }));
-
-    ASSERT_EQ(done.get_future().wait_for(std::chrono::seconds(10)), std::future_status::ready);
-    EXPECT_LE(failures.load(), 0);
-    EXPECT_TRUE(onStrand.load());
-    EXPECT_EQ(completions.load(), 1);
-    work.reset();
-}
-
-TEST(HttpClientRobustness, FinalPostThatKeepsFailingStillDeliversExactlyOnce) {
-    asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
-    asio::strand<asio::io_context::executor_type> strand{context.get_executor()};
-    std::atomic<int> failures{1000};
-
-    int completions = 0;
-    AVEVA::HttpRequest request;
-    request.SetUrl("ftp://example.com/file");
-    client->SendAsync(std::move(request), AVEVA::HttpRequestOptions{},
-                      asio::bind_executor(FailingStrandExecutor{strand, &failures},
-                                          [&](std::error_code, AVEVA::HttpResponse) { ++completions; }));
-
-    EXPECT_NO_THROW(RunBounded(context));
-    EXPECT_EQ(completions, 1);
-}
-
+// The limiter abort tests below use the Submit-level fault policies.
 TEST(HttpClientRobustness, LimiterAbortWhoseFailurePostThrowsStillCompletesTheHandlerOnce) {
     asio::io_context context;
     AVEVA::HttpClientOptions clientOptions;
@@ -1337,15 +1239,19 @@ TEST(HttpClientRobustness, DestroyingTheClientFailsQueuedRequestsAndCompletesAct
     for (int i = 0; i < 3; ++i) {
         AVEVA::HttpRequestOptions options;
         options.SetTimeout(std::chrono::seconds(10));
-        client->SendAsync(MakeRequest(server.Url("/" + std::to_string(i))), options,
-                          [&, i](std::error_code error, AVEVA::HttpResponse) {
-                              ++completions[i];
-                              results[i] = error;
-                              if (i > 0 && ++queuedDone == 2) {
-                                  // Release the held request only after the queued ones were failed.
-                                  server.Stop();
-                              }
-                          });
+        HttpClientTests::SendWith(*client, MakeRequest(server.Url("/" + std::to_string(i))), options,
+                                  [&, i](std::error_code error, AVEVA::HttpResponse) {
+                                      ++completions[i];
+                                      results[i] = error;
+                                      if (i > 0 && ++queuedDone == 2) {
+                                          // Release the held request only after the queued ones were failed.
+                                          server.Stop();
+                                      }
+                                  });
+    }
+    // The spawned coroutines must have started before the client is destroyed, or they would use a dead client.
+    for (int i = 0; i < 3; ++i) {
+        context.run_one();
     }
     client.reset();
     RunBounded(context);
@@ -1369,13 +1275,16 @@ TEST(HttpClientRobustness, DestroyingTheClientWithRunningRequestsCompletesEachEx
     for (int i = 0; i < 3; ++i) {
         AVEVA::HttpRequestOptions options;
         options.SetTimeout(std::chrono::seconds(10));
-        client->SendAsync(MakeRequest(server.Url("/" + std::to_string(i))), options,
-                          [&](std::error_code error, AVEVA::HttpResponse) {
-                              EXPECT_TRUE(error);
-                              if (++completions == 3) {
-                                  server.Stop();
-                              }
-                          });
+        HttpClientTests::SendWith(*client, MakeRequest(server.Url("/" + std::to_string(i))), options,
+                                  [&](std::error_code error, AVEVA::HttpResponse) {
+                                      EXPECT_TRUE(error);
+                                      if (++completions == 3) {
+                                          server.Stop();
+                                      }
+                                  });
+    }
+    for (int i = 0; i < 3; ++i) {
+        context.run_one();
     }
     client.reset();
     asio::steady_timer stopper(context, std::chrono::milliseconds(100));
@@ -1404,8 +1313,12 @@ TEST(HttpClientRobustness, DestroyingTheClientWhileSlotsReleaseOnAMultiThreadedC
         for (int i = 0; i < Requests; ++i) {
             AVEVA::HttpRequestOptions options;
             options.SetTimeout(std::chrono::seconds(10));
-            client->SendAsync(MakeRequest(server.Url("/" + std::to_string(i))), options,
-                              [&](std::error_code, AVEVA::HttpResponse) { ++completions; });
+            HttpClientTests::SendWith(*client, MakeRequest(server.Url("/" + std::to_string(i))), options,
+                                      [&](std::error_code, AVEVA::HttpResponse) { ++completions; });
+        }
+        // Start every spawned coroutine before the workers run, so destruction cannot overtake a pending start.
+        for (int i = 0; i < Requests; ++i) {
+            context.run_one();
         }
 
         std::vector<std::thread> workers;
@@ -1446,13 +1359,14 @@ TEST(HttpClientRobustness, CancellingTheSharedDnsLeaderStillCompletesEveryJoined
                 server.Stop();
             }
         };
-        client->SendAsync(MakeRequest(url), leaderOptions, [&](std::error_code, AVEVA::HttpResponse) { finish(); });
+        HttpClientTests::SendWith(*client, MakeRequest(url), leaderOptions,
+                                  [&](std::error_code, AVEVA::HttpResponse) { finish(); });
         for (int follower = 0; follower < 2; ++follower) {
-            client->SendAsync(MakeRequest(url), AVEVA::HttpRequestOptions{},
-                              [&](std::error_code error, AVEVA::HttpResponse) {
-                                  followerResult = error;
-                                  finish();
-                              });
+            HttpClientTests::SendWith(*client, MakeRequest(url), AVEVA::HttpRequestOptions{},
+                                      [&](std::error_code error, AVEVA::HttpResponse) {
+                                          followerResult = error;
+                                          finish();
+                                      });
         }
         // Queued behind the three starts, so it lands while the leader's lookup is in flight.
         asio::post(context, [&] { leaderCancel.emit(asio::cancellation_type::terminal); });
@@ -1471,15 +1385,16 @@ TEST(HttpClientRobustness, MixedCaseSchemeReusesTheSameConnection) {
     const auto port = server.Url("/").substr(std::string("http://127.0.0.1").size());
 
     std::vector<std::error_code> errors;
-    client->SendAsync(MakeRequest("http://127.0.0.1" + port + "a"), AVEVA::HttpRequestOptions{},
-                      [&](std::error_code error, AVEVA::HttpResponse) {
-                          errors.push_back(error);
-                          client->SendAsync(MakeRequest("HtTp://127.0.0.1" + port + "b"), AVEVA::HttpRequestOptions{},
-                                            [&](std::error_code secondError, AVEVA::HttpResponse) {
-                                                errors.push_back(secondError);
-                                                server.Stop();
-                                            });
-                      });
+    HttpClientTests::SendWith(*client, MakeRequest("http://127.0.0.1" + port + "a"), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  errors.push_back(error);
+                                  HttpClientTests::SendWith(*client, MakeRequest("HtTp://127.0.0.1" + port + "b"),
+                                                            AVEVA::HttpRequestOptions{},
+                                                            [&](std::error_code secondError, AVEVA::HttpResponse) {
+                                                                errors.push_back(secondError);
+                                                                server.Stop();
+                                                            });
+                              });
     RunBounded(context);
 
     ASSERT_EQ(errors.size(), 2U);
@@ -1522,8 +1437,8 @@ TEST(HttpClientRobustness, ConnectingToAClosedPortFailsWithConnectFailed) {
     auto client = AVEVA::HttpClient::Create(context);
 
     std::error_code result;
-    client->SendAsync(MakeRequest(HttpClientTests::ClosedLocalUrl()), AVEVA::HttpRequestOptions{},
-                      [&](std::error_code error, AVEVA::HttpResponse) { result = error; });
+    HttpClientTests::SendWith(*client, MakeRequest(HttpClientTests::ClosedLocalUrl()), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code error, AVEVA::HttpResponse) { result = error; });
     RunBounded(context);
 
     EXPECT_EQ(result, AVEVA::make_error_code(AVEVA::HttpClientError::ConnectFailed));
@@ -1534,8 +1449,8 @@ TEST(HttpClientRobustness, UnresolvableHostFailsWithResolveFailed) {
     auto client = AVEVA::HttpClient::Create(context);
 
     std::error_code result;
-    client->SendAsync(MakeRequest("http://no-such-host.invalid/"), AVEVA::HttpRequestOptions{},
-                      [&](std::error_code error, AVEVA::HttpResponse) { result = error; });
+    HttpClientTests::SendWith(*client, MakeRequest("http://no-such-host.invalid/"), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code error, AVEVA::HttpResponse) { result = error; });
     RunBounded(context);
 
     EXPECT_EQ(result, AVEVA::make_error_code(AVEVA::HttpClientError::ResolveFailed));
@@ -1552,11 +1467,11 @@ TEST(HttpClientDiagnostics, DisabledPoolingDoesNotReportConnectionNotPooled) {
                           [](int, const http::request<http::string_body>&) -> ServerAction { return {OkResponse}; });
 
     std::error_code result = AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut);
-    client->SendAsync(MakeRequest(server.Url()), AVEVA::HttpRequestOptions{},
-                      [&](std::error_code error, AVEVA::HttpResponse) {
-                          result = error;
-                          server.Stop();
-                      });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url()), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  result = error;
+                                  server.Stop();
+                              });
     RunBounded(context);
 
     EXPECT_FALSE(result);
@@ -1579,10 +1494,11 @@ TEST(HttpClientDiagnostics, TimeoutReportsThePhaseItHappenedIn) {
     AVEVA::HttpRequestOptions requestOptions;
     requestOptions.SetTimeout(std::chrono::milliseconds(200));
     std::error_code result;
-    client->SendAsync(MakeRequest(server.Url()), requestOptions, [&](std::error_code error, AVEVA::HttpResponse) {
-        result = error;
-        server.Stop();
-    });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url()), requestOptions,
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  result = error;
+                                  server.Stop();
+                              });
     RunBounded(context);
 
     EXPECT_EQ(result, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
@@ -1613,10 +1529,11 @@ TEST(HttpClientDiagnostics, ThrowingCallbackDoesNotDisturbTheRequest) {
     AVEVA::HttpRequestOptions requestOptions;
     requestOptions.SetTimeout(std::chrono::milliseconds(200));
     std::error_code result;
-    client->SendAsync(MakeRequest(server.Url()), requestOptions, [&](std::error_code error, AVEVA::HttpResponse) {
-        result = error;
-        server.Stop();
-    });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url()), requestOptions,
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  result = error;
+                                  server.Stop();
+                              });
     RunBounded(context);
 
     EXPECT_EQ(result, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
@@ -1640,14 +1557,15 @@ TEST(HttpClientDiagnostics, StaleReusedConnectionIsReportedAsARetry) {
     });
 
     std::error_code second;
-    client->SendAsync(MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
-                      [&](std::error_code, AVEVA::HttpResponse) {
-                          client->SendAsync(MakeRequest(server.Url("/second")), AVEVA::HttpRequestOptions{},
-                                            [&](std::error_code error, AVEVA::HttpResponse) {
-                                                second = error;
-                                                server.Stop();
-                                            });
-                      });
+    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
+                              [&](std::error_code, AVEVA::HttpResponse) {
+                                  HttpClientTests::SendWith(*client, MakeRequest(server.Url("/second")),
+                                                            AVEVA::HttpRequestOptions{},
+                                                            [&](std::error_code error, AVEVA::HttpResponse) {
+                                                                second = error;
+                                                                server.Stop();
+                                                            });
+                              });
     RunBounded(context);
 
     EXPECT_FALSE(second);

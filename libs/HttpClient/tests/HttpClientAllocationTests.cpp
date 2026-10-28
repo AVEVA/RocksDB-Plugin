@@ -185,14 +185,14 @@ class PublicClientDriver {
         request.SetMethod(AVEVA::HttpMethod::Get);
         request.SetUrl(m_url);
         m_started = std::chrono::steady_clock::now();
-        m_client.SendAsync(std::move(request), AVEVA::HttpRequestOptions{},
-                           [this](std::error_code error, AVEVA::HttpResponse response) {
-                               m_latencies.push_back(std::chrono::steady_clock::now() - m_started);
-                               if (error || response.GetStatus() != 200) {
-                                   ++m_failures;
-                               }
-                               Next();
-                           });
+        HttpClientTests::SendWith(m_client, std::move(request), AVEVA::HttpRequestOptions{},
+                                  [this](std::error_code error, AVEVA::HttpResponse response) {
+                                      m_latencies.push_back(std::chrono::steady_clock::now() - m_started);
+                                      if (error || response.GetStatus() != 200) {
+                                          ++m_failures;
+                                      }
+                                      Next();
+                                  });
     }
 
     void BeginMeasuring() {

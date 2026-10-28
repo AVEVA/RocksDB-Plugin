@@ -5,6 +5,9 @@
 
 #include "AVEVA/HttpClient/HttpClient.hpp"
 
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/ssl.hpp>
@@ -37,6 +40,30 @@ struct ExchangeResult {
 // completion), the context is stopped and the current test fails with a gtest message instead of hanging until the
 // ctest timeout kills the process.
 void RunBounded(boost::asio::io_context& context, std::chrono::milliseconds limit = std::chrono::seconds(5));
+
+namespace detail {
+// All state is passed as parameters so it lives in the coroutine frame; a capturing coroutine lambda would dangle.
+template <class Handler>
+boost::asio::awaitable<void> SendAndInvoke(AVEVA::HttpClient& client, AVEVA::HttpRequest request,
+                                           AVEVA::HttpRequestOptions options, Handler handler) {
+    AVEVA::HttpResult result = co_await client.SendAsync(std::move(request), std::move(options));
+    if (result) {
+        handler(std::error_code{}, std::move(*result));
+    } else {
+        handler(result.error(), AVEVA::HttpResponse{});
+    }
+}
+} // namespace detail
+
+// Starts SendAsync on the client's executor and reports the outcome to `handler(std::error_code, HttpResponse)`.
+// The handler never runs inside this call.
+template <class Handler>
+void SendWith(AVEVA::HttpClient& client, AVEVA::HttpRequest request, AVEVA::HttpRequestOptions options,
+              Handler handler) {
+    boost::asio::co_spawn(client.get_executor(),
+                          detail::SendAndInvoke(client, std::move(request), std::move(options), std::move(handler)),
+                          boost::asio::detached);
+}
 
 // URL of a loopback port that has no listener.
 std::string ClosedLocalUrl();
