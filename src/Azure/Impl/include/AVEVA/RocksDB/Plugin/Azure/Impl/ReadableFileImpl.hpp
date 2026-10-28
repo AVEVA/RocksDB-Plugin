@@ -87,6 +87,9 @@ template <typename TBlob> class BasicReadableFileImpl {
     mutable std::mutex m_metadataMutex;
     mutable int64_t m_size;
     mutable std::string m_etag;
+    // Bumped (under m_metadataMutex) whenever m_etag changes, so readers can detect a new blob version without
+    // copying the ETag.
+    mutable std::atomic<uint64_t> m_metadataVersion{0};
     // Cap on the shared prefetch budget; a Prefetch that would push the budget past it is declined.
     int64_t m_maxPrefetchBytes;
     // When m_size/m_etag were last read from the service; GetSize serves them for MetadataCacheTtl.

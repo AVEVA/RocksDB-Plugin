@@ -177,7 +177,7 @@ int64_t BasicReadableFileImpl<TBlob>::RandomRead(const int64_t offset, int64_t b
     int64_t served = 0;
     // Prefetched bytes belong to the version cached at this point; if the download below ends up on another
     // version the copied prefix is stale and the whole range must be read again.
-    const auto prefetchEtag = GetMetadata().second;
+    const auto prefetchVersion = m_metadataVersion.load(std::memory_order_acquire);
     if (const auto prefetched = TryReadFromPrefetch(offset, bytesToRead, buffer, true, true)) {
         served = static_cast<int64_t>(*prefetched);
         if (served >= bytesToRead) {
@@ -189,7 +189,7 @@ int64_t BasicReadableFileImpl<TBlob>::RandomRead(const int64_t offset, int64_t b
     // stale-read budget so a single read cannot spend it twice under churn.
     int refreshesLeft = kMaxStaleReadRetries;
     auto bytesRead = DownloadWithRetry(offset + served, bytesToRead - served, buffer + served, refreshesLeft);
-    if (served > 0 && !HasETag(prefetchEtag)) {
+    if (served > 0 && m_metadataVersion.load(std::memory_order_acquire) != prefetchVersion) {
         served = 0;
         bytesRead = DownloadWithRetry(offset, bytesToRead, buffer, refreshesLeft);
     }
@@ -233,6 +233,9 @@ template <typename TBlob> void BasicReadableFileImpl<TBlob>::SetMetadata(const i
         std::scoped_lock lock(m_metadataMutex);
         changed = m_etag != etag;
         m_size = size;
+        if (changed) {
+            m_metadataVersion.fetch_add(1, std::memory_order_release);
+        }
         m_etag = std::move(etag);
         m_metadataFetchedAt = m_h.Runtime ? m_h.Runtime->MetadataNow() : std::chrono::steady_clock::now();
     }
