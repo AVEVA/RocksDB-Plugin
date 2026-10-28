@@ -154,7 +154,7 @@ class WriteableFileTests : public ::testing::Test {
         g_failSmallAllocation = false;
 
         file.Sync();
-        EXPECT_EQ(expected, Prefix(m_env.Blob->Data, expected.size()));
+        EXPECT_EQ(expected, Prefix(m_env.Blob->Bytes(), expected.size()));
         EXPECT_EQ(static_cast<int64_t>(expected.size()), file.GetFileSize());
     }
 };
@@ -170,7 +170,7 @@ TEST_F(WriteableFileTests, SinglePageBuffer_IsRejectedInsteadOfSpinningInAppend)
     file.Append(data);
     file.Append(data);
     file.Sync();
-    EXPECT_EQ(std::vector<char>(200, 'x'), Prefix(m_env.Blob->Data, 200));
+    EXPECT_EQ(std::vector<char>(200, 'x'), Prefix(m_env.Blob->Bytes(), 200));
 }
 
 TEST_F(WriteableFileTests, Flush_ReusesBuffersAndKeepsTheTailAcrossTheSwap) {
@@ -186,7 +186,7 @@ TEST_F(WriteableFileTests, Flush_ReusesBuffersAndKeepsTheTailAcrossTheSwap) {
     file.Append(expected);
     file.Sync();
 
-    EXPECT_EQ(expected, Prefix(m_env.Blob->Data, expected.size()));
+    EXPECT_EQ(expected, Prefix(m_env.Blob->Bytes(), expected.size()));
     ASSERT_EQ(4U, m_env.Blob->SharedUploadPayloadAddresses.size());
     const auto addresses = m_env.Blob->SharedUploadPayloadAddresses.Snapshot();
     const std::set<const char*> distinct(addresses.begin(), addresses.end());
@@ -224,7 +224,7 @@ TEST_F(WriteableFileTests, RangeSync_PartialPageThenMoreData_UploadsNeverOverlap
     m_env.Blob->DeferUploads = false;
     file.Sync();
 
-    EXPECT_EQ(expected, Prefix(m_env.Blob->Data, expected.size()));
+    EXPECT_EQ(expected, Prefix(m_env.Blob->Bytes(), expected.size()));
 }
 
 TEST_F(WriteableFileTests, Destructor_WithoutClose_DoesNotUploadBufferedData) {
@@ -377,7 +377,7 @@ TEST_F(WriteableFileTests, Flush_UploadThrowsSynchronously_KeepsTheTailForARetry
     EXPECT_THROW(file.Flush(), std::bad_alloc);
 
     file.Sync();
-    EXPECT_EQ(expected, Prefix(m_env.Blob->Data, expected.size()));
+    EXPECT_EQ(expected, Prefix(m_env.Blob->Bytes(), expected.size()));
 }
 
 TEST_F(WriteableFileTests, Flush_PayloadOwnerAllocationFails_KeepsFullPagesAndTailForARetry) {
@@ -441,8 +441,8 @@ TEST_F(WriteableFileTests, AppendBytes_MoreThanAPage_2PagesWritten) {
 TEST_F(WriteableFileTests, Constructor_PartialPageInBlob_DataDownloaded) {
     constexpr size_t partialPageSize = 333;
     m_env.Blob->SetCapacity(Configuration::PageBlob::PageSize);
-    std::fill_n(m_env.Blob->Data.begin(), partialPageSize, 'p');
-    m_env.Blob->Size = partialPageSize;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), partialPageSize, 'p'); });
+    m_env.Blob->SetSize(partialPageSize);
 
     const auto file = MakeFile();
 
@@ -456,8 +456,8 @@ TEST_F(WriteableFileTests, Constructor_PartialLastPageInBlob_DataDownloaded) {
     constexpr size_t partialPageSize = 333;
     constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
     m_env.Blob->SetCapacity(pageSize * 2);
-    std::fill_n(m_env.Blob->Data.begin() + pageSize, partialPageSize, 'p');
-    m_env.Blob->Size = pageSize + partialPageSize;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin() + pageSize, partialPageSize, 'p'); });
+    m_env.Blob->SetSize(pageSize + partialPageSize);
 
     const auto file = MakeFile();
 
@@ -470,8 +470,8 @@ TEST_F(WriteableFileTests, Constructor_PartialLastPageInBlob_DataDownloaded) {
 TEST_F(WriteableFileTests, Constructor_ShortDownloadOfThePartialPage_ThrowsAndUploadsNothing) {
     constexpr size_t partialPageSize = 333;
     m_env.Blob->SetCapacity(Configuration::PageBlob::PageSize);
-    std::fill_n(m_env.Blob->Data.begin(), partialPageSize, 'p');
-    m_env.Blob->Size = partialPageSize;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), partialPageSize, 'p'); });
+    m_env.Blob->SetSize(partialPageSize);
     m_env.Blob->DownloadOverride = [](const auto&) { return std::string(10, 'p'); };
 
     EXPECT_THROW(MakeFile(), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
@@ -585,7 +585,7 @@ TEST_F(WriteableFileTests, Constructor_EmptyBlob_InitializesCorrectly) {
 TEST_F(WriteableFileTests, Constructor_FullPagesInBlob_NoDataDownloaded) {
     constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
     m_env.Blob->SetCapacity(pageSize * 4);
-    m_env.Blob->Size = pageSize * 3;
+    m_env.Blob->SetSize(pageSize * 3);
 
     const auto file = MakeFile();
 
@@ -809,7 +809,7 @@ TEST_F(WriteableFileTests, Release_FreeListAllocationFailure_DoesNotTerminateAnd
     m_env.Blob->DeferUploads = false;
     file.Sync();
 
-    EXPECT_EQ(expected, Prefix(m_env.Blob->Data, expected.size()));
+    EXPECT_EQ(expected, Prefix(m_env.Blob->Bytes(), expected.size()));
     EXPECT_EQ(static_cast<int64_t>(expected.size()), file.GetFileSize());
 }
 

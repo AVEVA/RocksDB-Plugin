@@ -77,8 +77,8 @@ struct FakeBlobEnvironment {
 
     // Makes the blob hold `size` bytes of `fill`, with that size also recorded in its metadata.
     void Fill(const int64_t size, const char fill = 'x') {
-        Blob->Data.assign(static_cast<size_t>(size), fill);
-        Blob->Size = size;
+        Blob->WithPrimaryBlob([&](auto& b) { b.Data.assign(static_cast<size_t>(size), fill); });
+        Blob->SetSize(size);
     }
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl::Tests

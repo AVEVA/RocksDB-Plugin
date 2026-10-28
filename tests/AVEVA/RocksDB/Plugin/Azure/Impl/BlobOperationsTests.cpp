@@ -267,7 +267,7 @@ class BlobOperationsFakeBlobTests : public ::testing::Test {
 } // namespace
 
 TEST_F(BlobOperationsFakeBlobTests, GetEtagReadsThePropertiesOfTheBlob) {
-    m_env.Blob->ETag = "\"fake\"";
+    m_env.Blob->SetETag("\"fake\"");
 
     EXPECT_EQ("\"fake\"", BlobOperations::GetInfo(*m_env.Client).ETag);
 }
@@ -292,7 +292,7 @@ TEST_F(BlobOperationsFakeBlobTests, GetMetadataReturnsTheSizeAndETagFromOneReque
     const auto metadata = BlobOperations::GetMetadata(*m_env.Client);
 
     EXPECT_EQ(512, metadata.Size);
-    EXPECT_EQ(m_env.Blob->ETag, metadata.ETag);
+    EXPECT_EQ(m_env.Blob->ETag(), metadata.ETag);
     EXPECT_EQ(1, m_env.Blob->PropertiesRequests);
 }
 
@@ -330,14 +330,14 @@ std::unique_ptr<FakeBlobEnvironment> MakeDestination(int64_t capacity) {
 
 TEST_F(BlobOperationsFakeBlobTests, CopyPagesTransfersOnlyThePopulatedRanges) {
     m_env.Fill(4096, '\0');
-    std::fill_n(m_env.Blob->Data.begin(), 512, 'a');
-    std::fill_n(m_env.Blob->Data.begin() + 2048, 1024, 'b');
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), 512, 'a'); });
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin() + 2048, 1024, 'b'); });
     const auto destinationBlob = MakeDestination(4096);
     auto& destination = *destinationBlob;
 
-    BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, 4096, m_env.Blob->ETag);
+    BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, 4096, m_env.Blob->ETag());
 
-    EXPECT_EQ(m_env.Blob->Data, destination.Blob->Data);
+    EXPECT_EQ(m_env.Blob->Bytes(), destination.Blob->Bytes());
     ASSERT_EQ(2U, destination.Blob->Uploads.size());
     EXPECT_EQ(0, destination.Blob->Uploads[0].Offset);
     EXPECT_EQ(2048, destination.Blob->Uploads[1].Offset);
@@ -347,14 +347,14 @@ TEST_F(BlobOperationsFakeBlobTests, CopyPagesTransfersOnlyThePopulatedRanges) {
 
 TEST_F(BlobOperationsFakeBlobTests, CopyPagesKeepsMoreThanOneUploadInFlight) {
     m_env.Fill(4096, '\0');
-    std::fill_n(m_env.Blob->Data.begin(), 512, 'a');
-    std::fill_n(m_env.Blob->Data.begin() + 2048, 1024, 'b');
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), 512, 'a'); });
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin() + 2048, 1024, 'b'); });
     const auto destinationBlob = MakeDestination(4096);
     auto& destination = *destinationBlob;
     destination.Blob->DeferUploads = true;
 
     auto copy = std::async(std::launch::async, [&] {
-        BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, 4096, m_env.Blob->ETag);
+        BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, 4096, m_env.Blob->ETag());
     });
 
     // Both uploads are held at once: the second started before the first finished.
@@ -363,7 +363,7 @@ TEST_F(BlobOperationsFakeBlobTests, CopyPagesKeepsMoreThanOneUploadInFlight) {
     destination.Blob->CompleteUpload();
     copy.get();
 
-    EXPECT_EQ(m_env.Blob->Data, destination.Blob->Data);
+    EXPECT_EQ(m_env.Blob->Bytes(), destination.Blob->Bytes());
 }
 
 TEST_F(BlobOperationsFakeBlobTests, CopyPagesOfAnEmptyBlobTransfersNothing) {
@@ -371,7 +371,7 @@ TEST_F(BlobOperationsFakeBlobTests, CopyPagesOfAnEmptyBlobTransfersNothing) {
     const auto destinationBlob = MakeDestination(2048);
     auto& destination = *destinationBlob;
 
-    BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, 0, m_env.Blob->ETag);
+    BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, 0, m_env.Blob->ETag());
 
     EXPECT_TRUE(destination.Blob->Uploads.empty());
     EXPECT_TRUE(m_env.Blob->Downloads.empty());
@@ -379,11 +379,11 @@ TEST_F(BlobOperationsFakeBlobTests, CopyPagesOfAnEmptyBlobTransfersNothing) {
 
 TEST_F(BlobOperationsFakeBlobTests, CopyPagesClipsToTheLogicalSizeAndPadsTheLastPage) {
     m_env.Fill(2048, 'z');
-    m_env.Blob->Size = 700;
+    m_env.Blob->SetSize(700);
     const auto destinationBlob = MakeDestination(2048);
     auto& destination = *destinationBlob;
 
-    BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, 700, m_env.Blob->ETag);
+    BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, 700, m_env.Blob->ETag());
 
     ASSERT_EQ(1U, destination.Blob->Uploads.size());
     ASSERT_EQ(1024U, destination.Blob->Uploads[0].Data.size());
@@ -399,29 +399,29 @@ TEST_F(BlobOperationsFakeBlobTests, CopyPagesSplitsRangesLargerThanTheCopyChunk)
     const auto destinationBlob = MakeDestination(chunk + 1024);
     auto& destination = *destinationBlob;
 
-    BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, chunk + 1024, m_env.Blob->ETag);
+    BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, chunk + 1024, m_env.Blob->ETag());
 
     ASSERT_EQ(2U, destination.Blob->Uploads.size());
     EXPECT_EQ(chunk, static_cast<int64_t>(destination.Blob->Uploads[0].Data.size()));
     EXPECT_EQ(chunk, destination.Blob->Uploads[1].Offset);
-    EXPECT_EQ(m_env.Blob->Data, destination.Blob->Data);
+    EXPECT_EQ(m_env.Blob->Bytes(), destination.Blob->Bytes());
 }
 
 TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyTransfersOnlyThePopulatedRangesWithoutDownloading) {
     m_env.Fill(4096, '\0');
-    std::fill_n(m_env.Blob->Data.begin(), 512, 'a');
-    std::fill_n(m_env.Blob->Data.begin() + 2048, 1024, 'b');
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), 512, 'a'); });
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin() + 2048, 1024, 'b'); });
     const auto destination = m_env.Blob->AddBlob("copy.sst", 4096);
 
     EXPECT_TRUE(
-        BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 4096, m_env.Blob->ETag));
+        BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 4096, m_env.Blob->ETag()));
 
-    EXPECT_EQ(m_env.Blob->Data, m_env.Blob->BlobBytes("copy.sst"));
+    EXPECT_EQ(m_env.Blob->Bytes(), m_env.Blob->BlobBytes("copy.sst"));
     ASSERT_EQ(2U, m_env.Blob->PageCopies.size());
     EXPECT_EQ(0, m_env.Blob->PageCopies[0].Offset);
     EXPECT_EQ(2048, m_env.Blob->PageCopies[1].Offset);
     EXPECT_EQ(1024, m_env.Blob->PageCopies[1].Length);
-    EXPECT_EQ(m_env.Blob->ETag, m_env.Blob->PageCopies[1].SourceIfMatch);
+    EXPECT_EQ(m_env.Blob->ETag(), m_env.Blob->PageCopies[1].SourceIfMatch);
     EXPECT_TRUE(m_env.Blob->Downloads.empty());
     EXPECT_TRUE(m_env.Blob->Uploads.empty());
 }
@@ -430,7 +430,8 @@ TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyOfAnEmptyBlobSendsNothing) {
     m_env.Fill(2048, '\0');
     const auto destination = m_env.Blob->AddBlob("copy.sst", 2048);
 
-    EXPECT_TRUE(BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 0, m_env.Blob->ETag));
+    EXPECT_TRUE(
+        BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 0, m_env.Blob->ETag()));
 
     EXPECT_TRUE(m_env.Blob->PageCopies.empty());
 }
@@ -440,7 +441,7 @@ TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyRoundsTheLastChunkUpToAWholePa
     const auto destination = m_env.Blob->AddBlob("copy.sst", 2048);
 
     EXPECT_TRUE(
-        BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 700, m_env.Blob->ETag));
+        BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 700, m_env.Blob->ETag()));
 
     ASSERT_EQ(1U, m_env.Blob->PageCopies.size());
     EXPECT_EQ(1024, m_env.Blob->PageCopies[0].Length);
@@ -453,10 +454,10 @@ TEST_F(BlobOperationsFakeBlobTests, ServerSideCopySplitsRangesLargerThanTheCopyC
     const auto destination = m_env.Blob->AddBlob("copy.sst", total);
 
     EXPECT_TRUE(
-        BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, total, m_env.Blob->ETag));
+        BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, total, m_env.Blob->ETag()));
 
     EXPECT_EQ(7U, m_env.Blob->PageCopies.size());
-    EXPECT_EQ(m_env.Blob->Data, m_env.Blob->BlobBytes("copy.sst"));
+    EXPECT_EQ(m_env.Blob->Bytes(), m_env.Blob->BlobBytes("copy.sst"));
 }
 
 TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyReportsAnUnauthorizedSourceSoTheCallerCanFallBack) {
@@ -465,7 +466,7 @@ TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyReportsAnUnauthorizedSourceSoT
     const auto destination = m_env.Blob->AddBlob("copy.sst", 1024);
 
     EXPECT_FALSE(
-        BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 1024, m_env.Blob->ETag));
+        BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 1024, m_env.Blob->ETag()));
 
     EXPECT_EQ(1U, m_env.Blob->PageCopies.size());
 }
@@ -481,7 +482,7 @@ TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyIsSkippedWhenNeitherSideCanAut
     FakeBlobServer::BlobClientType destination(m_env.Http, sharedKeyOptions);
     const auto requestsBefore = m_env.Blob->PageCopies.size();
 
-    EXPECT_FALSE(BlobOperations::CopyPagesServerSide(*m_env.Runtime, source, destination, 1024, m_env.Blob->ETag));
+    EXPECT_FALSE(BlobOperations::CopyPagesServerSide(*m_env.Runtime, source, destination, 1024, m_env.Blob->ETag()));
 
     EXPECT_EQ(requestsBefore, m_env.Blob->PageCopies.size());
 }
@@ -498,9 +499,9 @@ TEST_F(BlobOperationsFakeBlobTests, ServerSideCopySendsNothingWhenPlanningExhaus
     };
     m_env.Runtime->SetLeaseDeadline(this, std::chrono::steady_clock::now() + std::chrono::minutes(5));
 
-    EXPECT_THROW(
-        (void)BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 4096, m_env.Blob->ETag),
-        AVEVA::RocksDB::Plugin::Azure::WritesFencedException);
+    EXPECT_THROW((void)BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 4096,
+                                                           m_env.Blob->ETag()),
+                 AVEVA::RocksDB::Plugin::Azure::WritesFencedException);
 
     EXPECT_TRUE(m_env.Blob->PageCopies.empty());
 }
@@ -520,8 +521,8 @@ TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyBoundsLaterRequestsByTheRemain
         return std::nullopt;
     };
 
-    EXPECT_TRUE(
-        BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, chunk * 3, m_env.Blob->ETag));
+    EXPECT_TRUE(BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, chunk * 3,
+                                                    m_env.Blob->ETag()));
 
     ASSERT_EQ(3U, m_env.Blob->PageCopies.size());
     EXPECT_GT(m_env.Blob->PageCopies[0].Timeout, std::chrono::seconds(2));
@@ -552,7 +553,7 @@ TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyFailsWhenTheSourceChangesMidCo
     const auto destination = m_env.Blob->AddBlob("copy.sst", chunk * 2);
 
     EXPECT_THROW((void)BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, chunk * 2,
-                                                           m_env.Blob->ETag),
+                                                           m_env.Blob->ETag()),
                  RequestFailedException);
 }
 
@@ -580,8 +581,9 @@ TEST_F(BlobOperationsFakeBlobTests, CopyPagesFailsWhenTheSourceChangesMidCopy) {
     const auto destinationBlob = MakeDestination(1024);
     auto& destination = *destinationBlob;
 
-    EXPECT_THROW(BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, 1024, m_env.Blob->ETag),
-                 RequestFailedException);
+    EXPECT_THROW(
+        BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, 1024, m_env.Blob->ETag()),
+        RequestFailedException);
 }
 
 namespace {
@@ -616,7 +618,7 @@ TEST_F(DownloadToFileTests, FullBlobIsWrittenToTheFile) {
 
 TEST_F(DownloadToFileTests, OnlyTheRequestedRangeIsWritten) {
     m_env.Fill(4096, 'a');
-    std::fill(m_env.Blob->Data.begin() + 1024, m_env.Blob->Data.begin() + 2048, 'b');
+    m_env.Blob->WithPrimaryBlob([](auto& b) { std::fill(b.Data.begin() + 1024, b.Data.begin() + 2048, 'b'); });
     const auto path = m_dir.Path() / "range.sst";
 
     BlobOperations::DownloadToFile(*m_env.Client, path, 1024, 1024);

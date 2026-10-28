@@ -104,8 +104,8 @@ class AsyncReadTests : public ::testing::Test {
     void SetUp() override {
         m_deferredEnv.Fill(BlobSize, 'R');
         m_inlineEnv.Fill(BlobSize, 'B');
-        m_deferredEnv.Blob->ETag = "etag";
-        m_inlineEnv.Blob->ETag = "etag";
+        m_deferredEnv.Blob->SetETag("etag");
+        m_inlineEnv.Blob->SetETag("etag");
         m_deferredEnv.Blob->DeferDownloads = true;
     }
 
@@ -232,7 +232,7 @@ TEST_F(AsyncReadTests, ReadAsync_ConcurrentReadsAtCachedEnd_ShareOnePropertiesCa
 
 TEST_F(AsyncReadTests, ReadAsync_AtCachedEndWithMovedEtag_PublishesTheRefreshToTheRuntimeCache) {
     auto file = CreateFile(m_deferredEnv);
-    m_deferredEnv.Blob->ETag = "etag2";
+    m_deferredEnv.Blob->SetETag("etag2");
 
     std::vector<char> scratch(64);
     auto req = MakeRequest(BlobSize, scratch);
@@ -340,7 +340,7 @@ TEST_F(AsyncReadTests, GetSize_RefreshThatFindsANewEtag_DropsThePrefetchedBytes)
                                                        m_logger);
     ASSERT_TRUE(FakeReadableFileImpl::Prefetch(file, 0, 512));
     m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'P'));
-    m_deferredEnv.Blob->ETag = "etag2";
+    m_deferredEnv.Blob->SetETag("etag2");
     m_deferredEnv.AdvanceMetadataClock(Configuration::MetadataCacheTtl);
 
     EXPECT_EQ(BlobSize, file->GetSize());
@@ -452,7 +452,7 @@ TEST_F(AsyncReadTests, PrefetchCompletion_SlotInvalidatedDuringDownload_StillRel
     std::move_only_function<void()> waiter = [&ran] { ++ran; };
     ASSERT_TRUE(file->ChainOntoPendingPrefetch(100, 64, waiter));
 
-    m_deferredEnv.Blob->ETag = "etag2";
+    m_deferredEnv.Blob->SetETag("etag2");
     m_deferredEnv.AdvanceMetadataClock(Configuration::MetadataCacheTtl);
     EXPECT_EQ(BlobSize, file->GetSize());
     m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'P'));
@@ -535,7 +535,7 @@ TEST_F(AsyncReadTests, Read_BlobOverwrittenAfterPrefetch_NeverReturnsMixedVersio
     });
     ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return m_deferredEnv.Blob->PendingDownloads() == 1; }));
     // The blob is overwritten after the prefix was served from the prefetch; the suffix download then hits a 412.
-    m_deferredEnv.Blob->ETag = "etag2";
+    m_deferredEnv.Blob->SetETag("etag2");
     m_deferredEnv.Blob->TakeDownload().Fail(FakeBlobServer::Error(412, "ConditionNotMet"));
     while (reading.wait_for(std::chrono::milliseconds{10}) != std::future_status::ready) {
         if (m_deferredEnv.Blob->PendingDownloads() > 0) {
@@ -571,7 +571,7 @@ TEST_F(AsyncReadTests, Read_OverwrittenAfterPrefetchAndAgainDuringRecovery_Share
             auto download = m_deferredEnv.Blob->TakeDownload();
             ++downloads;
             if (downloads == 1) {
-                m_deferredEnv.Blob->ETag = "etag2";
+                m_deferredEnv.Blob->SetETag("etag2");
             }
             if (downloads == 3) {
                 download.Succeed(std::string(static_cast<size_t>(download.Request.Length), 'N'));
@@ -638,7 +638,7 @@ TEST_F(AsyncReadTests, Prefetch_InvalidatedWhileDownloading_KeepsChargeUntilTheD
     auto impl = std::make_shared<FakeReadableFileImpl>("test.sst", m_deferredEnv.Runtime, m_deferredEnv.Client, nullptr,
                                                        m_logger, nullptr, budget, 1024);
     ASSERT_TRUE(FakeReadableFileImpl::Prefetch(impl, 0, 1024));
-    m_deferredEnv.Blob->ETag = "etag2";
+    m_deferredEnv.Blob->SetETag("etag2");
     m_deferredEnv.AdvanceMetadataClock(Configuration::MetadataCacheTtl);
     EXPECT_EQ(BlobSize, impl->GetSize());
     ASSERT_EQ(1024, budget->load());
@@ -793,9 +793,11 @@ TEST_F(AsyncReadTests, Prefetch_ZeroBudget_NeverStartsADownload) {
 namespace {
 void FillPattern(FakeBlobEnvironment& env, const int64_t size) {
     env.Fill(size);
-    for (size_t i = 0; i < env.Blob->Data.size(); ++i) {
-        env.Blob->Data[i] = static_cast<char>('a' + (i % 26));
-    }
+    env.Blob->WithPrimaryBlob([](auto& b) {
+        for (size_t i = 0; i < b.Data.size(); ++i) {
+            b.Data[i] = static_cast<char>('a' + (i % 26));
+        }
+    });
 }
 
 std::string Expected(const uint64_t offset, const size_t length) {
@@ -1371,7 +1373,7 @@ TEST_F(AsyncReadTests, ReadAsync_StaleReadAfterTheDeadline_TimesOutInsteadOfRefr
     auto download = m_deferredEnv.Blob->TakeDownload();
     const int propertiesBefore = m_deferredEnv.Blob->PropertiesRequests;
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    m_deferredEnv.Blob->ETag = "etag2";
+    m_deferredEnv.Blob->SetETag("etag2");
     download.Fail(FakeBlobServer::Error(412, "ConditionNotMet"));
 
     std::vector<void*> handles{handle.Handle};
@@ -1456,7 +1458,7 @@ TEST_F(AsyncReadTests, ReadAsync_PreconditionFailed_RefreshesMetadataAndRetries)
     IoHandle handle;
     ASSERT_TRUE(Submit(file, req, record, handle).ok());
 
-    m_deferredEnv.Blob->ETag = "etag2";
+    m_deferredEnv.Blob->SetETag("etag2");
     m_deferredEnv.Blob->TakeDownload().Fail(FakeBlobServer::Error(412, "ConditionNotMet"));
     // The retry is issued from the failed request's completion, after the metadata refresh.
     ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return m_deferredEnv.Blob->PendingDownloads() == 1; }));
@@ -1824,8 +1826,8 @@ TEST_F(AsyncReadTests, ReadAsync_FilesystemDroppedMidRead_DrainWaitsUntilFileRel
     FakeBlobEnvironment standalone;
     auto& server = *standalone.Blob;
     server.SetCapacity(BlobSize);
-    server.Size = BlobSize;
-    server.ETag = "etag";
+    server.SetSize(BlobSize);
+    server.SetETag("etag");
     server.DeferDownloads = true;
     // A client owned only by this test (the environment's is also held by its server), so that expiry shows when the
     // in-flight read releases the file.
@@ -1918,8 +1920,8 @@ TEST_F(AsyncReadTests, ReadAsync_RestartAfter412ThatThrowsOnInitiation_FailsTheR
 TEST_F(AsyncReadTests, ReadAsync_WaiterOnSharedMetadataRefreshThrows_TheOtherWaiterStillCompletes) {
     auto file = CreateFile(m_deferredEnv);
     m_deferredEnv.Blob->SetCapacity(BlobSize * 2);
-    m_deferredEnv.Blob->Size = BlobSize * 2;
-    m_deferredEnv.Blob->ETag = "etag2";
+    m_deferredEnv.Blob->SetSize(BlobSize * 2);
+    m_deferredEnv.Blob->SetETag("etag2");
     m_deferredEnv.Blob->DeferProperties = true;
 
     std::vector<char> scratchA(16);

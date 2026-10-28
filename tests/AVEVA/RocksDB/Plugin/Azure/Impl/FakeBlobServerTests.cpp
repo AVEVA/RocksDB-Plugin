@@ -64,7 +64,7 @@ TEST_F(FakeBlobServerTests, DeferredUploadAfterTheBlobWasShrunk_FailsWith416AndD
     m_env.Blob->CompleteUpload(0);
 
     EXPECT_EQ(416U, status.get());
-    EXPECT_EQ(static_cast<size_t>(2 * Page), m_env.Blob->Data.size());
+    EXPECT_EQ(static_cast<size_t>(2 * Page), m_env.Blob->Bytes().size());
 }
 
 TEST_F(FakeBlobServerTests, WritingZeros_ReportsTheRange) {

@@ -140,7 +140,7 @@ class FakeBlobServer {
         std::chrono::milliseconds Timeout{};
     };
 
-  private:
+    // A blob's state. Only reachable through WithBlob / WithPrimaryBlob, which hold the server lock.
     struct StoredBlob {
         std::vector<char> Data;
         int64_t Size = 0;
@@ -157,6 +157,7 @@ class FakeBlobServer {
         std::vector<bool> WrittenPages;
     };
 
+  private:
     static constexpr size_t PageSize = 512;
 
     FakeHttpClient* m_http;
@@ -175,9 +176,9 @@ class FakeBlobServer {
   public:
     explicit FakeBlobServer(FakeHttpClient& http, const std::string& container = "files",
                             const std::string& blob = "test.sst")
-        : m_http(&http), m_primaryPath(container + "/" + blob), Data(m_blobs[m_primaryPath].Data),
-          Size(m_blobs[m_primaryPath].Size), ETag(m_blobs[m_primaryPath].ETag),
+        : m_http(&http), m_primaryPath(container + "/" + blob),
           Client(std::make_shared<BlobClientType>(http, AzureClient::Tests::MakeBlobClientOptions(container, blob))) {
+        m_blobs.try_emplace(m_primaryPath);
         m_http->SetResponder([this](const FakeHttpClient::RequestRecord& record) { return Respond(record); });
     }
 
@@ -198,10 +199,34 @@ class FakeBlobServer {
     FakeBlobServer(const FakeBlobServer&) = delete;
     FakeBlobServer& operator=(const FakeBlobServer&) = delete;
 
-    // The primary blob: its bytes (whose length is the capacity), the size recorded in its metadata, and its ETag.
-    std::vector<char>& Data;
-    int64_t& Size;
-    std::string& ETag;
+    // Runs `f(StoredBlob&)` on the named blob (or the primary one) with the server lock held, so a test can seed or
+    // inspect state without racing the requests the server is answering. `f` must not call back into the server.
+    template <class F> decltype(auto) WithBlob(const std::string& blob, F&& f) {
+        std::scoped_lock lock(m_mutex);
+        return std::forward<F>(f)(m_blobs.at(ContainerOfPrimary() + "/" + blob));
+    }
+    template <class F> decltype(auto) WithPrimaryBlob(F&& f) {
+        std::scoped_lock lock(m_mutex);
+        return std::forward<F>(f)(m_blobs.at(m_primaryPath));
+    }
+
+    // The primary blob: a copy of its bytes (whose length is the capacity), the size recorded in its metadata, and its
+    // ETag.
+    [[nodiscard]] std::vector<char> Bytes() {
+        return WithPrimaryBlob([](const StoredBlob& blob) { return blob.Data; });
+    }
+    [[nodiscard]] int64_t Size() {
+        return WithPrimaryBlob([](const StoredBlob& blob) { return blob.Size; });
+    }
+    [[nodiscard]] std::string ETag() {
+        return WithPrimaryBlob([](const StoredBlob& blob) { return blob.ETag; });
+    }
+    void SetSize(const int64_t size) {
+        WithPrimaryBlob([size](StoredBlob& blob) { blob.Size = size; });
+    }
+    void SetETag(std::string etag) {
+        WithPrimaryBlob([&etag](StoredBlob& blob) { blob.ETag = std::move(etag); });
+    }
 
     // The real page blob client, bound to the primary blob and to the fake transport.
     std::shared_ptr<BlobClientType> Client;
@@ -259,8 +284,10 @@ class FakeBlobServer {
     [[nodiscard]] static AzureClient::BlobStorageError Error(unsigned int statusCode, std::string errorCode);
 
     void SetCapacity(const int64_t capacity) {
-        Data.resize(static_cast<size_t>(capacity), '\0');
-        m_blobs.at(m_primaryPath).WrittenPages.resize(PageCount(static_cast<size_t>(capacity)));
+        WithPrimaryBlob([capacity](StoredBlob& blob) {
+            blob.Data.resize(static_cast<size_t>(capacity), '\0');
+            blob.WrittenPages.resize(PageCount(static_cast<size_t>(capacity)));
+        });
     }
 
     size_t PendingUploads() { return Count(m_heldUploads); }

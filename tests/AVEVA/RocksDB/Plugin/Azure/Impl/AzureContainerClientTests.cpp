@@ -25,7 +25,7 @@ using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobServer;
 TEST(AzureContainerClientTests, GetBlobSizeReadsTheSizeFromThePageBlobHandedOutByTheContainer) {
     boost::asio::io_context context;
     FakeBlobEnvironment env;
-    env.Blob->Size = 1234;
+    env.Blob->SetSize(1234);
 
     FakeBlobServer::BlobClientType pageBlob(env.Http,
                                             AVEVA::AzureClient::Tests::MakeBlobClientOptions("files", "test.sst"));

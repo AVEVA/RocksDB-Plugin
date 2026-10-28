@@ -270,7 +270,7 @@ class PluginPathBenchmark : public ::testing::Test {
 
     void FillBlob() {
         m_env.Fill(BlobBytes);
-        m_env.Blob->ETag = "etag";
+        m_env.Blob->SetETag("etag");
     }
 
     std::shared_ptr<FakeReadableFileImpl> MakeImpl() {

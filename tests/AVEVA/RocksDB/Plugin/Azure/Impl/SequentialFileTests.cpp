@@ -61,8 +61,8 @@ TEST_F(SequentialFileTests, SequentialRead_WithoutCache_ReadsFromBlob) {
 TEST_F(SequentialFileTests, SequentialRead_MultipleReads_IncrementsOffset) {
     const constexpr int64_t firstRead = 50;
     const constexpr int64_t secondRead = 75;
-    std::ranges::fill(m_env.Blob->Data, 'Y');
-    std::fill_n(m_env.Blob->Data.begin(), firstRead, 'X');
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::ranges::fill(b.Data, 'Y'); });
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), firstRead, 'X'); });
     std::vector<char> buffer1(firstRead);
     std::vector<char> buffer2(secondRead);
     auto file = MakeFile();
@@ -85,7 +85,7 @@ TEST_F(SequentialFileTests, SequentialRead_SmallReads_ShareOneReadaheadAndRefill
     const auto patternAt = [](int64_t position) { return static_cast<char>(position % 251); };
     m_env.Fill(blobSize);
     for (int64_t i = 0; i < blobSize; ++i) {
-        m_env.Blob->Data[static_cast<size_t>(i)] = patternAt(i);
+        m_env.Blob->WithPrimaryBlob([&](auto& b) { b.Data[static_cast<size_t>(i)] = patternAt(i); });
     }
     auto file = MakeFile();
 
@@ -111,7 +111,7 @@ TEST_F(SequentialFileTests, SequentialRead_SmallReads_ShareOneReadaheadAndRefill
 }
 
 TEST_F(SequentialFileTests, HasETag_ComparesTheCachedETagWithoutCopying) {
-    m_env.Blob->ETag = "etag-1";
+    m_env.Blob->SetETag("etag-1");
     const auto file = MakeReadable();
 
     EXPECT_TRUE(file.HasETag("etag-1"));

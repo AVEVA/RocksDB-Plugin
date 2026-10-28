@@ -131,14 +131,14 @@ TEST_F(ReadableFileTests, Constructor_FetchesSizeAndEtagWithOneMetadataCall) {
     const auto file = MakeFile();
 
     EXPECT_EQ(1, m_env.Blob->PropertiesRequests);
-    EXPECT_TRUE(file.HasETag(m_env.Blob->ETag));
+    EXPECT_TRUE(file.HasETag(m_env.Blob->ETag()));
 }
 
 TEST_F(ReadableFileTests, RandomRead_AtStaleEndOfBlob_RefreshesWithExactlyOnePropertiesCall) {
     m_env.Fill(1024, 'O');
     const auto file = MakeFile();
     m_env.Fill(2048, 'N');
-    m_env.Blob->ETag = "grown";
+    m_env.Blob->SetETag("grown");
     const int before = m_env.Blob->PropertiesRequests;
     std::vector<char> buffer(100);
 
@@ -151,7 +151,7 @@ TEST_F(ReadableFileTests, RandomRead_AtStaleEndOfBlob_RefreshesWithExactlyOnePro
 TEST_F(ReadableFileTests, GetSize_RefreshesWithOneMetadataCallOnceTheCachedMetadataIsOlderThanTheTtl) {
     m_env.Fill(1024);
     const auto file = MakeFile();
-    m_env.Blob->Size = 2048;
+    m_env.Blob->SetSize(2048);
     m_env.AdvanceMetadataClock(Configuration::MetadataCacheTtl);
 
     EXPECT_EQ(2048, file.GetSize());
@@ -161,7 +161,7 @@ TEST_F(ReadableFileTests, GetSize_RefreshesWithOneMetadataCallOnceTheCachedMetad
 TEST_F(ReadableFileTests, GetSize_OneTickBeforeTheTtlElapses_IsStillServedFromCachedMetadata) {
     m_env.Fill(1024);
     const auto file = MakeFile();
-    m_env.Blob->Size = 2048;
+    m_env.Blob->SetSize(2048);
     m_env.AdvanceMetadataClock(Configuration::MetadataCacheTtl - std::chrono::milliseconds(1));
 
     EXPECT_EQ(1024, file.GetSize());
@@ -171,7 +171,7 @@ TEST_F(ReadableFileTests, GetSize_OneTickBeforeTheTtlElapses_IsStillServedFromCa
 TEST_F(ReadableFileTests, GetSize_WithinTheTtl_IsServedFromCachedMetadata) {
     m_env.Fill(1024);
     const auto file = MakeFile();
-    m_env.Blob->Size = 2048;
+    m_env.Blob->SetSize(2048);
 
     EXPECT_EQ(1024, file.GetSize());
     EXPECT_EQ(1024, file.GetSize());

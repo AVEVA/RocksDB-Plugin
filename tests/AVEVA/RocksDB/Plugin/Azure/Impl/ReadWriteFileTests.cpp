@@ -44,7 +44,7 @@ class ReadWriteFileImplTests : public ::testing::Test {
 };
 TEST_F(ReadWriteFileImplTests, Constructor_InitializesCorrectly) {
     // Arrange
-    m_env.Blob->Size = 1024;
+    m_env.Blob->SetSize(1024);
 
     // Act
     const auto file = CreateFile();
@@ -92,7 +92,7 @@ TEST_F(ReadWriteFileImplTests, Flush_UploadFails_RetryKeepsSizeAndPersistsConten
 
     EXPECT_EQ(100, file->Read(0, 100, readBuffer.data()));
     EXPECT_EQ(data, readBuffer);
-    EXPECT_EQ(100, m_env.Blob->Size);
+    EXPECT_EQ(100, m_env.Blob->Size());
 }
 TEST_F(ReadWriteFileImplTests, Constructor_InitializesFromEmptyBlob) {
     // Arrange - simulator starts with fileSize = 0
@@ -186,8 +186,8 @@ TEST_F(ReadWriteFileImplTests, Flush_PartialFirstPage_MergesExistingData) {
 
     // Pre-populate blob with some data at page start
     const int64_t offset = 100; // Within first page
-    std::fill_n(m_env.Blob->Data.begin(), offset, 'X');
-    m_env.Blob->Size = offset;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), offset, 'X'); });
+    m_env.Blob->SetSize(offset);
 
     // Write data at offset
     const int64_t dataSize = 100;
@@ -211,11 +211,11 @@ TEST_F(ReadWriteFileImplTests, Flush_PartialFirstPage_MergesExistingData) {
 
 TEST_F(ReadWriteFileImplTests, Flush_ShortDownloadOfAnExistingGap_ThrowsAndUploadsNothing) {
     constexpr int64_t offset = 100;
-    std::fill_n(m_env.Blob->Data.begin(), offset, 'X');
-    m_env.Blob->Size = offset;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), offset, 'X'); });
+    m_env.Blob->SetSize(offset);
     auto file = CreateFile();
     // The blob ends before the size recorded when the file was opened, so the gap download is legitimately short.
-    m_env.Blob->Data.resize(10);
+    m_env.Blob->WithPrimaryBlob([](auto& b) { b.Data.resize(10); });
     const std::vector<char> newData(100, 'Y');
 
     file->Write(offset, newData.data(), 100);
@@ -228,8 +228,8 @@ TEST_F(ReadWriteFileImplTests, Flush_WritesOnDifferentPages_EachMergesItsOwnExis
     // Arrange - existing data on three separate pages
     constexpr int64_t page = Configuration::PageBlob::PageSize;
     const int64_t total = 3 * page;
-    std::fill_n(m_env.Blob->Data.begin(), total, 'X');
-    m_env.Blob->Size = total;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), total, 'X'); });
+    m_env.Blob->SetSize(total);
     auto file = CreateFile();
 
     // Act - a small write in the middle of each page, so every chunk needs pre and post padding
@@ -252,8 +252,8 @@ TEST_F(ReadWriteFileImplTests, Flush_WritesOnDifferentPages_EachMergesItsOwnExis
 TEST_F(ReadWriteFileImplTests, Flush_WritesSharingAPage_KeepEarlierWrites) {
     // Arrange
     constexpr int64_t page = Configuration::PageBlob::PageSize;
-    std::fill_n(m_env.Blob->Data.begin(), page, 'X');
-    m_env.Blob->Size = page;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), page, 'X'); });
+    m_env.Blob->SetSize(page);
     auto file = CreateFile();
 
     // Act - two writes inside the same page: the second chunk's padding must include the first chunk's bytes
@@ -275,8 +275,8 @@ TEST_F(ReadWriteFileImplTests, Flush_WritesSharingAPage_KeepEarlierWrites) {
 TEST_F(ReadWriteFileImplTests, Flush_WritesSharingAPage_AreMergedIntoOneUploadAndOnlyTheGapsAreRead) {
     // Arrange
     constexpr int64_t page = Configuration::PageBlob::PageSize;
-    std::fill_n(m_env.Blob->Data.begin(), 2 * page, 'X');
-    m_env.Blob->Size = 2 * page;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), 2 * page, 'X'); });
+    m_env.Blob->SetSize(2 * page);
     auto file = CreateFile();
 
     // Act - two writes in page 0 and one in page 1: all three share one page-aligned extent
@@ -310,8 +310,8 @@ TEST_F(ReadWriteFileImplTests, Flush_ManySmallWritesAcrossPages_CoalesceGapReads
     for (size_t i = 0; i < original.size(); ++i) {
         original[i] = static_cast<char>('a' + i % 23);
     }
-    std::ranges::copy(original, m_env.Blob->Data.begin());
-    m_env.Blob->Size = pages * page;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::ranges::copy(original, b.Data.begin()); });
+    m_env.Blob->SetSize(pages * page);
     auto file = CreateFile();
 
     auto expected = original;
@@ -350,8 +350,8 @@ class ReadWriteFileGapWindowTests : public ReadWriteFileImplTests {
         for (size_t i = 0; i < m_expected.size(); ++i) {
             m_expected[i] = static_cast<char>('a' + i % 23);
         }
-        std::ranges::copy(m_expected, m_env.Blob->Data.begin());
-        m_env.Blob->Size = total;
+        m_env.Blob->WithPrimaryBlob([&](auto& b) { std::ranges::copy(m_expected, b.Data.begin()); });
+        m_env.Blob->SetSize(total);
         m_file = CreateFile();
         const std::string payload(600, 'Z');
         for (const auto base : {int64_t{0}, secondExtentPage}) {
@@ -370,7 +370,8 @@ class ReadWriteFileGapWindowTests : public ReadWriteFileImplTests {
             maxPending = std::max(maxPending, m_env.Blob->PendingDownloads());
             if (m_env.Blob->PendingDownloads() > 0) {
                 auto held = m_env.Blob->TakeDownload();
-                const auto first = m_env.Blob->Data.begin() + held.Request.Offset;
+                const auto bytes = m_env.Blob->Bytes();
+                const auto first = bytes.begin() + held.Request.Offset;
                 held.Succeed(std::string(first, first + held.Request.Length));
             }
         }
@@ -427,9 +428,9 @@ TEST_F(ReadWriteFileGapWindowTests, Flush_GapReadFailsWhileOthersAreOutstanding_
 
 TEST_F(ReadWriteFileImplTests, Flush_Coalesced_ReadsStillFailOnShortDownload) {
     constexpr int64_t page = Configuration::PageBlob::PageSize;
-    m_env.Blob->Size = 4 * page;
+    m_env.Blob->SetSize(4 * page);
     auto file = CreateFile();
-    m_env.Blob->Data.resize(static_cast<size_t>(page));
+    m_env.Blob->WithPrimaryBlob([page](auto& b) { b.Data.resize(static_cast<size_t>(page)); });
     const std::string payload(10, 'Y');
     file->Write(100, payload.data(), 10);
     file->Write(page + 100, payload.data(), 10);
@@ -463,8 +464,8 @@ TEST_F(ReadWriteFileImplTests, Flush_ReusedBufferDoesNotLeakEarlierBytesIntoUnwr
 TEST_F(ReadWriteFileImplTests, Flush_OverlappingWritesToOnePage_LastWriteWins) {
     // Arrange
     constexpr int64_t page = Configuration::PageBlob::PageSize;
-    std::fill_n(m_env.Blob->Data.begin(), page, 'X');
-    m_env.Blob->Size = page;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), page, 'X'); });
+    m_env.Blob->SetSize(page);
     auto file = CreateFile();
 
     // Act
@@ -487,8 +488,8 @@ TEST_F(ReadWriteFileImplTests, Flush_OverlappingWritesToOnePage_LastWriteWins) {
 TEST_F(ReadWriteFileImplTests, Flush_OverlappingWritesWithTheSameStart_LastWriteWins) {
     // Arrange
     constexpr int64_t page = Configuration::PageBlob::PageSize;
-    std::fill_n(m_env.Blob->Data.begin(), page, 'X');
-    m_env.Blob->Size = page;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), page, 'X'); });
+    m_env.Blob->SetSize(page);
     auto file = CreateFile();
 
     // Act
@@ -528,8 +529,8 @@ TEST_F(ReadWriteFileImplTests, Flush_AppendingPastTheEnd_ReadsNothing) {
 TEST_F(ReadWriteFileImplTests, Flush_WritesOnDifferentPages_AreUploadedConcurrently) {
     // Arrange
     constexpr int64_t page = Configuration::PageBlob::PageSize;
-    std::fill_n(m_env.Blob->Data.begin(), 5 * page, 'X');
-    m_env.Blob->Size = 5 * page;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), 5 * page, 'X'); });
+    m_env.Blob->SetSize(5 * page);
     auto file = CreateFile();
     const std::string payload(10, 'A');
     // Every other page, so the extents are not adjacent and stay separate requests
@@ -568,8 +569,8 @@ TEST_F(ReadWriteFileImplTests, Flush_ManyExtents_ReusesBuffersAcrossWavesAndKeep
     // Arrange
     constexpr int64_t page = Configuration::PageBlob::PageSize;
     constexpr auto extentCount = 3 * Configuration::Transfer::MaxConcurrentPageCopies;
-    std::fill_n(m_env.Blob->Data.begin(), 2 * extentCount * page, 'X');
-    m_env.Blob->Size = static_cast<int64_t>(2 * extentCount) * page;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), 2 * extentCount * page, 'X'); });
+    m_env.Blob->SetSize(static_cast<int64_t>(2 * extentCount) * page);
     auto file = CreateFile();
     const std::string payload(10, 'A');
     const auto writeEveryOtherPage = [&] {
@@ -611,8 +612,8 @@ TEST_F(ReadWriteFileImplTests, Flush_ManyExtents_ReusesBuffersAcrossWavesAndKeep
 TEST_F(ReadWriteFileImplTests, Flush_UploadFailure_KeepsTheBufferedWritesForARetry) {
     // Arrange
     constexpr int64_t page = Configuration::PageBlob::PageSize;
-    std::fill_n(m_env.Blob->Data.begin(), 2 * page, 'X');
-    m_env.Blob->Size = 2 * page;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), 2 * page, 'X'); });
+    m_env.Blob->SetSize(2 * page);
     auto file = CreateFile();
     const std::string payload(10, 'A');
     file->Write(10, payload.data(), static_cast<int64_t>(payload.size()));
@@ -653,7 +654,7 @@ TEST_F(ReadWriteFileImplTests, Sync_UpdatesFileSizeMetadata) {
     file->Close(); // Close will call Sync internally
 
     // Assert - the size was written to the blob metadata exactly once
-    EXPECT_EQ(dataSize, m_env.Blob->Size);
+    EXPECT_EQ(dataSize, m_env.Blob->Size());
     EXPECT_EQ((std::vector<int64_t>{dataSize}), m_env.Blob->SizeWrites);
 }
 
@@ -663,7 +664,7 @@ TEST_F(ReadWriteFileImplTests, Sync_WithNothingNewToPublish_SendsNoMetadataWrite
     std::vector<char> data(500, 'F');
     file->Write(0, data.data(), static_cast<int64_t>(data.size()));
     file->Sync();
-    const auto etag = m_env.Blob->ETag;
+    const auto etag = m_env.Blob->ETag();
     ASSERT_EQ(1U, m_env.Blob->SizeWrites.size());
 
     // Act
@@ -672,7 +673,7 @@ TEST_F(ReadWriteFileImplTests, Sync_WithNothingNewToPublish_SendsNoMetadataWrite
 
     // Assert
     EXPECT_EQ(1U, m_env.Blob->SizeWrites.size());
-    EXPECT_EQ(etag, m_env.Blob->ETag);
+    EXPECT_EQ(etag, m_env.Blob->ETag());
 }
 
 TEST_F(ReadWriteFileImplTests, Sync_AfterWriteThatChangesSize_PublishesNewSize) {
@@ -737,7 +738,7 @@ TEST_F(ReadWriteFileImplTests, Read_AfterUnsyncedReadThenSync_PublishesTheSize) 
     file->Sync();
 
     // Assert
-    EXPECT_EQ(300, m_env.Blob->Size);
+    EXPECT_EQ(300, m_env.Blob->Size());
 }
 
 // Test Read returns correct data
