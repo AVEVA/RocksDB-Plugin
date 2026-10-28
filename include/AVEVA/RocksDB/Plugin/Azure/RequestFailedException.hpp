@@ -6,6 +6,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 namespace AVEVA::RocksDB::Plugin::Azure {
 /// <summary>
@@ -48,9 +49,9 @@ class RequestFailedException : public std::runtime_error {
           ErrorCode(std::move(errorCode)), Message(std::move(message)), RequestId(std::move(requestId)), Code(code),
           AuthenticationDetail(std::move(authenticationDetail)), RetryAfter(retryAfter) {}
 
-    /// Describes the failure as "<status> <ErrorCode>: <message> (request id: <id>)"; the request id is what Azure
-    /// support asks for.
-    std::string Describe() const { return FormatWhat(StatusCode, ErrorCode, Message, RequestId, Code); }
+    /// Describes the failure as "HTTP <status> <ErrorCode>: <message> (request id: <id>)"; the request id is what
+    /// Azure support asks for. The text is built once, in the constructor, and is valid for the exception's lifetime.
+    std::string_view Describe() const noexcept { return what(); }
 
     unsigned int StatusCode;
     std::string ErrorCode;
@@ -64,17 +65,22 @@ class RequestFailedException : public std::runtime_error {
     std::optional<std::chrono::milliseconds> RetryAfter;
     static std::string FormatWhat(unsigned int statusCode, const std::string& errorCode, const std::string& message,
                                   const std::string& requestId, const std::error_code& code) {
-        std::string what = message.empty() ? code.message() : message;
-        if (!errorCode.empty()) {
-            what = errorCode + ": " + what;
-        }
+        const std::string codeMessage = message.empty() ? code.message() : std::string{};
+        const std::string& text = message.empty() ? codeMessage : message;
 
+        std::string what;
+        what.reserve(text.size() + errorCode.size() + requestId.size() + 40);
         if (statusCode != 0) {
-            what = std::to_string(statusCode) + " " + what;
+            what.append("HTTP ").append(std::to_string(statusCode)).append(" ");
         }
 
+        if (!errorCode.empty()) {
+            what.append(errorCode).append(": ");
+        }
+
+        what.append(text);
         if (!requestId.empty()) {
-            what += " (request id: " + requestId + ")";
+            what.append(" (request id: ").append(requestId).append(")");
         }
 
         return what;

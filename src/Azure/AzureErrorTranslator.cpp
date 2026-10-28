@@ -25,11 +25,6 @@ bool IsInvalidInput(const std::error_code& code) {
            code == HttpClientError::InvalidRequest;
 }
 
-// The Azure error code, message and request id are always part of the text so that logs identify the failure.
-std::string DescribeFailure(const RequestFailedException& error) {
-    return error.StatusCode != 0 ? "HTTP " + error.Describe() : error.Describe();
-}
-
 // The single exception-to-status ladder, so a mapping change is made once. `log(kind, detail)` is a lambda (not an
 // erased callable) that the logging overload uses to report and the plain overload leaves empty. An empty
 // `operation` selects the plain overload's wording for unknown exceptions.
@@ -37,9 +32,9 @@ template <class TLog> rocksdb::IOStatus ClassifyCurrentException(TLog&& log, std
     try {
         throw;
     } catch (const RequestFailedException& ex) {
-        // Describe() carries the status, Azure error code, message and request id. AuthenticationDetail may echo the
+        // what() carries the status, Azure error code, message and request id. AuthenticationDetail may echo the
         // string-to-sign, so it is deliberately never logged.
-        log("failed", ex.Describe());
+        log("failed", ex.what());
         return AzureErrorTranslator::IOStatusFromError(ex);
     } catch (const WritesFencedException& ex) {
         log("failed", ex.what());
@@ -97,7 +92,8 @@ rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const std::string& con
 rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const RequestFailedException& error) {
     using rocksdb::IOStatus;
 
-    const std::string text = DescribeFailure(error);
+    // what() carries the status, Azure error code, message and request id so that logs identify the failure.
+    const std::string text = error.what();
     const std::error_code& code = error.Code;
 
     // The library's portable conditions are more precise than the HTTP status alone (e.g. a 409 can mean a lost lease).
