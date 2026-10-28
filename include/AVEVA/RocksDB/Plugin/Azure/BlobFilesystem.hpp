@@ -35,6 +35,10 @@ class BlobFilesystem final : public rocksdb::FileSystemWrapper {
 
     // Runs f, translating and logging any exception as a rocksdb::IOStatus. Defined in the .cpp (only used there).
     template <class F> rocksdb::IOStatus Guard(std::string_view operation, std::string_view path, F&& f);
+    // As above for two-path operations; the "first <separator> second" label is only built if f throws.
+    template <class F>
+    rocksdb::IOStatus Guard(std::string_view operation, std::string_view path, std::string_view separator,
+                            std::string_view path2, F&& f);
 
   public:
     // `keepAlive` is released after the filesystem is destroyed; it holds whatever the filesystem's I/O depends on.

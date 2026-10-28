@@ -134,6 +134,19 @@ template <class F> rocksdb::IOStatus BlobFilesystem::Guard(std::string_view oper
     }
 }
 
+template <class F>
+rocksdb::IOStatus BlobFilesystem::Guard(std::string_view operation, std::string_view path, std::string_view separator,
+                                        std::string_view path2, F&& f) {
+    try {
+        return f();
+    } catch (...) {
+        std::string label;
+        label.reserve(path.size() + separator.size() + path2.size());
+        label.append(path).append(separator).append(path2);
+        return Guard(operation, label, []() -> rocksdb::IOStatus { throw; });
+    }
+}
+
 const char* BlobFilesystem::Name() const { return "AzureBlobFileSystem"; }
 
 rocksdb::IOStatus BlobFilesystem::NewSequentialFile(const std::string& f, const rocksdb::FileOptions&,
@@ -242,6 +255,7 @@ rocksdb::IOStatus BlobFilesystem::GetChildrenFileAttributes(const std::string& d
     return Guard("GetChildrenFileAttributes", dir, [&]() -> rocksdb::IOStatus {
         const auto attributes = m_filesystem->GetChildrenFileAttributes(dir);
         result->clear();
+        result->reserve(attributes.size());
         for (const auto& attr : attributes) {
             result->push_back({
                 .name = attr.GetName(),
@@ -330,7 +344,7 @@ rocksdb::IOStatus BlobFilesystem::GetAbsolutePath(const std::string& db_path, co
 
 rocksdb::IOStatus BlobFilesystem::RenameFile(const std::string& s, const std::string& t, const rocksdb::IOOptions&,
                                              rocksdb::IODebugContext*) {
-    return Guard("RenameFile", s + " -> " + t, [&]() -> rocksdb::IOStatus {
+    return Guard("RenameFile", s, " -> ", t, [&]() -> rocksdb::IOStatus {
         m_filesystem->RenameFile(s, t);
         return rocksdb::IOStatus::OK();
     });
@@ -348,7 +362,7 @@ rocksdb::IOStatus BlobFilesystem::NumFileLinks(const std::string&, const rocksdb
 
 rocksdb::IOStatus BlobFilesystem::AreFilesSame(const std::string& first, const std::string& second,
                                                const rocksdb::IOOptions&, bool* res, rocksdb::IODebugContext*) {
-    return Guard("AreFilesSame", first + " vs " + second, [&]() -> rocksdb::IOStatus {
+    return Guard("AreFilesSame", first, " vs ", second, [&]() -> rocksdb::IOStatus {
         *res = NormalizePath(first) == NormalizePath(second);
         return rocksdb::IOStatus::OK();
     });
