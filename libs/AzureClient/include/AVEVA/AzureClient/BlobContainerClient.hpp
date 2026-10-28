@@ -79,9 +79,8 @@ class BasicBlobContainerClient : Private::ClientCore<THttp, Private::BasicContai
     BasicBlobContainerClient& operator=(BasicBlobContainerClient&&) noexcept = default;
     ~BasicBlobContainerClient() = default;
 
-    // The executor associated with this client's underlying HTTP client; usable as the default
-    // executor argument for a boost::asio::default_completion_token_t, or to schedule work that
-    // must run on the same executor as this client's completions.
+    // The executor associated with this client's underlying HTTP client; use it to schedule work that
+    // must run on the same executor as this client's operations.
     using executor_type = typename THttp::executor_type;
     using Core::get_executor;
     using Core::GetDefaultRequestOptions;

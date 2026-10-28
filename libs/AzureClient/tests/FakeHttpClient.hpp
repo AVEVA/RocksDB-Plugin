@@ -303,9 +303,6 @@ class FakeHttpClient final {
         std::error_code Error;
         HttpResponse Response{200, {}, ""};
         bool Deferred = false;
-        // A deferred request that does not react to its cancellation slot, like a transport whose in-flight write
-        // only ends when the test completes it.
-        bool IgnoreCancellation = false;
         std::function<bool(const RequestRecord&)> MatchRequest;
         // Runs just before a successful completion is delivered, so a deferred request applies its effect (e.g. a
         // page upload's bytes) only when the test releases it. It may amend the response (e.g. with the new ETag).
@@ -481,7 +478,7 @@ class FakeHttpClient final {
 
             // Honour the HttpClient cancellation contract: when the awaiting coroutine is cancelled, fail the matching
             // pending request, mirroring how a real transport would abort an in-flight request.
-            if (cancellation.is_connected() && !scripted.IgnoreCancellation) {
+            if (cancellation.is_connected()) {
                 cancellation.assign([this, requestIndex](boost::asio::cancellation_type_t /*type*/) {
                     (void)this->FailRequest(requestIndex, std::make_error_code(std::errc::operation_canceled));
                 });
