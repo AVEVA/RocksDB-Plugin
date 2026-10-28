@@ -123,7 +123,6 @@ template <typename TBlob> class BasicReadableFileImpl {
     };
     struct PrefetchState {
         std::mutex Mutex;
-        std::condition_variable Done;
         uint64_t NextId = 0;
         using SlotList = boost::container::static_vector<PrefetchSlot, kMaxPrefetchSlots>;
         SlotList Slots; // Oldest first.
@@ -175,14 +174,22 @@ template <typename TBlob> class BasicReadableFileImpl {
     static BlobOperations::Task<void> PrefetchAsync(std::shared_ptr<const BasicReadableFileImpl> self, uint64_t id,
                                                     std::shared_ptr<PrefetchCharge> charge, int64_t offset, int64_t n);
 
-    // Serves from a completed prefetch only. With `wait`, first waits (bounded) for a covering pending prefetch.
+    // Serves from a completed prefetch only; a pending one is skipped, so this never blocks.
     // With `allowPartial`, a range that only starts inside a slot is served up to the slot's end and the caller
     // fetches the remainder; the result is then the number of bytes copied, which may be less than requested.
     [[nodiscard]] std::optional<size_t> TryReadFromPrefetch(int64_t offset, int64_t bytesToRead, char* buffer,
-                                                            bool wait, bool allowPartial = false,
+                                                            bool allowPartial = false,
                                                             uint64_t* deferredRetire = nullptr) const;
+    // One-shot signal a read waits on until the prefetch it needs settles.
+    using PrefetchSettledChannel = boost::asio::experimental::concurrent_channel<void(boost::system::error_code)>;
+    // Waits (bounded by PrefetchWaitTimeout) for the pending prefetch covering `offset`, if there is one.
+    [[nodiscard]] BlobOperations::Task<void> WaitForPrefetchAsync(int64_t offset) const;
     void ClearPrefetch() const;
-    int64_t DownloadWithRetry(const int64_t offset, const int64_t bytesToRead, char* buffer, int& refreshesLeft) const;
+    // Trims a read to the addressable range; false when nothing is left to read.
+    [[nodiscard]] static bool ClampRead(int64_t offset, int64_t& bytesToRead);
+    [[nodiscard]] BlobOperations::Task<int64_t> DownloadWithRetryAsync(int64_t offset, int64_t bytesToRead,
+                                                                       char* buffer, int& refreshesLeft) const;
+    [[nodiscard]] BlobOperations::Task<void> RefreshBlobMetadataAsync() const;
     [[nodiscard]] std::pair<int64_t, std::string> GetMetadata() const;
     void SetMetadata(int64_t size, std::string etag) const;
     // Publishes a refreshed (size, ETag) to the runtime cache for later opens, then to this file. `epoch` is the
@@ -202,8 +209,16 @@ template <typename TBlob> class BasicReadableFileImpl {
         std::shared_ptr<std::atomic<int64_t>> prefetchBudget = nullptr,
         int64_t maxPrefetchBytes = Configuration::DefaultPrefetchBudgetBytes);
 
-    // Reads at an explicit offset; carries no read position of its own.
+    // Reads at an explicit offset; carries no read position of its own. Blocks the calling thread (never run it on the
+    // client's executor); RandomReadAsync is the awaitable form.
     [[nodiscard]] int64_t RandomRead(int64_t offset, int64_t bytesToRead, char* buffer) const;
+
+    // Awaitable random read into `buffer`: serves from a prefetch (waiting, bounded, for one in flight), then downloads
+    // the rest with the usual ETag/size refresh and retry. It does not consult the file cache, whose reads are blocking
+    // disk I/O; RandomRead does that first. `self` and `buffer` must stay alive until it completes.
+    [[nodiscard]] static BlobOperations::Task<int64_t>
+    RandomReadAsync(std::shared_ptr<const BasicReadableFileImpl> self, int64_t offset, int64_t bytesToRead,
+                    char* buffer);
 
     // Serves a random read from the local file cache only; returns nullopt when it must go to the blob.
     [[nodiscard]] std::optional<size_t> TryReadFromCache(int64_t offset, int64_t bytesToRead, char* buffer) const;

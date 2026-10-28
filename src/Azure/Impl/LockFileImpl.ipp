@@ -303,20 +303,29 @@ BasicLockFileImpl<TBlob>::FinishRenewal(const std::string& leaseId, std::chrono:
     return {error, renewed};
 }
 
+template <typename TBlob> boost::asio::awaitable<bool> BasicLockFileImpl<TBlob>::RenewAsync() const {
+    auto attempt = BeginRenewal();
+    if (!attempt.has_value()) {
+        co_return false;
+    }
+
+    std::exception_ptr failure;
+    try {
+        Unwrap(co_await m_file->RenewLeaseAsync(std::move(attempt->Options), std::move(attempt->RequestOptions)));
+    } catch (...) {
+        failure = std::current_exception();
+    }
+    const auto [error, renewed] = FinishRenewal(attempt->LeaseId, attempt->Start, std::move(failure));
+    if (error) {
+        std::rethrow_exception(error);
+    }
+    co_return renewed;
+}
+
 // Blocking renewal for RocksDB threads; it waits on RenewAsync and so must never run on the io_context thread.
 template <typename TBlob> void BasicLockFileImpl<TBlob>::RenewLease() const {
-    ThrowIfRunningOn(m_file->get_executor());
     // One cancellation path: the synchronous renewal waits on the asynchronous one.
-    auto outcome = std::make_shared<std::promise<bool>>();
-    auto future = outcome->get_future();
-    RenewAsync([outcome](std::exception_ptr error, bool renewed) {
-        if (error) {
-            outcome->set_exception(error);
-        } else {
-            outcome->set_value(renewed);
-        }
-    });
-    if (!future.get()) {
+    if (!Block(*m_file, RenewAsync())) {
         throw std::runtime_error("Cannot renew lease for '" + m_fileName + "': it was released");
     }
 }

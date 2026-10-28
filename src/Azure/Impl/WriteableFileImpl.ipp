@@ -7,6 +7,11 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include <algorithm>
+#include <boost/asio/async_result.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/asio/use_awaitable.hpp>
 #include <boost/log/trivial.hpp>
 #include <limits>
 
@@ -104,32 +109,83 @@ BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(BasicWriteableFileImpl<TBl
       m_flushed(other.m_flushed), m_unsyncedSize(other.m_unsyncedSize), m_buffer(std::move(other.m_buffer)),
       m_uploads(std::move(other.m_uploads)) {}
 
+template <typename TBlob> void BasicWriteableFileImpl<TBlob>::UploadTracker::Begin() {
+    std::scoped_lock lock(Mutex);
+    ++InFlight;
+}
+
+template <typename TBlob>
+void BasicWriteableFileImpl<TBlob>::UploadTracker::Complete(std::exception_ptr error) noexcept {
+    std::vector<std::move_only_function<void()>> ready;
+    {
+        std::scoped_lock lock(Mutex);
+        --InFlight;
+        if (error && !Error) {
+            Error = std::move(error);
+        }
+        for (auto it = Waiters.begin(); it != Waiters.end();) {
+            if (InFlight <= it->MaxRemaining) {
+                ready.push_back(std::move(it->Wake));
+                it = Waiters.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    Done.notify_all();
+    // Outside the lock: a woken coroutine takes it again.
+    for (auto& wake : ready) {
+        wake();
+    }
+}
+
 template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Close() {
-    m_close.Close([this] { Sync(); });
+    if (!m_close.IsClosed()) {
+        Block(*m_w.H.Blob, CloseAsync());
+    }
+}
+
+template <typename TBlob> BlobOperations::Task<void> BasicWriteableFileImpl<TBlob>::CloseAsync() {
+    if (!m_close.IsClosed()) {
+        co_await SyncAsync();
+        m_close.MarkClosed();
+    }
+}
+
+template <typename TBlob>
+std::span<const char> BasicWriteableFileImpl<TBlob>::CopyIntoBuffer(std::span<const char> data) {
+    while (!data.empty()) {
+        const auto spaceLeft = m_bufferSize - m_bufferOffset;
+        if (spaceLeft < Configuration::PageBlob::PageSize) {
+            break;
+        }
+
+        const auto bytesToCopy = std::min(spaceLeft, static_cast<int64_t>(data.size()));
+        std::copy_n(data.begin(), bytesToCopy, m_buffer.begin() + m_bufferOffset);
+
+        data = data.subspan(static_cast<size_t>(bytesToCopy));
+        m_bufferOffset += bytesToCopy;
+        m_size += bytesToCopy;
+        m_flushed = false; // Mark as not flushed since we added new data
+        m_unsyncedSize = true;
+    }
+    return data;
 }
 
 // Appends to the page-aligned buffer and starts an asynchronous upload whenever less than a page of space remains,
 // so RocksDB's small appends are batched into few, large page-blob writes instead of one request per Append.
+template <typename TBlob>
+BlobOperations::Task<void> BasicWriteableFileImpl<TBlob>::AppendAsync(std::span<const char> data) {
+    while (!(data = CopyIntoBuffer(data)).empty()) {
+        co_await StartFlushAsync(false);
+    }
+}
+
+// Most appends fit in the buffer, so they are served on the calling thread; only one that needs an upload started
+// goes through the executor.
 template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Append(const std::span<const char> data) {
-    const char* dataPos = data.data();
-    auto dataSize = static_cast<int64_t>(data.size());
-    while (dataSize > 0) {
-        const auto spaceLeft = m_bufferSize - m_bufferOffset;
-        if (spaceLeft < Configuration::PageBlob::PageSize) {
-            StartFlush(false);
-            continue;
-        }
-
-        auto bufPos = &m_buffer[static_cast<size_t>(m_bufferOffset)];
-        const auto bytesToCopy = std::min(spaceLeft, dataSize);
-        std::copy(dataPos, dataPos + bytesToCopy, bufPos);
-
-        dataSize -= bytesToCopy;
-        m_bufferOffset += bytesToCopy;
-        dataPos += bytesToCopy;
-        m_size += bytesToCopy;
-        m_flushed = false; // Mark as not flushed since we added new data
-        m_unsyncedSize = true;
+    if (const auto rest = CopyIntoBuffer(data); !rest.empty()) {
+        Block(*m_w.H.Blob, AppendAsync(rest));
     }
 }
 
@@ -138,29 +194,43 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Append(const std::
 // Sync and Close (re-uploading the same zero-padded page on every flush would multiply the traffic). Below the
 // threshold nothing is sent: readers only see data after Sync publishes the size, so per-page uploads gave no
 // visibility, only one request per 512 B and a stall on every fifth one. An earlier failed upload is still reported.
-template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Flush() {
-    if (m_bufferOffset >= m_bufferSize / 2) {
-        StartFlush(false);
+template <typename TBlob> BlobOperations::Task<void> BasicWriteableFileImpl<TBlob>::FlushAsync() {
+    if (ShouldStartFlush()) {
+        co_await StartFlushAsync(false);
     }
-    // The predicate is immediately true, so this only reports a failed upload or a fenced writer.
-    WaitForUploads(std::numeric_limits<size_t>::max());
+    ReportUploadError();
+}
+
+template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Flush() {
+    if (ShouldStartFlush()) {
+        Block(*m_w.H.Blob, FlushAsync());
+    } else {
+        ReportUploadError();
+    }
+}
+
+template <typename TBlob> BlobOperations::Task<void> BasicWriteableFileImpl<TBlob>::RangeSyncAsync() {
+    if (ShouldStartFlush()) {
+        co_await StartFlushAsync(false);
+    }
 }
 
 template <typename TBlob> void BasicWriteableFileImpl<TBlob>::RangeSync() {
-    if (m_bufferOffset >= m_bufferSize / 2) {
-        StartFlush(false);
+    if (ShouldStartFlush()) {
+        Block(*m_w.H.Blob, RangeSyncAsync());
     }
 }
 
-// Uploads the buffered data without waiting for its completion. Only the bounded back-pressure in StartFlush may
-// block, and only to cap in-flight uploads; Flush merely reports a recorded error, while Sync and Close wait for
+// Uploads the buffered data without waiting for its completion. Only the bounded back-pressure may suspend, and only
+// to cap in-flight uploads; Flush merely reports a recorded error, while Sync and Close wait for
 // durability. Asynchronous flushes send complete
 // pages only and keep the trailing partial page buffered: uploading it zero-padded and again later with more data
 // would put two overlapping requests in flight, and Azure does not order them. Only the final flush, which is
-// always followed by WaitForUploads(0), uploads the padded tail.
-template <typename TBlob> void BasicWriteableFileImpl<TBlob>::StartFlush(const bool includePartialPage) {
+// always followed by a wait for all uploads, uploads the padded tail.
+template <typename TBlob>
+BlobOperations::Task<void> BasicWriteableFileImpl<TBlob>::StartFlushAsync(const bool includePartialPage) {
     if (m_bufferOffset == 0 || m_flushed) {
-        return;
+        co_return;
     }
 
     constexpr auto pageSize = Configuration::PageBlob::PageSize;
@@ -168,17 +238,17 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::StartFlush(const b
     const auto tail = m_bufferOffset - fullBytes;
     const auto bytesToWrite = (includePartialPage && tail != 0) ? fullBytes + pageSize : fullBytes;
     if (bytesToWrite == 0) {
-        return;
+        co_return;
     }
 
     if ((m_lastPageOffset + bytesToWrite) > m_w.Capacity()) {
         // Resizing the blob while uploads are in flight would race with them.
-        WaitForUploads(0);
-        m_w.EnsureCapacity(m_lastPageOffset + bytesToWrite);
+        co_await WaitForUploadsAsync(0);
+        co_await m_w.EnsureCapacityAsync(m_lastPageOffset + bytesToWrite);
     }
 
     // Back-pressure: also surfaces an earlier upload failure before more data is accepted.
-    WaitForUploads(MaxInFlightUploads - 1);
+    co_await WaitForUploadsAsync(MaxInFlightUploads - 1);
     if (includePartialPage && tail != 0) {
         // The zero padding past the tail is part of the page being uploaded.
         std::fill(m_buffer.begin() + m_bufferOffset, m_buffer.begin() + bytesToWrite, '\0');
@@ -234,59 +304,65 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::StartFlush(const b
 
 // Makes everything written so far durable and publishes the logical size. The size is a separate metadata write
 // because a page blob's physical length is page-rounded.
-template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Sync() {
+template <typename TBlob> BlobOperations::Task<void> BasicWriteableFileImpl<TBlob>::SyncAsync() {
     // Every metadata write changes the blob's ETag and invalidates open readers, so a Sync with nothing new to
     // publish (e.g. Sync followed by Close) must not write the size again.
     if (m_unsyncedSize) {
         m_w.MarkStale();
     }
 
-    StartFlush(true);
-    WaitForUploads(0);
+    co_await StartFlushAsync(true);
+    co_await WaitForUploadsAsync(0);
     if (m_unsyncedSize) {
-        m_w.PublishSize(m_size);
+        co_await m_w.PublishSizeAsync(m_size);
         m_unsyncedSize = false;
     }
     BOOST_LOG_SEV(*m_w.H.Logger, boost::log::trivial::debug)
         << "Synced writeable file '" << m_w.H.Name << "' to " << m_size << " bytes";
 }
 
+template <typename TBlob> void BasicWriteableFileImpl<TBlob>::Sync() { Block(*m_w.H.Blob, SyncAsync()); }
+
 // Uploads of distinct page ranges are independent, so up to MaxInFlightUploads overlap. The payload is a buffer the
 // caller no longer touches, so it is sent without a copy.
 template <typename TBlob>
 void BasicWriteableFileImpl<TBlob>::StartUpload(std::shared_ptr<const std::vector<char>> data, const int64_t offset) {
-    {
-        std::scoped_lock lock(m_uploads->Mutex);
-        ++m_uploads->InFlight;
-    }
-
-    auto tracker = m_uploads;
-    const auto complete = [tracker](std::exception_ptr error) {
-        {
-            std::scoped_lock lock(tracker->Mutex);
-            --tracker->InFlight;
-            if (error && !tracker->Error) {
-                tracker->Error = std::move(error);
-            }
-        }
-        tracker->Done.notify_all();
-    };
+    m_uploads->Begin();
     try {
         // Fenced writes fail the upload without a request; checking here keeps that from needing the executor.
         m_w.H.Runtime->ThrowIfWritesFenced();
     } catch (...) {
-        complete(std::current_exception());
+        m_uploads->Complete(std::current_exception());
         return;
     }
     try {
-        StartOperation(m_w.H.Blob->get_executor(),
-                       BlobOperations::UploadPagesAsync(*m_w.H.Runtime, *m_w.H.Blob, std::move(data), offset),
-                       std::stop_token{}, [complete](std::exception_ptr error) { complete(std::move(error)); });
+        boost::asio::co_spawn(m_w.H.Blob->get_executor(),
+                              RunUpload(m_uploads, m_w.H.Runtime, m_w.H.Blob, std::move(data), offset),
+                              boost::asio::detached);
     } catch (...) {
-        std::scoped_lock lock(tracker->Mutex);
-        --tracker->InFlight;
+        m_uploads->Complete({});
         throw;
     }
+}
+
+// One upload, run detached so several overlap. The outcome goes to the tracker rather than being thrown. The
+// payload and handles are released before completing: the file may be destroyed (and a buffer reused) as soon as the
+// tracker reports the upload done.
+template <typename TBlob>
+BlobOperations::Task<void>
+BasicWriteableFileImpl<TBlob>::RunUpload(std::shared_ptr<UploadTracker> tracker,
+                                         std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
+                                         std::shared_ptr<const std::vector<char>> data, const int64_t offset) {
+    std::exception_ptr error;
+    try {
+        co_await BlobOperations::UploadPagesAsync(*runtime, *blob, std::move(data), offset);
+    } catch (...) {
+        error = std::current_exception();
+    }
+    data.reset();
+    blob.reset();
+    runtime.reset();
+    tracker->Complete(std::move(error));
 }
 
 template <typename TBlob> std::vector<char> BasicWriteableFileImpl<TBlob>::RentBuffer() const {
@@ -303,21 +379,42 @@ template <typename TBlob> std::vector<char> BasicWriteableFileImpl<TBlob>::RentB
     return buffer;
 }
 
-// Blocks the calling (RocksDB) thread, never an io_context thread. The first upload failure is sticky: the data of a
-// failed upload is gone, so every later Sync/Close must keep reporting it rather than claim durability. Writes that
-// were fenced (lease lost) while uploads were in flight are reported too, even if those uploads succeeded: the
-// service may have accepted them after another process took over, so they cannot be claimed as durable.
-template <typename TBlob> void BasicWriteableFileImpl<TBlob>::WaitForUploads(const size_t maxRemaining) {
+// Suspends until at most `maxRemaining` uploads are in flight, then reports the outcome (see ReportUploadError). The
+// first upload failure is sticky: the data of a failed upload is gone, so every later Sync/Close must keep reporting
+// it rather than claim durability. Writes that were fenced (lease lost) while uploads were in flight are reported
+// too, even if those uploads succeeded: the service may have accepted them after another process took over, so they
+// cannot be claimed as durable.
+template <typename TBlob>
+BlobOperations::Task<void> BasicWriteableFileImpl<TBlob>::WaitForUploadsAsync(const size_t maxRemaining) {
+    const auto tracker = m_uploads;
+    const auto mustWait = [&] {
+        std::scoped_lock lock(tracker->Mutex);
+        return tracker->InFlight > maxRemaining;
+    };
+    if (mustWait()) {
+        co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable), void()>(
+            [tracker, maxRemaining](auto handler) {
+                // Resumed through the coroutine's executor, not on the thread that completed the upload.
+                auto wake = [handler = std::move(handler)]() mutable {
+                    const auto executor = boost::asio::get_associated_executor(handler);
+                    boost::asio::post(executor, std::move(handler));
+                };
+                std::unique_lock lock(tracker->Mutex);
+                if (tracker->InFlight <= maxRemaining) {
+                    lock.unlock();
+                    wake();
+                    return;
+                }
+                tracker->Waiters.push_back({maxRemaining, std::move(wake)});
+            },
+            boost::asio::use_awaitable);
+    }
+    ReportUploadError();
+}
+
+template <typename TBlob> void BasicWriteableFileImpl<TBlob>::ReportUploadError() {
     {
-        std::unique_lock lock(m_uploads->Mutex);
-        if (m_uploads->InFlight > maxRemaining) {
-            // Upload completions run on the host executor, so waiting for them there can never finish. Checked only
-            // when a wait is needed, so a call that has nothing to wait for stays valid on any thread.
-            lock.unlock();
-            ThrowIfRunningOn(m_w.H.Blob->get_executor());
-            lock.lock();
-        }
-        m_uploads->Done.wait(lock, [&] { return m_uploads->InFlight <= maxRemaining; });
+        std::scoped_lock lock(m_uploads->Mutex);
         if (m_uploads->Error) {
             std::rethrow_exception(m_uploads->Error);
         }

@@ -90,6 +90,41 @@ TEST_F(ReadableFileTests, RandomRead_AtEndOfFile_ReturnsZero) {
     EXPECT_TRUE(m_env.Blob->Downloads.empty());
 }
 
+TEST_F(ReadableFileTests, RandomReadAsync_ReadsFromBlobIntoTheBuffer) {
+    constexpr int64_t blobSize = 200;
+    m_env.Fill(blobSize, 'D');
+    std::vector<char> buffer(100);
+    const auto file =
+        std::make_shared<FakeReadableFileImpl>("test.sst", m_env.Runtime, m_env.Client, nullptr, m_logger);
+
+    // Asks for more than remains after offset 150, so the read is trimmed to the end of the blob.
+    const auto bytesRead = AVEVA::RocksDB::Plugin::Azure::Impl::Block(
+        *m_env.Client, FakeReadableFileImpl::RandomReadAsync(file, 150, 100, buffer.data()));
+
+    EXPECT_EQ(50, bytesRead);
+    EXPECT_EQ(std::vector<char>(50, 'D'), std::vector<char>(buffer.begin(), buffer.begin() + 50));
+    ASSERT_EQ(1U, m_env.Blob->Downloads.size());
+    EXPECT_EQ(150, m_env.Blob->Downloads[0].Offset);
+}
+
+TEST_F(ReadableFileTests, RandomReadAsync_DownloadFails_ThrowsFromTheAwaitable) {
+    m_env.Fill(DefaultBlobSize);
+    m_env.Blob->Fault =
+        [](const FakeBlobServer::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::DownloadToBuffer) {
+            return FakeBlobServer::Error(500, "InternalError");
+        }
+        return std::nullopt;
+    };
+    std::vector<char> buffer(100);
+    const auto file =
+        std::make_shared<FakeReadableFileImpl>("test.sst", m_env.Runtime, m_env.Client, nullptr, m_logger);
+
+    EXPECT_THROW(AVEVA::RocksDB::Plugin::Azure::Impl::Block(
+                     *m_env.Client, FakeReadableFileImpl::RandomReadAsync(file, 50, 100, buffer.data())),
+                 RequestFailedException);
+}
+
 TEST_F(ReadableFileTests, GetSize_ReturnsCorrectSize) {
     constexpr int64_t expectedSize = 5000;
     m_env.Fill(expectedSize);

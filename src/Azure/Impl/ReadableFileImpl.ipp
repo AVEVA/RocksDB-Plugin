@@ -29,7 +29,7 @@ inline RequestFailedException StaleReadException() {
 inline std::exception_ptr StaleReadError() { return std::make_exception_ptr(StaleReadException()); }
 
 // The one policy for reads against a blob that may change underneath us, shared by the synchronous
-// (DownloadWithRetry) and asynchronous (ReadCoroutine) paths so they cannot drift apart: a 412 from the
+// (DownloadWithRetryAsync) and asynchronous (ReadAsync) paths so they cannot drift apart: a 412 from the
 // ETag-conditioned download means "stale", and each refresh-and-retry spends one unit of a fixed budget.
 namespace StaleReadPolicy {
 inline bool IsStale(const RequestFailedException& e) { return e.StatusCode == HttpStatus::PreconditionFailed; }
@@ -77,16 +77,22 @@ BasicReadableFileImpl<TBlob>::BasicReadableFileImpl(
     }
 }
 
-template <typename TBlob>
-int64_t BasicReadableFileImpl<TBlob>::RandomRead(const int64_t offset, int64_t bytesToRead, char* buffer) const {
-    // Readahead past a saturated sequential position would overflow the end offset; nothing exists out there.
+// Readahead past a saturated sequential position would overflow the end offset; nothing exists out there, so the
+// length is clamped. False means there is nothing to read.
+template <typename TBlob> bool BasicReadableFileImpl<TBlob>::ClampRead(const int64_t offset, int64_t& bytesToRead) {
     if (offset >= 0 && !RangeCheck::IsValid(offset, bytesToRead) && bytesToRead > 0) {
         bytesToRead = RangeCheck::MaxOffset - offset;
     }
-    if (offset < 0 || bytesToRead <= 0) {
+    return offset >= 0 && bytesToRead > 0;
+}
+
+template <typename TBlob>
+int64_t BasicReadableFileImpl<TBlob>::RandomRead(const int64_t offset, int64_t bytesToRead, char* buffer) const {
+    if (!ClampRead(offset, bytesToRead)) {
         return 0;
     }
 
+    // The cache is blocking disk I/O, so it is consulted here on the caller's thread rather than inside the coroutine.
     if (m_h.FileCache) {
         const auto bytesRead = m_h.FileCache->ReadFile(m_h.Name, offset, bytesToRead, buffer);
         if (bytesRead) {
@@ -94,28 +100,76 @@ int64_t BasicReadableFileImpl<TBlob>::RandomRead(const int64_t offset, int64_t b
         }
     }
 
+    // Non-owning: Block returns only after the coroutine has finished, so `this` outlives every use of the pointer.
+    const std::shared_ptr<const BasicReadableFileImpl> borrowed(std::shared_ptr<void>{}, this);
+    return Block(*m_h.Blob, RandomReadAsync(borrowed, offset, bytesToRead, buffer));
+}
+
+// Prefetch (waiting for one that is in flight), then download whatever it did not cover. Never touches the file cache.
+template <typename TBlob>
+BlobOperations::Task<int64_t>
+BasicReadableFileImpl<TBlob>::RandomReadAsync(std::shared_ptr<const BasicReadableFileImpl> self, const int64_t offset,
+                                              int64_t bytesToRead, char* const buffer) {
+    if (!ClampRead(offset, bytesToRead)) {
+        co_return 0;
+    }
+
     int64_t served = 0;
     // Prefetched bytes belong to the version cached at this point; if the download below ends up on another
     // version the copied prefix is stale and the whole range must be read again.
-    const auto prefetchVersion = m_metadataVersion.load(std::memory_order_acquire);
-    if (const auto prefetched = TryReadFromPrefetch(offset, bytesToRead, buffer, true, true)) {
+    const auto prefetchVersion = self->m_metadataVersion.load(std::memory_order_acquire);
+    co_await self->WaitForPrefetchAsync(offset);
+    if (const auto prefetched = self->TryReadFromPrefetch(offset, bytesToRead, buffer, true)) {
         served = static_cast<int64_t>(*prefetched);
         if (served >= bytesToRead) {
-            return served;
+            co_return served;
         }
     }
 
     // Only the part the prefetch did not cover is downloaded. The suffix and the whole-range re-read share one
     // stale-read budget so a single read cannot spend it twice under churn.
     int refreshesLeft = kMaxStaleReadRetries;
-    auto bytesRead = DownloadWithRetry(offset + served, bytesToRead - served, buffer + served, refreshesLeft);
-    if (served > 0 && m_metadataVersion.load(std::memory_order_acquire) != prefetchVersion) {
+    auto bytesRead =
+        co_await self->DownloadWithRetryAsync(offset + served, bytesToRead - served, buffer + served, refreshesLeft);
+    if (served > 0 && self->m_metadataVersion.load(std::memory_order_acquire) != prefetchVersion) {
         served = 0;
-        bytesRead = DownloadWithRetry(offset, bytesToRead, buffer, refreshesLeft);
+        bytesRead = co_await self->DownloadWithRetryAsync(offset, bytesToRead, buffer, refreshesLeft);
     }
-    bytesRead = std::max<int64_t>(bytesRead, 0);
+    co_return served + std::max<int64_t>(bytesRead, 0);
+}
 
-    return served + bytesRead;
+// Waits until the pending prefetch covering `offset` (if any) settles, bounded so a stuck download degrades to a normal
+// read instead of a hang. Returning does not promise the data is there: the caller re-checks and falls back.
+template <typename TBlob>
+BlobOperations::Task<void> BasicReadableFileImpl<TBlob>::WaitForPrefetchAsync(const int64_t offset) const {
+    const auto executor = co_await boost::asio::this_coro::executor;
+    auto settled = std::make_shared<PrefetchSettledChannel>(executor, 1);
+    bool registered = false;
+    try {
+        std::scoped_lock lock(m_prefetch.Mutex);
+        const auto slot = std::ranges::find_if(m_prefetch.Slots, [&](const PrefetchSlot& candidate) {
+            return candidate.Pending && offset >= candidate.Offset && offset < candidate.Offset + candidate.Length;
+        });
+        if (slot != m_prefetch.Slots.end()) {
+            std::move_only_function<void()> wake = [settled] { settled->try_send(boost::system::error_code{}); };
+            m_prefetch.AddWaiter(slot->Id, wake);
+            registered = true;
+        }
+    } catch (...) {
+        // Out of memory for the waiter: read without waiting rather than failing the read.
+    }
+    if (!registered) {
+        co_return;
+    }
+
+    using namespace boost::asio::experimental::awaitable_operators;
+    boost::asio::steady_timer timer(executor, Configuration::PrefetchWaitTimeout);
+    const auto outcome =
+        co_await (settled->async_receive(boost::asio::use_awaitable) || timer.async_wait(boost::asio::use_awaitable));
+    if (outcome.index() != 0) {
+        BOOST_LOG_SEV(*m_h.Logger, boost::log::trivial::debug)
+            << "Timed out waiting for a prefetch of '" << m_h.Name << "'; falling back to a download";
+    }
 }
 
 template <typename TBlob> std::string BasicReadableFileImpl<TBlob>::GetETag() const { return GetMetadata().second; }
@@ -211,11 +265,8 @@ template <typename TBlob> void BasicReadableFileImpl<TBlob>::PrefetchState::Drop
 template <typename TBlob> void BasicReadableFileImpl<TBlob>::PrefetchState::DropAll() { Slots.clear(); }
 
 template <typename TBlob> void BasicReadableFileImpl<TBlob>::ClearPrefetch() const {
-    {
-        std::scoped_lock lock(m_prefetch.Mutex);
-        m_prefetch.DropAll();
-    }
-    m_prefetch.Done.notify_all();
+    std::scoped_lock lock(m_prefetch.Mutex);
+    m_prefetch.DropAll();
 }
 
 // Downloads a prefetch range and publishes the outcome to its slot and waiters. Never throws: a failed download drops
@@ -257,7 +308,6 @@ BasicReadableFileImpl<TBlob>::PrefetchAsync(std::shared_ptr<const BasicReadableF
             }
         }
     }
-    state->Done.notify_all();
     // Waiters retry their read, which now finds the data or falls back to a download.
     ReadableFileDetail::RunWaiters(waiters, *logger);
     if (error) {
@@ -350,7 +400,6 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
                 state->Drop(slot);
             }
         }
-        state->Done.notify_all();
         // The slot is gone, so each waiter falls back to its own download rather than waiting forever.
         ReadableFileDetail::RunWaiters(waiters, *logger);
         throw;
@@ -358,13 +407,11 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
     return true;
 }
 
-// With `wait` this runs on RocksDB threads only (never the io_context), so waiting for an in-flight prefetch is safe.
-// The wait is bounded so a stuck download degrades to a normal read instead of a hang. Without `wait` a pending
-// prefetch is skipped so async callers never block.
+// Only a completed prefetch is served; a pending one is skipped, so this never blocks. RandomReadAsync waits for a
+// pending prefetch first (WaitForPrefetchAsync).
 template <typename TBlob>
 std::optional<size_t> BasicReadableFileImpl<TBlob>::TryReadFromPrefetch(const int64_t offset, const int64_t bytesToRead,
-                                                                        char* buffer, const bool wait,
-                                                                        const bool allowPartial,
+                                                                        char* buffer, const bool allowPartial,
                                                                         uint64_t* const deferredRetire) const {
     if (offset < 0 || bytesToRead <= 0) {
         return std::nullopt;
@@ -372,35 +419,12 @@ std::optional<size_t> BasicReadableFileImpl<TBlob>::TryReadFromPrefetch(const in
 
     auto& state = m_prefetch;
     std::unique_lock lock(state.Mutex);
-    const auto find = [&] {
-        return std::ranges::find_if(state.Slots, [&](const PrefetchSlot& slot) {
-            const auto end = slot.Offset + slot.Length;
-            return offset >= slot.Offset && offset < end && (allowPartial || offset + bytesToRead <= end);
-        });
-    };
-    auto slot = find();
-    if (slot == state.Slots.end()) {
+    const auto slot = std::ranges::find_if(state.Slots, [&](const PrefetchSlot& candidate) {
+        const auto end = candidate.Offset + candidate.Length;
+        return offset >= candidate.Offset && offset < end && (allowPartial || offset + bytesToRead <= end);
+    });
+    if (slot == state.Slots.end() || slot->Pending) {
         return std::nullopt;
-    }
-
-    if (slot->Pending) {
-        if (!wait) {
-            return std::nullopt;
-        }
-        const auto id = slot->Id;
-        const auto settled = state.Done.wait_for(lock, Configuration::PrefetchWaitTimeout, [&] {
-            const auto current = std::ranges::find(state.Slots, id, &PrefetchSlot::Id);
-            return current == state.Slots.end() || !current->Pending;
-        });
-        if (!settled) {
-            BOOST_LOG_SEV(*m_h.Logger, boost::log::trivial::debug)
-                << "Timed out waiting for a prefetch of '" << m_h.Name << "'; falling back to a download";
-            return std::nullopt;
-        }
-        slot = find();
-        if (slot == state.Slots.end()) {
-            return std::nullopt;
-        }
     }
 
     const auto start = static_cast<size_t>(offset - slot->Offset);
@@ -474,20 +498,20 @@ template <typename TBlob>
 std::optional<size_t> BasicReadableFileImpl<TBlob>::TryReadFromCache(const int64_t offset, const int64_t bytesToRead,
                                                                      char* buffer) const {
     if (!m_h.FileCache || offset < 0 || bytesToRead <= 0) {
-        return TryReadFromPrefetch(offset, bytesToRead, buffer, false);
+        return TryReadFromPrefetch(offset, bytesToRead, buffer);
     }
 
     if (const auto cached = m_h.FileCache->ReadFile(m_h.Name, offset, bytesToRead, buffer)) {
         return cached;
     }
-    return TryReadFromPrefetch(offset, bytesToRead, buffer, false);
+    return TryReadFromPrefetch(offset, bytesToRead, buffer);
 }
 
 template <typename TBlob>
 std::optional<size_t>
 BasicReadableFileImpl<TBlob>::TryReadFromCompletedPrefetch(const int64_t offset, const int64_t bytesToRead,
                                                            char* buffer, uint64_t* const deferredRetire) const {
-    return TryReadFromPrefetch(offset, bytesToRead, buffer, false, false, deferredRetire);
+    return TryReadFromPrefetch(offset, bytesToRead, buffer, false, deferredRetire);
 }
 
 template <typename TBlob> void BasicReadableFileImpl<TBlob>::RetirePrefetch(const uint64_t id) const {
@@ -666,67 +690,67 @@ void BasicReadableFileImpl<TBlob>::CompleteMetadataRefresh(std::shared_ptr<const
     }
 }
 
-// Downloads from the blob conditioned on the cached ETag. When the blob changed underneath us (precondition
-// failure, or reading at the cached end of a blob whose ETag moved on) the metadata is refreshed and the read
-// retried, so readers observe data appended by other writers. `refreshesLeft` is the caller's per-read budget.
+// Downloads into `buffer` from the blob conditioned on the cached ETag. When the blob changed underneath us
+// (precondition failure, or reading at the cached end of a blob whose ETag moved on) the metadata is refreshed and the
+// read retried, so readers observe data appended by other writers. `refreshesLeft` is the caller's per-read budget.
+// The caller keeps the file, `buffer` and `refreshesLeft` alive until the coroutine finishes.
 template <typename TBlob>
-int64_t BasicReadableFileImpl<TBlob>::DownloadWithRetry(const int64_t offset, const int64_t bytesToRead, char* buffer,
-                                                        int& refreshesLeft) const {
-    int64_t bytesRead = 0;
-
-    bool success = false;
-    do {
+BlobOperations::Task<int64_t>
+BasicReadableFileImpl<TBlob>::DownloadWithRetryAsync(const int64_t offset, const int64_t bytesToRead,
+                                                     char* const buffer, int& refreshesLeft) const {
+    for (;;) {
         auto [size, etag] = GetMetadata();
-        auto remaining = std::max<int64_t>(0, size - offset);
+        const auto remaining = std::max<int64_t>(0, size - offset);
         if (remaining == 0) {
             // One properties call serves both the ETag check and the refresh, so a stale end-of-blob read costs a
             // single round trip.
             const auto epoch = m_h.Runtime ? m_h.Runtime->BlobSizeEpoch() : 0;
-            auto latest = BlobOperations::GetMetadata(*m_h.Blob);
-            if (latest.ETag != etag) {
-                if (!ReadableFileDetail::StaleReadPolicy::TrySpendRefresh(refreshesLeft)) {
-                    throw ReadableFileDetail::StaleReadException();
-                }
-                ApplyRefreshedMetadata(latest.Size, std::move(latest.ETag), epoch);
-                continue;
+            auto latest = co_await BlobOperations::GetMetadataAsync(*m_h.Blob);
+            const bool changed = latest.ETag != etag;
+            if (changed && !ReadableFileDetail::StaleReadPolicy::TrySpendRefresh(refreshesLeft)) {
+                throw ReadableFileDetail::StaleReadException();
             }
             ApplyRefreshedMetadata(latest.Size, std::move(latest.ETag), epoch);
-
-            return 0;
+            if (!changed) {
+                co_return 0;
+            }
+            continue;
         }
 
-        auto toRead = std::min(bytesToRead, remaining);
+        const auto toRead = std::min(bytesToRead, remaining);
         const std::string usedEtag = etag;
+        // co_await may not appear in a handler, so a stale read only leaves the try block and is refreshed below.
         try {
-            bytesRead = BlobOperations::Download(*m_h.Blob, std::span<char>(buffer, static_cast<size_t>(toRead)),
-                                                 offset, toRead, std::move(etag));
-            bytesRead = std::min(bytesRead, remaining);
-            success = true;
+            const auto bytesRead = co_await BlobOperations::DownloadAsync(
+                *m_h.Blob, std::span<char>(buffer, static_cast<size_t>(toRead)), offset, toRead, std::move(etag));
+            co_return std::min(bytesRead, remaining);
         } catch (const RequestFailedException& ex) {
-            if (ReadableFileDetail::StaleReadPolicy::IsStale(ex)) {
-                if (!ReadableFileDetail::StaleReadPolicy::TrySpendRefresh(refreshesLeft)) {
-                    throw ReadableFileDetail::StaleReadException();
-                }
-                // Another thread may already have refreshed past the version this request used; retry with it
-                // instead of sending a redundant properties request.
-                if (HasETag(usedEtag)) {
-                    RefreshBlobMetadata();
-                }
-            } else {
+            if (!ReadableFileDetail::StaleReadPolicy::IsStale(ex)) {
                 throw;
             }
         }
-    } while (!success);
 
-    return bytesRead;
+        if (!ReadableFileDetail::StaleReadPolicy::TrySpendRefresh(refreshesLeft)) {
+            throw ReadableFileDetail::StaleReadException();
+        }
+        // Another reader may already have refreshed past the version this request used; retry with it instead of
+        // sending a redundant properties request.
+        if (HasETag(usedEtag)) {
+            co_await RefreshBlobMetadataAsync();
+        }
+    }
 }
 
-template <typename TBlob> void BasicReadableFileImpl<TBlob>::RefreshBlobMetadata() const {
+template <typename TBlob> BlobOperations::Task<void> BasicReadableFileImpl<TBlob>::RefreshBlobMetadataAsync() const {
     // Query outside the lock so concurrent readers are not serialized behind network round trips. A refresh means the
     // cached entry was stale, so it is replaced for the next open too.
     const auto epoch = m_h.Runtime ? m_h.Runtime->BlobSizeEpoch() : 0;
-    auto metadata = BlobOperations::GetMetadata(*m_h.Blob);
+    auto metadata = co_await BlobOperations::GetMetadataAsync(*m_h.Blob);
     ApplyRefreshedMetadata(metadata.Size, std::move(metadata.ETag), epoch);
+}
+
+template <typename TBlob> void BasicReadableFileImpl<TBlob>::RefreshBlobMetadata() const {
+    Block(*m_h.Blob, RefreshBlobMetadataAsync());
 }
 
 template <typename TBlob>

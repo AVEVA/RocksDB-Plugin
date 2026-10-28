@@ -48,6 +48,7 @@ template <typename TBlob> class BasicReadWriteFileImpl {
         int64_t Length = 0; // bytes the gap must receive in full
     };
     [[nodiscard]] std::vector<Extent> BuildExtents() const;
+    [[nodiscard]] bool IsSynced() const noexcept;
     void PlanGapReads(Extent& extent, int64_t sizeBefore, std::vector<GapRead>& reads);
     BlobOperations::Task<void> ReadGapAsync(GapRead read);
     void OverlayChunks(const Extent& extent);
@@ -64,6 +65,15 @@ template <typename TBlob> class BasicReadWriteFileImpl {
     BasicReadWriteFileImpl(BasicReadWriteFileImpl&&) noexcept;
     BasicReadWriteFileImpl& operator=(BasicReadWriteFileImpl&&) = delete;
 
+    // Awaitable operations for callers on the client's executor. They never block a thread, but a file has a single
+    // user, so await each before starting the next. Failures are thrown from the awaitable.
+    [[nodiscard]] BlobOperations::Task<void> FlushAsync();
+    [[nodiscard]] BlobOperations::Task<void> SyncAsync();
+    [[nodiscard]] BlobOperations::Task<void> CloseAsync();
+    /// Same contract as Read. `buffer` must stay valid until the awaitable completes.
+    [[nodiscard]] BlobOperations::Task<int64_t> ReadAsync(int64_t offset, int64_t bytesRequested, char* buffer);
+
+    // Blocking counterparts for RocksDB's threads, which must not be running the client's executor.
     void Close();
     void Sync();
     void Flush();

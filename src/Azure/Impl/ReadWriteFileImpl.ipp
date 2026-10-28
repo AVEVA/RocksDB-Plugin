@@ -61,21 +61,41 @@ BasicReadWriteFileImpl<TBlob>::BasicReadWriteFileImpl(BasicReadWriteFileImpl<TBl
       m_extentPool(std::move(other.m_extentPool)) {}
 
 template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Close() {
-    m_close.Close([this] { Sync(); });
+    if (!m_close.IsClosed()) {
+        Block(*m_w.H.Blob, CloseAsync());
+    }
+}
+
+template <typename TBlob> BlobOperations::Task<void> BasicReadWriteFileImpl<TBlob>::CloseAsync() {
+    if (!m_close.IsClosed()) {
+        co_await SyncAsync();
+        m_close.MarkClosed();
+    }
+}
+
+template <typename TBlob> bool BasicReadWriteFileImpl<TBlob>::IsSynced() const noexcept {
+    return m_bufferStats.empty() && m_size == m_syncSize && !m_dirty;
 }
 
 template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Sync() {
+    // Nothing to publish needs no request, so it stays valid on any thread.
+    if (!IsSynced()) {
+        Block(*m_w.H.Blob, SyncAsync());
+    }
+}
+
+template <typename TBlob> BlobOperations::Task<void> BasicReadWriteFileImpl<TBlob>::SyncAsync() {
     // A metadata write changes the blob's ETag and invalidates readers and the cache, so skip it when there is
     // nothing buffered and the published size is already current (e.g. Sync followed by Close).
-    if (m_bufferStats.empty() && m_size == m_syncSize && !m_dirty) {
-        return;
+    if (IsSynced()) {
+        co_return;
     }
 
     m_w.MarkStale();
 
-    Flush();
+    co_await FlushAsync();
 
-    m_w.PublishSize(m_size);
+    co_await m_w.PublishSizeAsync(m_size);
     m_syncSize = m_size;
     m_dirty = false;
     BOOST_LOG_SEV(*m_w.H.Logger, boost::log::trivial::debug)
@@ -233,8 +253,14 @@ BlobOperations::Task<void> BasicReadWriteFileImpl<TBlob>::RunWaveAsync(std::vect
 // Writes the buffered chunks to the blob in bounded waves of concurrent extents. m_size and the buffered chunks are
 // only committed once every wave has succeeded, so a failed Flush can be retried from the same state.
 template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
+    if (!m_bufferStats.empty()) {
+        Block(*m_w.H.Blob, FlushAsync());
+    }
+}
+
+template <typename TBlob> BlobOperations::Task<void> BasicReadWriteFileImpl<TBlob>::FlushAsync() {
     if (m_bufferStats.empty()) {
-        return;
+        co_return;
     }
 
     constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
@@ -248,14 +274,14 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
     if (maxSizeNeeded > RangeCheck::MaxOffset - pageSize) {
         throw std::invalid_argument("Write extends past the maximum supported file size");
     }
-    m_w.EnsureCapacity(maxSizeNeeded + pageSize);
+    co_await m_w.EnsureCapacityAsync(maxSizeNeeded + pageSize);
 
     auto extents = BuildExtents();
     // Trims on failure too, once each wave has released its buffers; the buffered writes stay for a retry.
     const boost::scope::scope_exit trimOnExit{[this] { TrimExtentPool(); }};
     for (size_t begin = 0; begin < extents.size(); begin += Configuration::Transfer::MaxConcurrentPageCopies) {
         const auto end = std::min(extents.size(), begin + Configuration::Transfer::MaxConcurrentPageCopies);
-        Block(*m_w.H.Blob, RunWaveAsync(extents, begin, end, m_size));
+        co_await RunWaveAsync(extents, begin, end, m_size);
     }
     // Writes that landed after the lease lapsed must not be reported as flushed.
     m_w.H.Runtime->ThrowIfWritesFenced();
@@ -343,30 +369,34 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Write(int64_t offs
 // Includes the file's own unsynced writes: buffered chunks are flushed first so the blob holds them, and the limit is
 // m_size rather than the published m_syncSize.
 template <typename TBlob>
-int64_t BasicReadWriteFileImpl<TBlob>::Read(int64_t offset, int64_t bytesRequested, char* buffer) {
+int64_t BasicReadWriteFileImpl<TBlob>::Read(const int64_t offset, const int64_t bytesRequested, char* buffer) {
+    return Block(*m_w.H.Blob, ReadAsync(offset, bytesRequested, buffer));
+}
+
+template <typename TBlob>
+BlobOperations::Task<int64_t> BasicReadWriteFileImpl<TBlob>::ReadAsync(const int64_t offset, int64_t bytesRequested,
+                                                                       char* buffer) {
     RangeCheck::ThrowIfInvalid(offset, bytesRequested, "Read");
-    if (!m_bufferStats.empty()) {
-        Flush();
-    }
+    co_await FlushAsync();
 
     if (offset >= m_size) {
-        return 0;
+        co_return 0;
     }
 
     // Cached pages may predate this file's unsynced writes.
     if (m_w.H.FileCache && !m_dirty) {
         const auto bytesRead = m_w.H.FileCache->ReadFile(m_w.H.Name, offset, bytesRequested, buffer);
         if (bytesRead) {
-            return static_cast<int64_t>(*bytesRead);
+            co_return static_cast<int64_t>(*bytesRead);
         }
     }
 
-    const auto bytesCanRead = m_size - offset;
-    if (bytesCanRead < bytesRequested)
-        bytesRequested = bytesCanRead;
-
-    std::span<char> readBuffer(buffer, static_cast<size_t>(bytesRequested));
-    return BlobOperations::DownloadToBuffer(*m_w.H.Blob, readBuffer, offset, bytesRequested);
+    bytesRequested = std::min(bytesRequested, m_size - offset);
+    if (bytesRequested <= 0) {
+        co_return 0;
+    }
+    co_return co_await BlobOperations::DownloadAsync(
+        *m_w.H.Blob, std::span<char>(buffer, static_cast<size_t>(bytesRequested)), offset, bytesRequested);
 }
 
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

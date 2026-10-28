@@ -8,6 +8,7 @@
 #include <AVEVA/AzureClient/AzureRequestOptions.hpp>
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
 #include <atomic>
+#include <boost/asio/awaitable.hpp>
 #include <boost/intrusive/list.hpp>
 #include <boost/log/trivial.hpp>
 #include <chrono>
@@ -78,41 +79,11 @@ class BasicLockFileImpl
     void Renew() const;
     // Renews the lease unless it was released concurrently; returns false when there was nothing to renew.
     [[nodiscard]] bool RenewIfLocked() const;
-    // Starts a renewal without blocking, so many leases can renew at once. The request is cancelled at the renewal
-    // deadline. The caller must keep this object alive until the callback has run.
-    // `callback(std::exception_ptr, bool)` is called once with the failure (null on success) and whether a renewal
-    // happened (false when the lease was not held or was released concurrently). It runs on the host io_context, or
-    // inline in RenewAsync when the renewal cannot be started, so it must not block. The renewed flag is false when
-    // the lease was released while the request was in flight, which is expected rather than a failure.
-    template <typename THandler> void RenewAsync(THandler callback) const {
-        std::optional<RenewalAttempt> attempt;
-        try {
-            attempt = BeginRenewal();
-        } catch (...) {
-            callback(std::current_exception(), true);
-            return;
-        }
-        if (!attempt.has_value()) {
-            callback(nullptr, false);
-            return;
-        }
-
-        StartOperation(m_file->get_executor(),
-                       m_file->RenewLeaseAsync(std::move(attempt->Options), std::move(attempt->RequestOptions)),
-                       std::stop_token{},
-                       [this, leaseId = std::move(attempt->LeaseId), requestStart = attempt->Start,
-                        callback = std::move(callback)](std::exception_ptr failure, auto result) mutable {
-                           if (!failure) {
-                               try {
-                                   Unwrap(std::move(result));
-                               } catch (...) {
-                                   failure = std::current_exception();
-                               }
-                           }
-                           const auto [error, renewed] = FinishRenewal(leaseId, requestStart, std::move(failure));
-                           callback(error, renewed);
-                       });
-    }
+    // Renews the lease without blocking a thread, so many leases can renew at once. The request is cancelled at the
+    // renewal deadline. Returns whether a renewal happened: false when the lease was not held or was released while
+    // the request was in flight, which is expected rather than a failure. Throws on any other failure, including a
+    // missed renewal deadline. The caller must keep this object alive until the awaitable completes.
+    [[nodiscard]] boost::asio::awaitable<bool> RenewAsync() const;
     void Unlock();
 
     [[nodiscard]] std::chrono::seconds TimeSinceLastRenewal() const;

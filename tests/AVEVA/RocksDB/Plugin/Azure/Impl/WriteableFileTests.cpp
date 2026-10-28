@@ -149,9 +149,18 @@ class WriteableFileTests : public ::testing::Test {
         auto file = MakeFile(3 * pageSize);
         file.Append(expected);
 
-        g_failSmallAllocation = true;
-        EXPECT_THROW(file.Flush(), std::bad_alloc);
-        g_failSmallAllocation = false;
+        // The payload owner is allocated by the coroutine on the client's executor, so the failure is armed there.
+        const auto failOnTheExecutor = [&]() -> AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations::Task<void> {
+            g_failSmallAllocation = true;
+            try {
+                co_await file.FlushAsync();
+            } catch (...) {
+                g_failSmallAllocation = false;
+                throw;
+            }
+            g_failSmallAllocation = false;
+        };
+        EXPECT_THROW(AVEVA::RocksDB::Plugin::Azure::Impl::Block(*m_env.Client, failOnTheExecutor()), std::bad_alloc);
 
         file.Sync();
         EXPECT_EQ(expected, Prefix(m_env.Blob->Bytes(), expected.size()));
@@ -171,6 +180,27 @@ TEST_F(WriteableFileTests, SinglePageBuffer_IsRejectedInsteadOfSpinningInAppend)
     file.Append(data);
     file.Sync();
     EXPECT_EQ(std::vector<char>(200, 'x'), Prefix(m_env.Blob->Bytes(), 200));
+}
+
+TEST_F(WriteableFileTests, AwaitableOperations_AppendSyncAndClose_PersistTheData) {
+    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
+    m_env.Blob->SetCapacity(64 * pageSize);
+    // Several buffers' worth, so AppendAsync has to wait for uploads before it can accept more data.
+    std::vector<char> expected;
+    for (int64_t i = 0; i < 12 * pageSize + 100; ++i) {
+        expected.push_back(static_cast<char>('a' + (i * 3) % 26));
+    }
+
+    auto file = MakeFile(2 * pageSize);
+    const auto writeAll = [&]() -> AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations::Task<void> {
+        co_await file.AppendAsync(expected);
+        co_await file.FlushAsync();
+        co_await file.CloseAsync();
+    };
+    AVEVA::RocksDB::Plugin::Azure::Impl::Block(*m_env.Client, writeAll());
+
+    EXPECT_EQ(expected, Prefix(m_env.Blob->Bytes(), expected.size()));
+    EXPECT_EQ(static_cast<int64_t>(expected.size()), file.GetFileSize());
 }
 
 TEST_F(WriteableFileTests, Flush_KeepsTheTailAcrossTheBufferSwap) {

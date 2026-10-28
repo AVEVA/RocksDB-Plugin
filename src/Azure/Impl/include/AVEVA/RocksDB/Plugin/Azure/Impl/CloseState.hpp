@@ -25,6 +25,9 @@ class CloseState {
 
     [[nodiscard]] bool IsClosed() const noexcept { return m_closed; }
 
+    // For coroutine closers, which run their own (awaited) sync and then record success here.
+    void MarkClosed() noexcept { m_closed = true; }
+
     template <typename SyncFn> void Close(SyncFn&& sync) {
         if (!m_closed) {
             sync();

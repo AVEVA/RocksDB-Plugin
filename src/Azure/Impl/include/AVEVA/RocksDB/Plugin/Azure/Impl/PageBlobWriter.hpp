@@ -37,14 +37,21 @@ template <typename TBlob> class PageBlobWriter {
     /// keeps repeated writes past the end from each paying for a resize request.
     /// </summary>
     void EnsureCapacity(const int64_t requiredCapacity) {
+        if (requiredCapacity > m_capacity) {
+            Block(*H.Blob, EnsureCapacityAsync(requiredCapacity));
+        }
+    }
+
+    /// <summary>The awaitable EnsureCapacity, for callers already running on the client's executor.</summary>
+    [[nodiscard]] BlobOperations::Task<void> EnsureCapacityAsync(const int64_t requiredCapacity) {
         if (requiredCapacity <= m_capacity) {
-            return;
+            co_return;
         }
         const auto [_, desiredSize] = BlobHelpers::RoundToEndOfNearestPage(GrowthTarget(requiredCapacity, m_capacity));
 
         BOOST_LOG_SEV(*H.Logger, boost::log::trivial::debug)
             << "Expanding file '" << H.Name << "' to " << desiredSize << " bytes";
-        Resize(desiredSize);
+        co_await ResizeAsync(desiredSize);
     }
 
     /// <summary>
@@ -62,8 +69,10 @@ template <typename TBlob> class PageBlobWriter {
     void AdoptCapacity(const int64_t capacity) noexcept { m_capacity = capacity; }
 
     /// <summary>Sets the blob's capacity exactly and tracks it.</summary>
-    void Resize(const int64_t capacity) {
-        BlobOperations::SetCapacity(*H.Runtime, *H.Blob, capacity);
+    void Resize(const int64_t capacity) { Block(*H.Blob, ResizeAsync(capacity)); }
+
+    [[nodiscard]] BlobOperations::Task<void> ResizeAsync(const int64_t capacity) {
+        co_await BlobOperations::SetCapacityAsync(*H.Runtime, *H.Blob, capacity);
         m_capacity = capacity;
     }
 
@@ -72,6 +81,10 @@ template <typename TBlob> class PageBlobWriter {
     /// write; it changes the ETag, which is why callers skip it when nothing new is to be published.
     /// </summary>
     void PublishSize(const int64_t size) { BlobOperations::SetSize(*H.Runtime, *H.Blob, size); }
+
+    [[nodiscard]] BlobOperations::Task<void> PublishSizeAsync(const int64_t size) {
+        co_await BlobOperations::SetSizeAsync(*H.Runtime, *H.Blob, size);
+    }
 
     /// <summary>Marks the cached copy stale before the blob changes, so a reader never serves the old bytes.</summary>
     void MarkStale() const {
