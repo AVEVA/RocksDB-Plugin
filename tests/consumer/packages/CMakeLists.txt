@@ -1,0 +1,30 @@
+# Minimal external consumer of the installed packages. Run by the install-consume job in
+# .github/workflows/build-and-test.yml; it is not part of the main build.
+cmake_minimum_required(VERSION 3.25)
+project(consumer CXX)
+find_package(aveva-rocksdb-plugin-azure CONFIG REQUIRED)
+add_executable(consumer main.cpp)
+target_link_libraries(consumer PRIVATE aveva::rocksdb-plugin-azure)
+target_compile_features(consumer PRIVATE cxx_std_23)
+
+# One executable per separately installable package, so a broken find_dependency in any of their
+# config templates fails here instead of only when a consumer picks that package on its own.
+foreach(pkg IN ITEMS http_client azure_client core azure_impl)
+  if(pkg STREQUAL "http_client")
+    set(pkg_name aveva-http-client)
+    set(pkg_target aveva::http-client)
+  elseif(pkg STREQUAL "azure_client")
+    set(pkg_name aveva-azure-client)
+    set(pkg_target aveva::azure-client)
+  elseif(pkg STREQUAL "core")
+    set(pkg_name aveva-rocksdb-plugin-core)
+    set(pkg_target aveva::rocksdb-plugin-core)
+  else()
+    set(pkg_name aveva-rocksdb-plugin-azure-impl)
+    set(pkg_target aveva::rocksdb-plugin-azure-impl)
+  endif()
+  find_package(${pkg_name} CONFIG REQUIRED)
+  add_executable(consume_${pkg} ${pkg}.cpp)
+  target_link_libraries(consume_${pkg} PRIVATE ${pkg_target})
+  target_compile_features(consume_${pkg} PRIVATE cxx_std_23)
+endforeach()
