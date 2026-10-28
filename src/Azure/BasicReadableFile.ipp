@@ -13,6 +13,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include <algorithm>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/container/small_vector.hpp>
 #include <boost/container/static_vector.hpp>
 #include <boost/scope/scope_exit.hpp>
 #include <cassert>
@@ -195,7 +196,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
                                                       const rocksdb::IOOptions& opts, rocksdb::IODebugContext*) {
     // Tracks which requests have an outcome, kept outside the try so the batch-level handler can still read it. It
     // is sized inside the try; if that allocation fails it stays empty and every request counts as unresolved.
-    std::vector<char> resolved;
+    boost::container::small_vector<char, 32> resolved;
     // Fixed before any planning or cache probing, so slow setup spends the caller's budget instead of extending it.
     const auto deadline =
         Impl::ReadableFileDetail::DeadlineAfter(std::chrono::ceil<std::chrono::milliseconds>(opts.timeout));
@@ -233,8 +234,8 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
         // download.
         // Slots a hit consumed to their end are retired only after the whole pass, so a later member (reverse order,
         // duplicate or overlapping range) can still be served from them instead of downloading resident bytes.
-        std::vector<uint64_t> exhausted;
-        std::vector<size_t> order;
+        boost::container::small_vector<uint64_t, 32> exhausted;
+        boost::container::small_vector<size_t, 32> order;
         order.reserve(num_reqs);
         for (size_t i = 0; i < num_reqs; ++i) {
             if (Impl::RangeCheck::IsValid(reqs[i].offset, reqs[i].len)) {
@@ -266,7 +267,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
         }
         std::ranges::sort(order, [&](const size_t a, const size_t b) { return reqs[a].offset < reqs[b].offset; });
 
-        std::vector<Group> groups;
+        boost::container::small_vector<Group, 32> groups;
         for (size_t position = 0; position < order.size(); ++position) {
             const auto& req = reqs[order[position]];
             const uint64_t end = req.offset + req.len;
