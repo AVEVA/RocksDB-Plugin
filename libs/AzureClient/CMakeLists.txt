@@ -44,6 +44,8 @@ add_library(aveva_azure_client_ubsan INTERFACE)
 add_library(aveva_azure_client_tsan INTERFACE)
 add_library(aveva_azure_client_coverage INTERFACE)
 
+# In-tree builds are instrumented by the parent's AVEVA_ROCKSDB_SANITIZER, so the standalone switches apply only here.
+if(PROJECT_IS_TOP_LEVEL)
 if(AVEVA_AZURE_CLIENT_ENABLE_ASAN)
     if(MSVC)
         target_compile_options(aveva_azure_client_asan INTERFACE /fsanitize=address)
@@ -88,6 +90,7 @@ if(AVEVA_AZURE_CLIENT_ENABLE_COVERAGE)
     else()
         message(WARNING "AVEVA_AZURE_CLIENT_ENABLE_COVERAGE is ON, but ${CMAKE_CXX_COMPILER_ID} is not configured for coverage instrumentation.")
     endif()
+endif()
 endif()
 
 # Links every instrumentation target into `target` (a no-op for those that are disabled). BUILD_INTERFACE
