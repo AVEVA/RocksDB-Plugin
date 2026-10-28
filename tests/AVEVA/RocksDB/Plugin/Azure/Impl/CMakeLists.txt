@@ -49,15 +49,18 @@ include(GoogleTest)
 # Every test keeps the `unit` label and also gets one subsystem label (file-io, filesystem, lock,
 # runtime) so a subsystem can be run alone with `ctest -L <label>`. Suites map to subsystems by
 # name; `*Suite.*` also matches parameterised "Prefix/Suite" names. `runtime` is the catch-all, so a
-# new suite is never left undiscovered.
+# new suite is never left undiscovered. When adding a suite, list it in the matching *_suites list below
+# (match the exact TEST/TEST_F suite name) or it silently lands in `runtime`.
 set(aveva_impl_file_io_suites
     AsyncReadRequestTests AsyncReadTests HeldRequestsTests BufferChunkInfoTests RangeCheckTests
-    ReadableFileTests ReadWriteFileImplTests PageBlobWriterTests SequentialFileTests WriteableFileTests)
+    ReadableFileTests ReadWriteFileImplTests PageBlobWriterTests SequentialFileTests WriteableFileTests
+    ReadDeadlineTests ReadWriteFileGapWindowTests BlobMetadataCacheAllocationTests)
 set(aveva_impl_filesystem_suites
     AzureContainerClientTests BlobFilesystemFakeRuntimeTests BlobFilesystemFakeTests CachedFailureTests
     PageBoundaryTests RenameFailureTests BlobFilesystemTests BlobHelpersCredentialLifetimeTests
     BlobHelpersTests CredentialChainTests FileSizeMetadataTests PageRoundingTests BlobOperationsFakeBlobTests
-    BlobOperationsTests DownloadToFileTests DownloadBufferPoolTests PluginTests)
+    BlobOperationsTests DownloadToFileTests DownloadBufferPoolTests PluginTests
+    RequireFullDownloadTests RenameTempNameTests BlobOperationsPushAcceptedTests)
 set(aveva_impl_lock_suites
     AsyncReadTrackerDrainTests LeaseDeadlineTests WriteDeadlineTests WriteFenceTests
     LeaseRenewalLoopBackoffTests LeaseRenewalLoopTests LeaseRenewalLoopThrowTests LockFileImplTests)
