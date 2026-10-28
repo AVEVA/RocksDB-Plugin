@@ -294,15 +294,17 @@ template <typename TBlob>
     return {info.Size, std::move(info.ETag), fetchedAt};
 }
 
-template <typename TBlob> void SetSize(const ClientRuntimeBase& runtime, TBlob& client, int64_t size) {
+// Returns the blob's new ETag, which the response already carries, so callers need no follow-up properties request.
+template <typename TBlob> std::string SetSize(const ClientRuntimeBase& runtime, TBlob& client, int64_t size) {
     const auto writeBudget = runtime.ThrowIfWritesFenced();
     const SizeInvalidation<TBlob> invalidate(runtime, client);
     AzureClient::SetBlobMetadataOptions options;
     options.Metadata.emplace(std::string(BlobHelpers::SizeMetadataKey), std::to_string(size));
-    Call([&](auto token) {
-        return client.SetMetadataAsync(std::move(options), token,
-                                       BoundByWriteDeadline(writeBudget, client.GetDefaultRequestOptions()));
-    });
+    return Call([&](auto token) {
+               return client.SetMetadataAsync(std::move(options), token,
+                                              BoundByWriteDeadline(writeBudget, client.GetDefaultRequestOptions()));
+           })
+        .ETag;
 }
 
 template <typename TBlob> void SetCapacity(const ClientRuntimeBase& runtime, TBlob& client, int64_t capacity) {

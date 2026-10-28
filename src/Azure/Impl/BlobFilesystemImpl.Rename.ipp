@@ -59,7 +59,7 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
 
     // Copies the source's content (and logical size) into `target`, which must already exist with the source's
     // capacity. Server-side copy comes first; it needs the source to be readable by the service with the client's
-    // credential.
+    // credential. Returns the target's ETag after the final write.
     const auto copyInto = [&](auto& target) {
         if (!BlobOperations::CopyPagesServerSide(*m_runtime, srcClient, target, size, etag)) {
             BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
@@ -67,7 +67,7 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
                 << " was refused (the source could not be authorized); copying through the client instead";
             BlobOperations::CopyPages(*m_runtime, srcClient, target, size, etag);
         }
-        BlobOperations::SetSize(*m_runtime, target, size);
+        return BlobOperations::SetSize(*m_runtime, target, size);
     };
     // Best-effort cleanup that never masks the failure being unwound.
     const auto deleteQuietly = [this](auto& blob, const std::string_view name) {
@@ -118,12 +118,10 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
         BlobOperations::CreateOrReplace(*m_runtime, tempClient, cap);
         {
             boost::scope::scope_fail rollback{[&] { deleteQuietly(tempClient, tempName); }};
-            copyInto(tempClient);
-
             // Commit: replace the destination from the fully written temporary blob.
-            // The temporary blob's capacity is the source's, already known; only its current ETag is needed to
-            // condition the copy. The destination's logical size stays 0 until the last step.
-            const auto tempEtag = BlobOperations::GetInfo(tempClient).ETag;
+            // The ETag from the temporary blob's final write conditions the copy. The destination's logical size
+            // stays 0 until the last step.
+            const auto tempEtag = copyInto(tempClient);
             BlobOperations::CreateOrReplace(*m_runtime, destClient, cap);
             if (!BlobOperations::CopyPagesServerSide(*m_runtime, tempClient, destClient, size, tempEtag)) {
                 BlobOperations::CopyPages(*m_runtime, tempClient, destClient, size, tempEtag);
