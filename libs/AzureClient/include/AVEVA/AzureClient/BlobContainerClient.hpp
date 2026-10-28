@@ -34,6 +34,7 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -152,6 +153,21 @@ class BasicBlobContainerClient : Private::ClientCore<THttp, Private::BasicContai
     // Clients are cheap, movable values (one shared target allocation each); no heap-allocated wrapper is needed.
     [[nodiscard]] PageBlobClientType GetPageBlobClient(std::string blobName) const {
         return PageBlobClientType{*m_httpClient, MakeBlobTarget(std::move(blobName)), m_httpOwner};
+    }
+
+    // The ResourceUrl() that GetPageBlobClient(blobName) would report, built without constructing a client. For
+    // callers that only need the identity key of a blob, e.g. to consult a cache before paying for a client.
+    [[nodiscard]] std::string BlobResourceUrl(std::string_view blobName) const {
+        if (blobName.empty()) {
+            throw std::invalid_argument("BlobName must not be empty.");
+        }
+        const auto& container = m_target->EncodedResource;
+        std::string url;
+        url.reserve(container.size() + blobName.size() + 1U);
+        url += container;
+        url += '/';
+        Private::UrlEncodeAppend(url, blobName, "/");
+        return url;
     }
 
     // Deletes the named blobs with Blob Batch requests (up to 256 deletes per request; longer lists are split and

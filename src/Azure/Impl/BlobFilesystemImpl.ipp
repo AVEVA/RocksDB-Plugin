@@ -329,8 +329,14 @@ inline std::string_view ChildName(std::string_view blobName, std::string_view di
 template <typename THttp> int64_t BasicBlobFilesystemImpl<THttp>::GetFileSize(const std::string& filePath) const {
     EnsureLiveness();
 
-    auto [prefix, realPath, client] = ResolveBlob(filePath);
+    const auto [prefix, realPath] = StorageAccount::StripPrefix(filePath);
+    const auto& container = GetContainer(prefix);
 
+    // A fresh cached size needs only the key; build the client only on a miss.
+    if (const auto cached = m_runtime->CachedBlobSize(container->BlobResourceUrl(realPath))) {
+        return *cached;
+    }
+    auto client = container->GetPageBlobClient(std::string(realPath));
     return BlobOperations::GetCachedSize(*m_runtime, client);
 }
 
