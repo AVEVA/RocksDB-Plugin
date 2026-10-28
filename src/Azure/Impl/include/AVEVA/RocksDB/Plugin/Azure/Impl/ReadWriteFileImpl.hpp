@@ -13,6 +13,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 
+#include <boost/container/small_vector.hpp>
 #include <boost/log/trivial.hpp>
 
 #include <cstdint>
@@ -38,8 +39,8 @@ template <typename TBlob> class BasicReadWriteFileImpl {
     struct Extent {
         int64_t Start = 0;
         int64_t End = 0;
-        std::vector<size_t> Chunks;              // indices into m_bufferStats, in write order
-        std::shared_ptr<std::vector<char>> Data; // shared so each upload's request views it without a copy
+        boost::container::small_vector<size_t, 8> Chunks; // indices into m_bufferStats, in write order
+        std::shared_ptr<std::vector<char>> Data;          // shared so each upload's request views it without a copy
     };
     struct GapRead {
         BlobOperations::PendingDownload<TBlob> Download;

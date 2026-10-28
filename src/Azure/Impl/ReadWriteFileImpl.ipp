@@ -8,6 +8,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/RangeCheck.hpp"
 #include <algorithm>
 #include <atomic>
+#include <boost/container/small_vector.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/scope/scope_exit.hpp>
 
@@ -129,7 +130,7 @@ void BasicReadWriteFileImpl<TBlob>::PrepareExtent(Extent& extent, int64_t sizeBe
     constexpr int64_t maxBridgedBytes = Configuration::PageBlob::PageSize;
     // A reused buffer holds an earlier flush's bytes, so everything not downloaded or copied later is zeroed.
     extent.Data = AcquireExtentBuffer(static_cast<size_t>(extent.End - extent.Start));
-    std::vector<std::pair<int64_t, int64_t>> covered;
+    boost::container::small_vector<std::pair<int64_t, int64_t>, 8> covered;
     covered.reserve(extent.Chunks.size());
     for (const auto index : extent.Chunks) {
         const auto& chunk = m_bufferStats[index];
