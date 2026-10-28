@@ -8,6 +8,9 @@ inputs:
   cache-suffix:
     description: Appended to the cache key and restore prefix, for jobs whose vcpkg ABI differs from the shared one.
     default: ""
+  extra-hash-files:
+    description: Glob hashed into the cache key in addition to the vcpkg manifests, for jobs that depend on extra files such as overlay ports.
+    default: ""
 
 outputs:
   cache-hit:
@@ -49,11 +52,10 @@ runs:
     - name: Compute vcpkg binary cache key
       id: key
       shell: bash
-      run: echo "key=vcpkg-${{ runner.os }}${{ inputs.cache-suffix }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'infrastructure/vcpkg-overlays/**') }}" >> "$GITHUB_OUTPUT"
+      run: echo "key=vcpkg-${{ runner.os }}${{ inputs.cache-suffix }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}${{ inputs.extra-hash-files != '' && format('-{0}', hashFiles(inputs.extra-hash-files)) || '' }}" >> "$GITHUB_OUTPUT"
     - name: Restore vcpkg binary cache
       id: cache
       uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: ${{ runner.temp }}/vcpkg-binary-cache
         key: ${{ steps.key.outputs.key }}
-        restore-keys: vcpkg-${{ runner.os }}${{ inputs.cache-suffix }}-

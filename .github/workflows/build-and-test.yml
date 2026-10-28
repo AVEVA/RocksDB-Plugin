@@ -219,6 +219,7 @@ jobs:
         if: steps.changes.outputs.relevant == 'true'
         with:
           cache-suffix: -db-bench
+          extra-hash-files: infrastructure/vcpkg-overlays/**
 
       - name: Configure and build with db_bench
         if: steps.changes.outputs.relevant == 'true'
