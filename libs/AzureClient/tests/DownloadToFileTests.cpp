@@ -33,34 +33,10 @@ using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
 using AVEVA::AzureClient::Tests::PageBlobClient;
+using AVEVA::AzureClient::Tests::RunAwaitable;
 
 [[nodiscard]] BlobClientOptions BuildOptions() { return MakeBlobClientOptions("logs", "t06.txt"); }
 
-void VerifyDownloadToPathSuccess(const std::expected<Response<DownloadBlobToResult>, BlobStorageError>& result,
-                                 bool& invoked) {
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result->Value().BytesWritten, 10U);
-    invoked = true;
-}
-
-void StartDownloadToPathAndVerifySuccess(PageBlobClient& client, const std::filesystem::path& path, bool& invoked) {
-    client.DownloadToAsync(path, [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result) {
-        VerifyDownloadToPathSuccess(result, invoked);
-    });
-}
-
-void VerifyDownloadToPathFailure(const std::expected<Response<DownloadBlobToResult>, BlobStorageError>& result,
-                                 bool& invoked) {
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::connection_reset));
-    invoked = true;
-}
-
-void StartDownloadToPathAndVerifyFailure(PageBlobClient& client, const std::filesystem::path& path, bool& invoked) {
-    client.DownloadToAsync(path, [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result) {
-        VerifyDownloadToPathFailure(result, invoked);
-    });
-}
 } // namespace
 
 TEST(T06_DownloadToFileTests, SuccessRenamesAtomic) {
@@ -80,14 +56,9 @@ TEST(T06_DownloadToFileTests, SuccessRenamesAtomic) {
         ofs << "original";
     }
 
-    bool invoked = false;
-    StartDownloadToPathAndVerifySuccess(client, path, invoked);
-
-    // Complete the in-flight HTTP response. FakeHttpClient may complete inline or defer the
-    // completion onto its executor depending on CompleteInline, so Poll() first to run any
-    // posted completion and only then check whether the callback has been invoked.
-    httpClient.Poll();
-    EXPECT_TRUE(invoked);
+    const auto result = RunAwaitable(httpClient, client.DownloadToAsync(path));
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->Value().BytesWritten, 10U);
 
     // Verify file content was replaced with downloaded data
     std::ifstream ifs(path, std::ios::binary);
@@ -105,14 +76,9 @@ TEST(T06_DownloadToFileTests, DirectoryTargetReportsIsADirectory) {
     const std::filesystem::path dir = scratch.Path() / "target";
     std::filesystem::create_directories(dir);
 
-    bool invoked = false;
-    client.DownloadToAsync(dir, [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result) {
-        invoked = true;
-        ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::is_a_directory));
-    });
-    httpClient.Poll();
-    EXPECT_TRUE(invoked);
+    const auto result = RunAwaitable(httpClient, client.DownloadToAsync(dir));
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::is_a_directory));
     EXPECT_TRUE(std::filesystem::is_directory(dir));
 }
 
@@ -132,15 +98,9 @@ TEST(T06_DownloadToFileTests, HttpFailureRemovesPartialAndLeavesTargetUntouched)
         ofs << "preserved";
     }
 
-    bool invoked = false;
-    StartDownloadToPathAndVerifyFailure(client, path, invoked);
-
-    // Complete the scripted failure
-    // FakeHttpClient completes synchronously for EnqueueResponse unless deferred; use CompleteNext if deferred
-    // Here SendAsyncErased will invoke completion immediately.
-    // No pending item expected; but ensure callback ran by polling executor
-    httpClient.Poll();
-    EXPECT_TRUE(invoked);
+    const auto result = RunAwaitable(httpClient, client.DownloadToAsync(path));
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::connection_reset));
 
     // Ensure no partial files remain (look for filename.partial-*)
     bool foundPartial = false;

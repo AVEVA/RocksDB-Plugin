@@ -70,14 +70,9 @@ TEST(BlobServiceClientTests, DerivedClientsSignWithTheSharedConnectionSigner) {
     AVEVA::AzureClient::Tests::BlobContainerClient container = service.GetBlobContainerClient("images");
     auto blob = container.GetPageBlobClient("folder/photo.png");
 
-    int completions = 0;
-    container.ListBlobsAsync([&](auto) { ++completions; });
-    blob.DeleteAsync([&](auto result) {
-        EXPECT_TRUE(result.has_value());
-        ++completions;
-    });
-    httpClient.Poll();
-    EXPECT_EQ(completions, 2);
+    (void)AVEVA::AzureClient::Tests::RunAwaitable(httpClient, container.ListBlobsAsync());
+    const auto deleted = AVEVA::AzureClient::Tests::RunAwaitable(httpClient, blob.DeleteAsync());
+    EXPECT_TRUE(deleted.has_value());
 
     ASSERT_EQ(httpClient.Requests().size(), 2U);
     for (const auto& record : httpClient.Requests()) {

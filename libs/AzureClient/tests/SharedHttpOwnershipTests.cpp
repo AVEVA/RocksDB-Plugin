@@ -26,6 +26,7 @@ using AVEVA::AzureClient::Tests::MakeBlobContainerClientOptions;
 using AVEVA::AzureClient::Tests::MakeBlobServiceClientOptions;
 using AVEVA::AzureClient::Tests::ManagedIdentityCredential;
 using AVEVA::AzureClient::Tests::PageBlobClient;
+using AVEVA::AzureClient::Tests::RunAwaitable;
 
 // A transport nobody but the clients under test refers to, so `Expired` tells whether any of them still holds it.
 struct SharedTransport {
@@ -43,7 +44,7 @@ TEST(SharedHttpOwnershipTests, BlobClientKeepsTheTransportAliveUntilItIsDestroye
     client.emplace(transport.Release(), MakeBlobClientOptions());
 
     EXPECT_FALSE(transport.Expired());
-    client->DeleteIfExistsAsync([](auto) {});
+    (void)RunAwaitable(*transport.Weak.lock(), client->DeleteIfExistsAsync());
     EXPECT_EQ(1U, transport.Weak.lock()->RequestCount());
 
     client.reset();
@@ -59,7 +60,7 @@ TEST(SharedHttpOwnershipTests, BlobClientsFromAContainerOutliveTheContainer) {
     container.reset();
     EXPECT_FALSE(transport.Expired());
 
-    blob.DeleteIfExistsAsync([](auto) {});
+    (void)RunAwaitable(*transport.Weak.lock(), blob.DeleteIfExistsAsync());
     EXPECT_EQ(1U, transport.Weak.lock()->RequestCount());
 }
 

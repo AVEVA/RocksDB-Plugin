@@ -9,6 +9,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/SequentialFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
+#include "BackgroundPump.hpp"
 #include "BasicReadableFile.hpp"
 #include "FakeBlobServer.hpp"
 #include "FakeHttpClient.hpp"
@@ -47,8 +48,8 @@ using SlowProbeReadableFile = BasicReadableFile<SlowProbeReadableFileImpl>;
 
 // Everything a file object needs to run against an in-memory blob: the library's real page blob client talking to a
 // FakeBlobServer through the fake HTTP transport. `Blob` is the server (the blob's state and the requests it saw);
-// `Client` is what the file classes are constructed with. Completions run inline on the calling thread, and a
-// background pump runs the ones the client posts itself (validation failures, download sink writes).
+// `Client` is what the file classes are constructed with. A background pump drives the transport's io_context, so
+// every completion runs on that thread while the test thread blocks in the file classes.
 //
 // Members are declared so that teardown runs in the production order: the client is released before the transport,
 // which is released before the runtime.
@@ -60,13 +61,13 @@ struct FakeBlobEnvironment {
     std::shared_ptr<BasicClientRuntime<FakeHttpClient>> Runtime =
         std::make_shared<BasicClientRuntime<FakeHttpClient>>(std::make_unique<FakeHttpClient>());
     FakeHttpClient& Http = Runtime->HttpClient();
+    // Stopped after the client and server are released and before the runtime, which owns the transport it drives.
+    BackgroundPump Pump{Http};
     std::shared_ptr<FakeBlobServer> Blob;
     std::shared_ptr<FakeBlobServer::BlobClientType> Client;
 
     explicit FakeBlobEnvironment(const std::string& container = "files", const std::string& blob = "test.sst")
         : Blob(std::make_shared<FakeBlobServer>(Http, container, blob)), Client(Blob->Client) {
-        Http.CompleteInline() = true;
-        Http.StartBackgroundPump();
         Runtime->SetMetadataClockForTesting(&m_metadataClockNanos);
     }
 

@@ -22,6 +22,7 @@ using AVEVA::AzureClient::Tests::MakeAzureErrorResponse;
 using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 using AVEVA::AzureClient::Tests::MakeBlobContainerClientOptions;
 using AVEVA::AzureClient::Tests::PageBlobClient;
+using AVEVA::AzureClient::Tests::RunAwaitable;
 
 struct Observed {
     bool Succeeded = false;
@@ -35,8 +36,9 @@ template <class TStart>
 [[nodiscard]] Observed RunSuppressed(FakeHttpClient& httpClient, unsigned int status, std::string_view code,
                                      TStart start) {
     httpClient.EnqueueResponse(MakeAzureErrorResponse(status, code, "suppressed", "req-1"));
-    std::optional<Observed> observed;
-    start([&](auto result) {
+    Observed observed;
+    {
+        auto result = RunAwaitable(httpClient, start());
         Observed value;
         value.Succeeded = result.has_value();
         if (result.has_value()) {
@@ -49,10 +51,8 @@ template <class TStart>
             value.ErrorRequestId = result->Error().has_value() ? result->Error()->RequestId : std::string{};
         }
         observed = value;
-    });
-    httpClient.Poll();
-    EXPECT_TRUE(observed.has_value());
-    return observed.value_or(Observed{});
+    }
+    return observed;
 }
 
 } // namespace
@@ -62,10 +62,10 @@ TEST(SuppressedErrorResponseTests, OtherFailuresAreStillReported) {
     PageBlobClient blockBlob{httpClient, MakeBlobClientOptions()};
     BlobContainerClient container{httpClient, MakeBlobContainerClientOptions()};
 
-    EXPECT_FALSE(RunSuppressed(httpClient, 403, "AuthorizationFailure", [&](auto completion) {
-                     blockBlob.DeleteIfExistsAsync(std::move(completion));
+    EXPECT_FALSE(RunSuppressed(httpClient, 403, "AuthorizationFailure", [&] {
+                     return blockBlob.DeleteIfExistsAsync();
                  }).Succeeded);
-    EXPECT_FALSE(RunSuppressed(httpClient, 409, "ContainerBeingDeleted", [&](auto completion) {
-                     container.CreateIfNotExistsAsync(std::move(completion));
+    EXPECT_FALSE(RunSuppressed(httpClient, 409, "ContainerBeingDeleted", [&] {
+                     return container.CreateIfNotExistsAsync();
                  }).Succeeded);
 }

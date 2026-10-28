@@ -5,6 +5,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientFactory.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
+#include "BackgroundPump.hpp"
 #include "FakeHttpClient.hpp"
 #include "TestSupport.hpp"
 
@@ -36,12 +37,8 @@ namespace ClientFactory = AVEVA::RocksDB::Plugin::Azure::Impl::ClientFactory;
 namespace {
 class BlobHelpersTests : public ::testing::Test {
   protected:
-    void SetUp() override {
-        m_httpClient.CompleteInline() = true;
-        m_httpClient.StartBackgroundPump();
-    }
-
     FakeHttpClient m_httpClient;
+    AVEVA::RocksDB::Plugin::Azure::Impl::Tests::BackgroundPump m_pump{m_httpClient};
 };
 
 TEST_F(BlobHelpersTests, ForbiddenIsNotRetried) {

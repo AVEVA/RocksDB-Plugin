@@ -10,7 +10,6 @@
 #include "IntegrationTestHelpers.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
-#include <boost/asio/use_future.hpp>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -1470,8 +1469,10 @@ TEST_F(BlobFilesystemIntegrationTests, ReadableFile_CachedSst_IsServedFromCacheA
     EXPECT_EQ(data, buffer);
 
     // The blob is gone, so a further hit proves the data comes from the local cache and not from a download.
-    AVEVA::RocksDB::Plugin::Azure::Impl::Unwrap(
-        m_containerClient->GetPageBlobClient(m_root + "/" + blobName).DeleteAsync(boost::asio::use_future).get());
+    {
+        auto blob = m_containerClient->GetPageBlobClient(m_root + "/" + blobName);
+        AVEVA::RocksDB::Plugin::Azure::Impl::Call(blob, blob.DeleteAsync());
+    }
     std::fill(buffer.begin(), buffer.end(), '\0');
     const auto again = file->TryReadFromCache(0, static_cast<int64_t>(buffer.size()), buffer.data());
     ASSERT_TRUE(again.has_value());

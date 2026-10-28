@@ -755,7 +755,9 @@ TEST_F(AsyncReadTests, Prefetch_ConfiguredBudget_CapsPrefetchedBytes) {
 }
 
 TEST_F(AsyncReadTests, Prefetch_AllocationFailureWhileAdmitting_RestoresBudgetAndLeavesNoPendingSlot) {
-    for (size_t failAt = 1; failAt <= 2; ++failAt) {
+    // The read behind a prefetch is started on the client executor, so the only fallible allocation left on the
+    // calling thread is the budget charge.
+    for (size_t failAt = 1; failAt <= 1; ++failAt) {
         auto budget = std::make_shared<std::atomic<int64_t>>(0);
         auto file = std::make_shared<FakeReadableFileImpl>("test-" + std::string(200, 'n'), m_deferredEnv.Runtime,
                                                            m_deferredEnv.Client, nullptr, m_logger, nullptr, budget);
@@ -1146,7 +1148,8 @@ TEST_F(AsyncReadTests, MultiRead_TimeoutIsOneBudgetForTheBatch_ExpiredQueuedGrou
     first.Succeed(Expected(first.Request.Offset, 16));
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
 
-    // Finishing the first wave after the deadline frees the window; the queued groups must not start new reads.
+    // Completing the first read before the deadline frees the window for one more group; once the deadline has
+    // passed the remaining queued groups must not start new reads.
     size_t served = 1;
     size_t startedAfterExpiry = 0;
     while (!done) {
@@ -1156,7 +1159,7 @@ TEST_F(AsyncReadTests, MultiRead_TimeoutIsOneBudgetForTheBatch_ExpiredQueuedGrou
         }
         auto download = m_deferredEnv.Blob->TakeDownload();
         download.Succeed(Expected(download.Request.Offset, 16));
-        if (++served > 32) {
+        if (++served > 33) {
             ++startedAfterExpiry;
         }
     }
@@ -1496,6 +1499,7 @@ TEST_F(AsyncReadTests, AbortIO_WhileInFlight_ReturnsImmediatelyAndLateDataIsDrop
     CallbackRecord record;
     IoHandle handle;
     ASSERT_TRUE(Submit(file, req, record, handle).ok());
+    AVEVA::RocksDB::Plugin::Azure::Impl::Tests::Settle(m_deferredEnv.Http);
 
     std::vector<void*> handles{handle.Handle};
     ASSERT_TRUE(AbortAsyncReads(handles).ok());
@@ -1503,7 +1507,9 @@ TEST_F(AsyncReadTests, AbortIO_WhileInFlight_ReturnsImmediatelyAndLateDataIsDrop
     EXPECT_TRUE(record.Status.IsAborted()) << record.Status.ToString();
 
     handle.Reset();
-    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(32, 'F'));
+    // Aborting cancels the request on the transport, so there is no late data left to deliver.
+    AVEVA::RocksDB::Plugin::Azure::Impl::Tests::Settle(m_deferredEnv.Http);
+    EXPECT_EQ(0U, m_deferredEnv.Blob->PendingDownloads());
     EXPECT_EQ(std::string(32, 'x'), std::string(scratch.begin(), scratch.end()));
     EXPECT_EQ(1, record.Calls.load());
 }
@@ -1713,10 +1719,12 @@ TEST_F(AsyncReadTests, DeleteHandle_BeforeCompletion_NeverCallsBackOrWritesScrat
     {
         IoHandle handle;
         ASSERT_TRUE(Submit(file, req, record, handle).ok());
+        AVEVA::RocksDB::Plugin::Azure::Impl::Tests::Settle(m_deferredEnv.Http);
     }
 
-    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(32, 'G'));
-
+    // Deleting the handle cancels the request on the transport, so there is no late data left to deliver.
+    AVEVA::RocksDB::Plugin::Azure::Impl::Tests::Settle(m_deferredEnv.Http);
+    EXPECT_EQ(0U, m_deferredEnv.Blob->PendingDownloads());
     EXPECT_EQ(0, record.Calls.load());
     EXPECT_EQ(std::string(32, 'x'), std::string(scratch.begin(), scratch.end()));
 }

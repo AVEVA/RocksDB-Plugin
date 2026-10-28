@@ -7,7 +7,6 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
 #include "IntegrationTestHelpers.hpp"
 
-#include <boost/asio/use_future.hpp>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -115,8 +114,8 @@ TEST_F(WriteableFileIntegrationTests, Flush_PersistsData_ToBlob) {
     AVEVA::AzureClient::DownloadBlobOptions options;
     options.Range = AVEVA::AzureClient::Models::BlobByteRange{0, static_cast<uint64_t>(downloadSize)};
 
-    const auto result = AVEVA::RocksDB::Plugin::Azure::Impl::Unwrap(
-        pageBlobClient.DownloadAsync(std::move(options), boost::asio::use_future).get());
+    const auto result =
+        AVEVA::RocksDB::Plugin::Azure::Impl::Call(pageBlobClient, pageBlobClient.DownloadAsync(std::move(options)));
     std::copy_n(result.Content.begin(), std::min(downloadedData.size(), result.Content.size()), downloadedData.begin());
 
     // Verify the test data is at the beginning

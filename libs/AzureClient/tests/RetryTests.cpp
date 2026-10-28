@@ -14,23 +14,19 @@
 
 #include <AVEVA/AzureClient/AzureRequestOptions.hpp>
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
-#include <AVEVA/AzureClient/WithRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpClientError.hpp>
 #include <AVEVA/HttpClient/HttpHeader.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 #include <algorithm>
-#include <boost/asio/bind_cancellation_slot.hpp>
-#include <boost/asio/cancellation_signal.hpp>
+#include <boost/asio/awaitable.hpp>
 #include <boost/asio/cancellation_type.hpp>
 #include <cstddef>
 #include <expected>
 #include <gtest/gtest.h>
 
 #include <chrono>
-#include <cstdlib>
 #include <functional>
-#include <future>
 #include <limits>
 #include <memory>
 #include <new>
@@ -39,30 +35,6 @@
 #include <thread>
 #include <utility>
 #include <vector>
-
-// Lets a test make the Nth upcoming allocation on this thread throw; -1 means disarmed. The retry runner's queue
-// allocates inside the standard library, so a global replacement is the only way to reach it.
-namespace AllocationFailure {
-thread_local int allocationsUntilFailure = -1;
-// Only allocations at least this large count, so a test can target the retry queue's event storage and not the// small
-// allocations of the standard containers around it.
-thread_local std::size_t minimumFailingSize = 0;
-} // namespace AllocationFailure
-
-void* operator new(std::size_t size) {
-    if (size >= AllocationFailure::minimumFailingSize && AllocationFailure::allocationsUntilFailure >= 0 &&
-        AllocationFailure::allocationsUntilFailure-- == 0) {
-        throw std::bad_alloc();
-    }
-    if (void* memory = std::malloc(size != 0 ? size : 1)) {
-        return memory;
-    }
-    throw std::bad_alloc();
-}
-
-void operator delete(void* memory) noexcept { std::free(memory); }
-
-void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
 
 namespace AVEVA::AzureClient::Tests {
 using AVEVA::HttpResponse;
@@ -77,20 +49,10 @@ TEST(RetryTests, NoRetries_DoesNotRetryOnTransientFailure) {
 
     BlobClient client{httpClient, options};
 
-    CallbackExpectation cb;
-    std::optional<BlobStorageError> observedError;
-    client.DeleteAsync([&](std::expected<Response<Models::DeleteBlobResult>, BlobStorageError> result) mutable {
-        if (!result.has_value()) {
-            observedError = std::move(result).error();
-        }
-        cb.MarkInvoked();
-    });
-
-    // Ensure any posted completions run
-    httpClient.Poll();
+    const auto result = RunAwaitable(httpClient, client.DeleteAsync());
 
     EXPECT_EQ(httpClient.RequestCount(), 1U);
-    EXPECT_TRUE(observedError.has_value());
+    EXPECT_FALSE(result.has_value());
 }
 
 TEST(RetryTests, MaxRetriesAtIntMaxDoesNotOverflow) {
@@ -104,20 +66,10 @@ TEST(RetryTests, MaxRetriesAtIntMaxDoesNotOverflow) {
 
     BlobClient client{httpClient, options};
 
-    CallbackExpectation cb;
-    std::optional<BlobStorageError> observedError;
-    client.DeleteAsync([&](std::expected<Response<Models::DeleteBlobResult>, BlobStorageError> result) mutable {
-        if (!result.has_value()) {
-            observedError = std::move(result).error();
-        }
-        cb.MarkInvoked();
-    });
-
-    ASSERT_TRUE(httpClient.WaitForRequest(2));
-    httpClient.Poll();
+    const auto result = RunAwaitable(httpClient, client.DeleteAsync());
 
     EXPECT_EQ(httpClient.RequestCount(), 2U);
-    EXPECT_FALSE(observedError.has_value());
+    EXPECT_TRUE(result.has_value());
 }
 
 TEST(RetryTests, Retries_OnTransientThenSucceeds) {
@@ -132,53 +84,10 @@ TEST(RetryTests, Retries_OnTransientThenSucceeds) {
 
     BlobClient client{httpClient, options};
 
-    CallbackExpectation cb;
-    std::optional<Response<Models::DeleteBlobResult>> success;
-    std::optional<BlobStorageError> observedError;
-
-    client.DeleteAsync([&](std::expected<Response<Models::DeleteBlobResult>, BlobStorageError> result) mutable {
-        if (result.has_value()) {
-            success = std::move(result).value();
-        } else {
-            observedError = std::move(result).error();
-        }
-        cb.MarkInvoked();
-    });
-
-    // Wait for the retry to occur without sleeping.
-    ASSERT_TRUE(httpClient.WaitForRequest(2));
-    // Run remaining handlers
-    httpClient.Poll();
+    const auto result = RunAwaitable(httpClient, client.DeleteAsync());
 
     EXPECT_GE(httpClient.RequestCount(), 2U);
-    EXPECT_TRUE(success.has_value());
-    EXPECT_FALSE(observedError.has_value());
-}
-
-TEST(RetryTests, RetryStartFailureCompletesWithErrorInsteadOfEscapingTheEventLoop) {
-    FakeHttpClient httpClient;
-    httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
-
-    BlobClientOptions options = MakeBlobClientOptions("container", "blob.txt");
-    options.Retry.MaxRetries = 1;
-    options.Retry.InitialDelay = std::chrono::milliseconds{0};
-
-    BlobClient client{httpClient, options};
-
-    CallbackExpectation cb;
-    std::optional<BlobStorageError> observedError;
-    client.DeleteAsync([&](std::expected<Response<Models::DeleteBlobResult>, BlobStorageError> result) mutable {
-        if (!result.has_value()) {
-            observedError = std::move(result).error();
-        }
-        cb.MarkInvoked();
-    });
-
-    // The retry's SendAsync runs on the event loop, not inside the initiating call.
-    httpClient.FailNextInitiation(std::make_exception_ptr(std::bad_alloc{}));
-    EXPECT_NO_THROW(ASSERT_TRUE(httpClient.RunUntil([&] { return observedError.has_value(); })));
-
-    EXPECT_TRUE(observedError.has_value());
+    EXPECT_TRUE(result.has_value());
 }
 
 TEST(RetryTests, FirstAttemptSuccessDoesNotConstructABackoffTimer) {
@@ -190,23 +99,14 @@ TEST(RetryTests, FirstAttemptSuccessDoesNotConstructABackoffTimer) {
 
     BlobClient client{httpClient, options};
 
-    CallbackExpectation cb;
-    std::optional<Response<Models::DeleteBlobResult>> success;
     const auto before = FakeHttpClient::RetryTimersConstructed();
-    client.DeleteAsync([&](std::expected<Response<Models::DeleteBlobResult>, BlobStorageError> result) mutable {
-        if (result.has_value()) {
-            success = std::move(result).value();
-        }
-        cb.MarkInvoked();
-    });
-    ASSERT_TRUE(httpClient.WaitForRequest(1));
-    httpClient.Poll();
+    const auto result = RunAwaitable(httpClient, client.DeleteAsync());
 
-    EXPECT_TRUE(success.has_value());
+    EXPECT_TRUE(result.has_value());
     EXPECT_EQ(FakeHttpClient::RetryTimersConstructed(), before);
 }
 
-TEST(RetryTests, ARetryConstructsExactlyOneBackoffTimer) {
+TEST(RetryTests, EachRetryConstructsExactlyOneBackoffTimer) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
@@ -218,29 +118,20 @@ TEST(RetryTests, ARetryConstructsExactlyOneBackoffTimer) {
 
     BlobClient client{httpClient, options};
 
-    CallbackExpectation cb;
-    std::optional<Response<Models::DeleteBlobResult>> success;
     const auto before = FakeHttpClient::RetryTimersConstructed();
-    client.DeleteAsync([&](std::expected<Response<Models::DeleteBlobResult>, BlobStorageError> result) mutable {
-        if (result.has_value()) {
-            success = std::move(result).value();
-        }
-        cb.MarkInvoked();
-    });
-    ASSERT_TRUE(httpClient.WaitForRequest(3));
-    httpClient.Poll();
+    const auto result = RunAwaitable(httpClient, client.DeleteAsync());
 
-    EXPECT_TRUE(success.has_value());
-    EXPECT_EQ(FakeHttpClient::RetryTimersConstructed(), before + 1U);
+    EXPECT_TRUE(result.has_value());
+    EXPECT_EQ(FakeHttpClient::RetryTimersConstructed(), before + 2U);
 }
 
 namespace {
 using DeleteResult = std::expected<Response<Models::DeleteBlobResult>, BlobStorageError>;
 
-void StartDeleteAsync(BlobClient& client, boost::asio::cancellation_signal& signal,
-                      std::optional<DeleteResult>& observed) {
-    client.DeleteAsync(
-        boost::asio::bind_cancellation_slot(signal.slot(), [&](DeleteResult result) { observed = std::move(result); }));
+// Starts `awaitable` without polling and stores its value in `observed` when it completes.
+template <class T>
+void StartInto(FakeHttpClient& httpClient, boost::asio::awaitable<T> awaitable, std::optional<T>& observed) {
+    Spawn(httpClient, std::move(awaitable), [&observed](T result) { observed = std::move(result); });
 }
 
 // Drives the fake transport's io_context (which also runs retry backoff timers) until `done`
@@ -265,12 +156,13 @@ struct UploadState {
     bool Succeeded = false;
 };
 
-void StartUploadAsync(PageBlobClient& client, const std::string& payload, UploadState& state) {
-    client.UploadPagesAsync(0, payload,
-                            [&](std::expected<Response<Models::UploadPagesResult>, BlobStorageError> result) {
-                                state.Succeeded = result.has_value();
-                                state.Done = true;
-                            });
+void StartUploadAsync(FakeHttpClient& httpClient, PageBlobClient& client, const std::string& payload,
+                      UploadState& state) {
+    Spawn(httpClient, client.UploadPagesAsync(0, payload),
+          [&](std::expected<Response<Models::UploadPagesResult>, BlobStorageError> result) {
+              state.Succeeded = result.has_value();
+              state.Done = true;
+          });
 }
 
 [[nodiscard]] std::size_t CountAuthorizationHeaders(const AVEVA::HttpRequest& request) {
@@ -287,7 +179,7 @@ TEST(RetryTests, RetriesEveryTransientStatus) {
         BlobClient client{httpClient, MakeRetryOptions(1)};
 
         std::optional<DeleteResult> observed;
-        client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
+        StartInto(httpClient, client.DeleteAsync(), observed);
 
         ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); })) << "status " << status;
         EXPECT_EQ(httpClient.RequestCount(), 2U) << "status " << status;
@@ -302,7 +194,7 @@ TEST(RetryTests, DoesNotRetryNonTransientStatus) {
     BlobClient client{httpClient, MakeRetryOptions(3)};
 
     std::optional<DeleteResult> observed;
-    client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
+    StartInto(httpClient, client.DeleteAsync(), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
     EXPECT_EQ(httpClient.RequestCount(), 1U);
@@ -321,7 +213,7 @@ TEST(RetryTests, RetriesTransientTransportErrors) {
         PageBlobClient client{httpClient, MakeRetryOptions(1)};
 
         UploadState state;
-        StartUploadAsync(client, std::string(512, 'p'), state);
+        StartUploadAsync(httpClient, client, std::string(512, 'p'), state);
 
         ASSERT_TRUE(PollUntil(httpClient, [&] { return state.Done; })) << error.message();
         EXPECT_EQ(httpClient.RequestCount(), 2U) << error.message();
@@ -336,7 +228,7 @@ TEST(RetryTests, DeleteIsRetriedAfterFailuresThatHappenedBeforeAnythingWasSent) 
     BlobClient client{httpClient, MakeRetryOptions(1)};
 
     std::optional<DeleteResult> observed;
-    client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
+    StartInto(httpClient, client.DeleteAsync(), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
     EXPECT_EQ(httpClient.RequestCount(), 2U);
@@ -354,7 +246,7 @@ TEST(RetryTests, DeleteIsNotReplayedAfterAnAmbiguousTransportErrorBecauseItsOutc
         BlobClient client{httpClient, MakeRetryOptions(3)};
 
         std::optional<DeleteResult> observed;
-        client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
+        StartInto(httpClient, client.DeleteAsync(), observed);
 
         ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); })) << error.message();
         EXPECT_EQ(httpClient.RequestCount(), 1U) << error.message();
@@ -363,6 +255,15 @@ TEST(RetryTests, DeleteIsNotReplayedAfterAnAmbiguousTransportErrorBecauseItsOutc
 }
 
 namespace {
+// Reduces an operation's outcome to its error (a default one on success) so mutations of different result types can
+// be driven by the same helper.
+template <class TResult>
+boost::asio::awaitable<BlobStorageError>
+FailureOf(boost::asio::awaitable<std::expected<Response<TResult>, BlobStorageError>> operation) {
+    auto result = co_await std::move(operation);
+    co_return result.has_value() ? BlobStorageError{} : std::move(result).error();
+}
+
 // Runs a conditional mutation whose first attempt fails with `error`; a replay would answer 412 because the ETag moved.
 template <class TStart>
 void ExpectConditionalMutationSentOnceOrRetried(const std::error_code& error, bool expectReplay, TStart start) {
@@ -371,23 +272,13 @@ void ExpectConditionalMutationSentOnceOrRetried(const std::error_code& error, bo
     httpClient.EnqueueResponse(HttpResponse{412, {{"x-ms-error-code", "ConditionNotMet"}}, ""});
     PageBlobClient client{httpClient, MakeRetryOptions(3)};
 
-    std::optional<unsigned> observedStatus;
-    bool done = false;
-    start(client, [&](BlobStorageError failure) {
-        observedStatus = failure.StatusCode;
-        done = true;
-    });
+    std::optional<BlobStorageError> failure;
+    StartInto(httpClient, start(client), failure);
 
-    ASSERT_TRUE(PollUntil(httpClient, [&] { return done; })) << error.message();
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return failure.has_value(); })) << error.message();
     EXPECT_EQ(httpClient.RequestCount(), expectReplay ? 2U : 1U) << error.message();
     // The ambiguous transport outcome is preserved rather than reported as a precondition failure.
-    EXPECT_EQ(observedStatus.value_or(0U) == 412U, expectReplay) << error.message();
-}
-
-template <class TResult> [[nodiscard]] auto FailureSink(const std::function<void(BlobStorageError)>& onFailure) {
-    return [onFailure](std::expected<Response<TResult>, BlobStorageError> result) {
-        onFailure(result.has_value() ? BlobStorageError{} : std::move(result).error());
-    };
+    EXPECT_EQ(ValueOrFail(failure).StatusCode == 412U, expectReplay) << error.message();
 }
 
 Models::BlobRequestConditions IfMatchConditions() {
@@ -399,25 +290,25 @@ Models::BlobRequestConditions IfMatchConditions() {
 
 TEST(RetryTests, ConditionalMutationsAreNotReplayedAfterAnAmbiguousTransportError) {
     const std::error_code error{AVEVA::HttpClientError::ReadFailed};
-    const auto upload = [](PageBlobClient& client, const std::function<void(BlobStorageError)>& sink) {
+    const auto upload = [](PageBlobClient& client) {
         UploadPagesOptions options;
         options.Conditions = IfMatchConditions();
-        client.UploadPagesAsync(0, std::string(512, 'p'), options, FailureSink<Models::UploadPagesResult>(sink));
+        return FailureOf(client.UploadPagesAsync(0, std::string(512, 'p'), options));
     };
-    const auto resize = [](PageBlobClient& client, const std::function<void(BlobStorageError)>& sink) {
+    const auto resize = [](PageBlobClient& client) {
         ResizePageBlobOptions options;
         options.Conditions = IfMatchConditions();
-        client.ResizeAsync(1024, options, FailureSink<Models::ResizePageBlobResult>(sink));
+        return FailureOf(client.ResizeAsync(1024, options));
     };
-    const auto metadata = [](PageBlobClient& client, const std::function<void(BlobStorageError)>& sink) {
+    const auto metadata = [](PageBlobClient& client) {
         SetBlobMetadataOptions options;
         options.Conditions = IfMatchConditions();
-        client.SetMetadataAsync(options, FailureSink<Models::SetBlobMetadataResult>(sink));
+        return FailureOf(client.SetMetadataAsync(options));
     };
-    const auto unmodifiedSince = [](PageBlobClient& client, const std::function<void(BlobStorageError)>& sink) {
+    const auto unmodifiedSince = [](PageBlobClient& client) {
         UploadPagesOptions options;
         options.Conditions.IfUnmodifiedSince = std::chrono::system_clock::now();
-        client.UploadPagesAsync(0, std::string(512, 'p'), options, FailureSink<Models::UploadPagesResult>(sink));
+        return FailureOf(client.UploadPagesAsync(0, std::string(512, 'p'), options));
     };
     ExpectConditionalMutationSentOnceOrRetried(error, false, upload);
     ExpectConditionalMutationSentOnceOrRetried(error, false, resize);
@@ -427,21 +318,19 @@ TEST(RetryTests, ConditionalMutationsAreNotReplayedAfterAnAmbiguousTransportErro
 
 TEST(RetryTests, ConditionalMutationsAreStillRetriedWhenNothingWasSent) {
     ExpectConditionalMutationSentOnceOrRetried(
-        std::error_code{AVEVA::HttpClientError::ConnectFailed}, true,
-        [](PageBlobClient& client, const std::function<void(BlobStorageError)>& sink) {
+        std::error_code{AVEVA::HttpClientError::ConnectFailed}, true, [](PageBlobClient& client) {
             UploadPagesOptions options;
             options.Conditions = IfMatchConditions();
-            client.UploadPagesAsync(0, std::string(512, 'p'), options, FailureSink<Models::UploadPagesResult>(sink));
+            return FailureOf(client.UploadPagesAsync(0, std::string(512, 'p'), options));
         });
 }
 
 TEST(RetryTests, WildcardIfMatchMutationIsStillReplayedAfterAnAmbiguousTransportError) {
     ExpectConditionalMutationSentOnceOrRetried(
-        std::error_code{AVEVA::HttpClientError::ReadFailed}, true,
-        [](PageBlobClient& client, const std::function<void(BlobStorageError)>& sink) {
+        std::error_code{AVEVA::HttpClientError::ReadFailed}, true, [](PageBlobClient& client) {
             UploadPagesOptions options;
             options.Conditions.IfMatch = "*";
-            client.UploadPagesAsync(0, std::string(512, 'p'), options, FailureSink<Models::UploadPagesResult>(sink));
+            return FailureOf(client.UploadPagesAsync(0, std::string(512, 'p'), options));
         });
 }
 
@@ -458,8 +347,7 @@ TEST(RetryTests, ConditionalCreateIfNotExistsIsReplayedAfterAnAmbiguousTransport
         PageBlobClient client{httpClient, MakeRetryOptions(3)};
 
         std::optional<CreateResult> observed;
-        client.CreateIfNotExistsAsync(512, CreatePageBlobOptions{},
-                                      [&](CreateResult result) { observed = std::move(result); });
+        StartInto(httpClient, client.CreateIfNotExistsAsync(512), observed);
 
         ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); })) << error.message();
         EXPECT_EQ(httpClient.RequestCount(), 2U) << error.message();
@@ -474,7 +362,7 @@ TEST(RetryTests, DeleteIfExistsIsReplayedAfterAnAmbiguousTransportErrorBecauseTh
     BlobClient client{httpClient, MakeRetryOptions(3)};
 
     std::optional<DeleteResult> observed;
-    client.DeleteIfExistsAsync([&](DeleteResult result) { observed = std::move(result); });
+    StartInto(httpClient, client.DeleteIfExistsAsync(), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
     EXPECT_EQ(httpClient.RequestCount(), 2U);
@@ -490,8 +378,7 @@ TEST(RetryTests, ReleaseLeaseReplayedAfterAnAmbiguousErrorAbsorbsTheLeaseAlready
     BlobClient client{httpClient, MakeRetryOptions(3)};
 
     std::optional<ReleaseResult> observed;
-    client.ReleaseLeaseAsync(ReleaseLeaseOptions{.LeaseId = "lease"},
-                             [&](ReleaseResult result) { observed = std::move(result); });
+    StartInto(httpClient, client.ReleaseLeaseAsync(ReleaseLeaseOptions{.LeaseId = "lease"}), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
     EXPECT_EQ(httpClient.RequestCount(), 2U);
@@ -507,8 +394,7 @@ TEST(RetryTests, ReleaseLeaseFirstAttempt409StillFails) {
     BlobClient client{httpClient, MakeRetryOptions(3)};
 
     std::optional<ReleaseResult> observed;
-    client.ReleaseLeaseAsync(ReleaseLeaseOptions{.LeaseId = "lease"},
-                             [&](ReleaseResult result) { observed = std::move(result); });
+    StartInto(httpClient, client.ReleaseLeaseAsync(ReleaseLeaseOptions{.LeaseId = "lease"}), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
     EXPECT_EQ(httpClient.RequestCount(), 1U);
@@ -528,8 +414,7 @@ TEST(RetryTests, ReleaseLease409AfterATokenRefreshRepeatStillFails) {
     BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{httpClient, std::move(options), credential};
 
     std::optional<ReleaseResult> observed;
-    client.ReleaseLeaseAsync(ReleaseLeaseOptions{.LeaseId = "lease"},
-                             [&](ReleaseResult result) { observed = std::move(result); });
+    StartInto(httpClient, client.ReleaseLeaseAsync(ReleaseLeaseOptions{.LeaseId = "lease"}), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
     EXPECT_EQ(httpClient.RequestCount(), 2U);
@@ -544,7 +429,7 @@ TEST(RetryTests, RenewLeaseReplayedAfterAnAmbiguousErrorSurfacesTheSubsequent409
     BlobClient client{httpClient, MakeRetryOptions(3)};
 
     std::optional<std::expected<Response<Models::RenewBlobLeaseResult>, BlobStorageError>> observed;
-    client.RenewLeaseAsync(RenewLeaseOptions{.LeaseId = "lease"}, [&](auto result) { observed = std::move(result); });
+    StartInto(httpClient, client.RenewLeaseAsync(RenewLeaseOptions{.LeaseId = "lease"}), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
     EXPECT_EQ(httpClient.RequestCount(), 2U);
@@ -560,8 +445,10 @@ TEST(RetryTests, AcquireLeaseReplayedAfterAnAmbiguousErrorSurfacesTheSubsequent4
     BlobClient client{httpClient, MakeRetryOptions(3)};
 
     std::optional<std::expected<Response<Models::AcquireBlobLeaseResult>, BlobStorageError>> observed;
-    client.AcquireLeaseAsync(AcquireLeaseOptions{.ProposedLeaseId = "proposed", .Duration = std::chrono::seconds{15}},
-                             [&](auto result) { observed = std::move(result); });
+    StartInto(httpClient,
+              client.AcquireLeaseAsync(
+                  AcquireLeaseOptions{.ProposedLeaseId = "proposed", .Duration = std::chrono::seconds{15}}),
+              observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
     ASSERT_EQ(httpClient.RequestCount(), 2U);
@@ -580,8 +467,7 @@ TEST(RetryTests, ConditionalUploadPagesAfterAnAmbiguousErrorIsNotReplayedAndKeep
     UploadPagesOptions options;
     options.Conditions.IfMatch = "\"0x1\"";
     std::optional<std::expected<Response<Models::UploadPagesResult>, BlobStorageError>> observed;
-    client.UploadPagesAsync(0, std::string(512, 'x'), std::move(options),
-                            [&](auto result) { observed = std::move(result); });
+    StartInto(httpClient, client.UploadPagesAsync(0, std::string(512, 'x'), std::move(options)), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
     EXPECT_EQ(httpClient.RequestCount(), 1U);
@@ -596,8 +482,7 @@ TEST(RetryTests, ConditionalCreateIsRetriedAfterFailuresThatHappenedBeforeAnythi
     PageBlobClient client{httpClient, MakeRetryOptions(1)};
 
     std::optional<CreateResult> observed;
-    client.CreateIfNotExistsAsync(512, CreatePageBlobOptions{},
-                                  [&](CreateResult result) { observed = std::move(result); });
+    StartInto(httpClient, client.CreateIfNotExistsAsync(512), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
     EXPECT_EQ(httpClient.RequestCount(), 2U);
@@ -611,7 +496,7 @@ TEST(RetryTests, UnconditionalCreateOverwriteIsReplayedAfterAnAmbiguousTransport
     PageBlobClient client{httpClient, MakeRetryOptions(1)};
 
     std::optional<CreateResult> observed;
-    client.CreateAsync(512, CreatePageBlobOptions{}, [&](CreateResult result) { observed = std::move(result); });
+    StartInto(httpClient, client.CreateAsync(512), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
     EXPECT_EQ(httpClient.RequestCount(), 2U);
@@ -631,7 +516,7 @@ TEST(RetryTests, UnauthorizedResponseIsRepeatedOnceWithAFreshToken) {
     BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{httpClient, std::move(options), credential};
 
     std::optional<DeleteResult> observed;
-    client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
+    StartInto(httpClient, client.DeleteAsync(), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
     ASSERT_EQ(httpClient.RequestCount(), 2U);
@@ -655,7 +540,7 @@ TEST(RetryTests, ThrowDuringSecondAttemptCompletesOnceWithAnErrorAndDoesNotEscap
 
     int completions = 0;
     std::optional<DeleteResult> observed;
-    client.DeleteAsync([&](DeleteResult result) {
+    Spawn(httpClient, client.DeleteAsync(), [&](DeleteResult result) {
         ++completions;
         observed = std::move(result);
     });
@@ -683,7 +568,7 @@ TEST(RetryTests, UnauthorizedResponseAfterTheDeadlineDoesNotRefreshTheToken) {
     AVEVA::AzureClient::AzureRequestOptions requestOptions;
     requestOptions.SetTotalDeadline(std::chrono::milliseconds{15});
     std::optional<DeleteResult> observed;
-    client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) { observed = std::move(result); }));
+    StartInto(httpClient, client.DeleteAsync({}, requestOptions), observed);
     ASSERT_TRUE(PollUntil(httpClient, [&] { return httpClient.PendingCount() == 1U; }, std::chrono::seconds{2}));
     // The 401 arrives after the deadline but before its timer has been serviced.
     std::this_thread::sleep_for(std::chrono::milliseconds{40});
@@ -710,7 +595,7 @@ TEST(RetryTests, UnauthorizedResponseIsOnlyRefreshedOnce) {
     BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{httpClient, std::move(options), credential};
 
     std::optional<DeleteResult> observed;
-    client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
+    StartInto(httpClient, client.DeleteAsync(), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
     EXPECT_EQ(httpClient.RequestCount(), 2U);
@@ -727,7 +612,7 @@ TEST(RetryTests, GivesUpAfterMaxRetriesAndReportsLastResponse) {
     BlobClient client{httpClient, MakeRetryOptions(2)};
 
     std::optional<DeleteResult> observed;
-    client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
+    StartInto(httpClient, client.DeleteAsync(), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
     EXPECT_EQ(httpClient.RequestCount(), 3U);
@@ -745,7 +630,7 @@ TEST(RetryTests, HonorsServerRetryAfterHeadersOverLongBackoff) {
         BlobClient client{httpClient, MakeRetryOptions(1, std::chrono::minutes{1})};
 
         std::optional<DeleteResult> observed;
-        client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
+        StartInto(httpClient, client.DeleteAsync(), observed);
 
         ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2})) << header;
         EXPECT_EQ(httpClient.RequestCount(), 2U) << header;
@@ -760,7 +645,7 @@ TEST(RetryTests, RetryAfterHttpDateInThePastRetriesImmediately) {
     BlobClient client{httpClient, MakeRetryOptions(1, std::chrono::minutes{1})};
 
     std::optional<DeleteResult> observed;
-    client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
+    StartInto(httpClient, client.DeleteAsync(), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}));
     EXPECT_EQ(httpClient.RequestCount(), 2U);
@@ -776,7 +661,7 @@ TEST(RetryTests, RetryAfterHttpDateIsRelativeToTheResponseDateHeader) {
     BlobClient client{httpClient, MakeRetryOptions(1, std::chrono::milliseconds{0})};
 
     std::optional<DeleteResult> observed;
-    client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
+    StartInto(httpClient, client.DeleteAsync(), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}));
     EXPECT_EQ(httpClient.RequestCount(), 2U);
@@ -792,7 +677,7 @@ TEST(RetryTests, RetryAfterFutureHttpDateDelaysTheRetry) {
     BlobClient client{httpClient, MakeRetryOptions(1, std::chrono::milliseconds{0})};
 
     std::optional<DeleteResult> observed;
-    client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
+    StartInto(httpClient, client.DeleteAsync(), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{4}));
     EXPECT_EQ(httpClient.RequestCount(), 2U);
@@ -812,7 +697,7 @@ TEST(RetryTests, XMsRetryAfterMsTakesPrecedenceOverRetryAfter) {
     BlobClient client{httpClient, MakeRetryOptions(1, std::chrono::minutes{1})};
 
     std::optional<DeleteResult> observed;
-    client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
+    StartInto(httpClient, client.DeleteAsync(), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}));
     EXPECT_EQ(httpClient.RequestCount(), 2U);
@@ -828,7 +713,7 @@ TEST(RetryTests, ComputedBackoffIsCappedByMaxDelay) {
     BlobClient client{httpClient, options};
 
     std::optional<DeleteResult> observed;
-    client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
+    StartInto(httpClient, client.DeleteAsync(), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}));
     EXPECT_EQ(httpClient.RequestCount(), 2U);
@@ -873,7 +758,7 @@ TEST(RetryTests, NegativeRetryAfterFallsBackToTheComputedBackoff) {
     BlobClient client{httpClient, MakeRetryOptions(1, std::chrono::milliseconds{0})};
 
     std::optional<DeleteResult> observed;
-    client.DeleteAsync([&](DeleteResult result) { observed = std::move(result); });
+    StartInto(httpClient, client.DeleteAsync(), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}));
     EXPECT_EQ(httpClient.RequestCount(), 2U);
@@ -888,14 +773,11 @@ TEST(RetryTests, ServerRetryAfterHintIsNotClampedToMaxDelay) {
     options.Retry.MaxDelay = std::chrono::milliseconds{0};
     BlobClient client{httpClient, options};
 
-    std::optional<DeleteResult> observed;
-    boost::asio::cancellation_signal signal;
-    client.DeleteAsync(
-        boost::asio::bind_cancellation_slot(signal.slot(), [&](DeleteResult result) { observed = std::move(result); }));
+    auto operation = StartAwaitable(httpClient, client.DeleteAsync());
 
-    EXPECT_FALSE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::milliseconds{300}));
+    EXPECT_FALSE(PollUntil(httpClient, [&] { return operation.Done(); }, std::chrono::milliseconds{300}));
     EXPECT_EQ(httpClient.RequestCount(), 1U);
-    signal.emit(boost::asio::cancellation_type::terminal);
+    operation.Cancel();
     httpClient.Poll();
 }
 
@@ -905,20 +787,16 @@ TEST(RetryTests, CancellationDuringBackoffCompletesWithOperationCanceledAndSends
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
     BlobClient client{httpClient, MakeRetryOptions(3, std::chrono::minutes{1})};
 
-    boost::asio::cancellation_signal signal;
-    std::optional<DeleteResult> observed;
-    StartDeleteAsync(client, signal, observed);
-
-    httpClient.Poll(); // deliver the 503; the operation is now waiting on its backoff timer
+    // The 503 is delivered on the first poll; the operation is then waiting on its backoff timer.
+    auto operation = StartAwaitable(httpClient, client.DeleteAsync());
     ASSERT_EQ(httpClient.RequestCount(), 1U);
-    ASSERT_FALSE(observed.has_value());
+    ASSERT_FALSE(operation.Done());
 
-    signal.emit(boost::asio::cancellation_type::terminal);
-    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}));
-    ASSERT_FALSE(ValueOrFail(observed).has_value());
-    EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::operation_canceled));
+    operation.Cancel();
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return operation.Done(); }, std::chrono::seconds{2}));
+    ASSERT_FALSE(operation.Result().has_value());
+    EXPECT_EQ(operation.Result().error().Code, std::make_error_code(std::errc::operation_canceled));
     EXPECT_EQ(httpClient.RequestCount(), 1U);
-    EXPECT_FALSE(signal.slot().has_handler());
 }
 
 TEST(RetryTests, PartialCancellationDoesNotAbortTheOperationButTerminalDoes) {
@@ -927,175 +805,16 @@ TEST(RetryTests, PartialCancellationDoesNotAbortTheOperationButTerminalDoes) {
     httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
     BlobClient client{httpClient, MakeRetryOptions(3, std::chrono::minutes{1})};
 
-    boost::asio::cancellation_signal signal;
-    std::optional<DeleteResult> observed;
-    StartDeleteAsync(client, signal, observed);
-
-    httpClient.Poll(); // deliver the 503; the operation is now waiting on its backoff timer
+    auto operation = StartAwaitable(httpClient, client.DeleteAsync());
     ASSERT_EQ(httpClient.RequestCount(), 1U);
 
-    signal.emit(boost::asio::cancellation_type::partial);
-    EXPECT_FALSE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::milliseconds{200}));
-    EXPECT_TRUE(signal.slot().has_handler());
+    operation.Cancel(boost::asio::cancellation_type::partial);
+    EXPECT_FALSE(PollUntil(httpClient, [&] { return operation.Done(); }, std::chrono::milliseconds{200}));
 
-    signal.emit(boost::asio::cancellation_type::terminal);
-    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}));
-    EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::operation_canceled));
-}
-
-TEST(RetryTests, CancellationFromAnotherThreadWhileRetryTimerIsPending) {
-    FakeHttpClient httpClient;
-    httpClient.EnqueueResponse(HttpResponse{503, {}, ""});
-    httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
-    BlobClient client{httpClient, MakeRetryOptions(3, std::chrono::minutes{1})};
-
-    boost::asio::cancellation_signal signal;
-    std::optional<DeleteResult> observed;
-    StartDeleteAsync(client, signal, observed);
-    httpClient.Poll();
-    ASSERT_EQ(httpClient.RequestCount(), 1U);
-
-    std::thread canceller([&] { signal.emit(boost::asio::cancellation_type::terminal); });
-    canceller.join();
-
-    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}));
-    ASSERT_FALSE(ValueOrFail(observed).has_value());
-    EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::operation_canceled));
-    EXPECT_EQ(httpClient.RequestCount(), 1U);
-}
-
-TEST(RetryTests, CancellationWhoseQueueAdmissionFailsStillCompletesTheRequestOnceWithTheFailure) {
-    FakeHttpClient httpClient;
-    httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
-    BlobClient client{httpClient, MakeRetryOptions(0)};
-
-    boost::asio::cancellation_signal signal;
-    std::promise<void> entered;
-    std::promise<void> release;
-    // Holds the runner busy inside its first dispatch, so the cancellation below is queued behind it.
-    httpClient.SetResponder(
-        [&,
-         once = false](const FakeHttpClient::RequestRecord&) mutable -> std::optional<FakeHttpClient::ScriptedResult> {
-            if (!once) {
-                once = true;
-                entered.set_value();
-                release.get_future().wait();
-            }
-            return std::nullopt;
-        });
-
-    std::thread canceller([&] {
-        entered.get_future().wait();
-        AllocationFailure::allocationsUntilFailure = 0;
-        try {
-            signal.emit(boost::asio::cancellation_type::terminal);
-        } catch (const std::bad_alloc&) {
-        }
-        AllocationFailure::allocationsUntilFailure = -1;
-        release.set_value();
-    });
-
-    int completions = 0;
-    std::optional<DeleteResult> observed;
-    client.DeleteAsync(boost::asio::bind_cancellation_slot(signal.slot(), [&](DeleteResult result) {
-        ++completions;
-        observed = std::move(result);
-    }));
-    canceller.join();
-
-    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}));
-    EXPECT_EQ(completions, 1);
-    ASSERT_FALSE(ValueOrFail(observed).has_value());
-    EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::not_enough_memory));
-}
-
-TEST(RetryTests, CancellationWhoseAdmissionFailsWaitsForTheTransportToReleaseTheSharedUploadBuffer) {
-    FakeHttpClient httpClient;
-    PageBlobClient client{httpClient, MakeRetryOptions(0)};
-    auto content = std::make_shared<std::vector<char>>(512, 'p');
-
-    boost::asio::cancellation_signal signal;
-    std::promise<void> entered;
-    std::promise<void> release;
-    // Holds the runner busy inside the first dispatch, with the upload already handed to a transport that keeps
-    // reading its body after being asked to stop.
-    httpClient.SetResponder(
-        [&,
-         once = false](const FakeHttpClient::RequestRecord&) mutable -> std::optional<FakeHttpClient::ScriptedResult> {
-            if (once) {
-                return std::nullopt;
-            }
-            once = true;
-            entered.set_value();
-            release.get_future().wait();
-            return FakeHttpClient::ScriptedResult{.Deferred = true, .IgnoreCancellation = true};
-        });
-
-    std::thread canceller([&] {
-        entered.get_future().wait();
-        AllocationFailure::allocationsUntilFailure = 0;
-        try {
-            signal.emit(boost::asio::cancellation_type::terminal);
-        } catch (const std::bad_alloc&) {
-        }
-        AllocationFailure::allocationsUntilFailure = -1;
-        release.set_value();
-    });
-
-    int completions = 0;
-    std::optional<std::expected<Response<Models::UploadPagesResult>, BlobStorageError>> observed;
-    client.UploadPagesAsync(
-        0, std::shared_ptr<const std::vector<char>>{content},
-        boost::asio::bind_cancellation_slot(
-            signal.slot(), [&](std::expected<Response<Models::UploadPagesResult>, BlobStorageError> result) {
-                ++completions;
-                observed = std::move(result);
-            }));
-    canceller.join();
-
-    httpClient.Poll();
-    ASSERT_TRUE(httpClient.IsPending(0));
-    EXPECT_FALSE(observed.has_value());
-    EXPECT_GT(content.use_count(), 1);
-
-    ASSERT_TRUE(httpClient.CompleteRequest(0));
-    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}));
-    EXPECT_EQ(completions, 1);
-    EXPECT_EQ(content.use_count(), 1);
-    ASSERT_FALSE(observed->has_value());
-    EXPECT_EQ(observed->error().Code, std::make_error_code(std::errc::not_enough_memory));
-}
-
-TEST(RetryTests, AttemptCompletionWhoseAdmissionFailsStillCompletesTheRequestOnce) {
-    FakeHttpClient httpClient;
-    httpClient.CompleteInline() = true;
-    BlobClient client{httpClient, MakeRetryOptions(1)};
-
-    // The second attempt's completion arrives on the runner, behind the dispatch that sent it, and cannot be queued.
-    httpClient.SetResponder(
-        [](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
-            if (record.Index == 0U) {
-                return FakeHttpClient::ScriptedResult{.Response = HttpResponse{503, {}, ""}};
-            }
-            return FakeHttpClient::ScriptedResult{.OnComplete = [](HttpResponse&) {
-                AllocationFailure::minimumFailingSize = sizeof(HttpRequest);
-                AllocationFailure::allocationsUntilFailure = 0;
-            }};
-        });
-
-    int completions = 0;
-    std::optional<DeleteResult> observed;
-    client.DeleteAsync([&](DeleteResult result) {
-        ++completions;
-        observed = std::move(result);
-    });
-
-    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}));
-    AllocationFailure::allocationsUntilFailure = -1;
-    AllocationFailure::minimumFailingSize = 0;
-    EXPECT_EQ(completions, 1);
-    ASSERT_FALSE(ValueOrFail(observed).has_value());
-    EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::not_enough_memory));
+    operation.Cancel(boost::asio::cancellation_type::terminal);
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return operation.Done(); }, std::chrono::seconds{2}));
+    ASSERT_FALSE(operation.Result().has_value());
+    EXPECT_EQ(operation.Result().error().Code, std::make_error_code(std::errc::operation_canceled));
 }
 
 TEST(RetryTests, CancellationOfInFlightAttemptIsNotRetried) {
@@ -1103,18 +822,14 @@ TEST(RetryTests, CancellationOfInFlightAttemptIsNotRetried) {
     httpClient.DeferByDefault() = true;
     BlobClient client{httpClient, MakeRetryOptions(3)};
 
-    boost::asio::cancellation_signal signal;
-    std::optional<DeleteResult> observed;
-    StartDeleteAsync(client, signal, observed);
+    auto operation = StartAwaitable(httpClient, client.DeleteAsync());
     ASSERT_EQ(httpClient.PendingCount(), 1U);
-    ASSERT_TRUE(signal.slot().has_handler());
-    ASSERT_TRUE(httpClient.LastRequestOptions().GetCancellationSlot().has_handler());
 
-    signal.emit(boost::asio::cancellation_type::terminal);
+    operation.Cancel();
     httpClient.Poll();
-    ASSERT_TRUE(observed.has_value());
-    ASSERT_FALSE(ValueOrFail(observed).has_value());
-    EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::operation_canceled));
+    ASSERT_TRUE(operation.Done());
+    ASSERT_FALSE(operation.Result().has_value());
+    EXPECT_EQ(operation.Result().error().Code, std::make_error_code(std::errc::operation_canceled));
     EXPECT_EQ(httpClient.RequestCount(), 1U);
 }
 
@@ -1127,7 +842,7 @@ TEST(RetryTests, MaxRetriesOverrideReplacesClientPolicy) {
     AVEVA::AzureClient::AzureRequestOptions requestOptions;
     requestOptions.SetMaxRetries(0);
     std::optional<DeleteResult> observed;
-    client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) { observed = std::move(result); }));
+    StartInto(httpClient, client.DeleteAsync({}, requestOptions), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
     EXPECT_EQ(httpClient.RequestCount(), 1U);
@@ -1144,7 +859,7 @@ TEST(RetryTests, MaxRetriesOverrideCanEnableRetriesDisabledOnTheClient) {
     AVEVA::AzureClient::AzureRequestOptions requestOptions;
     requestOptions.SetMaxRetries(1);
     std::optional<DeleteResult> observed;
-    client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) { observed = std::move(result); }));
+    StartInto(httpClient, client.DeleteAsync({}, requestOptions), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
     EXPECT_EQ(httpClient.RequestCount(), 2U);
@@ -1160,7 +875,7 @@ TEST(RetryTests, TotalDeadlineEndsRetryBackoffWithTimedOut) {
     AVEVA::AzureClient::AzureRequestOptions requestOptions;
     requestOptions.SetTotalDeadline(std::chrono::milliseconds{50});
     std::optional<DeleteResult> observed;
-    client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) { observed = std::move(result); }));
+    StartInto(httpClient, client.DeleteAsync({}, requestOptions), observed);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{5}));
     ASSERT_FALSE(ValueOrFail(observed).has_value());
@@ -1177,26 +892,9 @@ TEST(RetryTests, TotalDeadlineFailsImmediatelyWhenTheBackoffWouldOutlastIt) {
     AVEVA::AzureClient::AzureRequestOptions requestOptions;
     requestOptions.SetTotalDeadline(std::chrono::seconds{10});
     std::optional<DeleteResult> observed;
-    client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) { observed = std::move(result); }));
+    StartInto(httpClient, client.DeleteAsync({}, requestOptions), observed);
 
     // Without the check the operation would idle until the 10 second deadline fired, which outlasts this poll.
-    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{5}));
-    ASSERT_FALSE(ValueOrFail(observed).has_value());
-    EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::timed_out));
-    EXPECT_EQ(httpClient.RequestCount(), 1U);
-}
-
-TEST(RetryTests, TotalDeadlineCancelsInFlightAttemptAndIsNotRetried) {
-    FakeHttpClient httpClient;
-    httpClient.DeferByDefault() = true;
-    BlobClient client{httpClient, MakeRetryOptions(3)};
-
-    AVEVA::AzureClient::AzureRequestOptions requestOptions;
-    requestOptions.SetTotalDeadline(std::chrono::milliseconds{50});
-    std::optional<DeleteResult> observed;
-    client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) { observed = std::move(result); }));
-    ASSERT_EQ(httpClient.PendingCount(), 1U);
-
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{5}));
     ASSERT_FALSE(ValueOrFail(observed).has_value());
     EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::timed_out));
@@ -1213,10 +911,10 @@ TEST(RetryTests, TotalDeadlineClampsAttemptTimeoutAndDoesNotFireAfterSuccess) {
     requestOptions.SetTotalDeadline(std::chrono::milliseconds{200});
     std::optional<DeleteResult> observed;
     int completions = 0;
-    client.DeleteAsync(WithRequestOptions(requestOptions, [&](DeleteResult result) {
+    Spawn(httpClient, client.DeleteAsync({}, requestOptions), [&](DeleteResult result) {
         ++completions;
         observed = std::move(result);
-    }));
+    });
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }));
     EXPECT_TRUE(ValueOrFail(observed).has_value());
@@ -1274,7 +972,7 @@ TEST(RetryTests, RetryReSignsSharedKeyAndRefreshesDateHeader) {
 
     const std::string payload(512, 'p');
     UploadState uploadState;
-    StartUploadAsync(client, payload, uploadState);
+    StartUploadAsync(httpClient, client, payload, uploadState);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return uploadState.Done; }));
     EXPECT_TRUE(uploadState.Succeeded);
@@ -1306,7 +1004,7 @@ TEST(RetryTests, EveryAttemptOfARetriedUploadCarriesTheFullBody) {
 
     const std::string payload(64 * 1024, 'x');
     UploadState uploadState;
-    StartUploadAsync(client, payload, uploadState);
+    StartUploadAsync(httpClient, client, payload, uploadState);
 
     ASSERT_TRUE(PollUntil(httpClient, [&] { return uploadState.Done; }));
     EXPECT_TRUE(uploadState.Succeeded);

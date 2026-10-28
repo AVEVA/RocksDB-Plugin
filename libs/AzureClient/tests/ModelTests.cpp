@@ -45,10 +45,9 @@ using AVEVA::AzureClient::Tests::BlobClient;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 using AVEVA::AzureClient::Tests::PageBlobClient;
+using AVEVA::AzureClient::Tests::RunAwaitable;
 namespace Private = AVEVA::AzureClient::Private;
 using namespace std::chrono_literals;
-
-constexpr auto IgnoreResult = [](auto&&) {};
 
 [[nodiscard]] bool HasHeader(const HttpRequest& request, std::string_view name) {
     return std::ranges::any_of(request.GetHeaders(),
@@ -79,14 +78,11 @@ void ExpectMalformedExtendedHeadersAreRejected() {
 void ExpectAcquireLeaseRejectsInvalidDurations(BlobClient& client, FakeHttpClient& httpClient,
                                                std::initializer_list<std::chrono::seconds> durations) {
     for (const auto duration : durations) {
-        std::optional<std::error_code> error;
-        client.AcquireLeaseAsync(AcquireLeaseOptions{.Conditions = {}, .ProposedLeaseId = {}, .Duration = duration},
-                                 [&](auto result) {
-                                     ASSERT_FALSE(result.has_value());
-                                     error = result.error().Code;
-                                 });
-        httpClient.Poll();
-        EXPECT_EQ(error, std::make_error_code(std::errc::invalid_argument)) << duration.count();
+        const auto result =
+            RunAwaitable(httpClient, client.AcquireLeaseAsync(AcquireLeaseOptions{
+                                         .Conditions = {}, .ProposedLeaseId = {}, .Duration = duration}));
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument)) << duration.count();
     }
 }
 } // namespace
@@ -189,13 +185,11 @@ TEST(ModelTests, AcquireLeaseDurationIsInfiniteByDefaultAndValidated) {
     FakeHttpClient httpClient;
     BlobClient client{httpClient, MakeBlobClientOptions()};
 
-    client.AcquireLeaseAsync(IgnoreResult);
-    httpClient.Poll();
+    static_cast<void>(RunAwaitable(httpClient, client.AcquireLeaseAsync()));
     EXPECT_EQ(Header(httpClient.LastRequest(), "x-ms-lease-duration"), "-1");
 
-    client.AcquireLeaseAsync(AcquireLeaseOptions{.Conditions = {}, .ProposedLeaseId = {}, .Duration = 15s},
-                             IgnoreResult);
-    httpClient.Poll();
+    static_cast<void>(RunAwaitable(httpClient, client.AcquireLeaseAsync(AcquireLeaseOptions{
+                                                   .Conditions = {}, .ProposedLeaseId = {}, .Duration = 15s})));
     EXPECT_EQ(Header(httpClient.LastRequest(), "x-ms-lease-duration"), "15");
     const std::size_t sent = httpClient.RequestCount();
 
@@ -209,8 +203,7 @@ TEST(ModelTests, ResizeUsesResizePageBlobOptionsConditions) {
 
     ResizePageBlobOptions options;
     options.Conditions.IfMatch = "\"etag\"";
-    client.ResizeAsync(1024U, std::move(options), IgnoreResult);
-    httpClient.Poll();
+    static_cast<void>(RunAwaitable(httpClient, client.ResizeAsync(1024U, std::move(options))));
 
     EXPECT_EQ(Header(httpClient.LastRequest(), "x-ms-blob-content-length"), "1024");
     EXPECT_EQ(Header(httpClient.LastRequest(), "If-Match"), "\"etag\"");

@@ -7,6 +7,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include "AVEVA/RocksDB/Plugin/TestLogger.hpp"
 
+#include "BackgroundPump.hpp"
 #include "FakeHttpClient.hpp"
 #include "TestSupport.hpp"
 
@@ -47,9 +48,6 @@ namespace {
 class LockFileImplTests : public ::testing::Test {
   protected:
     void SetUp() override {
-        m_httpClient.CompleteInline() = true;
-        // Some completions are posted to the fake's own io_context while Lock() blocks on a future.
-        m_httpClient.StartBackgroundPump();
         m_runtime = std::make_shared<ClientRuntimeBase>();
         m_logger = AVEVA::RocksDB::Plugin::Tests::MakeTestLogger();
     }
@@ -70,8 +68,22 @@ class LockFileImplTests : public ::testing::Test {
         return FakeHttpClient::FindHeaderValue(m_httpClient.RequestAt(index).Request, "x-ms-proposed-lease-id");
     }
 
+    // The fake transport has no timers: a request bounded by a total deadline is timed out by hand once the deadline
+    // has passed, as a real transport would.
+    std::jthread TimeOutRequestAfter(std::size_t index, std::chrono::milliseconds delay) {
+        return std::jthread([this, index, delay] {
+            const auto giveUp = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (!m_httpClient.IsPending(index) && std::chrono::steady_clock::now() < giveUp) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            std::this_thread::sleep_for(delay);
+            (void)m_httpClient.FailRequest(index, std::make_error_code(std::errc::timed_out));
+        });
+    }
+
     boost::asio::io_context m_context;
     FakeHttpClient m_httpClient;
+    AVEVA::RocksDB::Plugin::Azure::Impl::Tests::BackgroundPump m_pump{m_httpClient};
     std::shared_ptr<ClientRuntimeBase> m_runtime;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
 };
@@ -230,7 +242,9 @@ TEST_F(LockFileImplTests, RenewThatOutlastsTheLeaseIsCancelledAtTheDeadlineAndTh
     ASSERT_FALSE(lock->HasExceededLeaseLength());
 
     // The caller must find out at the renewal deadline, not hang until the lease has run out.
+    auto deadline = TimeOutRequestAfter(1, std::chrono::milliseconds(250));
     EXPECT_ANY_THROW(lock->Renew());
+    deadline.join();
     lock->SetClockOffsetForTesting(leaseLength);
     EXPECT_TRUE(lock->HasExceededLeaseLength());
     EXPECT_THROW(lock->Renew(), std::runtime_error);
@@ -249,7 +263,9 @@ TEST_F(LockFileImplTests, UnlockThatOutlastsTheLeaseIsCancelledAtTheLeaseEnd) {
         std::chrono::duration_cast<std::chrono::steady_clock::duration>(leaseLength - std::chrono::milliseconds(200)));
 
     const auto start = std::chrono::steady_clock::now();
+    auto deadline = TimeOutRequestAfter(1, std::chrono::milliseconds(250));
     EXPECT_ANY_THROW(lock->Unlock());
+    deadline.join();
     EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(5));
     // Local state is cleared even though the release did not complete.
     EXPECT_FALSE(lock->IsRenewalOverdue());

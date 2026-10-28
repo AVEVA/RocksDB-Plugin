@@ -17,9 +17,7 @@
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 
-#include <boost/asio/bind_cancellation_slot.hpp>
-#include <boost/asio/cancellation_signal.hpp>
-#include <boost/asio/io_context.hpp>
+#include <boost/asio/cancellation_type.hpp>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -47,7 +45,9 @@ using AVEVA::AzureClient::Tests::BlobContainerClient;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeBlobContainerClientOptions;
 using AVEVA::AzureClient::Tests::MakeToken;
+using AVEVA::AzureClient::Tests::RunAwaitable;
 using AVEVA::AzureClient::Tests::ScriptedTokenCredential;
+using AVEVA::AzureClient::Tests::StartAwaitable;
 
 using BatchOutcome = std::expected<Response<DeleteBlobsResult>, BlobStorageError>;
 
@@ -98,13 +98,17 @@ void RespondToBatches(FakeHttpClient& http, std::function<PartOutcome(const std:
 
 [[nodiscard]] BatchOutcome DeleteAll(FakeHttpClient& http, BlobContainerClient& client, std::vector<std::string> names,
                                      DeleteBlobsOptions options = {}) {
-    std::optional<BatchOutcome> outcome;
-    client.DeleteBlobsAsync(std::move(names), options,
-                            [&outcome](BatchOutcome result) { outcome = std::move(result); });
-    if (!http.RunUntil([&] { return outcome.has_value(); })) {
-        throw std::runtime_error("DeleteBlobsAsync did not complete");
-    }
-    return outcome.value();
+    return RunAwaitable(http, client.DeleteBlobsAsync(std::move(names), options));
+}
+
+// Answers batch requests only when the test completes them.
+void DeferBatchResponses(FakeHttpClient& http) {
+    http.SetResponder([](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
+        FakeHttpClient::ScriptedResult result =
+            BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
+        result.Deferred = true;
+        return result;
+    });
 }
 
 [[nodiscard]] std::size_t CountOccurrences(std::string_view text, std::string_view needle) {
@@ -289,166 +293,104 @@ TEST(BatchDeleteTests, FailedRequestStopsLaterChunksAndReportsTheFirstFailure) {
 
 TEST(BatchDeleteTests, LimitsRequestsInFlight) {
     FakeHttpClient http;
-    http.SetResponder([](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
-        FakeHttpClient::ScriptedResult result =
-            BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
-        result.Deferred = true;
-        return result;
-    });
+    DeferBatchResponses(http);
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
-    std::optional<BatchOutcome> outcome;
-    client.DeleteBlobsAsync(MakeNames(256U * 3U), DeleteBlobsOptions{.MaxConcurrentRequests = 2},
-                            [&outcome](BatchOutcome result) { outcome = std::move(result); });
+    auto op = StartAwaitable(
+        http, client.DeleteBlobsAsync(MakeNames(256U * 3U), DeleteBlobsOptions{.MaxConcurrentRequests = 2}));
     ASSERT_EQ(http.PendingCount(), 2U);
 
     ASSERT_TRUE(http.CompleteNext());
+    http.Poll();
     EXPECT_EQ(http.RequestCount(), 3U);
-    EXPECT_FALSE(outcome.has_value());
+    EXPECT_FALSE(op.Done());
 
     http.CompleteAll();
-    ASSERT_TRUE(http.RunUntil([&] { return outcome.has_value(); }));
-    ASSERT_TRUE(outcome->has_value());
-    EXPECT_EQ(outcome->value().Value().Items.size(), 768U);
+    ASSERT_TRUE(http.RunUntil([&] { return op.Done(); }));
+    ASSERT_TRUE(op.Result().has_value());
+    EXPECT_EQ(op.Result().value().Value().Items.size(), 768U);
 }
 
 TEST(BatchDeleteTests, CancelAbortsEveryChunkInFlightAndStartsNoMore) {
     FakeHttpClient http;
-    http.SetResponder([](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
-        FakeHttpClient::ScriptedResult result =
-            BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
-        result.Deferred = true;
-        return result;
-    });
+    DeferBatchResponses(http);
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
-    boost::asio::cancellation_signal signal;
-    std::optional<BatchOutcome> outcome;
-    client.DeleteBlobsAsync(MakeNames(256U * 5U), DeleteBlobsOptions{.MaxConcurrentRequests = 2},
-                            boost::asio::bind_cancellation_slot(
-                                signal.slot(), [&outcome](BatchOutcome result) { outcome = std::move(result); }));
+    auto op = StartAwaitable(
+        http, client.DeleteBlobsAsync(MakeNames(256U * 5U), DeleteBlobsOptions{.MaxConcurrentRequests = 2}));
     ASSERT_EQ(http.PendingCount(), 2U);
 
     ASSERT_TRUE(http.CompleteNext());
+    http.Poll();
     ASSERT_EQ(http.RequestCount(), 3U);
     ASSERT_EQ(http.PendingCount(), 2U);
 
-    signal.emit(boost::asio::cancellation_type::terminal);
-    ASSERT_TRUE(http.RunUntil([&] { return outcome.has_value(); }));
+    op.Cancel();
+    ASSERT_TRUE(http.RunUntil([&] { return op.Done(); }));
 
-    ASSERT_FALSE(outcome->has_value());
-    EXPECT_EQ(outcome->error().Code, std::make_error_code(std::errc::operation_canceled));
+    const auto& outcome = op.Result();
+    ASSERT_FALSE(outcome.has_value());
+    EXPECT_EQ(outcome.error().Code, std::make_error_code(std::errc::operation_canceled));
     EXPECT_EQ(http.PendingCount(), 0U);
     EXPECT_EQ(http.RequestCount(), 3U);
 }
 
-TEST(BatchDeleteTests, ExplicitSlotEmittedAfterCompletionAndClientDestructionTouchesNothing) {
-    boost::asio::io_context context;
-    boost::asio::cancellation_signal signal;
-    std::optional<BatchOutcome> outcome;
-    {
-        FakeHttpClient http{context};
-        http.SetResponder(
-            [](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
-                return BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
-            });
-        BlobContainerClient client{http, MakeBlobContainerClientOptions()};
-        AVEVA::AzureClient::AzureRequestOptions requestOptions;
-        requestOptions.SetCancellationSlot(signal.slot());
-        client.DeleteBlobsAsync(
-            MakeNames(3U), DeleteBlobsOptions{}, [&outcome](BatchOutcome result) { outcome = std::move(result); },
-            requestOptions);
-        ASSERT_TRUE(http.RunUntil([&] { return outcome.has_value(); }));
-        ASSERT_TRUE(outcome->has_value());
-        context.restart();
-        context.poll();
-    }
-
-    // The operation is gone, so the leftover handler must not post anything (nor read the destroyed transport).
-    signal.emit(boost::asio::cancellation_type::terminal);
-    context.restart();
-    EXPECT_EQ(context.poll(), 0U);
-}
-
 TEST(BatchDeleteTests, PartialCancellationDoesNotAbortTheBatchButTerminalDoes) {
     FakeHttpClient http;
-    http.SetResponder([](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
-        FakeHttpClient::ScriptedResult result =
-            BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
-        result.Deferred = true;
-        return result;
-    });
+    DeferBatchResponses(http);
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
-    boost::asio::cancellation_signal signal;
-    std::optional<BatchOutcome> outcome;
-    client.DeleteBlobsAsync(MakeNames(256U * 3U), DeleteBlobsOptions{.MaxConcurrentRequests = 1},
-                            boost::asio::bind_cancellation_slot(
-                                signal.slot(), [&outcome](BatchOutcome result) { outcome = std::move(result); }));
+    auto op = StartAwaitable(
+        http, client.DeleteBlobsAsync(MakeNames(256U * 3U), DeleteBlobsOptions{.MaxConcurrentRequests = 1}));
     ASSERT_EQ(http.PendingCount(), 1U);
 
-    signal.emit(boost::asio::cancellation_type::partial);
+    op.Cancel(boost::asio::cancellation_type::partial);
     http.Poll();
-    ASSERT_FALSE(outcome.has_value());
+    ASSERT_FALSE(op.Done());
     ASSERT_EQ(http.PendingCount(), 1U);
 
     ASSERT_TRUE(http.CompleteNext());
+    http.Poll();
     ASSERT_EQ(http.RequestCount(), 2U);
-    signal.emit(boost::asio::cancellation_type::terminal);
-    ASSERT_TRUE(http.RunUntil([&] { return outcome.has_value(); }));
+    op.Cancel();
+    ASSERT_TRUE(http.RunUntil([&] { return op.Done(); }));
 
-    ASSERT_FALSE(outcome->has_value());
-    EXPECT_EQ(outcome->error().Code, std::make_error_code(std::errc::operation_canceled));
+    const auto& outcome = op.Result();
+    ASSERT_FALSE(outcome.has_value());
+    EXPECT_EQ(outcome.error().Code, std::make_error_code(std::errc::operation_canceled));
     EXPECT_EQ(http.RequestCount(), 2U);
 }
 
 TEST(BatchDeleteTests, PartialCancellationLetsTheBatchSucceed) {
     FakeHttpClient http;
-    http.SetResponder([](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
-        FakeHttpClient::ScriptedResult result =
-            BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
-        result.Deferred = true;
-        return result;
-    });
+    DeferBatchResponses(http);
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
-    boost::asio::cancellation_signal signal;
-    std::optional<BatchOutcome> outcome;
-    client.DeleteBlobsAsync(MakeNames(10U), DeleteBlobsOptions{},
-                            boost::asio::bind_cancellation_slot(
-                                signal.slot(), [&outcome](BatchOutcome result) { outcome = std::move(result); }));
+    auto op = StartAwaitable(http, client.DeleteBlobsAsync(MakeNames(10U)));
     ASSERT_EQ(http.PendingCount(), 1U);
 
-    signal.emit(boost::asio::cancellation_type::partial);
+    op.Cancel(boost::asio::cancellation_type::partial);
     http.Poll();
     ASSERT_TRUE(http.CompleteNext());
-    ASSERT_TRUE(http.RunUntil([&] { return outcome.has_value(); }));
+    ASSERT_TRUE(http.RunUntil([&] { return op.Done(); }));
 
-    ASSERT_TRUE(outcome->has_value());
-    EXPECT_EQ(outcome->value().Value().Items.size(), 10U);
+    ASSERT_TRUE(op.Result().has_value());
+    EXPECT_EQ(op.Result().value().Value().Items.size(), 10U);
 }
 
 TEST(BatchDeleteTests, CancelRightAfterInitiationOfManyChunksAlwaysCompletesCanceled) {
     for (int iteration = 0; iteration < 20; ++iteration) {
         FakeHttpClient http;
-        http.SetResponder(
-            [](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
-                FakeHttpClient::ScriptedResult result =
-                    BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
-                result.Deferred = true;
-                return result;
-            });
+        DeferBatchResponses(http);
         BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
-        boost::asio::cancellation_signal signal;
-        std::optional<BatchOutcome> outcome;
-        client.DeleteBlobsAsync(MakeNames(256U * 5U), DeleteBlobsOptions{.MaxConcurrentRequests = 4},
-                                boost::asio::bind_cancellation_slot(
-                                    signal.slot(), [&outcome](BatchOutcome result) { outcome = std::move(result); }));
-        signal.emit(boost::asio::cancellation_type::terminal);
-        ASSERT_TRUE(http.RunUntil([&] { return outcome.has_value(); }));
-        ASSERT_FALSE(outcome->has_value());
-        EXPECT_EQ(outcome->error().Code, std::make_error_code(std::errc::operation_canceled));
+        auto op = StartAwaitable(
+            http, client.DeleteBlobsAsync(MakeNames(256U * 5U), DeleteBlobsOptions{.MaxConcurrentRequests = 4}));
+        op.Cancel();
+        ASSERT_TRUE(http.RunUntil([&] { return op.Done(); }));
+        const auto& outcome = op.Result();
+        ASSERT_FALSE(outcome.has_value());
+        EXPECT_EQ(outcome.error().Code, std::make_error_code(std::errc::operation_canceled));
     }
 }
 
@@ -531,12 +473,10 @@ TEST(BatchDeleteTests, RetriedBatchRebuildsSubrequestsWithAFreshToken) {
     AVEVA::AzureClient::BasicBlobContainerClient<FakeHttpClient, ScriptedTokenCredential> client{http, options,
                                                                                                  credential};
 
-    std::optional<BatchOutcome> outcome;
-    client.DeleteBlobsAsync({"a", "b"}, {}, [&outcome](BatchOutcome result) { outcome = std::move(result); });
-    ASSERT_TRUE(http.RunUntil([&] { return outcome.has_value(); }));
+    const BatchOutcome outcome = RunAwaitable(http, client.DeleteBlobsAsync({"a", "b"}));
 
-    ASSERT_TRUE(outcome->has_value()) << outcome->error().Message << " status " << outcome->error().StatusCode
-                                      << " requests " << http.RequestCount();
+    ASSERT_TRUE(outcome.has_value()) << outcome.error().Message << " status " << outcome.error().StatusCode
+                                     << " requests " << http.RequestCount();
     const auto& first = http.RequestAt(0);
     const auto& second = http.RequestAt(1);
     EXPECT_EQ(CountOccurrences(first.Body, "Authorization: Bearer token-one"), 2U);
@@ -667,25 +607,14 @@ TEST(BatchDeleteTests, SuccessfulPartsNeedNoHeaderParsingAndFailedPartsKeepTheir
 
 TEST(BatchDeleteTests, SequentialBatchesShareOneAggregateDeadline) {
     FakeHttpClient http;
-    http.SetResponder([](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
-        FakeHttpClient::ScriptedResult result =
-            BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
-        result.Deferred = true;
-        return result;
-    });
+    DeferBatchResponses(http);
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
     AVEVA::AzureClient::AzureRequestOptions requestOptions;
     requestOptions.SetTotalDeadline(std::chrono::milliseconds{200});
-    int completions = 0;
-    std::optional<BatchOutcome> outcome;
-    client.DeleteBlobsAsync(
-        MakeNames(256U * 3U), DeleteBlobsOptions{.MaxConcurrentRequests = 1},
-        [&](BatchOutcome result) {
-            ++completions;
-            outcome = std::move(result);
-        },
-        requestOptions);
+    auto op =
+        StartAwaitable(http, client.DeleteBlobsAsync(MakeNames(256U * 3U),
+                                                     DeleteBlobsOptions{.MaxConcurrentRequests = 1}, requestOptions));
 
     // Each batch fits the 200 ms budget on its own, but together they overrun it.
     ASSERT_EQ(http.PendingCount(), 1U);
@@ -693,71 +622,50 @@ TEST(BatchDeleteTests, SequentialBatchesShareOneAggregateDeadline) {
     ASSERT_TRUE(http.CompleteNext());
     std::this_thread::sleep_for(std::chrono::milliseconds{110});
     static_cast<void>(http.CompleteNext());
-    ASSERT_TRUE(http.RunUntil([&] { return completions > 0 || http.RequestCount() > 2U; }));
+    ASSERT_TRUE(http.RunUntil([&] { return op.Done() || http.RequestCount() > 2U; }));
 
     EXPECT_EQ(http.RequestCount(), 2U);
-    ASSERT_EQ(completions, 1);
-    ASSERT_FALSE(outcome->has_value());
-    EXPECT_EQ(outcome->error().Code, std::make_error_code(std::errc::timed_out));
+    ASSERT_TRUE(op.Done());
+    const auto& outcome = op.Result();
+    ASSERT_FALSE(outcome.has_value());
+    EXPECT_EQ(outcome.error().Code, std::make_error_code(std::errc::timed_out));
 }
 
 TEST(BatchDeleteTests, ChildInitiationFailureAfterACompletedChunkCompletesOnceWithTheFailure) {
     FakeHttpClient http;
-    http.SetResponder([](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
-        FakeHttpClient::ScriptedResult result =
-            BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
-        result.Deferred = true;
-        return result;
-    });
+    DeferBatchResponses(http);
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
-    int completions = 0;
-    std::optional<BatchOutcome> outcome;
-    client.DeleteBlobsAsync(MakeNames(256U * 3U), DeleteBlobsOptions{.MaxConcurrentRequests = 1},
-                            [&](BatchOutcome result) {
-                                ++completions;
-                                outcome = std::move(result);
-                            });
+    auto op = StartAwaitable(
+        http, client.DeleteBlobsAsync(MakeNames(256U * 3U), DeleteBlobsOptions{.MaxConcurrentRequests = 1}));
     ASSERT_EQ(http.PendingCount(), 1U);
 
     http.FailNextInitiation(std::make_exception_ptr(std::bad_alloc{}));
     // The completion of the first chunk starts the next one; its failure must not escape into the event loop.
     EXPECT_NO_THROW(static_cast<void>(http.CompleteNext()));
-    ASSERT_TRUE(http.RunUntil([&] { return completions > 0; }));
+    ASSERT_TRUE(http.RunUntil([&] { return op.Done(); }));
 
-    EXPECT_EQ(completions, 1);
-    ASSERT_FALSE(outcome->has_value());
+    ASSERT_FALSE(op.Result().has_value());
     EXPECT_EQ(http.RequestCount(), 1U);
     EXPECT_EQ(http.PendingCount(), 0U);
 }
 
-TEST(BatchDeleteTests, ChildInitiationFailureDrainsTheChunksAlreadyAdmitted) {
+TEST(BatchDeleteTests, ChildInitiationFailureCancelsAndDrainsTheChunksAlreadyAdmitted) {
     FakeHttpClient http;
-    http.SetResponder([](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
-        FakeHttpClient::ScriptedResult result =
-            BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
-        result.Deferred = true;
-        return result;
-    });
+    DeferBatchResponses(http);
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
-    int completions = 0;
-    std::optional<BatchOutcome> outcome;
-    client.DeleteBlobsAsync(MakeNames(256U * 4U), DeleteBlobsOptions{.MaxConcurrentRequests = 2},
-                            [&](BatchOutcome result) {
-                                ++completions;
-                                outcome = std::move(result);
-                            });
+    auto op = StartAwaitable(
+        http, client.DeleteBlobsAsync(MakeNames(256U * 4U), DeleteBlobsOptions{.MaxConcurrentRequests = 2}));
     ASSERT_EQ(http.PendingCount(), 2U);
 
     http.FailNextInitiation(std::make_exception_ptr(std::bad_alloc{}));
     EXPECT_NO_THROW(static_cast<void>(http.CompleteNext()));
-    // One chunk is still in flight, so the aggregate must wait for it rather than complete early or hang.
-    EXPECT_EQ(completions, 0);
-    ASSERT_TRUE(http.CompleteNext());
-    ASSERT_TRUE(http.RunUntil([&] { return completions > 0; }));
+    http.Poll();
+    // The first failure cancels the chunk still in flight, and the aggregate returns once it has drained.
+    ASSERT_TRUE(http.RunUntil([&] { return op.Done(); }));
+    EXPECT_EQ(http.PendingCount(), 0U);
 
-    EXPECT_EQ(completions, 1);
-    ASSERT_FALSE(outcome->has_value());
+    ASSERT_FALSE(op.Result().has_value());
     EXPECT_EQ(http.RequestCount(), 2U);
 }

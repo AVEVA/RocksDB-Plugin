@@ -56,7 +56,9 @@ struct Clients {
     std::string Sink = std::string(1024U, '\0');
 };
 
-constexpr auto Ignore = [](auto&&...) {};
+template <class T> void Run(Clients& clients, boost::asio::awaitable<T> awaitable) {
+    static_cast<void>(AVEVA::AzureClient::Tests::RunAwaitable(clients.Http, std::move(awaitable)));
+}
 
 [[nodiscard]] std::chrono::system_clock::time_point Day(int day) {
     return std::chrono::sys_days{std::chrono::year{2024} / std::chrono::January / day};
@@ -176,7 +178,7 @@ std::vector<RequestShapeCase> BlobCases() {
                          [](Clients& c) {
                              DownloadBlobOptions o;
                              o.Conditions = FullConditions();
-                             c.Blob.DownloadAsync(std::move(o), Ignore);
+                             Run(c, c.Blob.DownloadAsync(std::move(o)));
                          },
                      .Method = HttpMethod::Get,
                      .Path = blob,
@@ -189,7 +191,7 @@ std::vector<RequestShapeCase> BlobCases() {
                          [](Clients& c) {
                              DownloadBlobOptions o;
                              o.Range = Models::BlobByteRange{.Offset = 10, .Length = 20};
-                             c.Blob.DownloadAsync(std::move(o), Ignore);
+                             Run(c, c.Blob.DownloadAsync(std::move(o)));
                          },
                      .Method = HttpMethod::Get,
                      .Path = blob,
@@ -202,7 +204,7 @@ std::vector<RequestShapeCase> BlobCases() {
                          [](Clients& c) {
                              DownloadBlobOptions o;
                              o.Range = Models::BlobByteRange{.Offset = 0, .Length = 1024};
-                             c.Blob.DownloadToAsync(std::span<char>(c.Sink), std::move(o), Ignore);
+                             Run(c, c.Blob.DownloadToAsync(std::span<char>(c.Sink), std::move(o)));
                          },
                      .Method = HttpMethod::Get,
                      .Path = blob,
@@ -211,7 +213,7 @@ std::vector<RequestShapeCase> BlobCases() {
                      .AbsentHeaders = {},
                      .Body = std::nullopt});
     cases.push_back({.Name = "Blob_DeleteIfExists",
-                     .Start = [](Clients& c) { c.Blob.DeleteIfExistsAsync(Ignore); },
+                     .Start = [](Clients& c) { Run(c, c.Blob.DeleteIfExistsAsync()); },
                      .Method = HttpMethod::Delete,
                      .Path = blob,
                      .Query = {},
@@ -223,7 +225,7 @@ std::vector<RequestShapeCase> BlobCases() {
                          [](Clients& c) {
                              GetBlobPropertiesOptions o;
                              o.Conditions = FullConditions();
-                             c.Blob.GetPropertiesAsync(std::move(o), Ignore);
+                             Run(c, c.Blob.GetPropertiesAsync(std::move(o)));
                          },
                      .Method = HttpMethod::Head,
                      .Path = blob,
@@ -232,7 +234,7 @@ std::vector<RequestShapeCase> BlobCases() {
                      .AbsentHeaders = {},
                      .Body = std::nullopt});
     cases.push_back({.Name = "Blob_Exists",
-                     .Start = [](Clients& c) { c.Blob.ExistsAsync(Ignore); },
+                     .Start = [](Clients& c) { Run(c, c.Blob.ExistsAsync()); },
                      .Method = HttpMethod::Head,
                      .Path = blob,
                      .Query = {},
@@ -245,7 +247,7 @@ std::vector<RequestShapeCase> BlobCases() {
                              SetBlobMetadataOptions o;
                              o.Metadata = Metadata();
                              o.Conditions = FullConditions();
-                             c.Blob.SetMetadataAsync(std::move(o), Ignore);
+                             Run(c, c.Blob.SetMetadataAsync(std::move(o)));
                          },
                      .Method = HttpMethod::Put,
                      .Path = blob,
@@ -260,7 +262,7 @@ std::vector<RequestShapeCase> BlobCases() {
                              o.Duration = 30s;
                              o.ProposedLeaseId = "proposed-1";
                              o.Conditions = FullConditions();
-                             c.Blob.AcquireLeaseAsync(std::move(o), Ignore);
+                             Run(c, c.Blob.AcquireLeaseAsync(std::move(o)));
                          },
                      .Method = HttpMethod::Put,
                      .Path = blob,
@@ -272,7 +274,7 @@ std::vector<RequestShapeCase> BlobCases() {
                      .AbsentHeaders = {"x-ms-lease-id"},
                      .Body = std::nullopt});
     cases.push_back({.Name = "Blob_AcquireLeaseInfinite",
-                     .Start = [](Clients& c) { c.Blob.AcquireLeaseAsync(Ignore); },
+                     .Start = [](Clients& c) { Run(c, c.Blob.AcquireLeaseAsync()); },
                      .Method = HttpMethod::Put,
                      .Path = blob,
                      .Query = {{"comp", "lease"}},
@@ -284,7 +286,7 @@ std::vector<RequestShapeCase> BlobCases() {
                          [](Clients& c) {
                              RenewLeaseOptions o;
                              o.LeaseId = "lease-1";
-                             c.Blob.RenewLeaseAsync(std::move(o), Ignore);
+                             Run(c, c.Blob.RenewLeaseAsync(std::move(o)));
                          },
                      .Method = HttpMethod::Put,
                      .Path = blob,
@@ -299,7 +301,7 @@ std::vector<RequestShapeCase> BlobCases() {
                  ReleaseLeaseOptions o;
                  o.LeaseId = "lease-1";
                  o.Conditions = FullConditions();
-                 c.Blob.ReleaseLeaseAsync(std::move(o), Ignore);
+                 Run(c, c.Blob.ReleaseLeaseAsync(std::move(o)));
              },
          .Method = HttpMethod::Put,
          .Path = blob,
@@ -321,7 +323,7 @@ std::vector<RequestShapeCase> TypedBlobCases() {
                  CreatePageBlobOptions o;
                  o.Metadata = Metadata();
                  o.Conditions = FullConditions();
-                 c.Page.CreateAsync(1024, std::move(o), Ignore);
+                 Run(c, c.Page.CreateAsync(1024, std::move(o)));
              },
          .Method = HttpMethod::Put,
          .Path = blob,
@@ -337,7 +339,7 @@ std::vector<RequestShapeCase> TypedBlobCases() {
              [](Clients& c) {
                  UploadPagesOptions o;
                  o.Conditions = FullConditions();
-                 c.Page.UploadPagesAsync(512, std::string(512, 'x'), std::move(o), Ignore);
+                 Run(c, c.Page.UploadPagesAsync(512, std::string(512, 'x'), std::move(o)));
              },
          .Method = HttpMethod::Put,
          .Path = blob,
@@ -350,7 +352,7 @@ std::vector<RequestShapeCase> TypedBlobCases() {
                          [](Clients& c) {
                              ResizePageBlobOptions o;
                              o.Conditions = FullConditions();
-                             c.Page.ResizeAsync(2048, std::move(o), Ignore);
+                             Run(c, c.Page.ResizeAsync(2048, std::move(o)));
                          },
                      .Method = HttpMethod::Put,
                      .Path = blob,
@@ -367,7 +369,7 @@ std::vector<RequestShapeCase> ContainerCases() {
     std::vector<RequestShapeCase> cases;
 
     cases.push_back({.Name = "Container_CreateIfNotExists",
-                     .Start = [](Clients& c) { c.Container.CreateIfNotExistsAsync(Ignore); },
+                     .Start = [](Clients& c) { Run(c, c.Container.CreateIfNotExistsAsync()); },
                      .Method = HttpMethod::Put,
                      .Path = container,
                      .Query = {{"restype", "container"}},
@@ -382,7 +384,7 @@ std::vector<RequestShapeCase> ContainerCases() {
                              o.Marker = "m1";
                              o.MaxResults = 10;
                              o.IncludeMetadata = true;
-                             c.Container.ListBlobsAsync(std::move(o), Ignore);
+                             Run(c, c.Container.ListBlobsAsync(std::move(o)));
                          },
                      .Method = HttpMethod::Get,
                      .Path = container,

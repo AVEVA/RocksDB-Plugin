@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "BackgroundPump.hpp"
 #include "FakeHttpClient.hpp"
 #include "TestSupport.hpp"
 
@@ -263,6 +264,7 @@ class FakeBlobServer {
     Knob<bool> DeferDownloads;
     // Defined before its first use: GCC rejects calling an auto-returning member before its definition.
     template <class THeld> auto Take(THeld& held, const std::size_t position, const char* missing) {
+        Settle(*m_http);
         std::scoped_lock lock(m_mutex);
         auto entry = held.Take(*m_http, position);
         if (!entry) {
@@ -279,6 +281,7 @@ class FakeBlobServer {
                 Take(m_heldProperties, 0, "FakeBlobServer has no deferred properties request").RequestIndex)) {
             throw std::logic_error("FakeBlobServer properties request was already completed");
         }
+        Settle(*m_http);
     }
 
     [[nodiscard]] static AzureClient::BlobStorageError Error(unsigned int statusCode, std::string errorCode);
@@ -311,9 +314,11 @@ class FakeBlobServer {
                 Take(m_heldUploads, index, "FakeBlobServer upload index out of range").RequestIndex)) {
             throw std::logic_error("FakeBlobServer upload was already completed");
         }
+        Settle(*m_http);
     }
     void FailUpload(const AzureClient::BlobStorageError& error, const size_t index = 0) {
         FailHeld(Take(m_heldUploads, index, "FakeBlobServer upload index out of range").RequestIndex, error);
+        Settle(*m_http);
     }
 
     // Takes the oldest deferred download; the caller completes it with Succeed / Fail.
@@ -327,7 +332,9 @@ class FakeBlobServer {
   private:
     using Result = FakeHttpClient::ScriptedResult;
 
+    // Operations the test started have reached the server by the time the held requests are counted.
     template <class THeld> std::size_t Count(THeld& held) {
+        Settle(*m_http);
         std::scoped_lock lock(m_mutex);
         return held.Count(*m_http);
     }

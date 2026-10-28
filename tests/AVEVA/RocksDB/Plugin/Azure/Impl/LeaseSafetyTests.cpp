@@ -7,6 +7,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/TestLogger.hpp"
 
+#include "BackgroundPump.hpp"
 #include "FakeHttpClient.hpp"
 #include "TestSupport.hpp"
 
@@ -96,14 +97,13 @@ namespace {
 class LeaseDeadlineTests : public ::testing::Test {
   protected:
     void SetUp() override {
-        m_httpClient.CompleteInline() = true;
-        m_httpClient.StartBackgroundPump();
         m_runtime = std::make_shared<ClientRuntimeBase>();
         m_logger = AVEVA::RocksDB::Plugin::Tests::MakeTestLogger();
     }
 
     boost::asio::io_context m_context;
     FakeHttpClient m_httpClient;
+    AVEVA::RocksDB::Plugin::Azure::Impl::Tests::BackgroundPump m_pump{m_httpClient};
     std::shared_ptr<ClientRuntimeBase> m_runtime;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
 };

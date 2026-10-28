@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntimeTransport.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/RequestHelpers.hpp"
 
 #include "FakeBlobEnvironment.hpp"
 
@@ -13,7 +14,9 @@
 #include <memory>
 #include <vector>
 
-using AVEVA::RocksDB::Plugin::Azure::Impl::Unwrap;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Block;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Call;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Spawn;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobEnvironment;
 
 namespace {
@@ -24,32 +27,29 @@ class FakeBlobServerTests : public ::testing::Test {
   protected:
     FakeBlobEnvironment m_env;
 
-    // Completions may be delivered from the fake transport's pump thread, so results travel through a future.
-    template <class TStart> static std::future<unsigned int> Start(TStart&& start) {
-        auto promise = std::make_shared<std::promise<unsigned int>>();
-        auto future = promise->get_future();
-        start([promise](auto result) { promise->set_value(result ? Ok : result.error().StatusCode); });
-        return future;
-    }
-
+    // The blob's transport is driven by the environment's pump thread, so results travel through a future.
     std::future<unsigned int> Upload(const int64_t offset, const char fill) {
         auto payload = std::make_shared<const std::vector<char>>(static_cast<size_t>(Page), fill);
-        return Start([&](auto handler) {
-            m_env.Client->UploadPagesAsync(static_cast<uint64_t>(offset), std::move(payload), std::move(handler));
+        auto result = Spawn(m_env.Client->get_executor(),
+                            m_env.Client->UploadPagesAsync(static_cast<uint64_t>(offset), std::move(payload)));
+        return std::async(std::launch::deferred, [result = std::move(result)]() mutable {
+            const auto outcome = result.get();
+            return outcome ? Ok : outcome.error().StatusCode;
         });
+    }
+
+    // The HTTP status of the failure, or Ok.
+    template <class TAwaitable> [[nodiscard]] unsigned int Status(TAwaitable operation) {
+        const auto outcome = Block(*m_env.Client, std::move(operation));
+        return outcome ? Ok : outcome.error().StatusCode;
     }
 
     [[nodiscard]] std::vector<std::pair<uint64_t, uint64_t>> Ranges() {
-        auto promise = std::make_shared<std::promise<std::vector<std::pair<uint64_t, uint64_t>>>>();
-        auto future = promise->get_future();
-        m_env.Client->GetPageRangesAsync([promise](auto result) {
-            std::vector<std::pair<uint64_t, uint64_t>> ranges;
-            for (const auto& range : Unwrap(std::move(result)).Ranges) {
-                ranges.emplace_back(range.Offset, range.Length);
-            }
-            promise->set_value(std::move(ranges));
-        });
-        return future.get();
+        std::vector<std::pair<uint64_t, uint64_t>> ranges;
+        for (const auto& range : Call(*m_env.Client, m_env.Client->GetPageRangesAsync()).Ranges) {
+            ranges.emplace_back(range.Offset, range.Length);
+        }
+        return ranges;
     }
 };
 } // namespace
@@ -88,35 +88,35 @@ TEST_F(FakeBlobServerTests, ReleasedLease_CannotBeRenewedWithTheOldIdAfterANewAc
     AVEVA::AzureClient::AcquireLeaseOptions acquire;
     acquire.ProposedLeaseId = "first";
     acquire.Duration = std::chrono::seconds(60);
-    ASSERT_EQ(Ok, Start([&](auto h) { m_env.Client->AcquireLeaseAsync(acquire, std::move(h)); }).get());
+    ASSERT_EQ(Ok, Status(m_env.Client->AcquireLeaseAsync(acquire)));
 
     AVEVA::AzureClient::ReleaseLeaseOptions release;
     release.LeaseId = "first";
-    ASSERT_EQ(Ok, Start([&](auto h) { m_env.Client->ReleaseLeaseAsync(release, std::move(h)); }).get());
+    ASSERT_EQ(Ok, Status(m_env.Client->ReleaseLeaseAsync(release)));
 
     acquire.ProposedLeaseId = "second";
-    ASSERT_EQ(Ok, Start([&](auto h) { m_env.Client->AcquireLeaseAsync(acquire, std::move(h)); }).get());
+    ASSERT_EQ(Ok, Status(m_env.Client->AcquireLeaseAsync(acquire)));
 
     AVEVA::AzureClient::RenewLeaseOptions renew;
     renew.LeaseId = "first";
-    EXPECT_EQ(409U, Start([&](auto h) { m_env.Client->RenewLeaseAsync(renew, std::move(h)); }).get());
+    EXPECT_EQ(409U, Status(m_env.Client->RenewLeaseAsync(renew)));
 
     renew.LeaseId = "second";
-    EXPECT_EQ(Ok, Start([&](auto h) { m_env.Client->RenewLeaseAsync(renew, std::move(h)); }).get());
+    EXPECT_EQ(Ok, Status(m_env.Client->RenewLeaseAsync(renew)));
 }
 
 TEST_F(FakeBlobServerTests, LeasedBlob_RejectsDeleteAndResizeWithoutTheLeaseId) {
     AVEVA::AzureClient::AcquireLeaseOptions acquire;
     acquire.ProposedLeaseId = "held";
     acquire.Duration = std::chrono::seconds(60);
-    ASSERT_EQ(Ok, Start([&](auto h) { m_env.Client->AcquireLeaseAsync(acquire, std::move(h)); }).get());
+    ASSERT_EQ(Ok, Status(m_env.Client->AcquireLeaseAsync(acquire)));
 
-    EXPECT_EQ(412U, Start([&](auto h) { m_env.Client->DeleteAsync(std::move(h)); }).get());
-    EXPECT_EQ(412U, Start([&](auto h) { m_env.Client->ResizeAsync(2 * Page, std::move(h)); }).get());
+    EXPECT_EQ(412U, Status(m_env.Client->DeleteAsync()));
+    EXPECT_EQ(412U, Status(m_env.Client->ResizeAsync(2 * Page)));
 
     AVEVA::AzureClient::DeleteBlobOptions withLease;
     withLease.Conditions.LeaseId = "held";
-    EXPECT_EQ(Ok, Start([&](auto h) { m_env.Client->DeleteAsync(withLease, std::move(h)); }).get());
+    EXPECT_EQ(Ok, Status(m_env.Client->DeleteAsync(withLease)));
 }
 
 TEST_F(FakeBlobServerTests, LeaseLapsedByTheInjectedClock_NoLongerFencesWrites) {
@@ -125,10 +125,10 @@ TEST_F(FakeBlobServerTests, LeaseLapsedByTheInjectedClock_NoLongerFencesWrites) 
     AVEVA::AzureClient::AcquireLeaseOptions acquire;
     acquire.ProposedLeaseId = "held";
     acquire.Duration = std::chrono::seconds(15);
-    ASSERT_EQ(Ok, Start([&](auto h) { m_env.Client->AcquireLeaseAsync(acquire, std::move(h)); }).get());
-    ASSERT_EQ(412U, Start([&](auto h) { m_env.Client->ResizeAsync(2 * Page, std::move(h)); }).get());
+    ASSERT_EQ(Ok, Status(m_env.Client->AcquireLeaseAsync(acquire)));
+    ASSERT_EQ(412U, Status(m_env.Client->ResizeAsync(2 * Page)));
 
     now->store(now->load() + std::chrono::seconds(16));
 
-    EXPECT_EQ(Ok, Start([&](auto h) { m_env.Client->ResizeAsync(2 * Page, std::move(h)); }).get());
+    EXPECT_EQ(Ok, Status(m_env.Client->ResizeAsync(2 * Page)));
 }

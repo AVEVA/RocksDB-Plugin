@@ -3,6 +3,7 @@
 
 #include "AVEVA/AzureClient/TokenCredential.hpp"
 #include "FakeHttpClient.hpp"
+#include "TestSupport.hpp"
 
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 #include <AVEVA/AzureClient/Credentials.hpp>
@@ -33,7 +34,7 @@ using AVEVA::HttpMethod;
 using AVEVA::HttpRequest;
 using AVEVA::HttpResponse;
 using AVEVA::AzureClient::AccessToken;
-using AVEVA::AzureClient::AssertionCompletion;
+using AVEVA::AzureClient::AssertionResult;
 using AVEVA::AzureClient::BlobStorageErrorCode;
 using AVEVA::AzureClient::ClientAssertionCredentialOptions;
 using AVEVA::AzureClient::ClientSecretCredentialOptions;
@@ -46,6 +47,8 @@ using AVEVA::AzureClient::Tests::ClientAssertionCredential;
 using AVEVA::AzureClient::Tests::ClientSecretCredential;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::ManagedIdentityCredential;
+using AVEVA::AzureClient::Tests::RunAwaitable;
+using AVEVA::AzureClient::Tests::StartAwaitable;
 using AVEVA::AzureClient::Tests::WorkloadIdentityCredential;
 using Clock = std::chrono::system_clock;
 
@@ -59,14 +62,11 @@ struct TokenResult {
 template <class TCred>
 [[nodiscard]] TokenResult GetToken(FakeHttpClient& httpClient, TCred& credential,
                                    std::vector<std::string> scopes = StorageScope()) {
-    std::optional<TokenResult> result;
-    credential.GetTokenAsync(std::move(scopes), [&](std::error_code error, AccessToken token) {
-        result = TokenResult{.Error = error, .Token = std::move(token)};
-    });
-    EXPECT_FALSE(result.has_value()) << "completion must not run inside GetTokenAsync";
-    httpClient.Poll();
-    EXPECT_TRUE(result.has_value());
-    return result.value_or(TokenResult{});
+    auto result = RunAwaitable(httpClient, credential.GetTokenAsync(std::move(scopes)));
+    if (!result) {
+        return TokenResult{.Error = result.error()};
+    }
+    return TokenResult{.Token = std::move(*result)};
 }
 
 // A token body whose "expires_on" (Unix seconds, as a string) is `lifetimeSeconds` from now.
@@ -258,7 +258,8 @@ TEST(CredentialsTests, WorkloadIdentityCredentialSendsFederatedTokenAsClientAsse
     EXPECT_EQ(httpClient.Requests().size(), 1U);
 }
 
-[[nodiscard]] ClientAssertionCredentialOptions AssertionOptions(std::function<void(AssertionCompletion)> provider) {
+[[nodiscard]] ClientAssertionCredentialOptions
+AssertionOptions(std::function<boost::asio::awaitable<AssertionResult>()> provider) {
     ClientAssertionCredentialOptions options;
     options.TenantId = "contoso.onmicrosoft.com";
     options.ClientId = "app";
@@ -271,9 +272,10 @@ TEST(CredentialsTests, ClientAssertionCredentialSendsTheProvidedAssertion) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(Json(200, R"({"expires_in":3600,"access_token":"ca-token"})"));
     int calls = 0;
-    ClientAssertionCredential credential{httpClient, AssertionOptions([&calls](AssertionCompletion done) {
+    ClientAssertionCredential credential{httpClient,
+                                         AssertionOptions([&calls]() -> boost::asio::awaitable<AssertionResult> {
                                              ++calls;
-                                             done(std::error_code{}, "a.b+c");
+                                             co_return "a.b+c";
                                          })};
 
     const TokenResult result = GetToken(httpClient, credential);
@@ -292,8 +294,9 @@ TEST(CredentialsTests, ClientAssertionCredentialRequestsAFreshAssertionEachTime)
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = Json(200, R"({"expires_in":3600,"access_token":"t"})");
     int calls = 0;
-    ClientAssertionCredential credential{httpClient, AssertionOptions([&calls](AssertionCompletion done) {
-                                             done(std::error_code{}, "assertion" + std::to_string(++calls));
+    ClientAssertionCredential credential{httpClient,
+                                         AssertionOptions([&calls]() -> boost::asio::awaitable<AssertionResult> {
+                                             co_return "assertion" + std::to_string(++calls);
                                          })};
 
     ASSERT_FALSE(GetToken(httpClient, credential).Error);
@@ -307,8 +310,10 @@ TEST(CredentialsTests, ClientAssertionCredentialRequestsAFreshAssertionEachTime)
 TEST(CredentialsTests, ClientAssertionProviderErrorIsPassedThroughWithoutARequest) {
     FakeHttpClient httpClient;
     const auto providerError = make_error_code(BlobStorageErrorCode::AuthenticationFailed);
-    ClientAssertionCredential credential{
-        httpClient, AssertionOptions([providerError](AssertionCompletion done) { done(providerError, {}); })};
+    ClientAssertionCredential credential{httpClient,
+                                         AssertionOptions([providerError]() -> boost::asio::awaitable<AssertionResult> {
+                                             co_return std::unexpected(providerError);
+                                         })};
 
     EXPECT_EQ(GetToken(httpClient, credential).Error, providerError);
     EXPECT_EQ(httpClient.Requests().size(), 0U);
@@ -316,7 +321,7 @@ TEST(CredentialsTests, ClientAssertionProviderErrorIsPassedThroughWithoutAReques
 
 TEST(CredentialsTests, ClientAssertionInvalidConfigurationFailsWithoutARequest) {
     FakeHttpClient httpClient;
-    const auto provider = [](AssertionCompletion done) { done(std::error_code{}, "assertion"); };
+    const auto provider = []() -> boost::asio::awaitable<AssertionResult> { co_return "assertion"; };
     const auto invalid = std::make_error_code(std::errc::invalid_argument);
 
     ClientAssertionCredential noProvider{httpClient, AssertionOptions({})};
@@ -328,7 +333,7 @@ TEST(CredentialsTests, ClientAssertionInvalidConfigurationFailsWithoutARequest) 
     EXPECT_EQ(GetToken(httpClient, badTenantCredential).Error, invalid);
 
     ClientAssertionCredential emptyAssertion{
-        httpClient, AssertionOptions([](AssertionCompletion done) { done(std::error_code{}, {}); })};
+        httpClient, AssertionOptions([]() -> boost::asio::awaitable<AssertionResult> { co_return std::string{}; })};
     EXPECT_EQ(GetToken(httpClient, emptyAssertion).Error, invalid);
 
     ClientAssertionCredential noScopes{httpClient, AssertionOptions(provider)};
@@ -437,13 +442,9 @@ TEST(CredentialsTests, TransientTokenEndpointFailuresAreRetried) {
 
     httpClient.EnqueueResponse(Json(503, "busy"));
     httpClient.EnqueueResponse(Json(200, R"({"access_token":"ok","expires_in":3600})"));
-    std::optional<TokenResult> result;
-    credential.GetTokenAsync(StorageScope(), [&](std::error_code error, AccessToken token) {
-        result = TokenResult{.Error = error, .Token = std::move(token)};
-    });
-    ASSERT_TRUE(httpClient.RunUntil([&] { return result.has_value(); }));
-    EXPECT_FALSE(result->Error);
-    EXPECT_EQ(result->Token.Token, "ok");
+    const TokenResult result = GetToken(httpClient, credential);
+    EXPECT_FALSE(result.Error);
+    EXPECT_EQ(result.Token.Token, "ok");
     EXPECT_EQ(httpClient.RequestCount(), 2U);
 }
 
@@ -474,12 +475,7 @@ TEST(CredentialsTests, ManagedIdentityRetriesNotFoundAndGone) {
     httpClient.EnqueueResponse(Json(404, "nf"));
     httpClient.EnqueueResponse(Json(410, "gone"));
     httpClient.EnqueueResponse(Json(200, ExpiresOnBody("mi", 3600)));
-    std::optional<TokenResult> result;
-    credential.GetTokenAsync(StorageScope(), [&](std::error_code error, AccessToken token) {
-        result = TokenResult{.Error = error, .Token = std::move(token)};
-    });
-    ASSERT_TRUE(httpClient.RunUntil([&] { return result.has_value(); }));
-    EXPECT_FALSE(result->Error);
+    EXPECT_FALSE(GetToken(httpClient, credential).Error);
     EXPECT_EQ(httpClient.RequestCount(), 3U);
 }
 
@@ -565,41 +561,31 @@ TEST(CredentialsTests, AllCredentialsAreCancelledWhileTheRequestIsInFlight) {
         file << "federated";
     }
 
-    const auto expectCancelled = [](FakeHttpClient& httpClient, boost::asio::cancellation_signal& signal,
-                                    auto& credential) {
+    const auto expectCancelled = [](FakeHttpClient& httpClient, auto& credential) {
         httpClient.EnqueueDeferredResponse(Json(200, R"({"access_token":"t","expires_in":3600})"));
-        std::optional<std::error_code> error;
-        credential.GetTokenAsync(StorageScope(), [&](std::error_code code, AccessToken /*token*/) { error = code; });
+        auto operation = StartAwaitable(httpClient, credential.GetTokenAsync(StorageScope()));
         EXPECT_EQ(httpClient.PendingCount(), 1U);
-        signal.emit(boost::asio::cancellation_type::terminal);
+        operation.Cancel();
         httpClient.Poll();
-        ASSERT_TRUE(error.has_value());
-        EXPECT_EQ(*error, std::make_error_code(std::errc::operation_canceled));
+        ASSERT_TRUE(operation.Done());
+        ASSERT_FALSE(operation.Result().has_value());
+        EXPECT_EQ(operation.Result().error(), std::make_error_code(std::errc::operation_canceled));
     };
 
     {
         FakeHttpClient httpClient;
-        boost::asio::cancellation_signal signal;
-        ClientSecretCredentialOptions options = SecretOptions();
-        options.RequestOptions.SetCancellationSlot(signal.slot());
-        ClientSecretCredential credential{httpClient, options};
-        expectCancelled(httpClient, signal, credential);
+        ClientSecretCredential credential{httpClient, SecretOptions()};
+        expectCancelled(httpClient, credential);
     }
     {
         FakeHttpClient httpClient;
-        boost::asio::cancellation_signal signal;
-        WorkloadIdentityCredentialOptions options = WorkloadOptions("t", "app", tokenFile.string());
-        options.RequestOptions.SetCancellationSlot(signal.slot());
-        WorkloadIdentityCredential credential{httpClient, options};
-        expectCancelled(httpClient, signal, credential);
+        WorkloadIdentityCredential credential{httpClient, WorkloadOptions("t", "app", tokenFile.string())};
+        expectCancelled(httpClient, credential);
     }
     {
         FakeHttpClient httpClient;
-        boost::asio::cancellation_signal signal;
-        ManagedIdentityCredentialOptions options;
-        options.RequestOptions.SetCancellationSlot(signal.slot());
-        ManagedIdentityCredential credential{httpClient, options};
-        expectCancelled(httpClient, signal, credential);
+        ManagedIdentityCredential credential{httpClient, ManagedIdentityCredentialOptions{}};
+        expectCancelled(httpClient, credential);
     }
     std::filesystem::remove(tokenFile);
 }
@@ -764,16 +750,12 @@ TEST(CredentialsTests, AzurePipelinesCredentialHonorsRetryAfterOnTheOidcRequest)
     options.Retry.MaxRetries = 2;
     AzurePipelinesCredential credential{httpClient, options};
 
-    std::optional<TokenResult> result;
     FakeHttpClient::ClearRetryDelays();
     const FakeHttpClient::InstantRetryTimers instantTimers;
-    credential.GetTokenAsync(StorageScope(), [&](std::error_code error, AccessToken token) {
-        result = TokenResult{.Error = error, .Token = std::move(token)};
-    });
-    ASSERT_TRUE(httpClient.RunUntil([&] { return result.has_value(); }));
+    const TokenResult result = GetToken(httpClient, credential);
 
-    EXPECT_FALSE(result->Error);
-    EXPECT_EQ(result->Token.Token, "tok");
+    EXPECT_FALSE(result.Error);
+    EXPECT_EQ(result.Token.Token, "tok");
     EXPECT_EQ(FakeHttpClient::RetryDelays(), (std::vector<std::chrono::milliseconds>{std::chrono::seconds{1}}));
 }
 

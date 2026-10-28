@@ -137,15 +137,6 @@ class Loopback {
 };
 constexpr const char* TestSasToken = "sv=2025-01-05&sig=fake";
 
-// Free coroutine taking a pointer rather than a capturing coroutine lambda, so the coroutine
-// frame never outlives captured references (cppcoreguidelines-avoid-capturing-lambda-coroutines).
-template <class MakeOperation>
-boost::asio::awaitable<void> AwaitHasValue(bool* out, bool* done, MakeOperation makeOperation) {
-    const auto result = co_await makeOperation();
-    *out = result.has_value();
-    *done = true;
-}
-
 [[nodiscard]] BlobClientOptions BlobOptions(const Loopback& loopback) {
     BlobClientOptions options;
     options.ServiceEndpoint = loopback.Endpoint();
@@ -156,51 +147,36 @@ boost::asio::awaitable<void> AwaitHasValue(bool* out, bool* done, MakeOperation 
     return options;
 }
 
-// Exercises one operation of `client` with (a) a lambda, (b) use_future and (c) the default
-// deferred token co_awaited in a coroutine.
+// Free coroutine taking a pointer rather than a capturing coroutine lambda, so the coroutine
+// frame never outlives captured references (cppcoreguidelines-avoid-capturing-lambda-coroutines).
+template <class TResult> boost::asio::awaitable<void> AwaitHasValue(bool* out, bool* done, TResult result) {
+    *out = (co_await std::move(result)).has_value();
+    *done = true;
+}
+
+// Runs one operation of client by co_awaiting it in a coroutine on the client's executor.
 template <class TClient, class TOperation>
-void ExerciseAllTokenKinds(Loopback& http, TClient& client, TOperation operation) {
-    bool lambdaOk = false;
-    bool lambdaDone = false;
-    operation(client, [&](auto result) {
-        lambdaOk = result.has_value();
-        lambdaDone = true;
-    });
-    http.RunUntil([&] { return lambdaDone; });
-    EXPECT_TRUE(lambdaOk) << "lambda";
-
-    auto future = operation(client, boost::asio::use_future);
-    http.RunUntil([&] { return future.wait_for(std::chrono::seconds{0}) == std::future_status::ready; });
-    EXPECT_TRUE(future.get().has_value()) << "use_future";
-
-    bool awaitedOk = false;
-    bool awaitedDone = false;
-    boost::asio::co_spawn(client.get_executor(),
-                          AwaitHasValue(&awaitedOk, &awaitedDone,
-                                        [&] { return operation(client, typename TClient::DefaultCompletionToken{}); }),
-                          boost::asio::detached);
-    http.RunUntil([&] { return awaitedDone; });
-    EXPECT_TRUE(awaitedOk) << "deferred + co_await";
+void ExerciseOperation(Loopback& http, TClient& client, TOperation operation) {
+    bool ok = false;
+    bool done = false;
+    boost::asio::co_spawn(client.get_executor(), AwaitHasValue(&ok, &done, operation(client)), boost::asio::detached);
+    http.RunUntil([&] { return done; });
+    EXPECT_TRUE(ok);
 }
 } // namespace
 
 TEST(PublicHeaderSelfContainedTests, BlobClient) {
     Loopback http;
     BlobClient client{http.Http(), BlobOptions(http)};
-    ExerciseAllTokenKinds(http, client, [](BlobClient& c, auto&& token) {
-        return c.GetPropertiesAsync(std::forward<decltype(token)>(token));
-    });
-    ExerciseAllTokenKinds(
-        http, client, [](BlobClient& c, auto&& token) { return c.DeleteAsync(std::forward<decltype(token)>(token)); });
-    EXPECT_EQ(http.Requests(), 6);
+    ExerciseOperation(http, client, [](BlobClient& c) { return c.GetPropertiesAsync(); });
+    ExerciseOperation(http, client, [](BlobClient& c) { return c.DeleteAsync(); });
+    EXPECT_EQ(http.Requests(), 2);
 }
 
 TEST(PublicHeaderSelfContainedTests, PageBlobClient) {
     Loopback http;
     PageBlobClient client{http.Http(), BlobOptions(http)};
-    ExerciseAllTokenKinds(http, client, [](PageBlobClient& c, auto&& token) {
-        return c.DeleteAsync(std::forward<decltype(token)>(token));
-    });
+    ExerciseOperation(http, client, [](PageBlobClient& c) { return c.DeleteAsync(); });
 }
 
 TEST(PublicHeaderSelfContainedTests, BlobContainerClient) {
@@ -211,12 +187,9 @@ TEST(PublicHeaderSelfContainedTests, BlobContainerClient) {
     options.SasToken = TestSasToken;
     options.AllowInsecureHttp = true;
     BlobContainerClient client{http.Http(), std::move(options)};
-    ExerciseAllTokenKinds(http, client, [](BlobContainerClient& c, auto&& token) {
-        return c.ListBlobsAsync(std::forward<decltype(token)>(token));
-    });
+    ExerciseOperation(http, client, [](BlobContainerClient& c) { return c.ListBlobsAsync(); });
 
     auto childClient = client.GetPageBlobClient("child");
     BlobClient& child = childClient;
-    ExerciseAllTokenKinds(
-        http, child, [](BlobClient& c, auto&& token) { return c.ExistsAsync(std::forward<decltype(token)>(token)); });
+    ExerciseOperation(http, child, [](BlobClient& c) { return c.ExistsAsync(); });
 }

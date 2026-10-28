@@ -44,13 +44,12 @@ namespace {
 class BlobOperationsTests : public ::testing::Test {
   protected:
     void SetUp() override {
-        // Completions are posted to the fake's own io_context while the operation blocks on a future.
-        m_httpClient.StartBackgroundPump();
         m_blob = std::make_unique<AVEVA::AzureClient::Tests::PageBlobClient>(
             m_httpClient, MakeBlobClientOptions("files", "000001.sst"));
     }
 
     FakeHttpClient m_httpClient;
+    AVEVA::RocksDB::Plugin::Azure::Impl::Tests::BackgroundPump m_pump{m_httpClient};
     std::unique_ptr<AVEVA::AzureClient::Tests::PageBlobClient> m_blob;
 };
 } // namespace
@@ -125,73 +124,6 @@ TEST_F(BlobOperationsTests, BlockingFromTheIoContextThreadThrowsInsteadOfDeadloc
     auto result = threw.get_future();
     ASSERT_EQ(std::future_status::ready, result.wait_for(std::chrono::seconds(10)));
     EXPECT_TRUE(result.get());
-}
-
-TEST_F(BlobOperationsTests, StopBridgeEmitsAStopRequestedWhileTheHandlerIsBeingInstalled) {
-    using Bridge = BlobOperations::Detail::StopBridge<boost::asio::io_context::executor_type>;
-    auto bridge = std::make_shared<Bridge>(m_httpClient.get_executor());
-    std::atomic<int> emitted{0};
-    std::thread requester;
-
-    bridge->Install(bridge, [&] {
-        requester = std::thread([&] { Bridge::Request(bridge); });
-        // The request is made while the handler is not installed yet; it must not be lost or race the install.
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        bridge->Slot().assign([&](boost::asio::cancellation_type_t) { ++emitted; });
-        return 0;
-    });
-    requester.join();
-    EXPECT_TRUE(WaitUntil([&] { return emitted.load() != 0; }));
-    bridge->Retire();
-
-    EXPECT_EQ(1, emitted.load());
-}
-
-TEST_F(BlobOperationsTests, StopBridgeEmitsAfterInstallationExactlyOnceOnTheExecutorThread) {
-    using Bridge = BlobOperations::Detail::StopBridge<boost::asio::io_context::executor_type>;
-    auto bridge = std::make_shared<Bridge>(m_httpClient.get_executor());
-    std::promise<std::thread::id> fired;
-    std::atomic<int> emitted{0};
-    bridge->Install(bridge, [&] {
-        bridge->Slot().assign([&](boost::asio::cancellation_type_t) {
-            if (emitted.fetch_add(1) == 0) {
-                fired.set_value(std::this_thread::get_id());
-            }
-        });
-        return 0;
-    });
-
-    const auto requesterId = std::this_thread::get_id();
-    std::thread first([&] { Bridge::Request(bridge); });
-    std::thread second([&] { Bridge::Request(bridge); });
-    first.join();
-    second.join();
-
-    auto firedOn = fired.get_future();
-    ASSERT_EQ(std::future_status::ready, firedOn.wait_for(std::chrono::seconds(10)));
-    EXPECT_NE(requesterId, firedOn.get());
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    EXPECT_EQ(1, emitted.load());
-    bridge->Retire();
-}
-
-TEST_F(BlobOperationsTests, RetiredStopBridgeDoesNotEmitAndReleasesItsWait) {
-    using Bridge = BlobOperations::Detail::StopBridge<boost::asio::io_context::executor_type>;
-    auto bridge = std::make_shared<Bridge>(m_httpClient.get_executor());
-    std::atomic<int> emitted{0};
-    bridge->Install(bridge, [&] {
-        bridge->Slot().assign([&](boost::asio::cancellation_type_t) { ++emitted; });
-        return 0;
-    });
-    const std::weak_ptr<Bridge> weak = bridge;
-
-    bridge->Retire();
-    Bridge::Request(bridge);
-    bridge.reset();
-
-    // The wait that Install left outstanding owns the bridge until the executor completes it.
-    EXPECT_TRUE(WaitUntil([&] { return weak.expired(); }));
-    EXPECT_EQ(0, emitted.load());
 }
 
 TEST_F(BlobOperationsTests, StopRequestCancelsAnAcceptedStalledCall) {
@@ -823,12 +755,6 @@ TEST(DownloadBufferPoolTests, OversizedBuffersAreNotRetained) {
     }
 
     EXPECT_EQ(0U, pool->PooledCount());
-}
-
-TEST_F(BlobOperationsTests, ArmingAStopBridgeAfterAcceptanceCannotThrow) {
-    using Bridge = BlobOperations::Detail::StopBridge<boost::asio::io_context::executor_type>;
-    static_assert(noexcept(std::declval<Bridge&>().Arm(std::stop_token{}, std::shared_ptr<Bridge>{})));
-    static_assert(noexcept(std::declval<Bridge&>().Release()));
 }
 
 TEST_F(BlobOperationsTests, DownloadAsyncStopAfterAcceptanceCancelsTheDeferredTransferExactlyOnce) {

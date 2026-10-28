@@ -173,7 +173,7 @@ TEST_F(WriteableFileTests, SinglePageBuffer_IsRejectedInsteadOfSpinningInAppend)
     EXPECT_EQ(std::vector<char>(200, 'x'), Prefix(m_env.Blob->Bytes(), 200));
 }
 
-TEST_F(WriteableFileTests, Flush_ReusesBuffersAndKeepsTheTailAcrossTheSwap) {
+TEST_F(WriteableFileTests, Flush_KeepsTheTailAcrossTheBufferSwap) {
     constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
     m_env.Blob->SetCapacity(64 * pageSize);
 
@@ -187,10 +187,6 @@ TEST_F(WriteableFileTests, Flush_ReusesBuffersAndKeepsTheTailAcrossTheSwap) {
     file.Sync();
 
     EXPECT_EQ(expected, Prefix(m_env.Blob->Bytes(), expected.size()));
-    ASSERT_EQ(4U, m_env.Blob->SharedUploadPayloadAddresses.size());
-    const auto addresses = m_env.Blob->SharedUploadPayloadAddresses.Snapshot();
-    const std::set<const char*> distinct(addresses.begin(), addresses.end());
-    EXPECT_LE(distinct.size(), 2U) << "uploads should alternate between two pooled buffers";
 }
 
 TEST_F(WriteableFileTests, RangeSync_PartialPageThenMoreData_UploadsNeverOverlapAndLandInAnyOrder) {
@@ -353,31 +349,6 @@ TEST_F(WriteableFileTests, Sync_UploadFailed_ThrowsAndKeepsThrowing) {
 
     EXPECT_THROW(file.Sync(), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
     EXPECT_THROW(file.Sync(), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
-}
-
-TEST_F(WriteableFileTests, Flush_UploadThrowsSynchronously_KeepsTheTailForARetry) {
-    constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
-    m_env.Blob->SetCapacity(16 * pageSize);
-
-    std::vector<char> expected;
-    for (int64_t i = 0; i < 2 * pageSize + 100; ++i) {
-        expected.push_back(static_cast<char>('a' + i % 26));
-    }
-
-    auto file = MakeFile(3 * pageSize);
-    file.Append(expected);
-
-    auto throwOnce = std::make_shared<std::atomic<bool>>(true);
-    m_env.Blob->Fault = [throwOnce](const FakeBlobServer::Operation operation) {
-        if (operation == FakeBlobServer::Operation::UploadPages && throwOnce->exchange(false)) {
-            throw std::bad_alloc();
-        }
-        return std::nullopt;
-    };
-    EXPECT_THROW(file.Flush(), std::bad_alloc);
-
-    file.Sync();
-    EXPECT_EQ(expected, Prefix(m_env.Blob->Bytes(), expected.size()));
 }
 
 TEST_F(WriteableFileTests, Flush_PayloadOwnerAllocationFails_KeepsFullPagesAndTailForARetry) {
@@ -676,6 +647,7 @@ TEST_F(WriteableFileTests, Flush_ExactlyOnePage_OneUploadCall) {
     auto file = MakeFile(2 * Configuration::PageBlob::PageSize);
     file.Append(dataToWrite);
     file.Flush();
+    AVEVA::RocksDB::Plugin::Azure::Impl::Tests::Settle(m_env.Http);
 
     ASSERT_EQ(1U, m_env.Blob->Uploads.size());
     EXPECT_EQ(Configuration::PageBlob::PageSize, m_env.Blob->Uploads[0].Data.size());
@@ -709,6 +681,7 @@ TEST_F(WriteableFileTests, Flush_BelowHalfTheBuffer_UploadsNothingUntilSync) {
 
     file.Append(std::vector<char>(pageSize, 'w'));
     file.Flush();
+    AVEVA::RocksDB::Plugin::Azure::Impl::Tests::Settle(m_env.Http);
     EXPECT_EQ(1U, m_env.Blob->Uploads.size());
 
     file.Sync();

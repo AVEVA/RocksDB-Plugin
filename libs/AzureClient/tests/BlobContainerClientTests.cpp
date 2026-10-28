@@ -9,7 +9,7 @@
 #include "AVEVA/AzureClient/Response.hpp"
 #include "FakeHttpClient.hpp"
 #include "TestSupport.hpp"
-#include "ValueOrFail.hpp"
+
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>
@@ -39,8 +39,6 @@
 #include <system_error>
 #include <vector>
 
-using AVEVA::AzureClient::Tests::ValueOrFail;
-
 namespace {
 using AVEVA::HttpMethod;
 using AVEVA::HttpRequestOptions;
@@ -54,13 +52,13 @@ using AVEVA::AzureClient::Models::ListBlobsResult;
 using AVEVA::AzureClient::Private::ParseHttpDateHeader;
 using AVEVA::AzureClient::Tests::BlobClient;
 using AVEVA::AzureClient::Tests::BlobContainerClient;
-using AVEVA::AzureClient::Tests::CallbackExpectation;
 using AVEVA::AzureClient::Tests::DefaultETag;
 using AVEVA::AzureClient::Tests::ExpectRequestContract;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeAzureErrorResponse;
 using AVEVA::AzureClient::Tests::MakeBlobContainerClientOptions;
 using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
+using AVEVA::AzureClient::Tests::RunAwaitable;
 
 [[nodiscard]] BlobContainerClientOptions BuildOptions() { return MakeBlobContainerClientOptions(); }
 
@@ -69,10 +67,9 @@ void VerifyMalformedListBlobsErrorCode(const BlobStorageError& error) {
     EXPECT_EQ(error.Code, std::errc::bad_message);
 }
 
-void VerifyMalformedListBlobsStatusAndMessage(const BlobStorageError& error, bool& callbackInvoked) {
+void VerifyMalformedListBlobsStatusAndMessage(const BlobStorageError& error) {
     EXPECT_EQ(error.StatusCode, 200U);
     EXPECT_FALSE(error.Message.empty());
-    callbackInvoked = true;
 }
 
 void VerifyListBlobsWithOptionsMarkers(const ListBlobsResult& result) { EXPECT_EQ(result.Prefix, "pref/"); }
@@ -87,44 +84,37 @@ void VerifyListBlobsWithOptionsItems(const ListBlobsResult& result) {
     EXPECT_EQ(result.Blobs.at(0).Name, "pref/blob.txt");
 }
 
-void ListBlobsAndVerifyMalformedXml(BlobContainerClient& client, bool& callbackInvoked) {
-    client.ListBlobsAsync([&](std::expected<Response<ListBlobsResult>, BlobStorageError> result) {
-        ASSERT_FALSE(result.has_value());
-        VerifyMalformedListBlobsErrorCode(result.error());
-        VerifyMalformedListBlobsStatusAndMessage(result.error(), callbackInvoked);
-    });
+void ListBlobsAndVerifyMalformedXml(FakeHttpClient& httpClient, BlobContainerClient& client) {
+    const auto result = RunAwaitable(httpClient, client.ListBlobsAsync());
+    ASSERT_FALSE(result.has_value());
+    VerifyMalformedListBlobsErrorCode(result.error());
+    VerifyMalformedListBlobsStatusAndMessage(result.error());
 }
 
-void ListBlobsWithOptionsAndVerifyResult(BlobContainerClient& client, CallbackExpectation& callback) {
+void ListBlobsWithOptionsAndVerifyResult(FakeHttpClient& httpClient, BlobContainerClient& client) {
     AVEVA::AzureClient::ListBlobsOptions options;
     options.Prefix = "pref/";
     options.Marker = "page-1";
     options.MaxResults = 7U;
     options.IncludeMetadata = true;
 
-    client.ListBlobsAsync(options, [&](std::expected<Response<ListBlobsResult>, BlobStorageError> result) {
-        ASSERT_TRUE(result.has_value());
-        VerifyListBlobsWithOptionsMarkers(result->Value());
-        VerifyListBlobsWithOptionsPaging(result->Value());
-        VerifyListBlobsWithOptionsItems(result->Value());
-        callback.MarkInvoked();
-    });
+    const auto result = RunAwaitable(httpClient, client.ListBlobsAsync(options));
+    ASSERT_TRUE(result.has_value());
+    VerifyListBlobsWithOptionsMarkers(result->Value());
+    VerifyListBlobsWithOptionsPaging(result->Value());
+    VerifyListBlobsWithOptionsItems(result->Value());
 }
 
-void CreateContainerIfMissingAndVerifyExpectedConflict(BlobContainerClient& client, CallbackExpectation& callback) {
+void CreateContainerIfMissingAndVerifyExpectedConflict(FakeHttpClient& httpClient, BlobContainerClient& client) {
     AVEVA::AzureClient::CreateBlobContainerOptions createOptions;
     createOptions.Metadata["project"] = "tests";
-    client.CreateIfNotExistsAsync(createOptions,
-                                  [&](std::expected<Response<CreateBlobContainerResult>, BlobStorageError> result) {
-                                      ASSERT_TRUE(result.has_value());
-                                      const Response<CreateBlobContainerResult>& response = *result;
-                                      ASSERT_TRUE(response.Error().has_value());
-                                      EXPECT_EQ(response.Error()->RequestId, "create-request");
-                                      EXPECT_TRUE(response.Value().ETag.empty());
-                                      callback.MarkInvoked();
-                                  });
+    const auto result = RunAwaitable(httpClient, client.CreateIfNotExistsAsync(createOptions));
+    ASSERT_TRUE(result.has_value());
+    const Response<CreateBlobContainerResult>& response = *result;
+    ASSERT_TRUE(response.Error().has_value());
+    EXPECT_EQ(response.Error()->RequestId, "create-request");
+    EXPECT_TRUE(response.Value().ETag.empty());
 }
-
 } // namespace
 
 TEST(BlobContainerClientTests, Constructor_ThrowsForMissingEndpoint) {
@@ -225,8 +215,7 @@ TEST(BlobContainerClientTests, ListBlobsAsync_PreservesSpecialSasValuesAlongside
     AVEVA::AzureClient::ListBlobsOptions listOptions;
     listOptions.Marker = "next+page&marker=%";
     listOptions.IncludeMetadata = true;
-    client.ListBlobsAsync(
-        listOptions, [](std::expected<Response<AVEVA::AzureClient::Models::ListBlobsResult>, BlobStorageError>) {});
+    (void)RunAwaitable(httpClient, client.ListBlobsAsync(listOptions));
 
     EXPECT_EQ(
         httpClient.LastRequest().GetUrl(),
@@ -241,11 +230,7 @@ TEST(BlobContainerClientTests, ListBlobsAsync_ReportsMalformedXmlAsInvalidRespon
     httpClient.DefaultResponse() = HttpResponse{200, {}, "<EnumerationResults><Blobs>"};
     BlobContainerClient client{httpClient, BuildOptions()};
 
-    bool callbackInvoked = false;
-    ListBlobsAndVerifyMalformedXml(client, callbackInvoked);
-
-    httpClient.Poll(); // drive the posted (async) completion (T26)
-    EXPECT_TRUE(callbackInvoked);
+    ListBlobsAndVerifyMalformedXml(httpClient, client);
 }
 
 TEST(BlobContainerClientTests, GetPageBlobClient_BuildsBlobScopedClient) {
@@ -253,8 +238,7 @@ TEST(BlobContainerClientTests, GetPageBlobClient_BuildsBlobScopedClient) {
     BlobContainerClient client{httpClient, BuildOptions()};
 
     auto pageBlobClient = client.GetPageBlobClient("disk.vhd");
-    pageBlobClient.DeleteAsync(
-        [](std::expected<Response<AVEVA::AzureClient::Models::DeleteBlobResult>, BlobStorageError>) {});
+    (void)RunAwaitable(httpClient, pageBlobClient.DeleteAsync());
 
     EXPECT_EQ(httpClient.LastRequest().GetUrl(),
               "https://storageaccount.blob.core.windows.net/images/disk.vhd?sv=2025-01-05&sig=fakesig");
@@ -276,10 +260,8 @@ TEST(BlobContainerClientTests, ListBlobsAsync_OptionsOverloadIncludesSupportedQu
             </EnumerationResults>)"};
     BlobContainerClient client{httpClient, BuildOptions()};
 
-    CallbackExpectation callback;
-    ListBlobsWithOptionsAndVerifyResult(client, callback);
+    ListBlobsWithOptionsAndVerifyResult(httpClient, client);
 
-    httpClient.Poll(); // drive the posted (async) completion (T26)
     EXPECT_EQ(httpClient.LastRequest().GetUrl(),
               "https://storageaccount.blob.core.windows.net/"
               "images?restype=container&comp=list&prefix=pref%2F&marker=page-1&maxresults=7&include=metadata&"
@@ -291,34 +273,11 @@ TEST(BlobContainerClientTests, CreateIfNotExists_TreatsAlreadyExistsAsNonFatal) 
     httpClient.EnqueueResponse(MakeAzureErrorResponse(409, "ContainerAlreadyExists", "", "create-request"));
     BlobContainerClient client{httpClient, BuildOptions()};
 
-    CallbackExpectation createCallback;
-    CreateContainerIfMissingAndVerifyExpectedConflict(client, createCallback);
-
-    httpClient.Poll();
+    CreateContainerIfMissingAndVerifyExpectedConflict(httpClient, client);
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(0).Request, "x-ms-meta-project"), "tests");
 }
 
-// Task 14: omitting the completion token entirely yields a deferred, directly co_await-able
-// operation (see BlockBlobClientTests.cpp for the detailed rationale).
-TEST(BlobContainerClientTests, ListBlobsAsyncSupportsCoAwaitWithNoExplicitCompletionToken) {
-    FakeHttpClient httpClient;
-    httpClient.DefaultResponse() =
-        HttpResponse{200, MakeCanonicalSuccessHeaders(), "<EnumerationResults></EnumerationResults>"};
-    BlobContainerClient client{httpClient, BuildOptions()};
-
-    std::optional<std::expected<Response<AVEVA::AzureClient::Models::ListBlobsResult>, BlobStorageError>> result;
-    boost::asio::co_spawn(httpClient.get_executor(),
-                          AVEVA::AzureClient::Tests::AwaitInto(&result, [&] { return client.ListBlobsAsync(); }),
-                          boost::asio::detached);
-
-    httpClient.Poll();
-
-    ASSERT_TRUE(result.has_value());
-    EXPECT_TRUE(ValueOrFail(result).has_value());
-}
-
-// Compile-only proof that defaulting CompletionToken did not introduce ambiguity between the
-// "options" and "no options" overloads. Never run; only needs to compile.
+// Compile-only proof that the "options" and "no options" overloads are unambiguous. Never run; only needs to compile.
 namespace {
 [[maybe_unused]] void BlobContainerClientNoTokenOverloadsCompile(BlobContainerClient& client) {
     using AVEVA::AzureClient::CreateBlobContainerOptions;

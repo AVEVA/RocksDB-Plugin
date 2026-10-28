@@ -8,7 +8,6 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/SequentialFileImpl.hpp"
 #include "IntegrationTestHelpers.hpp"
 
-#include <boost/asio/use_future.hpp>
 #include <gtest/gtest.h>
 
 #include <algorithm>

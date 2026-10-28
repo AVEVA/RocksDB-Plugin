@@ -17,18 +17,13 @@
 #include <AVEVA/HttpClient/HttpMethod.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
-#include <boost/asio/co_spawn.hpp> // IWYU pragma: keep (symbol is defined in a Boost impl/ header)
 #include <cstddef>
 #include <cstdint>
 #include <gtest/gtest.h>
 
-#include <boost/asio/detached.hpp>
-#include <boost/asio/use_future.hpp>
-
 #include <chrono>
 #include <expected>
 #include <filesystem>
-#include <future>
 #include <limits>
 #include <optional>
 #include <span>
@@ -38,8 +33,6 @@
 #include <string_view>
 #include <system_error>
 #include <vector>
-
-using AVEVA::AzureClient::Tests::ValueOrFail;
 
 namespace {
 using AVEVA::HttpMethod;
@@ -62,7 +55,6 @@ using AVEVA::AzureClient::Models::ReleaseBlobLeaseResult;
 using AVEVA::AzureClient::Models::ResizePageBlobResult;
 using AVEVA::AzureClient::Models::SetBlobMetadataResult;
 using AVEVA::AzureClient::Models::UploadPagesResult;
-using AVEVA::AzureClient::Tests::CallbackExpectation;
 using AVEVA::AzureClient::Tests::DefaultETag;
 using AVEVA::AzureClient::Tests::ExpectRequestContract;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
@@ -70,6 +62,7 @@ using AVEVA::AzureClient::Tests::MakeAzureErrorResponse;
 using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
 using AVEVA::AzureClient::Tests::PageBlobClient;
+using AVEVA::AzureClient::Tests::RunAwaitable;
 
 [[nodiscard]] BlobClientOptions BuildOptions() { return MakeBlobClientOptions("disks", "disk.vhd"); }
 
@@ -92,95 +85,73 @@ void VerifyUnrecognizedDeleteServiceErrorResult(
     EXPECT_EQ(result.error().RequestId, "page-409");
 }
 
-void StartCreateAsyncExpectingUnalignedLength(PageBlobClient& client, bool& callbackInvoked) {
-    client.CreateAsync(100, [&](std::expected<Response<CreatePageBlobResult>, BlobStorageError> result) {
-        ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
-        EXPECT_EQ(result.error().Message, "contentLength must be a multiple of 512 bytes.");
-        callbackInvoked = true;
-    });
+void StartCreateAsyncExpectingUnalignedLength(FakeHttpClient& httpClient, PageBlobClient& client) {
+    const auto result = RunAwaitable(httpClient, client.CreateAsync(100));
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
+    EXPECT_EQ(result.error().Message, "contentLength must be a multiple of 512 bytes.");
 }
 
-void StartUploadPagesAsyncExpectingUnalignedOffset(PageBlobClient& client, const std::string& content,
-                                                   bool& callbackInvoked) {
-    client.UploadPagesAsync(100, content, [&](std::expected<Response<UploadPagesResult>, BlobStorageError> result) {
-        ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
-        EXPECT_EQ(result.error().Message, "offset must be a multiple of 512 bytes.");
-        callbackInvoked = true;
-    });
+void StartUploadPagesAsyncExpectingUnalignedOffset(FakeHttpClient& httpClient, PageBlobClient& client,
+                                                   const std::string& content) {
+    const auto result = RunAwaitable(httpClient, client.UploadPagesAsync(100, content));
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
+    EXPECT_EQ(result.error().Message, "offset must be a multiple of 512 bytes.");
 }
 
-void StartUploadPagesAsyncExpectingZeroLengthContent(PageBlobClient& client, bool& callbackInvoked) {
-    client.UploadPagesAsync(0, std::string{}, [&](std::expected<Response<UploadPagesResult>, BlobStorageError> result) {
-        ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
-        EXPECT_EQ(result.error().Message, "length must be greater than zero.");
-        callbackInvoked = true;
-    });
+void StartUploadPagesAsyncExpectingZeroLengthContent(FakeHttpClient& httpClient, PageBlobClient& client) {
+    const auto result = RunAwaitable(httpClient, client.UploadPagesAsync(0, std::string{}));
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
+    EXPECT_EQ(result.error().Message, "length must be greater than zero.");
 }
 
-void StartDeleteAsyncExpectingTransportError(PageBlobClient& client, CallbackExpectation& callback) {
-    client.DeleteAsync([&](std::expected<Response<DeleteBlobResult>, BlobStorageError> result) {
-        ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::timed_out));
-        EXPECT_TRUE(result.error().RequestId.empty());
-        callback.MarkInvoked();
-    });
+void StartDeleteAsyncExpectingTransportError(FakeHttpClient& httpClient, PageBlobClient& client) {
+    const auto result = RunAwaitable(httpClient, client.DeleteAsync());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::timed_out));
+    EXPECT_TRUE(result.error().RequestId.empty());
 }
 
-void StartDeleteAsyncExpectingRedirectServiceError(PageBlobClient& client, CallbackExpectation& callback) {
-    client.DeleteAsync([&](std::expected<Response<DeleteBlobResult>, BlobStorageError> result) {
-        ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().Code, BlobStorageErrorCode::ServiceError);
-        EXPECT_EQ(result.error().StatusCode, 307U);
-        EXPECT_EQ(result.error().RequestId, "page-redirect");
-        callback.MarkInvoked();
-    });
+void StartDeleteAsyncExpectingRedirectServiceError(FakeHttpClient& httpClient, PageBlobClient& client) {
+    const auto result = RunAwaitable(httpClient, client.DeleteAsync());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, BlobStorageErrorCode::ServiceError);
+    EXPECT_EQ(result.error().StatusCode, 307U);
+    EXPECT_EQ(result.error().RequestId, "page-redirect");
 }
 
-void StartDeleteAsyncExpectingMalformedXmlServiceError(PageBlobClient& client, CallbackExpectation& callback) {
-    client.DeleteAsync([&](std::expected<Response<DeleteBlobResult>, BlobStorageError> result) {
-        VerifyMalformedDeleteServiceErrorResult(result);
-        callback.MarkInvoked();
-    });
+void StartDeleteAsyncExpectingMalformedXmlServiceError(FakeHttpClient& httpClient, PageBlobClient& client) {
+    VerifyMalformedDeleteServiceErrorResult(RunAwaitable(httpClient, client.DeleteAsync()));
 }
 
-void StartDeleteAsyncExpectingUnrecognizedServiceError(PageBlobClient& client, CallbackExpectation& callback) {
-    client.DeleteAsync([&](std::expected<Response<DeleteBlobResult>, BlobStorageError> result) {
-        VerifyUnrecognizedDeleteServiceErrorResult(result);
-        callback.MarkInvoked();
-    });
+void StartDeleteAsyncExpectingUnrecognizedServiceError(FakeHttpClient& httpClient, PageBlobClient& client) {
+    VerifyUnrecognizedDeleteServiceErrorResult(RunAwaitable(httpClient, client.DeleteAsync()));
 }
 
-void StartDownloadAsyncAndVerify(PageBlobClient& client, CallbackExpectation& downloadCallback) {
-    client.DownloadAsync([&](std::expected<Response<DownloadBlobResult>, BlobStorageError> result) {
-        ASSERT_TRUE(result.has_value());
-        EXPECT_EQ(result->Value().Properties.Type, BlobType::PageBlob);
-        EXPECT_EQ(result->Value().Properties.ContentLength, 3U);
-        EXPECT_EQ(result->Value().Content, "abc");
-        downloadCallback.MarkInvoked();
-    });
+void StartDownloadAsyncAndVerify(FakeHttpClient& httpClient, PageBlobClient& client) {
+    const auto result = RunAwaitable(httpClient, client.DownloadAsync());
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->Value().Properties.Type, BlobType::PageBlob);
+    EXPECT_EQ(result->Value().Properties.ContentLength, 3U);
+    EXPECT_EQ(result->Value().Content, "abc");
 }
 
-void StartDownloadToSpanAsyncAndVerify(PageBlobClient& client, std::span<char> destination,
-                                       CallbackExpectation& streamCallback) {
-    client.DownloadToAsync(destination, AVEVA::AzureClient::DownloadBlobOptions{},
-                           [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result) {
-                               ASSERT_TRUE(result.has_value());
-                               EXPECT_EQ(result->Value().BytesWritten, 4U);
-                               streamCallback.MarkInvoked();
-                           });
+void StartDownloadToSpanAsyncAndVerify(FakeHttpClient& httpClient, PageBlobClient& client,
+                                       std::span<char> destination) {
+    const auto result =
+        RunAwaitable(httpClient, client.DownloadToAsync(destination, AVEVA::AzureClient::DownloadBlobOptions{}));
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->Value().BytesWritten, 4U);
 }
 
-void StartDownloadToPathAsyncAndVerify(PageBlobClient& client, const std::filesystem::path& path,
-                                       const AVEVA::AzureClient::DownloadBlobOptions& options,
-                                       CallbackExpectation& pathCallback) {
-    client.DownloadToAsync(path, options, [&](std::expected<Response<DownloadBlobToResult>, BlobStorageError> result) {
-        ASSERT_TRUE(result.has_value());
-        EXPECT_EQ(result->Value().BytesWritten, 5U);
-        pathCallback.MarkInvoked();
-    });
+void StartDownloadToPathAsyncAndVerify(FakeHttpClient& httpClient, PageBlobClient& client,
+                                       const std::filesystem::path& path,
+                                       const AVEVA::AzureClient::DownloadBlobOptions& options) {
+    const auto result = RunAwaitable(httpClient, client.DownloadToAsync(path, options));
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->Value().BytesWritten, 5U);
 }
 
 } // namespace
@@ -218,15 +189,10 @@ TEST(PageBlobClientTests, CreateAsync_BuildsPutRequestWithPageBlobType) {
     httpClient.DefaultResponse() = HttpResponse{201, MakeCanonicalSuccessHeaders(), ""};
     PageBlobClient client{httpClient, BuildOptions()};
 
-    CallbackExpectation callback;
-    client.CreateAsync(2U * PageBlobPageSize,
-                       [&](std::expected<Response<CreatePageBlobResult>, BlobStorageError> result) {
-                           ASSERT_TRUE(result.has_value());
-                           EXPECT_EQ(result->Value().ETag, DefaultETag);
-                           callback.MarkInvoked();
-                       });
+    const auto result = RunAwaitable(httpClient, client.CreateAsync(2U * PageBlobPageSize));
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->Value().ETag, DefaultETag);
 
-    httpClient.Poll(); // drive the posted (async) completion (T26)
     const auto& request = httpClient.LastRequest();
     ExpectRequestContract(request, HttpMethod::Put,
                           "https://storageaccount.blob.core.windows.net/disks/disk.vhd?sv=2025-01-05&sig=fakesig");
@@ -238,12 +204,8 @@ TEST(PageBlobClientTests, CreateAsync_ReportsUnalignedLengthViaCompletion) {
     FakeHttpClient httpClient;
     PageBlobClient client{httpClient, BuildOptions()};
 
-    bool callbackInvoked = false;
-    StartCreateAsyncExpectingUnalignedLength(client, callbackInvoked);
+    StartCreateAsyncExpectingUnalignedLength(httpClient, client);
 
-    EXPECT_FALSE(callbackInvoked);
-    httpClient.Poll();
-    EXPECT_TRUE(callbackInvoked);
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
@@ -252,16 +214,11 @@ TEST(PageBlobClientTests, CreateIfNotExistsAsync_SendsIfNoneMatchStar) {
     httpClient.DefaultResponse() = HttpResponse{201, MakeCanonicalSuccessHeaders(), ""};
     PageBlobClient client{httpClient, BuildOptions()};
 
-    CallbackExpectation callback;
-    client.CreateIfNotExistsAsync(PageBlobPageSize,
-                                  [&](std::expected<Response<CreatePageBlobResult>, BlobStorageError> result) {
-                                      ASSERT_TRUE(result.has_value());
-                                      EXPECT_FALSE(result->Error().has_value());
-                                      EXPECT_EQ(result->Value().ETag, DefaultETag);
-                                      callback.MarkInvoked();
-                                  });
+    const auto result = RunAwaitable(httpClient, client.CreateIfNotExistsAsync(PageBlobPageSize));
+    ASSERT_TRUE(result.has_value());
+    EXPECT_FALSE(result->Error().has_value());
+    EXPECT_EQ(result->Value().ETag, DefaultETag);
 
-    httpClient.Poll();
     const auto& request = httpClient.LastRequest();
     EXPECT_EQ(request.GetMethod(), HttpMethod::Put);
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "If-None-Match"), "*");
@@ -275,15 +232,10 @@ TEST(PageBlobClientTests, CreateIfNotExistsAsync_SuppressesAlreadyExists) {
         httpClient.DefaultResponse() = HttpResponse{status, {{"x-ms-error-code", code}}, ""};
         PageBlobClient client{httpClient, BuildOptions()};
 
-        CallbackExpectation callback;
-        client.CreateIfNotExistsAsync(PageBlobPageSize,
-                                      [&](std::expected<Response<CreatePageBlobResult>, BlobStorageError> result) {
-                                          ASSERT_TRUE(result.has_value());
-                                          ASSERT_TRUE(result->Error().has_value());
-                                          EXPECT_EQ(result->Error()->StatusCode, status);
-                                          callback.MarkInvoked();
-                                      });
-        httpClient.Poll();
+        const auto result = RunAwaitable(httpClient, client.CreateIfNotExistsAsync(PageBlobPageSize));
+        ASSERT_TRUE(result.has_value());
+        ASSERT_TRUE(result->Error().has_value());
+        EXPECT_EQ(result->Error()->StatusCode, status);
     }
 }
 
@@ -292,24 +244,13 @@ TEST(PageBlobClientTests, CreateIfNotExistsAsync_OtherErrorsAndValidationStillFa
     httpClient.DefaultResponse() = HttpResponse{404, {{"x-ms-error-code", "ContainerNotFound"}}, ""};
     PageBlobClient client{httpClient, BuildOptions()};
 
-    bool failedOnService = false;
-    client.CreateIfNotExistsAsync(PageBlobPageSize,
-                                  [&](std::expected<Response<CreatePageBlobResult>, BlobStorageError> result) {
-                                      ASSERT_FALSE(result.has_value());
-                                      EXPECT_EQ(result.error().Code, BlobStorageErrorCode::ContainerNotFound);
-                                      failedOnService = true;
-                                  });
-    httpClient.Poll();
-    EXPECT_TRUE(failedOnService);
+    const auto failedOnService = RunAwaitable(httpClient, client.CreateIfNotExistsAsync(PageBlobPageSize));
+    ASSERT_FALSE(failedOnService.has_value());
+    EXPECT_EQ(failedOnService.error().Code, BlobStorageErrorCode::ContainerNotFound);
 
-    bool failedValidation = false;
-    client.CreateIfNotExistsAsync(100, [&](std::expected<Response<CreatePageBlobResult>, BlobStorageError> result) {
-        ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
-        failedValidation = true;
-    });
-    httpClient.Poll();
-    EXPECT_TRUE(failedValidation);
+    const auto failedValidation = RunAwaitable(httpClient, client.CreateIfNotExistsAsync(100));
+    ASSERT_FALSE(failedValidation.has_value());
+    EXPECT_EQ(failedValidation.error().Code, std::make_error_code(std::errc::invalid_argument));
     EXPECT_EQ(httpClient.RequestCount(), 1U);
 }
 
@@ -328,16 +269,10 @@ TEST(PageBlobClientTests, CreateIfNotExistsAsync_RejectsConditionsThatCouldOverw
         CreatePageBlobOptions options;
         mutate(options.Conditions);
 
-        bool failed = false;
-        client.CreateIfNotExistsAsync(PageBlobPageSize, std::move(options),
-                                      [&](std::expected<Response<CreatePageBlobResult>, BlobStorageError> result) {
-                                          ASSERT_FALSE(result.has_value());
-                                          EXPECT_EQ(result.error().Code,
-                                                    std::make_error_code(std::errc::invalid_argument));
-                                          failed = true;
-                                      });
-        httpClient.Poll();
-        EXPECT_TRUE(failed);
+        const auto result =
+            RunAwaitable(httpClient, client.CreateIfNotExistsAsync(PageBlobPageSize, std::move(options)));
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
         EXPECT_EQ(httpClient.RequestCount(), 0U);
     }
 }
@@ -350,13 +285,8 @@ TEST(PageBlobClientTests, CreateIfNotExistsAsync_AcceptsExplicitWildcardAndLease
     options.Conditions.IfNoneMatch = "*";
     options.Conditions.LeaseId = "lease-1";
 
-    bool succeeded = false;
-    client.CreateIfNotExistsAsync(PageBlobPageSize, std::move(options),
-                                  [&](std::expected<Response<CreatePageBlobResult>, BlobStorageError> result) {
-                                      succeeded = result.has_value() && !result->Error().has_value();
-                                  });
-    httpClient.Poll();
-    EXPECT_TRUE(succeeded);
+    const auto result = RunAwaitable(httpClient, client.CreateIfNotExistsAsync(PageBlobPageSize, std::move(options)));
+    EXPECT_TRUE(result.has_value() && !result->Error().has_value());
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.LastRequest(), "If-None-Match"), "*");
 }
 
@@ -365,8 +295,7 @@ TEST(PageBlobClientTests, UploadPagesAsync_SetsRangeAndPageWriteHeaders) {
     PageBlobClient client{httpClient, BuildOptions()};
 
     std::string const content(PageBlobPageSize, 'x');
-    client.UploadPagesAsync(PageBlobPageSize, content,
-                            [](std::expected<Response<UploadPagesResult>, BlobStorageError>) {});
+    (void)RunAwaitable(httpClient, client.UploadPagesAsync(PageBlobPageSize, content));
 
     const auto& request = httpClient.LastRequest();
     EXPECT_EQ(request.GetUrl(),
@@ -381,8 +310,7 @@ TEST(PageBlobClientTests, UploadPagesAsync_SpanOverloadUsesSingleRequestPath) {
     PageBlobClient client{httpClient, BuildOptions()};
 
     const std::vector<std::byte> content(PageBlobPageSize, std::byte{'x'});
-    client.UploadPagesAsync(0, std::span<const std::byte>{content},
-                            [](std::expected<Response<UploadPagesResult>, BlobStorageError>) {});
+    (void)RunAwaitable(httpClient, client.UploadPagesAsync(0, std::span<const std::byte>{content}));
 
     EXPECT_EQ(httpClient.LastRequest().GetBody().size(), PageBlobPageSize);
 }
@@ -393,8 +321,7 @@ TEST(PageBlobClientTests, UploadPagesAsync_SharedBufferOverloadSendsViewWithoutC
 
     auto content = std::make_shared<const std::vector<char>>(PageBlobPageSize, 'x');
     const auto* originalData = content->data();
-    client.UploadPagesAsync(PageBlobPageSize, content,
-                            [](std::expected<Response<UploadPagesResult>, BlobStorageError>) {});
+    (void)RunAwaitable(httpClient, client.UploadPagesAsync(PageBlobPageSize, content));
 
     const auto& request = httpClient.LastRequest();
     EXPECT_TRUE(request.HasBodyView());
@@ -412,12 +339,8 @@ TEST(PageBlobClientTests, UploadPagesAsync_ReportsUnalignedOffsetViaCompletion) 
     PageBlobClient client{httpClient, BuildOptions()};
 
     std::string const content(PageBlobPageSize, 'x');
-    bool callbackInvoked = false;
-    StartUploadPagesAsyncExpectingUnalignedOffset(client, content, callbackInvoked);
+    StartUploadPagesAsyncExpectingUnalignedOffset(httpClient, client, content);
 
-    EXPECT_FALSE(callbackInvoked);
-    httpClient.Poll();
-    EXPECT_TRUE(callbackInvoked);
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
@@ -425,12 +348,8 @@ TEST(PageBlobClientTests, UploadPagesAsync_ReportsZeroLengthContentViaCompletion
     FakeHttpClient httpClient;
     PageBlobClient client{httpClient, BuildOptions()};
 
-    bool callbackInvoked = false;
-    StartUploadPagesAsyncExpectingZeroLengthContent(client, callbackInvoked);
+    StartUploadPagesAsyncExpectingZeroLengthContent(httpClient, client);
 
-    EXPECT_FALSE(callbackInvoked);
-    httpClient.Poll();
-    EXPECT_TRUE(callbackInvoked);
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
@@ -438,9 +357,9 @@ TEST(PageBlobClientTests, UploadPagesFromUrlAsync_SendsCopySourceHeadersAndNoBod
     FakeHttpClient httpClient;
     PageBlobClient client{httpClient, BuildOptions()};
 
-    client.UploadPagesFromUrlAsync(1024, "https://account.blob.core.windows.net/files/src.sst", 512, 2048,
-                                   AVEVA::AzureClient::UploadPagesFromUrlOptions{.SourceIfMatch = "\"etag\""},
-                                   [](std::expected<Response<UploadPagesResult>, BlobStorageError>) {});
+    (void)RunAwaitable(httpClient, client.UploadPagesFromUrlAsync(
+                                       1024, "https://account.blob.core.windows.net/files/src.sst", 512, 2048,
+                                       AVEVA::AzureClient::UploadPagesFromUrlOptions{.SourceIfMatch = "\"etag\""}));
 
     const auto& request = httpClient.LastRequest();
     EXPECT_EQ(request.GetMethod(), HttpMethod::Put);
@@ -462,11 +381,9 @@ TEST(PageBlobClientTests, UploadPagesFromUrlAsync_ClientCredentialIsForwardedAsB
     AVEVA::AzureClient::BasicPageBlobClient<FakeHttpClient, AVEVA::AzureClient::Tests::StaticTokenCredential> client{
         httpClient, options, credential};
 
-    client.UploadPagesFromUrlAsync(
-        0, "https://a/b/c", 0, 512,
-        AVEVA::AzureClient::UploadPagesFromUrlOptions{.AuthorizeSourceWithClientCredential = true},
-        [](std::expected<Response<UploadPagesResult>, BlobStorageError>) {});
-    httpClient.Poll();
+    (void)RunAwaitable(httpClient, client.UploadPagesFromUrlAsync(0, "https://a/b/c", 0, 512,
+                                                                  AVEVA::AzureClient::UploadPagesFromUrlOptions{
+                                                                      .AuthorizeSourceWithClientCredential = true}));
 
     const auto& request = httpClient.LastRequest();
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(request, "x-ms-copy-source-authorization"), "Bearer client-token");
@@ -477,10 +394,9 @@ TEST(PageBlobClientTests, UploadPagesFromUrlAsync_ClientCredentialMarkerIsDroppe
     FakeHttpClient httpClient;
     PageBlobClient client{httpClient, BuildOptions()};
 
-    client.UploadPagesFromUrlAsync(
-        0, "https://a/b/c", 0, 512,
-        AVEVA::AzureClient::UploadPagesFromUrlOptions{.AuthorizeSourceWithClientCredential = true},
-        [](std::expected<Response<UploadPagesResult>, BlobStorageError>) {});
+    (void)RunAwaitable(httpClient, client.UploadPagesFromUrlAsync(0, "https://a/b/c", 0, 512,
+                                                                  AVEVA::AzureClient::UploadPagesFromUrlOptions{
+                                                                      .AuthorizeSourceWithClientCredential = true}));
 
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.LastRequest(), "x-ms-copy-source-authorization"), "");
 }
@@ -495,12 +411,12 @@ TEST(PageBlobClientTests, UploadPagesFromUrlAsync_RejectsBadRangesBeforeSending)
         ++failures;
     };
 
-    client.UploadPagesFromUrlAsync(1, "https://a/b/c", 0, 512, expectInvalid);
-    client.UploadPagesFromUrlAsync(0, "https://a/b/c", 100, 512, expectInvalid);
-    client.UploadPagesFromUrlAsync(0, "https://a/b/c", 0, 0, expectInvalid);
-    client.UploadPagesFromUrlAsync(0, "https://a/b/c", 0, 4U * 1024U * 1024U + 512U, expectInvalid);
-    client.UploadPagesFromUrlAsync(0, "", 0, 512, expectInvalid);
-    httpClient.Poll();
+    expectInvalid(RunAwaitable(httpClient, client.UploadPagesFromUrlAsync(1, "https://a/b/c", 0, 512)));
+    expectInvalid(RunAwaitable(httpClient, client.UploadPagesFromUrlAsync(0, "https://a/b/c", 100, 512)));
+    expectInvalid(RunAwaitable(httpClient, client.UploadPagesFromUrlAsync(0, "https://a/b/c", 0, 0)));
+    expectInvalid(
+        RunAwaitable(httpClient, client.UploadPagesFromUrlAsync(0, "https://a/b/c", 0, 4U * 1024U * 1024U + 512U)));
+    expectInvalid(RunAwaitable(httpClient, client.UploadPagesFromUrlAsync(0, "", 0, 512)));
 
     EXPECT_EQ(failures, 5);
     EXPECT_EQ(httpClient.RequestCount(), 0U);
@@ -516,27 +432,20 @@ TEST(PageBlobClientTests, GetPageRangesAsync_ParsesRangesAndHeaders) {
         R"(<PageRange><Start>4096</Start><End>5119</End></PageRange><NextMarker>m2</NextMarker></PageList>)"};
     PageBlobClient client{httpClient, BuildOptions()};
 
-    bool invoked = false;
     AVEVA::AzureClient::GetPageRangesOptions options;
     options.Conditions.IfMatch = "\"0x1\"";
-    client.GetPageRangesAsync(
-        options,
-        [&](std::expected<Response<AVEVA::AzureClient::Models::GetPageRangesResult>, BlobStorageError> result) {
-            ASSERT_TRUE(result.has_value());
-            const auto& value = result->Value();
-            ASSERT_EQ(value.Ranges.size(), 2U);
-            EXPECT_EQ(value.Ranges[0].Offset, 0U);
-            EXPECT_EQ(value.Ranges[0].Length, 512U);
-            EXPECT_EQ(value.Ranges[1].Offset, 4096U);
-            EXPECT_EQ(value.Ranges[1].Length, 1024U);
-            EXPECT_EQ(value.ETag, "\"0x1\"");
-            EXPECT_EQ(value.BlobContentLength, 8192U);
-            EXPECT_EQ(value.NextMarker, "m2");
-            invoked = true;
-        });
-    httpClient.Poll();
+    const auto result = RunAwaitable(httpClient, client.GetPageRangesAsync(options));
+    ASSERT_TRUE(result.has_value());
+    const auto& value = result->Value();
+    ASSERT_EQ(value.Ranges.size(), 2U);
+    EXPECT_EQ(value.Ranges[0].Offset, 0U);
+    EXPECT_EQ(value.Ranges[0].Length, 512U);
+    EXPECT_EQ(value.Ranges[1].Offset, 4096U);
+    EXPECT_EQ(value.Ranges[1].Length, 1024U);
+    EXPECT_EQ(value.ETag, "\"0x1\"");
+    EXPECT_EQ(value.BlobContentLength, 8192U);
+    EXPECT_EQ(value.NextMarker, "m2");
 
-    EXPECT_TRUE(invoked);
     const auto& request = httpClient.LastRequest();
     EXPECT_EQ(request.GetMethod(), HttpMethod::Get);
     EXPECT_NE(request.GetUrl().find("comp=pagelist"), std::string::npos);
@@ -551,17 +460,10 @@ TEST(PageBlobClientTests, GetPageRangesAsync_SendsMarker) {
 
     AVEVA::AzureClient::GetPageRangesOptions options;
     options.Marker = "abc";
-    bool invoked = false;
-    client.GetPageRangesAsync(
-        options,
-        [&](std::expected<Response<AVEVA::AzureClient::Models::GetPageRangesResult>, BlobStorageError> result) {
-            ASSERT_TRUE(result.has_value());
-            EXPECT_TRUE(result->Value().Ranges.empty());
-            invoked = true;
-        });
-    httpClient.Poll();
+    const auto result = RunAwaitable(httpClient, client.GetPageRangesAsync(options));
+    ASSERT_TRUE(result.has_value());
+    EXPECT_TRUE(result->Value().Ranges.empty());
 
-    EXPECT_TRUE(invoked);
     const auto& request = httpClient.LastRequest();
     EXPECT_NE(request.GetUrl().find("marker=abc"), std::string::npos);
 }
@@ -572,15 +474,9 @@ TEST(PageBlobClientTests, GetPageRangesAsync_MalformedRangeIsInvalidResponse) {
         HttpResponse{200, {}, "<PageList><PageRange><Start>512</Start><End>0</End></PageRange></PageList>"};
     PageBlobClient client{httpClient, BuildOptions()};
 
-    bool invoked = false;
-    client.GetPageRangesAsync(
-        [&](std::expected<Response<AVEVA::AzureClient::Models::GetPageRangesResult>, BlobStorageError> result) {
-            ASSERT_FALSE(result.has_value());
-            EXPECT_EQ(result.error().Code, BlobStorageErrorCode::InvalidResponse);
-            invoked = true;
-        });
-    httpClient.Poll();
-    EXPECT_TRUE(invoked);
+    const auto result = RunAwaitable(httpClient, client.GetPageRangesAsync());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, BlobStorageErrorCode::InvalidResponse);
 }
 
 TEST(PageBlobClientTests, GetPageRangesAsync_RangeLengthOverflowIsInvalidResponse) {
@@ -589,22 +485,16 @@ TEST(PageBlobClientTests, GetPageRangesAsync_RangeLengthOverflowIsInvalidRespons
         200, {}, "<PageList><PageRange><Start>0</Start><End>18446744073709551615</End></PageRange></PageList>"};
     PageBlobClient client{httpClient, BuildOptions()};
 
-    bool invoked = false;
-    client.GetPageRangesAsync(
-        [&](std::expected<Response<AVEVA::AzureClient::Models::GetPageRangesResult>, BlobStorageError> result) {
-            ASSERT_FALSE(result.has_value());
-            EXPECT_EQ(result.error().Code, BlobStorageErrorCode::InvalidResponse);
-            invoked = true;
-        });
-    httpClient.Poll();
-    EXPECT_TRUE(invoked);
+    const auto result = RunAwaitable(httpClient, client.GetPageRangesAsync());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, BlobStorageErrorCode::InvalidResponse);
 }
 
 TEST(PageBlobClientTests, ResizeAsync_SetsContentLengthHeader) {
     FakeHttpClient httpClient;
     PageBlobClient client{httpClient, BuildOptions()};
 
-    client.ResizeAsync(2048, [](std::expected<Response<ResizePageBlobResult>, BlobStorageError>) {});
+    (void)RunAwaitable(httpClient, client.ResizeAsync(2048));
 
     const auto& request = httpClient.LastRequest();
     EXPECT_EQ(request.GetUrl(),
@@ -616,7 +506,7 @@ TEST(PageBlobClientTests, DeleteAsync_UsesDeleteMethod) {
     FakeHttpClient httpClient;
     PageBlobClient client{httpClient, BuildOptions()};
 
-    client.DeleteAsync([](std::expected<Response<DeleteBlobResult>, BlobStorageError>) {});
+    (void)RunAwaitable(httpClient, client.DeleteAsync());
 
     EXPECT_EQ(httpClient.LastRequest().GetMethod(), HttpMethod::Delete);
 }
@@ -626,11 +516,10 @@ TEST(PageBlobClientTests, GetPropertiesAsync_ParsesBlobType) {
     httpClient.DefaultResponse() = HttpResponse{200, {{"x-ms-blob-type", "PageBlob"}, {"Content-Length", "2048"}}, ""};
     PageBlobClient client{httpClient, BuildOptions()};
 
-    client.GetPropertiesAsync([](std::expected<Response<BlobProperties>, BlobStorageError> result) {
-        ASSERT_TRUE(result.has_value());
-        EXPECT_EQ(result->Value().Type, BlobType::PageBlob);
-        EXPECT_EQ(result->Value().ContentLength, 2048U);
-    });
+    const auto result = RunAwaitable(httpClient, client.GetPropertiesAsync());
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->Value().Type, BlobType::PageBlob);
+    EXPECT_EQ(result->Value().ContentLength, 2048U);
 
     EXPECT_EQ(httpClient.LastRequest().GetMethod(), HttpMethod::Head);
 }
@@ -640,15 +529,9 @@ TEST(PageBlobClientTests, CreateAsync_MapsServiceErrorCode) {
     httpClient.DefaultResponse() = HttpResponse{404, {{"x-ms-error-code", "BlobNotFound"}}, ""};
     PageBlobClient client{httpClient, BuildOptions()};
 
-    bool callbackInvoked = false;
-    client.CreateAsync(PageBlobPageSize, [&](std::expected<Response<CreatePageBlobResult>, BlobStorageError> result) {
-        ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().Code, BlobStorageErrorCode::BlobNotFound);
-        callbackInvoked = true;
-    });
-
-    httpClient.Poll(); // drive the posted (async) completion (T26)
-    EXPECT_TRUE(callbackInvoked);
+    const auto result = RunAwaitable(httpClient, client.CreateAsync(PageBlobPageSize));
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, BlobStorageErrorCode::BlobNotFound);
 }
 
 TEST(PageBlobClientTests, Constructor_ThrowsForMissingBlobName) {
@@ -675,7 +558,7 @@ TEST(PageBlobClientTests, CreateAsync_UsesSharedKeyAuthorizationWhenConfigured) 
     options.SharedKey = {.AccountName = "storageaccount", .AccountKey = "MDEyMzQ1Njc4OWFiY2RlZg=="};
     PageBlobClient client{httpClient, options};
 
-    client.CreateAsync(PageBlobPageSize, [](std::expected<Response<CreatePageBlobResult>, BlobStorageError>) {});
+    (void)RunAwaitable(httpClient, client.CreateAsync(PageBlobPageSize));
 
     EXPECT_TRUE(FakeHttpClient::FindHeaderValue(httpClient.LastRequest(), "Authorization")
                     .starts_with("SharedKey storageaccount:"));
@@ -686,17 +569,11 @@ TEST(PageBlobClientTests, UploadPagesAsync_ReportsOverflowingRangeViaCompletion)
     PageBlobClient client{httpClient, BuildOptions()};
 
     std::string const content(PageBlobPageSize * 2U, 'x');
-    bool callbackInvoked = false;
-    client.UploadPagesAsync(std::numeric_limits<std::uint64_t>::max() - (PageBlobPageSize - 1U), content,
-                            [&](std::expected<Response<UploadPagesResult>, BlobStorageError> result) {
-                                ASSERT_FALSE(result.has_value());
-                                EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
-                                callbackInvoked = true;
-                            });
-
-    EXPECT_FALSE(callbackInvoked);
-    httpClient.Poll();
-    EXPECT_TRUE(callbackInvoked);
+    const auto result = RunAwaitable(
+        httpClient,
+        client.UploadPagesAsync(std::numeric_limits<std::uint64_t>::max() - (PageBlobPageSize - 1U), content));
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
@@ -706,10 +583,7 @@ TEST(PageBlobClientTests, DeleteAsync_PropagatesTransportErrorWithoutInspectingH
     httpClient.DefaultResponse() = HttpResponse{409, {{"x-ms-error-code", "BlobNotFound"}}, ""};
     PageBlobClient client{httpClient, BuildOptions()};
 
-    CallbackExpectation callback;
-    StartDeleteAsyncExpectingTransportError(client, callback);
-
-    httpClient.Poll(); // drive the posted (async) completion (T26)
+    StartDeleteAsyncExpectingTransportError(httpClient, client);
 }
 
 TEST(PageBlobClientTests, DeleteAsync_TreatsRedirectAsServiceError) {
@@ -717,10 +591,7 @@ TEST(PageBlobClientTests, DeleteAsync_TreatsRedirectAsServiceError) {
     httpClient.DefaultResponse() = HttpResponse{307, {{"x-ms-request-id", "page-redirect"}}, ""};
     PageBlobClient client{httpClient, BuildOptions()};
 
-    CallbackExpectation callback;
-    StartDeleteAsyncExpectingRedirectServiceError(client, callback);
-
-    httpClient.Poll(); // drive the posted (async) completion (T26)
+    StartDeleteAsyncExpectingRedirectServiceError(httpClient, client);
 }
 
 TEST(PageBlobClientTests, DeleteAsync_FallsBackToServiceErrorForMalformedXmlAndMissingRequestId) {
@@ -728,10 +599,7 @@ TEST(PageBlobClientTests, DeleteAsync_FallsBackToServiceErrorForMalformedXmlAndM
     httpClient.DefaultResponse() = HttpResponse{500, {}, "<Error><Message>broken"};
     PageBlobClient client{httpClient, BuildOptions()};
 
-    CallbackExpectation callback;
-    StartDeleteAsyncExpectingMalformedXmlServiceError(client, callback);
-
-    httpClient.Poll(); // drive the posted (async) completion (T26)
+    StartDeleteAsyncExpectingMalformedXmlServiceError(httpClient, client);
 }
 
 TEST(PageBlobClientTests, DeleteAsync_UnrecognizedStorageCodeFallsBackToServiceErrorButPreservesDetails) {
@@ -741,46 +609,32 @@ TEST(PageBlobClientTests, DeleteAsync_UnrecognizedStorageCodeFallsBackToServiceE
                                                 "<Error><Message>Unexpected detail</Message></Error>"};
     PageBlobClient client{httpClient, BuildOptions()};
 
-    CallbackExpectation callback;
-    StartDeleteAsyncExpectingUnrecognizedServiceError(client, callback);
-
-    httpClient.Poll(); // drive the posted (async) completion (T26)
+    StartDeleteAsyncExpectingUnrecognizedServiceError(httpClient, client);
 }
 
 TEST(PageBlobClientTests, DownloadAsyncAndDownloadToAsyncParseContentAndProperties) {
     FakeHttpClient httpClient;
-    httpClient.EnqueueResponse(HttpResponse{200,
-                                            MakeCanonicalSuccessHeaders({{"Content-Length", "3"},
-                                                                         {"Content-Type", "application/octet-stream"},
-                                                                         {"x-ms-blob-type", "PageBlob"}}),
-                                            "abc"},
-                               {}, true);
-    httpClient.EnqueueResponse(
-        HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "4"}, {"x-ms-blob-type", "PageBlob"}}),
-                     "data"},
-        {}, true);
-    httpClient.EnqueueResponse(
-        HttpResponse{200, MakeCanonicalSuccessHeaders({{"Content-Length", "5"}, {"x-ms-blob-type", "PageBlob"}}),
-                     "bytes"},
-        {}, true);
+    httpClient.EnqueueResponse(HttpResponse{
+        200,
+        MakeCanonicalSuccessHeaders(
+            {{"Content-Length", "3"}, {"Content-Type", "application/octet-stream"}, {"x-ms-blob-type", "PageBlob"}}),
+        "abc"});
+    httpClient.EnqueueResponse(HttpResponse{
+        200, MakeCanonicalSuccessHeaders({{"Content-Length", "4"}, {"x-ms-blob-type", "PageBlob"}}), "data"});
+    httpClient.EnqueueResponse(HttpResponse{
+        200, MakeCanonicalSuccessHeaders({{"Content-Length", "5"}, {"x-ms-blob-type", "PageBlob"}}), "bytes"});
     PageBlobClient client{httpClient, BuildOptions()};
 
-    CallbackExpectation downloadCallback;
-    StartDownloadAsyncAndVerify(client, downloadCallback);
-    EXPECT_TRUE(httpClient.CompleteNext());
+    StartDownloadAsyncAndVerify(httpClient, client);
 
     std::string destination(4, '\0');
-    CallbackExpectation streamCallback;
-    StartDownloadToSpanAsyncAndVerify(client, destination, streamCallback);
-    EXPECT_TRUE(httpClient.CompleteNext());
+    StartDownloadToSpanAsyncAndVerify(httpClient, client, destination);
     EXPECT_EQ(destination, "data");
 
     const std::filesystem::path fsPath = std::filesystem::current_path() / "azure-client-page-download.bin";
     AVEVA::AzureClient::DownloadBlobOptions options;
     options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 0U, .Length = 5U};
-    CallbackExpectation pathCallback;
-    StartDownloadToPathAsyncAndVerify(client, fsPath, options, pathCallback);
-    EXPECT_TRUE(httpClient.CompleteNext());
+    StartDownloadToPathAsyncAndVerify(httpClient, client, fsPath, options);
     EXPECT_EQ(std::filesystem::file_size(fsPath), 5U);
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(2).Request, "Range"), "bytes=0-4");
 
@@ -788,70 +642,31 @@ TEST(PageBlobClientTests, DownloadAsyncAndDownloadToAsyncParseContentAndProperti
     std::filesystem::remove(fsPath, ignored);
 }
 
-TEST(PageBlobClientTests, DownloadAsyncAcceptsUseFutureCompletionToken) {
+TEST(PageBlobClientTests, DownloadAsyncReturnsContent) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{
         200, MakeCanonicalSuccessHeaders({{"Content-Length", "5"}, {"x-ms-blob-type", "PageBlob"}}), "hello"};
     PageBlobClient client{httpClient, BuildOptions()};
 
-    std::future<std::expected<Response<DownloadBlobResult>, BlobStorageError>> future =
-        client.DownloadAsync(AVEVA::AzureClient::DownloadBlobOptions{}, boost::asio::use_future);
-
-    const auto result = PollAndGet(httpClient, future);
+    const auto result = RunAwaitable(httpClient, client.DownloadAsync());
     ASSERT_TRUE(result.has_value());
     const auto& content = result->Value().Content;
     EXPECT_EQ(std::string(content.data(), content.size()), "hello");
 }
 
-TEST(PageBlobClientTests, UploadPagesAsyncAcceptsUseFutureCompletionTokenAndReportsFailure) {
+TEST(PageBlobClientTests, UploadPagesAsyncReportsServiceFailure) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(MakeAzureErrorResponse(409, "BlobAlreadyExists", "conflict", "upload-pages-request"));
     PageBlobClient client{httpClient, BuildOptions()};
 
     const std::vector<std::byte> content(PageBlobPageSize, std::byte{'x'});
-    std::future<std::expected<Response<UploadPagesResult>, BlobStorageError>> future = client.UploadPagesAsync(
-        0, std::span<const std::byte>{content}, AVEVA::AzureClient::UploadPagesOptions{}, boost::asio::use_future);
-
-    const auto result = PollAndGet(httpClient, future);
+    const auto result = RunAwaitable(httpClient, client.UploadPagesAsync(0, std::span<const std::byte>{content}));
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().Code, BlobStorageErrorCode::BlobAlreadyExists);
     EXPECT_EQ(result.error().RequestId, "upload-pages-request");
 }
 
-TEST(PageBlobClientTests, ResizeAsyncAcceptsUseFutureCompletionToken) {
-    FakeHttpClient httpClient;
-    httpClient.DefaultResponse() = HttpResponse{200, MakeCanonicalSuccessHeaders(), ""};
-    PageBlobClient client{httpClient, BuildOptions()};
-
-    std::future<std::expected<Response<ResizePageBlobResult>, BlobStorageError>> future =
-        client.ResizeAsync(PageBlobPageSize, AVEVA::AzureClient::ResizePageBlobOptions{}, boost::asio::use_future);
-
-    const auto result = PollAndGet(httpClient, future);
-    EXPECT_TRUE(result.has_value());
-}
-
-// Task 14: omitting the completion token entirely yields a deferred, directly co_await-able
-// operation (see BlockBlobClientTests.cpp for the detailed rationale).
-TEST(PageBlobClientTests, UploadPagesAsyncSupportsCoAwaitWithNoExplicitCompletionToken) {
-    FakeHttpClient httpClient;
-    httpClient.DefaultResponse() = HttpResponse{201, MakeCanonicalSuccessHeaders(), ""};
-    PageBlobClient client{httpClient, BuildOptions()};
-
-    const std::vector<std::byte> content(PageBlobPageSize, std::byte{'x'});
-    std::optional<std::expected<Response<UploadPagesResult>, BlobStorageError>> result;
-    boost::asio::co_spawn(httpClient.get_executor(),
-                          AVEVA::AzureClient::Tests::AwaitInto(
-                              &result, [&] { return client.UploadPagesAsync(0, std::span<const std::byte>{content}); }),
-                          boost::asio::detached);
-
-    httpClient.Poll();
-
-    ASSERT_TRUE(result.has_value());
-    EXPECT_TRUE(ValueOrFail(result).has_value());
-}
-
-// Compile-only proof that defaulting CompletionToken did not introduce ambiguity between the
-// "options" and "no options" overloads. Never run; only needs to compile.
+// Compile-only proof that the "options" and "no options" overloads are unambiguous. Never run; only needs to compile.
 namespace {
 [[maybe_unused]] void PageBlobClientNoTokenOverloadsCompile(PageBlobClient& client) {
     using AVEVA::AzureClient::AcquireLeaseOptions;

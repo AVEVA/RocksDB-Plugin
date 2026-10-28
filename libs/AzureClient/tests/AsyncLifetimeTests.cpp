@@ -3,71 +3,82 @@
 
 #include "AsyncBehaviorSupport.hpp"
 
+#include <boost/asio/io_context.hpp>
+
+#include <memory>
+#include <string>
+#include <utility>
+
 using namespace AsyncBehaviorSupport;
 
-TEST(AsyncBehaviorTests, DeferredOperationRunsAfterItsClientWasMovedFromAndDestroyed) {
+namespace {
+using AVEVA::AzureClient::Tests::Spawn;
+} // namespace
+
+TEST(AsyncBehaviorTests, AwaitableRunsAfterItsClientWasMovedFromAndDestroyed) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
 
     auto client = std::make_unique<BlobClient>(httpClient, MakeBlobClientOptions());
-    auto operation = client->DeleteAsync(boost::asio::deferred);
+    auto operation = client->DeleteAsync();
     BlobClient moved{std::move(*client)};
     client.reset();
 
-    std::optional<DeleteResult> observed;
-    InvokeDeferredDeleteOperation(std::move(operation), observed);
+    auto started = StartAwaitable(httpClient, std::move(operation));
     ASSERT_EQ(httpClient.PendingCount(), 1U);
     ASSERT_TRUE(httpClient.CompleteNext());
-    EXPECT_TRUE(observed.has_value());
+    httpClient.Poll();
+    ASSERT_TRUE(started.Done());
+    EXPECT_TRUE(started.Result().has_value());
 }
 
-TEST(AsyncBehaviorTests, DeferredContainerOperationRunsAfterItsClientWasDestroyed) {
+TEST(AsyncBehaviorTests, ContainerAwaitableRunsAfterItsClientWasDestroyed) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
 
     auto client = std::make_unique<BlobContainerClient>(httpClient, MakeBlobContainerClientOptions());
-    auto operation = client->CreateIfNotExistsAsync(boost::asio::deferred);
+    auto operation = client->CreateIfNotExistsAsync();
     client.reset();
 
-    int completions = 0;
-    std::move(operation)([&](auto) { ++completions; });
+    auto started = StartAwaitable(httpClient, std::move(operation));
     ASSERT_EQ(httpClient.PendingCount(), 1U);
     ASSERT_TRUE(httpClient.CompleteNext());
-    EXPECT_EQ(completions, 1);
+    httpClient.Poll();
+    EXPECT_TRUE(started.Done());
 }
 
 TEST(AsyncBehaviorTests, BlobClientCanBeDestroyedAfterRequestIsInFlight) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
 
-    CallbackExpectation callback;
+    std::optional<Operation<DeleteResult>> operation;
     {
         auto client = std::make_unique<BlobClient>(httpClient, MakeBlobClientOptions());
-        client->DeleteAsync([&](std::expected<Response<DeleteBlobResult>, BlobStorageError> result) {
-            ASSERT_TRUE(result.has_value());
-            callback.MarkInvoked();
-        });
+        operation = StartAwaitable(httpClient, client->DeleteAsync());
     }
 
     EXPECT_EQ(httpClient.PendingCount(), 1U);
     EXPECT_TRUE(httpClient.CompleteNext());
+    httpClient.Poll();
+    ASSERT_TRUE(operation->Done());
+    EXPECT_TRUE(operation->Result().has_value());
 }
 
 TEST(AsyncBehaviorTests, PageBlobClientCanBeDestroyedAfterRequestIsInFlight) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
 
-    CallbackExpectation callback;
+    std::optional<Operation<DeleteResult>> operation;
     {
         auto client = std::make_unique<PageBlobClient>(httpClient, MakePageBlobOptions());
-        client->DeleteAsync([&](std::expected<Response<DeleteBlobResult>, BlobStorageError> result) {
-            EXPECT_TRUE(result.has_value());
-            callback.MarkInvoked();
-        });
+        operation = StartAwaitable(httpClient, client->DeleteAsync());
     }
 
     EXPECT_EQ(httpClient.PendingCount(), 1U);
     EXPECT_TRUE(httpClient.CompleteNext());
+    httpClient.Poll();
+    ASSERT_TRUE(operation->Done());
+    EXPECT_TRUE(operation->Result().has_value());
 }
 
 TEST(AsyncBehaviorTests, TokenCredentialRequestCanDestroyClientAfterRequestIsSent) {
@@ -79,84 +90,66 @@ TEST(AsyncBehaviorTests, TokenCredentialRequestCanDestroyClientAfterRequestIsSen
 
     BlobClientOptions options = MakeBlobClientOptions();
     options.SasToken.clear();
-    CallbackExpectation callback;
     auto client = std::make_unique<ScriptedBlobClient>(httpClient, std::move(options), tokenCredential);
-    StartDeleteAndExpectSuccess(*client, callback);
+    auto operation = StartAwaitable(httpClient, client->DeleteAsync());
 
     EXPECT_EQ(tokenCredential->PendingCount(), 1U);
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 
     EXPECT_TRUE(tokenCredential->CompleteNext());
+    httpClient.Poll();
     ASSERT_EQ(httpClient.RequestCount(), 1U);
     EXPECT_EQ(httpClient.PendingCount(), 1U);
 
     client.reset();
 
     EXPECT_TRUE(httpClient.CompleteNext());
+    httpClient.Poll();
+    ASSERT_TRUE(operation.Done());
+    EXPECT_TRUE(operation.Result().has_value());
 }
 
-TEST(AsyncBehaviorTests, CallbackCanDestroyClientAfterCompletionBegins) {
+TEST(AsyncBehaviorTests, CompletionHandlerCanDestroyClientAfterCompletionBegins) {
     FakeHttpClient httpClient;
     httpClient.DeferByDefault() = true;
 
     auto client = std::make_unique<BlobClient>(httpClient, MakeBlobClientOptions());
-    CallbackExpectation callback;
-    client->DeleteAsync([&](std::expected<Response<DeleteBlobResult>, BlobStorageError> result) {
-        ASSERT_TRUE(result.has_value());
+    bool invoked = false;
+    Spawn(httpClient, client->DeleteAsync(), [&](DeleteResult result) {
+        EXPECT_TRUE(result.has_value());
         client.reset();
-        callback.MarkInvoked();
+        invoked = true;
     });
+    httpClient.Poll();
 
     EXPECT_TRUE(httpClient.CompleteNext());
+    httpClient.Poll();
+    EXPECT_TRUE(invoked);
     EXPECT_EQ(client, nullptr);
 }
 
-TEST(AsyncBehaviorTests, DownloadToAsyncAllowsDestroyingTheTargetStreamInTheCompletionHandler) {
-    FakeHttpClient httpClient;
-    httpClient.DeferByDefault() = true;
-    httpClient.DefaultResponse() = HttpResponse{
-        200, MakeCanonicalSuccessHeaders({{"Content-Length", "4"}, {"Content-Type", "text/plain"}}), "data"};
-    BlobClient client{httpClient, MakeBlobClientOptions()};
-
-    auto stream = std::make_shared<std::string>(4U, '\0');
-    CallbackExpectation callback;
-    StartDownloadToAndReleaseStream(client, stream, callback);
-
-    EXPECT_TRUE(httpClient.CompleteNext());
-    EXPECT_EQ(stream, nullptr);
-}
-
-// Destroying the transport -- and with it the io_context that owns every pending handler, timer and
-// posted completion -- must destroy the user's handler (releasing everything it owns) without ever
-// invoking it. The sentinel's weak_ptr proves nothing is leaked by a reference cycle; ASan/LSan on CI
-// catch use-after-free or leaks in the engines' teardown.
+// Destroying the io_context that owns every suspended coroutine must destroy the coroutine frame (releasing everything
+// it owns) without ever resuming it or invoking the completion handler. The sentinel's weak_ptr proves nothing is
+// leaked by a reference cycle; ASan/LSan on CI catch use-after-free or leaks in the teardown.
 TEST(AsyncBehaviorTests, DestroyingTheIoContextWithPendingWorkReleasesTheHandlerWithoutInvokingIt) {
-    VerifyPendingWorkHandlersAreReleased();
-}
+    auto context = std::make_unique<boost::asio::io_context>();
+    auto httpClient = std::make_unique<FakeHttpClient>(*context);
+    httpClient->DeferByDefault() = true;
+    auto client = std::make_unique<BlobClient>(*httpClient, MakeBlobClientOptions());
 
-// The client's context must stay alive while the handler completes on a distinct executor, otherwise its single
-// run() can return before a foreign-thread credential or writer posts the continuation back.
-TEST(AsyncBehaviorTests, DistinctHandlerExecutorKeepsTheClientContextAliveUntilCompletion) {
-    boost::asio::io_context clientContext;
-    boost::asio::io_context handlerContext;
-    int completions = 0;
-    AVEVA::AzureClient::AzureRequestOptions options;
-    {
-        auto handler = boost::asio::bind_executor(handlerContext.get_executor(), [&](int) { ++completions; });
-        auto bound = AVEVA::AzureClient::Private::BindAssociationsAndAdoptCancellationOn<int>(
-            handler, clientContext.get_executor(), options);
+    auto sentinel = std::make_shared<int>(0);
+    std::weak_ptr<int> weak = sentinel;
+    bool invoked = false;
+    Spawn(*httpClient, client->DeleteAsync(),
+          [sentinel = std::move(sentinel), &invoked](DeleteResult) { invoked = true; });
+    httpClient->Poll();
+    ASSERT_EQ(httpClient->PendingCount(), 1U);
+    ASSERT_FALSE(weak.expired());
 
-        clientContext.poll();
-        EXPECT_FALSE(clientContext.stopped());
+    client.reset();
+    httpClient.reset();
+    context.reset();
 
-        std::thread foreign{[&] { bound(7); }};
-        foreign.join();
-    }
-    EXPECT_EQ(completions, 0);
-    EXPECT_FALSE(clientContext.stopped());
-
-    handlerContext.run();
-    EXPECT_EQ(completions, 1);
-    clientContext.poll();
-    EXPECT_TRUE(clientContext.stopped());
+    EXPECT_TRUE(weak.expired());
+    EXPECT_FALSE(invoked);
 }

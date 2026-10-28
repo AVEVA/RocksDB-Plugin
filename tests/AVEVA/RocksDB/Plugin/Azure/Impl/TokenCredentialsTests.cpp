@@ -4,6 +4,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/TokenCredentials.hpp"
 
 #include "FakeHttpClient.hpp"
+#include "TestSupport.hpp"
 
 #include <gtest/gtest.h>
 
@@ -31,37 +32,15 @@ using TestChain = ChainedTokenCredential<TestSource>;
 namespace {
 class TokenCredentialsTests : public ::testing::Test {
   protected:
-    void SetUp() override {
-        m_httpClient.CompleteInline() = true;
-        m_httpClient.StartBackgroundPump();
-    }
-
+    // Runs the token request on the fake HTTP client's executor, which also runs retry timers, until it completes.
     template <class TCred> std::pair<std::error_code, AccessToken> GetToken(TCred& credential) {
-        auto promise = std::make_shared<std::promise<std::pair<std::error_code, AccessToken>>>();
-        auto future = promise->get_future();
-        credential.GetTokenAsync(
-            {"https://storage.azure.com/.default"},
-            [promise](std::error_code error, AccessToken token) { promise->set_value({error, std::move(token)}); });
-        if (future.wait_for(std::chrono::seconds(20)) != std::future_status::ready) {
-            ADD_FAILURE() << "token request did not complete";
-            return {std::make_error_code(std::errc::timed_out), AccessToken{}};
+        auto result = AVEVA::AzureClient::Tests::RunAwaitable(
+            m_httpClient, credential.GetTokenAsync({"https://storage.azure.com/.default"}));
+        if (!result) {
+            return {result.error(), AccessToken{}};
         }
-        return future.get();
+        return {std::error_code{}, std::move(*result)};
     }
-
-    // Drives the fake HTTP client's executor (which also runs retry timers) until the token request completes.
-    template <class TCred> std::pair<std::error_code, AccessToken> GetTokenFromFake(TCred& credential) {
-        std::optional<std::pair<std::error_code, AccessToken>> result;
-        credential.GetTokenAsync(
-            {"https://storage.azure.com/.default"},
-            [&result](std::error_code error, AccessToken token) { result.emplace(error, std::move(token)); });
-        if (!m_httpClient.RunUntil([&result] { return result.has_value(); })) {
-            ADD_FAILURE() << "token request did not complete";
-            return {std::make_error_code(std::errc::timed_out), AccessToken{}};
-        }
-        return std::move(*result);
-    }
-
     AzurePipelinesCredentialOptions PipelineOptions() const {
         AzurePipelinesCredentialOptions options;
         options.TenantId = "tenant";
@@ -111,7 +90,7 @@ TEST_F(TokenCredentialsTests, RetryAfterIsHonoredOn429) {
     m_httpClient.EnqueueResponse(TokenResponse());
     auto credential = std::make_shared<PipelinesCredential>(m_httpClient, PipelineOptions());
 
-    const auto [error, token] = GetTokenFromFake(*credential);
+    const auto [error, token] = GetToken(*credential);
 
     // The retry is observable by the request count rather than by wall-clock elapsed time.
     EXPECT_FALSE(error);
@@ -124,7 +103,7 @@ TEST_F(TokenCredentialsTests, TokenLifetimeBeyondMaximumIsClampedNotRejected) {
     m_httpClient.EnqueueResponse(HttpResponse{200, {}, R"({"access_token":"tok","expires_in":"86401"})"});
     auto credential = std::make_shared<PipelinesCredential>(m_httpClient, PipelineOptions());
 
-    const auto [error, token] = GetTokenFromFake(*credential);
+    const auto [error, token] = GetToken(*credential);
 
     EXPECT_FALSE(error);
     EXPECT_EQ(token.Token, "tok");
@@ -134,7 +113,7 @@ TEST_F(TokenCredentialsTests, NonTransientFailureIsNotRetried) {
     m_httpClient.EnqueueResponse(HttpResponse{401, {}, ""});
     auto credential = std::make_shared<PipelinesCredential>(m_httpClient, PipelineOptions());
 
-    const auto [error, token] = GetTokenFromFake(*credential);
+    const auto [error, token] = GetToken(*credential);
 
     EXPECT_TRUE(error);
     EXPECT_EQ(m_httpClient.RequestCount(), 1U);

@@ -12,7 +12,6 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 
-#include <boost/asio/use_future.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid_io.hpp>
@@ -119,7 +118,7 @@ void AzureIntegrationTestBase::CreateContainerClient() {
 
 void AzureIntegrationTestBase::TryCreateContainer() {
     try {
-        Unwrap(m_containerClient->CreateIfNotExistsAsync(boost::asio::use_future).get());
+        Call(*m_containerClient, m_containerClient->CreateIfNotExistsAsync());
     } catch (const RequestFailedException& e) {
         HandleAuthenticationError(e);
         if (HasFatalFailure()) {
@@ -154,7 +153,7 @@ void AzureIntegrationTestBase::CleanupBlob() {
         options.Prefix = m_root + "/";
         std::vector<std::string> names;
         while (true) {
-            auto page = Unwrap(m_containerClient->ListBlobsAsync(options, boost::asio::use_future).get());
+            auto page = Call(*m_containerClient, m_containerClient->ListBlobsAsync(options));
             for (const auto& blob : page.Blobs) {
                 names.push_back(blob.Name);
             }
@@ -164,9 +163,7 @@ void AzureIntegrationTestBase::CleanupBlob() {
             options.Marker = std::move(page.NextMarker);
         }
         if (!names.empty()) {
-            Unwrap(
-                m_containerClient->DeleteBlobsAsync(names, AzureClient::DeleteBlobsOptions{}, boost::asio::use_future)
-                    .get());
+            Call(*m_containerClient, m_containerClient->DeleteBlobsAsync(names, AzureClient::DeleteBlobsOptions{}));
         }
     } catch (const std::exception& e) {
         BOOST_LOG_SEV(*m_logger, error) << "Cleanup of '" << m_root << "' failed: " << e.what();
@@ -178,7 +175,7 @@ void AzureIntegrationTestBase::CleanupBlob() {
 std::shared_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient> AzureIntegrationTestBase::CreateEmptyBlob() {
     const auto pageBlobClientPtr = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient>(
         m_containerClient->GetPageBlobClient(BlobPath()));
-    Unwrap(pageBlobClientPtr->CreateAsync(Configuration::PageBlob::DefaultSize, boost::asio::use_future).get());
+    Call(*pageBlobClientPtr, pageBlobClientPtr->CreateAsync(Configuration::PageBlob::DefaultSize));
     BlobOperations::SetSize(*m_runtime, *pageBlobClientPtr, 0);
     return pageBlobClientPtr;
 }
@@ -195,7 +192,7 @@ AzureIntegrationTestBase::CreateBlobWithData(const std::vector<char>& data) {
         capacity = ((capacity / Configuration::PageBlob::PageSize) + 1) * Configuration::PageBlob::PageSize;
     }
 
-    Unwrap(pageBlobClient.CreateAsync(static_cast<uint64_t>(capacity), boost::asio::use_future).get());
+    Call(pageBlobClient, pageBlobClient.CreateAsync(static_cast<uint64_t>(capacity)));
 
     if (!data.empty()) {
         std::vector<char> paddedData = data;
@@ -205,11 +202,10 @@ AzureIntegrationTestBase::CreateBlobWithData(const std::vector<char>& data) {
             paddedData.insert(paddedData.end(), padSize, 0);
         }
 
-        Unwrap(pageBlobClient
-                   .UploadPagesAsync(
-                       0, std::as_bytes(std::span<const char>(paddedData)), boost::asio::use_future,
-                       RequestOptionsForTransfer(pageBlobClient.GetDefaultRequestOptions(), paddedData.size()))
-                   .get());
+        Call(pageBlobClient,
+             pageBlobClient.UploadPagesAsync(
+                 0, std::as_bytes(std::span<const char>(paddedData)), {},
+                 RequestOptionsForTransfer(pageBlobClient.GetDefaultRequestOptions(), paddedData.size())));
         BlobOperations::SetSize(*m_runtime, pageBlobClient, static_cast<int64_t>(data.size()));
     }
 
@@ -227,11 +223,10 @@ std::vector<char> AzureIntegrationTestBase::DownloadBlobData(size_t maxSize) {
         AzureClient::DownloadBlobOptions options;
         options.Range = AzureClient::Models::BlobByteRange{0, data.size()};
 
-        const auto result =
-            Unwrap(pageBlobClient
-                       .DownloadAsync(std::move(options), boost::asio::use_future,
-                                      RequestOptionsForTransfer(pageBlobClient.GetDefaultRequestOptions(), data.size()))
-                       .get());
+        const auto result = Call(
+            pageBlobClient,
+            pageBlobClient.DownloadAsync(
+                std::move(options), RequestOptionsForTransfer(pageBlobClient.GetDefaultRequestOptions(), data.size())));
         std::memcpy(data.data(), result.Content.data(), std::min(data.size(), result.Content.size()));
     }
     return data;

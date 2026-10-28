@@ -30,11 +30,12 @@ using AVEVA::AzureClient::Tests::BlobClient;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 using AVEVA::AzureClient::Tests::PageBlobClient;
+using AVEVA::AzureClient::Tests::RunAwaitable;
 
 struct ValidationCase {
     std::string Name;
-    // Starts the operation under test, reporting the completion's error (empty on success).
-    std::function<void(FakeHttpClient&, std::function<void(std::error_code)>)> Start;
+    // Runs the operation under test, returning its error (empty on success).
+    std::function<std::error_code(FakeHttpClient&)> Start;
     std::errc Expected;
 };
 
@@ -42,27 +43,24 @@ std::vector<ValidationCase> MakeCases() {
     std::vector<ValidationCase> cases;
 
     cases.push_back({"PageUploadUnalignedOffset",
-                     [](FakeHttpClient& http, auto report) {
+                     [](FakeHttpClient& http) {
                          PageBlobClient client{http, MakeBlobClientOptions()};
-                         client.UploadPagesAsync(1, std::string(512, 'x'), [report](auto result) {
-                             report(result.has_value() ? std::error_code{} : result.error().Code);
-                         });
+                         const auto result = RunAwaitable(http, client.UploadPagesAsync(1, std::string(512, 'x')));
+                         return result.has_value() ? std::error_code{} : result.error().Code;
                      },
                      std::errc::invalid_argument});
     cases.push_back({"PageUploadUnalignedLength",
-                     [](FakeHttpClient& http, auto report) {
+                     [](FakeHttpClient& http) {
                          PageBlobClient client{http, MakeBlobClientOptions()};
-                         client.UploadPagesAsync(0, std::string(100, 'x'), [report](auto result) {
-                             report(result.has_value() ? std::error_code{} : result.error().Code);
-                         });
+                         const auto result = RunAwaitable(http, client.UploadPagesAsync(0, std::string(100, 'x')));
+                         return result.has_value() ? std::error_code{} : result.error().Code;
                      },
                      std::errc::invalid_argument});
     cases.push_back({"PageUploadEmptyContent",
-                     [](FakeHttpClient& http, auto report) {
+                     [](FakeHttpClient& http) {
                          PageBlobClient client{http, MakeBlobClientOptions()};
-                         client.UploadPagesAsync(0, std::string{}, [report](auto result) {
-                             report(result.has_value() ? std::error_code{} : result.error().Code);
-                         });
+                         const auto result = RunAwaitable(http, client.UploadPagesAsync(0, std::string{}));
+                         return result.has_value() ? std::error_code{} : result.error().Code;
                      },
                      std::errc::invalid_argument});
 
@@ -74,12 +72,9 @@ class OptionValidationTests : public ::testing::TestWithParam<ValidationCase> {}
 
 TEST_P(OptionValidationTests, RejectsInvalidOptionsBeforeSendingAnyRequest) {
     FakeHttpClient httpClient;
-    std::optional<std::error_code> error;
-    GetParam().Start(httpClient, [&](std::error_code code) { error = code; });
-    httpClient.Poll();
+    const std::error_code error = GetParam().Start(httpClient);
 
-    ASSERT_TRUE(error.has_value());
-    EXPECT_EQ(*error, GetParam().Expected);
+    EXPECT_EQ(error, GetParam().Expected);
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 

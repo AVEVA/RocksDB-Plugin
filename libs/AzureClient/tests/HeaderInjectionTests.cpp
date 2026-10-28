@@ -29,14 +29,13 @@ using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 using AVEVA::AzureClient::Tests::ManagedIdentityCredential;
 using AVEVA::AzureClient::Tests::PageBlobClient;
+using AVEVA::AzureClient::Tests::RunAwaitable;
 
 const std::string Injected = "a\r\nx-ms-evil: 1";
 
-template <class TResult> void ExpectRejected(FakeHttpClient& httpClient, const std::optional<TResult>& result) {
-    httpClient.Poll();
-    ASSERT_TRUE(result.has_value());
-    ASSERT_FALSE(result->has_value());
-    EXPECT_EQ(result->error().Code, std::errc::invalid_argument);
+template <class TResult> void ExpectRejected(FakeHttpClient& httpClient, const TResult& result) {
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, std::errc::invalid_argument);
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 } // namespace
@@ -47,11 +46,7 @@ TEST(HeaderInjectionTests, MetadataValueWithCrLfIsRejected) {
     SetBlobMetadataOptions options;
     options.Metadata.emplace("key", Injected);
 
-    using Result = std::expected<AVEVA::AzureClient::Response<AVEVA::AzureClient::Models::SetBlobMetadataResult>,
-                                 AVEVA::AzureClient::BlobStorageError>;
-    std::optional<Result> result;
-    client.SetMetadataAsync(std::move(options), [&](Result value) { result = std::move(value); });
-    ExpectRejected(httpClient, result);
+    ExpectRejected(httpClient, RunAwaitable(httpClient, client.SetMetadataAsync(std::move(options))));
 }
 
 TEST(HeaderInjectionTests, LeaseIdWithCrLfIsRejected) {
@@ -60,11 +55,7 @@ TEST(HeaderInjectionTests, LeaseIdWithCrLfIsRejected) {
     SetBlobMetadataOptions options;
     options.Conditions.LeaseId = Injected;
 
-    using Result = std::expected<AVEVA::AzureClient::Response<AVEVA::AzureClient::Models::SetBlobMetadataResult>,
-                                 AVEVA::AzureClient::BlobStorageError>;
-    std::optional<Result> result;
-    client.SetMetadataAsync(std::move(options), [&](Result value) { result = std::move(value); });
-    ExpectRejected(httpClient, result);
+    ExpectRejected(httpClient, RunAwaitable(httpClient, client.SetMetadataAsync(std::move(options))));
 }
 
 TEST(HeaderInjectionTests, NulInHeaderValueIsRejected) {
@@ -73,11 +64,7 @@ TEST(HeaderInjectionTests, NulInHeaderValueIsRejected) {
     SetBlobMetadataOptions options;
     options.Metadata.emplace("key", std::string{"a\0b", 3});
 
-    using Result = std::expected<AVEVA::AzureClient::Response<AVEVA::AzureClient::Models::SetBlobMetadataResult>,
-                                 AVEVA::AzureClient::BlobStorageError>;
-    std::optional<Result> result;
-    client.SetMetadataAsync(std::move(options), [&](Result value) { result = std::move(value); });
-    ExpectRejected(httpClient, result);
+    ExpectRejected(httpClient, RunAwaitable(httpClient, client.SetMetadataAsync(std::move(options))));
 }
 
 TEST(HeaderInjectionTests, ManagedIdentityHeaderWithCrLfIsRejected) {
@@ -87,13 +74,10 @@ TEST(HeaderInjectionTests, ManagedIdentityHeaderWithCrLfIsRejected) {
     options.IdentityHeader = Injected;
     ManagedIdentityCredential credential{httpClient, std::move(options)};
 
-    std::optional<std::error_code> error;
-    credential.GetTokenAsync({"https://storage.azure.com/.default"},
-                             [&](std::error_code code, AVEVA::AzureClient::AccessToken) { error = code; });
-    httpClient.Poll();
+    const auto token = RunAwaitable(httpClient, credential.GetTokenAsync({"https://storage.azure.com/.default"}));
 
-    ASSERT_TRUE(error.has_value());
-    EXPECT_EQ(*error, std::errc::invalid_argument);
+    ASSERT_FALSE(token.has_value());
+    EXPECT_EQ(token.error(), std::errc::invalid_argument);
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
@@ -112,13 +96,8 @@ TEST(HeaderInjectionTests, NonAsciiMetadataValueIsRejected) {
     SetBlobMetadataOptions options;
     options.Metadata.emplace("key", "caf\xc3\xa9");
 
-    using Result = std::expected<AVEVA::AzureClient::Response<AVEVA::AzureClient::Models::SetBlobMetadataResult>,
-                                 AVEVA::AzureClient::BlobStorageError>;
-    std::optional<Result> result;
-    client.SetMetadataAsync(std::move(options), [&](Result value) { result = std::move(value); });
-    httpClient.Poll();
-    ASSERT_TRUE(result.has_value());
-    ASSERT_FALSE(result->has_value());
-    EXPECT_EQ(result->error().Code, AVEVA::AzureClient::BlobStorageErrorCode::InvalidMetadata);
+    const auto result = RunAwaitable(httpClient, client.SetMetadataAsync(std::move(options)));
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, AVEVA::AzureClient::BlobStorageErrorCode::InvalidMetadata);
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }

@@ -13,6 +13,7 @@
 #include <AVEVA/HttpClient/HttpClient.hpp>
 
 #include <boost/asio/buffer.hpp>
+#include <boost/asio/co_spawn.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -34,6 +35,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -244,8 +246,14 @@ class ReadDriver {
         AVEVA::AzureClient::DownloadBlobOptions options;
         options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 0, .Length = m_readSize};
         m_starts[slot] = std::chrono::steady_clock::now();
-        m_client.DownloadToAsync(std::span<char>(m_buffers[slot]), std::move(options),
-                                 [this, slot](auto result) { Completed(slot, result); });
+        asio::co_spawn(m_client.get_executor(),
+                       m_client.DownloadToAsync(std::span<char>(m_buffers[slot]), std::move(options)),
+                       [this, slot](const std::exception_ptr& error, auto result) {
+                           if (error) {
+                               std::rethrow_exception(error);
+                           }
+                           Completed(slot, result);
+                       });
     }
 
     template <class Result> void Completed(std::size_t slot, const Result& result) {

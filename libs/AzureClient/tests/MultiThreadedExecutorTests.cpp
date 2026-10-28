@@ -20,9 +20,11 @@
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
-#include <boost/asio/async_result.hpp>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/thread_pool.hpp>
+#include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
 
 #include <cctype>
@@ -80,8 +82,6 @@ constexpr std::size_t ThreadCount = 4;
 class ThreadPoolBlobService final {
   public:
     using executor_type = boost::asio::thread_pool::executor_type;
-    using CompletionHandler = std::move_only_function<void(std::error_code, HttpResponse)>;
-
     ThreadPoolBlobService() = default;
 
     ~ThreadPoolBlobService() { m_pool.join(); }
@@ -93,13 +93,10 @@ class ThreadPoolBlobService final {
 
     executor_type get_executor() const noexcept { return m_pool.get_executor(); }
 
-    template <boost::asio::completion_token_for<void(std::error_code, HttpResponse)> CompletionToken>
-    auto SendAsync(HttpRequest request, AVEVA::HttpRequestOptions options, CompletionToken&& token) {
-        return boost::asio::async_initiate<CompletionToken, void(std::error_code, HttpResponse)>(
-            [this](auto handler, HttpRequest req, AVEVA::HttpRequestOptions /*opts*/) {
-                Dispatch(std::move(req), CompletionHandler{std::move(handler)});
-            },
-            token, std::move(request), options);
+    boost::asio::awaitable<AVEVA::HttpResult> SendAsync(HttpRequest request, AVEVA::HttpRequestOptions /*options*/) {
+        HttpResponse response = Handle(request);
+        co_await boost::asio::post(m_pool, boost::asio::use_awaitable);
+        co_return response;
     }
 
     void Seed(const std::string& blobName, std::string content) {
@@ -112,13 +109,6 @@ class ThreadPoolBlobService final {
     [[nodiscard]] std::size_t Throttled() const noexcept { return m_throttled.load(); }
 
   private:
-    void Dispatch(HttpRequest request, CompletionHandler completion) {
-        HttpResponse response = Handle(request);
-        boost::asio::post(m_pool, [completion = std::move(completion), response = std::move(response)]() mutable {
-            completion({}, std::move(response));
-        });
-    }
-
     [[nodiscard]] static HttpResponse Ok(unsigned int status, std::vector<HttpHeader> extra = {},
                                          std::string body = {}) {
         std::vector<HttpHeader> headers{
@@ -188,6 +178,11 @@ class ThreadPoolBlobService final {
 using PoolPageBlobClient = BasicPageBlobClient<ThreadPoolBlobService>;
 using PoolBlobContainerClient = BasicBlobContainerClient<ThreadPoolBlobService>;
 
+// Runs waitable on the service's thread pool and blocks the (non-pool) calling thread for its result.
+template <class T> T BlockOn(ThreadPoolBlobService& service, boost::asio::awaitable<T> awaitable) {
+    return boost::asio::co_spawn(service.get_executor(), std::move(awaitable), boost::asio::use_future).get();
+}
+
 [[nodiscard]] BlobContainerClientOptions SharedKeyContainerOptions() {
     BlobContainerClientOptions options;
     options.ServiceEndpoint = "https://account.blob.core.windows.net";
@@ -244,15 +239,16 @@ struct ConcurrentBlobData {
     return data;
 }
 
-void DownloadAndVerifyAllBlobs(std::vector<PoolPageBlobClient>& clients, const std::vector<std::string>& contents,
-                               const DownloadToOptions& downloadOptions) {
+void DownloadAndVerifyAllBlobs(ThreadPoolBlobService& service, std::vector<PoolPageBlobClient>& clients,
+                               const std::vector<std::string>& contents, const DownloadToOptions& downloadOptions) {
     const AVEVA::AzureClient::Tests::ScopedTestDirectory scratch{"mt-executor-downloads"};
     const std::filesystem::path& dir = scratch.Path();
     std::vector<std::future<std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>>> downloads;
     downloads.reserve(clients.size());
     for (std::size_t i = 0; i < clients.size(); ++i) {
-        downloads.push_back(clients.at(i).DownloadToAsync(dir / ("blob-" + std::to_string(i)), downloadOptions,
-                                                          boost::asio::use_future));
+        downloads.push_back(boost::asio::co_spawn(
+            service.get_executor(), clients.at(i).DownloadToAsync(dir / ("blob-" + std::to_string(i)), downloadOptions),
+            boost::asio::use_future));
     }
     for (std::size_t i = 0; i < clients.size(); ++i) {
         const auto result = downloads.at(i).get();
@@ -281,7 +277,7 @@ TEST(MultiThreadedExecutorTests, ConcurrentChunkedDownloadsOnAThreadPool) {
     downloadOptions.WriteScheduler = writers.get_executor();
     downloadOptions.ChunkSize = 4096U;
     downloadOptions.Concurrency = 4U;
-    DownloadAndVerifyAllBlobs(data.Clients, data.Contents, downloadOptions);
+    DownloadAndVerifyAllBlobs(service, data.Clients, data.Contents, downloadOptions);
     writers.join();
     EXPECT_GT(service.Throttled(), 0U) << "the retry path was not exercised";
 }
@@ -293,8 +289,7 @@ TEST(MultiThreadedExecutorTests, FileDownloadWithoutAWriterFailsAsNotSupported) 
     auto client = container.GetPageBlobClient("blob-0");
 
     const AVEVA::AzureClient::Tests::ScopedTestDirectory scratch{"mt-executor-no-writer"};
-    const auto result =
-        client.DownloadToAsync(scratch.Path() / "blob-0", DownloadToOptions{}, boost::asio::use_future).get();
+    const auto result = BlockOn(service, client.DownloadToAsync(scratch.Path() / "blob-0", DownloadToOptions{}));
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::operation_not_supported));
 }
@@ -318,7 +313,7 @@ TEST(MultiThreadedExecutorTests, ClientsAreSafeToInitiateFromManyThreads) {
             auto own = container.GetPageBlobClient("shared");
             for (std::size_t call = 0; call < CallsPerThread; ++call) {
                 PoolPageBlobClient& client = (call + t) % 2 == 0 ? shared : own;
-                if (client.GetPropertiesAsync(boost::asio::use_future).get().has_value()) {
+                if (BlockOn(service, client.GetPropertiesAsync()).has_value()) {
                     ++succeeded;
                 }
             }

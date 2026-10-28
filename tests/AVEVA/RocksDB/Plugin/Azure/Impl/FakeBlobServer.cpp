@@ -67,8 +67,12 @@ FakeBlobServer::HeldDownload FakeBlobServer::TakeDownload() {
             const bool shortRead = request.Length > 0 && content.size() < static_cast<std::size_t>(request.Length);
             total = shortRead ? offset + content.size() : (std::max)(total, offset + content.size());
             (void)m_http->FailRequest(requestIndex, {}, RangeResponse(offset, std::move(content), total, etag));
+            Settle(*m_http);
         },
-        [this, requestIndex](AzureClient::BlobStorageError error) { FailHeld(requestIndex, error); }};
+        [this, requestIndex](AzureClient::BlobStorageError error) {
+            FailHeld(requestIndex, error);
+            Settle(*m_http);
+        }};
 }
 
 Result FakeBlobServer::FailureResult(const AzureClient::BlobStorageError& error) {
