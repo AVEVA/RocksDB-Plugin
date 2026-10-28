@@ -32,10 +32,25 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
 namespace AVEVA::AzureClient::Tests {
+// Polls an asynchronous condition. The timeout is generous because a healthy run needs a fraction of it; it only
+// bounds how long a failing run takes to report.
+template <typename Predicate>
+[[nodiscard]] bool WaitUntil(Predicate&& done, std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+    const auto limit = std::chrono::steady_clock::now() + timeout;
+    while (!done()) {
+        if (std::chrono::steady_clock::now() >= limit) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return true;
+}
+
 // ---- Client option fixtures ----
 
 inline constexpr std::string_view DefaultServiceEndpoint = "https://storageaccount.blob.core.windows.net/";

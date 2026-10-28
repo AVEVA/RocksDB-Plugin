@@ -34,6 +34,7 @@ using AVEVA::HttpResponse;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
+using AVEVA::AzureClient::Tests::WaitUntil;
 using AVEVA::RocksDB::Plugin::Azure::RequestFailedException;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobEnvironment;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobServer;
@@ -140,10 +141,7 @@ TEST_F(BlobOperationsTests, StopBridgeEmitsAStopRequestedWhileTheHandlerIsBeingI
         return 0;
     });
     requester.join();
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (emitted.load() == 0 && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    EXPECT_TRUE(WaitUntil([&] { return emitted.load() != 0; }));
     bridge->Retire();
 
     EXPECT_EQ(1, emitted.load());
@@ -192,11 +190,7 @@ TEST_F(BlobOperationsTests, RetiredStopBridgeDoesNotEmitAndReleasesItsWait) {
     bridge.reset();
 
     // The wait that Install left outstanding owns the bridge until the executor completes it.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (!weak.expired() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    EXPECT_TRUE(weak.expired());
+    EXPECT_TRUE(WaitUntil([&] { return weak.expired(); }));
     EXPECT_EQ(0, emitted.load());
 }
 

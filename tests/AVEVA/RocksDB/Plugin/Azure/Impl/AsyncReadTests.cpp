@@ -838,9 +838,7 @@ TEST_F(AsyncReadTests, MultiRead_AdjacentAndNearbyRanges_AreFetchedWithOneDownlo
 // Prefetch completions run on the client executor, so a test must wait before relying on them.
 static void WaitForPrefetches(const FakeReadableFileImpl& impl, std::initializer_list<int64_t> offsets) {
     for (const auto offset : offsets) {
-        while (impl.HasPendingPrefetch(offset, 1)) {
-            std::this_thread::yield();
-        }
+        EXPECT_TRUE(AVEVA::AzureClient::Tests::WaitUntil([&] { return !impl.HasPendingPrefetch(offset, 1); }));
     }
 }
 
