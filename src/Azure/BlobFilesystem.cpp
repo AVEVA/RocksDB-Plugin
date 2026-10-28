@@ -15,6 +15,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/SequentialFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/WriteableFile.hpp"
+#include "BasicReadableFile.hpp"
 
 #include <boost/log/trivial.hpp>
 #include <boost/scope/scope_exit.hpp>
@@ -159,7 +160,7 @@ rocksdb::IOStatus BlobFilesystem::NewRandomAccessFile(const std::string& f, cons
                                                       rocksdb::IODebugContext*) {
     return Guard("NewRandomAccessFile", f, [&]() -> rocksdb::IOStatus {
         *r = std::unique_ptr<rocksdb::FSRandomAccessFile>(
-            new ReadableFile(m_filesystem->CreateReadableFile(f), m_logger));
+            new BasicReadableFile<Impl::ReadableFileImpl>(m_filesystem->CreateReadableFile(f), m_logger));
         return rocksdb::IOStatus::OK();
     });
 }

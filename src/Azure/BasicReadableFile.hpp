@@ -16,8 +16,8 @@
 
 namespace AVEVA::RocksDB::Plugin::Azure {
 // Adapts a readable file implementation to RocksDB. A template only so the tests can run it over a fake blob client;
-// the production instantiation is wrapped by the non-template ReadableFile.
-template <class TImpl> class BasicReadableFile final : public rocksdb::FSRandomAccessFile {
+// the production instantiation is returned directly as the public ReadableFile.
+template <class TImpl> class BasicReadableFile final : public ReadableFile {
     // Shared with in-flight async reads so the file (and its blob client) outlives their completions.
     std::shared_ptr<TImpl> m_file;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
