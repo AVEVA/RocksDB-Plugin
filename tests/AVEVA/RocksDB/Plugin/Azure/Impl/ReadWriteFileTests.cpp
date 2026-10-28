@@ -975,7 +975,11 @@ TEST(PageBlobWriterTests, GrowthTarget_NearInt64Max_SaturatesInsteadOfOverflowin
         std::remove_reference_t<decltype(*FakeBlobEnvironment{}.Client)>>;
     constexpr auto max = std::numeric_limits<int64_t>::max();
 
-    EXPECT_EQ(max, Writer::GrowthTarget(1, max / 2 + 1));
+    constexpr auto limit = Configuration::PageBlob::MaxPageBlobSize;
+
+    EXPECT_EQ(limit, Writer::GrowthTarget(1, max / 2 + 1));
+    EXPECT_EQ(limit, Writer::GrowthTarget(1, limit - 1));
+    EXPECT_EQ(limit + 1, Writer::GrowthTarget(limit + 1, limit));
     EXPECT_EQ(max, Writer::GrowthTarget(max, max));
     EXPECT_EQ(Configuration::PageBlob::DefaultSize * 4,
               Writer::GrowthTarget(1, Configuration::PageBlob::DefaultSize * 2));

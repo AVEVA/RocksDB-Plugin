@@ -49,12 +49,13 @@ template <typename TBlob> class PageBlobWriter {
 
     /// <summary>
     /// The capacity to grow to before page rounding: at least `required`, at least double `capacity` (saturating
-    /// rather than overflowing) and at least the default blob size.
+    /// rather than overflowing, and capped at the 8 TiB page blob limit) and at least the default blob size.
     /// </summary>
     [[nodiscard]] static int64_t GrowthTarget(const int64_t required, const int64_t capacity) noexcept {
         const auto doubled =
             capacity > std::numeric_limits<int64_t>::max() / 2 ? std::numeric_limits<int64_t>::max() : capacity * 2;
-        return std::max({required, doubled, static_cast<int64_t>(Configuration::PageBlob::DefaultSize)});
+        return std::max({required, std::min(doubled, Configuration::PageBlob::MaxPageBlobSize),
+                         static_cast<int64_t>(Configuration::PageBlob::DefaultSize)});
     }
 
     /// <summary>Records a capacity already known from the service (no request is made).</summary>

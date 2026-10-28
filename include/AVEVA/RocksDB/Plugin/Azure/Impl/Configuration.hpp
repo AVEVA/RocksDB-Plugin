@@ -13,6 +13,7 @@ struct Configuration {
         static const constexpr int64_t PageBits = 9;
         static const constexpr int64_t DefaultSize = Defaults::DataFileInitialSize;
         static const constexpr int64_t DefaultBufferSize = Defaults::DataFileBufferSize;
+        static const constexpr int64_t MaxPageBlobSize = 8LL << 40;
     };
 
     // Request sizing and fan-out used by the filesystem layer.
