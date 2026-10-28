@@ -4,12 +4,14 @@
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/RequestHelpers.hpp"
+#include <AVEVA/AzureClient/AzureRequestOptions.hpp>
+#include <AVEVA/AzureClient/BlobOperationOptions.hpp>
 #include <atomic>
 #include <boost/intrusive/list.hpp>
 #include <boost/log/trivial.hpp>
 #include <chrono>
 #include <exception>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -39,6 +41,19 @@ class BasicLockFileImpl
 
     [[nodiscard]] std::optional<std::string> CurrentLeaseId() const;
     void RenewLease() const;
+    struct RenewalAttempt {
+        std::string LeaseId;
+        std::chrono::steady_clock::time_point Start;
+        AzureClient::RenewLeaseOptions Options;
+        AzureClient::AzureRequestOptions RequestOptions;
+    };
+    // Empty when no lease is held; throws when the renewal deadline has passed.
+    [[nodiscard]] std::optional<RenewalAttempt> BeginRenewal() const;
+    // Records a completed renewal request. `failure` is the request's failure (null on success); returns the failure
+    // to report and whether a renewal happened.
+    [[nodiscard]] std::pair<std::exception_ptr, bool> FinishRenewal(const std::string& leaseId,
+                                                                    std::chrono::steady_clock::time_point requestStart,
+                                                                    std::exception_ptr failure) const;
     // Requires m_stateMutex.
     void PublishDeadlineLocked() const;
     // Throws when the lease has expired or its renewal deadline has passed; otherwise returns the time left to renew.
@@ -63,13 +78,40 @@ class BasicLockFileImpl
     void Renew() const;
     // Renews the lease unless it was released concurrently; returns false when there was nothing to renew.
     [[nodiscard]] bool RenewIfLocked() const;
-    // Called once per RenewAsync with the failure (null on success) and whether a renewal happened (false when the
-    // lease was not held or was released concurrently). Runs on the host io_context, or inline in RenewAsync when the
-    // renewal cannot be started, so it must not block.
-    using RenewCallback = std::function<void(std::exception_ptr, bool)>;
     // Starts a renewal without blocking, so many leases can renew at once. The request is cancelled at the renewal
     // deadline. The caller must keep this object alive until the callback has run.
-    void RenewAsync(RenewCallback callback) const;
+    // `callback(std::exception_ptr, bool)` is called once with the failure (null on success) and whether a renewal
+    // happened (false when the lease was not held or was released concurrently). It runs on the host io_context, or
+    // inline in RenewAsync when the renewal cannot be started, so it must not block. The renewed flag is false when
+    // the lease was released while the request was in flight, which is expected rather than a failure.
+    template <typename THandler> void RenewAsync(THandler callback) const {
+        std::optional<RenewalAttempt> attempt;
+        try {
+            attempt = BeginRenewal();
+        } catch (...) {
+            callback(std::current_exception(), true);
+            return;
+        }
+        if (!attempt.has_value()) {
+            callback(nullptr, false);
+            return;
+        }
+
+        m_file->RenewLeaseAsync(
+            std::move(attempt->Options),
+            [this, leaseId = std::move(attempt->LeaseId), requestStart = attempt->Start,
+             callback = std::move(callback)](auto result) mutable {
+                std::exception_ptr failure;
+                try {
+                    Unwrap(std::move(result));
+                } catch (...) {
+                    failure = std::current_exception();
+                }
+                const auto [error, renewed] = FinishRenewal(leaseId, requestStart, std::move(failure));
+                callback(error, renewed);
+            },
+            std::move(attempt->RequestOptions));
+    }
     void Unlock();
 
     [[nodiscard]] std::chrono::seconds TimeSinceLastRenewal() const;

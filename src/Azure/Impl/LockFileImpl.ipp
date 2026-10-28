@@ -261,53 +261,50 @@ template <typename TBlob> std::chrono::steady_clock::duration BasicLockFileImpl<
     return budget;
 }
 
-// Starts a renewal without blocking. The callback receives (error, renewed); renewed is false when the lease was
-// released while the request was in flight, which is expected rather than a failure.
-template <typename TBlob> void BasicLockFileImpl<TBlob>::RenewAsync(RenewCallback callback) const {
-    const auto leaseId = CurrentLeaseId();
+// Prepares a renewal request; the caller starts it. See RenewAsync in the header.
+template <typename TBlob>
+std::optional<typename BasicLockFileImpl<TBlob>::RenewalAttempt> BasicLockFileImpl<TBlob>::BeginRenewal() const {
+    auto leaseId = CurrentLeaseId();
     if (!leaseId.has_value()) {
-        callback(nullptr, false);
-        return;
+        return std::nullopt;
     }
-    std::chrono::steady_clock::duration budget;
-    try {
-        budget = RenewalBudget();
-    } catch (...) {
-        callback(std::current_exception(), true);
-        return;
-    }
+    const auto budget = RenewalBudget();
 
-    AzureClient::RenewLeaseOptions options;
-    options.LeaseId = *leaseId;
-
+    RenewalAttempt attempt;
+    attempt.Options.LeaseId = *leaseId;
+    attempt.LeaseId = std::move(*leaseId);
     // The client bounds the whole request, retries included, by the renewal deadline.
-    auto requestOptions = m_file->GetDefaultRequestOptions();
-    requestOptions.SetTotalDeadline(LockFileDetail::TotalDeadlineFor(budget));
-    const auto requestStart = Now();
-    m_file->RenewLeaseAsync(
-        std::move(options),
-        [this, leaseId = *leaseId, requestStart, callback = std::move(callback)](auto result) mutable {
-            std::exception_ptr error;
-            bool renewed = true;
-            try {
-                Unwrap(std::move(result));
-                // Overlapping renewals can complete out of order; never move the renewal time backwards.
-                auto current = m_lastRenewalTime.load();
-                while (current < requestStart && !m_lastRenewalTime.compare_exchange_weak(current, requestStart)) {
-                }
-                const std::scoped_lock lock(m_stateMutex);
-                PublishDeadlineLocked();
-            } catch (...) {
-                // An Unlock that raced with this renewal makes the failure expected, not an error.
-                if (CurrentLeaseId() != leaseId) {
-                    renewed = false;
-                } else {
-                    error = std::current_exception();
-                }
-            }
-            callback(error, renewed);
-        },
-        std::move(requestOptions));
+    attempt.RequestOptions = m_file->GetDefaultRequestOptions();
+    attempt.RequestOptions.SetTotalDeadline(LockFileDetail::TotalDeadlineFor(budget));
+    attempt.Start = Now();
+    return attempt;
+}
+
+template <typename TBlob>
+std::pair<std::exception_ptr, bool>
+BasicLockFileImpl<TBlob>::FinishRenewal(const std::string& leaseId, std::chrono::steady_clock::time_point requestStart,
+                                        std::exception_ptr failure) const {
+    std::exception_ptr error;
+    bool renewed = true;
+    try {
+        if (failure) {
+            std::rethrow_exception(failure);
+        }
+        // Overlapping renewals can complete out of order; never move the renewal time backwards.
+        auto current = m_lastRenewalTime.load();
+        while (current < requestStart && !m_lastRenewalTime.compare_exchange_weak(current, requestStart)) {
+        }
+        const std::scoped_lock lock(m_stateMutex);
+        PublishDeadlineLocked();
+    } catch (...) {
+        // An Unlock that raced with this renewal makes the failure expected, not an error.
+        if (CurrentLeaseId() != leaseId) {
+            renewed = false;
+        } else {
+            error = std::current_exception();
+        }
+    }
+    return {error, renewed};
 }
 
 // Blocking renewal for RocksDB threads; it waits on RenewAsync and so must never run on the io_context thread.
