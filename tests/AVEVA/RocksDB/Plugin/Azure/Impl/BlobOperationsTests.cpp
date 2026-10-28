@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/TaskGroup.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Core/Mocks/TempDirectory.hpp"
@@ -11,8 +12,14 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 
+#include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/this_coro.hpp>
+#include <boost/asio/thread_pool.hpp>
+#include <boost/asio/use_awaitable.hpp>
+#include <boost/asio/use_future.hpp>
 
 #include <gtest/gtest.h>
 
@@ -100,9 +107,10 @@ TEST_F(BlobOperationsTests, DownloadAsyncRejectsBodyShorterThanContentRange) {
         HttpResponse{206, MakeCanonicalSuccessHeaders({{"Content-Range", "bytes 0-7/8"}}), std::string(4, 'y')});
 
     std::promise<std::exception_ptr> done;
-    BlobOperations::DownloadAsync(*m_blob, 0, 8, std::string(), std::chrono::milliseconds(0),
-                                  [&](std::exception_ptr error, unsigned int, std::string_view,
-                                      const std::shared_ptr<const void>&) { done.set_value(error); });
+    AVEVA::RocksDB::Plugin::Azure::Impl::StartOperation(
+        m_blob->get_executor(),
+        BlobOperations::DownloadForReadAsync(*m_blob, 0, 8, std::string(), std::chrono::milliseconds(0)),
+        std::stop_token{}, [&](std::exception_ptr error, BlobOperations::DownloadedBytes) { done.set_value(error); });
 
     auto result = done.get_future();
     ASSERT_EQ(std::future_status::ready, result.wait_for(std::chrono::seconds(10)));
@@ -160,34 +168,79 @@ TEST_F(BlobOperationsTests, DownloadToBufferWithZeroLengthReturnsZeroWithoutRequ
 }
 
 namespace {
-struct ThrowingContainer {
-    void push_back(std::future<int>&&) { throw std::bad_alloc(); }
-};
-} // namespace
+using AVEVA::RocksDB::Plugin::Azure::Impl::TaskGroup;
 
-TEST(BlobOperationsPushAcceptedTests, DrainsAnAcceptedOperationWhenTheContainerCannotGrow) {
-    std::promise<int> promise;
-    std::future<int> pending = promise.get_future();
-    ThrowingContainer container;
-    bool drained = false;
-
-    EXPECT_THROW(BlobOperations::PushAccepted(container, std::move(pending),
-                                              [&](std::future<int>& item) {
-                                                  EXPECT_TRUE(item.valid());
-                                                  drained = true;
-                                                  promise.set_value(1);
-                                                  item.wait();
-                                              }),
-                 std::bad_alloc);
-    EXPECT_TRUE(drained);
+// Runs a coroutine on a small thread pool so children genuinely overlap, and returns its outcome.
+template <typename TBody> void RunOnPool(TBody body) {
+    boost::asio::thread_pool pool(4);
+    boost::asio::co_spawn(pool, std::move(body), boost::asio::use_future).get();
 }
 
-TEST(BlobOperationsPushAcceptedTests, KeepsTheOperationInTheContainerOnSuccess) {
-    std::promise<int> promise;
-    std::vector<std::future<int>> container;
-    BlobOperations::PushAccepted(container, promise.get_future(), [](std::future<int>&) { FAIL(); });
-    EXPECT_EQ(1U, container.size());
-    promise.set_value(1);
+boost::asio::awaitable<void> Occupy(std::atomic<int>& running, std::atomic<int>& peak, const bool fail) {
+    const auto now = running.fetch_add(1) + 1;
+    auto seen = peak.load();
+    while (now > seen && !peak.compare_exchange_weak(seen, now)) {
+    }
+    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor, std::chrono::milliseconds(20));
+    co_await timer.async_wait(boost::asio::use_awaitable);
+    running.fetch_sub(1);
+    if (fail) {
+        throw std::runtime_error("child failed");
+    }
+}
+} // namespace
+
+TEST(TaskGroupTests, NeverRunsMoreChildrenThanTheLimitAndWaitsForAllOfThem) {
+    std::atomic<int> running{0};
+    std::atomic<int> peak{0};
+    RunOnPool([&]() -> boost::asio::awaitable<void> {
+        TaskGroup group(co_await boost::asio::this_coro::executor, 2);
+        co_await group.Scope([&](TaskGroup& tasks) -> boost::asio::awaitable<void> {
+            for (int i = 0; i < 8; ++i) {
+                co_await tasks.Spawn(Occupy(running, peak, false));
+            }
+        });
+    });
+    EXPECT_EQ(0, running.load());
+    EXPECT_EQ(2, peak.load());
+}
+
+TEST(TaskGroupTests, RethrowsTheFirstChildFailureOnlyAfterEveryChildHasFinished) {
+    std::atomic<int> running{0};
+    std::atomic<int> peak{0};
+    std::atomic<bool> threwOnlyWhenIdle{false};
+    RunOnPool([&]() -> boost::asio::awaitable<void> {
+        TaskGroup group(co_await boost::asio::this_coro::executor, 4);
+        try {
+            co_await group.Scope([&](TaskGroup& tasks) -> boost::asio::awaitable<void> {
+                co_await tasks.Spawn(Occupy(running, peak, true));
+                co_await tasks.Spawn(Occupy(running, peak, false));
+                co_await tasks.Spawn(Occupy(running, peak, false));
+            });
+        } catch (const std::runtime_error&) {
+            threwOnlyWhenIdle = running.load() == 0;
+        }
+    });
+    EXPECT_TRUE(threwOnlyWhenIdle.load());
+}
+
+TEST(TaskGroupTests, AFailedChildStopsFurtherChildrenFromStarting) {
+    std::atomic<int> running{0};
+    std::atomic<int> peak{0};
+    std::atomic<int> started{0};
+    RunOnPool([&]() -> boost::asio::awaitable<void> {
+        TaskGroup group(co_await boost::asio::this_coro::executor, 1);
+        try {
+            co_await group.Scope([&](TaskGroup& tasks) -> boost::asio::awaitable<void> {
+                for (int i = 0; i < 10; ++i) {
+                    ++started;
+                    co_await tasks.Spawn(Occupy(running, peak, true));
+                }
+            });
+        } catch (const std::runtime_error&) {
+        }
+    });
+    EXPECT_LT(started.load(), 10);
 }
 
 namespace {
@@ -763,14 +816,14 @@ TEST_F(BlobOperationsTests, DownloadAsyncStopAfterAcceptanceCancelsTheDeferredTr
     std::stop_source source;
     std::atomic<int> completions{0};
     std::promise<std::exception_ptr> done;
-    BlobOperations::DownloadAsync(
-        *m_blob, 0, 8, std::string(), std::chrono::milliseconds(0),
-        [&](std::exception_ptr error, unsigned int, std::string_view, const std::shared_ptr<const void>&) {
+    AVEVA::RocksDB::Plugin::Azure::Impl::StartOperation(
+        m_blob->get_executor(),
+        BlobOperations::DownloadForReadAsync(*m_blob, 0, 8, std::string(), std::chrono::milliseconds(0)),
+        source.get_token(), [&](std::exception_ptr error, BlobOperations::DownloadedBytes) {
             if (completions.fetch_add(1) == 0) {
                 done.set_value(error);
             }
-        },
-        source.get_token());
+        });
     ASSERT_TRUE(m_httpClient.WaitForRequest(1));
 
     source.request_stop();
@@ -787,12 +840,10 @@ TEST_F(BlobOperationsTests, DownloadAsyncCompletingBeforeTheStopIsRequestedLeave
         HttpResponse{206, MakeCanonicalSuccessHeaders({{"Content-Range", "bytes 0-7/8"}}), std::string(8, 'z')});
     std::stop_source source;
     std::promise<std::exception_ptr> done;
-    BlobOperations::DownloadAsync(
-        *m_blob, 0, 8, std::string(), std::chrono::milliseconds(0),
-        [&](std::exception_ptr error, unsigned int, std::string_view, const std::shared_ptr<const void>&) {
-            done.set_value(error);
-        },
-        source.get_token());
+    AVEVA::RocksDB::Plugin::Azure::Impl::StartOperation(
+        m_blob->get_executor(),
+        BlobOperations::DownloadForReadAsync(*m_blob, 0, 8, std::string(), std::chrono::milliseconds(0)),
+        source.get_token(), [&](std::exception_ptr error, BlobOperations::DownloadedBytes) { done.set_value(error); });
     auto result = done.get_future();
     ASSERT_EQ(std::future_status::ready, result.wait_for(std::chrono::seconds(10)));
     EXPECT_TRUE(result.get() == nullptr);

@@ -21,6 +21,7 @@
 #include <atomic>
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
+#include <boost/asio/awaitable.hpp>
 #include <boost/log/trivial.hpp>
 
 #include <chrono>
@@ -245,6 +246,23 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     };
     [[nodiscard]] ResolvedBlob ResolveBlob(const std::string& path) const;
     void EnsureLiveness(std::source_location location = std::source_location::current()) const;
+
+    // The steps of RenameFile, as coroutines so the whole rename is one blocking call. The clients are referenced,
+    // not copied, so the caller keeps them alive until the rename completes.
+    using BlobClient = PageBlobClientOn<THttp>;
+    [[nodiscard]] boost::asio::awaitable<void> RenameBlobAsync(BlobContainerClientOn<THttp>& container,
+                                                               BlobClient& source, BlobClient& destination,
+                                                               std::string_view sourceName,
+                                                               std::string_view destinationName) const;
+    // Server-side copy first; falls back to copying through this process when the service cannot authorize the source.
+    [[nodiscard]] boost::asio::awaitable<void> CopyBlobPagesAsync(BlobClient& source, BlobClient& target, int64_t size,
+                                                                  const std::string& etag, std::string_view name) const;
+    // Copies the content and logical size into `target`; returns its ETag after the final write.
+    [[nodiscard]] boost::asio::awaitable<std::string> CopyIntoAsync(BlobClient& source, BlobClient& target,
+                                                                    int64_t size, const std::string& etag,
+                                                                    std::string_view name) const;
+    // Best-effort cleanup that never masks the failure being unwound.
+    [[nodiscard]] boost::asio::awaitable<void> DeleteQuietlyAsync(BlobClient& blob, std::string_view name) const;
 };
 extern template class BasicBlobFilesystemImpl<::AVEVA::HttpClient>;
 

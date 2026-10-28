@@ -13,6 +13,10 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 
+#include <boost/asio/experimental/awaitable_operators.hpp>
+#include <boost/asio/experimental/concurrent_channel.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/use_awaitable.hpp>
 #include <boost/container/static_vector.hpp>
 #include <boost/log/trivial.hpp>
 
@@ -32,14 +36,6 @@
 #include <utility>
 #include <vector>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-/// <summary>
-/// An async read completion is any callable taking an exception (null on success) and the bytes read. `data` is valid
-/// while `owner` (when non-null) or, failing that, until the callback returns; keep `owner` to retain the bytes
-/// without copying.
-/// </summary>
-template <typename TCallback>
-concept ReadCompletion = std::invocable<TCallback&, std::exception_ptr, std::string_view, std::shared_ptr<const void>>;
-
 /// <summary>
 /// The absolute time by which an async read must finish; empty means no deadline. It is fixed once when the read
 /// starts, so every step (prefetch wait, metadata refresh, download, stale-read restart) draws on one budget.
@@ -155,20 +151,29 @@ template <typename TBlob> class BasicReadableFileImpl {
 
     // Concurrent async reads that need fresh blob metadata (at the cached end, or after a precondition failure) share
     // one in-flight properties call instead of each issuing their own.
-    using MetadataCallback = std::move_only_function<void(std::exception_ptr, int64_t, std::string, uint64_t)>;
+    struct FetchedMetadata {
+        int64_t Size = 0;
+        std::string ETag;
+        uint64_t Epoch = 0;
+    };
+    // Each waiter owns a one-slot channel the shared refresh completes, so a waiter that timed out never blocks it.
+    using MetadataChannel = boost::asio::experimental::concurrent_channel<void(boost::system::error_code,
+                                                                               std::exception_ptr, FetchedMetadata)>;
     struct MetadataRefreshState {
         std::mutex Mutex;
         bool InFlight = false;
-        std::vector<MetadataCallback> Waiters;
+        std::vector<std::shared_ptr<MetadataChannel>> Waiters;
     };
     mutable MetadataRefreshState m_metadataRefresh;
-    static void CoalescedMetadataAsync(const std::shared_ptr<const BasicReadableFileImpl>& file,
-                                       MetadataCallback callback);
-    // Like CoalescedMetadataAsync, but `continuation` also runs (with a TimedOut error) once `deadline` passes. The
-    // shared properties call is never cancelled on behalf of one waiter that gave up.
-    template <typename TContinuation>
-    static void WaitForMetadataAsync(const std::shared_ptr<const BasicReadableFileImpl>& file,
-                                     const ReadDeadline& deadline, TContinuation continuation);
+    static void JoinMetadataRefresh(const std::shared_ptr<const BasicReadableFileImpl>& file,
+                                    std::shared_ptr<MetadataChannel> waiter);
+    static void CompleteMetadataRefresh(std::shared_ptr<const BasicReadableFileImpl> file, std::exception_ptr error,
+                                        const FetchedMetadata& fetched) noexcept;
+    // Waits for fresh metadata, sharing one in-flight properties call; fails with TimedOut once `deadline` passes.
+    static BlobOperations::Task<FetchedMetadata> FetchMetadataAsync(std::shared_ptr<const BasicReadableFileImpl> file,
+                                                                    ReadDeadline deadline);
+    static BlobOperations::Task<void> PrefetchAsync(std::shared_ptr<const BasicReadableFileImpl> self, uint64_t id,
+                                                    std::shared_ptr<PrefetchCharge> charge, int64_t offset, int64_t n);
 
     // Serves from a completed prefetch only. With `wait`, first waits (bounded) for a covering pending prefetch.
     // With `allowPartial`, a range that only starts inside a slot is served up to the slot's end and the caller
@@ -183,14 +188,6 @@ template <typename TBlob> class BasicReadableFileImpl {
     // Publishes a refreshed (size, ETag) to the runtime cache for later opens, then to this file. `epoch` is the
     // runtime BlobSizeEpoch captured before the fetch started.
     void ApplyRefreshedMetadata(int64_t size, std::string etag, uint64_t epoch) const;
-    template <ReadCompletion TCallback>
-    static void ReadAsyncAttempt(std::shared_ptr<const BasicReadableFileImpl> self, int64_t offset, int64_t bytesToRead,
-                                 TCallback callback, int attemptsLeft, ReadDeadline deadline,
-                                 std::stop_token stopToken);
-    template <ReadCompletion TCallback>
-    static void RefreshMetadataAndReadAsync(std::shared_ptr<const BasicReadableFileImpl> self, int64_t offset,
-                                            int64_t bytesToRead, TCallback callback, int attemptsLeft,
-                                            ReadDeadline deadline, std::stop_token stopToken);
 
   public:
     // A blob that keeps changing underneath the reader fails with an IOError after this many metadata refreshes.
@@ -226,21 +223,31 @@ template <typename TBlob> class BasicReadableFileImpl {
     [[nodiscard]] bool ChainOntoPendingPrefetch(int64_t offset, int64_t bytesToRead,
                                                 std::move_only_function<void()>& resume) const;
 
+    /// The bytes of an async read. `Data` is valid while `Owner` is held; keep it to retain the bytes without copying.
+    struct ReadResult {
+        std::string_view Data;
+        std::shared_ptr<const void> Owner;
+    };
+
     // Non-blocking random read from the blob (bypassing the file cache), with the same ETag/size refresh and retry
-    // semantics as RandomRead. `self` keeps the file alive until `callback` has run; the callback may run on an
-    // io_context thread or inline, so it must not block on blob I/O. The file is released before `callback` runs,
-    // and the read stays registered with the AsyncReadTracker (if any) until `callback` itself is released.
-    // A non-zero `timeout` bounds the whole read, measured from this call: metadata refreshes, downloads (including
-    // their transport retries) and stale-read restarts all draw on it, and the read completes with a TimedOut error
-    // once it is spent.
+    // semantics as RandomRead. Failures are thrown from the awaitable. `self` is held by the coroutine, so the file
+    // outlives the read. Run it with StartTracked (or StartOperation) on the client's executor.
+    // A non-zero `timeout` bounds the whole read, measured from when it starts: metadata refreshes, downloads
+    // (including their transport retries) and stale-read restarts all draw on it, and the read fails with a TimedOut
+    // error once it is spent.
     // A stop request on `stopToken` cancels this read's own download (including its transport retries), starts no
-    // restart or further download, and completes the read with a cancelled error. It never touches a shared
-    // metadata refresh or prefetch that the read may be waiting on.
-    template <ReadCompletion TCallback>
-    static void ReadAsync(std::shared_ptr<const BasicReadableFileImpl> self, int64_t offset, int64_t bytesToRead,
-                          TCallback callback, int attemptsLeft = kMaxStaleReadRetries,
-                          std::chrono::milliseconds timeout = std::chrono::milliseconds::zero(),
-                          std::stop_token stopToken = {});
+    // restart or further download, and fails the read with a cancelled error. It never touches a shared metadata
+    // refresh or prefetch that the read may be waiting on.
+    [[nodiscard]] static BlobOperations::Task<ReadResult>
+    ReadAsync(std::shared_ptr<const BasicReadableFileImpl> self, int64_t offset, int64_t bytesToRead,
+              int attemptsLeft = kMaxStaleReadRetries,
+              std::chrono::milliseconds timeout = std::chrono::milliseconds::zero(), std::stop_token stopToken = {});
+
+    // Starts `operation` like StartOperation, additionally counting it as in flight for the AsyncReadTracker (if any)
+    // until `done` has run and been released.
+    template <typename TAwaitable, typename TDone>
+    static void StartTracked(const std::shared_ptr<const BasicReadableFileImpl>& file, TAwaitable operation,
+                             std::stop_token stopToken, TDone done);
 
     // Upper bound of a single prefetched range, to keep per-file memory bounded.
     static constexpr int64_t kMaxPrefetchBytes = 8 * 1024 * 1024;

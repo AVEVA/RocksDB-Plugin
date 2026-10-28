@@ -113,16 +113,16 @@ BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& req, std::function<v
                             AzureErrorTranslator::FromException(Impl::ReadableFileDetail::ReadTimedOutError()), {});
                         return;
                     }
-                    TImpl::ReadAsync(
-                        file, offset, length,
-                        [request, logger](std::exception_ptr error, std::string_view data,
-                                          const std::shared_ptr<const void>&) {
+                    TImpl::StartTracked(
+                        file,
+                        TImpl::ReadAsync(file, offset, length, TImpl::kMaxStaleReadRetries,
+                                         Impl::ReadableFileDetail::Remaining(deadline), request->StopToken()),
+                        request->StopToken(),
+                        [request, logger](std::exception_ptr error, typename TImpl::ReadResult result) {
                             request->Complete(error ? AzureErrorTranslator::FromException(*logger, error, "ReadAsync")
                                                     : rocksdb::IOStatus::OK(),
-                                              data);
-                        },
-                        TImpl::kMaxStaleReadRetries, Impl::ReadableFileDetail::Remaining(deadline),
-                        request->StopToken());
+                                              result.Data);
+                        });
                 };
             };
 

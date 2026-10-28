@@ -120,13 +120,14 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::OverlayChunks(cons
 }
 
 // Fills the bytes of an extent that no chunk supplies with what the blob already holds. Reads past the file's old
-// end (`sizeBefore`) are skipped: that region holds no data yet and stays zero.
+// end (`sizeBefore`) are skipped: that region holds no data yet and stays zero. This only plans: the zeroing happens
+// here, the downloads are returned in `reads` for the caller to run.
 //
 // Gaps separated by no more than a page of buffered data share one request: many tiny writes would otherwise each
-// cost a GET plus a pending download. The wider read also fetches the bytes in between, so the chunks are copied over
-// the extent afterwards (OverlayChunks) rather than before.
+// cost a GET. The wider read also fetches the bytes in between, so the chunks are copied over the extent afterwards
+// (OverlayChunks) rather than before.
 template <typename TBlob>
-void BasicReadWriteFileImpl<TBlob>::PrepareExtent(Extent& extent, int64_t sizeBefore, std::deque<GapRead>& reads) {
+void BasicReadWriteFileImpl<TBlob>::PlanGapReads(Extent& extent, int64_t sizeBefore, std::vector<GapRead>& reads) {
     constexpr int64_t maxBridgedBytes = Configuration::PageBlob::PageSize;
     // A reused buffer holds an earlier flush's bytes, so everything not downloaded or copied later is zeroed.
     extent.Data = AcquireExtentBuffer(static_cast<size_t>(extent.End - extent.Start));
@@ -140,21 +141,11 @@ void BasicReadWriteFileImpl<TBlob>::PrepareExtent(Extent& extent, int64_t sizeBe
 
     int64_t readStart = 0;
     int64_t readEnd = 0; // empty when equal to readStart
-    const auto startRead = [&] {
+    const auto flushRead = [&] {
         if (readEnd > readStart) {
-            // Sliding window: one extent can hold many separated gaps, so wait for the oldest before exceeding it.
-            while (reads.size() >= Configuration::Transfer::MaxConcurrentPageCopies) {
-                auto oldest = std::move(reads.front());
-                reads.pop_front();
-                FinishGapRead(oldest);
-            }
-            std::span<char> target(extent.Data->data() + (readStart - extent.Start),
-                                   static_cast<size_t>(readEnd - readStart));
-            BlobOperations::PushAccepted(
-                reads,
-                GapRead{BlobOperations::StartDownload(*m_w.H.Blob, target, readStart, readEnd - readStart), readStart,
-                        readEnd - readStart},
-                [](GapRead& read) { read.Download.Result.wait(); });
+            reads.push_back(GapRead{std::span<char>(extent.Data->data() + (readStart - extent.Start),
+                                                    static_cast<size_t>(readEnd - readStart)),
+                                    readStart, readEnd - readStart});
         }
         readStart = readEnd = 0;
     };
@@ -172,7 +163,7 @@ void BasicReadWriteFileImpl<TBlob>::PrepareExtent(Extent& extent, int64_t sizeBe
             readEnd = gapEnd;
             return;
         }
-        startRead();
+        flushRead();
         readStart = gapStart;
         readEnd = gapEnd;
     };
@@ -185,82 +176,53 @@ void BasicReadWriteFileImpl<TBlob>::PrepareExtent(Extent& extent, int64_t sizeBe
         cursor = std::max(cursor, end);
     }
     addGap(cursor, extent.End);
-    startRead();
+    flushRead();
 }
 
 // A short gap read would upload zeros over bytes that were never fetched, so it fails the flush.
-template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::FinishGapRead(GapRead& read) {
-    BlobHelpers::RequireFullDownload(m_w.H.Name, read.Offset, read.Length,
-                                     BlobOperations::FinishDownload(read.Download));
+template <typename TBlob> BlobOperations::Task<void> BasicReadWriteFileImpl<TBlob>::ReadGapAsync(const GapRead read) {
+    BlobHelpers::RequireFullDownload(
+        m_w.H.Name, read.Offset, read.Length,
+        co_await BlobOperations::DownloadAsync(*m_w.H.Blob, read.Target, read.Offset, read.Length));
 }
 
-// Reads the gaps of, then uploads, extents [begin, end). Waits for everything before reporting the first failure: the
-// operations write into / read from the extents' buffers, which must not be released while any is still in flight.
+// Reads the gaps of, then uploads, extents [begin, end). Each stage waits for all of its operations before reporting
+// the first failure: they write into / read from the extents' buffers, which must not be released while any is still
+// in flight.
 template <typename TBlob>
-void BasicReadWriteFileImpl<TBlob>::RunWave(std::vector<Extent>& extents, size_t begin, size_t end,
-                                            int64_t sizeBefore) {
-    const auto finishAll = [](auto& pending, auto&& finish) {
-        std::exception_ptr failure;
-        for (auto& item : pending) {
-            try {
-                finish(item);
-            } catch (...) {
-                if (!failure) {
-                    failure = std::current_exception();
-                }
-            }
-        }
-        pending.clear();
-        if (failure) {
-            std::rethrow_exception(failure);
-        }
-    };
-    const auto finishRead = [this](GapRead& read) { FinishGapRead(read); };
-    const auto finishUpload = [](auto& upload) { BlobOperations::FinishUploadPages(upload); };
-
-    // Runs on every exit, after the reads and uploads above have drained, so the wave's buffers go back to the pool
-    // for the next wave instead of staying owned until the whole flush ends.
+BlobOperations::Task<void> BasicReadWriteFileImpl<TBlob>::RunWaveAsync(std::vector<Extent>& extents, size_t begin,
+                                                                       size_t end, int64_t sizeBefore) {
+    // Runs on every exit, after the reads and uploads have drained, so the wave's buffers go back to the pool for the
+    // next wave instead of staying owned until the whole flush ends.
     const boost::scope::scope_exit releaseWave{[&] noexcept {
         for (auto i = begin; i < end; ++i) {
             extents[i].Data.reset();
         }
     }};
 
-    std::deque<GapRead> reads;
-    try {
-        for (auto i = begin; i < end; ++i) {
-            PrepareExtent(extents[i], sizeBefore, reads);
-        }
-    } catch (...) {
-        try {
-            finishAll(reads, finishRead);
-        } catch (...) {
-        }
-        throw;
+    const auto executor = co_await boost::asio::this_coro::executor;
+    std::vector<GapRead> gaps;
+    for (auto i = begin; i < end; ++i) {
+        PlanGapReads(extents[i], sizeBefore, gaps);
     }
-    finishAll(reads, finishRead);
+    // One extent can hold many separated gaps, so only a window of them is in flight.
+    TaskGroup reads(executor, Configuration::Transfer::MaxConcurrentPageCopies);
+    co_await reads.Scope([&](TaskGroup& running) -> BlobOperations::Task<void> {
+        for (const auto& gap : gaps) {
+            co_await running.Spawn(ReadGapAsync(gap));
+        }
+    });
     for (auto i = begin; i < end; ++i) {
         OverlayChunks(extents[i]);
     }
 
-    using PendingUploadT = decltype(BlobOperations::StartUploadPages(
-        *m_w.H.Runtime, *m_w.H.Blob, std::shared_ptr<const std::vector<char>>{}, int64_t{0}));
-    std::vector<PendingUploadT> uploads;
-    try {
+    TaskGroup uploads(executor, end - begin);
+    co_await uploads.Scope([&](TaskGroup& running) -> BlobOperations::Task<void> {
         for (auto i = begin; i < end; ++i) {
-            BlobOperations::PushAccepted(
-                uploads,
-                BlobOperations::StartUploadPages(*m_w.H.Runtime, *m_w.H.Blob, extents[i].Data, extents[i].Start),
-                [](PendingUploadT& upload) { upload.Result.wait(); });
+            co_await running.Spawn(
+                BlobOperations::UploadPagesAsync(*m_w.H.Runtime, *m_w.H.Blob, extents[i].Data, extents[i].Start));
         }
-    } catch (...) {
-        try {
-            finishAll(uploads, finishUpload);
-        } catch (...) {
-        }
-        throw;
-    }
-    finishAll(uploads, finishUpload);
+    });
 
     for (auto i = begin; i < end; ++i) {
         BOOST_LOG_SEV(*m_w.H.Logger, boost::log::trivial::debug)
@@ -293,7 +255,7 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Flush() {
     const boost::scope::scope_exit trimOnExit{[this] { TrimExtentPool(); }};
     for (size_t begin = 0; begin < extents.size(); begin += Configuration::Transfer::MaxConcurrentPageCopies) {
         const auto end = std::min(extents.size(), begin + Configuration::Transfer::MaxConcurrentPageCopies);
-        RunWave(extents, begin, end, m_size);
+        Block(*m_w.H.Blob, RunWaveAsync(extents, begin, end, m_size));
     }
     // Writes that landed after the lease lapsed must not be reported as flushed.
     m_w.H.Runtime->ThrowIfWritesFenced();

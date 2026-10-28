@@ -43,15 +43,15 @@ template <typename TBlob> class BasicReadWriteFileImpl {
         std::shared_ptr<std::vector<char>> Data;          // shared so each upload's request views it without a copy
     };
     struct GapRead {
-        BlobOperations::PendingDownload<TBlob> Download;
+        std::span<char> Target; // inside the extent's buffer
         int64_t Offset = 0;
         int64_t Length = 0; // bytes the gap must receive in full
     };
     [[nodiscard]] std::vector<Extent> BuildExtents() const;
-    void PrepareExtent(Extent& extent, int64_t sizeBefore, std::deque<GapRead>& reads);
-    void FinishGapRead(GapRead& read);
+    void PlanGapReads(Extent& extent, int64_t sizeBefore, std::vector<GapRead>& reads);
+    BlobOperations::Task<void> ReadGapAsync(GapRead read);
     void OverlayChunks(const Extent& extent);
-    void RunWave(std::vector<Extent>& extents, size_t begin, size_t end, int64_t sizeBefore);
+    BlobOperations::Task<void> RunWaveAsync(std::vector<Extent>& extents, size_t begin, size_t end, int64_t sizeBefore);
 
   public:
     BasicReadWriteFileImpl(

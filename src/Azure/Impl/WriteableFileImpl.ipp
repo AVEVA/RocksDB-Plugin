@@ -261,18 +261,27 @@ void BasicWriteableFileImpl<TBlob>::StartUpload(std::shared_ptr<const std::vecto
     }
 
     auto tracker = m_uploads;
+    const auto complete = [tracker](std::exception_ptr error) {
+        {
+            std::scoped_lock lock(tracker->Mutex);
+            --tracker->InFlight;
+            if (error && !tracker->Error) {
+                tracker->Error = std::move(error);
+            }
+        }
+        tracker->Done.notify_all();
+    };
     try {
-        BlobOperations::UploadPagesAsync(*m_w.H.Runtime, *m_w.H.Blob, std::move(data), offset,
-                                         [tracker](std::exception_ptr error) {
-                                             {
-                                                 std::scoped_lock lock(tracker->Mutex);
-                                                 --tracker->InFlight;
-                                                 if (error && !tracker->Error) {
-                                                     tracker->Error = error;
-                                                 }
-                                             }
-                                             tracker->Done.notify_all();
-                                         });
+        // Fenced writes fail the upload without a request; checking here keeps that from needing the executor.
+        m_w.H.Runtime->ThrowIfWritesFenced();
+    } catch (...) {
+        complete(std::current_exception());
+        return;
+    }
+    try {
+        StartOperation(m_w.H.Blob->get_executor(),
+                       BlobOperations::UploadPagesAsync(*m_w.H.Runtime, *m_w.H.Blob, std::move(data), offset),
+                       std::stop_token{}, [complete](std::exception_ptr error) { complete(std::move(error)); });
     } catch (...) {
         std::scoped_lock lock(tracker->Mutex);
         --tracker->InFlight;

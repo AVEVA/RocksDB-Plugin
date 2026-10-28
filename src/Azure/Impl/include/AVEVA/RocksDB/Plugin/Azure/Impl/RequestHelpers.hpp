@@ -8,6 +8,7 @@
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
 #include <AVEVA/AzureClient/Response.hpp>
 
+#include <boost/asio/awaitable.hpp>
 #include <boost/asio/bind_cancellation_slot.hpp>
 #include <boost/asio/bind_executor.hpp>
 #include <boost/asio/cancellation_signal.hpp>
@@ -101,6 +102,16 @@ template <class T> T Unwrap(std::expected<AzureClient::Response<T>, AzureClient:
     return std::move(UnwrapResponse(std::move(result))).Value();
 }
 
+/// <summary>
+/// Awaits a client operation and returns its value, throwing RequestFailedException on failure. The coroutine
+/// counterpart of Unwrap for callers that hand an operation to something that wants a plain value (Block, Spawn).
+/// </summary>
+template <class T>
+boost::asio::awaitable<T>
+Unwrapped(boost::asio::awaitable<std::expected<AzureClient::Response<T>, AzureClient::BlobStorageError>> operation) {
+    co_return Unwrap(co_await std::move(operation));
+}
+
 /// <summary>Throws std::logic_error when the calling thread is running `executor`: blocking there can never finish.
 /// </summary>
 template <class Executor> void ThrowIfRunningOn(const Executor& executor) {
@@ -137,25 +148,26 @@ template <class Executor> void ThrowIfRunningOn(const Executor& executor) {
 
 /// <summary>
 /// Starts `operation` on `executor`; `done(std::exception_ptr error, Result result)` runs on the executor when it
-/// completes. A stop request on `stopToken` cancels the operation, which then completes with its cancellation error.
+/// completes (without the `result` argument when the operation returns void). A stop request on `stopToken` cancels
+/// the operation, which then completes with its cancellation error.
 /// </summary>
 template <class Executor, class Awaitable, class Done>
 void StartOperation(const Executor& executor, Awaitable operation, std::stop_token stopToken, Done done) {
-    using Result = typename Awaitable::value_type;
     auto state = std::make_shared<Detail::CancelState>();
     // Binding the executor makes the co_spawn cancellation handler dispatch the emission onto it, so a stop request
     // never runs the coroutine's cancellation handlers on the stopping thread.
-    boost::asio::co_spawn(
-        executor, std::move(operation),
-        boost::asio::bind_cancellation_slot(
-            state->Slot(), boost::asio::bind_executor(executor, [state, executor, done = std::move(done)](
-                                                                    std::exception_ptr error, Result result) mutable {
-                state->Release();
-                // The coroutine machinery may still touch the signal after this handler returns,
-                // so its destruction is deferred rather than done here.
-                boost::asio::post(executor, [state = std::move(state)] {});
-                done(std::move(error), std::move(result));
-            })));
+    boost::asio::co_spawn(executor, std::move(operation),
+                          boost::asio::bind_cancellation_slot(
+                              state->Slot(), boost::asio::bind_executor(
+                                                 executor, [state, executor, done = std::move(done)](
+                                                               std::exception_ptr error, auto&&... result) mutable {
+                                                     state->Release();
+                                                     // The coroutine machinery may still touch the signal after this
+                                                     // handler returns, so its destruction is deferred rather than done
+                                                     // here.
+                                                     boost::asio::post(executor, [state = std::move(state)] {});
+                                                     done(std::move(error), std::move(result)...);
+                                                 })));
     if (stopToken.stop_possible()) {
         state->Arm(std::move(stopToken), state);
     }
@@ -174,11 +186,11 @@ template <class Executor, class Awaitable>
     std::promise<Result> promise;
     auto future = promise.get_future();
     StartOperation(executor, std::move(operation), std::move(stopToken),
-                   [promise = std::move(promise)](std::exception_ptr error, Result result) mutable {
+                   [promise = std::move(promise)](std::exception_ptr error, auto&&... result) mutable {
                        if (error) {
                            promise.set_exception(std::move(error));
                        } else {
-                           promise.set_value(std::move(result));
+                           promise.set_value(std::move(result)...);
                        }
                    });
     return future;
