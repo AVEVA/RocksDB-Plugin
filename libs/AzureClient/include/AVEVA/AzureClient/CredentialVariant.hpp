@@ -5,7 +5,7 @@
 
 #include <AVEVA/AzureClient/TokenCredential.hpp>
 
-#include <boost/asio/async_result.hpp>
+#include <boost/asio/awaitable.hpp>
 
 #include <concepts>
 #include <memory>
@@ -21,11 +21,6 @@ namespace AVEVA::AzureClient {
 template <class... TCreds> class CredentialVariant {
     std::variant<std::shared_ptr<TCreds>...> m_value;
 
-    template <class Handler> void Begin(std::vector<std::string> scopes, Handler handler) {
-        std::visit([&](auto& credential) { credential->GetTokenAsync(std::move(scopes), std::move(handler)); },
-                   m_value);
-    }
-
   public:
     template <class T>
         requires(std::same_as<T, TCreds> || ...)
@@ -36,13 +31,14 @@ template <class... TCreds> class CredentialVariant {
         return std::visit([](const auto& credential) -> const std::type_info& { return typeid(*credential); }, m_value);
     }
 
-    template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
-    auto GetTokenAsync(std::vector<std::string> scopes, CompletionToken&& token) {
-        return boost::asio::async_initiate<TokenSignature>(
-            [this](auto handler, std::vector<std::string> requestedScopes) {
-                Begin(std::move(requestedScopes), std::move(handler));
+    [[nodiscard]] boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> scopes) {
+        // Visiting inside the coroutine keeps the held credential (a shared_ptr copy) alive across suspension.
+        co_return co_await std::visit(
+            [&](const auto& credential) -> boost::asio::awaitable<TokenResult> {
+                const auto held = credential;
+                co_return co_await held->GetTokenAsync(std::move(scopes));
             },
-            token, std::move(scopes));
+            m_value);
     }
 };
 } // namespace AVEVA::AzureClient

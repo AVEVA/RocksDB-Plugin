@@ -8,11 +8,11 @@
 #include <AVEVA/AzureClient/BlobOperationOptions.hpp>
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
-#include <AVEVA/AzureClient/Detail/AsyncInitiation.hpp>
 #include <AVEVA/AzureClient/HttpClientLike.hpp>
 #include <AVEVA/AzureClient/Models/BlobContainerModels.hpp>
 #include <AVEVA/AzureClient/Models/BlobModels.hpp>
 #include <AVEVA/AzureClient/Response.hpp>
+#include <AVEVA/AzureClient/TokenCredential.hpp>
 #include <AVEVA/HttpClient/HttpHeader.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
@@ -23,6 +23,7 @@
 #include <boost/asio/associated_cancellation_slot.hpp>
 #include <boost/asio/associated_executor.hpp>
 #include <boost/asio/async_result.hpp>
+#include <boost/asio/awaitable.hpp>
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/url/url_view_base.hpp>
@@ -429,31 +430,26 @@ template <class T>
     return std::unexpected(MakeClientError(error));
 }
 
-// Completion adapter for *IfExists / *IfNotExists: a failure whose code is one of `suppressed` completes as
-// success with the real raw response, keeping the suppressed error's details in Response<T>::Error().
-template <class TModel, class TCompletion, std::same_as<BlobStorageErrorCode>... TCodes>
-[[nodiscard]] auto SuppressErrors(TCompletion completion, TCodes... suppressed) {
-    return [completion = std::move(completion),
-            codes = std::array<BlobStorageErrorCode, sizeof...(TCodes)>{suppressed...}](
-               std::error_code error, Response<TModel> response) mutable {
-        if (error && std::ranges::contains(codes, error)) {
-            error.clear();
-        }
-        completion(ToExpected(error, std::move(response)));
-    };
-}
-
 // A client-side failure (e.g. argument validation) with `message` defaulting to error.message().
 template <class T>
 [[nodiscard]] std::expected<Response<T>, BlobStorageError> MakeError(std::error_code error, std::string message = {}) {
     return std::unexpected(MakeClientError(error, std::move(message)));
 }
 
-// Parses a completed response with `parser` and completes either with
-// std::expected<Response<TModel>, BlobStorageError> or, if `completion` takes them, with (std::error_code,
-// Response<TModel>).
-template <class TModel, class TParser, class TCompletion>
-void CompleteParsed(std::error_code error, HttpResponse response, TParser&& parser, TCompletion&& completion) {
+// Parses a completed response with `parser`. A failure whose code is one of `suppressed` (the *IfExists /
+// *IfNotExists operations) becomes success with the real raw response, keeping the suppressed error's details in
+// Response<T>::Error(); `absorbed` is one more such code, chosen per call.
+template <class TModel, class TParser>
+[[nodiscard]] std::expected<Response<TModel>, BlobStorageError>
+ParseOutcome(HttpResult sent, TParser&& parser, std::span<const BlobStorageErrorCode> suppressed = {},
+             std::optional<BlobStorageErrorCode> absorbed = std::nullopt) {
+    std::error_code error;
+    HttpResponse response;
+    if (sent) {
+        response = std::move(*sent);
+    } else {
+        error = sent.error();
+    }
     RequestFailure failure = DetermineBlobStorageFailure(error, response);
     TModel model;
     if (!failure.Error) {
@@ -465,11 +461,11 @@ void CompleteParsed(std::error_code error, HttpResponse response, TParser&& pars
     }
 
     Response<TModel> result{std::move(model), std::move(response), std::move(failure.Details)};
-    if constexpr (std::is_invocable_v<TCompletion, std::error_code, Response<TModel>>) {
-        std::forward<TCompletion>(completion)(failure.Error, std::move(result));
-    } else {
-        std::forward<TCompletion>(completion)(ToExpected(failure.Error, std::move(result)));
+    if (failure.Error &&
+        (std::ranges::contains(suppressed, failure.Error) || (absorbed.has_value() && failure.Error == *absorbed))) {
+        failure.Error.clear();
     }
+    return ToExpected(failure.Error, std::move(result));
 }
 
 template <class T>
@@ -526,44 +522,38 @@ struct RequestAuth {
 // Server-provided retry delay (x-ms-retry-after-ms, then Retry-After in seconds), if any.
 [[nodiscard]] std::optional<std::chrono::milliseconds> ParseRetryAfter(const HttpResponse& response) noexcept;
 
-// Rebuilds the body (and anything derived from it, such as a nested signature) of each attempt just before it is
-// authorized and sent, so a retry never replays a stale date, signature or token. `bearerToken` is the token the
-// attempt will carry (empty when it is not bearer-authorized). Throwing fails the request. Any callable taking
-// (HttpRequest&, std::string_view) is accepted; the pipeline is templated on its type, so nothing is type-erased.
+// Called before each attempt of a request is authorized and sent; see RequestPipeline.hpp.
 struct NoRebuild {};
 
-// Sends `request` with per-attempt authorization and retry/backoff according to `retry`.
-// All state is owned by the operation (no references to the caller's options are retained);
-// only `httpClient` must outlive the operation. A cancellation slot on `requestOptions` cancels
-// the in-flight attempt or the pending backoff, completing with std::errc::operation_canceled.
-// `retryNotFoundAndGone` additionally retries HTTP 404/410 (managed identity endpoints answer these while
-// starting). Defined in RequestPipeline.hpp.
-// `completion` is invoked as completion(std::error_code, HttpResponse).
-template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler, class TRebuild = NoRebuild>
-void SendWithRetryAsync(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
-                        HttpRequest request, THandler completion, AzureRequestOptions requestOptions,
-                        bool retryNotFoundAndGone = false, TRebuild rebuild = {}, bool replaySafe = false);
+// Defined in RequestPipeline.hpp.
+template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild = NoRebuild>
+boost::asio::awaitable<HttpResult> SendWithRetry(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential,
+                                                 RetryOptions retry, HttpRequest request,
+                                                 AzureRequestOptions requestOptions, bool retryNotFoundAndGone = false,
+                                                 TRebuild rebuild = {}, bool replaySafe = false);
 
 // Defined in RequestPipeline.hpp. `replaySafe` marks a request whose caller absorbs the outcome of a replay (the
 // *IfExists/*IfNotExists operations), so it may be retried even after an ambiguous transport error.
-template <HttpClientLike THttp, TokenCredentialLike TCred, class THandler, class TRebuild = NoRebuild>
-void SendAuthorizedRequestAsync(THttp& httpClient, const ConnectionState& connection, std::shared_ptr<TCred> credential,
-                                HttpRequest request, THandler completion, AzureRequestOptions requestOptions,
-                                TRebuild rebuild = {}, bool replaySafe = false);
+template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild = NoRebuild>
+boost::asio::awaitable<HttpResult> SendAuthorizedRequest(THttp& httpClient, const ConnectionState& connection,
+                                                         std::shared_ptr<TCred> credential, HttpRequest request,
+                                                         AzureRequestOptions requestOptions, TRebuild rebuild = {},
+                                                         bool replaySafe = false);
 
-template <HttpClientLike THttp, class TCred, class THandler, class TRebuild = NoRebuild>
-void SendAuthorizedRequestAsync(THttp& httpClient, const BasicContainerTarget<TCred>& target, HttpRequest request,
-                                THandler completion, AzureRequestOptions requestOptions, TRebuild rebuild = {},
-                                bool replaySafe = false) {
-    SendAuthorizedRequestAsync(httpClient, *target.Connection, target.Credential, std::move(request),
-                               std::move(completion), std::move(requestOptions), std::move(rebuild), replaySafe);
+template <HttpClientLike THttp, class TCred, class TRebuild = NoRebuild>
+boost::asio::awaitable<HttpResult> SendAuthorizedRequest(THttp& httpClient, const BasicContainerTarget<TCred>& target,
+                                                         HttpRequest request, AzureRequestOptions requestOptions,
+                                                         TRebuild rebuild = {}, bool replaySafe = false) {
+    co_return co_await SendAuthorizedRequest(httpClient, *target.Connection, target.Credential, std::move(request),
+                                             std::move(requestOptions), std::move(rebuild), replaySafe);
 }
 
-template <HttpClientLike THttp, class TCred, class THandler>
-void SendAuthorizedRequestAsync(THttp& httpClient, const BasicBlobTarget<TCred>& target, HttpRequest request,
-                                THandler completion, AzureRequestOptions requestOptions, bool replaySafe = false) {
-    SendAuthorizedRequestAsync(httpClient, *target.Connection, target.Credential, std::move(request),
-                               std::move(completion), std::move(requestOptions), NoRebuild{}, replaySafe);
+template <HttpClientLike THttp, class TCred, class TRebuild = NoRebuild>
+boost::asio::awaitable<HttpResult> SendAuthorizedRequest(THttp& httpClient, const BasicBlobTarget<TCred>& target,
+                                                         HttpRequest request, AzureRequestOptions requestOptions,
+                                                         TRebuild rebuild = {}, bool replaySafe = false) {
+    co_return co_await SendAuthorizedRequest(httpClient, *target.Connection, target.Credential, std::move(request),
+                                             std::move(requestOptions), std::move(rebuild), replaySafe);
 }
 
 // Maps the single-request download options onto the chunked engine's options (default chunk
@@ -579,89 +569,78 @@ void SendAuthorizedRequestAsync(THttp& httpClient, const BasicBlobTarget<TCred>&
 // MaxSize limits the output, not transport buffering: it is checked once the first response (at most
 // ChunkSize bytes, already buffered) has revealed the blob size. AzureRequestOptions::SetTotalDeadline is one
 // absolute budget for the whole download; each request receives only the time remaining.
-template <HttpClientLike THttp, class TCred, class TCompletion>
-void DownloadBlobAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
-                       DownloadBlobOptions operationOptions, TCompletion completion,
-                       AzureRequestOptions requestOptions);
-// Writes straight into `destination`, which must stay valid until the completion runs. A range larger than
+// Cancelling the awaiting coroutine cancels the in-flight requests; the coroutine returns once they have drained.
+template <HttpClientLike THttp, class TCred>
+boost::asio::awaitable<std::expected<Response<Models::DownloadBlobResult>, BlobStorageError>>
+DownloadBlobAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
+                  DownloadBlobOptions operationOptions, AzureRequestOptions requestOptions);
+// Writes straight into `destination`, which must stay valid until the coroutine completes. A range larger than
 // the buffer fails the download; a shorter blob leaves the tail untouched (see BytesWritten).
-template <HttpClientLike THttp, class TCred, class TCompletion>
-void DownloadBlobToSpanAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
-                             DownloadToOptions operationOptions, std::span<char> destination, TCompletion completion,
-                             AzureRequestOptions requestOptions);
+template <HttpClientLike THttp, class TCred>
+boost::asio::awaitable<std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>>
+DownloadBlobToSpanAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
+                        DownloadToOptions operationOptions, std::span<char> destination,
+                        AzureRequestOptions requestOptions);
 // Downloads into `<path>.partial-<id>` and renames it over `path` only on success.
-template <HttpClientLike THttp, class TCred, class TCompletion>
-void DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
-                             DownloadToOptions operationOptions, const std::filesystem::path& path,
-                             TCompletion completion, AzureRequestOptions requestOptions);
+template <HttpClientLike THttp, class TCred>
+boost::asio::awaitable<std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>>
+DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
+                        DownloadToOptions operationOptions, std::filesystem::path path,
+                        AzureRequestOptions requestOptions);
 
-// Sends `request` to `target` and completes with the TModel produced by `parser`. `extra` is forwarded to
-// SendAuthorizedRequestAsync (for a blob target, the replay-safety flag).
-template <class TModel, HttpClientLike THttp, class TTarget, class TParser, class TCompletion, class... TExtra>
-void SendAndParse(THttp& httpClient, const TTarget& target, HttpRequest request, TParser parser,
-                  TCompletion&& completion, AzureRequestOptions requestOptions, TExtra&&... extra) {
-    SendAuthorizedRequestAsync(
-        httpClient, target, std::move(request),
-        [parser = std::move(parser),
-         completion = std::forward<TCompletion>(completion)](std::error_code error, HttpResponse response) mutable {
-            CompleteParsed<TModel>(error, std::move(response), parser, std::move(completion));
-        },
-        std::move(requestOptions), std::forward<TExtra>(extra)...);
+// Sends `request` to `target` and returns the TModel produced by `parser`. `suppressed` lists the service error
+// codes that count as success (the *IfExists/*IfNotExists operations); `replaySafe` allows replay after an
+// ambiguous transport failure.
+template <class TModel, HttpClientLike THttp, class TTarget, class TParser>
+boost::asio::awaitable<std::expected<Response<TModel>, BlobStorageError>>
+SendAndParse(THttp& httpClient, const TTarget& target, HttpRequest request, TParser parser,
+             AzureRequestOptions requestOptions, bool replaySafe = false,
+             std::vector<BlobStorageErrorCode> suppressed = {}) {
+    HttpResult sent = co_await SendAuthorizedRequest(httpClient, target, std::move(request), std::move(requestOptions),
+                                                     NoRebuild{}, replaySafe);
+    co_return ParseOutcome<TModel>(std::move(sent), parser, suppressed);
 }
 
-template <HttpClientLike THttp, class TCred, class TCompletion>
-void DeleteBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
-                     const DeleteBlobOptions& operationOptions, TCompletion&& completion,
-                     AzureRequestOptions requestOptions, bool replaySafe = false) {
+template <HttpClientLike THttp, class TCred>
+boost::asio::awaitable<std::expected<Response<Models::DeleteBlobResult>, BlobStorageError>>
+DeleteBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, DeleteBlobOptions operationOptions,
+                AzureRequestOptions requestOptions, bool replaySafe = false,
+                std::vector<BlobStorageErrorCode> suppressed = {}) {
     HttpRequest request = BuildBlobRequest(options, HttpMethod::Delete);
     ApplyBlobRequestConditions(request, operationOptions.Conditions);
 
-    SendAndParse<Models::DeleteBlobResult>(httpClient, options, std::move(request), ParseDeleteBlobResult,
-                                           std::forward<TCompletion>(completion), std::move(requestOptions),
-                                           replaySafe);
+    co_return co_await SendAndParse<Models::DeleteBlobResult>(httpClient, options, std::move(request),
+                                                              ParseDeleteBlobResult, std::move(requestOptions),
+                                                              replaySafe, std::move(suppressed));
 }
 
-template <HttpClientLike THttp, class TCred, class TCompletion>
-void GetBlobPropertiesAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
-                            const GetBlobPropertiesOptions& operationOptions, TCompletion&& completion,
-                            AzureRequestOptions requestOptions) {
+template <HttpClientLike THttp, class TCred>
+boost::asio::awaitable<std::expected<Response<Models::BlobProperties>, BlobStorageError>>
+GetBlobPropertiesAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
+                       GetBlobPropertiesOptions operationOptions, AzureRequestOptions requestOptions) {
     HttpRequest request = BuildBlobRequest(options, HttpMethod::Head);
     ApplyBlobRequestConditions(request, operationOptions.Conditions);
 
-    SendAndParse<Models::BlobProperties>(httpClient, options, std::move(request), ParseBlobProperties,
-                                         std::forward<TCompletion>(completion), std::move(requestOptions));
+    co_return co_await SendAndParse<Models::BlobProperties>(httpClient, options, std::move(request),
+                                                            ParseBlobProperties, std::move(requestOptions));
 }
 
-template <HttpClientLike THttp, class TCred, class TCompletion>
-void SetBlobMetadataAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
-                          const SetBlobMetadataOptions& operationOptions, TCompletion&& completion,
-                          AzureRequestOptions requestOptions) {
+template <HttpClientLike THttp, class TCred>
+boost::asio::awaitable<std::expected<Response<Models::SetBlobMetadataResult>, BlobStorageError>>
+SetBlobMetadataAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, SetBlobMetadataOptions operationOptions,
+                     AzureRequestOptions requestOptions) {
     HttpRequest request = BuildBlobRequest(options, HttpMethod::Put, "comp=metadata");
     ApplyMetadata(request, operationOptions.Metadata);
     ApplyBlobRequestConditions(request, operationOptions.Conditions);
 
-    SendAndParse<Models::SetBlobMetadataResult>(httpClient, options, std::move(request),
-                                                ParseETagAndLastModified<Models::SetBlobMetadataResult>,
-                                                std::forward<TCompletion>(completion), std::move(requestOptions));
+    co_return co_await SendAndParse<Models::SetBlobMetadataResult>(
+        httpClient, options, std::move(request), ParseETagAndLastModified<Models::SetBlobMetadataResult>,
+        std::move(requestOptions));
 }
 
-// Completes `completion` with an invalid_argument failure carrying `message`.
-template <class TModel, HttpClientLike THttp, class THandler>
-void FailInvalidArgument(THttp& httpClient, THandler&& completion, std::string message) {
-    PostCompletion(httpClient, std::forward<THandler>(completion),
-                   MakeError<TModel>(std::make_error_code(std::errc::invalid_argument), std::move(message)));
-}
-
-// If `validationError` is set, completes `completion` with it as an invalid_argument failure.
-// Returns true when the caller must stop. `completion` is only consumed on failure, so pass it as std::move(...).
-template <class TModel, HttpClientLike THttp, class THandler>
-[[nodiscard]] bool ValidateOrFail(THttp& httpClient, THandler&& completion,
-                                  const std::optional<std::string>& validationError) {
-    if (!validationError.has_value()) {
-        return false;
-    }
-    FailInvalidArgument<TModel>(httpClient, std::forward<THandler>(completion), *validationError);
-    return true;
+// A failed argument validation as an invalid_argument failure carrying `message`.
+[[nodiscard]] inline std::unexpected<BlobStorageError> InvalidArgument(std::string message) {
+    return std::unexpected(MakeClientError(std::make_error_code(std::errc::invalid_argument), std::move(message)));
 }
 
 // The lease id of a lease request comes from the options' LeaseId; Conditions.LeaseId is ignored.
@@ -670,16 +649,13 @@ void ApplyLeaseRequestConditions(HttpRequest& request, Models::BlobRequestCondit
 // Lease requests (Lease Blob).
 [[nodiscard]] HttpRequest BuildLeaseRequest(const BlobTarget& target, std::string_view action);
 
-template <HttpClientLike THttp, class TTarget, class TCompletion>
-void AcquireLeaseAsync(THttp& httpClient, const TTarget& target, AcquireLeaseOptions operationOptions,
-                       TCompletion&& completion, AzureRequestOptions requestOptions) {
+template <HttpClientLike THttp, class TTarget>
+boost::asio::awaitable<std::expected<Response<Models::AcquireBlobLeaseResult>, BlobStorageError>>
+AcquireLeaseAsync(THttp& httpClient, const TTarget& target, AcquireLeaseOptions operationOptions,
+                  AzureRequestOptions requestOptions) {
     if (operationOptions.Duration.has_value() &&
         (*operationOptions.Duration < MinFixedLeaseDuration || *operationOptions.Duration > MaxFixedLeaseDuration)) {
-        PostCompletion(httpClient, std::forward<TCompletion>(completion),
-                       MakeError<Models::AcquireBlobLeaseResult>(
-                           std::make_error_code(std::errc::invalid_argument),
-                           "Lease duration must be between 15 and 60 seconds, or infinite."));
-        return;
+        co_return InvalidArgument("Lease duration must be between 15 and 60 seconds, or infinite.");
     }
 
     HttpRequest request = BuildLeaseRequest(target, "acquire");
@@ -692,35 +668,31 @@ void AcquireLeaseAsync(THttp& httpClient, const TTarget& target, AcquireLeaseOpt
     }
     AddHeader(request, XMsProposedLeaseIdHeaderName, operationOptions.ProposedLeaseId);
     ApplyLeaseRequestConditions(request, std::move(operationOptions.Conditions));
-    SendAndParse<Models::AcquireBlobLeaseResult>(httpClient, target, std::move(request), ParseAcquireBlobLeaseResult,
-                                                 std::forward<TCompletion>(completion), std::move(requestOptions));
+    co_return co_await SendAndParse<Models::AcquireBlobLeaseResult>(
+        httpClient, target, std::move(request), ParseAcquireBlobLeaseResult, std::move(requestOptions));
 }
 
-template <HttpClientLike THttp, class TTarget, class TCompletion>
-void RenewLeaseAsync(THttp& httpClient, const TTarget& target, RenewLeaseOptions operationOptions,
-                     TCompletion&& completion, AzureRequestOptions requestOptions) {
+template <HttpClientLike THttp, class TTarget>
+boost::asio::awaitable<std::expected<Response<Models::RenewBlobLeaseResult>, BlobStorageError>>
+RenewLeaseAsync(THttp& httpClient, const TTarget& target, RenewLeaseOptions operationOptions,
+                AzureRequestOptions requestOptions) {
     if (operationOptions.LeaseId.empty()) {
-        PostCompletion(httpClient, std::forward<TCompletion>(completion),
-                       MakeError<Models::RenewBlobLeaseResult>(std::make_error_code(std::errc::invalid_argument),
-                                                               "LeaseId must not be empty."));
-        return;
+        co_return InvalidArgument("LeaseId must not be empty.");
     }
 
     HttpRequest request = BuildLeaseRequest(target, "renew");
     AddHeader(request, XMsLeaseIdHeaderName, operationOptions.LeaseId);
     ApplyLeaseRequestConditions(request, std::move(operationOptions.Conditions));
-    SendAndParse<Models::RenewBlobLeaseResult>(httpClient, target, std::move(request), ParseRenewBlobLeaseResult,
-                                               std::forward<TCompletion>(completion), std::move(requestOptions));
+    co_return co_await SendAndParse<Models::RenewBlobLeaseResult>(httpClient, target, std::move(request),
+                                                                  ParseRenewBlobLeaseResult, std::move(requestOptions));
 }
 
-template <HttpClientLike THttp, class TTarget, class TCompletion>
-void ReleaseLeaseAsync(THttp& httpClient, const TTarget& target, ReleaseLeaseOptions operationOptions,
-                       TCompletion&& completion, AzureRequestOptions requestOptions) {
+template <HttpClientLike THttp, class TTarget>
+boost::asio::awaitable<std::expected<Response<Models::ReleaseBlobLeaseResult>, BlobStorageError>>
+ReleaseLeaseAsync(THttp& httpClient, const TTarget& target, ReleaseLeaseOptions operationOptions,
+                  AzureRequestOptions requestOptions) {
     if (operationOptions.LeaseId.empty()) {
-        PostCompletion(httpClient, std::forward<TCompletion>(completion),
-                       MakeError<Models::ReleaseBlobLeaseResult>(std::make_error_code(std::errc::invalid_argument),
-                                                                 "LeaseId must not be empty."));
-        return;
+        co_return InvalidArgument("LeaseId must not be empty.");
     }
 
     HttpRequest request = BuildLeaseRequest(target, "release");
@@ -730,45 +702,41 @@ void ReleaseLeaseAsync(THttp& httpClient, const TTarget& target, ReleaseLeaseOpt
     // replay after an ambiguous outcome lets that 409 be told apart from a genuine one (including one that follows
     // a plain token-refresh repeat).
     auto replayed = std::make_shared<bool>(false);
-    auto absorb = [replayed, completion = std::forward<TCompletion>(completion)](
-                      std::error_code error, Response<Models::ReleaseBlobLeaseResult> response) mutable {
-        if (error && *replayed && error == BlobStorageErrorCode::LeaseNotPresentWithLeaseOperation) {
-            error.clear();
-        }
-        completion(ToExpected(error, std::move(response)));
-    };
-    SendAuthorizedRequestAsync(
-        httpClient, *target.Connection, target.Credential, std::move(request),
-        [absorb = std::move(absorb)](std::error_code error, HttpResponse response) mutable {
-            CompleteParsed<Models::ReleaseBlobLeaseResult>(error, std::move(response), ParseReleaseBlobLeaseResult,
-                                                           absorb);
-        },
-        std::move(requestOptions),
+    HttpResult sent = co_await SendAuthorizedRequest(
+        httpClient, *target.Connection, target.Credential, std::move(request), std::move(requestOptions),
         [replayed](HttpRequest&, std::string_view, bool replayAfterAmbiguous) { *replayed = replayAfterAmbiguous; },
         true);
+    std::optional<BlobStorageErrorCode> absorbed;
+    if (*replayed) {
+        absorbed = BlobStorageErrorCode::LeaseNotPresentWithLeaseOperation;
+    }
+    co_return ParseOutcome<Models::ReleaseBlobLeaseResult>(std::move(sent), ParseReleaseBlobLeaseResult, {}, absorbed);
 }
 
-template <HttpClientLike THttp, class TCred, class TCompletion>
-void ExistsBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, TCompletion&& completion,
-                     AzureRequestOptions requestOptions) {
+template <HttpClientLike THttp, class TCred>
+boost::asio::awaitable<std::expected<Response<bool>, BlobStorageError>>
+ExistsBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, AzureRequestOptions requestOptions) {
     HttpRequest request = BuildBlobRequest(options, HttpMethod::Head);
 
-    SendAuthorizedRequestAsync(
-        httpClient, options, std::move(request),
-        [completion = std::forward<TCompletion>(completion)](std::error_code error, HttpResponse response) mutable {
-            RequestFailure failure = DetermineBlobStorageFailure(error, response);
-            bool exists = false;
-            if (!failure.Error) {
-                exists = true;
-            } else if (!error && response.GetStatus() == 404) {
-                // A HEAD 404 carries no body, so the error code may be absent; any 404 (including a missing
-                // container) means the blob does not exist.
-                failure.Error = {};
-            }
+    HttpResult sent =
+        co_await SendAuthorizedRequest(httpClient, options, std::move(request), std::move(requestOptions));
+    std::error_code error;
+    HttpResponse response;
+    if (sent) {
+        response = std::move(*sent);
+    } else {
+        error = sent.error();
+    }
+    RequestFailure failure = DetermineBlobStorageFailure(error, response);
+    bool exists = false;
+    if (!failure.Error) {
+        exists = true;
+    } else if (!error && response.GetStatus() == 404) {
+        // A HEAD 404 carries no body, so the error code may be absent; any 404 (including a missing
+        // container) means the blob does not exist.
+        failure.Error = {};
+    }
 
-            completion(
-                ToExpected(failure.Error, Response<bool>{exists, std::move(response), std::move(failure.Details)}));
-        },
-        std::move(requestOptions));
+    co_return ToExpected(failure.Error, Response<bool>{exists, std::move(response), std::move(failure.Details)});
 }
 } // namespace AVEVA::AzureClient::Private

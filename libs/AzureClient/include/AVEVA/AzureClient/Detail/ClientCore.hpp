@@ -9,6 +9,7 @@
 
 #include <gsl/pointers>
 #include <memory>
+#include <optional>
 #include <utility>
 
 namespace AVEVA::AzureClient::Private {
@@ -20,13 +21,17 @@ template <HttpClientLike THttp, class TTarget> class ClientCore {
 
     [[nodiscard]] executor_type get_executor() const { return m_httpClient->get_executor(); }
 
-    // Request options (timeout, response body limit, cancellation slot) applied to every operation
-    // that is not given its own via WithRequestOptions(...) or the trailing requestOptions argument.
+    // Request options (timeout, response body limit) applied to every operation that is not given its own via the
+    // trailing requestOptions argument.
     [[nodiscard]] const AzureRequestOptions& GetDefaultRequestOptions() const noexcept AVEVA_LIFETIMEBOUND {
         return m_target->Connection->DefaultRequestOptions;
     }
 
   protected:
+    // The options an operation runs with: the caller's, else the client's defaults.
+    [[nodiscard]] AzureRequestOptions Resolve(std::optional<AzureRequestOptions> requestOptions) const {
+        return requestOptions ? std::move(*requestOptions) : GetDefaultRequestOptions();
+    }
     ClientCore(THttp& httpClient, std::shared_ptr<const TTarget> target, std::shared_ptr<THttp> owner = nullptr)
         : m_httpClient(&httpClient), m_httpOwner(std::move(owner)), m_target(std::move(target)) {}
     // Shares ownership of the HTTP client for as long as this core or any client made from it exists.

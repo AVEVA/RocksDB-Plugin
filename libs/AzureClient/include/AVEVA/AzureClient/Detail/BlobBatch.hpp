@@ -8,7 +8,6 @@
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 #include <AVEVA/AzureClient/Detail/AggregateDeadline.hpp>
-#include <AVEVA/AzureClient/Detail/AsyncInitiation.hpp>
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 #include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
 #include <AVEVA/AzureClient/HttpClientLike.hpp>
@@ -19,19 +18,21 @@
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 
-#include <boost/asio/cancellation_signal.hpp>
-#include <boost/asio/post.hpp>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/deferred.hpp>
+#include <boost/asio/experimental/parallel_group.hpp>
+#include <boost/asio/strand.hpp>
+#include <boost/asio/this_coro.hpp>
+#include <boost/asio/use_awaitable.hpp>
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <exception>
 #include <expected>
 #include <gsl/util>
-#include <map>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -56,144 +57,72 @@ void AppendBatchClosingBoundary(std::string& body, std::string_view boundary);
 [[nodiscard]] std::vector<Models::DeleteBlobItemResult> ParseBatchDeleteResponse(const HttpResponse& response,
                                                                                  std::span<const std::string> names);
 
-// Splits the names into Blob Batch requests of at most MaxBatchSubrequests deletes and runs them with a bounded
-// number in flight. Chunk results are written to their own slice of the result, so concurrent completions never
-// touch the same element; the first chunk-level failure stops new chunks from starting and is reported once the
-// chunks already in flight have finished.
-template <HttpClientLike THttp, TokenCredentialLike TCred, class TCompletion>
-class BatchDeleteOperation final
-    : public std::enable_shared_from_this<BatchDeleteOperation<THttp, TCred, TCompletion>> {
+namespace BatchDetail {
+// Thrown by a worker once the failure is recorded, so the parallel group cancels its siblings.
+struct StopWorkers {};
+
+// The state shared by the workers of one batch delete. Workers run on one strand, so none of it needs a lock; the
+// owning coroutine outlives every worker because it awaits the whole group.
+template <HttpClientLike THttp, TokenCredentialLike TCred> class BatchDeleteRun {
   public:
-    BatchDeleteOperation(THttp& httpClient, std::shared_ptr<const BasicContainerTarget<TCred>> target,
-                         std::vector<std::string> names, std::size_t maxConcurrentRequests, TCompletion completion,
-                         AzureRequestOptions requestOptions)
-        : m_httpClient(httpClient), m_target(std::move(target)), m_names(std::move(names)),
-          m_maxConcurrent(std::max<std::size_t>(1U, maxConcurrentRequests)), m_completion(std::move(completion)),
-          m_requestOptions(requestOptions), m_deadline(requestOptions),
-          m_parentSlot(requestOptions.GetCancellationSlot()),
-          m_auth(MakeRequestAuth(*m_target->Connection, m_target->Credential != nullptr)) {
-        m_items.resize(m_names.size());
+    BatchDeleteRun(THttp& httpClient, const BasicContainerTarget<TCred>& target, const std::vector<std::string>& names,
+                   const AzureRequestOptions& requestOptions)
+        : m_httpClient(httpClient), m_target(target), m_names(names), m_requestOptions(requestOptions),
+          m_deadline(requestOptions), m_auth(MakeRequestAuth(*target.Connection, target.Credential != nullptr)) {
+        m_items.resize(names.size());
     }
 
-    void Start() {
-        if (m_parentSlot.is_connected()) {
-            // The parent slot is assigned once here; every chunk gets its own signal so no chunk replaces the
-            // handler of another, and a cancel reaches all of them.
-            std::weak_ptr<BatchDeleteOperation> const weak = this->weak_from_this();
-            // The handler outlives the operation when the caller's explicit slot stays connected, so it must not
-            // reach the transport: it keeps a copy of the executor and checks the operation first.
-            m_parentSlot.assign([weak, executor = m_httpClient.get_executor()](boost::asio::cancellation_type_t type) {
-                if (!IsAbortingCancellation(type) || weak.expired()) {
-                    return;
-                }
-                boost::asio::post(executor, [weak]() {
-                    if (auto self = weak.lock()) {
-                        self->OnCancel();
-                    }
-                });
-            });
-        }
-        m_initiating.store(true, std::memory_order_release);
-        try {
-            Pump();
-        } catch (...) {
-            m_initiating.store(false, std::memory_order_release);
-            throw;
-        }
-        m_initiating.store(false, std::memory_order_release);
-    }
-
-  private:
     [[nodiscard]] std::size_t ChunkCount() const noexcept {
         // Ceiling division without the addition that could wrap for sizes near SIZE_MAX.
         return (m_names.size() / MaxBatchSubrequests) + (m_names.size() % MaxBatchSubrequests != 0U ? 1U : 0U);
     }
 
-    // Starts chunks while there is room and finishes once nothing is left in flight. Completions may arrive inline,
-    // so re-entrant calls are expected; the lock makes each decision (start / finish / nothing) exactly once.
-    void Pump() {
-        const auto keepAlive = this->shared_from_this();
-        for (;;) {
-            std::optional<std::size_t> chunk;
-            std::shared_ptr<boost::asio::cancellation_signal> signal;
-            bool finish = false;
-            {
-                const std::scoped_lock lock(m_mutex);
-                if (!m_failure && m_nextChunk < ChunkCount() && m_inFlight < m_maxConcurrent) {
-                    // Admission is transactional: the counters only advance once the signal is registered, so a
-                    // failure here leaves no in-flight count that nothing will ever release.
-                    try {
-                        signal = std::make_shared<boost::asio::cancellation_signal>();
-                        m_signals.emplace(m_nextChunk, signal);
-                        chunk = m_nextChunk++;
-                        ++m_inFlight;
-                    } catch (...) {
-                        chunk.reset();
-                        m_failure = MakeFailureFromCurrentException();
-                        continue;
-                    }
-                } else if (m_inFlight == 0 && !m_finished && (m_failure || m_nextChunk >= ChunkCount())) {
-                    m_finished = true;
-                    finish = true;
-                }
-            }
-            if (chunk) {
-                StartChunk(*chunk, signal);
-                continue;
-            }
-            if (finish) {
-                Finish();
-            }
-            return;
-        }
-    }
-
-    // The bearer token for each attempt comes from the request pipeline's rebuild hook, so a retry never replays
-    // stale sub-request dates, signatures or tokens.
-    void StartChunk(std::size_t chunk, const std::shared_ptr<boost::asio::cancellation_signal>& signal) {
-        // Slot assignment (inside SendChunk) and every emit on the signal are serialized by m_emitMutex because
-        // cancellation_signal is not thread-safe. Recursive: a failure path may re-enter Pump on this thread.
-        const std::scoped_lock emitLock(m_emitMutex);
+    // Each worker claims the next unstarted chunk until none is left. The first failure stops every worker: the
+    // others are cancelled by the group and report operation_canceled, which is ignored because the first one wins.
+    boost::asio::awaitable<void> Worker() {
+        co_await boost::asio::this_coro::throw_if_cancelled(false);
+        const auto cancellation = co_await boost::asio::this_coro::cancellation_state;
         try {
-            SendChunk(chunk, signal);
+            for (;;) {
+                if (m_failure) {
+                    throw StopWorkers{};
+                }
+                if (IsAbortingCancellation(cancellation.cancelled())) {
+                    Fail(MakeClientError(std::make_error_code(std::errc::operation_canceled),
+                                         "The operation was canceled."));
+                    throw StopWorkers{};
+                }
+                if (m_nextChunk >= ChunkCount()) {
+                    co_return;
+                }
+                co_await RunChunk(m_nextChunk++);
+            }
+        } catch (const StopWorkers&) {
+            throw;
         } catch (...) {
-            // Initiation threw before the child accepted the request, so no completion will ever arrive for it.
-            FailChunk(chunk, MakeFailureFromCurrentException());
-            return;
-        }
-        // A cancel that raced the chunk start may have emitted before the pipeline attached its handler.
-        if (m_cancelled.load(std::memory_order_acquire)) {
-            signal->emit(boost::asio::cancellation_type::terminal);
+            Fail(MakeFailureFromCurrentException());
+            throw StopWorkers{};
         }
     }
 
-    // Aborts every chunk in flight and stops new ones from starting. Each chunk reports operation_canceled through
-    // its own completion, so the result is delivered once the in-flight chunks have wound down.
-    void OnCancel() {
-        std::vector<std::shared_ptr<boost::asio::cancellation_signal>> signals;
-        {
-            const std::scoped_lock lock(m_mutex);
-            if (m_finished) {
-                return;
-            }
-            m_cancelled.store(true, std::memory_order_release);
-            if (!m_failure) {
-                m_failure =
-                    MakeClientError(std::make_error_code(std::errc::operation_canceled), "The operation was canceled.");
-            }
-            for (const auto& entry : m_signals) {
-                signals.push_back(entry.second);
-            }
+    void Fail(BlobStorageError error) {
+        if (!m_failure) {
+            m_failure = std::move(error);
         }
-        {
-            const std::scoped_lock emitLock(m_emitMutex);
-            for (const auto& signal : signals) {
-                signal->emit(boost::asio::cancellation_type::terminal);
-            }
-        }
-        Pump();
     }
 
+    [[nodiscard]] std::expected<Response<Models::DeleteBlobsResult>, BlobStorageError> TakeResult() {
+        if (m_failure) {
+            return std::unexpected(std::move(*m_failure));
+        }
+        Models::DeleteBlobsResult result{.Items = std::move(m_items)};
+        return Response<Models::DeleteBlobsResult>{std::move(result),
+                                                   std::move(m_rawResponse).value_or(HttpResponse{})};
+    }
+
+    [[nodiscard]] bool Failed() const noexcept { return m_failure.has_value(); }
+
+  private:
     void AuthorizeSubrequest(HttpRequest& subrequest, std::string_view token) const {
         switch (m_auth.Type) {
         case RequestAuth::Kind::SharedKey:
@@ -218,7 +147,7 @@ class BatchDeleteOperation final
             urls.reserve(end - begin);
             for (std::size_t index = begin; index < end; ++index) {
                 urls.push_back(
-                    BuildBlobUrl(MakeBlobTarget(m_target->Connection, m_target->ContainerName, m_names[index])));
+                    BuildBlobUrl(MakeBlobTarget(m_target.Connection, m_target.ContainerName, m_names[index])));
             }
         }
         // One date per body: sub-requests are built within the same instant, well inside the allowed clock skew.
@@ -243,7 +172,9 @@ class BatchDeleteOperation final
         return body;
     }
 
-    void SendChunk(std::size_t chunk, const std::shared_ptr<boost::asio::cancellation_signal>& signal) {
+    // Sends one chunk and stores its results in the chunk's own slice of the result. A failure is recorded and stops
+    // the workers.
+    boost::asio::awaitable<void> RunChunk(std::size_t chunk) {
         const std::size_t begin = chunk * MaxBatchSubrequests;
         const std::size_t end = std::min(begin + MaxBatchSubrequests, m_names.size());
 
@@ -251,153 +182,100 @@ class BatchDeleteOperation final
         std::string boundary;
         try {
             boundary = "batch_" + CreateClientRequestId();
-            request = BuildContainerRequest(*m_target, HttpMethod::Post, "comp=batch");
+            request = BuildContainerRequest(m_target, HttpMethod::Post, "comp=batch");
             AddHeader(request, ContentTypeHeaderName, "multipart/mixed; boundary=" + boundary);
         } catch (...) {
-            FailChunk(chunk, MakeFailureFromCurrentException());
-            return;
+            Fail(MakeFailureFromCurrentException());
+            throw StopWorkers{};
         }
 
         AzureRequestOptions chunkOptions = m_requestOptions;
         // Each batch gets only what is left of the whole delete's budget, and none starts once it is spent.
         if (!m_deadline.Apply(chunkOptions)) {
-            FailChunk(chunk, MakeClientError(std::make_error_code(std::errc::timed_out),
-                                             "The batch delete exceeded its total deadline."));
-            return;
-        }
-        chunkOptions.SetCancellationSlot(signal->slot());
-        SendAuthorizedRequestAsync(
-            m_httpClient, *m_target, std::move(request),
-            [self = this->shared_from_this(), chunk, begin, end](std::error_code error, HttpResponse response) {
-                self->OnChunkResponse(chunk, std::span{self->m_names}.subspan(begin, end - begin), error,
-                                      std::move(response));
-            },
-            chunkOptions,
-            [self = this->shared_from_this(), begin, end, boundary = std::move(boundary),
-             urls = std::make_shared<std::vector<std::string>>()](HttpRequest& attempt, std::string_view token) {
-                attempt.SetBody(self->BuildChunkBody(begin, end, boundary, token, *urls));
-            });
-    }
-    void OnChunkResponse(std::size_t chunk, std::span<const std::string> names, std::error_code error,
-                         HttpResponse response) {
-        RequestFailure failure = DetermineBlobStorageFailure(error, response);
-        std::vector<Models::DeleteBlobItemResult> items;
-        if (!failure.Error) {
-            try {
-                items = ParseBatchDeleteResponse(response, names);
-            } catch (const std::exception& exception) {
-                failure = MakeInvalidResponseFailure(response, exception.what());
-            }
+            Fail(MakeClientError(std::make_error_code(std::errc::timed_out),
+                                 "The batch delete exceeded its total deadline."));
+            throw StopWorkers{};
         }
 
-        if (failure.Error) {
-            RecordFailure(chunk, ToDetails(std::move(failure)));
-            return;
-        }
+        // The bearer token for each attempt comes from the pipeline's rebuild hook, so a retry never replays stale
+        // sub-request dates, signatures or tokens.
+        std::vector<std::string> urls;
+        HttpResult sent =
+            co_await SendAuthorizedRequest(m_httpClient, m_target, std::move(request), std::move(chunkOptions),
+                                           [&](HttpRequest& attempt, std::string_view token) {
+                                               attempt.SetBody(BuildChunkBody(begin, end, boundary, token, urls));
+                                           });
 
-        {
-            const std::scoped_lock lock(m_mutex);
-            std::ranges::move(items, m_items.begin() + gsl::narrow_cast<std::ptrdiff_t>(chunk * MaxBatchSubrequests));
-            if (!m_rawResponse.has_value()) {
-                m_rawResponse = std::move(response);
-            }
-            m_signals.erase(chunk);
-            --m_inFlight;
+        const std::span<const std::string> names = std::span{m_names}.subspan(begin, end - begin);
+        auto outcome = ParseOutcome<std::vector<Models::DeleteBlobItemResult>>(
+            std::move(sent),
+            [names](const HttpResponse& response) { return ParseBatchDeleteResponse(response, names); });
+        if (!outcome) {
+            Fail(std::move(outcome).error());
+            throw StopWorkers{};
         }
-        Pump();
-    }
-
-    // Never completes inline: the failure may be found while still inside the initiating call.
-    void FailChunk(std::size_t chunk, BlobStorageError error) {
-        try {
-            boost::asio::post(m_httpClient.get_executor(), [self = this->shared_from_this(), chunk, error]() mutable {
-                self->RecordFailure(chunk, std::move(error));
-            });
-        } catch (...) {
-            // Without a posted continuation the accounting must still be released, or the batch never completes.
-            RecordFailure(chunk, std::move(error));
+        std::ranges::move(outcome->Value(), m_items.begin() + gsl::narrow_cast<std::ptrdiff_t>(begin));
+        if (!m_rawResponse.has_value()) {
+            m_rawResponse = std::move(*outcome).RawResponse();
         }
-    }
-
-    void RecordFailure(std::size_t chunk, BlobStorageError error) {
-        {
-            const std::scoped_lock lock(m_mutex);
-            m_signals.erase(chunk);
-            if (!m_failure) {
-                m_failure = std::move(error);
-            }
-            --m_inFlight;
-        }
-        Pump();
-    }
-
-    void Finish() {
-        // No other thread can touch the state any more: every chunk has completed and none will start.
-        using Result = std::expected<Response<Models::DeleteBlobsResult>, BlobStorageError>;
-        Result outcome = std::unexpected(BlobStorageError{});
-        if (m_failure) {
-            outcome = std::unexpected(std::move(*m_failure));
-        } else {
-            Models::DeleteBlobsResult result{.Items = std::move(m_items)};
-            outcome = Response<Models::DeleteBlobsResult>{std::move(result),
-                                                          std::move(m_rawResponse).value_or(HttpResponse{})};
-        }
-        // A failure found while still inside the initiating call must not run the handler re-entrantly.
-        if (m_initiating.load(std::memory_order_acquire)) {
-            PostCompletion(m_httpClient, std::move(m_completion), std::move(outcome));
-            return;
-        }
-        m_completion(std::move(outcome));
     }
 
     THttp& m_httpClient;
-    std::shared_ptr<const BasicContainerTarget<TCred>> m_target;
-    std::vector<std::string> m_names;
-    std::size_t m_maxConcurrent;
-    TCompletion m_completion;
+    const BasicContainerTarget<TCred>& m_target;
+    const std::vector<std::string>& m_names;
     AzureRequestOptions m_requestOptions;
     AggregateDeadline m_deadline;
-    boost::asio::cancellation_slot m_parentSlot;
     RequestAuth m_auth;
 
-    std::mutex m_mutex;
-    std::recursive_mutex m_emitMutex;
     std::vector<Models::DeleteBlobItemResult> m_items;
     std::optional<BlobStorageError> m_failure;
     std::optional<HttpResponse> m_rawResponse;
     std::size_t m_nextChunk = 0;
-    std::size_t m_inFlight = 0;
-    bool m_finished = false;
-    std::atomic<bool> m_cancelled{false};
-    std::atomic<bool> m_initiating{false};
-    std::map<std::size_t, std::shared_ptr<boost::asio::cancellation_signal>> m_signals;
 };
+} // namespace BatchDetail
 
 // Deletes `names` from the container with Blob Batch requests. Invalid names fail the whole call before anything is
-// sent; an empty list completes successfully with an empty result.
-template <HttpClientLike THttp, TokenCredentialLike TCred, class TCompletion>
-void DeleteBlobsAsync(THttp& httpClient, std::shared_ptr<const BasicContainerTarget<TCred>> target,
-                      std::vector<std::string> names, const DeleteBlobsOptions& options, TCompletion completion,
-                      AzureRequestOptions requestOptions) {
-    if (names.empty()) {
-        PostCompletion(httpClient, std::move(completion),
-                       std::expected<Response<Models::DeleteBlobsResult>, BlobStorageError>{
-                           Response<Models::DeleteBlobsResult>{}});
-        return;
+// sent; an empty list completes successfully with an empty result. The names are split into requests of at most
+// MaxBatchSubrequests deletes, run by up to MaxConcurrentRequests workers. The first failure cancels the requests in
+// flight, and the result is returned once every worker has finished. Cancelling the awaiting coroutine cancels all
+// workers and fails with operation_canceled.
+template <HttpClientLike THttp, TokenCredentialLike TCred>
+boost::asio::awaitable<std::expected<Response<Models::DeleteBlobsResult>, BlobStorageError>>
+DeleteBlobsAsync(THttp& httpClient, std::shared_ptr<const BasicContainerTarget<TCred>> target,
+                 std::vector<std::string> blobNames, DeleteBlobsOptions options, AzureRequestOptions requestOptions) {
+    using Result = std::expected<Response<Models::DeleteBlobsResult>, BlobStorageError>;
+    if (blobNames.empty()) {
+        co_return Result{Response<Models::DeleteBlobsResult>{}};
     }
-    for (const std::string& name : names) {
+    for (const std::string& name : blobNames) {
         if (name.empty() || name.size() > MaxBlobNameLength) {
-            PostCompletion(
-                httpClient, std::move(completion),
-                MakeError<Models::DeleteBlobsResult>(std::make_error_code(std::errc::invalid_argument),
-                                                     "Blob names must be between 1 and 1024 characters long."));
-            return;
+            co_return InvalidArgument("Blob names must be between 1 and 1024 characters long.");
         }
     }
 
-    auto operation = std::make_shared<BatchDeleteOperation<THttp, TCred, TCompletion>>(
-        httpClient, std::move(target), std::move(names), options.MaxConcurrentRequests, std::move(completion),
-        requestOptions);
-    operation->Start();
+    co_await boost::asio::this_coro::throw_if_cancelled(false);
+    const auto cancellation = co_await boost::asio::this_coro::cancellation_state;
+    const auto executor = co_await boost::asio::this_coro::executor;
+
+    BatchDetail::BatchDeleteRun<THttp, TCred> run(httpClient, *target, blobNames, requestOptions);
+    const std::size_t workers = std::min(std::max<std::size_t>(1U, options.MaxConcurrentRequests), run.ChunkCount());
+    const auto strand = boost::asio::make_strand(executor);
+    using Op = decltype(boost::asio::co_spawn(strand, run.Worker(), boost::asio::deferred));
+    std::vector<Op> operations;
+    try {
+        operations.reserve(workers);
+        for (std::size_t index = 0; index < workers; ++index) {
+            operations.push_back(boost::asio::co_spawn(strand, run.Worker(), boost::asio::deferred));
+        }
+        // Waits for every worker even after a failure, so nothing touches `run` once this coroutine returns.
+        co_await boost::asio::experimental::make_parallel_group(std::move(operations))
+            .async_wait(boost::asio::experimental::wait_for_one_error(), boost::asio::use_awaitable);
+    } catch (...) {
+        run.Fail(MakeFailureFromCurrentException());
+    }
+    if (!run.Failed() && IsAbortingCancellation(cancellation.cancelled())) {
+        run.Fail(MakeClientError(std::make_error_code(std::errc::operation_canceled), "The operation was canceled."));
+    }
+    co_return run.TakeResult();
 }
 } // namespace AVEVA::AzureClient::Private

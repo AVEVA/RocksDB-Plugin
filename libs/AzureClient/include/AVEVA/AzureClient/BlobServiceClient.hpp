@@ -30,18 +30,7 @@ struct ConnectionState;
 
 // Account-level operations, and the factory for container clients.
 //
-// Thread safety: concurrent ...Async calls on one instance are supported. Caller-supplied buffers are
-// not synchronized by the library. Completion handlers are never invoked from inside the initiating call
-// (see BlobClient.hpp for the full completion contract) and are not serialized with each other unless their
-// executor is a strand.
-//
-// Lifetime: operations borrow the HTTP client and never own it, unless this client was built from a
-// std::shared_ptr to it (then this client and everything made from it shares ownership). The HTTP client must
-// outlive every in-flight ...Async operation, so keep it or a shared owner alive until the handler has run.
-//
-// Cancellation: AzureRequestOptions carries a boost::asio::cancellation_slot that aborts in-flight work
-// (completing with an operation_aborted-flavored BlobStorageError); a slot associated with the
-// completion token is adopted when AzureRequestOptions has none.
+// See BlobClient.hpp for the thread-safety, lifetime and cancellation contract; it is the same here.
 //
 // Operations: GetBlobContainerClient is synchronous and cheap; it only builds a client that shares this one's
 // connection state. Asynchronous operations live on the container and blob clients.
@@ -68,9 +57,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobServic
     BasicBlobServiceClient& operator=(BasicBlobServiceClient&&) noexcept = default;
     ~BasicBlobServiceClient() = default;
 
-    // The executor associated with this client's underlying HTTP client; usable as the default
-    // executor argument for a boost::asio::default_completion_token_t, or to schedule work that
-    // must run on the same executor as this client's completions.
+    // The executor of this client's underlying HTTP client.
     using executor_type = typename THttp::executor_type;
 
     [[nodiscard]] executor_type get_executor() const { return m_httpClient->get_executor(); }

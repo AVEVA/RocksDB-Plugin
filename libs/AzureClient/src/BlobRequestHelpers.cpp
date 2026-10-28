@@ -8,7 +8,6 @@
 #include "AVEVA/AzureClient/BlobOperationOptions.hpp"
 #include "AVEVA/AzureClient/BlobServiceClient.hpp"
 #include "AVEVA/AzureClient/BlobStorageError.hpp"
-#include "AVEVA/AzureClient/Detail/AsyncInitiation.hpp"
 #include "AVEVA/AzureClient/Models/BlobContainerModels.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
 #include "AVEVA/AzureClient/PageBlobClient.hpp"

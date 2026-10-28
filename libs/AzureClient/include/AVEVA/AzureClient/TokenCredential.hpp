@@ -4,22 +4,26 @@
 #pragma once
 
 #include <boost/asio/any_completion_handler.hpp>
-#include <boost/asio/append.hpp>
+#include <boost/asio/as_tuple.hpp>
 #include <boost/asio/async_result.hpp>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
+#include <boost/asio/this_coro.hpp>
+#include <boost/asio/use_awaitable.hpp>
 
 #include <chrono>
 #include <concepts>
 #include <exception>
-#include <functional>
+#include <expected>
 #include <memory>
 #include <mutex>
 #include <new>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <type_traits>
 #include <utility>
@@ -37,62 +41,39 @@ struct AccessToken {
     std::chrono::system_clock::time_point ExpiresOn = std::chrono::system_clock::time_point::max();
 };
 
-// Completion signature of every token acquisition. Every configuration, transport and parsing failure is
-// reported through it as a non-zero std::error_code (the AccessToken is then unspecified); the operation
-// itself does not throw for such failures. The completion may run inline, before the initiating call
-// returns, or later on an executor or transport thread.
-using TokenSignature = void(std::error_code, AccessToken);
+// The outcome of every token acquisition. Every configuration, transport and parsing failure is reported as a
+// non-zero std::error_code; an acquisition does not throw for such failures.
+using TokenResult = std::expected<AccessToken, std::error_code>;
 
 // A scope list shared between calls, so callers that ask for the same scopes on every request (and caches
 // that only compare them) need not copy the strings.
 using ScopeList = std::shared_ptr<const std::vector<std::string>>;
 
 // A token credential is any type with
-//   GetTokenAsync(std::vector<std::string> scopes, CompletionToken&&)
-// that accepts every Boost.Asio completion token for TokenSignature. A credential may additionally provide
-// GetTokenForScopesAsync(ScopeList, CompletionToken&&), which the clients prefer because it avoids copying
-// the scope list on every request.
+//   boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> scopes)
+// A credential may additionally provide `awaitable<TokenResult> GetTokenForScopesAsync(ScopeList)`, which the
+// clients prefer because it avoids copying the scope list on every request.
 template <class T>
 concept TokenCredentialLike = requires(T& credential, std::vector<std::string> scopes) {
-    credential.GetTokenAsync(std::move(scopes), boost::asio::detached);
+    { credential.GetTokenAsync(std::move(scopes)) } -> std::same_as<boost::asio::awaitable<TokenResult>>;
 };
 
 // Requests a token for `scopes` through the shared-scope overload when the credential has one.
-template <TokenCredentialLike TCred, class CompletionToken>
-auto GetTokenForScopes(TCred& credential, ScopeList scopes, CompletionToken&& token) {
-    if constexpr (requires { credential.GetTokenForScopesAsync(scopes, std::forward<CompletionToken>(token)); }) {
-        return credential.GetTokenForScopesAsync(std::move(scopes), std::forward<CompletionToken>(token));
+template <TokenCredentialLike TCred>
+[[nodiscard]] boost::asio::awaitable<TokenResult> GetTokenForScopes(TCred& credential, ScopeList scopes) {
+    if constexpr (requires { credential.GetTokenForScopesAsync(scopes); }) {
+        co_return co_await credential.GetTokenForScopesAsync(std::move(scopes));
     } else {
-        return credential.GetTokenAsync(scopes ? *scopes : std::vector<std::string>{},
-                                        std::forward<CompletionToken>(token));
+        co_return co_await credential.GetTokenAsync(scopes ? *scopes : std::vector<std::string>{});
     }
 }
-
-namespace Private {
-// Completes on `executor` when one is set, otherwise inline.
-template <class THandler, class... Args>
-void CompleteOnExecutorIfSet(const std::optional<boost::asio::io_context::executor_type>& executor,
-                             THandler&& completion, Args&&... args) {
-    if (executor.has_value()) {
-        boost::asio::post(*executor,
-                          boost::asio::append(std::forward<THandler>(completion), std::forward<Args>(args)...));
-    } else {
-        std::forward<THandler>(completion)(std::forward<Args>(args)...);
-    }
-}
-} // namespace Private
 
 // The credential of clients that are not given one: every request fails with std::errc::operation_not_permitted.
 // Clients authorized by SAS or Shared Key use it as their TCred.
 class NoTokenCredential {
   public:
-    template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
-    auto GetTokenAsync(std::vector<std::string> /*scopes*/, CompletionToken&& token) {
-        return boost::asio::async_initiate<TokenSignature>(
-            [](auto handler) {
-                std::move(handler)(std::make_error_code(std::errc::operation_not_permitted), AccessToken{});
-            },
-            token);
+    [[nodiscard]] boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> /*scopes*/) {
+        co_return std::unexpected(std::make_error_code(std::errc::operation_not_permitted));
     }
 };
 
@@ -116,52 +97,65 @@ concept TokenClockLike =
 // DefaultTokenCredentialNegativeCacheWindow (5 s) and returned without calling the inner credential.
 //
 // Thread safety: GetTokenAsync may be called concurrently from several threads; internal state is
-// mutex-protected and concurrent callers during a refresh are coalesced onto one request. Completions
-// may run inline on the calling thread or on the executor of the underlying credential.
-//
-// Callers coalesced onto one refresh come with different handler types, so the handlers waiting on a refresh
-// are stored as boost::asio::any_completion_handler, Asio's own erased handler; this is the only type
-// erasure left in the credential path.
+// mutex-protected. The first caller without a usable token performs the inner request inside its own
+// coroutine and the others wait for its outcome; a background refresh runs as a detached coroutine on the
+// executor of the caller that triggered it. If the leading caller is cancelled, the waiters ask again.
 template <TokenCredentialLike TInner, TokenClockLike TClock = SystemTokenClock>
 class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenCredential<TInner, TClock>> {
     // Keeps the constructor unusable outside Create while still allowing std::make_shared.
     struct CreateKey {
         explicit CreateKey() = default;
     };
-
-    using Waiter = boost::asio::any_completion_handler<TokenSignature>;
+    // Waiters of one refresh; erased because callers resume on their own executors.
+    using Waiter = boost::asio::any_completion_handler<void()>;
 
   public:
     // The cache relies on shared ownership, so instances can only be created through this factory.
     [[nodiscard]] static std::shared_ptr<CachingTokenCredential>
     Create(std::shared_ptr<TInner> inner, std::chrono::seconds refreshWindow = DefaultTokenCredentialRefreshWindow,
-           std::optional<boost::asio::io_context::executor_type> executor = std::nullopt, TClock clock = {}) {
-        return std::make_shared<CachingTokenCredential>(CreateKey{}, std::move(inner), refreshWindow,
-                                                        std::move(executor), std::move(clock));
+           TClock clock = {}) {
+        return std::make_shared<CachingTokenCredential>(CreateKey{}, std::move(inner), refreshWindow, std::move(clock));
     }
 
-    CachingTokenCredential(CreateKey, std::shared_ptr<TInner> inner, std::chrono::seconds refreshWindow,
-                           std::optional<boost::asio::io_context::executor_type> executor, TClock clock)
-        : m_inner(std::move(inner)), m_refreshWindow(refreshWindow), m_executor(std::move(executor)),
-          m_clock(std::move(clock)) {
+    CachingTokenCredential(CreateKey, std::shared_ptr<TInner> inner, std::chrono::seconds refreshWindow, TClock clock)
+        : m_inner(std::move(inner)), m_refreshWindow(refreshWindow), m_clock(std::move(clock)) {
         // A negative window makes every token look about to expire, so each request would start a refresh.
         if (m_refreshWindow < std::chrono::seconds::zero()) {
             throw std::invalid_argument("CachingTokenCredential refreshWindow must not be negative.");
         }
     }
 
-    template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
-    auto GetTokenAsync(std::vector<std::string> scopes, CompletionToken&& token) {
-        return GetTokenForScopesAsync(std::make_shared<const std::vector<std::string>>(std::move(scopes)),
-                                      std::forward<CompletionToken>(token));
+    [[nodiscard]] boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> scopes) {
+        co_return co_await GetTokenForScopesAsync(std::make_shared<const std::vector<std::string>>(std::move(scopes)));
     }
 
     // The cache-hit path compares against the shared list without copying it.
-    template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
-    auto GetTokenForScopesAsync(ScopeList scopes, CompletionToken&& token) {
-        return boost::asio::async_initiate<TokenSignature>(
-            [this](auto handler, ScopeList requestedScopes) { Start(std::move(requestedScopes), std::move(handler)); },
-            token, std::move(scopes));
+    [[nodiscard]] boost::asio::awaitable<TokenResult> GetTokenForScopesAsync(ScopeList scopes) {
+        if (!scopes) {
+            scopes = std::make_shared<const std::vector<std::string>>();
+        }
+        const auto self = this->shared_from_this();
+        for (;;) {
+            Lookup lookup = LookUp(scopes);
+            if (lookup.Immediate.has_value()) {
+                if (lookup.BackgroundRefresh) {
+                    // Started first, so a re-entrant call joins it.
+                    boost::asio::co_spawn(co_await boost::asio::this_coro::executor,
+                                          Refresh(self, scopes, std::move(lookup.BackgroundRefresh)),
+                                          boost::asio::detached);
+                }
+                co_return std::move(*lookup.Immediate);
+            }
+            if (lookup.Leader) {
+                co_return co_await Refresh(self, scopes, std::move(lookup.State));
+            }
+            co_await WaitFor(lookup.State);
+            // A cancelled leader tells nothing about the credential, so ask again.
+            if (lookup.State->Result.has_value() ||
+                lookup.State->Result.error() != std::make_error_code(std::errc::operation_canceled)) {
+                co_return lookup.State->Result;
+            }
+        }
     }
 
     // Drops the cached token (and any remembered failure) for `scopes`, so the next request asks the inner
@@ -173,6 +167,23 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
     void Invalidate(const ScopeList& scopes, std::string_view rejectedToken) { InvalidateIf(scopes, &rejectedToken); }
 
   private:
+    struct RefreshState {
+        ScopeList Scopes;
+        std::mutex Mutex;
+        std::vector<Waiter> Waiters;
+        TokenResult Result = std::unexpected(std::make_error_code(std::errc::operation_canceled));
+        bool Done = false;
+    };
+
+    // Result of consulting the cache under lock: a token or failure to serve right away (optionally alongside a
+    // background refresh to start), or a refresh to lead or to wait for.
+    struct Lookup {
+        std::optional<TokenResult> Immediate;
+        std::shared_ptr<RefreshState> BackgroundRefresh;
+        std::shared_ptr<RefreshState> State;
+        bool Leader = false;
+    };
+
     void InvalidateIf(const ScopeList& scopes, const std::string_view* rejectedToken) {
         std::scoped_lock const lock(m_mutex);
         if (m_hasToken && SameScopes(m_cachedScopes, scopes) &&
@@ -186,7 +197,6 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         }
     }
 
-  private:
     // Callers normally share one list, so pointer identity answers the common case and the element-wise
     // comparison only runs when two distinct lists are compared. A null list is an empty one.
     static bool SameScopes(const ScopeList& left, const ScopeList& right) {
@@ -197,72 +207,14 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         return (left ? *left : empty) == (right ? *right : empty);
     }
 
-    struct RefreshState {
-        ScopeList Scopes;
-        std::optional<boost::asio::io_context::executor_type> Executor;
-        std::vector<Waiter> Completions;
-        // Guards Completions; the state can outlive the credential that created it.
-        std::mutex Mutex;
-        // Set once the waiters were taken for completion (guarded by Mutex).
-        bool Drained = false;
-    };
-
-    // Result of consulting the cache under lock: either a cached token to serve immediately, a refresh to
-    // start (optionally alongside the cached token), or an indication that `completion` was already queued
-    // onto an in-flight refresh and must not be used again by the caller.
-    struct LookupResult {
-        std::optional<AccessToken> CachedToken;
-        // Set when a recent acquisition failed and there is no valid token to fall back to.
-        std::optional<std::error_code> CachedFailure;
-        std::shared_ptr<RefreshState> RefreshToStart;
-    };
-
-    // Hands `token` to the last pending completion by move and copies it to the others, without the
-    // move-inside-a-loop pattern that would leave `token` in a moved-from state mid-iteration.
-    static void CompleteAll(const std::optional<boost::asio::io_context::executor_type>& executor,
-                            std::vector<Waiter> completions, std::error_code error, AccessToken token) {
-        if (completions.empty()) {
-            return;
-        }
-
-        // With no completion executor the handlers run inline. A throwing recipient must not strand the ones
-        // behind it, so every recipient is invoked and the first exception is rethrown afterwards.
-        std::exception_ptr firstFailure;
-        const auto deliver = [&](Waiter&& pending, std::error_code outcome, AccessToken&& value) {
-            try {
-                Private::CompleteOnExecutorIfSet(executor, std::move(pending), outcome, std::move(value));
-            } catch (...) {
-                if (!firstFailure) {
-                    firstFailure = std::current_exception();
-                }
-            }
-        };
-
-        Waiter last = std::move(completions.back());
-        completions.pop_back();
-        for (auto& pending : completions) {
-            // The copy can throw while `pending` is still owned here, so that recipient is failed instead of
-            // being dropped, and the remaining recipients are still served.
-            std::optional<AccessToken> copy;
-            try {
-                copy.emplace(token);
-            } catch (...) {
-            }
-            if (copy.has_value()) {
-                deliver(std::move(pending), error, std::move(*copy));
-            } else {
-                deliver(std::move(pending), std::make_error_code(std::errc::not_enough_memory), AccessToken{});
-            }
-        }
-        deliver(std::move(last), error, std::move(token));
-        if (firstFailure) {
-            std::rethrow_exception(firstFailure);
-        }
+    [[nodiscard]] std::shared_ptr<RefreshState> NewRefreshState(const ScopeList& scopes) {
+        auto state = std::make_shared<RefreshState>();
+        state->Scopes = scopes;
+        m_inFlightRefresh = state;
+        return state;
     }
 
-    // `completion` is only erased into a Waiter when it has to queue behind a refresh; otherwise the caller keeps it.
-    template <class THandler>
-    LookupResult LookUpCachedTokenOrStartRefresh(const ScopeList& scopes, THandler& completion) {
+    Lookup LookUp(const ScopeList& scopes) {
         std::scoped_lock const lock(m_mutex);
         const auto now = m_clock();
         const bool hasMatchingToken = m_hasToken && SameScopes(m_cachedScopes, scopes);
@@ -271,103 +223,103 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         const bool refreshBackoffActive =
             tokenStillValid && m_nextRefreshRetryAfter.has_value() && now < *m_nextRefreshRetryAfter;
 
+        Lookup result;
         if (outsideRefreshWindow || refreshBackoffActive) {
-            LookupResult result;
-            result.CachedToken = m_cachedToken;
+            result.Immediate = m_cachedToken;
             return result;
         }
-
         if (!tokenStillValid && m_failureRetryAfter.has_value() && now < *m_failureRetryAfter &&
             SameScopes(m_failedScopes, scopes)) {
-            LookupResult result;
-            result.CachedFailure = m_lastFailure;
+            result.Immediate = std::unexpected(m_lastFailure);
             return result;
         }
-
         if (tokenStillValid) {
             // Inside the refresh window: serve the still-valid token now and refresh in the background
             // (joining a refresh that is already running).
-            LookupResult result;
-            result.CachedToken = m_cachedToken;
+            result.Immediate = m_cachedToken;
             if (!m_inFlightRefresh || !SameScopes(m_inFlightRefresh->Scopes, scopes)) {
-                result.RefreshToStart = std::make_shared<RefreshState>();
-                result.RefreshToStart->Scopes = scopes;
-                result.RefreshToStart->Executor = m_executor;
-                m_inFlightRefresh = result.RefreshToStart;
+                result.BackgroundRefresh = NewRefreshState(scopes);
             }
             return result;
         }
-
         if (m_inFlightRefresh && SameScopes(m_inFlightRefresh->Scopes, scopes)) {
-            std::scoped_lock const stateLock(m_inFlightRefresh->Mutex);
-            m_inFlightRefresh->Completions.push_back(Waiter{std::move(completion)});
-            return {};
+            result.State = m_inFlightRefresh;
+            return result;
         }
-
-        LookupResult result;
-        result.RefreshToStart = std::make_shared<RefreshState>();
-        result.RefreshToStart->Scopes = scopes;
-        result.RefreshToStart->Executor = m_executor;
-        result.RefreshToStart->Completions.push_back(Waiter{std::move(completion)});
-        m_inFlightRefresh = result.RefreshToStart;
+        result.State = NewRefreshState(scopes);
+        result.Leader = true;
         return result;
     }
 
-    // Lock order is m_mutex then the state mutex (joining a waiter holds both). Here the state is detached under
-    // m_mutex first and m_mutex is released before the state mutex is taken, so this never inverts that order.
-    // Waiters can no longer join once it is detached, so draining it afterwards is complete.
-    // `alreadyDrained` reports whether an earlier drain (the inner completion) already ran for this state.
-    std::vector<Waiter> DrainAndReset(const std::shared_ptr<RefreshState>& refreshState,
-                                      bool* alreadyDrained = nullptr) {
+    // Suspends until `state` is done; resumes inline-free through post.
+    static boost::asio::awaitable<void> WaitFor(std::shared_ptr<RefreshState> state) {
+        auto token = boost::asio::as_tuple(boost::asio::use_awaitable);
+        co_await boost::asio::async_initiate<decltype(token), void()>(
+            [](auto handler, std::shared_ptr<RefreshState> st) {
+                auto executor = boost::asio::get_associated_executor(handler);
+                // Resuming an awaitable handler runs the coroutine in place, so hop to its executor first.
+                Waiter waiter = [executor, handler = std::move(handler)]() mutable {
+                    boost::asio::post(executor, std::move(handler));
+                };
+                std::unique_lock lock(st->Mutex);
+                if (st->Done) {
+                    lock.unlock();
+                    std::move(waiter)();
+                    return;
+                }
+                st->Waiters.emplace_back(std::move(waiter));
+            },
+            token, std::move(state));
+    }
+
+    void Finish(const std::shared_ptr<RefreshState>& state, TokenResult result) {
         {
             std::scoped_lock const lock(m_mutex);
-            if (m_inFlightRefresh == refreshState) {
+            if (m_inFlightRefresh == state) {
                 m_inFlightRefresh.reset();
             }
         }
-        std::scoped_lock const stateLock(refreshState->Mutex);
-        if (alreadyDrained != nullptr) {
-            *alreadyDrained = refreshState->Drained;
+        std::vector<Waiter> waiters;
+        {
+            std::scoped_lock const lock(state->Mutex);
+            state->Result = std::move(result);
+            state->Done = true;
+            waiters = std::move(state->Waiters);
         }
-        refreshState->Drained = true;
-        return std::move(refreshState->Completions);
+        for (auto& waiter : waiters) {
+            std::move(waiter)();
+        }
     }
 
-    // The inner credential threw before it could deliver a result, so nothing will ever complete the waiters
-    // admitted to this refresh. Releases the claim and fails them once. Returns false when the inner credential
-    // had already delivered, in which case the exception came from a completion and must not be swallowed.
-    bool FailRefreshAfterInitiationThrow(const std::shared_ptr<RefreshState>& refreshState,
-                                         std::exception_ptr failure) {
-        bool alreadyDrained = false;
-        std::vector<Waiter> completions = DrainAndReset(refreshState, &alreadyDrained);
-        if (alreadyDrained) {
-            return false;
+    // Asks the inner credential and publishes the outcome to the cache and to every waiter.
+    static boost::asio::awaitable<TokenResult> Refresh(std::shared_ptr<CachingTokenCredential> self, ScopeList scopes,
+                                                       std::shared_ptr<RefreshState> state) {
+        TokenResult result = std::unexpected(std::make_error_code(std::errc::operation_not_permitted));
+        if (self->m_inner) {
+            try {
+                result = co_await GetTokenForScopes(*self->m_inner, scopes);
+            } catch (const std::bad_alloc&) {
+                result = std::unexpected(std::make_error_code(std::errc::not_enough_memory));
+            } catch (const std::system_error& e) {
+                result = std::unexpected(e.code());
+            } catch (...) {
+                result = std::unexpected(std::make_error_code(std::errc::io_error));
+            }
         }
-        std::error_code error = std::make_error_code(std::errc::io_error);
-        try {
-            std::rethrow_exception(failure);
-        } catch (const std::bad_alloc&) {
-            error = std::make_error_code(std::errc::not_enough_memory);
-        } catch (...) {
-        }
-        CompleteAll(refreshState->Executor, std::move(completions), error, AccessToken{});
-        return true;
+        self->Publish(scopes, result);
+        self->Finish(state, result);
+        co_return result;
     }
 
-    void CompleteWithNoInnerCredentialError(const std::shared_ptr<RefreshState>& refreshState) {
-        std::vector<Waiter> completions = DrainAndReset(refreshState);
-        CompleteAll(refreshState->Executor, std::move(completions),
-                    std::make_error_code(std::errc::operation_not_permitted), AccessToken{});
-    }
-
-    void HandleInnerTokenResult(std::error_code error, AccessToken token,
-                                const std::shared_ptr<RefreshState>& refreshState, const ScopeList& scopes) {
+    // Caching is an optimisation: a failure to publish must not prevent delivering the outcome.
+    void Publish(const ScopeList& scopes, const TokenResult& result) noexcept {
         const auto now = m_clock();
-        // The copies are made before taking the lock and published by (noexcept) moves, so a failed copy leaves
-        // the cache untouched. Publishing is an optimisation: the waiters below must get their outcome regardless.
+        if (!result.has_value() && result.error() == std::make_error_code(std::errc::operation_canceled)) {
+            return;
+        }
         try {
-            if (!error) {
-                auto cachedToken = token;
+            if (result) {
+                auto cachedToken = *result;
                 std::scoped_lock const lock(m_mutex);
                 m_cachedScopes = scopes;
                 m_cachedToken = std::move(cachedToken);
@@ -380,88 +332,16 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
                     m_nextRefreshRetryAfter = now + DefaultTokenCredentialFailedRefreshBackoff;
                 } else {
                     m_failureRetryAfter = now + DefaultTokenCredentialNegativeCacheWindow;
-                    m_lastFailure = error;
+                    m_lastFailure = result.error();
                     m_failedScopes = scopes;
                 }
             }
         } catch (...) {
         }
-
-        std::vector<Waiter> completions = DrainAndReset(refreshState);
-        CompleteAll(refreshState->Executor, std::move(completions), error, std::move(token));
-    }
-
-    template <class THandler> void Start(ScopeList scopes, THandler completion) {
-        if (!scopes) {
-            scopes = std::make_shared<const std::vector<std::string>>();
-        }
-        const std::optional<boost::asio::io_context::executor_type> completionExecutor = m_executor;
-        LookupResult lookup = LookUpCachedTokenOrStartRefresh(scopes, completion);
-        if (lookup.CachedFailure.has_value()) {
-            Private::CompleteOnExecutorIfSet(completionExecutor, std::move(completion), *lookup.CachedFailure,
-                                             AccessToken{});
-            return;
-        }
-        if (!lookup.RefreshToStart && !lookup.CachedToken.has_value()) {
-            // The completion was queued onto a refresh that is already running; it will be invoked from there.
-            return;
-        }
-
-        if (lookup.CachedToken.has_value() && !lookup.RefreshToStart) {
-            Private::CompleteOnExecutorIfSet(completionExecutor, std::move(completion), std::error_code{},
-                                             std::move(*lookup.CachedToken));
-            return;
-        }
-
-        if (!m_inner) {
-            CompleteWithNoInnerCredentialError(lookup.RefreshToStart);
-            return;
-        }
-
-        std::exception_ptr initiationFailure;
-        try {
-            GetTokenForScopes(*m_inner, scopes,
-                              [weakSelf = this->weak_from_this(), refreshState = lookup.RefreshToStart,
-                               scopes](std::error_code error, AccessToken token) mutable {
-                                  if (const auto self = weakSelf.lock()) {
-                                      self->HandleInnerTokenResult(error, std::move(token), refreshState, scopes);
-                                      return;
-                                  }
-
-                                  std::vector<Waiter> completions;
-                                  {
-                                      std::scoped_lock const stateLock(refreshState->Mutex);
-                                      refreshState->Drained = true;
-                                      completions = std::move(refreshState->Completions);
-                                  }
-                                  CompleteAll(refreshState->Executor, std::move(completions), error, std::move(token));
-                              });
-        } catch (...) {
-            initiationFailure = std::current_exception();
-            if (FailRefreshAfterInitiationThrow(lookup.RefreshToStart, initiationFailure)) {
-                initiationFailure = nullptr;
-            }
-            if (!lookup.CachedToken.has_value()) {
-                if (initiationFailure) {
-                    std::rethrow_exception(initiationFailure);
-                }
-                return;
-            }
-        }
-
-        // The background refresh is started first, so a re-entrant call from this completion joins it.
-        if (lookup.CachedToken.has_value()) {
-            Private::CompleteOnExecutorIfSet(completionExecutor, std::move(completion), std::error_code{},
-                                             std::move(*lookup.CachedToken));
-        }
-        if (initiationFailure) {
-            std::rethrow_exception(initiationFailure);
-        }
     }
 
     std::shared_ptr<TInner> m_inner;
     std::chrono::seconds m_refreshWindow;
-    std::optional<boost::asio::io_context::executor_type> m_executor;
     TClock m_clock;
     std::mutex m_mutex;
     std::shared_ptr<RefreshState> m_inFlightRefresh;
@@ -476,11 +356,11 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
 
 // Deduces the inner credential and clock types.
 template <TokenCredentialLike TInner, TokenClockLike TClock = SystemTokenClock>
-[[nodiscard]] std::shared_ptr<CachingTokenCredential<TInner, TClock>> MakeCachingTokenCredential(
-    std::shared_ptr<TInner> inner, std::chrono::seconds refreshWindow = DefaultTokenCredentialRefreshWindow,
-    std::optional<boost::asio::io_context::executor_type> executor = std::nullopt, TClock clock = {}) {
-    return CachingTokenCredential<TInner, TClock>::Create(std::move(inner), refreshWindow, std::move(executor),
-                                                          std::move(clock));
+[[nodiscard]] std::shared_ptr<CachingTokenCredential<TInner, TClock>>
+MakeCachingTokenCredential(std::shared_ptr<TInner> inner,
+                           std::chrono::seconds refreshWindow = DefaultTokenCredentialRefreshWindow,
+                           TClock clock = {}) {
+    return CachingTokenCredential<TInner, TClock>::Create(std::move(inner), refreshWindow, std::move(clock));
 }
 
 template <class T> struct IsCachingTokenCredential : std::false_type {};

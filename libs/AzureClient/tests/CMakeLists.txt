@@ -69,7 +69,6 @@ aveva_azure_client_add_unit_tests(aveva-azure-client-pipeline-tests
     ParserRobustnessTests.cpp
     SuppressedErrorResponseTests.cpp
     ResponseTests.cpp
-    BlockOnTests.cpp
     SharedHttpOwnershipTests.cpp
 )
 aveva_azure_client_add_unit_tests(aveva-azure-client-blob-tests

@@ -6,12 +6,12 @@
 #include "AVEVA/AzureClient/BlobOperationOptions.hpp"
 #include "AVEVA/AzureClient/BlobStorageError.hpp"
 #include "AVEVA/AzureClient/BlobStorageErrorCode.hpp"
-#include "AVEVA/AzureClient/Detail/AsyncInitiation.hpp"
 #include "AVEVA/AzureClient/Models/BlobModels.hpp"
 #include "AVEVA/AzureClient/Response.hpp"
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 #include <AVEVA/AzureClient/Detail/DownloadSinks.hpp>
 #include <AVEVA/AzureClient/Detail/ProtocolConstants.hpp>
+#include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
 
 #include <AVEVA/AzureClient/AzureRequestOptions.hpp>
 #include <AVEVA/AzureClient/Detail/AggregateDeadline.hpp>
@@ -19,13 +19,19 @@
 #include <AVEVA/HttpClient/HttpMethod.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
-#include <boost/asio/cancellation_signal.hpp>
-#include <boost/asio/cancellation_type.hpp>
-#include <boost/asio/post.hpp>
+#include <boost/asio/as_tuple.hpp>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/deferred.hpp>
+#include <boost/asio/experimental/parallel_group.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/strand.hpp>
+#include <boost/asio/this_coro.hpp>
+#include <boost/asio/use_awaitable.hpp>
 
 #include <algorithm>
-#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -33,12 +39,10 @@
 #include <expected>
 #include <filesystem>
 #include <fstream>
-#include <gsl/pointers>
 #include <gsl/util>
 #include <ios>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <new>
 #include <optional>
 #include <span>
@@ -50,14 +54,22 @@
 
 namespace AVEVA::AzureClient::Private {
 namespace DownloadDetail {
-// Runs a blocking task off the I/O thread: on the caller's scheduler, else the HTTP client's. Throws
-// std::errc::operation_not_supported for a transport with neither.
+// Runs a blocking task off the I/O thread: on the caller's scheduler, else the HTTP client's, and resumes the caller
+// on its own executor afterwards. Throws std::errc::operation_not_supported for a transport with neither, and
+// rethrows whatever the task throws.
 template <class THttp, class TTask>
-void RunOnWriter(THttp& httpClient, const std::optional<DownloadWriteScheduler>& scheduler, TTask task) {
+boost::asio::awaitable<void> RunOnWriter(THttp& httpClient, const std::optional<DownloadWriteScheduler>& scheduler,
+                                         TTask task) {
+    const auto body = [&task]() -> boost::asio::awaitable<void> {
+        task();
+        co_return;
+    };
     if (scheduler) {
-        boost::asio::post(*scheduler, std::move(task));
-    } else if constexpr (requires { boost::asio::post(httpClient.GetDownloadWriter(), std::move(task)); }) {
-        boost::asio::post(httpClient.GetDownloadWriter(), std::move(task));
+        co_await boost::asio::co_spawn(*scheduler, body, boost::asio::use_awaitable);
+    } else if constexpr (requires {
+                             boost::asio::co_spawn(httpClient.GetDownloadWriter(), body, boost::asio::use_awaitable);
+                         }) {
+        co_await boost::asio::co_spawn(httpClient.GetDownloadWriter(), body, boost::asio::use_awaitable);
     } else {
         // A detached thread could outlive the client, so refuse; callers map the throw to the download's error.
         throw std::system_error(std::make_error_code(std::errc::operation_not_supported),
@@ -68,12 +80,6 @@ void RunOnWriter(THttp& httpClient, const std::optional<DownloadWriteScheduler>&
 inline constexpr std::size_t DefaultDownloadChunkSize = BlobTransferLimits::DefaultDownloadChunkSize;
 inline constexpr std::uint64_t ResponseBodySlack = BlobTransferLimits::ResponseBodySlack;
 inline constexpr std::uint64_t MaxBufferedDownloadBytes = BlobTransferLimits::MaxBufferedDownloadBytes;
-
-// Tags the chunk length with its own type so it's never adjacent-and-same-type with the
-// chunk offset parameter.
-struct ChunkLengthTag {};
-
-using ChunkLength = NumericLabel<std::uint64_t, ChunkLengthTag>;
 
 // Range-end arithmetic must never wrap: a wrapped end would make the download look complete or place data at the
 // wrong offset.
@@ -95,7 +101,7 @@ using ChunkLength = NumericLabel<std::uint64_t, ChunkLengthTag>;
 
 [[nodiscard]] BlobStorageError MakeInvalidResponse(std::string message);
 
-// A sink may throw anything; an exception must never unwind through the event loop, so it counts as a failed write.
+// A sink may throw anything; an exception must never unwind into the event loop, so it counts as a failed write.
 [[nodiscard]] inline bool TryWrite(DownloadSinkLike auto& sink, std::string data) noexcept {
     try {
         return sink.Write(std::move(data));
@@ -117,233 +123,113 @@ struct DownloadSummary {
 
 using SummaryResult = std::expected<DownloadSummary, BlobStorageError>;
 
-// An internal completion adapter never reaches a user handler and does not throw, so it may run inline on the
-// initiating thread; only a user's completion has to be deferred to its executor.
-template <class T>
-concept InternalCompletion = requires { requires T::IsInternal; };
+template <DownloadSinkLike TSink> struct DownloadOutcome {
+    SummaryResult Result;
+    TSink Sink;
+};
 
-// One download (to a stream, file, or memory). The first ranged GET learns the blob size and
-// ETag; the rest is fetched in ChunkSize ranges with up to Concurrency requests in flight and
-// written strictly in order through a reorder window of at most Concurrency chunks. Later
-// chunks carry If-Match: <first ETag> so a concurrent overwrite fails instead of tearing.
+// Thrown by a chunk worker once the download's failure is recorded, so the parallel group cancels its siblings.
+struct StopWorkers {};
+
+[[nodiscard]] inline BlobStorageError CanceledFailure() {
+    return MakeFailure(std::errc::operation_canceled, "The operation was canceled.");
+}
+
+// One download (to a stream, file, or memory). The first ranged GET (run by the owning coroutine) learns the blob
+// size and ETag; the rest is fetched in ChunkSize ranges by up to Concurrency worker coroutines. Each worker claims the
+// next range, fetches it, waits until every earlier range has been written, then writes its own, so data reaches the
+// sink strictly in order and at most Concurrency chunks are buffered. Later chunks carry If-Match: <first ETag> so a
+// concurrent overwrite fails instead of tearing.
 //
-// All state is owned here. Transport completions and cancellation requests are queued as
-// events and processed one at a time by whichever thread queued first (a trampoline), so
-// handlers never run re-entrantly inside SendAsync or a cancellation emit, and completions
-// that the transport delivers inline are processed inline (no extra executor hop).
-template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink, class TDone>
-class DownloadOperation final : public std::enable_shared_from_this<DownloadOperation<THttp, TCred, TSink, TDone>> {
+// The workers run on one strand, so their shared state needs no lock. They are awaited as a parallel group: the first
+// failure (or a cancellation of the awaiting coroutine) cancels the others, and the group completes only after all of
+// them have, so no worker outlives the owning coroutine that holds this object.
+template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class DownloadEngine final {
   public:
-    DownloadOperation(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> clientOptions,
-                      DownloadToOptions options, AzureRequestOptions requestOptions, TSink sink, TDone completion,
-                      std::chrono::steady_clock::time_point start)
-        : m_httpClient(httpClient), m_clientOptions(std::move(clientOptions)), m_options(std::move(options)),
-          m_requestOptions(requestOptions), m_deadline(m_requestOptions, start), m_sink(std::move(sink)),
-          m_completion(std::move(completion)), m_parentSlot(m_requestOptions.GetCancellationSlot()),
+    DownloadEngine(THttp& httpClient, const BasicBlobTarget<TCred>& target, DownloadToOptions options,
+                   AzureRequestOptions requestOptions, TSink sink, std::chrono::steady_clock::time_point start)
+        : m_httpClient(httpClient), m_target(target), m_options(std::move(options)),
+          m_requestOptions(std::move(requestOptions)), m_deadline(m_requestOptions, start), m_sink(std::move(sink)),
           m_chunkSize(m_options.ChunkSize == 0U ? DefaultDownloadChunkSize : m_options.ChunkSize),
           m_concurrency(std::min(std::max<std::size_t>(1U, m_options.Concurrency),
-                                 std::max<std::size_t>(1U, MaxBufferedDownloadBytes / m_chunkSize))),
-          m_inFlight(m_concurrency), m_ready(m_concurrency) {}
+                                 std::max<std::size_t>(1U, MaxBufferedDownloadBytes / m_chunkSize))) {}
 
-    void Start() {
-        // Must precede everything that can queue an event: queueing is then allocation-free (see ReserveEvents).
-        ReserveEvents(2U);
-        std::unique_lock lock(m_mutex);
-        m_processing = true;
-        m_initiating = true;
-        lock.unlock();
+    boost::asio::awaitable<DownloadOutcome<TSink>> Run() {
+        co_await boost::asio::this_coro::throw_if_cancelled(false);
+        const auto cancellation = co_await boost::asio::this_coro::cancellation_state;
+        const auto executor = co_await boost::asio::this_coro::executor;
 
-        Guarded([this] { Begin(); });
+        try {
+            co_await RunFirstRequest();
+        } catch (...) {
+            Fail(MakeFailureFromCurrentException());
+        }
 
-        lock.lock();
-        Drain(lock);
-        m_initiating = false;
+        if (!m_failure.has_value() && m_ranged && m_next < *m_end) {
+            try {
+                co_await RunWorkers(executor);
+            } catch (...) {
+                Fail(MakeFailureFromCurrentException());
+            }
+        }
+        if (!m_failure.has_value() && IsAbortingCancellation(cancellation.cancelled())) {
+            Fail(CanceledFailure());
+        }
+        co_return DownloadOutcome<TSink>{.Result = Finish(), .Sink = std::move(m_sink)};
     }
 
   private:
-    // An internal throw (allocation, request setup, writer scheduling) becomes the download's failure instead of
-    // escaping onto the host event loop. Once the download has completed a throw can only come from the caller's
-    // completion, which is not a storage failure and propagates after the runner state is restored.
-    template <class TStep> void Guarded(TStep&& step) {
-        try {
-            step();
-        } catch (...) {
-            if (m_done) {
-                std::lock_guard lock(m_mutex);
-                m_processing = false;
-                throw;
-            }
-            Fail(MakeFailureFromCurrentException());
-            try {
-                MaybeFinish();
-            } catch (...) {
-                std::lock_guard lock(m_mutex);
-                m_processing = false;
-                throw;
-            }
-        }
-    }
-
     enum class RequestKind : std::uint8_t { Probe, Full, Chunk };
 
-    struct InFlightRequest {
-        RequestKind Kind = RequestKind::Chunk;
-        std::uint64_t Offset = 0;
-        std::uint64_t Length = 0;
-        bool Active = false;
-        boost::asio::cancellation_signal Signal;
-    };
-
-    // A chunk that arrived ahead of the write cursor. The slot is chosen by chunk number modulo the concurrency, which
-    // cannot collide: in-flight, ready and writing chunks together never exceed the concurrency.
-    struct ReadyChunk {
-        bool Filled = false;
-        std::uint64_t Offset = 0;
-        std::string Data;
-    };
-
-    [[nodiscard]] ReadyChunk& ReadySlot(std::uint64_t offset) {
-        return m_ready[gsl::narrow_cast<std::size_t>(((offset - m_begin) / m_chunkSize) % m_ready.size())];
-    }
-
-    // Removes and returns the chunk that starts at `offset`, if it has arrived.
-    [[nodiscard]] std::optional<std::string> TakeReady(std::uint64_t offset) {
-        ReadyChunk& slot = ReadySlot(offset);
-        if (!slot.Filled || slot.Offset != offset) {
-            return std::nullopt;
+    // Records the first failure; later ones are consequences (cancelled siblings) and are dropped.
+    void Fail(BlobStorageError error) {
+        if (!m_failure.has_value()) {
+            m_failure = std::move(error);
         }
-        slot.Filled = false;
-        --m_readyCount;
-        return std::move(slot.Data);
-    }
-
-    void ClearReady() {
-        for (auto& slot : m_ready) {
-            slot.Filled = false;
-            slot.Data = std::string{};
-        }
-        m_readyCount = 0U;
-    }
-
-    struct Event {
-        bool Cancel = false;
-        std::uint64_t RequestId = 0;
-        std::error_code Error;
-        HttpResponse Response;
-        bool WriteDone = false;
-        bool WriteOk = true;
-        std::size_t WriteSize = 0;
-        std::optional<BlobStorageError> WriteError;
-    };
-
-    // Queueing an event must not fail: a lost completion, write-done or cancellation would strand the download. The
-    // pending events are bounded (one per in-flight request, one write-done, one cancel), so room for them is
-    // reserved up front, on a path that can still fail the download, and Enqueue only ever fills it.
-    void ReserveEvents(std::size_t extra) {
-        std::lock_guard lock(m_mutex);
-        CompactEvents();
-        const std::size_t needed = m_events.size() + extra;
-        if (m_events.capacity() < needed) {
-            m_events.reserve(needed);
+        if (m_turn.has_value()) {
+            m_turn->cancel();
         }
     }
 
-    // Reclaims the consumed prefix without allocating.
-    void CompactEvents() {
-        if (m_head != 0U) {
-            m_events.erase(m_events.begin(), m_events.begin() + static_cast<std::ptrdiff_t>(m_head));
-            m_head = 0U;
-        }
-    }
-
-    void Enqueue(Event event) {
-        std::unique_lock lock(m_mutex);
-        if (m_events.size() == m_events.capacity()) {
-            CompactEvents();
-        }
-        m_events.push_back(std::move(event));
-        if (m_processing) {
-            return;
-        }
-        m_processing = true;
-        Drain(lock);
-    }
-
-    void Drain(std::unique_lock<std::mutex>& lock) {
-        while (m_head < m_events.size()) {
-            Event event = std::move(m_events[m_head]);
-            ++m_head;
-            lock.unlock();
-            Guarded([&] { Handle(std::move(event)); });
-            lock.lock();
-        }
-        m_events.clear();
-        m_head = 0U;
-        m_processing = false;
-    }
-
-    void Begin() {
+    boost::asio::awaitable<void> RunFirstRequest() {
         m_begin = m_options.Range.has_value() ? m_options.Range->Offset : 0U;
         if (m_options.Range.has_value() && m_options.Range->Length.has_value()) {
             const std::uint64_t length = *m_options.Range->Length;
             if (length == 0U || length > std::numeric_limits<std::uint64_t>::max() - m_begin) {
                 Fail(MakeFailure(std::errc::invalid_argument,
                                  "Download range length must be non-zero and must not overflow."));
-                MaybeFinish();
-                return;
+                co_return;
             }
             m_end = m_begin + length;
         }
 
-        if (m_parentSlot.is_connected()) {
-            std::weak_ptr<DownloadOperation> const weak = this->weak_from_this();
-            // The handler outlives the operation when the caller's explicit slot stays connected, so it must not
-            // reach the transport: it keeps a copy of the executor and checks the operation first.
-            m_parentSlot.assign([weak, executor = m_httpClient.get_executor()](boost::asio::cancellation_type_t type) {
-                if (!IsAbortingCancellation(type) || weak.expired()) {
-                    return;
-                }
-                // One queued cancel is enough, and it keeps the bound on pending events.
-                if (const auto self = weak.lock(); !self || self->m_cancelPosted.exchange(true)) {
-                    return;
-                }
-                boost::asio::post(executor, [weak]() {
-                    if (auto self = weak.lock()) {
-                        self->Enqueue(Event{.Cancel = true, .RequestId = 0, .Error = {}, .Response = {}});
-                    }
-                });
-            });
-        }
-
         const std::uint64_t probeLength =
             m_end.has_value() ? std::min<std::uint64_t>(m_chunkSize, *m_end - m_begin) : m_chunkSize;
-        Send(RequestKind::Probe, m_begin, probeLength, m_options.Conditions);
-        MaybeFinish();
-    }
-
-    // Frees the slot and detaches any handler the finished request left on its signal; false if it was already free.
-    bool ReleaseInFlight(std::uint64_t id) {
-        InFlightRequest& slot = m_inFlight[gsl::narrow_cast<std::size_t>(id)];
-        if (!slot.Active) {
-            return false;
+        HttpResult sent;
+        if (!co_await Fetch(RequestKind::Probe, m_begin, probeLength, m_options.Conditions, sent)) {
+            co_return;
         }
-        slot.Active = false;
-        slot.Signal.slot().clear();
-        --m_inFlightCount;
-        return true;
+        if (co_await OnProbe(std::move(sent), probeLength)) {
+            if (!co_await Fetch(RequestKind::Full, m_begin, 0U, m_options.Conditions, sent)) {
+                co_return;
+            }
+            co_await OnFull(std::move(sent));
+        }
     }
 
-    void Send(RequestKind kind, std::uint64_t offset, std::uint64_t length,
-              const Models::BlobRequestConditions& conditions) {
-        HttpRequest request;
+    // Sends one GET. False means the request could not even be built (or the budget is spent) and the failure is
+    // recorded; otherwise `out` holds the transport outcome.
+    boost::asio::awaitable<bool> Fetch(RequestKind kind, std::uint64_t offset, std::uint64_t length,
+                                       const Models::BlobRequestConditions& conditions, HttpResult& out) {
         AzureRequestOptions requestOptions = m_requestOptions;
         // Every request gets only what is left of the whole download's budget, and none starts once it is spent.
         if (!m_deadline.Apply(requestOptions)) {
             Fail(MakeFailure(std::errc::timed_out, "The download exceeded its total deadline."));
-            return;
+            co_return false;
         }
+        HttpRequest request;
         try {
-            request = BuildBlobRequest(*m_clientOptions, HttpMethod::Get);
+            request = BuildBlobRequest(m_target, HttpMethod::Get);
             if (kind != RequestKind::Full) {
                 AddHeader(request, RangeHeaderName,
                           BuildRangeHeaderValue(Models::BlobByteRange{.Offset = offset, .Length = length}));
@@ -355,90 +241,17 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
             ApplyBlobRequestConditions(request, conditions);
         } catch (...) {
             Fail(MakeFailureFromCurrentException());
-            return;
+            co_return false;
         }
-
-        const auto free = std::ranges::find_if(m_inFlight, [](const InFlightRequest& slot) { return !slot.Active; });
-        if (free == m_inFlight.end()) {
-            Fail(MakeFailure(std::errc::resource_unavailable_try_again, "Too many concurrent download requests."));
-            return;
-        }
-        InFlightRequest& entry = *free;
-        const auto id = static_cast<std::uint64_t>(free - m_inFlight.begin());
-        requestOptions.SetCancellationSlot(entry.Signal.slot());
-        ReserveEvents(m_inFlightCount + 3U);
-        entry.Kind = kind;
-        entry.Offset = offset;
-        entry.Length = length;
-        entry.Active = true;
-        ++m_inFlightCount;
-        if (kind == RequestKind::Chunk) {
-            ++m_chunksInFlight;
-        }
-
-        try {
-            SendAuthorizedRequestAsync(
-                m_httpClient, *m_clientOptions, std::move(request),
-                [self = this->shared_from_this(), id](std::error_code error, HttpResponse response) mutable {
-                    self->Enqueue(Event{.RequestId = id, .Error = error, .Response = std::move(response)});
-                },
-                std::move(requestOptions));
-        } catch (...) {
-            // The request was not accepted, so no completion will ever drain this entry.
-            if (ReleaseInFlight(id) && kind == RequestKind::Chunk) {
-                --m_chunksInFlight;
-            }
-            Fail(MakeFailureFromCurrentException());
-        }
+        out = co_await SendAuthorizedRequest(m_httpClient, m_target, std::move(request), std::move(requestOptions));
+        co_return true;
     }
 
-    void Handle(Event event) {
-        if (event.Cancel) {
-            if (!m_done) {
-                Fail(MakeFailure(std::errc::operation_canceled, "The operation was canceled."));
-                MaybeFinish();
-            }
-            return;
+    static std::pair<std::error_code, HttpResponse> Split(HttpResult sent) {
+        if (sent) {
+            return {std::error_code{}, std::move(*sent)};
         }
-
-        if (event.WriteDone) {
-            OnWriteDone(event);
-            Pump();
-            MaybeFinish();
-            return;
-        }
-
-        if (event.RequestId >= m_inFlight.size() ||
-            !m_inFlight[gsl::narrow_cast<std::size_t>(event.RequestId)].Active) {
-            return;
-        }
-        const InFlightRequest& entry = m_inFlight[gsl::narrow_cast<std::size_t>(event.RequestId)];
-        const struct {
-            RequestKind Kind;
-            std::uint64_t Offset;
-            std::uint64_t Length;
-        } request{entry.Kind, entry.Offset, entry.Length};
-        ReleaseInFlight(event.RequestId);
-        if (request.Kind == RequestKind::Chunk) {
-            --m_chunksInFlight;
-        }
-
-        if (!m_failure.has_value()) {
-            switch (request.Kind) {
-            case RequestKind::Probe:
-                OnProbe(event.Error, std::move(event.Response), request.Length);
-                break;
-            case RequestKind::Full:
-                OnFull(event.Error, std::move(event.Response));
-                break;
-            case RequestKind::Chunk:
-                OnChunk(event.Error, std::move(event.Response), request.Offset, request.Length);
-                break;
-            }
-        }
-
-        Pump();
-        MaybeFinish();
+        return {sent.error(), HttpResponse{}};
     }
 
     [[nodiscard]] bool CaptureFirstResponse(HttpResponse& response) {
@@ -452,28 +265,29 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         return true;
     }
 
-    void OnProbe(std::error_code error, HttpResponse response, std::uint64_t probeLength) {
+    // True when the blob turned out to be empty and one un-ranged GET must follow.
+    boost::asio::awaitable<bool> OnProbe(HttpResult sent, std::uint64_t probeLength) {
+        auto [error, response] = Split(std::move(sent));
         // A 0-byte blob rejects any range with 416; fall back to one un-ranged GET. That is only
         // equivalent when the request starts at byte 0 and has no length limit.
         const bool unboundedFromStart =
             !m_options.Range.has_value() || (m_begin == 0U && !m_options.Range->Length.has_value());
         if (!error && response.GetStatus() == HttpStatusRangeNotSatisfiable && unboundedFromStart) {
-            Send(RequestKind::Full, m_begin, 0U, m_options.Conditions);
-            return;
+            co_return true;
         }
         if (auto failure = ToFailure(error, response); failure.has_value()) {
             Fail(std::move(*failure));
-            return;
+            co_return false;
         }
         if (!CaptureFirstResponse(response)) {
-            return;
+            co_return false;
         }
 
         if (response.GetStatus() != HttpStatusPartialContent) {
             // A 200 means the Range header was ignored and the body is the whole blob from byte 0.
             if (m_begin != 0U) {
                 Fail(MakeInvalidResponse("The service ignored the requested range."));
-                return;
+                co_return false;
             }
             std::string body = TakeBody(response);
             if (m_end.has_value() && body.size() > *m_end) {
@@ -481,11 +295,11 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
             }
             m_end = body.size();
             m_summary.FirstResponse = std::move(response);
-            if (ExceedsMaxSize(body.size())) {
-                return;
+            if (ExceedsMaxSize(*m_end)) {
+                co_return false;
             }
-            Deliver(0U, std::move(body));
-            return;
+            co_await WriteBody(std::move(body));
+            co_return false;
         }
 
         // A 206 without a valid Content-Range cannot be placed or validated; refuse it rather than guess.
@@ -494,7 +308,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         if (!parsedRange.has_value() || parsedRange->Unsatisfied || parsedRange->Start != m_begin ||
             parsedRange->End < parsedRange->Start) {
             Fail(MakeInvalidResponse("The download response has an unexpected Content-Range."));
-            return;
+            co_return false;
         }
         const std::optional<std::uint64_t> total = parsedRange->Total;
         m_total = total;
@@ -502,7 +316,7 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         std::string body = TakeBody(response);
         if (body.empty() || parsedRange->End - parsedRange->Start != body.size() - 1U) {
             Fail(MakeInvalidResponse("The download response has an unexpected Content-Range."));
-            return;
+            co_return false;
         }
         if (total.has_value()) {
             m_end = m_end.has_value() ? std::min(*m_end, *total) : *total;
@@ -510,31 +324,31 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
             m_end = CheckedAdd(m_begin, body.size());
             if (!m_end.has_value()) {
                 Fail(MakeInvalidResponse("The download response range overflows."));
-                return;
+                co_return false;
             }
         } else if (!m_end.has_value()) {
             Fail(MakeInvalidResponse("The download response does not report the blob size."));
-            return;
+            co_return false;
         }
 
         if (*m_end < m_begin || body.size() != std::min<std::uint64_t>(probeLength, *m_end - m_begin)) {
             Fail(MakeInvalidResponse("The download response has an unexpected length."));
-            return;
+            co_return false;
         }
 
         m_ranged = true;
         m_summary.FirstResponse = std::move(response);
         if (ExceedsMaxSize(*m_end - m_begin)) {
-            return;
+            co_return false;
         }
         try {
             m_sink.Reserve(*m_end - m_begin);
         } catch (const std::exception&) {
             Fail(MakeFailure(std::errc::not_enough_memory));
-            return;
+            co_return false;
         } catch (...) {
             Fail(MakeFailure(std::errc::io_error, "The download sink failed to reserve space."));
-            return;
+            co_return false;
         }
 
         m_chunkConditions = m_options.Conditions;
@@ -547,36 +361,38 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         const auto next = CheckedAdd(m_begin, body.size());
         if (!next.has_value()) {
             Fail(MakeInvalidResponse("The download response range overflows."));
-            return;
+            co_return false;
         }
         // Without a validator the remaining chunks would be unconditional and could mix blob versions.
         if (*next < *m_end && m_chunkConditions.IfMatch.empty()) {
             Fail(MakeInvalidResponse("The download response has no ETag to keep later chunks on one blob version."));
-            return;
+            co_return false;
         }
         m_next = *next;
-        Deliver(m_begin, std::move(body));
+        co_await WriteBody(std::move(body));
+        co_return false;
     }
 
-    void OnFull(std::error_code error, HttpResponse response) {
+    boost::asio::awaitable<void> OnFull(HttpResult sent) {
+        auto [error, response] = Split(std::move(sent));
         if (auto failure = ToFailure(error, response); failure.has_value()) {
             Fail(std::move(*failure));
-            return;
+            co_return;
         }
         if (!CaptureFirstResponse(response)) {
-            return;
+            co_return;
         }
         std::string body = TakeBody(response);
         m_end = CheckedAdd(m_begin, body.size());
         if (!m_end.has_value()) {
             Fail(MakeInvalidResponse("The download response range overflows."));
-            return;
+            co_return;
         }
         m_summary.FirstResponse = std::move(response);
         if (ExceedsMaxSize(body.size())) {
-            return;
+            co_return;
         }
-        Deliver(m_begin, std::move(body));
+        co_await WriteBody(std::move(body));
     }
 
     // Fails the download when `size` is over the caller's limit; true means it failed.
@@ -588,194 +404,133 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
         return true;
     }
 
-    void OnChunk(std::error_code error, HttpResponse response, std::uint64_t offset, ChunkLength length) {
+    // Checks a chunk response against the range that was asked for; false means the failure is recorded.
+    [[nodiscard]] bool ValidateChunk(HttpResult sent, std::uint64_t offset, std::uint64_t length, std::string& body) {
+        auto [error, response] = Split(std::move(sent));
         if (auto failure = ToFailure(error, response); failure.has_value()) {
             Fail(std::move(*failure));
-            return;
-        }
-        std::string body = TakeBody(response);
-        if (response.GetStatus() != HttpStatusPartialContent || body.size() != length.Value) {
-            Fail(MakeInvalidResponse("The download response has an unexpected length."));
-            return;
-        }
-        // A server that answers a different range would otherwise be written at the wrong offset.
-        if (const std::string_view header = FindHeaderValue(response, "Content-Range"); !header.empty()) {
-            const auto parsed = ParseContentRange(header);
-            if (!parsed.has_value() || parsed->Unsatisfied || parsed->Start != offset || parsed->End < parsed->Start ||
-                body.empty() || parsed->End - parsed->Start != body.size() - 1U ||
-                (m_total.has_value() && parsed->Total.has_value() && *parsed->Total != *m_total)) {
-                Fail(MakeInvalidResponse("The download response has an unexpected Content-Range."));
-                return;
-            }
-        } else {
-            Fail(MakeInvalidResponse("The download response has an unexpected Content-Range."));
-            return;
-        }
-        Deliver(offset, std::move(body));
-    }
-
-    // Writes `data` (or queues it behind earlier gaps), then everything that has become contiguous.
-    void Deliver(std::uint64_t offset, std::string data) {
-        ReadyChunk& slot = ReadySlot(offset);
-        if (slot.Filled) {
-            Fail(MakeInvalidResponse("The download reorder window overflowed."));
-            return;
-        }
-        slot.Filled = true;
-        slot.Offset = offset;
-        slot.Data = std::move(data);
-        ++m_readyCount;
-        WriteReady();
-    }
-
-    // Sinks that block on the disk are written from the writer scheduler (see RunOnWriter) so a slow
-    // write never stalls the I/O thread that is also servicing every other connection. One write is in
-    // flight at a time, which keeps the sink in offset order; completion re-enters on the I/O executor.
-    void WriteReady() {
-        while (!m_writing && !m_failure.has_value()) {
-            const auto cursor = CheckedAdd(m_written, m_begin);
-            if (!cursor.has_value()) {
-                Fail(MakeInvalidResponse("The download write offset overflows."));
-                return;
-            }
-            auto taken = TakeReady(*cursor);
-            if (!taken.has_value()) {
-                return;
-            }
-            std::string data = std::move(*taken);
-
-            if constexpr (TSink::WritesInline) {
-                if (!WriteToSink(std::move(data))) {
-                    return;
-                }
-                continue;
-            } else {
-                // Take every chunk that is already contiguous so one writer task (and one hop back to the
-                // I/O executor) covers the whole run instead of one pair of hops per chunk.
-                std::vector<std::string> batch;
-                batch.reserve(m_readyCount + 1U);
-                batch.push_back(std::move(data));
-                std::uint64_t next = *cursor;
-                while (true) {
-                    const auto advanced = CheckedAdd(next, batch.back().size());
-                    if (!advanced.has_value()) {
-                        Fail(MakeInvalidResponse("The download write offset overflows."));
-                        return;
-                    }
-                    next = *advanced;
-                    auto following = TakeReady(next);
-                    if (!following.has_value()) {
-                        break;
-                    }
-                    batch.push_back(std::move(*following));
-                }
-
-                m_writing = true;
-                m_writingChunks = batch.size();
-                try {
-                    RunOnWriter(m_httpClient, m_options.WriteScheduler,
-                                [self = this->shared_from_this(), batch = std::move(batch)]() mutable {
-                                    std::size_t size = 0U;
-                                    bool ok = true;
-                                    for (auto& chunk : batch) {
-                                        const std::size_t chunkSize = chunk.size();
-                                        ok = TryWrite(self->m_sink, std::move(chunk));
-                                        if (!ok) {
-                                            break;
-                                        }
-                                        size += chunkSize;
-                                    }
-                                    PostWriteDone(self, ok, size);
-                                });
-                } catch (...) {
-                    // Scheduling failed, so no write-done event will ever clear the writing state.
-                    m_writing = false;
-                    m_writingChunks = 0U;
-                    Fail(MakeFailureFromCurrentException());
-                }
-                return;
-            }
-        }
-    }
-
-    // Runs on a writer thread. The hop back to the I/O executor is what normally clears `m_writing`; if it cannot be
-    // scheduled the event is queued from here instead, so the failure still completes the download exactly once
-    // rather than escaping the worker and stranding the write.
-    static void PostWriteDone(const std::shared_ptr<DownloadOperation>& self, bool ok, std::size_t size) noexcept {
-        std::optional<BlobStorageError> failure;
-        try {
-            boost::asio::post(self->m_httpClient.get_executor(), [self, ok, size]() {
-                self->Enqueue(Event{.WriteDone = true, .WriteOk = ok, .WriteSize = size});
-            });
-            return;
-        } catch (...) {
-            try {
-                failure = MakeFailureFromCurrentException();
-            } catch (...) {
-                // The generic write failure is reported instead.
-            }
-        }
-        try {
-            self->Enqueue(
-                Event{.WriteDone = true, .WriteOk = false, .WriteSize = size, .WriteError = std::move(failure)});
-        } catch (...) {
-            // Nothing is left to report the failure to; the worker must still not unwind.
-        }
-    }
-
-    void OnWriteDone(const Event& event) {
-        m_writing = false;
-        m_writingChunks = 0U;
-        if (!event.WriteOk) {
-            Fail(event.WriteError.value_or(MakeFailure(std::errc::io_error, "Failed to write the downloaded data.")));
-            return;
-        }
-        m_written += event.WriteSize;
-        WriteReady();
-    }
-
-    [[nodiscard]] bool WriteToSink(std::string data) {
-        const std::size_t size = data.size();
-        if (!TryWrite(m_sink, std::move(data))) {
-            Fail(MakeFailure(std::errc::io_error, "Failed to write the downloaded data."));
             return false;
         }
-        m_written += size;
+        body = TakeBody(response);
+        if (response.GetStatus() != HttpStatusPartialContent || body.size() != length) {
+            Fail(MakeInvalidResponse("The download response has an unexpected length."));
+            return false;
+        }
+        // A server that answers a different range would otherwise be written at the wrong offset.
+        const std::string_view header = FindHeaderValue(response, "Content-Range");
+        if (header.empty()) {
+            Fail(MakeInvalidResponse("The download response has an unexpected Content-Range."));
+            return false;
+        }
+        const auto parsed = ParseContentRange(header);
+        if (!parsed.has_value() || parsed->Unsatisfied || parsed->Start != offset || parsed->End < parsed->Start ||
+            body.empty() || parsed->End - parsed->Start != body.size() - 1U ||
+            (m_total.has_value() && parsed->Total.has_value() && *parsed->Total != *m_total)) {
+            Fail(MakeInvalidResponse("The download response has an unexpected Content-Range."));
+            return false;
+        }
         return true;
     }
 
-    void Pump() {
-        if (m_failure.has_value() || m_done || !m_ranged) {
-            return;
-        }
-        while (m_next < *m_end && m_chunksInFlight + m_readyCount + m_writingChunks < m_concurrency &&
-               !m_failure.has_value()) {
-            const std::uint64_t length = std::min<std::uint64_t>(m_chunkSize, *m_end - m_next);
-            const std::uint64_t offset = m_next;
-            m_next += length;
-            Send(RequestKind::Chunk, offset, length, m_chunkConditions);
-        }
-    }
-
-    // Records the first failure and cancels every in-flight request; completion waits for
-    // them to drain (MaybeFinish).
-    void Fail(BlobStorageError error) {
-        if (m_failure.has_value()) {
-            return;
-        }
-        m_failure = std::move(error);
-        ClearReady();
-        for (auto& request : m_inFlight) {
-            if (request.Active) {
-                request.Signal.emit(boost::asio::cancellation_type::terminal);
+    // Sinks that block on the disk are written from the writer scheduler (see RunOnWriter) so a slow write never
+    // stalls the I/O thread that is also servicing every other connection. Only the worker whose turn it is writes, so
+    // the sink is never used concurrently and receives data in offset order.
+    boost::asio::awaitable<bool> WriteBody(std::string data) {
+        const std::size_t size = data.size();
+        bool ok = false;
+        if constexpr (TSink::WritesInline) {
+            ok = TryWrite(m_sink, std::move(data));
+        } else {
+            try {
+                co_await RunOnWriter(m_httpClient, m_options.WriteScheduler,
+                                     [&] { ok = TryWrite(m_sink, std::move(data)); });
+            } catch (...) {
+                Fail(MakeFailureFromCurrentException());
+                co_return false;
             }
         }
+        if (!ok) {
+            Fail(MakeFailure(std::errc::io_error, "Failed to write the downloaded data."));
+            co_return false;
+        }
+        m_written += size;
+        co_return true;
     }
 
-    void MaybeFinish() {
-        if (m_done || m_inFlightCount != 0U || m_writing) {
-            return;
+    boost::asio::awaitable<void> Worker() {
+        co_await boost::asio::this_coro::throw_if_cancelled(false);
+        const auto cancellation = co_await boost::asio::this_coro::cancellation_state;
+        const auto stopped = [&] {
+            if (m_failure.has_value()) {
+                return true;
+            }
+            if (IsAbortingCancellation(cancellation.cancelled())) {
+                Fail(CanceledFailure());
+                return true;
+            }
+            return false;
+        };
+        try {
+            for (;;) {
+                if (stopped()) {
+                    throw StopWorkers{};
+                }
+                if (m_next >= *m_end) {
+                    co_return;
+                }
+                const std::uint64_t length = std::min<std::uint64_t>(m_chunkSize, *m_end - m_next);
+                const std::uint64_t offset = m_next;
+                m_next += length;
+
+                HttpResult sent;
+                if (!co_await Fetch(RequestKind::Chunk, offset, length, m_chunkConditions, sent)) {
+                    throw StopWorkers{};
+                }
+                std::string body;
+                if (!ValidateChunk(std::move(sent), offset, length, body)) {
+                    throw StopWorkers{};
+                }
+
+                // Hold the chunk until every earlier one is written; a notification (or a cancellation) wakes the wait.
+                while (!stopped() && m_begin + m_written != offset) {
+                    co_await m_turn->async_wait(boost::asio::as_tuple(boost::asio::use_awaitable));
+                }
+                if (stopped() || !co_await WriteBody(std::move(body))) {
+                    throw StopWorkers{};
+                }
+                m_turn->cancel();
+            }
+        } catch (const StopWorkers&) {
+            throw;
+        } catch (...) {
+            Fail(MakeFailureFromCurrentException());
+            throw StopWorkers{};
         }
+    }
+
+    boost::asio::awaitable<void> RunWorkers(const boost::asio::any_io_executor& executor) {
+        const auto strand = boost::asio::make_strand(executor);
+        m_turn.emplace(strand);
+        // Only ever woken by cancel(), never by expiry.
+        m_turn->expires_at(std::chrono::steady_clock::time_point::max());
+
+        const std::uint64_t remaining = *m_end - m_next;
+        const std::uint64_t chunks = remaining / m_chunkSize + (remaining % m_chunkSize != 0U ? 1U : 0U);
+        const std::size_t workers = gsl::narrow_cast<std::size_t>(std::min<std::uint64_t>(m_concurrency, chunks));
+
+        using Op = decltype(boost::asio::co_spawn(strand, Worker(), boost::asio::deferred));
+        std::vector<Op> operations;
+        operations.reserve(workers);
+        for (std::size_t index = 0; index < workers; ++index) {
+            operations.push_back(boost::asio::co_spawn(strand, Worker(), boost::asio::deferred));
+        }
+        // Completes only after every worker has, so none can touch this object once the owner returns.
+        co_await boost::asio::experimental::make_parallel_group(std::move(operations))
+            .async_wait(boost::asio::experimental::wait_for_one_error(), boost::asio::use_awaitable);
+        m_turn.reset();
+    }
+
+    [[nodiscard]] SummaryResult Finish() {
         if (!m_failure.has_value() && (!m_end.has_value() || *m_end < m_begin || m_written != *m_end - m_begin)) {
             Fail(MakeInvalidResponse("The download ended before all data was received."));
         }
@@ -784,62 +539,27 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
             Fail(MakeFailure(std::errc::timed_out, "The download exceeded its total deadline."));
         }
         if (m_failure.has_value()) {
-            Finish(std::unexpected(std::move(*m_failure)));
-            return;
+            return std::unexpected(std::move(*m_failure));
         }
-
         m_summary.BytesWritten = m_written;
         m_summary.Properties.ContentLength = m_written;
         if (m_ranged) {
             m_summary.ContentRange = Models::BlobByteRange{.Offset = m_begin, .Length = m_written};
         }
-        Finish(std::move(m_summary));
-    }
-
-    void Finish(SummaryResult result) {
-        m_done = true;
-        // A completion that takes the sink gets it moved in, so it can outlive the operation (file finalization,
-        // string result).
-        auto completion = [&]() {
-            if constexpr (std::invocable<TDone&, SummaryResult, TSink>) {
-                return [done = std::move(m_completion), sink = std::move(m_sink)](SummaryResult value) mutable {
-                    done(std::move(value), std::move(sink));
-                };
-            } else {
-                return std::move(m_completion);
-            }
-        }();
-        if (m_initiating && !InternalCompletion<TDone>) {
-            PostCompletion(m_httpClient, std::move(completion), std::move(result));
-        } else {
-            completion(std::move(result));
-        }
+        return std::move(m_summary);
     }
 
     THttp& m_httpClient;
-    std::shared_ptr<const BasicBlobTarget<TCred>> m_clientOptions;
+    const BasicBlobTarget<TCred>& m_target;
     DownloadToOptions m_options;
     AzureRequestOptions m_requestOptions;
     AggregateDeadline m_deadline;
     TSink m_sink;
-    TDone m_completion;
-    boost::asio::cancellation_slot m_parentSlot;
     std::size_t m_chunkSize;
     std::size_t m_concurrency;
 
-    std::mutex m_mutex;
-    std::vector<Event> m_events;
-    std::size_t m_head = 0;
-    std::atomic<bool> m_cancelPosted{false};
-    bool m_processing = false;
-    bool m_initiating = false;
-
-    // Only touched by the thread currently draining events.
-    std::vector<InFlightRequest> m_inFlight;
-    std::size_t m_inFlightCount = 0;
-    std::size_t m_chunksInFlight = 0;
-    std::vector<ReadyChunk> m_ready;
-    std::size_t m_readyCount = 0;
+    // Workers share everything below; they run on one strand.
+    std::optional<boost::asio::steady_timer> m_turn;
     Models::BlobRequestConditions m_chunkConditions;
     std::string m_etag;
     std::uint64_t m_begin = 0;
@@ -848,59 +568,29 @@ class DownloadOperation final : public std::enable_shared_from_this<DownloadOper
     std::uint64_t m_next = 0;
     std::uint64_t m_written = 0;
     bool m_ranged = false;
-    bool m_writing = false;
-    std::size_t m_writingChunks = 0;
     std::optional<BlobStorageError> m_failure;
     DownloadSummary m_summary;
-    bool m_done = false;
 };
 
 [[nodiscard]] Response<Models::DownloadBlobToResult> ToDownloadToResponse(DownloadSummary summary);
 
-template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink, class TDone>
-void StartDownload(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
-                   DownloadToOptions operationOptions, TSink sink, TDone completion, AzureRequestOptions requestOptions,
-                   std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now()) {
-    std::make_shared<DownloadOperation<THttp, TCred, TSink, TDone>>(httpClient, std::move(options),
-                                                                    std::move(operationOptions), requestOptions,
-                                                                    std::move(sink), std::move(completion), start)
-        ->Start();
+// The engine's state lives in this coroutine's frame, which is why the arguments are taken by value.
+template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink>
+boost::asio::awaitable<DownloadOutcome<TSink>>
+RunDownload(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> target, DownloadToOptions options,
+            TSink sink, AzureRequestOptions requestOptions,
+            std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now()) {
+    DownloadEngine<THttp, TCred, TSink> engine(httpClient, *target, std::move(options), std::move(requestOptions),
+                                               std::move(sink), start);
+    co_return co_await engine.Run();
 }
+
 // Closes the temporary file and, on success, renames it over `target`; any failure removes the temporary file.
 [[nodiscard]] std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>
 FinalizeFileDownload(std::ofstream& file, const std::filesystem::path& tempPath, const std::filesystem::path& target,
                      SummaryResult result);
 
 using FileResult = std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>;
-
-// What a file download owns across its writer and I/O-executor hand-offs. It is shared so a hand-off that throws
-// while being scheduled cannot take the user's completion or the temporary file's path down with the discarded task,
-// and `Completed` keeps the completion exactly-once however many paths race to fail the download.
-template <class TCompletion> struct FileDownloadState {
-    FileDownloadState(std::optional<DownloadWriteScheduler> scheduler, std::filesystem::path targetPath,
-                      TCompletion userCompletion, const AzureRequestOptions& requestOptions,
-                      std::chrono::steady_clock::time_point start)
-        : Scheduler(std::move(scheduler)), Deadline(requestOptions, start), Target(std::move(targetPath)),
-          Completion(std::move(userCompletion)) {}
-
-    std::optional<DownloadWriteScheduler> Scheduler;
-    AggregateDeadline Deadline;
-    std::filesystem::path TempPath;
-    std::filesystem::path Target;
-    TCompletion Completion;
-    std::optional<FileSink> Sink;
-    std::optional<SummaryResult> Result;
-    std::optional<FileResult> Final;
-    std::atomic<bool> Completed{false};
-
-    // The caller's slot is owned here for the whole operation. The inner download listens to `Signal` instead, and
-    // `Canceled` remembers an abort that arrives while no inner download exists yet (queued file preparation) or
-    // after it finished (queued finalization). `SignalMutex` serializes the inner download installing its handler
-    // with an abort being forwarded.
-    std::atomic<bool> Canceled{false};
-    std::mutex SignalMutex;
-    boost::asio::cancellation_signal Signal;
-};
 
 [[nodiscard]] inline BlobStorageError CurrentFailure() {
     try {
@@ -910,240 +600,128 @@ template <class TCompletion> struct FileDownloadState {
     }
 }
 
-// Delivers the user's completion once, on its associated executor. The handler stays owned by `state` until it is
-// invoked, so a post that cannot be scheduled falls back to invoking it on this thread rather than losing it.
-template <HttpClientLike THttp, class TState>
-void CompleteFileDownload(THttp& httpClient, const std::shared_ptr<TState>& state, FileResult result) noexcept {
-    if (state->Completed.exchange(true)) {
-        return;
-    }
-    const auto deliver = [state]() { std::move(state->Completion)(std::move(*state->Final)); };
-    try {
-        state->Final.emplace(std::move(result));
-        boost::asio::post(boost::asio::get_associated_executor(state->Completion, httpClient.get_executor()), deliver);
-        return;
-    } catch (...) {
-    }
-    if (!state->Final.has_value()) {
-        return;
-    }
-    try {
-        deliver();
-    } catch (...) {
-    }
-}
-
-// Closes the temporary file, removes it and reports `error`. Blocks on the disk, so it runs on a writer thread (or
-// before any file exists).
-template <HttpClientLike THttp, class TState>
-void AbandonFileDownload(THttp& httpClient, const std::shared_ptr<TState>& state, BlobStorageError error) noexcept {
-    state->Sink.reset();
-    if (!state->TempPath.empty()) {
+// Removes the temporary file (if any) and reports `error`. Blocks on the disk, so it runs on a writer thread.
+inline FileResult AbandonFileDownload(const std::filesystem::path& tempPath, BlobStorageError error) noexcept {
+    if (!tempPath.empty()) {
         std::error_code ignored;
-        std::filesystem::remove(state->TempPath, ignored);
+        std::filesystem::remove(tempPath, ignored);
     }
-    CompleteFileDownload(httpClient, state, FileResult{std::unexpect, std::move(error)});
+    return FileResult{std::unexpect, std::move(error)};
 }
-
-// As AbandonFileDownload, for a thread that must not block: it hops to a writer. Only when that hop fails too does
-// the cleanup run here, because leaking the partial file and the completion would be worse.
-template <HttpClientLike THttp, class TState>
-void AbandonFileDownloadFromIo(THttp& httpClient, const std::shared_ptr<TState>& state,
-                               const BlobStorageError& error) noexcept {
-    try {
-        RunOnWriter(httpClient, state->Scheduler,
-                    [&httpClient, state, error]() { AbandonFileDownload(httpClient, state, error); });
-        return;
-    } catch (...) {
-    }
-    AbandonFileDownload(httpClient, state, error);
-}
-
-// The last writer-thread step: closes the file and renames it over the target (see FinalizeFileDownload).
-template <HttpClientLike THttp, class TState>
-void FinishFileDownloadOnWriter(THttp& httpClient, const std::shared_ptr<TState>& state) noexcept {
-    try {
-        // The commit point: once the rename starts the destination is published and a cancellation is too late.
-        if (state->Canceled.load() && state->Result->has_value()) {
-            AbandonFileDownload(httpClient, state,
-                                MakeFailure(std::errc::operation_canceled, "The operation was canceled."));
-            return;
-        }
-        if (state->Result->has_value() && state->Deadline.Expired()) {
-            AbandonFileDownload(httpClient, state,
-                                MakeFailure(std::errc::timed_out, "The download exceeded its total deadline."));
-            return;
-        }
-        auto result =
-            FinalizeFileDownload(state->Sink->File(), state->TempPath, state->Target, std::move(*state->Result));
-        state->Sink.reset();
-        CompleteFileDownload(httpClient, state, std::move(result));
-    } catch (...) {
-        AbandonFileDownload(httpClient, state, CurrentFailure());
-    }
-}
-
-// Receives the network phase's outcome on the I/O thread and schedules finalization on a writer. It is internal
-// (see InternalCompletion): it never throws, and a failure to schedule becomes the download's error.
-template <HttpClientLike THttp, class TState> struct FileFinalizer {
-    static constexpr bool IsInternal = true;
-
-    gsl::not_null<THttp*> Http;
-    std::shared_ptr<TState> State;
-
-    void operator()(SummaryResult result, FileSink sink) noexcept {
-        try {
-            State->Sink.emplace(std::move(sink));
-            State->Result.emplace(std::move(result));
-            RunOnWriter(*Http, State->Scheduler,
-                        [http = Http, state = State]() { FinishFileDownloadOnWriter(*http, state); });
-        } catch (...) {
-            AbandonFileDownloadFromIo(*Http, State, CurrentFailure());
-        }
-    }
-};
 } // namespace DownloadDetail
 
-template <HttpClientLike THttp, class TCred, class TCompletion>
-void DownloadBlobAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
-                       DownloadBlobOptions operationOptions, TCompletion completion,
-                       AzureRequestOptions requestOptions) {
-    DownloadDetail::StartDownload(
-        httpClient, std::move(options), ToDownloadToOptions(std::move(operationOptions)), StringSink{},
-        [completion = std::move(completion)](DownloadDetail::SummaryResult result, StringSink sink) mutable {
-            if (!result.has_value()) {
-                completion(std::unexpected(std::move(result).error()));
-                return;
-            }
-            Models::DownloadBlobResult value;
-            value.Content = sink.Take();
-            value.Properties = std::move(result->Properties);
-            value.ContentRange = result->ContentRange;
-            completion(
-                Response<Models::DownloadBlobResult>{std::move(value), std::move(result->FirstResponse), std::nullopt});
-        },
-        requestOptions);
+// Downloads the blob into memory. See DownloadBlobToSpanAsync for the transfer behavior.
+template <HttpClientLike THttp, class TCred>
+boost::asio::awaitable<std::expected<Response<Models::DownloadBlobResult>, BlobStorageError>>
+DownloadBlobAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
+                  DownloadBlobOptions operationOptions, AzureRequestOptions requestOptions) {
+    auto outcome = co_await DownloadDetail::RunDownload(httpClient, std::move(options),
+                                                        ToDownloadToOptions(std::move(operationOptions)), StringSink{},
+                                                        std::move(requestOptions));
+    if (!outcome.Result.has_value()) {
+        co_return std::unexpected(std::move(outcome.Result).error());
+    }
+    Models::DownloadBlobResult value;
+    value.Content = outcome.Sink.Take();
+    value.Properties = std::move(outcome.Result->Properties);
+    value.ContentRange = outcome.Result->ContentRange;
+    co_return Response<Models::DownloadBlobResult>{std::move(value), std::move(outcome.Result->FirstResponse),
+                                                   std::nullopt};
 }
 
-template <HttpClientLike THttp, class TCred, class TCompletion>
-void DownloadBlobToSpanAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
-                             DownloadToOptions operationOptions, std::span<char> destination, TCompletion completion,
-                             AzureRequestOptions requestOptions) {
-    DownloadDetail::StartDownload(
-        httpClient, std::move(options), std::move(operationOptions), SpanSink{destination},
-        [completion = std::move(completion)](DownloadDetail::SummaryResult result) mutable {
-            if (!result.has_value()) {
-                completion(std::unexpected(std::move(result).error()));
-                return;
-            }
-            completion(DownloadDetail::ToDownloadToResponse(std::move(*result)));
-        },
-        requestOptions);
+template <HttpClientLike THttp, class TCred>
+boost::asio::awaitable<std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>>
+DownloadBlobToSpanAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
+                        DownloadToOptions operationOptions, std::span<char> destination,
+                        AzureRequestOptions requestOptions) {
+    auto outcome = co_await DownloadDetail::RunDownload(httpClient, std::move(options), std::move(operationOptions),
+                                                        SpanSink{destination}, std::move(requestOptions));
+    if (!outcome.Result.has_value()) {
+        co_return std::unexpected(std::move(outcome.Result).error());
+    }
+    co_return DownloadDetail::ToDownloadToResponse(std::move(*outcome.Result));
 }
 
 // Every blocking filesystem call (directory check, open, close, rename, remove) runs on the write scheduler (see
-// RunOnWriter), never on the thread that initiates the download or on the transport thread that completes it. The
-// handler then completes on its associated executor.
-template <HttpClientLike THttp, class TCred, class TCompletion>
-void DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
-                             DownloadToOptions operationOptions, const std::filesystem::path& path,
-                             TCompletion completion, AzureRequestOptions requestOptions) {
-    using State = DownloadDetail::FileDownloadState<TCompletion>;
+// RunOnWriter), never on the thread that runs the coroutine. The download goes to a sibling temporary file that is
+// renamed over `path` only on success, so a failed download never leaves a truncated target behind. A cancellation
+// that arrives before the rename removes the temporary file; the rename is the commit point.
+template <HttpClientLike THttp, class TCred>
+boost::asio::awaitable<std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>>
+DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
+                        DownloadToOptions operationOptions, std::filesystem::path path,
+                        AzureRequestOptions requestOptions) {
+    using namespace DownloadDetail;
+    co_await boost::asio::this_coro::throw_if_cancelled(false);
+    const auto cancellation = co_await boost::asio::this_coro::cancellation_state;
     // The budget covers the hand-offs to the writer and back, so it starts here rather than at the first GET.
     const auto start = std::chrono::steady_clock::now();
-    // Holds the completion and temporary path for the whole operation, so no hand-off can lose them if it throws.
-    auto state =
-        std::make_shared<State>(operationOptions.WriteScheduler, path, std::move(completion), requestOptions, start);
-    auto scheduler = operationOptions.WriteScheduler;
-    if (auto parentSlot = requestOptions.GetCancellationSlot(); parentSlot.is_connected()) {
-        std::weak_ptr<State> const weak = state;
-        // The handler may outlive the operation (an explicit slot stays connected), so it holds only the weak state.
-        parentSlot.assign([weak](boost::asio::cancellation_type_t type) {
-            if (!IsAbortingCancellation(type)) {
-                return;
-            }
-            if (auto self = weak.lock()) {
-                self->Canceled.store(true);
-                std::lock_guard lock(self->SignalMutex);
-                self->Signal.emit(type);
-            }
-        });
-        requestOptions.SetCancellationSlot(state->Signal.slot());
+    const AggregateDeadline deadline(requestOptions, start);
+    const auto scheduler = operationOptions.WriteScheduler;
+    const auto canceled = [&] { return IsAbortingCancellation(cancellation.cancelled()); };
+
+    std::filesystem::path tempPath;
+    std::ofstream file;
+    std::optional<BlobStorageError> prepareFailure;
+    if (canceled()) {
+        co_return std::unexpected(CanceledFailure());
     }
     try {
-        DownloadDetail::RunOnWriter(
-            httpClient, scheduler,
-            [&httpClient, state, start, options, operationOptions = std::move(operationOptions),
-             requestOptions]() mutable {
-                try {
-                    if (state->Canceled.load()) {
-                        DownloadDetail::CompleteFileDownload(
-                            httpClient, state,
-                            DownloadDetail::FileResult{std::unexpect,
-                                                       DownloadDetail::MakeFailure(std::errc::operation_canceled,
-                                                                                   "The operation was canceled.")});
-                        return;
-                    }
-                    std::error_code statusError;
-                    if (std::filesystem::is_directory(state->Target, statusError)) {
-                        DownloadDetail::CompleteFileDownload(
-                            httpClient, state,
-                            DownloadDetail::FileResult{
-                                std::unexpect,
-                                DownloadDetail::MakeFailure(std::make_error_code(std::errc::is_a_directory),
-                                                            "The destination path is a directory.")});
-                        return;
-                    }
-
-                    // Download into a sibling temporary file and rename it over the target only on success, so a
-                    // failed download never leaves a truncated target behind.
-                    state->TempPath = state->Target;
-                    state->TempPath += ".partial-" + CreateClientRequestId();
-                    errno = 0;
-                    std::ofstream file(state->TempPath, std::ios::binary | std::ios::trunc);
-                    if (!file) {
-                        DownloadDetail::CompleteFileDownload(
-                            httpClient, state,
-                            DownloadDetail::FileResult{
-                                std::unexpect, DownloadDetail::MakeFailure(DownloadDetail::LastOpenError(),
-                                                                           "Failed to open destination file.")});
-                        return;
-                    }
-                    if (state->Canceled.load()) {
-                        file.close();
-                        DownloadDetail::AbandonFileDownload(
-                            httpClient, state,
-                            DownloadDetail::MakeFailure(std::errc::operation_canceled, "The operation was canceled."));
-                        return;
-                    }
-
-                    // The chunk requests are started from the I/O executor, like any other download. If the post
-                    // throws, the discarded task takes only the stream; the state still lets us clean up.
-                    boost::asio::post(httpClient.get_executor(), [&httpClient, state, options = std::move(options),
-                                                                  operationOptions = std::move(operationOptions),
-                                                                  file = std::move(file), requestOptions,
-                                                                  start]() mutable {
-                        try {
-                            std::lock_guard lock(state->SignalMutex);
-                            DownloadDetail::StartDownload(
-                                httpClient, std::move(options), std::move(operationOptions), FileSink{std::move(file)},
-                                DownloadDetail::FileFinalizer<THttp, State>{&httpClient, state}, requestOptions, start);
-                            // An abort that arrived before the inner download installed its handler was only recorded.
-                            if (state->Canceled.load()) {
-                                state->Signal.emit(boost::asio::cancellation_type::terminal);
-                            }
-                        } catch (...) {
-                            DownloadDetail::AbandonFileDownloadFromIo(httpClient, state,
-                                                                      DownloadDetail::CurrentFailure());
-                        }
-                    });
-                } catch (...) {
-                    DownloadDetail::AbandonFileDownload(httpClient, state, DownloadDetail::CurrentFailure());
-                }
-            });
+        co_await RunOnWriter(httpClient, scheduler, [&] {
+            std::error_code statusError;
+            if (std::filesystem::is_directory(path, statusError)) {
+                prepareFailure = MakeFailure(std::make_error_code(std::errc::is_a_directory),
+                                             "The destination path is a directory.");
+                return;
+            }
+            tempPath = path;
+            tempPath += ".partial-" + CreateClientRequestId();
+            errno = 0;
+            file.open(tempPath, std::ios::binary | std::ios::trunc);
+            if (!file) {
+                prepareFailure = MakeFailure(LastOpenError(), "Failed to open destination file.");
+                tempPath.clear();
+            }
+        });
     } catch (...) {
-        // Nothing has started and no file exists, so only the completion remains to be delivered.
-        DownloadDetail::AbandonFileDownload(httpClient, state, DownloadDetail::CurrentFailure());
+        prepareFailure = CurrentFailure();
     }
+    if (prepareFailure.has_value()) {
+        co_return std::unexpected(std::move(*prepareFailure));
+    }
+    if (canceled()) {
+        file.close();
+        co_return AbandonFileDownload(tempPath, CanceledFailure());
+    }
+
+    auto outcome = co_await RunDownload(httpClient, std::move(options), std::move(operationOptions),
+                                        FileSink{std::move(file)}, std::move(requestOptions), start);
+
+    FileResult finished = std::unexpected(BlobStorageError{});
+    const auto finalize = [&] {
+        try {
+            const bool succeeded = outcome.Result.has_value();
+            // The commit point: once the rename starts the destination is published and a cancellation is too late.
+            if (succeeded && canceled()) {
+                outcome.Sink.File().close();
+                finished = AbandonFileDownload(tempPath, CanceledFailure());
+            } else if (succeeded && deadline.Expired()) {
+                outcome.Sink.File().close();
+                finished = AbandonFileDownload(
+                    tempPath, MakeFailure(std::errc::timed_out, "The download exceeded its total deadline."));
+            } else {
+                finished = FinalizeFileDownload(outcome.Sink.File(), tempPath, path, std::move(outcome.Result));
+            }
+        } catch (...) {
+            finished = AbandonFileDownload(tempPath, CurrentFailure());
+        }
+    };
+    try {
+        co_await RunOnWriter(httpClient, scheduler, finalize);
+    } catch (...) {
+        // The hop failed too, but leaking the partial file would be worse than blocking this thread once.
+        finalize();
+    }
+    co_return finished;
 }
 } // namespace AVEVA::AzureClient::Private
