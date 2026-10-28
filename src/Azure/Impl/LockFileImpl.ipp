@@ -291,7 +291,10 @@ template <typename TBlob> void BasicLockFileImpl<TBlob>::RenewAsync(RenewCallbac
             bool renewed = true;
             try {
                 Unwrap(std::move(result));
-                m_lastRenewalTime = requestStart;
+                // Overlapping renewals can complete out of order; never move the renewal time backwards.
+                auto current = m_lastRenewalTime.load();
+                while (current < requestStart && !m_lastRenewalTime.compare_exchange_weak(current, requestStart)) {
+                }
                 const std::scoped_lock lock(m_stateMutex);
                 PublishDeadlineLocked();
             } catch (...) {
