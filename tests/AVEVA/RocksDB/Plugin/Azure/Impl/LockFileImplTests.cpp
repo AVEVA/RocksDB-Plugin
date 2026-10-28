@@ -5,6 +5,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LeaseRenewalLoop.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
+#include "AVEVA/RocksDB/Plugin/TestLogger.hpp"
 
 #include "FakeHttpClient.hpp"
 #include "TestSupport.hpp"
@@ -50,7 +51,7 @@ class LockFileImplTests : public ::testing::Test {
         // Some completions are posted to the fake's own io_context while Lock() blocks on a future.
         m_httpClient.StartBackgroundPump();
         m_runtime = std::make_shared<ClientRuntimeBase>();
-        m_logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
+        m_logger = AVEVA::RocksDB::Plugin::Tests::MakeTestLogger();
     }
 
     std::unique_ptr<LockFileImpl> CreateLock(std::chrono::seconds leaseLength,

@@ -5,6 +5,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlobWriter.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
+#include "AVEVA/RocksDB/Plugin/TestLogger.hpp"
 
 #include "FakeBlobEnvironment.hpp"
 
@@ -34,7 +35,7 @@ class ReadWriteFileImplTests : public ::testing::Test {
     std::string m_testFileName = "test.blob";
 
     void SetUp() override {
-        m_logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
+        m_logger = AVEVA::RocksDB::Plugin::Tests::MakeTestLogger();
         m_env.Blob->SetCapacity(Configuration::PageBlob::DefaultSize);
     }
 
@@ -957,7 +958,7 @@ TEST_F(ReadWriteFileImplTests, DestructorAfterExplicitCloseIsQuiet) {
 
 TEST(PageBlobWriterTests, EnsureCapacityHonoursTheRequirementAndDoublesOtherwise) {
     FakeBlobEnvironment env;
-    auto logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
+    auto logger = AVEVA::RocksDB::Plugin::Tests::MakeTestLogger();
     AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobWriter<std::remove_reference_t<decltype(*env.Client)>> writer(
         "f", env.Runtime, env.Client, nullptr, logger, 0);
     EXPECT_EQ(writer.Capacity(), 0);

@@ -7,6 +7,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientFactory.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
+#include "AVEVA/RocksDB/Plugin/TestLogger.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
@@ -84,7 +85,7 @@ void AzureIntegrationTestBase::SetUp() {
     m_root = "it-" + boost::uuids::to_string(boost::uuids::random_generator()());
     m_containerPrefix =
         StorageAccount::UniquePrefix(m_credentials->GetStorageAccountUrl(), m_credentials->GetDbName()) + "/" + m_root;
-    m_logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
+    m_logger = AVEVA::RocksDB::Plugin::Tests::MakeTestLogger();
 
     CreateContainerClient();
 }

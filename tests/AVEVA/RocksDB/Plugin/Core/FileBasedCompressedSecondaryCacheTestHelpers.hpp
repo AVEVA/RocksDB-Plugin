@@ -5,6 +5,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp"
+#include "AVEVA/RocksDB/Plugin/TestLogger.hpp"
 #include "Mocks/FilesystemMock.hpp"
 #include "Mocks/TempDirectory.hpp"
 
@@ -43,7 +44,7 @@ namespace {
 // Returns a severity_logger_mt that discards all log records.
 // Use this wherever a non-null logger is required but log output is unwanted.
 inline std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> MakeNullLogger() {
-    return std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
+    return AVEVA::RocksDB::Plugin::Tests::MakeTestLogger();
 }
 
 // A simple heap-allocated payload object used by the test helper callbacks.
