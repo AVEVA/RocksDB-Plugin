@@ -305,7 +305,11 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
         return true;
     }
 
-    n = std::min(n, kMaxPrefetchBytes);
+    // Clamp so that offset + n below cannot overflow int64_t.
+    n = std::min({n, kMaxPrefetchBytes, RangeCheck::MaxOffset - offset});
+    if (n <= 0) {
+        return true;
+    }
     auto* const state = &self->m_prefetch;
     uint64_t id = 0;
     std::string name;
