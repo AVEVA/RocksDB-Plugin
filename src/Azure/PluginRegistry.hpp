@@ -6,10 +6,12 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Plugin.hpp"
 #include <rocksdb/file_system.h>
 
+#include <boost/algorithm/hex.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
 
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
@@ -56,14 +58,10 @@ std::string PluginNameFor(const StorageInfo& primary, const std::optional<Storag
         append(backup->GetDbName());
     }
 
-    static constexpr std::string_view digits = "0123456789abcdef";
     std::string name(Plugin::Name);
     name += '-';
-    for (const char ch : canonical) {
-        const auto c = static_cast<unsigned char>(ch);
-        name += digits[c >> 4U];
-        name += digits[c & 0x0FU];
-    }
+    name.reserve(name.size() + canonical.size() * 2);
+    boost::algorithm::hex_lower(canonical, std::back_inserter(name));
     return name;
 }
 
