@@ -33,6 +33,14 @@ class CachedReadHandle {
 class FileCacheEntry
     : public boost::intrusive::list_base_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>> {
   public:
+    enum class State {
+        Stale,
+        QueuedForDownload,
+        Downloading,
+        Active,
+    };
+
+  private:
     // Links the entry into the cache's list of metadata-only stale entries (stale, nothing on disk) while it is one,
     // so the oldest can be pruned without scanning the LRU list.
     using MetadataOnlyHook =
@@ -45,14 +53,6 @@ class FileCacheEntry
     // cache's mutex.
     uint64_t LastRelinkEpoch = 0;
 
-    enum class State {
-        Stale,
-        QueuedForDownload,
-        Downloading,
-        Active,
-    };
-
-  private:
     State m_state;
     std::string m_filePath;
     int64_t m_size;
