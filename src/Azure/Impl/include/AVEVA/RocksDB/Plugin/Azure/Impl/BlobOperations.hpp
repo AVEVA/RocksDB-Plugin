@@ -774,7 +774,7 @@ void DownloadAsync(TBlob& client, int64_t blobOffset, int64_t readLength, std::s
         return;
     }
     // The lease is owned by the completion, so the transfer can never write into freed memory.
-    auto buffer = DownloadBufferPool::Shared()->Acquire(static_cast<size_t>(readLength));
+    auto buffer = DownloadBufferPool::Shared().Acquire(static_cast<size_t>(readLength));
     const std::span<char> destination(buffer->Data(), buffer->Size());
     // The stop registration is armed after the request is initiated, so destroying it (by the completion, possibly
     // on another thread) never waits on the bridge mutex that initiation holds. A stop requested before arming

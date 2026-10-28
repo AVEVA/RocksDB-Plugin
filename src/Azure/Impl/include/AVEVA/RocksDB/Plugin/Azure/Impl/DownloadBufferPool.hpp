@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <utility>
 #include <vector>
 
@@ -33,8 +34,7 @@ struct NoDownloadBufferPoolHooks {
 /// while the transfer is still writing, so the bytes land in a pooled buffer that the completion owns and are copied
 /// into scratch only if the read is still live (see AsyncReadRequest::Complete). That one copy remains by design.
 /// </summary>
-template <typename Hooks = NoDownloadBufferPoolHooks>
-class BasicDownloadBufferPool : public std::enable_shared_from_this<BasicDownloadBufferPool<Hooks>> {
+template <typename Hooks = NoDownloadBufferPoolHooks> class BasicDownloadBufferPool {
   public:
     // Buffers above this size are not retained, so one large read cannot pin memory for the process lifetime.
     static constexpr std::size_t MaxPooledBufferBytes = 4U * 1024U * 1024U;
@@ -48,9 +48,8 @@ class BasicDownloadBufferPool : public std::enable_shared_from_this<BasicDownloa
     /// <summary>A buffer on loan from the pool; it returns itself when the last owner lets go.</summary>
     class Lease {
       public:
-        Lease(std::shared_ptr<BasicDownloadBufferPool> pool, std::unique_ptr<char[]> buffer, std::size_t capacity,
-              std::size_t size)
-            : m_pool(std::move(pool)), m_buffer(std::move(buffer)), m_capacity(capacity), m_size(size) {}
+        Lease(BasicDownloadBufferPool& pool, std::unique_ptr<char[]> buffer, std::size_t capacity, std::size_t size)
+            : m_pool(&pool), m_buffer(std::move(buffer)), m_capacity(capacity), m_size(size) {}
         Lease(const Lease&) = delete;
         Lease& operator=(const Lease&) = delete;
         ~Lease() { m_pool->Return(std::move(m_buffer), m_capacity); }
@@ -59,16 +58,29 @@ class BasicDownloadBufferPool : public std::enable_shared_from_this<BasicDownloa
         [[nodiscard]] std::size_t Size() const noexcept { return m_size; }
 
       private:
-        std::shared_ptr<BasicDownloadBufferPool> m_pool;
+        BasicDownloadBufferPool* m_pool;
         std::unique_ptr<char[]> m_buffer;
         std::size_t m_capacity;
         std::size_t m_size;
     };
 
-    /// <summary>The process-wide pool. Leases keep it alive, so they may outlive any caller.</summary>
-    static std::shared_ptr<BasicDownloadBufferPool> Shared() {
-        static const auto pool = std::make_shared<BasicDownloadBufferPool>();
-        return pool;
+    /// <summary>The process-wide pool. It is never destroyed, so leases (which hold a raw pointer to their pool)
+    /// may outlive any caller and static destruction.</summary>
+    static BasicDownloadBufferPool& Shared() {
+        static BasicDownloadBufferPool* const pool = new BasicDownloadBufferPool();
+        return *pool;
+    }
+
+    BasicDownloadBufferPool() = default;
+    BasicDownloadBufferPool(const BasicDownloadBufferPool&) = delete;
+    BasicDownloadBufferPool& operator=(const BasicDownloadBufferPool&) = delete;
+    // Leases hold a raw pointer to the pool, so every lease must be gone first.
+    ~BasicDownloadBufferPool() {
+        while (m_freeBlocks != nullptr) {
+            FreeBlock* next = m_freeBlocks->Next;
+            ::operator delete(m_freeBlocks, m_blockSize, std::align_val_t{BlockAlign});
+            m_freeBlocks = next;
+        }
     }
 
     /// <summary>The bytes actually allocated for a request of `size`; callers budgeting memory should charge
@@ -93,7 +105,7 @@ class BasicDownloadBufferPool : public std::enable_shared_from_this<BasicDownloa
         if (!buffer) {
             buffer = std::make_unique_for_overwrite<char[]>(capacity);
         }
-        return std::make_shared<Lease>(this->shared_from_this(), std::move(buffer), capacity, size);
+        return std::allocate_shared<Lease>(BlockAllocator<Lease>(this), *this, std::move(buffer), capacity, size);
     }
 
     /// <summary>Bytes currently held for reuse (for tests and diagnostics).</summary>
@@ -110,6 +122,61 @@ class BasicDownloadBufferPool : public std::enable_shared_from_this<BasicDownloa
     }
 
   private:
+    // A recycled shared_ptr control block. allocate_shared only ever asks for one block size, so a single free list
+    // serves every lease and a pool hit allocates nothing.
+    struct FreeBlock {
+        FreeBlock* Next;
+    };
+    static constexpr std::size_t BlockAlign = alignof(std::max_align_t);
+    static constexpr std::size_t MaxFreeBlocks = 64;
+
+    template <typename T> class BlockAllocator {
+      public:
+        using value_type = T;
+        explicit BlockAllocator(BasicDownloadBufferPool* pool) noexcept : m_pool(pool) {}
+        template <typename U> BlockAllocator(const BlockAllocator<U>& other) noexcept : m_pool(other.m_pool) {}
+
+        [[nodiscard]] T* allocate(const std::size_t count) {
+            return static_cast<T*>(m_pool->AllocateBlock(count * sizeof(T), alignof(T)));
+        }
+        void deallocate(T* block, const std::size_t count) noexcept {
+            m_pool->DeallocateBlock(block, count * sizeof(T), alignof(T));
+        }
+        template <typename U> bool operator==(const BlockAllocator<U>& other) const noexcept {
+            return m_pool == other.m_pool;
+        }
+
+      private:
+        template <typename U> friend class BlockAllocator;
+        BasicDownloadBufferPool* m_pool;
+    };
+
+    [[nodiscard]] void* AllocateBlock(const std::size_t bytes, const std::size_t align) {
+        if (align <= BlockAlign) {
+            std::scoped_lock lock(m_blockMutex);
+            if (m_freeBlocks != nullptr && m_blockSize == bytes) {
+                FreeBlock* block = m_freeBlocks;
+                m_freeBlocks = block->Next;
+                --m_freeBlockCount;
+                return block;
+            }
+        }
+        return ::operator new(bytes, std::align_val_t{std::max(align, BlockAlign)});
+    }
+
+    void DeallocateBlock(void* block, const std::size_t bytes, const std::size_t align) noexcept {
+        if (align <= BlockAlign && bytes >= sizeof(FreeBlock)) {
+            std::scoped_lock lock(m_blockMutex);
+            if ((m_freeBlocks == nullptr || m_blockSize == bytes) && m_freeBlockCount < MaxFreeBlocks) {
+                m_blockSize = bytes;
+                m_freeBlocks = new (block) FreeBlock{m_freeBlocks};
+                ++m_freeBlockCount;
+                return;
+            }
+        }
+        ::operator delete(block, bytes, std::align_val_t{std::max(align, BlockAlign)});
+    }
+
     static constexpr std::size_t ClassCount = std::bit_width(MaxPooledBufferBytes / MinBufferBytes);
 
 // One lock per size class, on its own cache line, so threads reading different sizes never contend or false-share.
@@ -172,6 +239,10 @@ class BasicDownloadBufferPool : public std::enable_shared_from_this<BasicDownloa
         }
     }
 
+    std::mutex m_blockMutex;
+    FreeBlock* m_freeBlocks = nullptr;
+    std::size_t m_freeBlockCount = 0;
+    std::size_t m_blockSize = 0;
     std::atomic<std::size_t> m_pooledBytes = 0;
     std::array<SizeClass, ClassCount> m_classes;
 };
