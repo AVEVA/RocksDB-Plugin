@@ -154,8 +154,6 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
     if (it == m_cache.end()) {
         // File not found in cache. The first access only records an entry and
         // marks it stale. A subsequent access to the same SST queues download.
-        BOOST_LOG_SEV(*m_logger, debug) << "File not found in cache on first access '" << filePath << "'";
-
         auto [inserted, _] = m_cache.emplace(std::piecewise_construct, std::forward_as_tuple(std::string(filePath)),
                                              std::forward_as_tuple(filePath, 0));
         inserted->second.SetGeneration(++m_nextGeneration);
@@ -169,6 +167,7 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
         ++m_undownloadedStaleCount;
         const auto pruned = PruneUndownloadedStaleEntriesUnsafe();
         lock.unlock();
+        BOOST_LOG_SEV(*m_logger, debug) << "File not found in cache on first access '" << filePath << "'";
         if (pruned != 0) {
             BOOST_LOG_SEV(*m_logger, debug) << "Pruned " << pruned << " stale metadata-only entries";
         }
@@ -179,17 +178,17 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
             // File is stale, do not read, but queue in the background for download.
             const auto state = fileEntry.GetState();
             if (state == FileCacheEntry::State::Stale) {
-                BOOST_LOG_SEV(*m_logger, debug) << "File is stale. Queueing for download: '" << filePath << "'";
                 m_fileDownloadQueue.emplace(filePath);
                 fileEntry.KnownNotOnDisk = false;
 
                 // A fresh download must not sit at its old, possibly least recent, LRU position.
-                EntryAccessedUnsafe(fileEntry);
+                EntryAccessedUnsafe(fileEntry, true);
                 // Mark as downloading now so we don't queue it again.
                 UpdateEntryUnsafe(
                     fileEntry, [](FileCacheEntry& entry) { entry.SetState(FileCacheEntry::State::QueuedForDownload); });
 
                 lock.unlock();
+                BOOST_LOG_SEV(*m_logger, debug) << "File is stale. Queueing for download: '" << filePath << "'";
                 m_cv.notify_one();
             }
 
@@ -530,7 +529,7 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                 UpdateEntryUnsafe(it->second,
                                   [](FileCacheEntry& entry) { entry.SetState(FileCacheEntry::State::Active); });
                 // The download took a while; the entry is the newest one, so a trim below must not pick it first.
-                EntryAccessedUnsafe(it->second);
+                EntryAccessedUnsafe(it->second, true);
 
                 // SetCacheSize may have lowered the maximum while this file was downloading, and it was not yet
                 // counted then.

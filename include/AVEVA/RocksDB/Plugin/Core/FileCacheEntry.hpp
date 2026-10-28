@@ -40,6 +40,9 @@ class FileCacheEntry
     // Set only for an entry recorded on first access with no download ever queued for it and nothing of that name
     // possibly on disk; pruning it then skips the delete. Guarded by the owning cache's mutex.
     bool KnownNotOnDisk = false;
+    // The cache's access epoch when this entry was last moved to the front of the LRU list. Guarded by the owning
+    // cache's mutex.
+    uint64_t LastRelinkEpoch = 0;
 
     enum class State {
         Stale,

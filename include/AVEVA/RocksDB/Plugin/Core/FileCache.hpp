@@ -37,6 +37,8 @@ class FileCache {
     // Guarded by m_mutex. Every new entry and every bump takes a fresh value, so a removed and re-created entry never
     // repeats the generation a downloader or reader captured earlier.
     uint64_t m_nextGeneration = 0;
+    // Counts accesses; an entry touched within the last size/4 accesses is not relinked again.
+    uint64_t m_accessEpoch = 0;
     std::unordered_map<std::string, FileCacheEntry, StringHash, StringEqual> m_cache;
     std::queue<std::string> m_fileDownloadQueue;
     boost::intrusive::list<FileCacheEntry, boost::intrusive::constant_time_size<false>> m_entryList;
@@ -100,7 +102,7 @@ class FileCache {
     void BackgroundDownload(std::stop_token stopToken);
     void PurgePartialDownloads() noexcept;
     void RetryFailedDeletesOnShutdown();
-    void EntryAccessedUnsafe(FileCacheEntry& file);
+    void EntryAccessedUnsafe(FileCacheEntry& file, bool force = false);
     size_t PruneUndownloadedStaleEntriesUnsafe();
     // Makes room for an incoming file by evicting `bytes`; refuses when that is more than the whole cache could hold.
     bool EvictToFit(int64_t bytes);

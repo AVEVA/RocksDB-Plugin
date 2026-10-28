@@ -16,7 +16,14 @@ namespace {
 constexpr size_t MaxUndownloadedStaleEntries = 2048;
 } // namespace
 
-void FileCache::EntryAccessedUnsafe(FileCacheEntry& file) {
+// Second chance: an entry relinked within the last size/4 accesses is already near the front, so hot files do not
+// churn the list on every read. Small caches (< 4 entries) always relink, keeping exact LRU order.
+void FileCache::EntryAccessedUnsafe(FileCacheEntry& file, const bool force) {
+    ++m_accessEpoch;
+    if (!force && file.is_linked() && m_accessEpoch - file.LastRelinkEpoch < m_cache.size() / 4) {
+        return;
+    }
+    file.LastRelinkEpoch = m_accessEpoch;
     file.unlink();
     m_entryList.push_front(file);
 }
@@ -70,6 +77,7 @@ bool FileCache::ShrinkToMaxUnsafe() {
 bool FileCache::EvictBytesUnsafe(const int64_t bytes) {
     BOOST_LOG_SEV(*m_logger, debug) << "Attempting to evict " << bytes << " (bytes) from the file cache.";
     int64_t bytesEvicted = 0;
+    size_t evictedCount = 0;
     if (m_entryList.empty()) {
         return bytesEvicted >= bytes;
     }
@@ -96,10 +104,9 @@ bool FileCache::EvictBytesUnsafe(const int64_t bytes) {
             const std::string filePath = current->GetFilePath();
             const auto fileSize = current->GetSize();
 
-            BOOST_LOG_SEV(*m_logger, debug)
-                << "Evicting '" << filePath << "' of size " << fileSize << "'bytes' from file cache";
             if (RemoveFileUnsafe(filePath)) {
                 bytesEvicted += fileSize;
+                ++evictedCount;
             }
         }
 
@@ -108,6 +115,8 @@ bool FileCache::EvictBytesUnsafe(const int64_t bytes) {
         }
     }
 
+    BOOST_LOG_SEV(*m_logger, debug) << "Evicted " << evictedCount << " file(s), " << bytesEvicted << " of " << bytes
+                                    << " (bytes) requested, from the file cache";
     return bytesEvicted >= bytes;
 }
 
