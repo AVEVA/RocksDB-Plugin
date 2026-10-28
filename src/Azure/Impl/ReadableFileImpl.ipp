@@ -647,7 +647,11 @@ void BasicReadableFileImpl<TBlob>::ReadAsyncAttempt(std::shared_ptr<const BasicR
          stopToken](std::exception_ptr error, unsigned int status, std::string_view data,
                     std::shared_ptr<const void> owner) mutable {
             if (error) {
-                if (status == HttpStatus::PreconditionFailed && !stopToken.stop_requested()) {
+                if (status == HttpStatus::PreconditionFailed && stopToken.stop_requested()) {
+                    ReadableFileDetail::FinishRead(self, callback, ReadableFileDetail::ReadAbandonedError(), {});
+                    return;
+                }
+                if (status == HttpStatus::PreconditionFailed) {
                     auto left = attemptsLeft;
                     if (!ReadableFileDetail::StaleReadPolicy::TrySpendRefresh(left)) {
                         ReadableFileDetail::FinishRead(self, callback, ReadableFileDetail::StaleReadError(), {});
