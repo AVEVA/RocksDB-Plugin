@@ -73,7 +73,7 @@ void BlobMetadataCache::Store(std::string_view blobUrl, const int64_t size, std:
     if (m_sizes.size() >= MaxCachedSizes) {
         // The full sweep is O(n), so it runs at most once per TTL; otherwise a single entry is evicted.
         if (now >= m_nextSweep) {
-            std::erase_if(m_sizes, [&](const auto& entry) {
+            boost::unordered::erase_if(m_sizes, [&](const auto& entry) {
                 return now - entry.second.FetchedAt >= Configuration::MetadataCacheTtl;
             });
             m_nextSweep = now + Configuration::MetadataCacheTtl;

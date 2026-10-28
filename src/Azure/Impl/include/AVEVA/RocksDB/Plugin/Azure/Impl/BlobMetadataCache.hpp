@@ -3,6 +3,7 @@
 
 #pragma once
 #include <atomic>
+#include <boost/unordered/unordered_flat_map.hpp>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -10,7 +11,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// <summary>
@@ -61,7 +61,7 @@ class BlobMetadataCache {
         using is_transparent = void;
         std::size_t operator()(const std::string_view url) const noexcept { return std::hash<std::string_view>{}(url); }
     };
-    using EntryMap = std::unordered_map<std::string, Entry, UrlHash, std::equal_to<>>;
+    using EntryMap = boost::unordered_flat_map<std::string, Entry, UrlHash, std::equal_to<>>;
 
     void Store(std::string_view blobUrl, int64_t size, std::optional<std::string> etag, uint64_t epoch) const;
     // Locks, drops the entry if it expired, and returns project(entry) (empty when there is none), so a caller that
@@ -73,7 +73,7 @@ class BlobMetadataCache {
     mutable std::atomic<uint64_t> m_epoch{0};
     // Per-URL invalidation epochs: a fetch is rejected only if its own URL was invalidated after it started, or it
     // started before the watermark (raised whenever tombstones are dropped wholesale).
-    mutable std::unordered_map<std::string, uint64_t, UrlHash, std::equal_to<>> m_tombstones;
+    mutable boost::unordered_flat_map<std::string, uint64_t, UrlHash, std::equal_to<>> m_tombstones;
     mutable uint64_t m_tombstoneWatermark = 0;
     mutable std::chrono::steady_clock::time_point m_nextSweep{};
     const std::atomic<int64_t>* m_manualClock = nullptr;
