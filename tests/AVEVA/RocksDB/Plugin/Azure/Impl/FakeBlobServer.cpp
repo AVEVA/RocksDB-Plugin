@@ -3,8 +3,9 @@
 
 #include "FakeBlobServer.hpp"
 
+#include <boost/algorithm/string/case_conv.hpp>
+
 #include <algorithm>
-#include <cctype>
 #include <charconv>
 #include <string_view>
 #include <system_error>
@@ -209,8 +210,7 @@ void FakeBlobServer::ApplyMetadata(const HttpRequest& request, StoredBlob& blob)
     blob.Metadata.clear();
     blob.Size = 0;
     for (const auto& header : request.GetHeaders()) {
-        std::string name = header.GetName();
-        std::ranges::transform(name, name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        std::string name = boost::algorithm::to_lower_copy(std::string(header.GetName()));
         if (!name.starts_with(prefix)) {
             continue;
         }

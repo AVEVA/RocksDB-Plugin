@@ -3,6 +3,7 @@
 
 find_package(aveva-http-client CONFIG REQUIRED)
 find_package(Boost CONFIG REQUIRED COMPONENTS asio beast)
+find_package(boost_url CONFIG REQUIRED)
 find_package(GTest CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 
@@ -32,7 +33,7 @@ endif()
 add_library(aveva-azure-client-test-main STATIC FakeInstantiations.cpp TestEventListener.cpp)
 target_include_directories(aveva-azure-client-test-main PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_link_libraries(aveva-azure-client-test-main
-    PUBLIC aveva::azure-client aveva::http-client Boost::asio Boost::beast GTest::gtest OpenSSL::SSL OpenSSL::Crypto
+    PUBLIC aveva::azure-client aveva::http-client Boost::asio Boost::beast Boost::url GTest::gtest OpenSSL::SSL OpenSSL::Crypto
 )
 if(MSVC)
     target_compile_options(aveva-azure-client-test-main PRIVATE /bigobj)

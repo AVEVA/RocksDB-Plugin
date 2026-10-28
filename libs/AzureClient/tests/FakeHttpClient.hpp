@@ -24,6 +24,7 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/thread_pool.hpp>
+#include <boost/url/parse.hpp>
 
 #include <cassert>
 #include <charconv>
@@ -57,45 +58,42 @@ namespace AVEVA::AzureClient::Tests {
     decoded.reserve(text.size());
     for (std::size_t i = 0; i < text.size(); ++i) {
         unsigned int value = 0;
-        if (text[i] == '%' && i + 2 < text.size() &&
-            std::from_chars(text.data() + i + 1, text.data() + i + 3, value, 16).ec == std::errc{}) {
-            decoded += static_cast<char>(value);
-            i += 2;
-        } else {
-            decoded += text[i];
+        if (text[i] == '%' && i + 2 < text.size()) {
+            const auto digits = text.data() + i + 1;
+            const auto [end, ec] = std::from_chars(digits, digits + 2, value, 16);
+            if (ec == std::errc{} && end == digits + 2) {
+                decoded += static_cast<char>(value);
+                i += 2;
+                continue;
+            }
         }
+        decoded += text[i];
     }
     return decoded;
 }
 
 // The decoded path of a URL without its leading '/' and without the query ("container/blob").
 [[nodiscard]] inline std::string UrlPath(const std::string& url) {
-    const auto scheme = url.find("://");
-    const auto start = url.find('/', scheme == std::string::npos ? 0 : scheme + 3);
-    if (start == std::string::npos) {
+    const auto parsed = boost::urls::parse_uri_reference(url);
+    if (!parsed) {
         return {};
     }
-    const auto end = url.find('?', start);
-    return PercentDecode(std::string_view(url).substr(start + 1, end == std::string::npos ? end : end - start - 1));
+    std::string path = parsed->path();
+    if (!path.empty()) {
+        path.erase(0, 1);
+    }
+    return path;
 }
 
 // The decoded value of the first query parameter called `name`; empty if absent or valueless.
 [[nodiscard]] inline std::string QueryValue(const std::string& url, std::string_view name) {
-    const auto query = url.find('?');
-    if (query == std::string::npos) {
+    const auto parsed = boost::urls::parse_uri_reference(url);
+    if (!parsed) {
         return {};
     }
-    std::string_view rest = std::string_view(url).substr(query + 1);
-    while (!rest.empty()) {
-        const auto end = rest.find('&');
-        const auto pair = rest.substr(0, end);
-        const auto equals = pair.find('=');
-        if (pair.substr(0, equals) == name) {
-            return equals == std::string_view::npos ? std::string() : PercentDecode(pair.substr(equals + 1));
-        }
-        rest = end == std::string_view::npos ? std::string_view() : rest.substr(end + 1);
-    }
-    return {};
+    const auto params = parsed->params();
+    const auto it = params.find(name);
+    return it == params.end() || !(*it).has_value ? std::string() : std::string((*it).value);
 }
 
 // Requests a fake holds until the test releases them, oldest first. An entry whose request has finished by other
