@@ -5,11 +5,13 @@
 // with the RocksDB ObjectLibrary and then hands control to the stock
 // rocksdb::db_bench_tool. Configure the plugin via environment variables:
 //
-//   AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL  (required to enable Azure backend)
+//   AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL  (storage account endpoint)
 //   AVEVA_DB_BENCH_CONTAINER            (blob container name; used as dbName)
 //   AVEVA_DB_BENCH_TENANT_ID            (Service Principal auth)
 //   AVEVA_DB_BENCH_CLIENT_ID            (Service Principal auth)
 //   AVEVA_DB_BENCH_CLIENT_SECRET        (Service Principal auth)
+//
+// All five variables are required; the tool exits with status 2 when one is missing.
 //
 // Pass RocksDB db_bench flags on the command line as usual. To route I/O
 // through the plugin add:
@@ -34,6 +36,7 @@
 #include <rocksdb/db_bench_tool.h>
 #include <rocksdb/env.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -42,7 +45,6 @@
 #include <string>
 #include <string_view>
 #include <thread>
-#include <vector>
 
 namespace {
 
@@ -94,10 +96,9 @@ int main(int argc, char** argv) {
     static boost::asio::io_context ioContextStorage;
     static auto workGuard = boost::asio::make_work_guard(ioContextStorage);
     auto* ioContext = &ioContextStorage;
-    std::vector<std::thread> ioThreads;
-    for (int i = 0; i < 4; ++i) {
-        ioThreads.emplace_back([ioContext] { ioContext->run(); });
-        ioThreads.back().detach();
+    const auto ioThreadCount = std::max(2U, std::thread::hardware_concurrency());
+    for (unsigned i = 0; i < ioThreadCount; ++i) {
+        std::thread([ioContext] { ioContext->run(); }).detach();
     }
 
     auto status = Plugin::Register(configOptions, &env, &guard, *ioContext, primary,

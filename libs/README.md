@@ -18,8 +18,8 @@ Both libraries are installed as static-only CMake packages (`aveva_install_libra
 
 | Package | Imported target | Public dependencies (resolved by its config file) | Link-only dependencies (private, still required at link time) |
 |---------|-----------------|---------------------------------------------------|----------------------------------------------------------------|
-| `aveva-http-client` | `aveva::http-client` | `boost_asio` | `boost_beast`, `boost_intrusive`, `boost_unordered`, `boost_url`, OpenSSL |
-| `aveva-azure-client` | `aveva::azure-client` | `aveva-http-client`, `boost_asio` | OpenSSL, `boost_json`, `boost_url`, `boost_uuid`, LibXml2 (config package) |
+| `aveva-http-client` | `aveva::http-client` | `boost_asio`, `Microsoft.GSL` | `boost_beast`, `boost_intrusive`, `boost_unordered`, `boost_url`, OpenSSL |
+| `aveva-azure-client` | `aveva::azure-client` | `aveva-http-client`, `boost_asio`, `Microsoft.GSL` | OpenSSL, `boost_json`, `boost_url`, `boost_uuid`, LibXml2 (config package) |
 
 A consumer only calls `find_package(aveva-azure-client CONFIG REQUIRED)` (and `aveva-http-client` if it uses the HTTP
 client directly); the config files call `find_dependency` for everything in the table, so Boost, OpenSSL and LibXml2
@@ -86,10 +86,10 @@ Do not copy an upstream tree over these directories: that would silently revert 
 2. Leave out standalone-only files (CI pipelines, `CMakePresets.json`, `vcpkg-configuration.json`,
    backlog files).
 3. Update the version column above and add any new local commits to the range described in "Local modifications".
-4. The plugin tests reuse `FakeHttpClient.hpp` and `TestFixtures.hpp` from `libs/AzureClient/tests` through the
+4. The plugin tests reuse `FakeHttpClient.hpp` and `TestSupport.hpp` from `libs/AzureClient/tests` through the
    `aveva-azure-client-test-support` INTERFACE target (`infrastructure/cmake/AvevaClientLibraries.cmake`). Check
    that both headers still exist after a sync.
-5. Rebuild and run `ctest -E Integration`.
+5. Rebuild and run `ctest -LE integration`.
 
 ## Building the library tests
 

@@ -115,7 +115,7 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
 
 ###### Building consumers on Windows
 
-Public headers include Boost.Asio, which must see the same `_WIN32_WINNT` in every translation unit. The plugin targets therefore export `_WIN32_WINNT=0x0A00` (Windows 10) as a PUBLIC compile definition; consumers that set their own value must use the same one.
+The plugin's public headers only forward-declare `boost::asio::io_context`, but the client libraries it links (`aveva::http-client`, `aveva::azure-client`) expose Boost.Asio, which must see the same `_WIN32_WINNT` in every translation unit. Those libraries therefore export `_WIN32_WINNT=0x0A00` (Windows 10) as a PUBLIC compile definition that reaches consumers through the plugin targets; consumers that set their own value must use the same one.
 
 ###### File cache
 
