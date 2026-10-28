@@ -90,7 +90,7 @@ jobs:
             save-cache: true
           - os: ubuntu-latest
             preset: LinuxRelease
-            config: Release
+            config: RelWithDebInfo
             tests: true
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
