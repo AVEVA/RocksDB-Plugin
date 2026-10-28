@@ -193,6 +193,11 @@ Then add `--secondary_cache_uri` alongside your usual flags:
     --secondary_cache_uri="aveva-file-based-secondary-cache://"
 ```
 
+Plugin log verbosity is controlled by `AVEVA_DB_BENCH_LOG_LEVEL`
+(`trace|debug|info|warning|error|fatal`, default `info`). Debug records, such as
+per-WAL-flush lines, are written synchronously and slow write-heavy runs, so
+they are off by default.
+
 On CacheLib builds, swap the URI for `aveva-cachelib-secondary-cache://` and
 optionally tune Navy through its own env vars (all optional; defaults shown):
 

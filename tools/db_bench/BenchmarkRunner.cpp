@@ -30,6 +30,10 @@
 //   AVEVA_DB_BENCH_SECONDARY_CACHE_DIR           (required to use either backend)
 //   AVEVA_DB_BENCH_SECONDARY_CACHE_CAPACITY_MB   (optional, default 512)
 //
+// Logging (optional):
+//
+//   AVEVA_DB_BENCH_LOG_LEVEL   (trace|debug|info|warning|error|fatal, default info)
+//
 // The CacheLib backend additionally reads (all optional, defaults shown):
 //
 //   AVEVA_DB_BENCH_CACHELIB_REGION_SIZE_BYTES          (4194304)
@@ -61,6 +65,7 @@
 
 #include <boost/log/core.hpp>
 #include <boost/log/sources/severity_logger.hpp>
+#include <boost/log/expressions.hpp>
 #include <boost/log/trivial.hpp>
 #include <rocksdb/convenience.h>
 #include <rocksdb/db_bench_tool.h>
@@ -108,6 +113,26 @@ bool EnvFlagOr(const char* name, bool defaultValue) {
         return *value != "0" && *value != "false";
     }
     return defaultValue;
+}
+
+// Applies a global boost.log severity filter from AVEVA_DB_BENCH_LOG_LEVEL
+// (trace|debug|info|warning|error|fatal, default info). Debug records such as
+// per-WAL-flush lines are written synchronously and add measurable overhead to
+// write-heavy benchmarks, so they are off unless explicitly requested.
+// Returns false (and sets *error) for an unrecognised level.
+bool ConfigureLogLevel(std::string* error) {
+    namespace trivial = boost::log::trivial;
+
+    trivial::severity_level level = trivial::info;
+    if (const auto value = Env("AVEVA_DB_BENCH_LOG_LEVEL")) {
+        if (!trivial::from_string(value->c_str(), value->size(), level)) {
+            *error = "AVEVA_DB_BENCH_LOG_LEVEL must be one of trace|debug|info|warning|error|fatal, got '" + *value +
+                     "'";
+            return false;
+        }
+    }
+    boost::log::core::get()->set_filter(trivial::severity >= level);
+    return true;
 }
 
 // Fields shared by every AVEVA secondary cache backend: the directory the
@@ -262,6 +287,11 @@ int main(int argc, char** argv) {
     const auto tenantId     = Require("AVEVA_DB_BENCH_TENANT_ID",     Env("AVEVA_DB_BENCH_TENANT_ID"));
     const auto clientId     = Require("AVEVA_DB_BENCH_CLIENT_ID",     Env("AVEVA_DB_BENCH_CLIENT_ID"));
     const auto clientSecret = Require("AVEVA_DB_BENCH_CLIENT_SECRET", Env("AVEVA_DB_BENCH_CLIENT_SECRET"));
+
+    if (std::string logError; !ConfigureLogLevel(&logError)) {
+        std::cerr << "aveva_db_bench: " << logError << "\n";
+        return 2;
+    }
 
     ServicePrincipalStorageInfo primary{
         container,
