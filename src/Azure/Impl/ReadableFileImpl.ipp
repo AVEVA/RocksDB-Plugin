@@ -84,9 +84,7 @@ template <typename TCallback> class ReadCompletionGuard {
             return;
         }
         try {
-            m_callback(std::make_exception_ptr(
-                           RequestFailedException(0, "ReadAbandoned", "Read abandoned before it completed", "", {})),
-                       std::string_view{}, std::shared_ptr<const void>{});
+            m_callback(ReadAbandonedError(), std::string_view{}, std::shared_ptr<const void>{});
         } catch (...) {
             // Nothing left to report to: the callback only completes the request and must not throw.
         }
