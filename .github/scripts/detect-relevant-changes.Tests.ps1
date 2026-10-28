@@ -57,6 +57,17 @@ Describe 'detect-relevant-changes.sh' {
         $res.Output | Should -Match 'relevant=false'
     }
 
+    It 'selects the build when <Path> changes' -ForEach @(
+        @{ Path = '.github/workflows/build-and-test.yml' }
+        @{ Path = '.github/scripts/detect-relevant-changes.sh' }
+        @{ Path = 'tools/CMakeLists.txt' }
+    ) {
+        $r = New-Repo @($Path)
+        $res = Invoke-Detect $r.Repo $r.Base
+        $res.ExitCode | Should -Be 0
+        $res.Output | Should -Match 'relevant=true'
+    }
+
     It 'fails explicitly when the diff command fails' {
         $r = New-Repo @('docs/readme.md')
         $res = Invoke-Detect $r.Repo ('0' * 40)

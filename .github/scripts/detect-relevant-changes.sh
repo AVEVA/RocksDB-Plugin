@@ -9,7 +9,7 @@ base="$1"
 # Read the whole list before matching: a pipe into `grep -q` lets grep exit early, and the still-writing producer
 # then dies of SIGPIPE, which pipefail reports as "no match".
 changed="$(git diff --name-only "$base" HEAD)"
-if grep -E '^(include/|src/|libs/|infrastructure/|tools/db_bench/|\.github/actions/setup-vcpkg/|vcpkg\.json$|vcpkg-configuration\.json$|CMakeLists\.txt$|CMakePresets\.json$)' \
+if grep -E '^(include/|src/|libs/|infrastructure/|tools/db_bench/|tools/CMakeLists\.txt$|\.github/actions/setup-vcpkg/|\.github/workflows/build-and-test\.yml$|\.github/scripts/detect-relevant-changes\.sh$|vcpkg\.json$|vcpkg-configuration\.json$|CMakeLists\.txt$|CMakePresets\.json$)' \
      <<<"$changed" >/dev/null; then
   echo "relevant=true"
 else
