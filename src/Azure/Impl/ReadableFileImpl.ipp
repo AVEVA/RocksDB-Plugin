@@ -310,7 +310,6 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
     }
     auto* const state = &self->m_prefetch;
     uint64_t id = 0;
-    std::string name;
     std::shared_ptr<PrefetchCharge> charge;
     {
         std::scoped_lock lock(state->Mutex);
@@ -323,7 +322,6 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
         // Everything fallible is prepared before budget or slot state changes, so a failure leaves both untouched and
         // the admission below cannot throw. The slots are inline, so the push below needs no allocation and a full list
         // is only ever appended to after its victim is dropped.
-        name = self->m_h.Name;
         if (state->Budget) {
             charge = std::make_shared<PrefetchCharge>();
         }
@@ -368,8 +366,10 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
     auto keepAlive = self;
     try {
         ReadAsync(std::move(self), offset, n,
-                  [state, id, logger, name = std::move(name), keepAlive, charge = std::move(charge)](
-                      std::exception_ptr error, std::string_view data, std::shared_ptr<const void> owner) {
+                  [keepAlive, id, charge = std::move(charge)](std::exception_ptr error, std::string_view data,
+                                                              std::shared_ptr<const void> owner) {
+                      auto* const state = &keepAlive->m_prefetch;
+                      const auto& logger = keepAlive->m_h.Logger;
                       std::vector<std::move_only_function<void()>> waiters;
                       {
                           std::scoped_lock lock(state->Mutex);
@@ -399,10 +399,10 @@ bool BasicReadableFileImpl<TBlob>::Prefetch(std::shared_ptr<const BasicReadableF
                               std::rethrow_exception(error);
                           } catch (const std::exception& e) {
                               BOOST_LOG_SEV(*logger, boost::log::trivial::warning)
-                                  << "Prefetch of '" << name << "' failed: " << e.what();
+                                  << "Prefetch of '" << keepAlive->m_h.Name << "' failed: " << e.what();
                           } catch (...) {
                               BOOST_LOG_SEV(*logger, boost::log::trivial::warning)
-                                  << "Prefetch of '" << name << "' failed";
+                                  << "Prefetch of '" << keepAlive->m_h.Name << "' failed";
                           }
                       }
                   });
