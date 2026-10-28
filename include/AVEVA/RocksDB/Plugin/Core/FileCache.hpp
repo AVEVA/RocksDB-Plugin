@@ -39,7 +39,8 @@ class FileCache {
     uint64_t m_nextGeneration = 0;
     // Counts accesses; an entry touched within the last size/4 accesses is not relinked again.
     uint64_t m_accessEpoch = 0;
-    std::unordered_map<std::string, FileCacheEntry, StringHash, StringEqual> m_cache;
+    using CacheMap = std::unordered_map<std::string, FileCacheEntry, StringHash, StringEqual>;
+    CacheMap m_cache;
     std::queue<std::string> m_fileDownloadQueue;
     boost::intrusive::list<FileCacheEntry, boost::intrusive::constant_time_size<false>> m_entryList;
     // Stale entries with no size, newest at the front, so pruning pops the back in O(1).
@@ -113,6 +114,7 @@ class FileCache {
     // Returns whether the entry left the cache; false when it was absent or, after an allocation failure, was only
     // invalidated (kept Stale) and will be evicted later.
     bool RemoveFileUnsafe(std::string_view filePath);
+    bool RemoveEntryUnsafe(CacheMap::iterator it);
     void DropNeverDownloadedEntryUnsafe(std::string_view filePath);
     void ReservePendingReleaseUnsafe();
     void InvalidateEntryUnsafe(FileCacheEntry& entry) noexcept;

@@ -565,28 +565,29 @@ void FileCache::ReservePendingReleaseUnsafe() {
 // Everything that can throw (the path copy and the vector growth) happens before the entry is touched, so a failure
 // leaves it fully cached. The commit that follows cannot throw. Returns whether the entry left the cache.
 bool FileCache::RemoveFileUnsafe(const std::string_view filePath) {
-    auto it = m_cache.find(filePath);
-    if (it == m_cache.end()) {
-        return false;
-    }
+    const auto it = m_cache.find(filePath);
+    return it != m_cache.end() && RemoveEntryUnsafe(it);
+}
+
+// The map node is extracted so its key moves into the PendingRelease instead of being copied and rehashed.
+bool FileCache::RemoveEntryUnsafe(const CacheMap::iterator it) {
     auto& fileEntry = it->second;
     try {
-        PendingRelease release{std::string(filePath), nullptr, true};
         ReservePendingReleaseUnsafe();
 
         fileEntry.unlink();
         // The entry leaves the totals now; the file itself is deleted (and its handle closed) later on the
         // background thread, outside this mutex.
         UpdateEntryUnsafe(fileEntry, [](FileCacheEntry&) {}, true);
-        release.Handle = fileEntry.TakeReadHandle();
-        m_pendingReleases.push_back(std::move(release));
-        m_cache.erase(it);
+        auto node = m_cache.extract(it);
+        // Capacity was reserved above, so this cannot throw.
+        m_pendingReleases.push_back(PendingRelease{std::move(node.key()), node.mapped().TakeReadHandle(), true});
         m_cv.notify_one();
     } catch (const std::exception& e) {
         InvalidateEntryUnsafe(fileEntry);
         try {
             BOOST_LOG_SEV(*m_logger, error)
-                << "Could not queue the removal of '" << filePath << "'; invalidated the entry instead: " << e.what();
+                << "Could not queue the removal of '" << it->first << "'; invalidated the entry instead: " << e.what();
         } catch (...) {
             // Logging is best effort: this runs from cleanup paths that must not throw.
         }

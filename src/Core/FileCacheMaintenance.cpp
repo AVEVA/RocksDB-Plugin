@@ -36,7 +36,7 @@ size_t FileCache::PruneUndownloadedStaleEntriesUnsafe() {
     // Oldest first. Removing an entry unlinks it from m_metadataOnlyList, so the list shrinks on every iteration.
     size_t pruned = 0;
     while (m_undownloadedStaleCount > MaxUndownloadedStaleEntries && !m_metadataOnlyList.empty()) {
-        const std::string staleEntry = m_metadataOnlyList.back().GetFilePath();
+        const std::string_view staleEntry = m_metadataOnlyList.back().GetFilePath();
         if (m_metadataOnlyList.back().KnownNotOnDisk) {
             // Nothing was ever downloaded, so there is no file or handle to release: drop it without queueing a delete.
             DropNeverDownloadedEntryUnsafe(staleEntry);
@@ -101,10 +101,10 @@ bool FileCache::EvictBytesUnsafe(const int64_t bytes) {
             // Frees nothing, and removing it would discard its access history; PruneUndownloadedStaleEntriesUnsafe
             // bounds these.
         } else {
-            const std::string filePath = current->GetFilePath();
             const auto fileSize = current->GetSize();
+            const auto it = m_cache.find(current->GetFilePath());
 
-            if (RemoveFileUnsafe(filePath)) {
+            if (it != m_cache.end() && RemoveEntryUnsafe(it)) {
                 bytesEvicted += fileSize;
                 ++evictedCount;
             }
