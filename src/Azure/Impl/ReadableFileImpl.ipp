@@ -815,6 +815,7 @@ int64_t BasicReadableFileImpl<TBlob>::DownloadWithRetry(const int64_t offset, co
         }
 
         auto toRead = std::min(bytesToRead, remaining);
+        const std::string usedEtag = etag;
         try {
             bytesRead = BlobOperations::Download(*m_h.Blob, std::span<char>(buffer, static_cast<size_t>(toRead)),
                                                  offset, toRead, std::move(etag));
@@ -825,7 +826,11 @@ int64_t BasicReadableFileImpl<TBlob>::DownloadWithRetry(const int64_t offset, co
                 if (!ReadableFileDetail::StaleReadPolicy::TrySpendRefresh(refreshesLeft)) {
                     throw ReadableFileDetail::StaleReadException();
                 }
-                RefreshBlobMetadata();
+                // Another thread may already have refreshed past the version this request used; retry with it
+                // instead of sending a redundant properties request.
+                if (HasETag(usedEtag)) {
+                    RefreshBlobMetadata();
+                }
             } else {
                 throw;
             }
