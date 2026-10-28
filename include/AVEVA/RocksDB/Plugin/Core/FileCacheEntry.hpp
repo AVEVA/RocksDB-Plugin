@@ -12,13 +12,14 @@
 namespace AVEVA::RocksDB::Plugin::Core {
 namespace detail {
 // One open handle on a cached file, shared by every reader of that file so a read does not pay for an open.
-// File::Read is not thread-safe (it seeks, then reads), so readers take Mutex around the whole access.
+// File::Read must be safe to call concurrently (positional I/O), so Mutex only guards Opened/Closed and is not
+// held during a read; readers keep the file alive through their own shared_ptr.
 // Close() marks the handle unusable for good: readers that still hold it fall back to the blob instead of
 // reopening a file that is being evicted, replaced or deleted.
 class CachedReadHandle {
   public:
     std::mutex Mutex;
-    std::unique_ptr<File> Opened;
+    std::shared_ptr<File> Opened;
     bool Closed = false;
 
     void Close() {

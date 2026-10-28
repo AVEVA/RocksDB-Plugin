@@ -213,26 +213,35 @@ std::optional<int64_t> FileCache::ReadFile(const std::string_view filePath, int6
         bool shortRead = false;
         std::optional<int64_t> result;
         try {
-            // Reads of one cached file are serialized on purpose: the handle is shared and its Read may seek, so
-            // concurrent readers would need positional I/O. No contention was measured, so that is left for later.
-            std::scoped_lock handleLock(handle->Mutex);
-            if (handle->Closed) {
-                return std::nullopt;
+            // The handle lock only covers open/close bookkeeping; the read itself is positional and lock-free.
+            std::shared_ptr<File> file;
+            {
+                std::scoped_lock handleLock(handle->Mutex);
+                if (handle->Closed) {
+                    return std::nullopt;
+                }
+                if (!handle->Opened) {
+                    handle->Opened = m_filesystem->Open(m_cachePath / filePath);
+                }
+                file = handle->Opened;
             }
-            if (!handle->Opened) {
-                handle->Opened = m_filesystem->Open(m_cachePath / filePath);
-            }
+            const auto dropFile = [&handle, &file] {
+                std::scoped_lock handleLock(handle->Mutex);
+                if (handle->Opened == file) {
+                    handle->Opened.reset();
+                }
+            };
             int64_t bytesRead = 0;
             try {
-                bytesRead = handle->Opened->Read(buffer, offset, bytesToRead);
+                bytesRead = file->Read(buffer, offset, bytesToRead);
             } catch (...) {
                 // Do not keep a handle that just failed; the next read reopens the file.
-                handle->Opened.reset();
+                dropFile();
                 throw;
             }
             if (bytesRead < expectedBytes) {
                 // A truncated or corrupt cached file must not be returned as if it were the blob's data.
-                handle->Opened.reset();
+                dropFile();
                 BOOST_LOG_SEV(*m_logger, error)
                     << "Cached read of '" << filePath << "' returned " << bytesRead << " bytes but " << expectedBytes
                     << " were expected. Dropping the cached file.";

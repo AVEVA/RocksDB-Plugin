@@ -9,6 +9,7 @@ class File {
   public:
     virtual ~File() = default;
 
+    // Implementations must allow concurrent calls on one instance.
     virtual int64_t Read(char* buffer, int64_t offset, int64_t length) = 0;
 };
 } // namespace AVEVA::RocksDB::Plugin::Core
