@@ -114,7 +114,7 @@ jobs:
 
       # Live Azure tests are opt-in (AVEVA_RUN_AZURE_INTEGRATION_TESTS=1) and never run here.
       - name: Test
-        run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure --build-config ${{ matrix.config || 'Debug' }} --parallel 4
+        run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure --build-config ${{ matrix.config || 'Debug' }} --parallel 4 -LE benchmark
 
       # One writer per OS, on main only; an exact hit means the entry already exists.
       - name: Save vcpkg binary cache
@@ -164,7 +164,7 @@ jobs:
         if: matrix.name != 'tsan'
         env:
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: ctest --test-dir build/LinuxDebug --output-on-failure --build-config Debug --parallel 4
+        run: ctest --test-dir build/LinuxDebug --output-on-failure --build-config Debug --parallel 4 -LE benchmark
 
       # TSan is 5-15x slower and reports on the first race, so the deterministic Core and HttpClient suites run first as
       # their own step: a failure there points at the library, not at the timing-sensitive plugin and AzureClient tests.
@@ -178,7 +178,7 @@ jobs:
         if: matrix.name == 'tsan'
         env:
           TSAN_OPTIONS: suppressions=${{ github.workspace }}/.github/tsan.supp halt_on_error=1 second_deadlock_stack=1
-        run: ctest --test-dir build/LinuxDebug --output-on-failure --build-config Debug --parallel 4 -LE 'core|http-client'
+        run: ctest --test-dir build/LinuxDebug --output-on-failure --build-config Debug --parallel 4 -LE 'core|http-client|benchmark'
 
   db-bench:
     # Builds the patched RocksDB overlay and tools/db_bench, which no other job exercises. Runs on manual request and on
