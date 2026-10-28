@@ -36,10 +36,7 @@ struct AsyncReadTracker::Registration {
 AsyncReadTracker::AsyncReadTracker(boost::asio::io_context::executor_type executor) : m_executor(std::move(executor)) {}
 
 AsyncReadTracker::Token AsyncReadTracker::Begin() {
-    {
-        std::scoped_lock lock(m_mutex);
-        ++m_inFlight;
-    }
+    m_inFlight.fetch_add(1, std::memory_order_relaxed);
 
     try {
         return std::make_shared<const Registration>(shared_from_this());
@@ -51,23 +48,23 @@ AsyncReadTracker::Token AsyncReadTracker::Begin() {
 
 void AsyncReadTracker::Drain() {
     std::unique_lock lock(m_mutex);
-    m_idle.wait(lock, [this] { return m_inFlight == 0; });
+    m_idle.wait(lock, [this] { return m_inFlight.load(std::memory_order_acquire) == 0; });
 }
 
 bool AsyncReadTracker::DrainFor(std::chrono::nanoseconds timeout) {
     std::unique_lock lock(m_mutex);
-    return m_idle.wait_for(lock, timeout, [this] { return m_inFlight == 0; });
+    return m_idle.wait_for(lock, timeout, [this] { return m_inFlight.load(std::memory_order_acquire) == 0; });
 }
 
-size_t AsyncReadTracker::InFlight() const {
-    std::scoped_lock lock(m_mutex);
-    return m_inFlight;
-}
+size_t AsyncReadTracker::InFlight() const { return m_inFlight.load(std::memory_order_acquire); }
 
 void AsyncReadTracker::End() noexcept {
+    if (m_inFlight.fetch_sub(1, std::memory_order_acq_rel) != 1) {
+        return;
+    }
+    // Taking the mutex orders the notify after a waiter's predicate check, so the wakeup cannot be lost.
     {
         std::scoped_lock lock(m_mutex);
-        --m_inFlight;
     }
     m_idle.notify_all();
 }

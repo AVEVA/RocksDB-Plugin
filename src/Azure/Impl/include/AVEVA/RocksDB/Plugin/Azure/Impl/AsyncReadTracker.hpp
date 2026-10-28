@@ -4,6 +4,7 @@
 #pragma once
 #include <boost/asio/io_context.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -55,6 +56,6 @@ class AsyncReadTracker : public std::enable_shared_from_this<AsyncReadTracker> {
     boost::asio::io_context::executor_type m_executor;
     mutable std::mutex m_mutex;
     std::condition_variable m_idle;
-    size_t m_inFlight = 0;
+    std::atomic<size_t> m_inFlight{0};
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
