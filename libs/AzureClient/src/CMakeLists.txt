@@ -11,7 +11,7 @@ find_package(boost_uuid CONFIG REQUIRED)
 find_package(Microsoft.GSL CONFIG REQUIRED)
 find_package(LibXml2 CONFIG REQUIRED)
 
-add_library(aveva-azure-client
+add_library(aveva-azure-client STATIC
     BlobClientOptions.cpp
     BlobBatch.cpp
     BlobDownload.cpp
@@ -30,9 +30,6 @@ add_library(aveva-azure-client
 set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../include")
 
 add_library(aveva::azure-client ALIAS aveva-azure-client)
-if(BUILD_SHARED_LIBS)
-    message(FATAL_ERROR "aveva-azure-client supports static linking only.")
-endif()
 # Lets the static library link into shared plugins on Linux.
 set_target_properties(aveva-azure-client PROPERTIES POSITION_INDEPENDENT_CODE ON)
 aveva_azure_client_enable_clang_tidy(aveva-azure-client)
