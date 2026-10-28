@@ -1,3 +1,13 @@
+# The fake blob server and the explicit template instantiations are the heaviest translation units, so they are built
+# once and shared by the test and benchmark executables.
+add_library(aveva-rocksdb-plugin-azure-impl-test-support STATIC FakeBlobServer.cpp FakeInstantiations.cpp)
+target_link_libraries(aveva-rocksdb-plugin-azure-impl-test-support PUBLIC GTest::gtest GTest::gmock aveva-rocksdb-plugin-azure aveva-rocksdb-plugin-azure-impl aveva-rocksdb-plugin-core-mocks aveva::azure-client-testing)
+if(MSVC)
+    target_compile_options(aveva-rocksdb-plugin-azure-impl-test-support PRIVATE /bigobj)
+endif()
+target_include_directories(aveva-rocksdb-plugin-azure-impl-test-support PUBLIC
+    "${PROJECT_SOURCE_DIR}/src/Azure"
+    "${PROJECT_SOURCE_DIR}/src/Azure/Impl")
 add_executable(aveva-rocksdb-plugin-azure-impl-tests
     ImplTests.cpp
     AsyncReadTests.cpp
@@ -7,7 +17,6 @@ add_executable(aveva-rocksdb-plugin-azure-impl-tests
     ReadWriteFileTests.cpp
     FakeBlobServerTests.cpp
     RangeCheckTests.cpp
-    FakeBlobServer.cpp
     BufferChunkInfoTests.cpp
     LogRateLimiterTests.cpp
     LoggerTests.cpp
@@ -25,18 +34,17 @@ add_executable(aveva-rocksdb-plugin-azure-impl-tests
     TokenCredentialsTests.cpp
     PublicHeadersTests.cpp
     SourceCompatTests.cpp
-    FakeInstantiations.cpp
 )
 
-target_link_libraries(aveva-rocksdb-plugin-azure-impl-tests PRIVATE GTest::gtest GTest::gmock aveva-rocksdb-plugin-azure aveva-rocksdb-plugin-azure-impl aveva-rocksdb-plugin-core-mocks aveva::azure-client-testing)
+target_link_libraries(aveva-rocksdb-plugin-azure-impl-tests PRIVATE GTest::gtest GTest::gmock aveva-rocksdb-plugin-azure aveva-rocksdb-plugin-azure-impl aveva-rocksdb-plugin-core-mocks aveva::azure-client-testing aveva-rocksdb-plugin-azure-impl-test-support)
 if(MSVC)
     target_compile_options(aveva-rocksdb-plugin-azure-impl-tests PRIVATE /bigobj)
 endif()
 # The template bodies (*.ipp) are private to the library, so the tests that instantiate them over fakes reach them
 # through the source tree.
 target_include_directories(aveva-rocksdb-plugin-azure-impl-tests PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../src/Azure"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../src/Azure/Impl")
+    "${PROJECT_SOURCE_DIR}/src/Azure"
+    "${PROJECT_SOURCE_DIR}/src/Azure/Impl")
 include(GoogleTest)
 # Every test keeps the `unit` label and also gets one subsystem label (file-io, filesystem, lock,
 # runtime) so a subsystem can be run alone with `ctest -L <label>`. Suites map to subsystems by
@@ -82,16 +90,14 @@ gtest_discover_tests(aveva-rocksdb-plugin-azure-impl-tests DISCOVERY_TIMEOUT 60
 find_package(OpenSSL REQUIRED)
 add_executable(aveva-rocksdb-plugin-azure-impl-benchmark
     PluginPathBenchmark.cpp
-    FakeBlobServer.cpp
-    FakeInstantiations.cpp
 )
-target_link_libraries(aveva-rocksdb-plugin-azure-impl-benchmark PRIVATE GTest::gtest_main GTest::gmock aveva-rocksdb-plugin-azure aveva-rocksdb-plugin-azure-impl aveva-rocksdb-plugin-core-mocks aveva::azure-client-testing OpenSSL::Crypto)
+target_link_libraries(aveva-rocksdb-plugin-azure-impl-benchmark PRIVATE GTest::gtest_main GTest::gmock aveva-rocksdb-plugin-azure aveva-rocksdb-plugin-azure-impl aveva-rocksdb-plugin-core-mocks aveva::azure-client-testing aveva-rocksdb-plugin-azure-impl-test-support OpenSSL::Crypto)
 if(MSVC)
     target_compile_options(aveva-rocksdb-plugin-azure-impl-benchmark PRIVATE /bigobj)
 endif()
 target_include_directories(aveva-rocksdb-plugin-azure-impl-benchmark PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../src/Azure"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../src/Azure/Impl")
+    "${PROJECT_SOURCE_DIR}/src/Azure"
+    "${PROJECT_SOURCE_DIR}/src/Azure/Impl")
 gtest_discover_tests(aveva-rocksdb-plugin-azure-impl-benchmark DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 300 LABELS "benchmark;plugin")
 
 # Live-Azure tests skip themselves unless AVEVA_RUN_AZURE_INTEGRATION_TESTS=1, so they live in their own executable.
@@ -108,5 +114,5 @@ if(MSVC)
     target_compile_options(aveva-rocksdb-plugin-azure-impl-integration-tests PRIVATE /bigobj)
 endif()
 target_include_directories(aveva-rocksdb-plugin-azure-impl-integration-tests PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../src/Azure")
+    "${PROJECT_SOURCE_DIR}/src/Azure")
 gtest_discover_tests(aveva-rocksdb-plugin-azure-impl-integration-tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600 LABELS integration RESOURCE_LOCK azure_integration_account)
