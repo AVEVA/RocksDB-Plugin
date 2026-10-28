@@ -6,7 +6,6 @@ add_library(aveva-rocksdb-plugin-core STATIC
     ResultHandle.cpp
     LruFileIndex.cpp
     RocksDBHelpers.cpp
-    Util.cpp
     LocalFilesystem.cpp
     LocalFile.cpp
 
