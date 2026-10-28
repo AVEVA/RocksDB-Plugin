@@ -38,9 +38,9 @@ level.
 
 ## Boost.Asio is part of the public API
 
-The public headers of both libraries expose Boost.Asio types on purpose (`executor_type`, `get_executor()`,
-`boost::asio::default_completion_token`, cancellation slots and associated executors). This is what lets callers
-choose a completion token (`use_future`, `use_awaitable`, a plain callback, ...) and supply their own `io_context`.
+The public headers of both libraries expose Boost.Asio types on purpose (`awaitable`, `executor_type`,
+`get_executor()` and cancellation slots). Every operation is a C++20 coroutine (`boost::asio::awaitable`); there are no
+completion tokens, callbacks or futures, and callers supply their own `io_context`.
 Treat the Asio version as part of the API/ABI contract: consumers must build against the same Boost.Asio that these
 libraries were built with, and changing it is a breaking change. The libraries never own or run an `io_context`; the
 host injects one. Redesigning the API to hide Asio is deliberately out of scope.

@@ -28,7 +28,7 @@ The AVEVA RocksDB Plugin provides filesystem and caching extensions so RocksDB c
 ## Threading and Ownership
 
 The plugin never owns or runs an `io_context`; the host injects it (`Plugin::Register`). Blocking calls use
-`use_future` + `.get()` and must never run on a thread servicing that `io_context`. Destroy plugin objects before
+`co_spawn` + `use_future` + `.get()` (see `Impl/RequestHelpers.hpp`) and must never run on a thread servicing that `io_context`. Destroy plugin objects before
 stopping the host `io_context`.
 
 ## File Semantics
