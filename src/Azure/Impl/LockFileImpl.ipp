@@ -147,6 +147,23 @@ template <typename TBlob> bool BasicLockFileImpl<TBlob>::Lock() {
         if (lastError->StatusCode == HttpStatus::Conflict) {
             return false;
         }
+        // The failed attempt may still have been granted (e.g. a timeout after the service applied it). Release our
+        // proposed ID so the next Lock() does not wait for the lease to lapse; the failure is only logged. Definitive
+        // failures (auth, invalid request) cannot have granted it, so they skip the extra request.
+        if (LockFileDetail::ShouldRetryAcquire(*lastError)) {
+            try {
+                AzureClient::ReleaseLeaseOptions releaseOptions;
+                releaseOptions.LeaseId = leaseId;
+                auto releaseRequestOptions = m_file->GetDefaultRequestOptions();
+                releaseRequestOptions.SetTotalDeadline(LockFileDetail::TotalDeadlineFor(m_leaseLength));
+                Unwrap(m_file->ReleaseLeaseAsync(
+                    std::move(releaseOptions),
+                    AzureClient::WithRequestOptions(std::move(releaseRequestOptions), AzureClient::block_on)));
+            } catch (const std::exception& e) {
+                BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
+                    << "Best-effort release after failed lock of '" << m_fileName << "' did not succeed: " << e.what();
+            }
+        }
         ThrowRequestFailed(*lastError);
     }
 
