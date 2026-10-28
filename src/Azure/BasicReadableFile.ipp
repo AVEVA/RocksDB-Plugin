@@ -8,7 +8,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include "BasicReadableFile.hpp"
 
-#include "AVEVA/AzureClient/BlockOn.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/RequestHelpers.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include <algorithm>
@@ -203,7 +203,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
     try {
         // The waits below need completions that run on the host io_context, so they would hang on one of its threads.
         try {
-            AzureClient::ThrowIfRunningOn(m_file->ClientExecutor());
+            Impl::ThrowIfRunningOn(m_file->ClientExecutor());
         } catch (const std::logic_error& error) {
             return rocksdb::IOStatus::InvalidArgument(error.what());
         }

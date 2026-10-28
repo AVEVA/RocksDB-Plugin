@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <utility>
 
-#include "AVEVA/AzureClient/BlockOn.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/RequestHelpers.hpp"
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 void AsyncReadSignal::Notify() {
@@ -37,7 +37,7 @@ AsyncReadRequest::AsyncReadRequest(const rocksdb::FSReadRequest& request, Callba
 void AsyncReadRequest::ThrowIfWaitWouldDeadlock() {
     // A finished request is never waited on, so polling it from any thread is fine.
     if (m_completionExecutor && !Finished()) {
-        AzureClient::ThrowIfRunningOn(*m_completionExecutor);
+        ThrowIfRunningOn(*m_completionExecutor);
     }
 }
 

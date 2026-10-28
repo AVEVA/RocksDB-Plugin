@@ -32,6 +32,7 @@ using AVEVA::AzureClient::Tests::DefaultETag;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
 using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
+using AVEVA::AzureClient::Tests::RunAwaitable;
 using namespace std::chrono_literals;
 
 [[nodiscard]] std::string Header(const HttpRequest& request, std::string_view name) {
@@ -52,21 +53,20 @@ using namespace std::chrono_literals;
 
 const HttpRequest& RenewBlobLease(FakeHttpClient& httpClient, BlobClient& client, std::string leaseId,
                                   BlobRequestConditions conditions, std::optional<std::string>& renewed) {
-    client.RenewLeaseAsync(RenewLeaseOptions{.LeaseId = std::move(leaseId), .Conditions = std::move(conditions)},
-                           [&](auto result) {
-                               ASSERT_TRUE(result.has_value());
-                               EXPECT_EQ(result->Value().ETag, DefaultETag);
-                               renewed = result->Value().LeaseId;
-                           });
-    httpClient.Poll();
+    auto result = RunAwaitable(httpClient, client.RenewLeaseAsync(RenewLeaseOptions{
+                                               .LeaseId = std::move(leaseId), .Conditions = std::move(conditions)}));
+    EXPECT_TRUE(result.has_value());
+    if (result) {
+        EXPECT_EQ(result->Value().ETag, DefaultETag);
+        renewed = result->Value().LeaseId;
+    }
     return httpClient.LastRequest();
 }
 
 const HttpRequest& ReleaseBlobLease(FakeHttpClient& httpClient, BlobClient& client, std::string leaseId,
                                     BlobRequestConditions conditions) {
-    client.ReleaseLeaseAsync(ReleaseLeaseOptions{.LeaseId = std::move(leaseId), .Conditions = std::move(conditions)},
-                             [](auto) {});
-    httpClient.Poll();
+    (void)RunAwaitable(httpClient, client.ReleaseLeaseAsync(ReleaseLeaseOptions{.LeaseId = std::move(leaseId),
+                                                                                .Conditions = std::move(conditions)}));
     return httpClient.LastRequest();
 }
 } // namespace
@@ -75,16 +75,12 @@ TEST(LeaseTests, BlobRenewReleaseRejectEmptyLeaseIds) {
     FakeHttpClient httpClient;
     BlobClient client{httpClient, MakeBlobClientOptions()};
 
-    int completed = 0;
-    const auto expectInvalid = [&](auto result) {
-        ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
-        ++completed;
-    };
-    client.RenewLeaseAsync(RenewLeaseOptions{}, expectInvalid);
-    client.ReleaseLeaseAsync(ReleaseLeaseOptions{}, expectInvalid);
-    httpClient.Poll();
-    EXPECT_EQ(completed, 2);
+    const auto renew = RunAwaitable(httpClient, client.RenewLeaseAsync(RenewLeaseOptions{}));
+    const auto release = RunAwaitable(httpClient, client.ReleaseLeaseAsync(ReleaseLeaseOptions{}));
+    ASSERT_FALSE(renew.has_value());
+    ASSERT_FALSE(release.has_value());
+    EXPECT_EQ(renew.error().Code, std::make_error_code(std::errc::invalid_argument));
+    EXPECT_EQ(release.error().Code, std::make_error_code(std::errc::invalid_argument));
     EXPECT_TRUE(httpClient.NoRequestMade());
 }
 
@@ -109,14 +105,10 @@ TEST(LeaseTests, BlobAcquireLeaseValidatesDuration) {
     FakeHttpClient httpClient;
     BlobClient client{httpClient, MakeBlobClientOptions()};
 
-    std::optional<std::error_code> error;
-    client.AcquireLeaseAsync(AcquireLeaseOptions{.Conditions = {}, .ProposedLeaseId = {}, .Duration = 5s},
-                             [&](auto result) {
-                                 ASSERT_FALSE(result.has_value());
-                                 error = result.error().Code;
-                             });
-    httpClient.Poll();
-    EXPECT_EQ(error, std::make_error_code(std::errc::invalid_argument));
+    const auto result = RunAwaitable(httpClient, client.AcquireLeaseAsync(AcquireLeaseOptions{
+                                                     .Conditions = {}, .ProposedLeaseId = {}, .Duration = 5s}));
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
@@ -130,19 +122,13 @@ TEST(LeaseTests, BlobAcquireLeaseRetryReusesGeneratedProposedLeaseId) {
     options.Retry.InitialDelay = 0ms;
     BlobClient client{httpClient, options};
 
-    std::optional<std::string> acquired;
-    client.AcquireLeaseAsync([&](auto result) {
-        ASSERT_TRUE(result.has_value());
-        acquired = result->Value().LeaseId;
-    });
-
-    ASSERT_TRUE(httpClient.WaitForRequest(2));
-    httpClient.Poll();
+    const auto result = RunAwaitable(httpClient, client.AcquireLeaseAsync());
+    ASSERT_TRUE(result.has_value());
 
     ASSERT_EQ(httpClient.RequestCount(), 2U);
     const std::string firstLeaseId = Header(httpClient.RequestAt(0).Request, "x-ms-proposed-lease-id");
     const std::string secondLeaseId = Header(httpClient.RequestAt(1).Request, "x-ms-proposed-lease-id");
     EXPECT_FALSE(firstLeaseId.empty());
     EXPECT_EQ(firstLeaseId, secondLeaseId);
-    EXPECT_EQ(acquired, "lease-a");
+    EXPECT_EQ(result->Value().LeaseId, "lease-a");
 }

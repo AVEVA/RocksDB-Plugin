@@ -7,8 +7,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
-#include <AVEVA/AzureClient/BlockOn.hpp>
-#include <AVEVA/AzureClient/WithRequestOptions.hpp>
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/RequestHelpers.hpp"
 
 #include <boost/scope/scope_exit.hpp>
 #include <boost/uuid/random_generator.hpp>
@@ -113,8 +112,7 @@ template <typename TBlob> bool BasicLockFileImpl<TBlob>::Lock() {
         // budget so Lock() cannot block far beyond the lease length.
         auto requestOptions = m_file->GetDefaultRequestOptions();
         requestOptions.SetTotalDeadline(LockFileDetail::TotalDeadlineFor(m_acquireTimeout - (attemptStart - start)));
-        auto result = m_file->AcquireLeaseAsync(
-            std::move(options), AzureClient::WithRequestOptions(std::move(requestOptions), AzureClient::block_on));
+        auto result = Block(*m_file, m_file->AcquireLeaseAsync(std::move(options), std::move(requestOptions)));
         if (result.has_value()) {
             {
                 const std::scoped_lock lock(m_stateMutex);
@@ -156,9 +154,7 @@ template <typename TBlob> bool BasicLockFileImpl<TBlob>::Lock() {
                 releaseOptions.LeaseId = leaseId;
                 auto releaseRequestOptions = m_file->GetDefaultRequestOptions();
                 releaseRequestOptions.SetTotalDeadline(LockFileDetail::TotalDeadlineFor(m_leaseLength));
-                Unwrap(m_file->ReleaseLeaseAsync(
-                    std::move(releaseOptions),
-                    AzureClient::WithRequestOptions(std::move(releaseRequestOptions), AzureClient::block_on)));
+                Call(*m_file, m_file->ReleaseLeaseAsync(std::move(releaseOptions), std::move(releaseRequestOptions)));
             } catch (const std::exception& e) {
                 BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
                     << "Best-effort release after failed lock of '" << m_fileName << "' did not succeed: " << e.what();
@@ -309,7 +305,7 @@ BasicLockFileImpl<TBlob>::FinishRenewal(const std::string& leaseId, std::chrono:
 
 // Blocking renewal for RocksDB threads; it waits on RenewAsync and so must never run on the io_context thread.
 template <typename TBlob> void BasicLockFileImpl<TBlob>::RenewLease() const {
-    AzureClient::ThrowIfRunningOn(m_file->get_executor());
+    ThrowIfRunningOn(m_file->get_executor());
     // One cancellation path: the synchronous renewal waits on the asynchronous one.
     auto outcome = std::make_shared<std::promise<bool>>();
     auto future = outcome->get_future();
@@ -361,8 +357,7 @@ template <typename TBlob> void BasicLockFileImpl<TBlob>::Unlock() {
     auto requestOptions = m_file->GetDefaultRequestOptions();
     requestOptions.SetTotalDeadline(LockFileDetail::TotalDeadlineFor(m_lastRenewalTime.load() + m_leaseLength - Now()));
     try {
-        Unwrap(m_file->ReleaseLeaseAsync(
-            std::move(options), AzureClient::WithRequestOptions(std::move(requestOptions), AzureClient::block_on)));
+        Call(*m_file, m_file->ReleaseLeaseAsync(std::move(options), std::move(requestOptions)));
     } catch (const std::exception& e) {
         BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
             << "Failed to release blob lease for '" << m_fileName << "'; it will lapse on its own: " << e.what();

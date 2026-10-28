@@ -19,12 +19,17 @@
 #include <gtest/gtest.h>
 
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/bind_cancellation_slot.hpp>
+#include <boost/asio/cancellation_signal.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/io_context.hpp>
 
 #include <chrono>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
-#include <future>
 #include <initializer_list>
+#include <memory>
 #include <optional>
 #include <random>
 #include <regex>
@@ -33,6 +38,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -141,57 +147,154 @@ MakeCanonicalSuccessHeaders(std::initializer_list<std::pair<std::string_view, st
     return HttpResponse{statusCode, std::move(headers), body};
 }
 
-// ---- Assertions and coroutine helpers ----
+// ---- Running coroutines ----
+//
+// Client operations are awaitables, so a test starts one on an executor and drives that executor itself. A started
+// operation only runs while its io_context is polled: Start*/Spawn poll once, so it has run up to its first
+// suspension (e.g. a deferred request is pending) when they return. Completions are driven by FakeHttpClient::Poll()
+// or by RunAwaitable.
 
-// Assertion that `future` is already satisfied. Completions are driven by Poll(), so there is nothing to wait
-// for; a hung test is caught by the CTest timeout rather than a fixed sleep budget.
-template <class T> [[nodiscard]] ::testing::AssertionResult ExpectReady(const std::future<T>& future) {
-    if (future.wait_for(std::chrono::seconds{0}) == std::future_status::ready) {
-        return ::testing::AssertionSuccess();
-    }
-    return ::testing::AssertionFailure() << "future was not ready after the client was polled";
-}
+namespace Detail {
+template <class T> struct OperationState {
+    std::optional<T> Value;
+    std::exception_ptr Error;
+    bool Done = false;
+    boost::asio::cancellation_signal Signal;
+};
+template <> struct OperationState<void> {
+    std::exception_ptr Error;
+    bool Done = false;
+    boost::asio::cancellation_signal Signal;
+};
+} // namespace Detail
 
-// Drives the client once and returns the value of a use_future completion. Throws (which gtest reports as a
-// failure) instead of blocking when the completion did not run.
-template <class T> [[nodiscard]] T PollAndGet(FakeHttpClient& client, std::future<T>& future) {
-    client.Poll();
-    if (!ExpectReady(future)) {
-        throw std::runtime_error("future was not ready after the client was polled");
-    }
-    return future.get();
-}
-
-// Awaits the deferred operation produced by `makeOperation()` and stores its result through
-// `out`. This is a free coroutine taking a pointer rather than a capturing coroutine lambda, so
-// the coroutine frame never outlives captured references (cppcoreguidelines-avoid-capturing-
-// lambda-coroutines / cppcoreguidelines-avoid-reference-coroutine-parameters).
-template <class Result, class MakeOperation>
-boost::asio::awaitable<void> AwaitInto(std::optional<Result>* out, MakeOperation makeOperation) {
-    *out = co_await makeOperation();
-}
-
-// Same idea, but only records whether the awaited result was engaged.
-template <class MakeOperation> boost::asio::awaitable<void> AwaitHasValue(bool* out, MakeOperation makeOperation) {
-    const auto result = co_await makeOperation();
-    *out = result.has_value();
-}
-
-class CallbackExpectation {
+// An awaitable started with StartAwaitable. Copies share the state, so it may be captured freely.
+template <class T> class Operation {
   public:
-    CallbackExpectation() = default;
-    CallbackExpectation(const CallbackExpectation&) = delete;
-    CallbackExpectation& operator=(const CallbackExpectation&) = delete;
-    CallbackExpectation(CallbackExpectation&&) = delete;
-    CallbackExpectation& operator=(CallbackExpectation&&) = delete;
+    explicit Operation(std::shared_ptr<Detail::OperationState<T>> state) : m_state(std::move(state)) {}
 
-    ~CallbackExpectation() { EXPECT_TRUE(m_invoked) << "Completion callback was not invoked."; }
+    [[nodiscard]] bool Done() const noexcept { return m_state->Done; }
 
-    void MarkInvoked() { m_invoked = true; }
+    // The value the awaitable returned. Throws what the coroutine threw, or std::logic_error while it is still
+    // running (so gtest reports a failure instead of reading an empty optional).
+    std::conditional_t<std::is_void_v<T>, void, T&> Result() const {
+        Rethrow();
+        if constexpr (!std::is_void_v<T>) {
+            return *m_state->Value;
+        }
+    }
+
+    // Emits cancellation on the coroutine's cancellation slot, as the owner of the awaiting coroutine would.
+    void Cancel(boost::asio::cancellation_type type = boost::asio::cancellation_type::terminal) {
+        m_state->Signal.emit(type);
+    }
+
+    [[nodiscard]] boost::asio::cancellation_signal& Signal() const noexcept { return m_state->Signal; }
 
   private:
-    bool m_invoked = false;
+    void Rethrow() const {
+        if (!m_state->Done) {
+            throw std::logic_error{"the awaitable has not completed (is a request still pending?)"};
+        }
+        if (m_state->Error) {
+            std::rethrow_exception(m_state->Error);
+        }
+    }
+
+    std::shared_ptr<Detail::OperationState<T>> m_state;
 };
+
+// Starts `awaitable` on `executor` with a cancellation slot bound to the returned Operation. Does not poll.
+template <class T, class Executor>
+[[nodiscard]] Operation<T> StartAwaitableOn(const Executor& executor, boost::asio::awaitable<T> awaitable) {
+    auto state = std::make_shared<Detail::OperationState<T>>();
+    boost::asio::co_spawn(
+        executor, std::move(awaitable),
+        boost::asio::bind_cancellation_slot(state->Signal.slot(), [state](std::exception_ptr error, auto&&... value) {
+            state->Error = std::move(error);
+            if constexpr (sizeof...(value) == 1U) {
+                state->Value.emplace(std::forward<decltype(value)>(value)...);
+            }
+            state->Done = true;
+        }));
+    return Operation<T>{std::move(state)};
+}
+
+// Starts `awaitable` on the client's executor and polls it once.
+template <class T>
+[[nodiscard]] Operation<T> StartAwaitable(FakeHttpClient& httpClient, boost::asio::awaitable<T> awaitable) {
+    auto operation = StartAwaitableOn(httpClient.get_executor(), std::move(awaitable));
+    httpClient.Poll();
+    return operation;
+}
+
+// Starts `awaitable` on `context` and polls it once.
+template <class T>
+[[nodiscard]] Operation<T> StartAwaitable(boost::asio::io_context& context, boost::asio::awaitable<T> awaitable) {
+    auto operation = StartAwaitableOn(context.get_executor(), std::move(awaitable));
+    context.restart();
+    context.poll();
+    return operation;
+}
+
+// Runs `awaitable` on the client's executor until it completes (real retry timers included) and returns its value.
+// Throws instead of hanging when it does not complete within `timeout`, e.g. because a deferred request is never
+// completed: use StartAwaitable for those.
+template <class T>
+T RunAwaitable(FakeHttpClient& httpClient, boost::asio::awaitable<T> awaitable,
+               std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+    auto operation = StartAwaitableOn(httpClient.get_executor(), std::move(awaitable));
+    if (!httpClient.RunUntil([&] { return operation.Done(); }, timeout)) {
+        throw std::runtime_error("the awaitable did not complete in time");
+    }
+    if constexpr (std::is_void_v<T>) {
+        operation.Result();
+    } else {
+        return std::move(operation.Result());
+    }
+}
+
+template <class T>
+T RunAwaitable(boost::asio::io_context& context, boost::asio::awaitable<T> awaitable,
+               std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+    auto operation = StartAwaitableOn(context.get_executor(), std::move(awaitable));
+    const auto limit = std::chrono::steady_clock::now() + timeout;
+    while (!operation.Done()) {
+        if (std::chrono::steady_clock::now() >= limit) {
+            throw std::runtime_error("the awaitable did not complete in time");
+        }
+        context.restart();
+        context.run_one_for(std::chrono::milliseconds(50));
+    }
+    if constexpr (std::is_void_v<T>) {
+        operation.Result();
+    } else {
+        return std::move(operation.Result());
+    }
+}
+
+// Starts `awaitable` and passes its value to `handler(T)` (`handler()` for void) when it completes; the handler
+// never runs inside this call. An exception thrown by the coroutine is rethrown from the polling thread.
+template <class T, class Executor, class Handler>
+void SpawnOn(const Executor& executor, boost::asio::awaitable<T> awaitable, Handler handler) {
+    boost::asio::co_spawn(executor, std::move(awaitable),
+                          [handler = std::move(handler)](std::exception_ptr error, auto&&... value) mutable {
+                              if (error) {
+                                  std::rethrow_exception(error);
+                              }
+                              handler(std::forward<decltype(value)>(value)...);
+                          });
+}
+
+template <class T, class Handler>
+void Spawn(FakeHttpClient& httpClient, boost::asio::awaitable<T> awaitable, Handler handler) {
+    SpawnOn(httpClient.get_executor(), std::move(awaitable), std::move(handler));
+}
+
+template <class T, class Handler>
+void Spawn(boost::asio::io_context& context, boost::asio::awaitable<T> awaitable, Handler handler) {
+    SpawnOn(context.get_executor(), std::move(awaitable), std::move(handler));
+}
 
 inline void ExpectOptionalBodyMatches(const HttpRequest& request, std::optional<std::string_view> expectedBody) {
     if (expectedBody.has_value()) {

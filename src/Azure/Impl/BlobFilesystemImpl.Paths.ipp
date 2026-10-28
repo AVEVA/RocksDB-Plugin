@@ -21,7 +21,7 @@ template <typename THttp> bool BasicBlobFilesystemImpl<THttp>::FileExists(const 
 
     auto [prefix, realPath, client] = ResolveBlob(name);
 
-    if (Call([&](auto token) { return client.ExistsAsync(token); })) {
+    if (Call(client, client.ExistsAsync())) {
         return true;
     }
 

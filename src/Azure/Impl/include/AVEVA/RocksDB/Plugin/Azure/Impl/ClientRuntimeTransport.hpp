@@ -29,7 +29,7 @@ template <> struct HttpClientFactory<::AVEVA::HttpClient> {
 /// owned and run by the host application. The runtime never runs, stops or destroys that io_context: the host
 /// must keep it alive and running on at least one thread for as long as the runtime exists.
 /// The HTTP client is shared with the Azure clients and credentials, which keep it alive for as long as they exist.
-/// Operations are started with boost::asio::use_future and waited for on the caller's thread, which
+/// Operations are run as coroutines on the transport's executor and waited for on the caller's thread, which
 /// must never be one of the threads running the io_context.
 /// </summary>
 template <AzureClient::HttpClientLike THttp> class BasicClientRuntime : public ClientRuntimeBase {

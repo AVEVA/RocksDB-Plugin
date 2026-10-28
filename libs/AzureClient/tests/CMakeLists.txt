@@ -56,9 +56,7 @@ endfunction()
 
 aveva_azure_client_add_unit_tests(aveva-azure-client-pipeline-tests
     AsyncCancellationTests.cpp
-    AsyncDeferredCompletionTests.cpp
     AsyncLifetimeTests.cpp
-    AsyncRecursionTests.cpp
     RetryTests.cpp
     ParseContentRangeTests.cpp
     RequestOptionsTests.cpp

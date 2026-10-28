@@ -4,8 +4,7 @@
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
-
-#include <AVEVA/AzureClient/BlockOn.hpp>
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/RequestHelpers.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -32,7 +31,7 @@ void CreateContainerIfNotExists(TContainer& client, int maxRetries = 5,
                                 std::chrono::milliseconds baseDelay = std::chrono::seconds(1)) {
     int retries = 1;
     while (true) {
-        auto result = client.CreateIfNotExistsAsync(AzureClient::block_on);
+        auto result = Block(client, client.CreateIfNotExistsAsync());
         if (result.has_value()) {
             return;
         }

@@ -74,7 +74,7 @@ template <typename TBlob> BasicWriteableFileImpl<TBlob>::~BasicWriteableFileImpl
     // the violation and then still has to wait.
     if (m_uploads && HasPendingUploads()) {
         try {
-            AzureClient::ThrowIfRunningOn(m_w.H.Blob->get_executor());
+            ThrowIfRunningOn(m_w.H.Blob->get_executor());
         } catch (const std::exception& e) {
             BOOST_LOG_SEV(*m_w.H.Logger, boost::log::trivial::error)
                 << "Writeable file '" << m_w.H.Name
@@ -305,7 +305,7 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::WaitForUploads(con
             // Upload completions run on the host executor, so waiting for them there can never finish. Checked only
             // when a wait is needed, so a call that has nothing to wait for stays valid on any thread.
             lock.unlock();
-            AzureClient::ThrowIfRunningOn(m_w.H.Blob->get_executor());
+            ThrowIfRunningOn(m_w.H.Blob->get_executor());
             lock.lock();
         }
         m_uploads->Done.wait(lock, [&] { return m_uploads->InFlight <= maxRemaining; });

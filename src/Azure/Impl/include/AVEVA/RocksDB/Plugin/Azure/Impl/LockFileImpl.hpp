@@ -97,20 +97,21 @@ class BasicLockFileImpl
             return;
         }
 
-        m_file->RenewLeaseAsync(
-            std::move(attempt->Options),
-            [this, leaseId = std::move(attempt->LeaseId), requestStart = attempt->Start,
-             callback = std::move(callback)](auto result) mutable {
-                std::exception_ptr failure;
-                try {
-                    Unwrap(std::move(result));
-                } catch (...) {
-                    failure = std::current_exception();
-                }
-                const auto [error, renewed] = FinishRenewal(leaseId, requestStart, std::move(failure));
-                callback(error, renewed);
-            },
-            std::move(attempt->RequestOptions));
+        StartOperation(m_file->get_executor(),
+                       m_file->RenewLeaseAsync(std::move(attempt->Options), std::move(attempt->RequestOptions)),
+                       std::stop_token{},
+                       [this, leaseId = std::move(attempt->LeaseId), requestStart = attempt->Start,
+                        callback = std::move(callback)](std::exception_ptr failure, auto result) mutable {
+                           if (!failure) {
+                               try {
+                                   Unwrap(std::move(result));
+                               } catch (...) {
+                                   failure = std::current_exception();
+                               }
+                           }
+                           const auto [error, renewed] = FinishRenewal(leaseId, requestStart, std::move(failure));
+                           callback(error, renewed);
+                       });
     }
     void Unlock();
 

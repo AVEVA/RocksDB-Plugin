@@ -17,13 +17,15 @@
 #include <algorithm>
 #include <atomic>
 #include <boost/asio/any_io_executor.hpp>
+#include <boost/asio/as_tuple.hpp>
 #include <boost/asio/async_result.hpp>
+#include <boost/asio/awaitable.hpp>
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/error.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
-#include <boost/asio/thread_pool.hpp>
+#include <boost/asio/use_awaitable.hpp>
 #include <boost/url/parse.hpp>
 
 #include <cassert>
@@ -32,6 +34,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <deque>
+#include <expected>
 #include <functional>
 #include <future>
 #include <memory>
@@ -159,11 +162,9 @@ template <class T> class Knob {
     mutable std::mutex m_mutex;
     T m_value{};
 };
-// Writer pool for downloads started through FakeHttpClient. It counts tasks so Poll() can settle a download
-// deterministically.
+// Counts how often a download asked a FakeHttpClient for its writer executor (i.e. had no scheduler of its own).
+// Downloads write on the client's own io_context, so Poll() settles them like any other completion.
 struct TestDownloadWriters {
-    boost::asio::thread_pool Pool{2U};
-    std::atomic<std::size_t> Pending{0U};
     std::atomic<std::size_t> Started{0U};
 };
 
@@ -215,15 +216,26 @@ class FakeHttpClient final {
             m_real.expires_after(delay);
         }
 
-        template <typename Handler> void async_wait(Handler&& handler) {
-            if (!InstantRetryFlag().load()) {
-                m_real.async_wait(std::forward<Handler>(handler));
-                return;
-            }
-            m_pending = std::make_shared<std::atomic<bool>>(false);
-            boost::asio::post(m_executor, [cancelled = m_pending, h = std::forward<Handler>(handler)]() mutable {
-                h(cancelled->load() ? boost::asio::error::operation_aborted : boost::system::error_code{});
-            });
+        // Accepts any completion token, in particular as_tuple(use_awaitable); honours the awaiting coroutine's
+        // cancellation slot in both modes.
+        template <typename Token> auto async_wait(Token&& token) {
+            return boost::asio::async_initiate<Token, void(boost::system::error_code)>(
+                [this](auto handler) {
+                    if (!InstantRetryFlag().load()) {
+                        m_real.async_wait(std::move(handler));
+                        return;
+                    }
+                    m_pending = std::make_shared<std::atomic<bool>>(false);
+                    auto slot = boost::asio::get_associated_cancellation_slot(handler);
+                    if (slot.is_connected()) {
+                        slot.assign(
+                            [cancelled = m_pending](boost::asio::cancellation_type_t) { cancelled->store(true); });
+                    }
+                    boost::asio::post(m_executor, [cancelled = m_pending, h = std::move(handler)]() mutable {
+                        h(cancelled->load() ? boost::asio::error::operation_aborted : boost::system::error_code{});
+                    });
+                },
+                token);
         }
 
         std::size_t cancel() {
@@ -319,116 +331,55 @@ class FakeHttpClient final {
     // Poll()/Run() instead of racing a background thread pool.
     executor_type get_executor() const noexcept { return m_context.get_executor(); }
 
-    // Lets file downloads run their blocking writes on a test pool whose activity Poll() can observe.
-    struct CountingWriterExecutor {
-        template <class F> void execute(F&& task) const {
-            auto& writers = DownloadWriters();
-            writers.Pending.fetch_add(1U);
-            writers.Started.fetch_add(1U);
-            boost::asio::post(writers.Pool, [task = std::forward<F>(task), &writers]() mutable {
-                task();
-                writers.Pending.fetch_sub(1U);
-            });
-        }
-        // Lets boost::asio::post accept this execute-only executor.
-        [[nodiscard]] CountingWriterExecutor require(boost::asio::execution::blocking_t::never_t) const noexcept {
-            return *this;
-        }
-        bool operator==(const CountingWriterExecutor&) const noexcept = default;
-    };
-
-    [[nodiscard]] static CountingWriterExecutor GetDownloadWriter() { return {}; }
-
-    template <boost::asio::completion_token_for<void(std::error_code, HttpResponse)> CompletionToken>
-    auto SendAsync(HttpRequest request, HttpRequestOptions options, CompletionToken&& token) {
-        return boost::asio::async_initiate<CompletionToken, void(std::error_code, HttpResponse)>(
-            [this](auto handler, HttpRequest req, HttpRequestOptions opts) {
-                if (auto failure = TakeInitiationFailure()) {
-                    std::rethrow_exception(failure);
-                }
-                SendAsyncErased(std::move(req), CompletionHandler{std::move(handler)}, opts);
-            },
-            token, std::move(request), options);
+    // Downloads write on this client's own io_context, so Poll() runs the writes together with every other
+    // completion. The counter lets a test see whether a download fell back to the client's writer.
+    [[nodiscard]] executor_type GetDownloadWriter() const noexcept {
+        DownloadWriters().Started.fetch_add(1U);
+        return m_context.get_executor();
     }
 
-    // Makes the next SendAsync throw from its initiation, before any request is recorded (as an allocation failure
-    // would). Only that one call is affected.
+    // Records the request and completes it per the scripts. The awaiting coroutine's cancellation slot reaches a
+    // deferred request, which then fails with operation_canceled, like a real transport aborting an in-flight request.
+    boost::asio::awaitable<HttpResult> SendAsync(HttpRequest request, HttpRequestOptions options) {
+        if (auto failure = TakeInitiationFailure()) {
+            std::rethrow_exception(failure);
+        }
+        auto token = boost::asio::as_tuple(boost::asio::use_awaitable);
+        boost::asio::cancellation_slot slot;
+        auto [error, response] =
+            co_await boost::asio::async_initiate<decltype(token), void(std::error_code, HttpResponse)>(
+                [this, &slot](auto handler, HttpRequest req, HttpRequestOptions opts) {
+                    slot = boost::asio::get_associated_cancellation_slot(handler);
+                    SendAsyncErased(std::move(req), CompletionHandler{std::move(handler)}, std::move(opts), slot);
+                },
+                token, std::move(request), std::move(options));
+        // The fake's handler must not outlive the request it belongs to.
+        if (slot.is_connected()) {
+            slot.clear();
+        }
+        if (error) {
+            co_return std::unexpected(error);
+        }
+        co_return std::move(response);
+    }
+
+    // Makes the next SendAsync throw before any request is recorded (as an allocation failure would). Only that one
+    // call is affected.
     void FailNextInitiation(std::exception_ptr failure) {
         std::scoped_lock lock(m_mutex);
         m_initiationFailure = std::move(failure);
     }
 
-    // Runs ready handlers on this client's executor without blocking; returns the number run.
-    // Use after an ...Async call to observe a completion that Task 8's PostCompletion deferred.
-    std::size_t Poll() {
-        const std::size_t writesBefore = DownloadWriters().Started.load();
-        const std::size_t ran = PollRaw();
-        SettleIfWritesStarted(writesBefore);
-        return ran;
-    }
+    // Runs ready handlers on this client's executor (coroutines, posted completions, instant retry timers) without
+    // blocking; returns the number run.
+    std::size_t Poll() { return PollRaw(); }
 
-    // Downloads write to their sink off the I/O thread; when a step started such a write this waits for it and
-    // runs the completions it posts back, so a test observes the state a synchronous sink would have produced.
-    void SettleIfWritesStarted(std::size_t writesBefore) {
-        if (DownloadWriters().Started.load() == writesBefore && DownloadWriters().Pending.load() == 0U) {
-            return;
-        }
-        SettleLoop();
-    }
-
-    // File downloads start (and finish) on the writer pool, so a test that inspects the client right after starting
-    // one first lets those steps run: this is a no-op unless a writer task started since the last settle.
-    void SettleWriters() const {
-        if (DownloadWriters().Pending.load() == 0U && DownloadWriters().Started.load() == m_settledStarted.load()) {
-            return;
-        }
-        const_cast<FakeHttpClient*>(this)->SettleLoop();
-    }
-
-    // Bounded so a writer that never finishes fails the test instead of hanging the whole run.
-    void SettleLoop() {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
-        for (;;) {
-            while (DownloadWriters().Pending.load() > 0U) {
-                if (std::chrono::steady_clock::now() > deadline) {
-                    ADD_FAILURE() << "FakeHttpClient::SettleLoop gave up waiting for download writers";
-                    return;
-                }
-                std::this_thread::yield();
-            }
-            if (std::chrono::steady_clock::now() > deadline) {
-                ADD_FAILURE() << "FakeHttpClient::SettleLoop did not settle";
-                return;
-            }
-            const std::size_t startedNow = DownloadWriters().Started.load();
-            if (PollRaw() == 0U && DownloadWriters().Pending.load() == 0U &&
-                DownloadWriters().Started.load() == startedNow) {
-                m_settledStarted.store(startedNow);
-                return;
-            }
-        }
-    }
-
-    // Runs `task` on the client's executor, the way a real transport completes: completion handlers that check
-    // running_in_this_thread() would otherwise defer a call made from the bare test thread and never run it.
-    // Inline when already on the executor (a handler completing another request). Under the background pump the
-    // task runs on the pump thread and this waits for it, so the caller still observes the finished completion.
+    // Runs `task` on the client's executor, the way a real transport completes: coroutines resumed from it then
+    // continue on their own executor instead of the bare test thread. Inline when already on the executor (a handler
+    // completing another request).
     template <class F> void RunOnExecutor(F&& task) {
         if (m_context.get_executor().running_in_this_thread()) {
             task();
-            return;
-        }
-        if (m_pumpActive.load()) {
-            std::promise<void> done;
-            boost::asio::post(m_context, [&task, &done] {
-                try {
-                    task();
-                    done.set_value();
-                } catch (...) {
-                    done.set_exception(std::current_exception());
-                }
-            });
-            done.get_future().get();
             return;
         }
         boost::asio::post(m_context, [&task] { task(); });
@@ -436,36 +387,11 @@ class FakeHttpClient final {
     }
 
     std::size_t PollRaw() {
-        // restart() must not race a poll()/run() on another thread, so every thread that drives the context
-        // (including the background pump) takes this lock. The pump holds it for its whole life, so skip then.
-        if (m_pumpActive.load()) {
-            return 0U;
-        }
         std::scoped_lock lock(m_pollMutex);
         // poll() leaves the context stopped once it runs out of work; restart so repeated
         // Poll() calls keep observing newly posted handlers.
         m_context.restart();
         return m_context.poll();
-    }
-
-    // Drives completions on a background thread, so a test (or code under test) that blocks on a future gets its
-    // completion without calling Poll(). Stopped when the client is destroyed.
-    void StartBackgroundPump() {
-        if (m_pump.joinable()) {
-            return;
-        }
-        m_pumpActive.store(true);
-        m_pump = std::jthread([this](const std::stop_token& stop) {
-            // The guard keeps run() blocked on the context instead of returning when it is idle; the stop callback
-            // wakes it. While the pump owns the context, Poll()/RunUntil() must not drive it from another thread.
-            auto guard = boost::asio::make_work_guard(m_context);
-            std::scoped_lock lock(m_pollMutex);
-            // Restart before arming the callback, or a stop requested earlier would be undone.
-            m_context.restart();
-            std::stop_callback onStop(stop, [this] { m_context.stop(); });
-            m_context.run();
-            m_pumpActive.store(false);
-        });
     }
 
     // Runs handlers (including timers such as retry backoff) until `done()` holds, blocking on the
@@ -480,10 +406,6 @@ class FakeHttpClient final {
             const auto remaining = deadline - std::chrono::steady_clock::now();
             if (remaining <= std::chrono::steady_clock::duration::zero()) {
                 return false;
-            }
-            if (m_pumpActive.load()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds{1});
-                continue;
             }
             std::scoped_lock lock(m_pollMutex);
             m_context.restart();
@@ -504,7 +426,9 @@ class FakeHttpClient final {
         return m_requestCv.wait_for(lock, timeout, [&] { return m_requests.size() >= count; });
     }
 
-    void SendAsyncErased(HttpRequest request, CompletionHandler completion, HttpRequestOptions options) {
+    // `cancellation` is the awaiting coroutine's slot; it fails a deferred request when it fires.
+    void SendAsyncErased(HttpRequest request, CompletionHandler completion, HttpRequestOptions options,
+                         boost::asio::cancellation_slot cancellation = {}) {
         // Snapshot the body now, while any SetBodyView() backing buffer is still guaranteed
         // alive (i.e. before completion runs) -- mirrors how a real transport consumes the
         // bytes up front rather than retaining a live reference across the completion.
@@ -555,40 +479,27 @@ class FakeHttpClient final {
                 m_registeredDeferred.insert(requestIndex);
             }
 
-            // Honour the HttpClient cancellation contract: if the caller attached a
-            // cancellation slot to this request, forward cancellation signals into a
-            // synchronous failure of the matching pending completion (if still pending),
-            // mirroring how a real transport would abort an in-flight request.
-            boost::asio::cancellation_slot slot = record->Options.GetCancellationSlot();
-            if (slot.is_connected() && !scripted.IgnoreCancellation) {
-                slot.assign([this, requestIndex](boost::asio::cancellation_type_t /*type*/) {
+            // Honour the HttpClient cancellation contract: when the awaiting coroutine is cancelled, fail the matching
+            // pending request, mirroring how a real transport would abort an in-flight request.
+            if (cancellation.is_connected() && !scripted.IgnoreCancellation) {
+                cancellation.assign([this, requestIndex](boost::asio::cancellation_type_t /*type*/) {
                     (void)this->FailRequest(requestIndex, std::make_error_code(std::errc::operation_canceled));
                 });
             }
             return;
         }
 
-        // Default to posting completions on the client's io_context to avoid re-entrant
-        // synchronous completions that the real transport would not provide. Tests that need
-        // inline completion can set CompleteInline() = true.
-        if (m_completeInline.Get()) {
-            const std::size_t writesBefore = DownloadWriters().Started.load();
-            if (scripted.OnComplete) {
-                scripted.OnComplete(scripted.Response);
+        // Completions are always posted to the client's io_context: resuming the awaiting coroutine from inside its
+        // own initiation would not be a legal asynchronous completion.
+        auto exec = m_context.get_executor();
+        boost::asio::post(exec, [completion = std::move(completion), error = scripted.Error,
+                                 response = std::move(scripted.Response),
+                                 onComplete = std::move(scripted.OnComplete)]() mutable {
+            if (onComplete) {
+                onComplete(response);
             }
-            completion(scripted.Error, std::move(scripted.Response));
-            SettleIfWritesStarted(writesBefore);
-        } else {
-            auto exec = m_context.get_executor();
-            boost::asio::post(exec, [completion = std::move(completion), error = scripted.Error,
-                                     response = std::move(scripted.Response),
-                                     onComplete = std::move(scripted.OnComplete)]() mutable {
-                if (onComplete) {
-                    onComplete(response);
-                }
-                completion(error, std::move(response));
-            });
-        }
+            completion(error, std::move(response));
+        });
     }
 
     void EnqueueResponse(HttpResponse response, std::error_code error = {}, bool deferred = false) {
@@ -610,10 +521,7 @@ class FakeHttpClient final {
 
     [[nodiscard]] bool CompleteNext() { return CompletePending(0U); }
 
-    [[nodiscard]] bool CompletePending(std::size_t index) {
-        SettleWriters();
-        return CompleteTaken(TakePending(index));
-    }
+    [[nodiscard]] bool CompletePending(std::size_t index) { return CompleteTaken(TakePending(index)); }
 
     // Templated only because PendingCompletion is declared further down.
     template <class TPending> [[nodiscard]] bool CompleteTaken(TPending pending) {
@@ -621,43 +529,32 @@ class FakeHttpClient final {
             return false;
         }
 
-        // Complete immediately for test helpers: invoking the completion inline simplifies
-        // test assertions that expect the callback to have been invoked after calling
-        // CompleteNext/CompletePending. SendAsyncErased still posts completions when
-        // CompleteInline is false, so this keeps the non-reentrant testing helper behavior.
-        const std::size_t writesBefore = DownloadWriters().Started.load();
+        // Completes on the client's executor right away, so a test that calls CompleteNext/CompletePending sees the
+        // awaiting coroutine run up to its next suspension without a separate Poll().
         RunOnExecutor([&pending] {
             if (pending->OnComplete) {
                 pending->OnComplete(pending->Response);
             }
             pending->Completion(pending->Error, std::move(pending->Response));
         });
-        SettleIfWritesStarted(writesBefore);
         return true;
     }
 
     // True while the request is deferred and neither completed, failed nor cancelled.
-    [[nodiscard]] bool IsPending(std::size_t requestIndex) const {
-        SettleWriters();
-        return FindPending(requestIndex).has_value();
-    }
+    [[nodiscard]] bool IsPending(std::size_t requestIndex) const { return FindPending(requestIndex).has_value(); }
 
     // True once a deferred request was completed, failed or cancelled. A responder that holds a request records it
     // before SendAsyncErased registers it as pending, so "not pending yet" must not be mistaken for "not pending
     // any more": a hold list pruned in that window would lose the request for good.
     [[nodiscard]] bool HasLeftPending(std::size_t requestIndex) const {
-        SettleWriters();
         std::scoped_lock lock(m_mutex);
         return m_registeredDeferred.contains(requestIndex) && !FindPendingLocked(requestIndex).has_value();
     }
 
     [[nodiscard]] bool CompleteRequest(std::size_t requestIndex) {
-        SettleWriters();
         return CompleteTaken(TakePendingRequest(requestIndex));
     }
 
-    // Downloads write to their sink off the I/O thread; this waits for those writes and runs the completions
-    // they post back, so a test observes the same state a synchronous sink would have produced.
     [[nodiscard]] bool FailPending(std::size_t index, std::error_code error, HttpResponse response = HttpResponse{}) {
         return FailTaken(TakePending(index), error, std::move(response));
     }
@@ -668,10 +565,7 @@ class FakeHttpClient final {
             return false;
         }
 
-        // Invoke inline for test helper immediacy.
-        const std::size_t writesBefore = DownloadWriters().Started.load();
         RunOnExecutor([&] { pending->Completion(error, std::move(response)); });
-        SettleIfWritesStarted(writesBefore);
         return true;
     }
 
@@ -697,13 +591,11 @@ class FakeHttpClient final {
     }
 
     [[nodiscard]] std::size_t RequestCount() const {
-        SettleWriters();
         std::scoped_lock lock(m_mutex);
         return m_requests.size();
     }
 
     [[nodiscard]] std::size_t PendingCount() const {
-        SettleWriters();
         std::scoped_lock lock(m_mutex);
         return m_pending.size();
     }
@@ -712,13 +604,11 @@ class FakeHttpClient final {
 
     // A copy of the records taken under the lock, so it can be inspected while other threads keep sending.
     [[nodiscard]] std::deque<RequestRecord> Requests() const {
-        SettleWriters();
         std::scoped_lock lock(m_mutex);
         return m_requests;
     }
 
     [[nodiscard]] const RequestRecord& RequestAt(std::size_t index) const {
-        SettleWriters();
         std::scoped_lock lock(m_mutex);
         return m_requests.at(index);
     }
@@ -785,11 +675,6 @@ class FakeHttpClient final {
     [[nodiscard]] Knob<std::error_code>& DefaultError() noexcept { return m_defaultError; }
 
     [[nodiscard]] Knob<bool>& DeferByDefault() noexcept { return m_deferByDefault; }
-
-    // When true, completions are delivered inline (synchronous). Default false: completions are posted
-    // to the internal io_context to better approximate a real transport that never invokes
-    // completions on the initiating thread.
-    [[nodiscard]] Knob<bool>& CompleteInline() noexcept { return m_completeInline; }
 
   private:
     struct PendingCompletion {
@@ -882,8 +767,6 @@ class FakeHttpClient final {
     Knob<HttpResponse> m_defaultResponse{HttpResponse{201, {}, ""}};
     Knob<std::error_code> m_defaultError;
     Knob<bool> m_deferByDefault;
-    Knob<bool> m_completeInline; // false: async (posted) completions // default to async (posted) completions per the
-                                 // HttpClient contract (T26)
 
     // Backs m_context unless the client is built on a caller-owned io_context.
     boost::asio::io_context m_ownedContext;
@@ -894,7 +777,6 @@ class FakeHttpClient final {
     std::condition_variable m_responderIdle;
     std::size_t m_respondersInFlight = 0U;
     std::recursive_mutex m_pollMutex;
-    mutable std::atomic<std::size_t> m_settledStarted{0U};
     Responder m_responder;
     std::exception_ptr m_initiationFailure;
 
@@ -935,10 +817,6 @@ class FakeHttpClient final {
         static std::atomic<bool> flag{false};
         return flag;
     }
-
-    // Last member, so the pump thread is joined before anything it touches is destroyed.
-    std::atomic<bool> m_pumpActive{false};
-    std::jthread m_pump;
 };
 
 // The clients under test run on the fake transport; these shadow the HttpClient-bound aliases of the library.
@@ -956,29 +834,23 @@ using AzurePipelinesCredential = BasicAzurePipelinesCredential<FakeHttpClient>;
 // Returns a fixed token. The requested `scopes` are ignored.
 class StaticTokenCredential {
   public:
-    explicit StaticTokenCredential(
-        std::string token,
-        std::chrono::system_clock::time_point expiresOn = std::chrono::system_clock::time_point::max(),
-        std::optional<boost::asio::io_context::executor_type> executor = std::nullopt)
-        : m_token(std::move(token)), m_expiresOn(expiresOn), m_executor(std::move(executor)) {}
+    explicit StaticTokenCredential(std::string token, std::chrono::system_clock::time_point expiresOn =
+                                                          std::chrono::system_clock::time_point::max())
+        : m_token(std::move(token)), m_expiresOn(expiresOn) {}
 
-    template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
-    auto GetTokenAsync(std::vector<std::string> /*scopes*/, CompletionToken&& token) {
-        return boost::asio::async_initiate<TokenSignature>(
-            [this](auto handler) {
-                Private::CompleteOnExecutorIfSet(m_executor, std::move(handler), std::error_code{},
-                                                 AccessToken{.Token = m_token, .ExpiresOn = m_expiresOn});
-            },
-            token);
+    boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> /*scopes*/) {
+        co_return AccessToken{.Token = m_token, .ExpiresOn = m_expiresOn};
     }
 
   private:
     std::string m_token;
     std::chrono::system_clock::time_point m_expiresOn;
-    std::optional<boost::asio::io_context::executor_type> m_executor;
 };
 class ScriptedTokenCredential final {
   public:
+    // Matches the completion the deferred scripts are finished with.
+    using TokenSignature = void(std::error_code, AccessToken);
+
     struct Script {
         std::error_code Error;
         AccessToken Token;
@@ -991,6 +863,7 @@ class ScriptedTokenCredential final {
         std::error_code Error;
         AccessToken Token;
         std::move_only_function<TokenSignature> Completion;
+        std::size_t Id = 0U;
     };
 
     void EnqueueImmediate(std::error_code error, AccessToken token) {
@@ -1000,20 +873,14 @@ class ScriptedTokenCredential final {
     // The next token request throws from inside GetTokenAsync, as an allocation failure would.
     void EnqueueThrow() { m_scripts.push_back(Script{.Throws = true}); }
 
+    // The next token request suspends until CompleteNext()/CompletePending() (or the awaiting coroutine is
+    // cancelled, which completes it with operation_canceled). The awaiting coroutine resumes on its own executor, so
+    // poll that executor after completing it.
     void EnqueueDeferred(std::error_code error, AccessToken token) {
         m_scripts.push_back(Script{.Error = error, .Token = std::move(token), .Deferred = true});
     }
 
-    template <boost::asio::completion_token_for<TokenSignature> CompletionToken>
-    auto GetTokenAsync(std::vector<std::string> scopes, CompletionToken&& token) {
-        return boost::asio::async_initiate<TokenSignature>(
-            [this](auto handler, std::vector<std::string> scopeList) {
-                Begin(std::move(scopeList), std::move(handler));
-            },
-            token, std::move(scopes));
-    }
-
-    template <class Handler> void Begin(std::vector<std::string> scopes, Handler completion) {
+    boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> scopes) {
         ++m_callCount;
         m_requestedScopes.push_back(scopes);
 
@@ -1027,15 +894,45 @@ class ScriptedTokenCredential final {
             throw std::bad_alloc{};
         }
 
-        if (script.Deferred) {
-            m_pending.push_back(PendingRequest{.Scopes = std::move(scopes),
-                                               .Error = script.Error,
-                                               .Token = std::move(script.Token),
-                                               .Completion = std::move(completion)});
-            return;
+        if (!script.Deferred) {
+            if (script.Error) {
+                co_return std::unexpected(script.Error);
+            }
+            co_return std::move(script.Token);
         }
 
-        completion(script.Error, std::move(script.Token));
+        auto token = boost::asio::as_tuple(boost::asio::use_awaitable);
+        boost::asio::cancellation_slot slot;
+        auto [error, accessToken] = co_await boost::asio::async_initiate<decltype(token), TokenSignature>(
+            [this, &slot](auto handler, std::vector<std::string> scopeList, Script deferred) {
+                slot = boost::asio::get_associated_cancellation_slot(handler);
+                const std::size_t id = ++m_nextId;
+                // Resuming an awaitable handler runs the coroutine in place, so hop to its executor first.
+                auto executor = boost::asio::get_associated_executor(handler);
+                m_pending.push_back(PendingRequest{
+                    .Scopes = std::move(scopeList),
+                    .Error = deferred.Error,
+                    .Token = std::move(deferred.Token),
+                    .Completion =
+                        [executor, handler = std::move(handler)](std::error_code ec, AccessToken tok) mutable {
+                            boost::asio::post(executor,
+                                              [handler = std::move(handler), ec, tok = std::move(tok)]() mutable {
+                                                  handler(ec, std::move(tok));
+                                              });
+                        },
+                    .Id = id});
+                if (slot.is_connected()) {
+                    slot.assign([this, id](boost::asio::cancellation_type_t) { CancelRequest(id); });
+                }
+            },
+            token, std::move(scopes), std::move(script));
+        if (slot.is_connected()) {
+            slot.clear();
+        }
+        if (error) {
+            co_return std::unexpected(error);
+        }
+        co_return std::move(accessToken);
     }
 
     [[nodiscard]] std::size_t PendingCount() const noexcept { return m_pending.size(); }
@@ -1060,6 +957,17 @@ class ScriptedTokenCredential final {
     }
 
   private:
+    void CancelRequest(std::size_t id) {
+        const auto it = std::ranges::find(m_pending, id, &PendingRequest::Id);
+        if (it == m_pending.end()) {
+            return;
+        }
+        PendingRequest pending = std::move(*it);
+        m_pending.erase(it);
+        pending.Completion(std::make_error_code(std::errc::operation_canceled), AccessToken{});
+    }
+
+    std::size_t m_nextId = 0U;
     int m_callCount = 0;
     std::vector<std::vector<std::string>> m_requestedScopes;
     std::deque<Script> m_scripts;

@@ -12,7 +12,6 @@
 #include "AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/RocksDBHelpers.hpp"
 
-#include <boost/asio/use_future.hpp>
 #include <boost/scope/scope_exit.hpp>
 #include <boost/scope/scope_fail.hpp>
 #include <boost/uuid/random_generator.hpp>
@@ -44,7 +43,7 @@ namespace BlobFilesystemDetail {
 template <typename TContainer, std::predicate<const AzureClient::Models::BlobItem&> TOnBlob>
 void ForEachBlobUntil(TContainer& container, AzureClient::ListBlobsOptions options, TOnBlob&& onBlob) {
     while (true) {
-        auto page = Call([&](auto token) { return container.ListBlobsAsync(options, token); });
+        auto page = Call(container, container.ListBlobsAsync(options));
         for (const auto& blob : page.Blobs) {
             if (onBlob(blob)) {
                 return;
@@ -66,7 +65,7 @@ void ForEachBlobUntil(TContainer& container, AzureClient::ListBlobsOptions optio
 template <typename TContainer, typename TOnPage>
 void ForEachBlobPage(TContainer& container, AzureClient::ListBlobsOptions options, TOnPage&& onPage) {
     while (true) {
-        auto page = Call([&](auto token) { return container.ListBlobsAsync(options, token); });
+        auto page = Call(container, container.ListBlobsAsync(options));
         onPage(std::as_const(page.Blobs));
 
         if (page.NextMarker.empty()) {
