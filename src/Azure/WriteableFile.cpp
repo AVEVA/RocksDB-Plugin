@@ -20,33 +20,24 @@ WriteableFile::~WriteableFile() = default;
 
 rocksdb::IOStatus WriteableFile::Append(const rocksdb::Slice& data, const rocksdb::IOOptions&,
                                         rocksdb::IODebugContext*) {
-    try {
+    return AzureErrorTranslator::Invoke(*m_logger, "Append", [&] {
         m_file->Append(std::span(data.data(), data.size()));
-    } catch (...) {
-        return AzureErrorTranslator::FromCurrentException(*m_logger, "Append");
-    }
-
-    return rocksdb::IOStatus::OK();
+        return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus WriteableFile::Close(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    try {
+    return AzureErrorTranslator::Invoke(*m_logger, "Close", [&] {
         m_file->Close();
-    } catch (...) {
-        return AzureErrorTranslator::FromCurrentException(*m_logger, "Close");
-    }
-
-    return rocksdb::IOStatus::OK();
+        return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus WriteableFile::Flush(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    try {
+    return AzureErrorTranslator::Invoke(*m_logger, "Flush", [&] {
         m_file->Flush();
-    } catch (...) {
-        return AzureErrorTranslator::FromCurrentException(*m_logger, "Flush");
-    }
-
-    return rocksdb::IOStatus::OK();
+        return rocksdb::IOStatus::OK();
+    });
 }
 
 // RocksDB calls this every `bytes_per_sync` bytes while writing an SST. Starting the page uploads now (without waiting
@@ -58,23 +49,17 @@ rocksdb::IOStatus WriteableFile::RangeSync(uint64_t, uint64_t, const rocksdb::IO
         return Sync(options, dbg);
     }
 
-    try {
+    return AzureErrorTranslator::Invoke(*m_logger, "RangeSync", [&] {
         m_file->RangeSync();
-    } catch (...) {
-        return AzureErrorTranslator::FromCurrentException(*m_logger, "RangeSync");
-    }
-
-    return rocksdb::IOStatus::OK();
+        return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus WriteableFile::Sync(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    try {
+    return AzureErrorTranslator::Invoke(*m_logger, "Sync", [&] {
         m_file->Sync();
-    } catch (...) {
-        return AzureErrorTranslator::FromCurrentException(*m_logger, "Sync");
-    }
-
-    return rocksdb::IOStatus::OK();
+        return rocksdb::IOStatus::OK();
+    });
 }
 
 uint64_t WriteableFile::GetFileSize(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {

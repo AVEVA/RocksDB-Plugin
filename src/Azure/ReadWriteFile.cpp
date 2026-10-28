@@ -20,22 +20,19 @@ ReadWriteFile::~ReadWriteFile() = default;
 
 rocksdb::IOStatus ReadWriteFile::Write(uint64_t offset, const rocksdb::Slice& data, const rocksdb::IOOptions&,
                                        rocksdb::IODebugContext*) {
-    try {
+    return AzureErrorTranslator::Invoke(*m_logger, "Write", [&] {
         if (!Impl::RangeCheck::IsValid(offset, data.size())) {
             return rocksdb::IOStatus::InvalidArgument("Write offset or size is out of range");
         }
 
         m_file->Write(static_cast<int64_t>(offset), data.data(), static_cast<int64_t>(data.size()));
-    } catch (...) {
-        return AzureErrorTranslator::FromCurrentException(*m_logger, "Write");
-    }
-
-    return rocksdb::IOStatus::OK();
+        return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus ReadWriteFile::Read(uint64_t offset, size_t n, const rocksdb::IOOptions&, rocksdb::Slice* result,
                                       char* scratch, rocksdb::IODebugContext*) const {
-    try {
+    return AzureErrorTranslator::Invoke(*m_logger, "Read", [&] {
         if (!Impl::RangeCheck::IsValid(offset, n)) {
             return rocksdb::IOStatus::InvalidArgument("Read offset or size is out of range");
         }
@@ -47,40 +44,28 @@ rocksdb::IOStatus ReadWriteFile::Read(uint64_t offset, size_t n, const rocksdb::
 
         result->data_ = scratch;
         result->size_ = static_cast<size_t>(bytesRead);
-    } catch (...) {
-        return AzureErrorTranslator::FromCurrentException(*m_logger, "Read");
-    }
-
-    return rocksdb::IOStatus::OK();
+        return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus ReadWriteFile::Flush(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    try {
+    return AzureErrorTranslator::Invoke(*m_logger, "Flush", [&] {
         m_file->Flush();
-    } catch (...) {
-        return AzureErrorTranslator::FromCurrentException(*m_logger, "Flush");
-    }
-
-    return rocksdb::IOStatus::OK();
+        return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus ReadWriteFile::Sync(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    try {
+    return AzureErrorTranslator::Invoke(*m_logger, "Sync", [&] {
         m_file->Sync();
-    } catch (...) {
-        return AzureErrorTranslator::FromCurrentException(*m_logger, "Sync");
-    }
-
-    return rocksdb::IOStatus::OK();
+        return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus ReadWriteFile::Close(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    try {
+    return AzureErrorTranslator::Invoke(*m_logger, "Close", [&] {
         m_file->Close();
-    } catch (...) {
-        return AzureErrorTranslator::FromCurrentException(*m_logger, "Close");
-    }
-
-    return rocksdb::IOStatus::OK();
+        return rocksdb::IOStatus::OK();
+    });
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure

@@ -10,6 +10,7 @@
 
 #include <exception>
 #include <string_view>
+#include <utility>
 namespace AVEVA::RocksDB::Plugin::Azure {
 struct AzureErrorTranslator {
     /// <summary>
@@ -54,6 +55,21 @@ struct AzureErrorTranslator {
     static rocksdb::IOStatus
     FromException(boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>& logger,
                   const std::exception_ptr& error, std::string_view operation);
+
+    /// <summary>
+    /// Runs `f` (which returns an IOStatus) and converts any exception it throws to a logged status, so file wrappers
+    /// share one try/catch instead of repeating it.
+    /// </summary>
+    template <class F>
+    static rocksdb::IOStatus
+    Invoke(boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>& logger,
+           std::string_view operation, F&& f) noexcept {
+        try {
+            return std::forward<F>(f)();
+        } catch (...) {
+            return FromCurrentException(logger, operation);
+        }
+    }
 
   private:
     static rocksdb::IOStatus IOStatusFromError(const std::string& context, unsigned int statusCode);

@@ -21,7 +21,7 @@ SequentialFile::~SequentialFile() = default;
 
 rocksdb::IOStatus SequentialFile::Read(const size_t n, const rocksdb::IOOptions&, rocksdb::Slice* result, char* scratch,
                                        rocksdb::IODebugContext*) {
-    try {
+    return AzureErrorTranslator::Invoke(*m_logger, "Read", [&] {
         if (n > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
             return rocksdb::IOStatus::InvalidArgument("Read size is out of range");
         }
@@ -29,20 +29,16 @@ rocksdb::IOStatus SequentialFile::Read(const size_t n, const rocksdb::IOOptions&
         assert(bytesRead >= 0 && "SequentialRead should not return negative values");
         *result = rocksdb::Slice(scratch, static_cast<size_t>(bytesRead));
         return rocksdb::IOStatus::OK();
-    } catch (...) {
-        return AzureErrorTranslator::FromCurrentException(*m_logger, "Read");
-    }
+    });
 }
 
 rocksdb::IOStatus SequentialFile::Skip(const uint64_t n) {
-    try {
+    return AzureErrorTranslator::Invoke(*m_logger, "Skip", [&] {
         if (n > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
             return rocksdb::IOStatus::InvalidArgument("Skip size is out of range");
         }
         m_file->Skip(static_cast<int64_t>(n));
         return rocksdb::IOStatus::OK();
-    } catch (...) {
-        return AzureErrorTranslator::FromCurrentException(*m_logger, "Skip");
-    }
+    });
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure

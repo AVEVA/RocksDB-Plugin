@@ -15,12 +15,10 @@ Directory::Directory(
 Directory::~Directory() = default;
 
 rocksdb::IOStatus Directory::Fsync(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    try {
+    return AzureErrorTranslator::Invoke(*m_logger, "Fsync", [&] {
         m_directory->Fsync();
         return rocksdb::IOStatus::OK();
-    } catch (...) {
-        return AzureErrorTranslator::FromCurrentException(*m_logger, "Fsync");
-    }
+    });
 }
 
 size_t Directory::GetUniqueId(char* id, size_t max_size) const { return m_directory->GetUniqueId(id, max_size); }
