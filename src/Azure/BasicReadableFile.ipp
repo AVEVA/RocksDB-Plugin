@@ -90,8 +90,10 @@ BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& req, std::function<v
     if (!Impl::RangeCheck::IsValid(req.offset, req.len)) {
         return rocksdb::IOStatus::InvalidArgument("ReadAsync offset or size is out of range");
     }
+    // Declared outside the try: once the download is running, a later throw must still stop it from writing scratch.
+    std::shared_ptr<AsyncReadRequest> request;
     try {
-        auto request =
+        request =
             std::make_shared<AsyncReadRequest>(req, std::move(cb), cb_arg, std::move(signal), m_file->ClientExecutor());
         auto handle = std::make_unique<AsyncReadHandle>(AsyncReadHandle{request});
         const auto offset = static_cast<int64_t>(req.offset);
@@ -180,6 +182,11 @@ BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& req, std::function<v
         *del_fn = DeleteAsyncReadHandle;
         return rocksdb::IOStatus::OK();
     } catch (...) {
+        // The caller gets an error and no handle, so RocksDB may free req.scratch at once; a download or prefetch
+        // waiter already started for this request must not write into it afterwards.
+        if (request) {
+            request->Abort();
+        }
         return AzureErrorTranslator::FromCurrentException(*m_logger, "ReadAsync");
     }
 }
