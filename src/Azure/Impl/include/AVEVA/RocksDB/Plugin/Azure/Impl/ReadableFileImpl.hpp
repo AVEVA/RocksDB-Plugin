@@ -189,6 +189,9 @@ template <typename TBlob> class BasicReadableFileImpl {
     [[nodiscard]] static bool ClampRead(int64_t offset, int64_t& bytesToRead);
     [[nodiscard]] BlobOperations::Task<int64_t> DownloadWithRetryAsync(int64_t offset, int64_t bytesToRead,
                                                                        char* buffer, int& refreshesLeft) const;
+    // The body of RandomRead/RandomReadAsync. Borrows `file`, which must outlive the returned coroutine.
+    [[nodiscard]] static BlobOperations::Task<int64_t> RandomReadFrom(const BasicReadableFileImpl& file, int64_t offset,
+                                                                      int64_t bytesToRead, char* buffer);
     [[nodiscard]] BlobOperations::Task<void> RefreshBlobMetadataAsync() const;
     [[nodiscard]] std::pair<int64_t, std::string> GetMetadata() const;
     void SetMetadata(int64_t size, std::string etag) const;

@@ -100,16 +100,26 @@ int64_t BasicReadableFileImpl<TBlob>::RandomRead(const int64_t offset, int64_t b
         }
     }
 
-    // Non-owning: Block returns only after the coroutine has finished, so `this` outlives every use of the pointer.
-    const std::shared_ptr<const BasicReadableFileImpl> borrowed(std::shared_ptr<void>{}, this);
-    return Block(*m_h.Blob, RandomReadAsync(borrowed, offset, bytesToRead, buffer));
+    // The file is borrowed, not shared: Block returns only after the coroutine has finished, so `*this` outlives it.
+    // The coroutine has no owning pointer to hand to a detached task, which a fake shared_ptr could not guarantee.
+    return Block(*m_h.Blob, RandomReadFrom(*this, offset, bytesToRead, buffer));
 }
 
-// Prefetch (waiting for one that is in flight), then download whatever it did not cover. Never touches the file cache.
 template <typename TBlob>
 BlobOperations::Task<int64_t>
 BasicReadableFileImpl<TBlob>::RandomReadAsync(std::shared_ptr<const BasicReadableFileImpl> self, const int64_t offset,
-                                              int64_t bytesToRead, char* const buffer) {
+                                              const int64_t bytesToRead, char* const buffer) {
+    // `self` lives in this frame, so the file stays alive for the whole delegated read.
+    co_return co_await RandomReadFrom(*self, offset, bytesToRead, buffer);
+}
+
+// Prefetch (waiting for one that is in flight), then download whatever it did not cover. Never touches the file cache.
+// Only calls members on `file` and never copies a pointer to it, so the caller merely has to keep it alive until the
+// coroutine completes.
+template <typename TBlob>
+BlobOperations::Task<int64_t> BasicReadableFileImpl<TBlob>::RandomReadFrom(const BasicReadableFileImpl& file,
+                                                                           const int64_t offset, int64_t bytesToRead,
+                                                                           char* const buffer) {
     if (!ClampRead(offset, bytesToRead)) {
         co_return 0;
     }
@@ -117,9 +127,9 @@ BasicReadableFileImpl<TBlob>::RandomReadAsync(std::shared_ptr<const BasicReadabl
     int64_t served = 0;
     // Prefetched bytes belong to the version cached at this point; if the download below ends up on another
     // version the copied prefix is stale and the whole range must be read again.
-    const auto prefetchVersion = self->m_metadataVersion.load(std::memory_order_acquire);
-    co_await self->WaitForPrefetchAsync(offset);
-    if (const auto prefetched = self->TryReadFromPrefetch(offset, bytesToRead, buffer, true)) {
+    const auto prefetchVersion = file.m_metadataVersion.load(std::memory_order_acquire);
+    co_await file.WaitForPrefetchAsync(offset);
+    if (const auto prefetched = file.TryReadFromPrefetch(offset, bytesToRead, buffer, true)) {
         served = static_cast<int64_t>(*prefetched);
         if (served >= bytesToRead) {
             co_return served;
@@ -130,10 +140,10 @@ BasicReadableFileImpl<TBlob>::RandomReadAsync(std::shared_ptr<const BasicReadabl
     // stale-read budget so a single read cannot spend it twice under churn.
     int refreshesLeft = kMaxStaleReadRetries;
     auto bytesRead =
-        co_await self->DownloadWithRetryAsync(offset + served, bytesToRead - served, buffer + served, refreshesLeft);
-    if (served > 0 && self->m_metadataVersion.load(std::memory_order_acquire) != prefetchVersion) {
+        co_await file.DownloadWithRetryAsync(offset + served, bytesToRead - served, buffer + served, refreshesLeft);
+    if (served > 0 && file.m_metadataVersion.load(std::memory_order_acquire) != prefetchVersion) {
         served = 0;
-        bytesRead = co_await self->DownloadWithRetryAsync(offset, bytesToRead, buffer, refreshesLeft);
+        bytesRead = co_await file.DownloadWithRetryAsync(offset, bytesToRead, buffer, refreshesLeft);
     }
     co_return served + std::max<int64_t>(bytesRead, 0);
 }
