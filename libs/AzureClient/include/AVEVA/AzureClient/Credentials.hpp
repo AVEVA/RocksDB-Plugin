@@ -259,6 +259,10 @@ template <HttpClientLike THttp> class BasicWorkloadIdentityCredential final {
             m_options.TokenFilePath.empty() || scopes.empty()) {
             co_return Private::InvalidArgument();
         }
+        // Deliberately read inline: the file is a few hundred bytes (a projected service-account token) and the
+        // credential sits behind CachingTokenCredential, so this runs about once per token lifetime. Moving it
+        // off the io thread would need a client-owned thread or a new executor option, which costs more than the
+        // microseconds this blocks for. Revisit if TokenFilePath may point at a slow or network filesystem.
         const std::optional<std::string> assertion = Private::ReadTokenFile(m_options.TokenFilePath);
         if (!assertion.has_value()) {
             co_return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
