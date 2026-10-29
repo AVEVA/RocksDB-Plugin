@@ -6,6 +6,7 @@
 #include "AVEVA/HttpClient/HttpClient.hpp"
 
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/bind_cancellation_slot.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/io_context.hpp>
@@ -56,13 +57,13 @@ boost::asio::awaitable<void> SendAndInvoke(AVEVA::HttpClient& client, AVEVA::Htt
 } // namespace detail
 
 // Starts SendAsync on the client's executor and reports the outcome to `handler(std::error_code, HttpResponse)`.
-// The handler never runs inside this call.
+// The handler never runs inside this call. Emitting on cancellation cancels the request.
 template <class Handler>
-void SendWith(AVEVA::HttpClient& client, AVEVA::HttpRequest request, AVEVA::HttpRequestOptions options,
-              Handler handler) {
+void SendWith(AVEVA::HttpClient& client, AVEVA::HttpRequest request, AVEVA::HttpRequestOptions options, Handler handler,
+              boost::asio::cancellation_slot cancellation = {}) {
     boost::asio::co_spawn(client.get_executor(),
                           detail::SendAndInvoke(client, std::move(request), std::move(options), std::move(handler)),
-                          boost::asio::detached);
+                          boost::asio::bind_cancellation_slot(cancellation, boost::asio::detached));
 }
 
 // URL of a loopback port that has no listener.

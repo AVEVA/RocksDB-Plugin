@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "private/DnsCache.hpp"
-#include "private/RequestOperation.hpp"
+#include "private/Exchange.hpp"
 
 #include <boost/asio/io_context.hpp>
 
@@ -266,22 +266,23 @@ TEST(DnsCacheTests, FinishPublishesTheResultToTheCacheAndEveryWaiter) {
     EXPECT_EQ(cache.Find("host", "80")->begin()->endpoint(), first.begin()->endpoint());
 }
 
-TEST(DnsCacheTests, ResolveWaiterDoesNotKeepAFinishedRequestAlive) {
+TEST(DnsCacheTests, ResolveWaiterDeliversTheLeadersOutcomeThroughItsChannel) {
     boost::asio::io_context io;
-    auto operation = std::make_shared<AVEVA::Private::RequestOperation<AVEVA::Private::PlainStream>>(
-        nullptr, std::make_unique<AVEVA::Private::PlainStream>(io), AVEVA::Detail::CompletionPointer{},
-        AVEVA::HttpRequestOptions{}, nullptr, AVEVA::Private::BasicConnectionKey{"host", "80"},
-        std::chrono::steady_clock::now() + std::chrono::seconds{30});
-    std::weak_ptr<AVEVA::Private::RequestOperation<AVEVA::Private::PlainStream>> weak = operation;
+    const auto results = Loopback(io);
+    auto channel = std::make_shared<AVEVA::Private::ResolveChannel>(io.get_executor(), 1);
 
-    AVEVA::Private::ResolveWaiter waiter(operation);
-    operation.reset();
+    AVEVA::Private::ResolveWaiter waiter(channel);
+    waiter({}, results);
 
-    // A follower that timed out stays queued in the cache until the leader finishes; that must not pin it.
-    EXPECT_TRUE(weak.expired());
-    waiter(boost::asio::error::operation_aborted, Tcp::resolver::results_type{});
+    // The value is buffered, so the joiner sees it even though it only starts listening afterwards.
+    bool received = false;
+    EXPECT_TRUE(channel->try_receive([&](boost::system::error_code error, Tcp::resolver::results_type delivered) {
+        received = true;
+        EXPECT_FALSE(error);
+        EXPECT_EQ(delivered.begin()->endpoint(), results.begin()->endpoint());
+    }));
+    EXPECT_TRUE(received);
 }
-
 TEST(DnsCacheTests, InvalidateDropsOnlyTheNamedEntry) {
     boost::asio::io_context io;
     const auto results = Loopback(io);

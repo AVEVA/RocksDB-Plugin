@@ -3,16 +3,13 @@
 
 #pragma once
 
-#include <boost/asio/cancellation_signal.hpp>
-
 #include <chrono>
 #include <cstdint>
 
 namespace AVEVA {
 /// <summary>
-/// Per-request knobs: the overall deadline, the limits that bound how much of a response is buffered, and an
-/// optional cancellation slot. Defaults are a 30 second timeout, an 8 MiB body limit, and a 64 KiB header
-/// limit.
+/// Per-request knobs: the overall deadline, the limits that bound how much of a response is buffered. Defaults are a 30
+/// second timeout, an 8 MiB body limit, and a 64 KiB header limit.
 /// </summary>
 class HttpRequestOptions {
   public:
@@ -35,12 +32,6 @@ class HttpRequestOptions {
     [[nodiscard]] std::uint32_t GetResponseHeaderLimit() const noexcept;
 
     /// <summary>
-    /// The slot the request watches for cancellation.
-    /// </summary>
-    /// <returns>The slot, disconnected when none was set.</returns>
-    [[nodiscard]] boost::asio::cancellation_slot GetCancellationSlot() const noexcept;
-
-    /// <summary>
     /// Sets the deadline covering the whole request.
     /// </summary>
     /// <param name="timeout">The deadline. A non-positive value makes the request invalid.</param>
@@ -61,15 +52,6 @@ class HttpRequestOptions {
     void SetResponseHeaderLimit(std::uint32_t responseHeaderLimit) noexcept;
 
     /// <summary>
-    /// Sets the slot through which the request can be cancelled.
-    ///
-    /// Asio does not synchronize signal emission with slot clearing. The signal must therefore be emitted on
-    /// the completion executor, or otherwise serialized with the completion of the request.
-    /// </summary>
-    /// <param name="cancellationSlot">The slot to watch; a disconnected slot means no cancellation.</param>
-    void SetCancellationSlot(boost::asio::cancellation_slot cancellationSlot) noexcept;
-
-    /// <summary>
     /// Whether a TLS connection closed without close_notify may end an EOF-delimited response body. Off by
     /// default because an attacker can truncate such a body undetected.
     /// </summary>
@@ -87,6 +69,5 @@ class HttpRequestOptions {
     std::chrono::milliseconds m_timeout{30000};
     std::uint64_t m_responseBodyLimit = 8 * 1024 * 1024;
     std::uint32_t m_responseHeaderLimit = 64 * 1024;
-    boost::asio::cancellation_slot m_cancellationSlot;
 };
 } // namespace AVEVA

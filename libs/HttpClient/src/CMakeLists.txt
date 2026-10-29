@@ -10,8 +10,8 @@ add_library(aveva-http-client STATIC
     HttpRequestOptions.cpp
     HttpResponse.cpp
     private/HttpErrorCategory.cpp
+    private/Exchange.cpp
     private/IdleSweeper.cpp
-    private/RequestOperation.cpp
     private/RequestValidation.cpp
     private/TlsContextConfigurator.cpp
 )
@@ -22,7 +22,6 @@ target_sources(aveva-http-client
     PUBLIC
     FILE_SET HEADERS BASE_DIRS "${base-include-dir}" FILES
         "${base-include-dir}/AVEVA/HttpClient/HttpHeader.hpp"
-        "${base-include-dir}/AVEVA/HttpClient/Detail/CompletionOperation.hpp"
         "${base-include-dir}/AVEVA/HttpClient/Detail/Lifetime.hpp"
         "${base-include-dir}/AVEVA/HttpClient/HttpClient.hpp"
         "${base-include-dir}/AVEVA/HttpClient/HttpClientError.hpp"

@@ -3,7 +3,8 @@
 
 #include "AVEVA/HttpClient/HttpClient.hpp"
 #include "HttpClientTestHelpers.hpp"
-#include "private/HttpClientImpl.hpp"
+#include "private/DnsCache.hpp"
+#include "private/Exchange.hpp"
 
 #include <gtest/gtest.h>
 
@@ -358,17 +359,19 @@ TEST(HttpClientRobustness, CancellingAStalledRawViewUploadCompletesOnceAndLetsTh
     request.SetBodyView(std::span<const std::byte>(*body));
     asio::cancellation_signal cancellation;
     AVEVA::HttpRequestOptions options;
-    options.SetCancellationSlot(cancellation.slot());
 
     int completions = 0;
     std::error_code observed;
-    HttpClientTests::SendWith(*client, std::move(request), options, [&](std::error_code error, AVEVA::HttpResponse) {
-        ++completions;
-        observed = error;
-        body.reset();
-        acceptor.close();
-        accepted.close();
-    });
+    HttpClientTests::SendWith(
+        *client, std::move(request), options,
+        [&](std::error_code error, AVEVA::HttpResponse) {
+            ++completions;
+            observed = error;
+            body.reset();
+            acceptor.close();
+            accepted.close();
+        },
+        cancellation.slot());
     asio::steady_timer cancelTimer(context, std::chrono::milliseconds(300));
     cancelTimer.async_wait([&](boost::system::error_code) { cancellation.emit(asio::cancellation_type::terminal); });
     RunBounded(context);
@@ -598,11 +601,7 @@ TEST(HttpClientRobustness, CancellingAQueuedRequestFailsItWithoutStartingIt) {
     });
 
     asio::cancellation_signal firstCancel;
-    AVEVA::HttpRequestOptions firstOptions;
-    firstOptions.SetCancellationSlot(firstCancel.slot());
     asio::cancellation_signal queuedCancel;
-    AVEVA::HttpRequestOptions queuedOptions;
-    queuedOptions.SetCancellationSlot(queuedCancel.slot());
 
     std::error_code firstResult;
     std::error_code queuedResult;
@@ -614,22 +613,25 @@ TEST(HttpClientRobustness, CancellingAQueuedRequestFailsItWithoutStartingIt) {
             server.Stop();
         }
     };
-    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/held")), firstOptions,
-                              [&](std::error_code error, AVEVA::HttpResponse) {
-                                  firstResult = error;
-                                  finishWhenBothDone();
-                              });
-    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/queued")), queuedOptions,
-                              [&](std::error_code error, AVEVA::HttpResponse) {
-                                  queuedResult = error;
-                                  // The queued request is cancelled first; the held one is released only after that
-                                  // completion.
-                                  firstCancel.emit(asio::cancellation_type::terminal);
-                                  finishWhenBothDone();
-                              });
-    // Both coroutines must have started so the queued request's cancellation slot is connected.
-    context.run_one();
-    context.run_one();
+    HttpClientTests::SendWith(
+        *client, MakeRequest(server.Url("/held")), AVEVA::HttpRequestOptions{},
+        [&](std::error_code error, AVEVA::HttpResponse) {
+            firstResult = error;
+            finishWhenBothDone();
+        },
+        firstCancel.slot());
+    HttpClientTests::SendWith(
+        *client, MakeRequest(server.Url("/queued")), AVEVA::HttpRequestOptions{},
+        [&](std::error_code error, AVEVA::HttpResponse) {
+            queuedResult = error;
+            // The queued request is cancelled first; the held one is released only after that
+            // completion.
+            firstCancel.emit(asio::cancellation_type::terminal);
+            finishWhenBothDone();
+        },
+        queuedCancel.slot());
+    // Let both requests reach their first suspension so the queued one is parked in the gate.
+    context.poll();
     queuedCancel.emit(asio::cancellation_type::terminal);
     RunBounded(context);
 
@@ -677,17 +679,18 @@ TEST(HttpClientRobustness, CancellationAtVaryingStagesCompletesExactlyOnce) {
 
         asio::cancellation_signal cancellation;
         AVEVA::HttpRequestOptions options;
-        options.SetCancellationSlot(cancellation.slot());
         options.SetTimeout(std::chrono::seconds(10));
 
         int completions = 0;
         std::error_code result;
-        HttpClientTests::SendWith(*client, MakeRequest(server.Url()), options,
-                                  [&](std::error_code error, AVEVA::HttpResponse) {
-                                      ++completions;
-                                      result = error;
-                                      server.Stop();
-                                  });
+        HttpClientTests::SendWith(
+            *client, MakeRequest(server.Url()), options,
+            [&](std::error_code error, AVEVA::HttpResponse) {
+                ++completions;
+                result = error;
+                server.Stop();
+            },
+            cancellation.slot());
 
         // Emit from the context rather than another thread: a slot's handler may only be reached by whoever
         // owns the slot, and re-posting a varying number of times lands the cancel at different stages.
@@ -717,27 +720,29 @@ TEST(HttpClientRobustness, CancellationDuringStaleConnectionRetryCompletesExactl
         asio::cancellation_signal cancellation;
         int completions = 0;
         std::error_code secondResult;
-        HttpClientTests::SendWith(
-            *client, MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
-            [&](std::error_code, AVEVA::HttpResponse) {
-                auto timer = std::make_shared<asio::steady_timer>(context, std::chrono::milliseconds(50));
-                timer->async_wait([&, timer](boost::system::error_code) {
-                    AVEVA::HttpRequestOptions options;
-                    options.SetCancellationSlot(cancellation.slot());
-                    HttpClientTests::SendWith(*client, MakeRequest(server.Url("/second")), options,
+        HttpClientTests::SendWith(*client, MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
+                                  [&](std::error_code, AVEVA::HttpResponse) {
+                                      auto timer =
+                                          std::make_shared<asio::steady_timer>(context, std::chrono::milliseconds(50));
+                                      timer->async_wait([&, timer](boost::system::error_code) {
+                                          AVEVA::HttpRequestOptions options;
+                                          HttpClientTests::SendWith(
+                                              *client, MakeRequest(server.Url("/second")), options,
                                               [&](std::error_code error, AVEVA::HttpResponse) {
                                                   ++completions;
                                                   secondResult = error;
                                                   server.Stop();
-                                              });
-                    // Lands while the reuse failure and the replacement connection are being processed.
-                    auto cancelTimer =
-                        std::make_shared<asio::steady_timer>(context, std::chrono::microseconds(iteration * 200));
-                    cancelTimer->async_wait([&, cancelTimer](boost::system::error_code) {
-                        cancellation.emit(asio::cancellation_type::terminal);
-                    });
-                });
-            });
+                                              },
+                                              cancellation.slot());
+                                          // Lands while the reuse failure and the replacement connection are being
+                                          // processed.
+                                          auto cancelTimer = std::make_shared<asio::steady_timer>(
+                                              context, std::chrono::microseconds(iteration * 200));
+                                          cancelTimer->async_wait([&, cancelTimer](boost::system::error_code) {
+                                              cancellation.emit(asio::cancellation_type::terminal);
+                                          });
+                                      });
+                                  });
         RunBounded(context);
 
         EXPECT_EQ(completions, 1);
@@ -827,9 +832,9 @@ TEST(HttpClientRobustness, StartedDnsLeaderKeepsItsPendingEntryWhileTheLookupIsI
     asio::post(context, [&] {
         probedAsLeader = AVEVA::Private::DnsCache::Shared().JoinOrLead(
             "leader-guard.invalid", "80",
-            [] {
+            [&context] {
                 return AVEVA::Private::ResolveWaiter(
-                    std::shared_ptr<AVEVA::Private::RequestOperation<AVEVA::Private::PlainStream>>{});
+                    std::make_shared<AVEVA::Private::ResolveChannel>(context.get_executor(), 1));
             },
             &context);
         if (probedAsLeader) {
@@ -879,347 +884,6 @@ TEST(HttpClientRobustness, RequestTargetIsBuiltFromPathAndQuery) {
     RunBounded(context);
 
     EXPECT_EQ(targets, (std::vector<std::string>{"/", "/?a=1", "/p/q%20r?x=%2F&y=", "/p?"}));
-}
-
-struct ThrowBadAlloc : AVEVA::Private::NoFault {
-    static void OnSubmit() { throw std::bad_alloc(); }
-    static void OnStartLimited() noexcept {}
-    static void OnFailPost() noexcept {}
-};
-
-// Throws from the Nth call to StartLimited, counted across the process; each test resets the counters.
-struct ThrowOnStartLimited : AVEVA::Private::NoFault {
-    static inline std::atomic<int> Calls{0};
-    static inline std::atomic<int> ThrowOnCall{0};
-    static void OnSubmit() noexcept {}
-    static void OnStartLimited() {
-        if (++Calls == ThrowOnCall) {
-            throw std::bad_alloc();
-        }
-    }
-    static void OnFailPost() noexcept {}
-};
-
-struct ThrowOnFailPost : AVEVA::Private::NoFault {
-    static void OnSubmit() noexcept {}
-    static void OnStartLimited() noexcept {}
-    static void OnFailPost() { throw std::bad_alloc(); }
-};
-
-// Runs handlers on the context like its own executor, except that one armed failure makes execute() throw, the way
-// a handler allocation failure would during a post.
-struct FailingPostExecutor {
-    asio::io_context* Context;
-    std::atomic<bool>* FailNext;
-
-    template <typename F> void execute(F&& function) const {
-        if (FailNext->exchange(false)) {
-            throw std::bad_alloc();
-        }
-        Context->get_executor().execute(std::forward<F>(function));
-    }
-    [[nodiscard]] asio::execution_context& query(asio::execution::context_t) const noexcept { return *Context; }
-    [[nodiscard]] FailingPostExecutor require(asio::execution::blocking_t::never_t) const { return *this; }
-    friend bool operator==(const FailingPostExecutor& a, const FailingPostExecutor& b) noexcept {
-        return a.Context == b.Context;
-    }
-};
-
-TEST(HttpClientRobustness, FailedSharedResolvePostLeavesRecoveryToTheWaitersStrand) {
-    using Operation = AVEVA::Private::RequestOperation<AVEVA::Private::PlainStream>;
-    asio::io_context context;
-    std::atomic<bool> failNext{false};
-    const asio::any_io_executor executor{FailingPostExecutor{&context, &failNext}};
-    const std::string host = "lost-resolve.invalid";
-
-    int completions = 0;
-    std::error_code result;
-    AVEVA::HttpRequestOptions options;
-    auto request = MakeRequest("http://" + host + "/");
-    auto route = AVEVA::Private::Route::Of(request, options);
-    auto operation =
-        std::make_shared<Operation>(nullptr, std::make_unique<AVEVA::Private::PlainStream>(executor),
-                                    AVEVA::Detail::MakeCompletion([&](std::error_code error, AVEVA::HttpResponse) {
-                                        ++completions;
-                                        result = error;
-                                    }),
-                                    options, nullptr, AVEVA::Private::BasicConnectionKey{host, "80"},
-                                    std::chrono::steady_clock::now() + std::chrono::milliseconds(300));
-    operation->Prepare(std::move(request), std::move(route));
-
-    // Stand in for the DNS leader so the operation joins its lookup instead of resolving.
-    const void* const scope = &asio::query(executor, asio::execution::context);
-    auto& dns = AVEVA::Private::DnsCache::Shared();
-    ASSERT_TRUE(
-        dns.JoinOrLead(host, "80", [] { return AVEVA::Private::ResolveWaiter(std::shared_ptr<Operation>{}); }, scope));
-    operation->Start();
-
-    failNext = true;
-    dns.Finish(host, "80", asio::error::host_not_found, {}, scope);
-
-    // Recovery must not run on the leader's thread: the request's own strand has not run yet.
-    EXPECT_EQ(completions, 0);
-    RunBounded(context);
-    EXPECT_EQ(completions, 1);
-    EXPECT_EQ(result, std::make_error_code(std::errc::not_enough_memory));
-}
-
-// The limiter abort tests below use the Submit-level fault policies.
-TEST(HttpClientRobustness, LimiterAbortWhoseFailurePostThrowsStillCompletesTheHandlerOnce) {
-    asio::io_context context;
-    AVEVA::HttpClientOptions clientOptions;
-    clientOptions.SetMaxConnectionsPerHost(1);
-    AVEVA::Private::BasicHttpClientImpl<ThrowOnFailPost> impl(context, clientOptions);
-    ScriptedServer server(context, [](int, const http::request<http::string_body>&) -> ServerAction {
-        return {.Wire = OkResponse, .Delay = std::chrono::milliseconds(400)};
-    });
-
-    std::vector<int> completions(2, 0);
-    std::vector<std::error_code> results(2);
-    AVEVA::HttpRequestOptions queuedOptions;
-    queuedOptions.SetTimeout(std::chrono::milliseconds(100));
-    // The first request holds the only slot, so the second expires in the queue and is aborted by the limiter.
-    impl.Submit(MakeRequest(server.Url("/0")), AVEVA::HttpRequestOptions{},
-                AVEVA::Detail::MakeCompletion([&](std::error_code error, AVEVA::HttpResponse) {
-                    ++completions[0];
-                    results[0] = error;
-                    server.Stop();
-                }));
-    impl.Submit(MakeRequest(server.Url("/1")), queuedOptions,
-                AVEVA::Detail::MakeCompletion([&](std::error_code error, AVEVA::HttpResponse) {
-                    ++completions[1];
-                    results[1] = error;
-                }));
-    EXPECT_NO_THROW(context.run());
-
-    EXPECT_EQ(completions, (std::vector<int>{1, 1}));
-    EXPECT_EQ(results[1], AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
-}
-
-TEST(HttpClientRobustness, ThrowingFirstStartReturnsTheOriginSlotAndFailsTheRequestOnce) {
-    ThrowOnStartLimited::Calls = 0;
-    ThrowOnStartLimited::ThrowOnCall = 1;
-    asio::io_context context;
-    AVEVA::HttpClientOptions clientOptions;
-    clientOptions.SetMaxConnectionsPerHost(1);
-    AVEVA::Private::BasicHttpClientImpl<ThrowOnStartLimited> impl(context, clientOptions);
-    ScriptedServer server(
-        context, [](int, const http::request<http::string_body>&) -> ServerAction { return {.Wire = OkResponse}; });
-
-    std::vector<int> completions(2, 0);
-    std::vector<std::error_code> results(2);
-    impl.Submit(MakeRequest(server.Url("/0")), AVEVA::HttpRequestOptions{},
-                AVEVA::Detail::MakeCompletion([&](std::error_code error, AVEVA::HttpResponse) {
-                    ++completions[0];
-                    results[0] = error;
-                    // With a cap of 1 this only starts if the failed request gave its slot back.
-                    impl.Submit(MakeRequest(server.Url("/1")), AVEVA::HttpRequestOptions{},
-                                AVEVA::Detail::MakeCompletion([&](std::error_code second, AVEVA::HttpResponse) {
-                                    ++completions[1];
-                                    results[1] = second;
-                                    server.Stop();
-                                }));
-                }));
-    EXPECT_NO_THROW(context.run());
-
-    EXPECT_EQ(completions, (std::vector<int>{1, 1}));
-    EXPECT_EQ(results[0], std::make_error_code(std::errc::not_enough_memory));
-    EXPECT_FALSE(results[1]);
-}
-
-TEST(HttpClientRobustness, ThrowingReleaseTriggeredStartCompletesBothHandlersOnceAndKeepsTheOriginUsable) {
-    ThrowOnStartLimited::Calls = 0;
-    ThrowOnStartLimited::ThrowOnCall = 2;
-    asio::io_context context;
-    AVEVA::HttpClientOptions clientOptions;
-    clientOptions.SetMaxConnectionsPerHost(1);
-    AVEVA::Private::BasicHttpClientImpl<ThrowOnStartLimited> impl(context, clientOptions);
-    ScriptedServer server(context, [](int, const http::request<http::string_body>&) -> ServerAction {
-        return {.Wire = OkResponse, .Delay = std::chrono::milliseconds(50)};
-    });
-
-    std::vector<int> completions(3, 0);
-    std::vector<std::error_code> results(3);
-    const auto submit = [&](const int index, std::function<void()> then = {}) {
-        impl.Submit(MakeRequest(server.Url("/" + std::to_string(index))), AVEVA::HttpRequestOptions{},
-                    AVEVA::Detail::MakeCompletion([&, index, then](std::error_code error, AVEVA::HttpResponse) {
-                        ++completions[index];
-                        results[index] = error;
-                        if (then) {
-                            then();
-                        }
-                    }));
-    };
-    // The first request holds the only slot; the second waits and is started by the first one's release, which
-    // is the start that throws. A third request afterwards proves the slot was not lost.
-    submit(0);
-    submit(1, [&] { submit(2, [&] { server.Stop(); }); });
-    EXPECT_NO_THROW(context.run());
-
-    EXPECT_EQ(completions, (std::vector<int>{1, 1, 1}));
-    EXPECT_FALSE(results[0]);
-    EXPECT_EQ(results[1], std::make_error_code(std::errc::not_enough_memory));
-    EXPECT_FALSE(results[2]);
-}
-
-TEST(HttpClientRobustness, ThrowingInitiationCompletesTheHandlerExactlyOnceAndNeverInline) {
-    asio::io_context context;
-    AVEVA::Private::BasicHttpClientImpl<ThrowBadAlloc> impl(context, AVEVA::HttpClientOptions{});
-
-    int completions = 0;
-    std::error_code result;
-    bool inSubmit = true;
-    impl.Submit(MakeRequest(HttpClientTests::ClosedLocalUrl()), AVEVA::HttpRequestOptions{},
-                AVEVA::Detail::MakeCompletion([&](std::error_code error, AVEVA::HttpResponse) {
-                    ++completions;
-                    result = error;
-                    EXPECT_FALSE(inSubmit);
-                }));
-    inSubmit = false;
-    EXPECT_EQ(completions, 0);
-    RunBounded(context);
-
-    EXPECT_EQ(completions, 1);
-    EXPECT_EQ(result, std::make_error_code(std::errc::not_enough_memory));
-}
-
-struct ThrowOnAdmit : AVEVA::Private::NoFault {
-    static inline std::atomic<int> Calls{0};
-    static inline std::atomic<int> ThrowOnCall{0};
-    static void OnAdmit() {
-        if (++Calls == ThrowOnCall) {
-            throw std::bad_alloc();
-        }
-    }
-};
-
-struct ThrowOnStateAlloc : AVEVA::Private::NoFault {
-    static inline std::atomic<int> Calls{0};
-    static void OnStateAlloc() {
-        if (++Calls == 1) {
-            throw std::bad_alloc();
-        }
-    }
-};
-
-// Admission throws after the request was moved into the limiter's hands; the failure must still reach the handler
-// through the retained state, once, with the slot intact for whoever comes next.
-static void RunFailedAdmission(const int failingAdmission, const bool withCancellation) {
-    ThrowOnAdmit::Calls = 0;
-    ThrowOnAdmit::ThrowOnCall = failingAdmission;
-    asio::io_context context;
-    AVEVA::HttpClientOptions clientOptions;
-    clientOptions.SetMaxConnectionsPerHost(1);
-    AVEVA::Private::BasicHttpClientImpl<ThrowOnAdmit> impl(context, clientOptions);
-    ScriptedServer server(context, [](int, const http::request<http::string_body>&) -> ServerAction {
-        return {.Wire = OkResponse, .Delay = std::chrono::milliseconds(50)};
-    });
-
-    std::vector<int> completions(3, 0);
-    std::vector<std::error_code> results(3);
-    std::vector<asio::cancellation_signal> signals(3);
-    const auto submit = [&](const int index, std::function<void()> then = {}) {
-        AVEVA::HttpRequestOptions options;
-        if (withCancellation) {
-            options.SetCancellationSlot(signals[index].slot());
-        }
-        impl.Submit(MakeRequest(server.Url("/" + std::to_string(index))), options,
-                    AVEVA::Detail::MakeCompletion([&, index, then](std::error_code error, AVEVA::HttpResponse) {
-                        ++completions[index];
-                        results[index] = error;
-                        if (then) {
-                            then();
-                        }
-                    }));
-    };
-    // With admission 1 failing, request 0 never runs. With admission 2 failing, request 1 is the queued one,
-    // behind request 0, which holds the only slot.
-    submit(0, [&] {
-        if (failingAdmission == 1) {
-            submit(2, [&] { server.Stop(); });
-        }
-    });
-    if (failingAdmission == 2) {
-        submit(1, [&] { submit(2, [&] { server.Stop(); }); });
-    } else {
-        submit(1);
-    }
-    if (withCancellation) {
-        signals[failingAdmission - 1].emit(asio::cancellation_type::terminal);
-    }
-    EXPECT_NO_THROW(context.run());
-
-    const auto failed = static_cast<std::size_t>(failingAdmission - 1);
-    EXPECT_EQ(completions[failed], 1);
-    EXPECT_EQ(results[failed], std::make_error_code(std::errc::not_enough_memory));
-    EXPECT_EQ(completions[2], 1);
-    EXPECT_FALSE(results[2]);
-}
-
-TEST(HttpClientRobustness, FirstAdmissionFailureCompletesOnceAndLaterRequestsRun) { RunFailedAdmission(1, false); }
-
-TEST(HttpClientRobustness, FirstAdmissionFailureWithCancellationCompletesOnce) { RunFailedAdmission(1, true); }
-
-TEST(HttpClientRobustness, QueuedAdmissionFailureCompletesOnceAndLaterRequestsRun) { RunFailedAdmission(2, false); }
-
-TEST(HttpClientRobustness, QueuedAdmissionFailureWithCancellationCompletesOnce) { RunFailedAdmission(2, true); }
-
-TEST(HttpClientRobustness, FailedStateAllocationStillCompletesTheOriginalHandlerOnceAndNeverInline) {
-    ThrowOnStateAlloc::Calls = 0;
-    asio::io_context context;
-    AVEVA::HttpClientOptions clientOptions;
-    clientOptions.SetMaxConnectionsPerHost(1);
-    AVEVA::Private::BasicHttpClientImpl<ThrowOnStateAlloc> impl(context, clientOptions);
-
-    int completions = 0;
-    std::error_code result;
-    bool inSubmit = true;
-    impl.Submit(MakeRequest(HttpClientTests::ClosedLocalUrl()), AVEVA::HttpRequestOptions{},
-                AVEVA::Detail::MakeCompletion([&](std::error_code error, AVEVA::HttpResponse) {
-                    ++completions;
-                    result = error;
-                    EXPECT_FALSE(inSubmit);
-                }));
-    inSubmit = false;
-    EXPECT_EQ(completions, 0);
-    RunBounded(context);
-
-    EXPECT_EQ(completions, 1);
-    EXPECT_EQ(result, std::make_error_code(std::errc::not_enough_memory));
-}
-
-// The 16 KiB read buffer is the only allocation of that size a plain request makes, so failing it reaches the
-// read-stage setup (which runs from a transport completion, not from submission) deterministically.
-TEST(HttpClientRobustness, ReadBufferAllocationFailureCompletesOnceWithoutEscapingRunAndKeepsTheClientUsable) {
-    asio::io_context context;
-    AVEVA::Private::BasicHttpClientImpl<> impl(context, AVEVA::HttpClientOptions{});
-    ScriptedServer server(
-        context, [](int, const http::request<http::string_body>&) -> ServerAction { return {.Wire = OkResponse}; });
-
-    std::vector<int> completions(2, 0);
-    std::vector<std::error_code> results(2);
-    impl.Submit(MakeRequest(server.Url("/0")), AVEVA::HttpRequestOptions{},
-                AVEVA::Detail::MakeCompletion([&](std::error_code error, AVEVA::HttpResponse) {
-                    ++completions[0];
-                    results[0] = error;
-                    AllocationFailure::allocationsUntilFailure = -1;
-                    AllocationFailure::failureMinimumSize = 0;
-                    impl.Submit(MakeRequest(server.Url("/1")), AVEVA::HttpRequestOptions{},
-                                AVEVA::Detail::MakeCompletion([&](std::error_code second, AVEVA::HttpResponse) {
-                                    ++completions[1];
-                                    results[1] = second;
-                                    server.Stop();
-                                }));
-                }));
-    AllocationFailure::failureMinimumSize = 16 * 1024;
-    AllocationFailure::allocationsUntilFailure = 0;
-    EXPECT_NO_THROW(RunBounded(context));
-    AllocationFailure::allocationsUntilFailure = -1;
-    AllocationFailure::failureMinimumSize = 0;
-
-    EXPECT_EQ(completions, (std::vector<int>{1, 1}));
-    EXPECT_EQ(results[0], std::make_error_code(std::errc::not_enough_memory));
-    EXPECT_FALSE(results[1]);
 }
 
 TEST(HttpClientRobustness, DestroyingTheClientFailsQueuedRequestsAndCompletesActiveOnesOnce) {
@@ -1350,8 +1014,6 @@ TEST(HttpClientRobustness, CancellingTheSharedDnsLeaderStillCompletesEveryJoined
         const auto url = server.Url();
 
         asio::cancellation_signal leaderCancel;
-        AVEVA::HttpRequestOptions leaderOptions;
-        leaderOptions.SetCancellationSlot(leaderCancel.slot());
         int completions = 0;
         std::error_code followerResult;
         const auto finish = [&] {
@@ -1359,8 +1021,9 @@ TEST(HttpClientRobustness, CancellingTheSharedDnsLeaderStillCompletesEveryJoined
                 server.Stop();
             }
         };
-        HttpClientTests::SendWith(*client, MakeRequest(url), leaderOptions,
-                                  [&](std::error_code, AVEVA::HttpResponse) { finish(); });
+        HttpClientTests::SendWith(
+            *client, MakeRequest(url), AVEVA::HttpRequestOptions{},
+            [&](std::error_code, AVEVA::HttpResponse) { finish(); }, leaderCancel.slot());
         for (int follower = 0; follower < 2; ++follower) {
             HttpClientTests::SendWith(*client, MakeRequest(url), AVEVA::HttpRequestOptions{},
                                       [&](std::error_code error, AVEVA::HttpResponse) {

@@ -22,8 +22,8 @@ add_executable(aveva-http-client-tests
 	HttpClientTestHelpers.cpp
 	HttpClientTlsTests.cpp
 	IdleSweeperTests.cpp
-	OriginLimiterTests.cpp
 	OptionValidationTests.cpp
+	OriginGateTests.cpp
 )
 # ConnectionPoolTests.cpp exercises the internal pool directly, so the tests need the private
 # headers that live alongside the library sources.

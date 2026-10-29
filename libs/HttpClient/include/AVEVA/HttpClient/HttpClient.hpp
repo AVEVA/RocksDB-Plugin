@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include <AVEVA/HttpClient/Detail/CompletionOperation.hpp>
 #include <AVEVA/HttpClient/HttpClientError.hpp>
 #include <AVEVA/HttpClient/HttpClientOptions.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
@@ -28,9 +27,8 @@ namespace AVEVA {
 using HttpResult = std::expected<HttpResponse, std::error_code>;
 
 /// <summary>
-/// Asynchronous HTTP client, used from C++20 coroutines. Non-copyable and non-movable. The coroutine's continuation
-/// is stored once per request in an intrusive operation (see <c>Detail::CompletionOperation</c>) rather than in a
-/// type-erased function object.
+/// Asynchronous HTTP client, used from C++20 coroutines. Non-copyable and non-movable. Each request is a single
+/// coroutine, so cancelling the awaiting coroutine cancels the request.
 /// </summary>
 class HttpClient {
   public:
@@ -82,13 +80,11 @@ class HttpClient {
     [[nodiscard]] boost::asio::thread_pool::executor_type GetDownloadWriter();
 
     /// <summary>
-    /// Sends a request. The result is delivered on the awaiting coroutine's executor, never from inside this call,
-    /// and cancelling the coroutine (or <paramref name="options"/>' explicit cancellation slot) cancels the request.
+    /// Sends a request. Cancelling the awaiting coroutine cancels the request, and the per-request timeout covers
+    /// everything, including time spent waiting for a per-origin connection slot.
     /// Nothing is thrown for a rejected request: the result carries <c>std::errc::not_enough_memory</c> for
     /// <c>std::bad_alloc</c>, <c>HttpClientError::InvalidRequest</c> for rejected input, and
-    /// <c>std::errc::state_not_recoverable</c> for anything else. The result is delivered through a post to the
-    /// coroutine's executor; a post that fails is retried a few times, and only if the executor keeps rejecting
-    /// work is the coroutine resumed once on the completing thread instead of being dropped.
+    /// <c>std::errc::state_not_recoverable</c> for anything else.
     /// </summary>
     /// <param name="request">The request to send.</param>
     /// <param name="options">The per-request settings to apply.</param>
@@ -97,15 +93,6 @@ class HttpClient {
 
   private:
     class Impl;
-
-    /// <summary>
-    /// Starts the request; the operation is completed exactly once, never from inside this call, and the
-    /// request honors <c>options.GetCancellationSlot()</c>.
-    /// </summary>
-    /// <param name="request">The request to send.</param>
-    /// <param name="options">The per-request settings to apply.</param>
-    /// <param name="completion">Completed with the outcome.</param>
-    void Submit(HttpRequest request, HttpRequestOptions options, Detail::CompletionPointer completion);
 
     gsl::not_null<boost::asio::io_context*> m_context;
     std::unique_ptr<Impl> m_impl;

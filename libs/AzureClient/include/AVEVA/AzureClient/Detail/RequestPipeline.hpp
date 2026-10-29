@@ -215,9 +215,6 @@ boost::asio::awaitable<HttpResult> SendWithRetry(THttp& httpClient, RequestAuth 
     const int maxAttempts = ComputeMaxAttempts(requestOptions.GetMaxRetries().value_or(retry.MaxRetries));
     const bool requestReplaySafe = replaySafe || IsReplaySafe(request);
 
-    // The explicit slot of a caller's options is replaced by the coroutine's own cancellation.
-    requestOptions.SetCancellationSlot({});
-
     AttemptFactory attempts(std::move(request));
     int attempt = 0;
     bool tokenRefreshed = false;

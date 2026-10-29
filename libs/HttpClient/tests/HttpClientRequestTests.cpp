@@ -387,19 +387,21 @@ TEST(HttpClientRequest, CancellationRightAfterStartCompletesWithOperationCancele
     auto client = AVEVA::HttpClient::Create(context);
     asio::cancellation_signal cancellation;
     AVEVA::HttpRequestOptions options;
-    options.SetCancellationSlot(cancellation.slot());
 
     AVEVA::HttpRequest request;
     request.SetUrl(HttpClientTests::ClosedLocalUrl());
 
     int completions = 0;
-    HttpClientTests::SendWith(*client, request, options, [&](std::error_code error, AVEVA::HttpResponse response) {
-        ++completions;
-        EXPECT_EQ(error, std::make_error_code(std::errc::operation_canceled));
-        EXPECT_EQ(response.GetStatus(), 0u);
-        EXPECT_TRUE(response.GetBody().empty());
-        EXPECT_TRUE(response.GetHeaders().empty());
-    });
+    HttpClientTests::SendWith(
+        *client, request, options,
+        [&](std::error_code error, AVEVA::HttpResponse response) {
+            ++completions;
+            EXPECT_EQ(error, std::make_error_code(std::errc::operation_canceled));
+            EXPECT_EQ(response.GetStatus(), 0u);
+            EXPECT_TRUE(response.GetBody().empty());
+            EXPECT_TRUE(response.GetHeaders().empty());
+        },
+        cancellation.slot());
 
     // The slot is only connected once the coroutine has started the request, so run that first.
     context.run_one();
@@ -423,35 +425,25 @@ TEST(HttpClientRequest, CancellationMidFlightCompletesWithOperationCanceled) {
     });
 
     AVEVA::HttpRequestOptions options;
-    options.SetCancellationSlot(cancellation.slot());
     options.SetTimeout(std::chrono::seconds(5));
 
     AVEVA::HttpRequest request;
     request.SetUrl(server.Url());
 
     int completions = 0;
-    HttpClientTests::SendWith(*client, request, options, [&](std::error_code error, AVEVA::HttpResponse response) {
-        ++completions;
-        EXPECT_EQ(error, std::make_error_code(std::errc::operation_canceled));
-        EXPECT_EQ(response.GetStatus(), 0u);
-        server.Stop();
-    });
+    HttpClientTests::SendWith(
+        *client, request, options,
+        [&](std::error_code error, AVEVA::HttpResponse response) {
+            ++completions;
+            EXPECT_EQ(error, std::make_error_code(std::errc::operation_canceled));
+            EXPECT_EQ(response.GetStatus(), 0u);
+            server.Stop();
+        },
+        cancellation.slot());
 
     RunBounded(context);
     EXPECT_TRUE(requestRead);
     EXPECT_EQ(completions, 1);
-}
-
-TEST(HttpClientRequest, ConnectedCancellationSlotDoesNotAffectNormalCompletion) {
-    asio::cancellation_signal cancellation;
-    AVEVA::HttpRequestOptions options;
-    options.SetCancellationSlot(cancellation.slot());
-
-    auto result = Exchange({}, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", options);
-
-    EXPECT_FALSE(result.error);
-    EXPECT_EQ(result.response.GetStatus(), 200u);
-    EXPECT_EQ(result.response.GetBody(), "hello");
 }
 
 TEST(HttpClientRequest, CancellingAfterCompletionIsANoop) {
@@ -462,18 +454,20 @@ TEST(HttpClientRequest, CancellingAfterCompletionIsANoop) {
 
     asio::cancellation_signal cancellation;
     AVEVA::HttpRequestOptions options;
-    options.SetCancellationSlot(cancellation.slot());
 
     AVEVA::HttpRequest request;
     request.SetUrl(server.Url());
 
     int completions = 0;
-    HttpClientTests::SendWith(*client, request, options, [&](std::error_code error, AVEVA::HttpResponse response) {
-        ++completions;
-        EXPECT_FALSE(error);
-        EXPECT_EQ(response.GetStatus(), 200u);
-        server.Stop();
-    });
+    HttpClientTests::SendWith(
+        *client, request, options,
+        [&](std::error_code error, AVEVA::HttpResponse response) {
+            ++completions;
+            EXPECT_FALSE(error);
+            EXPECT_EQ(response.GetStatus(), 200u);
+            server.Stop();
+        },
+        cancellation.slot());
 
     RunBounded(context);
     EXPECT_EQ(completions, 1);
