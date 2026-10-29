@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <boost/system/error_code.hpp> // IWYU pragma: keep (symbol is defined in a Boost impl/ header)
+#include <boost/system/system_error.hpp>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -201,18 +202,25 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
           m_replaySafe(replaySafe || IsReplaySafe(request)), m_attempts(std::move(request)) {}
 
     boost::asio::awaitable<HttpResult> Run() {
-        // Cancellation is checked at every step below instead of surfacing as an exception from the next co_await.
-        co_await boost::asio::this_coro::throw_if_cancelled(false);
-        m_cancellation = co_await boost::asio::this_coro::cancellation_state;
+        // Cancelling the awaiting coroutine makes whichever await is pending throw operation_aborted; this is the
+        // one place it becomes a result.
+        try {
+            co_return co_await Attempts();
+        } catch (const boost::system::system_error& aborted) {
+            if (aborted.code() != boost::asio::error::operation_aborted) {
+                throw;
+            }
+        }
+        co_return std::unexpected(CanceledError());
+    }
 
+  private:
+    boost::asio::awaitable<HttpResult> Attempts() {
         for (;;) {
             if (m_countsAsAttempt) {
                 ++m_attempt;
             }
             m_countsAsAttempt = true;
-            if (Cancelled()) {
-                co_return std::unexpected(CanceledError());
-            }
 
             auto request = co_await PrepareAttempt();
             if (!request) {
@@ -227,9 +235,6 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
             const std::error_code error = sent ? std::error_code{} : sent.error();
             HttpResponse response = sent ? std::move(*sent) : HttpResponse{};
 
-            if (Cancelled()) {
-                co_return std::unexpected(CanceledError());
-            }
             if (error && DeadlinePassed()) {
                 co_return std::unexpected(std::make_error_code(std::errc::timed_out));
             }
@@ -258,19 +263,16 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
             typename RetryTimerFor<THttp>::type timer(m_http.get_executor());
             timer.expires_after(*delay);
             const auto [waitError] = co_await timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable));
-            if (waitError || Cancelled()) {
-                co_return std::unexpected(CanceledError());
+            if (waitError) {
+                throw boost::system::system_error(boost::asio::error::operation_aborted);
             }
         }
     }
 
-  private:
     enum class Refresh { NotApplicable, Retry, DeadlinePassed };
 
     static constexpr bool CanInvalidateTokens =
         requires(TCred& credential, const RequestAuth& auth) { credential.Invalidate(auth.TokenScopes); };
-
-    bool Cancelled() const { return IsAbortingCancellation(m_cancellation.cancelled()); }
 
     std::chrono::milliseconds Remaining() const {
         return *m_totalDeadline -
@@ -287,10 +289,11 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
         }
     }
 
-    // Waits for `limit`, then reports it; abandoned (cancelled) when the token arrives first.
+    // Waits for `limit`, then reports it; abandoned (cancelled, so it throws operation_aborted) when the token
+    // arrives first.
     static boost::asio::awaitable<void> Expire(std::chrono::milliseconds limit) {
         boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor, limit);
-        co_await timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable));
+        co_await timer.async_wait(boost::asio::use_awaitable);
     }
 
     // A hung identity endpoint must not stall an attempt past its timeout or the total deadline, so the token
@@ -322,9 +325,6 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
         std::string_view bearerToken;
         if (m_auth.Type == RequestAuth::Kind::Token) {
             auto token = co_await AcquireToken();
-            if (Cancelled()) {
-                co_return std::unexpected(CanceledError());
-            }
             if (!token) {
                 co_return std::unexpected(token.error());
             }
@@ -442,7 +442,6 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
     int m_maxAttempts;
     bool m_replaySafe;
     AttemptFactory m_attempts;
-    boost::asio::cancellation_state m_cancellation;
     int m_attempt = 0;
     bool m_countsAsAttempt = true;
     bool m_tokenRefreshed = false;
