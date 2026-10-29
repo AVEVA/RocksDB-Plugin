@@ -18,7 +18,6 @@
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/awaitable.hpp>
-#include <boost/asio/cancellation_type.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
@@ -44,13 +43,6 @@
 #include <utility>
 
 namespace AVEVA::AzureClient::Private {
-// Only terminal and total cancellation abort an operation; a partial request has nothing safe to hand back
-// half-done, so every other cancellation type is ignored.
-[[nodiscard]] inline bool IsAbortingCancellation(boost::asio::cancellation_type_t type) noexcept {
-    return (type & (boost::asio::cancellation_type::terminal | boost::asio::cancellation_type::total)) !=
-           boost::asio::cancellation_type::none;
-}
-
 namespace RetryDetail {
 // Backoff jitter and exponent bounds live in RetryPolicyConstants.
 inline constexpr double MinBackoffJitter = RetryPolicyConstants::MinBackoffJitter;

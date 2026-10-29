@@ -23,6 +23,8 @@
 #include <AVEVA/HttpClient/HttpMethod.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
+#include <boost/asio/error.hpp>
+#include <boost/system/system_error.hpp>
 #include <boost/url/encode.hpp> // IWYU pragma: keep (symbol is defined in a Boost impl/ header)
 #include <boost/url/parse.hpp>
 #include <boost/url/pct_string_view.hpp>
@@ -439,6 +441,12 @@ BlobStorageError MakeFailureFromCurrentException() {
         return MakeClientError(std::make_error_code(std::errc::invalid_argument), e.what());
     } catch (const std::system_error& e) {
         return MakeClientError(e.code(), e.what());
+    } catch (const boost::system::system_error& e) {
+        // A cancelled await unwinds with operation_aborted; the operation boundary reports it as a cancellation.
+        if (e.code() == boost::asio::error::operation_aborted) {
+            return MakeClientError(std::make_error_code(std::errc::operation_canceled), "The operation was canceled.");
+        }
+        return MakeClientError(std::make_error_code(std::errc::state_not_recoverable), e.what());
     } catch (const std::exception& e) {
         return MakeClientError(std::make_error_code(std::errc::state_not_recoverable), e.what());
     } catch (...) {
