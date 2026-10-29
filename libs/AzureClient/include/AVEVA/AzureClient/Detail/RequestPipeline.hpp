@@ -184,6 +184,248 @@ class AttemptFactory {
     return maxRetries >= std::numeric_limits<int>::max() - 1 ? std::numeric_limits<int>::max()
                                                              : std::max(0, maxRetries) + 1;
 }
+
+// One request's attempts, from the first send to the final result. Each step of the retry policy is a small member
+// (authorize, decide, back off) so `Run` reads as the policy itself. Lives in the awaiting coroutine's frame.
+template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class RetryingSender {
+  public:
+    RetryingSender(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
+                   HttpRequest request, AzureRequestOptions requestOptions, bool retryNotFoundAndGone, TRebuild rebuild,
+                   bool replaySafe)
+        : m_http(httpClient), m_auth(std::move(auth)), m_credential(std::move(credential)), m_retry(retry),
+          m_requestOptions(std::move(requestOptions)), m_retryNotFoundAndGone(retryNotFoundAndGone),
+          m_rebuild(std::move(rebuild)), m_totalDeadline(m_requestOptions.GetTotalDeadline()),
+          m_start(std::chrono::steady_clock::now()),
+          m_maxAttempts(ComputeMaxAttempts(m_requestOptions.GetMaxRetries().value_or(retry.MaxRetries))),
+          m_replaySafe(replaySafe || IsReplaySafe(request)), m_attempts(std::move(request)) {}
+
+    boost::asio::awaitable<HttpResult> Run() {
+        // Cancellation is checked at every step below instead of surfacing as an exception from the next co_await.
+        co_await boost::asio::this_coro::throw_if_cancelled(false);
+        m_cancellation = co_await boost::asio::this_coro::cancellation_state;
+
+        for (;;) {
+            if (m_countsAsAttempt) {
+                ++m_attempt;
+            }
+            m_countsAsAttempt = true;
+            if (Cancelled()) {
+                co_return std::unexpected(CanceledError());
+            }
+
+            auto request = co_await PrepareAttempt();
+            if (!request) {
+                co_return std::unexpected(request.error());
+            }
+            auto options = AttemptOptions();
+            if (!options) {
+                co_return std::unexpected(options.error());
+            }
+
+            auto sent = co_await m_http.SendAsync(std::move(*request), std::move(*options));
+            const std::error_code error = sent ? std::error_code{} : sent.error();
+            HttpResponse response = sent ? std::move(*sent) : HttpResponse{};
+
+            if (Cancelled()) {
+                co_return std::unexpected(CanceledError());
+            }
+            if (error && DeadlinePassed()) {
+                co_return std::unexpected(std::make_error_code(std::errc::timed_out));
+            }
+
+            switch (RefreshTokenAfter401(error, response)) {
+            case Refresh::Retry:
+                continue;
+            case Refresh::DeadlinePassed:
+                co_return std::unexpected(std::make_error_code(std::errc::timed_out));
+            case Refresh::NotApplicable:
+                break;
+            }
+
+            const auto delay = BackoffBeforeRetry(error, response);
+            if (!delay) {
+                if (error) {
+                    co_return std::unexpected(error);
+                }
+                co_return std::move(response);
+            }
+            if (m_totalDeadline && Remaining() <= *delay) {
+                // The backoff alone would outlast the deadline, so another attempt can never be made.
+                co_return std::unexpected(std::make_error_code(std::errc::timed_out));
+            }
+
+            typename RetryTimerFor<THttp>::type timer(m_http.get_executor());
+            timer.expires_after(*delay);
+            const auto [waitError] = co_await timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable));
+            if (waitError || Cancelled()) {
+                co_return std::unexpected(CanceledError());
+            }
+        }
+    }
+
+  private:
+    enum class Refresh { NotApplicable, Retry, DeadlinePassed };
+
+    static constexpr bool CanInvalidateTokens =
+        requires(TCred& credential, const RequestAuth& auth) { credential.Invalidate(auth.TokenScopes); };
+
+    bool Cancelled() const { return IsAbortingCancellation(m_cancellation.cancelled()); }
+
+    std::chrono::milliseconds Remaining() const {
+        return *m_totalDeadline -
+               std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - m_start);
+    }
+
+    bool DeadlinePassed() const { return m_totalDeadline && Remaining() <= std::chrono::milliseconds{0}; }
+
+    bool CanRefreshToken() const {
+        if constexpr (CanInvalidateTokens) {
+            return m_auth.Type == RequestAuth::Kind::Token && m_credential != nullptr && !m_tokenRefreshed;
+        } else {
+            return false;
+        }
+    }
+
+    // Builds the attempt's request and authorizes it. A failure to build or authorize ends the request rather than
+    // escaping.
+    boost::asio::awaitable<std::expected<HttpRequest, std::error_code>> PrepareAttempt() {
+        HttpRequest request;
+        try {
+            request = m_attempts.Build(m_attempt >= m_maxAttempts && !CanRefreshToken());
+        } catch (...) {
+            co_return std::unexpected(ErrorFromCurrentException());
+        }
+
+        std::string_view bearerToken;
+        if (m_auth.Type == RequestAuth::Kind::Token) {
+            auto token = co_await GetTokenForScopes(*m_credential, m_auth.TokenScopes);
+            if (Cancelled()) {
+                co_return std::unexpected(CanceledError());
+            }
+            if (!token) {
+                co_return std::unexpected(token.error());
+            }
+            // m_attemptToken is what the 401 path invalidates.
+            m_attemptToken = std::move(token->Token);
+            bearerToken = m_attemptToken;
+        }
+
+        try {
+            ResolveCopySourceAuthorization(request, bearerToken);
+            if constexpr (!std::is_same_v<TRebuild, NoRebuild>) {
+                if constexpr (std::invocable<TRebuild&, HttpRequest&, std::string_view, bool>) {
+                    m_rebuild(request, bearerToken, m_replayAfterAmbiguous);
+                } else {
+                    m_rebuild(request, bearerToken);
+                }
+            }
+            if (m_auth.Type == RequestAuth::Kind::SharedKey) {
+                AuthorizeRequest(*m_auth.Signer, request);
+            } else if (m_auth.Type == RequestAuth::Kind::Token) {
+                SetBearerAuthorization(request, bearerToken);
+            }
+        } catch (...) {
+            co_return std::unexpected(ErrorFromCurrentException());
+        }
+        co_return request;
+    }
+
+    // The options for the next send: the caller's, with the timeout clamped to what is left of the total deadline.
+    std::expected<AzureRequestOptions, std::error_code> AttemptOptions() const {
+        AzureRequestOptions options = m_requestOptions;
+        if (m_totalDeadline) {
+            const auto left = Remaining();
+            if (left <= std::chrono::milliseconds{0}) {
+                // The deadline has passed: never start a fresh attempt.
+                return std::unexpected(std::make_error_code(std::errc::timed_out));
+            }
+            options.SetTimeout(std::min(options.GetTimeout(), left));
+        }
+        return options;
+    }
+
+    // A 401 on a token-authorized request usually means the cached token was revoked or rotated, so one extra attempt
+    // with a freshly requested token is allowed regardless of the retry budget.
+    Refresh RefreshTokenAfter401(const std::error_code& error, const HttpResponse& response) {
+        constexpr unsigned int Unauthorized = 401;
+        if (error || response.GetStatus() != Unauthorized || !CanRefreshToken()) {
+            return Refresh::NotApplicable;
+        }
+        if constexpr (CanInvalidateTokens) {
+            // Don't invalidate the cached token and fetch a new one for an attempt that can never be sent.
+            if (DeadlinePassed()) {
+                return Refresh::DeadlinePassed;
+            }
+            m_tokenRefreshed = true;
+            if constexpr (requires { m_credential->Invalidate(m_auth.TokenScopes, std::string_view{}); }) {
+                m_credential->Invalidate(m_auth.TokenScopes, m_attemptToken);
+            } else {
+                m_credential->Invalidate(m_auth.TokenScopes);
+            }
+            m_countsAsAttempt = false;
+            return Refresh::Retry;
+        } else {
+            return Refresh::NotApplicable;
+        }
+    }
+
+    // How long to wait before the next attempt, or empty when this outcome is final (success, a failure that is not
+    // worth retrying, or the budget is spent).
+    std::optional<std::chrono::milliseconds> BackoffBeforeRetry(const std::error_code& error,
+                                                                const HttpResponse& response) {
+        constexpr unsigned int NotFound = 404;
+        constexpr unsigned int Gone = 410;
+        const bool retriableNotFoundOrGone =
+            m_retryNotFoundAndGone && !error && (response.GetStatus() == NotFound || response.GetStatus() == Gone);
+        if (m_attempt >= m_maxAttempts || !(IsRetriableFailure(error, response) || retriableNotFoundOrGone)) {
+            return std::nullopt;
+        }
+
+        // After an ambiguous transport failure the request may already have been applied, so replaying one that
+        // cannot be repeated safely would misreport the outcome (e.g. 409 for a create that succeeded). Surface the
+        // transport error as "outcome unknown" and let the caller decide.
+        if (error && !m_replaySafe && IsAmbiguousTransportError(error)) {
+            return std::nullopt;
+        }
+
+        constexpr unsigned int RequestTimeout = 408;
+        constexpr unsigned int ServerErrorFloor = 500;
+        // Remembered for the rebuild hook: only a replay that follows an unknown outcome can see its own earlier
+        // effect (a token-refresh repeat after a 401 cannot).
+        if (error ? IsAmbiguousTransportError(error)
+                  : (response.GetStatus() >= ServerErrorFloor || response.GetStatus() == RequestTimeout)) {
+            m_replayAfterAmbiguous = true;
+        }
+
+        // A server hint may exceed MaxDelay (the service knows when it will recover) but is capped so a
+        // bogus value cannot stall a request for hours.
+        constexpr std::chrono::milliseconds maxHint{std::chrono::minutes{1}};
+        if (const auto hint = ParseRetryAfter(response); hint.has_value()) {
+            return std::min(*hint, std::max(m_retry.MaxDelay, maxHint));
+        }
+        return std::clamp(ComputeBackoff(m_retry, m_attempt), std::chrono::milliseconds{0},
+                          std::max(m_retry.MaxDelay, std::chrono::milliseconds{0}));
+    }
+
+    THttp& m_http;
+    RequestAuth m_auth;
+    std::shared_ptr<TCred> m_credential;
+    RetryOptions m_retry;
+    AzureRequestOptions m_requestOptions;
+    bool m_retryNotFoundAndGone;
+    TRebuild m_rebuild;
+    std::optional<std::chrono::milliseconds> m_totalDeadline;
+    std::chrono::steady_clock::time_point m_start;
+    int m_maxAttempts;
+    bool m_replaySafe;
+    AttemptFactory m_attempts;
+    boost::asio::cancellation_state m_cancellation;
+    int m_attempt = 0;
+    bool m_countsAsAttempt = true;
+    bool m_tokenRefreshed = false;
+    bool m_replayAfterAmbiguous = false;
+    std::string m_attemptToken;
+};
 } // namespace RetryDetail
 
 // Sends `request` with per-attempt authorization and retry/backoff according to `retry`, and returns the final
@@ -200,184 +442,10 @@ boost::asio::awaitable<HttpResult> SendWithRetry(THttp& httpClient, RequestAuth 
                                                  RetryOptions retry, HttpRequest request,
                                                  AzureRequestOptions requestOptions, bool retryNotFoundAndGone,
                                                  TRebuild rebuild, bool replaySafe) {
-    using namespace RetryDetail;
-    // Cancellation is checked at every step below instead of surfacing as an exception from the next co_await.
-    co_await boost::asio::this_coro::throw_if_cancelled(false);
-    const auto cancellation = co_await boost::asio::this_coro::cancellation_state;
-    const auto cancelled = [&cancellation] { return IsAbortingCancellation(cancellation.cancelled()); };
-
-    const auto totalDeadline = requestOptions.GetTotalDeadline();
-    const auto start = std::chrono::steady_clock::now();
-    const auto remaining = [&] {
-        return *totalDeadline -
-               std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
-    };
-    const int maxAttempts = ComputeMaxAttempts(requestOptions.GetMaxRetries().value_or(retry.MaxRetries));
-    const bool requestReplaySafe = replaySafe || IsReplaySafe(request);
-
-    AttemptFactory attempts(std::move(request));
-    int attempt = 0;
-    bool tokenRefreshed = false;
-    bool replayAfterAmbiguous = false;
-    bool countsAsAttempt = true;
-    std::string attemptToken;
-
-    const auto canRefreshToken = [&] {
-        if constexpr (requires { credential->Invalidate(auth.TokenScopes); }) {
-            return auth.Type == RequestAuth::Kind::Token && credential != nullptr && !tokenRefreshed;
-        } else {
-            return false;
-        }
-    };
-    // Runs the caller's rebuild hook and the authorization of the attempt; a failure ends the request rather than
-    // escaping.
-    const auto prepare = [&](HttpRequest& attemptRequest, std::string_view bearerToken) -> std::error_code {
-        try {
-            ResolveCopySourceAuthorization(attemptRequest, bearerToken);
-            if constexpr (!std::is_same_v<TRebuild, NoRebuild>) {
-                if constexpr (std::invocable<TRebuild&, HttpRequest&, std::string_view, bool>) {
-                    rebuild(attemptRequest, bearerToken, replayAfterAmbiguous);
-                } else {
-                    rebuild(attemptRequest, bearerToken);
-                }
-            }
-            if (auth.Type == RequestAuth::Kind::SharedKey) {
-                AuthorizeRequest(*auth.Signer, attemptRequest);
-            } else if (auth.Type == RequestAuth::Kind::Token) {
-                SetBearerAuthorization(attemptRequest, bearerToken);
-            }
-        } catch (...) {
-            return ErrorFromCurrentException();
-        }
-        return {};
-    };
-
-    for (;;) {
-        if (countsAsAttempt) {
-            ++attempt;
-        }
-        countsAsAttempt = true;
-        if (cancelled()) {
-            co_return std::unexpected(CanceledError());
-        }
-
-        HttpRequest attemptRequest;
-        try {
-            attemptRequest = attempts.Build(attempt >= maxAttempts && !canRefreshToken());
-        } catch (...) {
-            co_return std::unexpected(ErrorFromCurrentException());
-        }
-
-        std::string_view bearerToken;
-        if (auth.Type == RequestAuth::Kind::Token) {
-            auto token = co_await GetTokenForScopes(*credential, auth.TokenScopes);
-            if (cancelled()) {
-                co_return std::unexpected(CanceledError());
-            }
-            if (!token) {
-                co_return std::unexpected(token.error());
-            }
-            // m_attemptToken is what the 401 path invalidates.
-            attemptToken = std::move(token->Token);
-            bearerToken = attemptToken;
-        }
-        if (const auto prepared = prepare(attemptRequest, bearerToken)) {
-            co_return std::unexpected(prepared);
-        }
-
-        AzureRequestOptions attemptOptions = requestOptions;
-        if (totalDeadline) {
-            const auto left = remaining();
-            if (left <= std::chrono::milliseconds{0}) {
-                // The deadline has passed: never start a fresh attempt.
-                co_return std::unexpected(std::make_error_code(std::errc::timed_out));
-            }
-            attemptOptions.SetTimeout(std::min(attemptOptions.GetTimeout(), left));
-        }
-
-        auto sent = co_await httpClient.SendAsync(std::move(attemptRequest), std::move(attemptOptions));
-        const std::error_code error = sent ? std::error_code{} : sent.error();
-        HttpResponse response = sent ? std::move(*sent) : HttpResponse{};
-
-        if (cancelled()) {
-            co_return std::unexpected(CanceledError());
-        }
-        if (error && totalDeadline && remaining() <= std::chrono::milliseconds{0}) {
-            co_return std::unexpected(std::make_error_code(std::errc::timed_out));
-        }
-
-        // A 401 on a token-authorized request usually means the cached token was revoked or rotated, so one extra
-        // attempt with a freshly requested token is allowed regardless of the retry budget.
-        constexpr unsigned int Unauthorized = 401;
-        if (!error && response.GetStatus() == Unauthorized && canRefreshToken()) {
-            if constexpr (requires { credential->Invalidate(auth.TokenScopes); }) {
-                // Don't invalidate the cached token and fetch a new one for an attempt that can never be sent.
-                if (totalDeadline && remaining() <= std::chrono::milliseconds{0}) {
-                    co_return std::unexpected(std::make_error_code(std::errc::timed_out));
-                }
-                tokenRefreshed = true;
-                if constexpr (requires { credential->Invalidate(auth.TokenScopes, std::string_view{}); }) {
-                    credential->Invalidate(auth.TokenScopes, attemptToken);
-                } else {
-                    credential->Invalidate(auth.TokenScopes);
-                }
-                countsAsAttempt = false;
-                continue;
-            }
-        }
-
-        constexpr unsigned int NotFound = 404;
-        constexpr unsigned int Gone = 410;
-        const bool retriableNotFoundOrGone =
-            retryNotFoundAndGone && !error && (response.GetStatus() == NotFound || response.GetStatus() == Gone);
-        const auto finish = [&]() -> HttpResult {
-            if (error) {
-                return std::unexpected(error);
-            }
-            return std::move(response);
-        };
-        if (attempt >= maxAttempts || !(IsRetriableFailure(error, response) || retriableNotFoundOrGone)) {
-            co_return finish();
-        }
-
-        // After an ambiguous transport failure the request may already have been applied, so replaying one that
-        // cannot be repeated safely would misreport the outcome (e.g. 409 for a create that succeeded). Surface the
-        // transport error as "outcome unknown" and let the caller decide.
-        if (error && !requestReplaySafe && IsAmbiguousTransportError(error)) {
-            co_return finish();
-        }
-
-        constexpr unsigned int RequestTimeout = 408;
-        constexpr unsigned int ServerErrorFloor = 500;
-        // Remembered for the rebuild hook: only a replay that follows an unknown outcome can see its own earlier
-        // effect (a token-refresh repeat after a 401 cannot).
-        if (error ? IsAmbiguousTransportError(error)
-                  : (response.GetStatus() >= ServerErrorFloor || response.GetStatus() == RequestTimeout)) {
-            replayAfterAmbiguous = true;
-        }
-
-        // A server hint may exceed MaxDelay (the service knows when it will recover) but is capped so a
-        // bogus value cannot stall a request for hours.
-        constexpr std::chrono::milliseconds maxHint{std::chrono::minutes{1}};
-        std::chrono::milliseconds delay;
-        if (const auto hint = ParseRetryAfter(response); hint.has_value()) {
-            delay = std::min(*hint, std::max(retry.MaxDelay, maxHint));
-        } else {
-            delay = std::clamp(ComputeBackoff(retry, attempt), std::chrono::milliseconds{0},
-                               std::max(retry.MaxDelay, std::chrono::milliseconds{0}));
-        }
-        if (totalDeadline && remaining() <= delay) {
-            // The backoff alone would outlast the deadline, so another attempt can never be made.
-            co_return std::unexpected(std::make_error_code(std::errc::timed_out));
-        }
-
-        typename RetryTimerFor<THttp>::type timer(httpClient.get_executor());
-        timer.expires_after(delay);
-        const auto [waitError] = co_await timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable));
-        if (waitError || cancelled()) {
-            co_return std::unexpected(CanceledError());
-        }
-    }
+    RetryDetail::RetryingSender<THttp, TCred, TRebuild> sender(httpClient, std::move(auth), std::move(credential),
+                                                               retry, std::move(request), std::move(requestOptions),
+                                                               retryNotFoundAndGone, std::move(rebuild), replaySafe);
+    co_return co_await sender.Run();
 }
 
 // Validates the shape of the caller's headers, then sends the request with retries. The result carries
