@@ -205,27 +205,27 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
 
         const std::uint64_t probeLength =
             m_end.has_value() ? std::min<std::uint64_t>(m_chunkSize, *m_end - m_begin) : m_chunkSize;
-        HttpResult sent;
-        if (!co_await Fetch(RequestKind::Probe, m_begin, probeLength, m_options.Conditions, sent)) {
+        auto probe = co_await Fetch(RequestKind::Probe, m_begin, probeLength, m_options.Conditions);
+        if (!probe) {
             co_return;
         }
-        if (co_await OnProbe(std::move(sent), probeLength)) {
-            if (!co_await Fetch(RequestKind::Full, m_begin, 0U, m_options.Conditions, sent)) {
-                co_return;
+        if (co_await OnProbe(std::move(*probe), probeLength)) {
+            if (auto full = co_await Fetch(RequestKind::Full, m_begin, 0U, m_options.Conditions)) {
+                co_await OnFull(std::move(*full));
             }
-            co_await OnFull(std::move(sent));
         }
     }
 
-    // Sends one GET. False means the request could not even be built (or the budget is spent) and the failure is
-    // recorded; otherwise `out` holds the transport outcome.
-    boost::asio::awaitable<bool> Fetch(RequestKind kind, std::uint64_t offset, std::uint64_t length,
-                                       const Models::BlobRequestConditions& conditions, HttpResult& out) {
+    // Sends one GET and returns its transport outcome. Empty means the request could not even be built (or the budget
+    // is spent) and the failure is recorded.
+    boost::asio::awaitable<std::optional<HttpResult>> Fetch(RequestKind kind, std::uint64_t offset,
+                                                            std::uint64_t length,
+                                                            const Models::BlobRequestConditions& conditions) {
         AzureRequestOptions requestOptions = m_requestOptions;
         // Every request gets only what is left of the whole download's budget, and none starts once it is spent.
         if (!m_deadline.Apply(requestOptions)) {
             Fail(MakeFailure(std::errc::timed_out, "The download exceeded its total deadline."));
-            co_return false;
+            co_return std::nullopt;
         }
         HttpRequest request;
         try {
@@ -241,10 +241,9 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
             ApplyBlobRequestConditions(request, conditions);
         } catch (...) {
             Fail(MakeFailureFromCurrentException());
-            co_return false;
+            co_return std::nullopt;
         }
-        out = co_await SendAuthorizedRequest(m_httpClient, m_target, std::move(request), std::move(requestOptions));
-        co_return true;
+        co_return co_await SendAuthorizedRequest(m_httpClient, m_target, std::move(request), std::move(requestOptions));
     }
 
     static std::pair<std::error_code, HttpResponse> Split(HttpResult sent) {
@@ -482,12 +481,12 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
                 const std::uint64_t offset = m_next;
                 m_next += length;
 
-                HttpResult sent;
-                if (!co_await Fetch(RequestKind::Chunk, offset, length, m_chunkConditions, sent)) {
+                auto sent = co_await Fetch(RequestKind::Chunk, offset, length, m_chunkConditions);
+                if (!sent) {
                     throw StopWorkers{};
                 }
                 std::string body;
-                if (!ValidateChunk(std::move(sent), offset, length, body)) {
+                if (!ValidateChunk(std::move(*sent), offset, length, body)) {
                     throw StopWorkers{};
                 }
 
