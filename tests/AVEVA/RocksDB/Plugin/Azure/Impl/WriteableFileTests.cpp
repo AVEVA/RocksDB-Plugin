@@ -264,39 +264,32 @@ TEST_F(WriteableFileTests, Destructor_WithoutClose_DoesNotUploadBufferedData) {
     EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(700));
 }
 
-TEST_F(WriteableFileTests, Destructor_UploadsStillInFlightAfterFailure_WaitsForThem) {
+TEST_F(WriteableFileTests, Destructor_UploadsStillInFlight_DoesNotWaitAndTheyCompleteAfterwards) {
     constexpr int64_t pageSize = Configuration::PageBlob::PageSize;
     m_env.Blob->SetCapacity(16 * pageSize);
     m_env.Blob->DeferUploads = true;
 
     auto file = std::make_unique<FakeWriteableFileImpl>("test.dat", m_env.Runtime, m_env.Client, nullptr, m_logger,
                                                         2 * pageSize);
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 2; ++i) {
         file->Append(std::vector<char>(pageSize, 'a'));
         file->RangeSync();
     }
-    ASSERT_EQ(4U, m_env.Blob->PendingUploads());
+    ASSERT_EQ(2U, m_env.Blob->PendingUploads());
 
-    file->Append(std::vector<char>(pageSize, 'b'));
-    m_env.Blob->FailUpload(FakeBlobServer::Error(500, "upload failed"), 0);
-    ASSERT_THROW(file->RangeSync(), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
-
-    // Records whether every upload had been released by the time the destructor returned; no sleep needed.
-    std::atomic<bool> uploadsReleased = false;
-    std::atomic<bool> releasedBeforeDestroyed = false;
-    std::thread destroyer([&] {
+    // Destroyed on the client's executor thread, where waiting for the uploads would deadlock. A regression
+    // blocks here, so the uploads are released after a timeout to fail the test instead of hanging it.
+    std::promise<void> destroyed;
+    boost::asio::post(m_env.Http.get_executor(), [&] {
         file.reset();
-        releasedBeforeDestroyed = uploadsReleased.load();
+        destroyed.set_value();
     });
-
+    auto result = destroyed.get_future();
+    const auto status = result.wait_for(std::chrono::seconds(5));
     while (m_env.Blob->PendingUploads() > 0) {
-        if (m_env.Blob->PendingUploads() == 1) {
-            uploadsReleased = true;
-        }
         m_env.Blob->CompleteUpload(0);
     }
-    destroyer.join();
-    EXPECT_TRUE(releasedBeforeDestroyed);
+    ASSERT_EQ(std::future_status::ready, status);
 }
 
 TEST_F(WriteableFileTests, RangeSync_UploadInFlight_ReturnsWithoutWaitingAndSyncCompletesIt) {

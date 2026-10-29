@@ -68,38 +68,24 @@ BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(
 
 template <typename TBlob> BasicWriteableFileImpl<TBlob>::~BasicWriteableFileImpl() {
     // Close() is the durability boundary. A destructor that ran sleeping retries would stall RocksDB's cleanup
-    // threads, so it only reports unpersisted data and waits for uploads that are already running.
+    // threads, so it only reports unpersisted data.
     // A moved-from file is closed and has lost its logger, which must not be dereferenced.
     if (!m_close.IsClosed()) {
         m_close.LogIfUnclosed(*m_w.H.Logger, m_w.H.Name, m_unsyncedSize);
     }
 
-    // Outstanding upload completions use the blob client and logger, which are released below. Callers must not
-    // destroy the file on the host executor while uploads are pending: this noexcept path cannot throw, so it logs
-    // the violation and then still has to wait.
+    // Uploads already running own the runtime, blob, payload and tracker, so they finish safely after the file is
+    // gone. The destructor never waits for them: blocking here could deadlock when it runs on the client's io thread.
     if (m_uploads && HasPendingUploads()) {
-        try {
-            ThrowIfRunningOn(m_w.H.Blob->get_executor());
-        } catch (const std::exception& e) {
-            BOOST_LOG_SEV(*m_w.H.Logger, boost::log::trivial::error)
-                << "Writeable file '" << m_w.H.Name
-                << "' destroyed on the client executor with uploads pending; this will block: " << e.what();
-        }
+        BOOST_LOG_SEV(*m_w.H.Logger, boost::log::trivial::warning)
+            << "Writeable file '" << m_w.H.Name
+            << "' destroyed with uploads still in flight; they complete in the background and any failure is lost.";
     }
-    DrainUploads();
 }
 
 template <typename TBlob> bool BasicWriteableFileImpl<TBlob>::HasPendingUploads() const noexcept {
     std::scoped_lock lock(m_uploads->Mutex);
     return m_uploads->InFlight > 0;
-}
-
-template <typename TBlob> void BasicWriteableFileImpl<TBlob>::DrainUploads() noexcept {
-    if (!m_uploads) {
-        return;
-    }
-    std::unique_lock lock(m_uploads->Mutex);
-    m_uploads->Done.wait(lock, [&] { return m_uploads->InFlight == 0; });
 }
 
 template <typename TBlob>
@@ -132,7 +118,6 @@ void BasicWriteableFileImpl<TBlob>::UploadTracker::Complete(std::exception_ptr e
             }
         }
     }
-    Done.notify_all();
     // Outside the lock: a woken coroutine takes it again.
     for (auto& wake : ready) {
         wake();

@@ -15,7 +15,6 @@
 #include <boost/container/static_vector.hpp>
 #include <boost/log/trivial.hpp>
 
-#include <condition_variable>
 #include <cstdint>
 #include <exception>
 #include <functional>
@@ -49,8 +48,6 @@ template <typename TBlob> class BasicWriteableFileImpl {
         };
 
         std::mutex Mutex;
-        // Only for the destructor, which cannot suspend; coroutines wait through Waiters.
-        std::condition_variable Done;
         size_t InFlight = 0;
         std::exception_ptr Error;
         std::vector<Waiter> Waiters;
@@ -124,7 +121,6 @@ template <typename TBlob> class BasicWriteableFileImpl {
     // Rethrows a recorded upload failure or a fenced writer without waiting for anything.
     void ReportUploadError();
     [[nodiscard]] bool HasPendingUploads() const noexcept;
-    void DrainUploads() noexcept;
 };
 extern template class BasicWriteableFileImpl<PageBlobClient>;
 
