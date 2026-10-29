@@ -508,6 +508,18 @@ TEST(ConnectionPool, ReleaseLeavesAConnectionItDidNotTakeWithTheCaller) {
     EXPECT_NE(connection.stream, nullptr);
 }
 
+TEST(ConnectionPool, ReleaseAfterClearDeclinesTheConnection) {
+    int live = 0;
+    Pool pool(4, LongTimeout);
+    pool.Clear();
+
+    auto connection = MakeConnection(1, live);
+    EXPECT_FALSE(pool.Release(MakeKey("example.com"), std::move(connection)));
+    EXPECT_NE(connection.stream, nullptr);
+    EXPECT_FALSE(pool.Acquire(MakeKey("example.com")).has_value());
+    EXPECT_EQ(pool.IdleCount(), 0U);
+}
+
 TEST(ConnectionPool, DestroyingThePoolFromAnotherThreadHandsIdleSocketsToTheirExecutor) {
     asio::io_context context;
     auto pool = std::make_unique<ConnectionPool<PlainStream, FakeClock>>(4, LongTimeout);

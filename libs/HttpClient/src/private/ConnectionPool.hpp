@@ -227,13 +227,16 @@ class ConnectionPool {
     ~ConnectionPool() { Clear(); }
 
     /// <summary>
-    /// Disposes every idle connection. Idle streams are handed to their own executor like Sweep does: SSL streams
-    /// must not be torn down on whichever thread happens to call this.
+    /// Closes the pool for good and disposes every idle connection. Idle streams are handed to their own executor
+    /// like Sweep does: SSL streams must not be torn down on whichever thread happens to call this. After this,
+    /// Release declines every connection, so a request that was in flight during shutdown closes its connection
+    /// itself instead of parking it where it would be destroyed after its executor is gone.
     /// </summary>
     void Clear() {
         LruList retired;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
+            m_closed = true;
             m_dormant.clear();
             m_origins.clear();
             retired.swap(m_lru);
@@ -321,6 +324,9 @@ class ConnectionPool {
         const boost::scope::scope_exit disposeRetired{[&retired] { retired.clear_and_dispose(ExecutorDisposer{}); }};
         {
             std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_closed) {
+                return false;
+            }
             const auto now = Clock::now();
             DropExpired(now, retired);
 
@@ -582,6 +588,7 @@ class ConnectionPool {
     const Notifier m_notifier;
     std::chrono::milliseconds m_probeThreshold;
     mutable std::mutex m_mutex;
+    bool m_closed = false; // Guarded by m_mutex.
     OriginMap m_origins;
     DormantList m_dormant;
     LruList m_lru;
