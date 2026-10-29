@@ -73,8 +73,10 @@ class OriginGate : public std::enable_shared_from_this<OriginGate> {
     /// caller applies to the awaiting coroutine.
     /// </summary>
     /// <param name="origin">The "scheme://host:port" the slot counts against.</param>
-    /// <returns>The slot, or <c>operation_canceled</c> if the wait was cancelled or the gate closed.</returns>
+    /// <returns>The slot, or <c>operation_canceled</c> if the gate closed. Throws <c>operation_aborted</c> if the
+    /// wait was cancelled.</returns>
     boost::asio::awaitable<std::expected<Slot, std::error_code>> Acquire(std::string origin) {
+        // Cancellation is handled below, after the queue entry and any handed-over slot are cleaned up.
         co_await boost::asio::this_coro::throw_if_cancelled(false);
         std::shared_ptr<Waiter> waiter;
         {
@@ -107,6 +109,10 @@ class OriginGate : public std::enable_shared_from_this<OriginGate> {
         }
         if (handedOver) {
             Release(origin);
+        }
+        if (error == boost::asio::experimental::error::channel_cancelled ||
+            error == boost::asio::error::operation_aborted) {
+            throw boost::system::system_error(boost::asio::error::operation_aborted);
         }
         co_return std::unexpected(std::make_error_code(std::errc::operation_canceled));
     }

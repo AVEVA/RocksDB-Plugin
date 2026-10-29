@@ -16,12 +16,12 @@
 #include "Timeouts.hpp"
 #include "TlsContextConfigurator.hpp"
 
-#include <boost/asio/as_tuple.hpp>
 #include <boost/asio/awaitable.hpp>
-#include <boost/asio/experimental/awaitable_operators.hpp>
+#include <boost/asio/cancel_at.hpp>
+#include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ssl/context.hpp>
-#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
 #include <algorithm>
@@ -84,10 +84,7 @@ class HttpClientCore : public std::enable_shared_from_this<HttpClientCore> {
     /// a classified error code.
     /// </summary>
     asio::awaitable<HttpResult> Send(HttpRequest request, HttpRequestOptions options) {
-        using namespace asio::experimental::awaitable_operators;
-        co_await asio::this_coro::throw_if_cancelled(false);
         const auto cancellation = co_await asio::this_coro::cancellation_state;
-
         std::error_code failure;
         try {
             const Route route = Route::Of(request, options);
@@ -95,21 +92,19 @@ class HttpClientCore : public std::enable_shared_from_this<HttpClientCore> {
                 co_return std::unexpected(route.Parsed ? route.Error : make_error_code(HttpClientError::InvalidUrl));
             }
 
-            if (cancellation.cancelled() != asio::cancellation_type::none) {
-                co_return std::unexpected(std::make_error_code(std::errc::operation_canceled));
-            }
             HttpRequestPhase phase = HttpRequestPhase::Queued;
-            const auto deadline = DeadlineFor(options);
-            auto outcome =
-                co_await (Dispatch(route, std::move(request), std::move(options), phase) || Expire(deadline));
-            const bool cancelled = cancellation.cancelled() != asio::cancellation_type::none;
-            if (outcome.index() == 0) {
-                auto& result = std::get<0>(outcome);
-                if (result || !cancelled) {
-                    co_return std::move(result);
+            try {
+                // The strand serializes the deadline timer with the request's completion, which cancel_at requires.
+                co_return co_await asio::co_spawn(asio::make_strand(co_await asio::this_coro::executor),
+                                                  RunWithDeadline(route, std::move(request), std::move(options), phase),
+                                                  asio::use_awaitable);
+            } catch (const boost::system::system_error& aborted) {
+                if (aborted.code() != asio::error::operation_aborted) {
+                    throw;
                 }
             }
-            if (cancelled) {
+            // Either the caller cancelled or the deadline fired; the caller's cancellation tells them apart.
+            if (cancellation.cancelled() != asio::cancellation_type::none) {
                 co_return std::unexpected(std::make_error_code(std::errc::operation_canceled));
             }
             DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::Timeout, phase, route.Host, route.Port, {},
@@ -129,21 +124,22 @@ class HttpClientCore : public std::enable_shared_from_this<HttpClientCore> {
     }
 
     /// <summary>
-    /// Completes when the deadline passes, or is cancelled.
+    /// Runs the request with the deadline attached. Throws operation_aborted when the deadline passes or the
+    /// awaiting coroutine is cancelled.
     /// </summary>
-    static asio::awaitable<void> Expire(std::chrono::steady_clock::time_point deadline) {
-        co_await asio::this_coro::throw_if_cancelled(false);
-        asio::steady_timer timer(co_await asio::this_coro::executor, deadline);
-        co_await timer.async_wait(asio::as_tuple(asio::use_awaitable));
+    asio::awaitable<HttpResult> RunWithDeadline(const Route& route, HttpRequest request, HttpRequestOptions options,
+                                                HttpRequestPhase& phase) {
+        const auto deadline = DeadlineFor(options);
+        co_return co_await asio::co_spawn(co_await asio::this_coro::executor,
+                                          Dispatch(route, std::move(request), std::move(options), phase),
+                                          asio::cancel_at(deadline, asio::use_awaitable));
     }
-
     /// <summary>
     /// Waits for a per-origin slot when a cap is configured, then runs the exchange over the stream the route calls
     /// for. The slot is returned as the coroutine ends, before the caller sees the result.
     /// </summary>
     asio::awaitable<HttpResult> Dispatch(const Route& route, HttpRequest request, HttpRequestOptions options,
                                          HttpRequestPhase& phase) {
-        co_await asio::this_coro::throw_if_cancelled(false);
         OriginGate::Slot slot;
         if (m_gate) {
             auto acquired = co_await m_gate->Acquire(route.Origin());

@@ -25,11 +25,16 @@ using AVEVA::Private::OriginGate;
 asio::awaitable<void> AcquireAndHold(std::shared_ptr<OriginGate> gate, std::string origin,
                                      std::optional<OriginGate::Slot>& slot, std::error_code& error, int& finished,
                                      std::vector<int>* order = nullptr, int id = 0) {
-    auto result = co_await gate->Acquire(std::move(origin));
-    if (result) {
-        slot.emplace(std::move(*result));
-    } else {
-        error = result.error();
+    // A cancelled wait throws operation_aborted; the tests record it as the same canceled error a closed gate returns.
+    try {
+        auto result = co_await gate->Acquire(std::move(origin));
+        if (result) {
+            slot.emplace(std::move(*result));
+        } else {
+            error = result.error();
+        }
+    } catch (const boost::system::system_error&) {
+        error = std::make_error_code(std::errc::operation_canceled);
     }
     if (order) {
         order->push_back(id);

@@ -29,6 +29,16 @@ namespace {
 constexpr auto Await = asio::as_tuple(asio::use_awaitable);
 
 /// <summary>
+/// Turns an aborted operation into the exception a cancelled await throws, so cancellation unwinds to the boundary in
+/// HttpClientCore::Send instead of being classified as an I/O failure here.
+/// </summary>
+void ThrowIfAborted(const boost::system::error_code& error) {
+    if (error == asio::error::operation_aborted) {
+        throw boost::system::system_error(error);
+    }
+}
+
+/// <summary>
 /// Releases a DNS lookup the leading request abandons, so requests joined to it are not left waiting. Also
 /// runs if the coroutine is destroyed without resuming (the io_context was torn down).
 /// </summary>
@@ -65,7 +75,6 @@ class LeaderClaim {
 /// Runs detached so the caller's result does not wait for it.
 /// </summary>
 asio::awaitable<void> ShutdownTls(std::unique_ptr<TlsStream> stream) {
-    co_await asio::this_coro::throw_if_cancelled(false);
     beast::get_lowest_layer(*stream).expires_after(TlsShutdownGrace);
     co_await stream->async_shutdown(Await);
     boost::system::error_code ignored;
@@ -82,14 +91,6 @@ Exchange<Stream>::Exchange(Environment environment, const Route& route, HttpRequ
       m_options(std::move(options)), m_phase(phase) {}
 
 template <typename Stream> asio::awaitable<HttpResult> Exchange<Stream>::Run() {
-    co_await asio::this_coro::throw_if_cancelled(false);
-    m_cancellation = co_await asio::this_coro::cancellation_state;
-
-    // A cancellation that arrived while this request was still being set up has no operation to interrupt, so each
-    // step below checks for it before starting I/O.
-    if (Cancelled()) {
-        co_return std::unexpected(CanceledError());
-    }
     BuildRequest();
     if (auto pooled = m_env.pool->Acquire(m_key)) {
         m_stream = std::move(pooled->stream);
@@ -269,18 +270,15 @@ template <typename Stream> asio::awaitable<std::expected<ResolveResults, std::er
             LeaderClaim claim(m_key.host, m_key.service, scope);
             Tcp::resolver resolver(executor);
             const auto [error, results] = co_await resolver.async_resolve(m_key.host, m_key.service, Await);
+            ThrowIfAborted(error); // The claim's destructor releases the joined requests.
             claim.Publish(error, results);
             if (error) {
-                co_return std::unexpected(Cancelled() ? std::make_error_code(std::errc::operation_canceled)
-                                                      : std::error_code(HttpClientError::ResolveFailed));
+                co_return std::unexpected(std::error_code(HttpClientError::ResolveFailed));
             }
             co_return results;
         }
 
         const auto [error, results] = co_await joined->async_receive(Await);
-        if (Cancelled()) {
-            co_return std::unexpected(std::make_error_code(std::errc::operation_canceled));
-        }
         if (error == asio::error::operation_aborted) {
             continue; // The leader was cancelled or timed out, which says nothing about this request's lookup.
         }
@@ -299,30 +297,24 @@ template <typename Stream> asio::awaitable<std::error_code> Exchange<Stream>::Co
     if (!resolved) {
         co_return resolved.error();
     }
-    if (Cancelled()) {
-        co_return CanceledError();
-    }
-
     m_phase = HttpRequestPhase::Connect;
     const auto [connectError, endpoint] = co_await beast::get_lowest_layer(*m_stream).async_connect(*resolved, Await);
     if (connectError) {
+        ThrowIfAborted(connectError);
         if (m_resolvedFromCache) {
             // The cached address may be stale; make the next request resolve again.
             DnsCache::Shared().Invalidate(m_key.host, m_key.service);
             Report(HttpDiagnosticKind::DnsInvalidated, connectError,
                    "Connecting to a cached address failed; dropped the cached DNS answer");
         }
-        co_return Cancelled() ? std::make_error_code(std::errc::operation_canceled)
-                              : std::error_code(HttpClientError::ConnectFailed);
+        co_return std::error_code(HttpClientError::ConnectFailed);
     }
 
     if constexpr (std::is_same_v<Stream, TlsStream>) {
-        if (Cancelled()) {
-            co_return CanceledError();
-        }
         m_phase = HttpRequestPhase::Handshake;
         const auto [handshakeError] = co_await m_stream->async_handshake(asio::ssl::stream_base::client, Await);
         if (handshakeError) {
+            ThrowIfAborted(handshakeError);
             co_return std::error_code(HttpClientError::TlsFailed);
         }
     }
@@ -337,26 +329,22 @@ template <typename Stream> bool Exchange<Stream>::Replayable(bool requestMayHave
 template <typename Stream>
 asio::awaitable<std::expected<typename Exchange<Stream>::Reply, typename Exchange<Stream>::Failure>>
 Exchange<Stream>::Transfer() {
-    if (Cancelled()) {
-        co_return std::unexpected(Failure{CanceledError(), false});
-    }
     m_phase = HttpRequestPhase::Write;
     m_serializer.emplace(*m_request);
     const auto [writeError, bytesWritten] = co_await http::async_write(*m_stream, *m_serializer, Await);
     if (writeError) {
+        ThrowIfAborted(writeError);
         co_return std::unexpected(Failure{HttpClientError::WriteFailed, Replayable(bytesWritten != 0)});
     }
 
     for (;;) {
-        if (Cancelled()) {
-            co_return std::unexpected(Failure{CanceledError(), false});
-        }
         m_phase = HttpRequestPhase::Read;
         // The parser consumes body bytes eagerly, so without a reserve beast reads only ~0.5-2 KiB per round trip.
         if (m_buffer.capacity() < ReadChunk) {
             m_buffer.reserve(ReadChunk);
         }
         auto [readError, bytesRead] = co_await http::async_read(*m_stream, m_buffer, *m_parser, Await);
+        ThrowIfAborted(readError);
         if (readError) {
             readError = AcceptTruncatedTlsBody(readError);
         }

@@ -16,7 +16,6 @@
 #include "AVEVA/HttpClient/HttpResponse.hpp"
 
 #include <boost/asio/awaitable.hpp>
-#include <boost/asio/cancellation_state.hpp>
 #include <boost/asio/experimental/concurrent_channel.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ssl/context.hpp>
@@ -118,10 +117,6 @@ template <typename Stream> class Exchange {
     void Report(HttpDiagnosticKind kind, std::error_code error, std::string_view message) const noexcept {
         DiagnosticsSink::Report(m_env.diagnostics, kind, m_phase, m_key.host, m_key.service, error, message);
     }
-    static std::error_code CanceledError() { return std::make_error_code(std::errc::operation_canceled); }
-    [[nodiscard]] bool Cancelled() const noexcept {
-        return m_cancellation.cancelled() != boost::asio::cancellation_type::none;
-    }
 
     /// <summary>
     /// Builds the wire message. Throws on input Beast cannot represent or on allocation failure.
@@ -154,9 +149,7 @@ template <typename Stream> class Exchange {
     /// <summary>
     /// Whether a failure on a reused connection should be retried once on a fresh one.
     /// </summary>
-    bool ShouldRetry(const Failure& failure) const noexcept {
-        return failure.replayable && m_reused && !m_retried && !Cancelled();
-    }
+    bool ShouldRetry(const Failure& failure) const noexcept { return failure.replayable && m_reused && !m_retried; }
     std::expected<HttpResponse, std::error_code> BuildResponse();
 
     /// <summary>
@@ -171,7 +164,6 @@ template <typename Stream> class Exchange {
     HttpRequest m_stagedRequest;
     HttpRequestOptions m_options;
     HttpRequestPhase& m_phase;
-    boost::asio::cancellation_state m_cancellation;
     std::unique_ptr<Stream> m_stream;
     beast::flat_buffer m_buffer;
     bool m_reused = false;
