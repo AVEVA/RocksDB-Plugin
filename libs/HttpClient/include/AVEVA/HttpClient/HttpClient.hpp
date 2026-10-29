@@ -11,7 +11,6 @@
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
-#include <boost/asio/thread_pool.hpp>
 
 #include <gsl/pointers>
 
@@ -68,16 +67,6 @@ class HttpClient {
     /// </summary>
     /// <returns>The client's executor.</returns>
     executor_type get_executor() const noexcept { return m_context->get_executor(); }
-
-    /// <summary>
-    /// Executor for blocking work that must stay off the I/O thread, such as download-to-file writes. Backed by a
-    /// small thread pool that is created on first use, owned by this client and joined in its destructor, so the
-    /// thread count stays bounded. The client may be destroyed from one of these writer threads (or from a completion
-    /// bound to this executor): the destructor then hands the join and teardown to a helper thread instead of
-    /// joining itself. Safe to call from any thread.
-    /// </summary>
-    /// <returns>An executor that runs tasks on the pool.</returns>
-    [[nodiscard]] boost::asio::thread_pool::executor_type GetDownloadWriter();
 
     /// <summary>
     /// Sends a request. Cancelling the awaiting coroutine cancels the request, and the per-request timeout covers
