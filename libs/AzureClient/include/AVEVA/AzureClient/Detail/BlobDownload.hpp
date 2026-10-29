@@ -21,8 +21,11 @@
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/bind_cancellation_slot.hpp>
+#include <boost/asio/cancellation_type.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/deferred.hpp>
+#include <boost/asio/error.hpp>
 #include <boost/asio/experimental/parallel_group.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
@@ -30,6 +33,7 @@
 #include <boost/asio/use_awaitable.hpp>
 
 #include <algorithm>
+#include <boost/system/system_error.hpp>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -56,27 +60,67 @@ namespace AVEVA::AzureClient::Private {
 namespace DownloadDetail {
 // Runs a blocking task off the I/O thread: on the caller's scheduler, else the HTTP client's, and resumes the caller
 // on its own executor afterwards. Throws std::errc::operation_not_supported for a transport with neither, and
-// rethrows whatever the task throws.
+// rethrows whatever the task throws. A task still queued when the caller is cancelled is skipped and the await throws
+// operation_aborted; a task that has started always runs to completion and the await then returns normally.
 template <class THttp, class TTask>
 boost::asio::awaitable<void> RunOnWriter(THttp& httpClient, const std::optional<DownloadWriteScheduler>& scheduler,
                                          TTask task) {
-    const auto body = [&task]() -> boost::asio::awaitable<void> {
+    // The writer thread cannot read this coroutine's cancellation state, so a handler mirrors it into a flag.
+    struct HopState {
+        std::atomic<bool> Canceled{false};
+        std::atomic<bool> Ran{false};
+    };
+    const auto hop = std::make_shared<HopState>();
+    auto cancellation = co_await boost::asio::this_coro::cancellation_state;
+    struct SlotGuard {
+        boost::asio::cancellation_slot Slot;
+        ~SlotGuard() {
+            if (Slot.is_connected()) {
+                Slot.clear();
+            }
+        }
+    } guard{cancellation.slot()};
+    const auto mirror = [hop](boost::asio::cancellation_type_t) { hop->Canceled = true; };
+    if (guard.Slot.is_connected()) {
+        guard.Slot.emplace<decltype(mirror)>(mirror);
+    }
+    if (cancellation.cancelled() != boost::asio::cancellation_type::none) {
+        hop->Canceled = true;
+    }
+
+    const auto body = [&task, hop]() -> boost::asio::awaitable<void> {
+        // A cancellation that arrives while the task is queued must keep it from running: it may publish a file.
+        if (hop->Canceled) {
+            throw boost::system::system_error(boost::asio::error::operation_aborted);
+        }
+        hop->Ran = true;
         task();
         co_return;
     };
+    const auto run = [&](auto executor) -> boost::asio::awaitable<void> {
+        try {
+            // The hop gets its own slot so it cannot replace the handler above; a started task is not interruptible.
+            boost::asio::cancellation_signal unused;
+            co_await boost::asio::co_spawn(
+                executor, body, boost::asio::bind_cancellation_slot(unused.slot(), boost::asio::use_awaitable));
+        } catch (const boost::system::system_error& e) {
+            if (e.code() != boost::asio::error::operation_aborted || !hop->Ran) {
+                throw;
+            }
+        }
+    };
     if (scheduler) {
-        co_await boost::asio::co_spawn(*scheduler, body, boost::asio::use_awaitable);
+        co_await run(*scheduler);
     } else if constexpr (requires {
                              boost::asio::co_spawn(httpClient.GetDownloadWriter(), body, boost::asio::use_awaitable);
                          }) {
-        co_await boost::asio::co_spawn(httpClient.GetDownloadWriter(), body, boost::asio::use_awaitable);
+        co_await run(httpClient.GetDownloadWriter());
     } else {
         // A detached thread could outlive the client, so refuse; callers map the throw to the download's error.
         throw std::system_error(std::make_error_code(std::errc::operation_not_supported),
                                 "The HTTP client has no download writer and no write scheduler was supplied.");
     }
 }
-
 inline constexpr std::size_t DefaultDownloadChunkSize = BlobTransferLimits::DefaultDownloadChunkSize;
 inline constexpr std::uint64_t ResponseBodySlack = BlobTransferLimits::ResponseBodySlack;
 inline constexpr std::uint64_t MaxBufferedDownloadBytes = BlobTransferLimits::MaxBufferedDownloadBytes;
@@ -155,8 +199,6 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
                                  std::max<std::size_t>(1U, MaxBufferedDownloadBytes / m_chunkSize))) {}
 
     boost::asio::awaitable<DownloadOutcome<TSink>> Run() {
-        co_await boost::asio::this_coro::throw_if_cancelled(false);
-        const auto cancellation = co_await boost::asio::this_coro::cancellation_state;
         const auto executor = co_await boost::asio::this_coro::executor;
 
         try {
@@ -171,9 +213,6 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
             } catch (...) {
                 Fail(MakeFailureFromCurrentException());
             }
-        }
-        if (!m_failure.has_value() && IsAbortingCancellation(cancellation.cancelled())) {
-            Fail(CanceledFailure());
         }
         co_return DownloadOutcome<TSink>{.Result = Finish(), .Sink = std::move(m_sink)};
     }
@@ -457,21 +496,9 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
     }
 
     boost::asio::awaitable<void> Worker() {
-        co_await boost::asio::this_coro::throw_if_cancelled(false);
-        const auto cancellation = co_await boost::asio::this_coro::cancellation_state;
-        const auto stopped = [&] {
-            if (m_failure.has_value()) {
-                return true;
-            }
-            if (IsAbortingCancellation(cancellation.cancelled())) {
-                Fail(CanceledFailure());
-                return true;
-            }
-            return false;
-        };
         try {
             for (;;) {
-                if (stopped()) {
+                if (m_failure.has_value()) {
                     throw StopWorkers{};
                 }
                 if (m_next >= *m_end) {
@@ -490,11 +517,12 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
                     throw StopWorkers{};
                 }
 
-                // Hold the chunk until every earlier one is written; a notification (or a cancellation) wakes the wait.
-                while (!stopped() && m_begin + m_written != offset) {
+                // Hold the chunk until every earlier one is written. A notification wakes the wait; so does a
+                // cancellation, which the next await then rethrows as operation_aborted.
+                while (!m_failure.has_value() && m_begin + m_written != offset) {
                     co_await m_turn->async_wait(boost::asio::as_tuple(boost::asio::use_awaitable));
                 }
-                if (stopped() || !co_await WriteBody(std::move(body))) {
+                if (m_failure.has_value() || !co_await WriteBody(std::move(body))) {
                     throw StopWorkers{};
                 }
                 m_turn->cancel();
@@ -651,20 +679,14 @@ DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget
                         DownloadToOptions operationOptions, std::filesystem::path path,
                         AzureRequestOptions requestOptions) {
     using namespace DownloadDetail;
-    co_await boost::asio::this_coro::throw_if_cancelled(false);
-    const auto cancellation = co_await boost::asio::this_coro::cancellation_state;
     // The budget covers the hand-offs to the writer and back, so it starts here rather than at the first GET.
     const auto start = std::chrono::steady_clock::now();
     const AggregateDeadline deadline(requestOptions, start);
     const auto scheduler = operationOptions.WriteScheduler;
-    const auto canceled = [&] { return IsAbortingCancellation(cancellation.cancelled()); };
 
     std::filesystem::path tempPath;
     std::ofstream file;
     std::optional<BlobStorageError> prepareFailure;
-    if (canceled()) {
-        co_return std::unexpected(CanceledFailure());
-    }
     try {
         co_await RunOnWriter(httpClient, scheduler, [&] {
             std::error_code statusError;
@@ -688,28 +710,29 @@ DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget
     if (prepareFailure.has_value()) {
         co_return std::unexpected(std::move(*prepareFailure));
     }
-    if (canceled()) {
-        file.close();
+
+    std::optional<DownloadOutcome<FileSink>> outcome;
+    try {
+        outcome.emplace(co_await RunDownload(httpClient, std::move(options), std::move(operationOptions),
+                                             FileSink{std::move(file)}, std::move(requestOptions), start));
+    } catch (const boost::system::system_error& e) {
+        // Cancelled before the download started; the temporary file exists but nothing was written.
+        if (e.code() != boost::asio::error::operation_aborted) {
+            throw;
+        }
         co_return AbandonFileDownload(tempPath, CanceledFailure());
     }
-
-    auto outcome = co_await RunDownload(httpClient, std::move(options), std::move(operationOptions),
-                                        FileSink{std::move(file)}, std::move(requestOptions), start);
 
     FileResult finished = std::unexpected(BlobStorageError{});
     const auto finalize = [&] {
         try {
-            const bool succeeded = outcome.Result.has_value();
             // The commit point: once the rename starts the destination is published and a cancellation is too late.
-            if (succeeded && canceled()) {
-                outcome.Sink.File().close();
-                finished = AbandonFileDownload(tempPath, CanceledFailure());
-            } else if (succeeded && deadline.Expired()) {
-                outcome.Sink.File().close();
+            if (outcome->Result.has_value() && deadline.Expired()) {
+                outcome->Sink.File().close();
                 finished = AbandonFileDownload(
                     tempPath, MakeFailure(std::errc::timed_out, "The download exceeded its total deadline."));
             } else {
-                finished = FinalizeFileDownload(outcome.Sink.File(), tempPath, path, std::move(outcome.Result));
+                finished = FinalizeFileDownload(outcome->Sink.File(), tempPath, path, std::move(outcome->Result));
             }
         } catch (...) {
             finished = AbandonFileDownload(tempPath, CurrentFailure());
@@ -717,6 +740,14 @@ DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget
     };
     try {
         co_await RunOnWriter(httpClient, scheduler, finalize);
+    } catch (const boost::system::system_error& e) {
+        if (e.code() == boost::asio::error::operation_aborted && outcome->Result.has_value()) {
+            // The hop never started, so the rename did not happen and the cancellation still wins.
+            outcome->Sink.File().close();
+            finished = AbandonFileDownload(tempPath, CanceledFailure());
+        } else {
+            finalize();
+        }
     } catch (...) {
         // The hop failed too, but leaking the partial file would be worse than blocking this thread once.
         finalize();
