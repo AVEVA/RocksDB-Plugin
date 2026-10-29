@@ -80,16 +80,9 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BatchDeleteRun 
     // Each worker claims the next unstarted chunk until none is left. The first failure stops every worker: the
     // others are cancelled by the group and report operation_canceled, which is ignored because the first one wins.
     boost::asio::awaitable<void> Worker() {
-        co_await boost::asio::this_coro::throw_if_cancelled(false);
-        const auto cancellation = co_await boost::asio::this_coro::cancellation_state;
         try {
             for (;;) {
                 if (m_failure) {
-                    throw StopWorkers{};
-                }
-                if (IsAbortingCancellation(cancellation.cancelled())) {
-                    Fail(MakeClientError(std::make_error_code(std::errc::operation_canceled),
-                                         "The operation was canceled."));
                     throw StopWorkers{};
                 }
                 if (m_nextChunk >= ChunkCount()) {
@@ -253,8 +246,6 @@ DeleteBlobsAsync(THttp& httpClient, std::shared_ptr<const BasicContainerTarget<T
         }
     }
 
-    co_await boost::asio::this_coro::throw_if_cancelled(false);
-    const auto cancellation = co_await boost::asio::this_coro::cancellation_state;
     const auto executor = co_await boost::asio::this_coro::executor;
 
     BatchDetail::BatchDeleteRun<THttp, TCred> run(httpClient, *target, blobNames, requestOptions);
@@ -272,9 +263,6 @@ DeleteBlobsAsync(THttp& httpClient, std::shared_ptr<const BasicContainerTarget<T
             .async_wait(boost::asio::experimental::wait_for_one_error(), boost::asio::use_awaitable);
     } catch (...) {
         run.Fail(MakeFailureFromCurrentException());
-    }
-    if (!run.Failed() && IsAbortingCancellation(cancellation.cancelled())) {
-        run.Fail(MakeClientError(std::make_error_code(std::errc::operation_canceled), "The operation was canceled."));
     }
     co_return run.TakeResult();
 }
