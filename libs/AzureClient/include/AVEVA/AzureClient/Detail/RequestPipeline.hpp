@@ -19,6 +19,7 @@
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/cancellation_type.hpp>
+#include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
@@ -286,6 +287,28 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
         }
     }
 
+    // Waits for `limit`, then reports it; abandoned (cancelled) when the token arrives first.
+    static boost::asio::awaitable<void> Expire(std::chrono::milliseconds limit) {
+        boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor, limit);
+        co_await timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable));
+    }
+
+    // A hung identity endpoint must not stall an attempt past its timeout or the total deadline, so the token
+    // request is raced against the smaller of the two. Losing cancels the credential, which cancellation-aware
+    // credentials report as operation_canceled and the token cache does not remember.
+    boost::asio::awaitable<TokenResult> AcquireToken() {
+        using namespace boost::asio::experimental::awaitable_operators;
+        auto limit = m_requestOptions.GetTimeout();
+        if (m_totalDeadline) {
+            limit = std::min(limit, std::max(Remaining(), std::chrono::milliseconds{0}));
+        }
+        auto outcome = co_await (GetTokenForScopes(*m_credential, m_auth.TokenScopes) || Expire(limit));
+        if (outcome.index() == 0) {
+            co_return std::move(std::get<0>(outcome));
+        }
+        co_return std::unexpected(std::make_error_code(std::errc::timed_out));
+    }
+
     // Builds the attempt's request and authorizes it. A failure to build or authorize ends the request rather than
     // escaping.
     boost::asio::awaitable<std::expected<HttpRequest, std::error_code>> PrepareAttempt() {
@@ -298,7 +321,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
 
         std::string_view bearerToken;
         if (m_auth.Type == RequestAuth::Kind::Token) {
-            auto token = co_await GetTokenForScopes(*m_credential, m_auth.TokenScopes);
+            auto token = co_await AcquireToken();
             if (Cancelled()) {
                 co_return std::unexpected(CanceledError());
             }

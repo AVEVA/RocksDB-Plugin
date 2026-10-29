@@ -581,6 +581,27 @@ TEST(RetryTests, UnauthorizedResponseAfterTheDeadlineDoesNotRefreshTheToken) {
     EXPECT_EQ(httpClient.RequestCount(), 1U);
 }
 
+TEST(RetryTests, HungTokenAcquisitionIsBoundedByTheTotalDeadline) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{202, {}, ""});
+    auto credential = std::make_shared<ScriptedTokenCredential>();
+    credential->EnqueueDeferred({}, MakeToken("never-delivered", std::chrono::hours(1)));
+
+    BlobClientOptions options = MakeRetryOptions(0);
+    options.SasToken.clear();
+    BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{httpClient, std::move(options), credential};
+
+    AVEVA::AzureClient::AzureRequestOptions requestOptions;
+    requestOptions.SetTotalDeadline(std::chrono::milliseconds{50});
+    std::optional<DeleteResult> observed;
+    StartInto(httpClient, client.DeleteAsync({}, requestOptions), observed);
+
+    ASSERT_TRUE(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{5}));
+    ASSERT_FALSE(ValueOrFail(observed).has_value());
+    EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::timed_out));
+    EXPECT_EQ(httpClient.RequestCount(), 0U);
+}
+
 TEST(RetryTests, UnauthorizedResponseIsOnlyRefreshedOnce) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{401, {}, ""});
