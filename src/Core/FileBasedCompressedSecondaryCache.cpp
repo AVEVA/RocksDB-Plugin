@@ -163,8 +163,8 @@ class FileBasedCompressedSecondaryCache::Impl {
 
     std::unique_ptr<rocksdb::SecondaryCacheResultHandle>
     Lookup(const rocksdb::Slice& key, const rocksdb::Cache::CacheItemHelper* cacheItemHelper,
-           rocksdb::Cache::CreateContext* createContext, bool /*wait*/, bool adviseErase, rocksdb::Statistics* stats,
-           bool& keptInSecondaryCache) noexcept {
+           rocksdb::Cache::CreateContext* createContext, bool /*wait*/, bool adviseErase,
+           rocksdb::Statistics* /*stats*/, bool& keptInSecondaryCache) noexcept {
         try {
             keptInSecondaryCache = false;
             if (!cacheItemHelper || !cacheItemHelper->IsSecondaryCacheCompatible()) {
@@ -248,8 +248,8 @@ class FileBasedCompressedSecondaryCache::Impl {
                 return nullptr;
             }
 
-            RecordHitStats(stats, cacheItemHelper->role);
-
+            // Hit tickers are recorded by RocksDB's CacheWithSecondaryAdapter::Promote; recording
+            // them here as well would double count every secondary cache hit.
             entryIsValid = true;
             keptInSecondaryCache = !adviseErase;
             auto result = std::make_unique<ResultHandle>(outObj, outCharge);
@@ -454,28 +454,6 @@ class FileBasedCompressedSecondaryCache::Impl {
         } catch (...) {
             BOOST_LOG_SEV(*m_logger, error)
                 << Name() << "::" << __func__ << ": " << StatusUtil::CurrentExceptionToStatus().ToString();
-        }
-    }
-
-    /// <summary>Records a secondary cache hit to RocksDB's statistics subsystem.</summary>
-    static void RecordHitStats(rocksdb::Statistics* stats, const rocksdb::CacheEntryRole role) noexcept {
-        if (stats == nullptr) {
-            return;
-        }
-
-        stats->recordTick(rocksdb::SECONDARY_CACHE_HITS);
-        switch (role) {
-        case rocksdb::CacheEntryRole::kFilterBlock:
-            stats->recordTick(rocksdb::SECONDARY_CACHE_FILTER_HITS);
-            break;
-        case rocksdb::CacheEntryRole::kIndexBlock:
-            stats->recordTick(rocksdb::SECONDARY_CACHE_INDEX_HITS);
-            break;
-        case rocksdb::CacheEntryRole::kDataBlock:
-            stats->recordTick(rocksdb::SECONDARY_CACHE_DATA_HITS);
-            break;
-        default:
-            break;
         }
     }
 };

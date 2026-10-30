@@ -168,11 +168,7 @@ TEST_P(SecondaryCacheRocksDbTests, SecondaryCacheHitsAreNotDoubleCounted) {
     const auto total = Ticker(rocksdb::SECONDARY_CACHE_HITS);
     const auto byRole = Ticker(rocksdb::SECONDARY_CACHE_DATA_HITS) + Ticker(rocksdb::SECONDARY_CACHE_INDEX_HITS) +
                         Ticker(rocksdb::SECONDARY_CACHE_FILTER_HITS);
-    if (std::get<0>(GetParam()) == SecondaryCacheBackend::CacheLib) {
-        EXPECT_EQ(byRole, total);
-    } else {
-        EXPECT_GE(byRole, total);
-    }
+    EXPECT_EQ(byRole, total);
 }
 
 TEST_P(SecondaryCacheRocksDbTests, SecondaryCacheIsNotRewrittenOnReHit) {

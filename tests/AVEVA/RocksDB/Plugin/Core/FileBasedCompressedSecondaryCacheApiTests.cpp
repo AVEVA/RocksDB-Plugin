@@ -49,9 +49,9 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, LookupWithNullHelper) {
 }
 
 // --------------------------------------------------------------------------
-// A successful Lookup increments the RocksDB hit statistics counters
+// Lookup leaves hit tickers to RocksDB's adapter so hits are not double counted
 // --------------------------------------------------------------------------
-TEST_F(FileBasedCompressedSecondaryCacheTests, LookupRecordsHitStatistics) {
+TEST_F(FileBasedCompressedSecondaryCacheTests, LookupDoesNotRecordHitStatistics) {
     const std::string keyStr = "stats_key";
     TestPayload payload{"statistics test payload"};
 
@@ -64,8 +64,8 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, LookupRecordsHitStatistics) {
     ASSERT_NE(handle, nullptr);
     delete static_cast<TestPayload*>(handle->Value());
 
-    EXPECT_EQ(stats->getTickerCount(rocksdb::SECONDARY_CACHE_HITS), 1u);
-    EXPECT_EQ(stats->getTickerCount(rocksdb::SECONDARY_CACHE_DATA_HITS), 1u);
+    EXPECT_EQ(stats->getTickerCount(rocksdb::SECONDARY_CACHE_HITS), 0u);
+    EXPECT_EQ(stats->getTickerCount(rocksdb::SECONDARY_CACHE_DATA_HITS), 0u);
 }
 
 // --------------------------------------------------------------------------
