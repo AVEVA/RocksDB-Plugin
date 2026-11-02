@@ -39,14 +39,7 @@ TEST(SourceCompatTests, MainStyleFileUsage_Compiles) {
 // Intentional breaks documented in README.md ("Source and binary compatibility"). If one of these starts to compile
 // again, update the note: it is a deliberate boundary, not an accident.
 TEST(SourceCompatTests, IntentionalBreaks_AreEnforced) {
-    using AVEVA::RocksDB::Plugin::Azure::ReadableFile;
     using AVEVA::RocksDB::Plugin::Azure::SequentialFile;
-    // ReadableFile is random access only; sequential reads moved to SequentialFile.
-    static_assert(!std::is_base_of_v<rocksdb::FSSequentialFile, ReadableFile>);
     static_assert(std::is_base_of_v<rocksdb::FSSequentialFile, SequentialFile>);
-    // The file classes are created only by BlobFilesystem; consumers get them from rocksdb::FileSystem.
-    static_assert(
-        !std::is_constructible_v<ReadableFile, std::shared_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::ReadableFileImpl>>);
-    static_assert(!std::is_default_constructible_v<ReadableFile>);
     SUCCEED();
 }

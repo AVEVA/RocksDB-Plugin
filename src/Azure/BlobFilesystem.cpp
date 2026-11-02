@@ -12,7 +12,6 @@
 #include "AVEVA/RocksDB/Plugin/Azure/LockFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Logger.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/ReadWriteFile.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/SequentialFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/WriteableFile.hpp"

@@ -29,7 +29,6 @@ target_sources(aveva-rocksdb-plugin-azure
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Directory.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Logger.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/SequentialFile.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/WriteableFile.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/ReadWriteFile.hpp"

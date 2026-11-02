@@ -5,7 +5,6 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntimeTransport.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Support/TempDirectory.hpp"
 #include "BasicReadableFile.hpp"
 #include "IntegrationTestHelpers.hpp"

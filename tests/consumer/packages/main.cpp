@@ -1,6 +1,5 @@
 #include <AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp>
 #include <AVEVA/RocksDB/Plugin/Azure/Plugin.hpp>
-#include <AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp>
 
 // The runtime guard keeps the call from executing but still forces the linker to resolve the symbol and
 // its transitive dependencies.

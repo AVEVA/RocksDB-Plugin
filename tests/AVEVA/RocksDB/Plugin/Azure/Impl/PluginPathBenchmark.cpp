@@ -20,7 +20,6 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
 
 #include "Fakes/FakeBlobEnvironment.hpp"
 

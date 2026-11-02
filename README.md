@@ -192,14 +192,14 @@ installed package by the `install-consume` CI job):
 * `Defaults::*` (`Core::ByteCount`, and `SignedByteCount` for `MaxPrefetchBytes`).
 * Normal RocksDB use of the registered filesystem through `rocksdb::FileSystem`
   (`NewWritableFile`, `NewRandomAccessFile`, `NewSequentialFile`, `NewRandomRWFile`).
-* `ReadableFile`, `ReadWriteFile` and `WriteableFile` as `FSRandomAccessFile`, `FSRandomRWFile` and `FSWritableFile`.
+* `ReadWriteFile` and `WriteableFile` as `FSRandomRWFile` and `FSWritableFile`.
 
 Intentional breaks (no compatibility shim; use the replacement):
 
 | Removed or changed | Replacement |
 | --- | --- |
-| `ReadableFile` was both `FSSequentialFile` and `FSRandomAccessFile` | `ReadableFile` is random access only; sequential reads use `SequentialFile` (obtain either through `rocksdb::FileSystem`) |
-| Public constructors of `ReadableFile`, `ReadWriteFile`, `WriteableFile`, `SequentialFile` taking `Impl::*` objects | Not constructible by consumers; create them through `Plugin::Register` and RocksDB |
+| Public `ReadableFile` (was both `FSSequentialFile` and `FSRandomAccessFile`) | Removed; random access files are plain `rocksdb::FSRandomAccessFile` from `NewRandomAccessFile`, and sequential reads use `SequentialFile` (obtain either through `rocksdb::FileSystem`) |
+| Public constructors of `ReadWriteFile`, `WriteableFile`, `SequentialFile` taking `Impl::*` objects | Not constructible by consumers; create them through `Plugin::Register` and RocksDB |
 | `Impl/*` headers other than `Impl/Configuration.hpp` (`ReadableFileImpl.hpp`, `BlobFilesystemImpl.hpp`, `PageBlob.hpp`, ...) and `Core/BlobClient.hpp` | Not installed and unsupported; use the public API or the `aveva-azure-client` package |
 | `Core::File`, `Core::Filesystem`, `Core::ContainerClient` and `RocksDBHelpers` signatures | Update implementations and mocks to the new signatures (see the list above) |
 | Azure SDK types in public headers | The in-tree `AVEVA::AzureClient` library |

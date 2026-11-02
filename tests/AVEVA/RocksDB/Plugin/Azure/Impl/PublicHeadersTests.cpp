@@ -10,7 +10,6 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Logger.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Plugin.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/ReadWriteFile.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/SequentialFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/WriteableFile.hpp"
@@ -41,8 +40,4 @@ TEST(PublicHeadersTests, SignedByteCount_AboveInt64Max_IsRefused) {
     using AVEVA::RocksDB::Plugin::Core::ByteCount;
     EXPECT_EQ(SignedByteCount::Max, SignedByteCount{SignedByteCount::Max}.Bytes());
     EXPECT_THROW((void)SignedByteCount{ByteCount{SignedByteCount::Max.Value() + 1}}, std::out_of_range);
-}
-TEST(PublicHeadersTests, ReadableFile_IsANonTemplateRandomAccessFile) {
-    static_assert(std::is_base_of_v<rocksdb::FSRandomAccessFile, AVEVA::RocksDB::Plugin::Azure::ReadableFile>);
-    SUCCEED();
 }
