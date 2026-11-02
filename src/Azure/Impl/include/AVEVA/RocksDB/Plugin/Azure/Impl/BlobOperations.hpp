@@ -348,25 +348,16 @@ struct DownloadedBytes {
 
 /// <summary>
 /// Downloads a range into a pooled buffer, for reads that outlive the caller's stack. The bytes stay valid for as
-/// long as `Owner` is held. A non-zero `timeout` caps how long the request may take, retries included; it only ever
-/// shortens the transfer-scaled default. A stop request on the token the operation was started with cancels the
-/// transfer, transport retries included.
+/// long as `Owner` is held. A stop request on the token the operation was started with cancels the transfer,
+/// transport retries included; that is how a caller's deadline is enforced.
 /// </summary>
 template <typename TBlob>
 [[nodiscard]] Task<DownloadedBytes> DownloadForReadAsync(TBlob& client, int64_t blobOffset, int64_t readLength,
-                                                         std::string ifMatch, std::chrono::milliseconds timeout) {
+                                                         std::string ifMatch) {
     AzureClient::DownloadBlobOptions options;
     options.Range = Detail::ToRange(blobOffset, readLength);
     options.Conditions.IfMatch = std::move(ifMatch);
-    // The transfer-scaled default timeout can be minutes; a caller-supplied deadline only ever shortens it.
     auto requestOptions = TransferOptions(client, static_cast<uint64_t>(readLength));
-    if (timeout.count() > 0) {
-        if (timeout < requestOptions.GetTimeout()) {
-            requestOptions.SetTimeout(timeout);
-        }
-        // The timeout is per attempt; the total deadline is what stops transport retries from outliving the caller.
-        requestOptions.SetTotalDeadline(timeout);
-    }
     // The lease lives in this frame, which outlives the transfer, so it can never write into freed memory.
     auto buffer = DownloadBufferPool::Shared().Acquire(static_cast<size_t>(readLength));
     const auto downloaded = Unwrap(co_await client.DownloadToAsync(std::span<char>(buffer->Data(), buffer->Size()),

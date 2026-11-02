@@ -231,7 +231,6 @@ TEST_F(ReadableFileTests, RandomRead_GivesUpWhenBlobKeepsChanging) {
 
 TEST(ReadDeadlineTests, DeadlineAfter_SaturatesExtremeTimeoutsInsteadOfOverflowingTheClock) {
     using AVEVA::RocksDB::Plugin::Azure::Impl::ReadableFileDetail::DeadlineAfter;
-    using AVEVA::RocksDB::Plugin::Azure::Impl::ReadableFileDetail::Remaining;
     const auto before = std::chrono::steady_clock::now();
 
     EXPECT_FALSE(DeadlineAfter(std::chrono::milliseconds::min()).has_value());
@@ -239,10 +238,9 @@ TEST(ReadDeadlineTests, DeadlineAfter_SaturatesExtremeTimeoutsInsteadOfOverflowi
     const auto huge = DeadlineAfter(std::chrono::milliseconds::max());
     ASSERT_TRUE(huge.has_value());
     EXPECT_GT(*huge, before + std::chrono::hours{24 * 365});
-    EXPECT_GT(Remaining(huge), std::chrono::hours{24 * 365});
 
     const auto shortDeadline = DeadlineAfter(std::chrono::milliseconds{50});
     ASSERT_TRUE(shortDeadline.has_value());
-    EXPECT_LE(Remaining(shortDeadline), std::chrono::milliseconds{50});
-    EXPECT_GE(Remaining(shortDeadline), std::chrono::milliseconds{1});
+    EXPECT_GE(*shortDeadline, before + std::chrono::milliseconds{50});
+    EXPECT_LE(*shortDeadline, std::chrono::steady_clock::now() + std::chrono::milliseconds{50});
 }

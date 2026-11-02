@@ -1216,22 +1216,49 @@ TEST_F(AsyncReadTests, MultiRead_SlowPlanningSpendsTheBudget_MissStartsNoDownloa
     EXPECT_TRUE(reqs[2].status.IsInvalidArgument()) << reqs[2].status.ToString();
 }
 
-TEST_F(AsyncReadTests, ReadAsync_PassesIoOptionsTimeoutToTheDownload) {
+TEST_F(AsyncReadTests, ReadAsync_StalledDownloadPastIoOptionsTimeout_TimesOutAndCancelsTheDownload) {
+    auto file = CreateFile(m_deferredEnv);
+    std::vector<char> scratch(64, 'x');
+    auto req = MakeRequest(0, scratch);
+    CallbackRecord record;
+    IoHandle handle;
+    rocksdb::IOOptions options;
+    options.timeout = std::chrono::milliseconds(50);
+
+    ASSERT_TRUE(Submit(file, req, record, handle, options).ok());
+    ASSERT_TRUE(m_deferredEnv.Blob->WaitForPendingDownloads(1));
+    std::vector<void*> handles{handle.Handle};
+    ASSERT_TRUE(PollAsyncReads(handles).ok());
+
+    EXPECT_EQ(1, record.Calls.load());
+    EXPECT_TRUE(record.Status.IsTimedOut()) << record.Status.ToString();
+    // Nothing completes the held request: only the deadline's stop request can drain it, and it must not retry.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (m_deferredEnv.Blob->PendingDownloads() > 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    EXPECT_EQ(0U, m_deferredEnv.Blob->PendingDownloads());
+    EXPECT_EQ(1U, m_deferredEnv.Blob->Downloads.size());
+    EXPECT_EQ(std::string(64, 'x'), std::string(scratch.begin(), scratch.end()));
+}
+
+TEST_F(AsyncReadTests, ReadAsync_FinishingBeforeTheIoOptionsTimeout_IsNotTimedOutLater) {
     auto file = CreateFile(m_deferredEnv);
     std::vector<char> scratch(64);
     auto req = MakeRequest(0, scratch);
     CallbackRecord record;
     IoHandle handle;
     rocksdb::IOOptions options;
-    options.timeout = std::chrono::microseconds(2500);
+    options.timeout = std::chrono::milliseconds(50);
 
     ASSERT_TRUE(Submit(file, req, record, handle, options).ok());
-    ASSERT_EQ(1U, m_deferredEnv.Blob->PendingDownloads());
-    auto download = m_deferredEnv.Blob->TakeDownload();
-    EXPECT_EQ(std::chrono::milliseconds(3), download.Request.Timeout);
-    download.Succeed(std::string(64, 'C'));
+    m_deferredEnv.Blob->TakeDownload().Succeed(std::string(64, 'C'));
     std::vector<void*> handles{handle.Handle};
     ASSERT_TRUE(PollAsyncReads(handles).ok());
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    EXPECT_EQ(1, record.Calls.load());
+    EXPECT_TRUE(record.Status.ok()) << record.Status.ToString();
 }
 
 TEST_F(AsyncReadTests, ReadAsync_WithoutIoOptionsTimeoutRequestsNoDeadline) {

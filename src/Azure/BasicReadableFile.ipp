@@ -105,23 +105,30 @@ BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& req, std::function<v
             // The cache wrote straight into scratch; Complete only records the length.
             request->Complete(rocksdb::IOStatus::OK(), std::string_view(req.scratch, *cached));
         } else {
+            // The deadline fails the request with TimedOut and cancels its download through the request's stop token,
+            // whatever the read is waiting on (a prefetch, a metadata refresh or the transfer). The prefetch and
+            // metadata refresh are shared and keep going for their other waiters. Every continuation below holds the
+            // guard, so the timer is disarmed as soon as the last of them is released.
+            const auto expiredStatus =
+                AzureErrorTranslator::FromException(Impl::ReadableFileDetail::ReadTimedOutError());
+            const auto deadlineGuard =
+                std::make_shared<const Impl::RequestDeadline>(m_file->ClientExecutor(), deadline, request, expiredStatus);
+
             auto makeDownload = [&] {
-                return [file = m_file, offset, length, deadline, request, logger = m_logger] {
+                return [file = m_file, offset, length, deadline, request, logger = m_logger, deadlineGuard,
+                        expiredStatus] {
                     if (request->Finished() == Impl::Completion::Done) {
                         return;
                     }
                     if (Impl::ReadableFileDetail::StatusOf(deadline) ==
                         Impl::ReadableFileDetail::DeadlineStatus::Expired) {
-                        request->Complete(
-                            AzureErrorTranslator::FromException(Impl::ReadableFileDetail::ReadTimedOutError()), {});
+                        request->Complete(expiredStatus, {});
                         return;
                     }
                     TImpl::StartTracked(
-                        file,
-                        TImpl::ReadAsync(file, offset, length, TImpl::kMaxStaleReadRetries,
-                                         Impl::ReadableFileDetail::Remaining(deadline), request->StopToken()),
+                        file, TImpl::ReadAsync(file, offset, length, TImpl::kMaxStaleReadRetries, request->StopToken()),
                         request->StopToken(),
-                        [request, logger](std::exception_ptr error, typename TImpl::ReadResult result) {
+                        [request, logger, deadlineGuard](std::exception_ptr error, typename TImpl::ReadResult result) {
                             request->Complete(error ? AzureErrorTranslator::FromException(*logger, error, "ReadAsync")
                                                     : rocksdb::IOStatus::OK(),
                                               result.Data);
@@ -138,27 +145,11 @@ BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& req, std::function<v
             // request, so it is turned into the request's error status instead.
             // The pending check is advisory, so the common case builds no waiter; if the prefetch settles in
             // between, ChainOntoPendingPrefetch declines and the download starts directly.
-            // With a deadline, a timer completes the request with TimedOut if the prefetch is still running by then;
-            // the prefetch itself is shared and keeps going for its other waiters.
             auto chain = Impl::ReadableFileDetail::PrefetchChain::Declined;
             if (m_file->HasPendingPrefetch(offset, length) == Impl::ReadableFileDetail::PrefetchCoverage::Pending) {
-                std::shared_ptr<boost::asio::steady_timer> timer;
-                if (deadline) {
-                    timer = std::make_shared<boost::asio::steady_timer>(m_file->ClientExecutor());
-                    timer->expires_at(*deadline);
-                    timer->async_wait([request, timer](const boost::system::error_code& cancelled) {
-                        if (!cancelled) {
-                            request->Complete(
-                                AzureErrorTranslator::FromException(Impl::ReadableFileDetail::ReadTimedOutError()), {});
-                        }
-                    });
-                }
                 std::move_only_function<void()> resume = [file = m_file, offset, length, request,
                                                           download = makeDownload(), logger = m_logger,
-                                                          timer]() mutable {
-                    if (timer) {
-                        timer->cancel();
-                    }
+                                                          deadlineGuard]() mutable {
                     try {
                         if (request->TryCompleteInline([&](char* scratch) {
                                 return file->TryReadFromCompletedPrefetch(offset, length, scratch);
@@ -170,9 +161,6 @@ BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& req, std::function<v
                     }
                 };
                 chain = m_file->ChainOntoPendingPrefetch(offset, length, resume);
-                if (chain == Impl::ReadableFileDetail::PrefetchChain::Declined && timer) {
-                    timer->cancel();
-                }
             }
             if (chain == Impl::ReadableFileDetail::PrefetchChain::Declined) {
                 makeDownload()();

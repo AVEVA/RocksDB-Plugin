@@ -83,15 +83,6 @@ inline ReadDeadline DeadlineAfter(const std::chrono::milliseconds timeout) {
 inline DeadlineStatus StatusOf(const ReadDeadline& deadline) {
     return deadline && std::chrono::steady_clock::now() >= *deadline ? DeadlineStatus::Expired : DeadlineStatus::Live;
 }
-
-// The time left as a request timeout: zero means "no deadline", so a live deadline never rounds down to it.
-inline std::chrono::milliseconds Remaining(const ReadDeadline& deadline) {
-    if (!deadline) {
-        return std::chrono::milliseconds::zero();
-    }
-    return std::max(std::chrono::milliseconds(1),
-                    std::chrono::ceil<std::chrono::milliseconds>(*deadline - std::chrono::steady_clock::now()));
-}
 } // namespace ReadableFileDetail
 
 // Neither copyable nor movable: it is built once, in place, by make_shared, and in-flight reads hold it by shared_ptr.
@@ -186,9 +177,8 @@ template <typename TBlob> class BasicReadableFileImpl {
                                     std::shared_ptr<MetadataChannel> waiter);
     static void CompleteMetadataRefresh(std::shared_ptr<const BasicReadableFileImpl> file, std::exception_ptr error,
                                         const FetchedMetadata& fetched) noexcept;
-    // Waits for fresh metadata, sharing one in-flight properties call; fails with TimedOut once `deadline` passes.
-    static BlobOperations::Task<FetchedMetadata> FetchMetadataAsync(std::shared_ptr<const BasicReadableFileImpl> file,
-                                                                    ReadDeadline deadline);
+    // Waits for fresh metadata, sharing one in-flight properties call; a stop request ends this reader's wait.
+    static BlobOperations::Task<FetchedMetadata> FetchMetadataAsync(std::shared_ptr<const BasicReadableFileImpl> file);
     static BlobOperations::Task<void> PrefetchAsync(std::shared_ptr<const BasicReadableFileImpl> self, uint64_t id,
                                                     std::shared_ptr<PrefetchCharge> charge, int64_t offset, int64_t n);
 
@@ -269,16 +259,12 @@ template <typename TBlob> class BasicReadableFileImpl {
     // Non-blocking random read from the blob (bypassing the file cache), with the same ETag/size refresh and retry
     // semantics as RandomRead. Failures are thrown from the awaitable. `self` is held by the coroutine, so the file
     // outlives the read. Run it with StartTracked (or StartOperation) on the client's executor.
-    // A non-zero `timeout` bounds the whole read, measured from when it starts: metadata refreshes, downloads
-    // (including their transport retries) and stale-read restarts all draw on it, and the read fails with a TimedOut
-    // error once it is spent.
-    // A stop request on `stopToken` cancels this read's own download (including its transport retries), starts no
-    // restart or further download, and fails the read with a cancelled error. It never touches a shared metadata
-    // refresh or prefetch that the read may be waiting on.
+    // A stop request on `stopToken` cancels this read's own wait or download (including its transport retries), starts
+    // no restart or further download, and fails the read with a cancelled error. It never touches a shared metadata
+    // refresh or prefetch that the read may be waiting on. Callers enforce a deadline by requesting a stop when it passes.
     [[nodiscard]] static BlobOperations::Task<ReadResult>
     ReadAsync(std::shared_ptr<const BasicReadableFileImpl> self, int64_t offset, int64_t bytesToRead,
-              int attemptsLeft = kMaxStaleReadRetries,
-              std::chrono::milliseconds timeout = std::chrono::milliseconds::zero(), std::stop_token stopToken = {});
+              int attemptsLeft = kMaxStaleReadRetries, std::stop_token stopToken = {});
 
     // Starts `operation` like StartOperation, additionally counting it as in flight for the AsyncReadTracker (if any)
     // until `done` has run and been released.

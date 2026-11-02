@@ -578,14 +578,13 @@ void BasicReadableFileImpl<TBlob>::StartTracked(const std::shared_ptr<const Basi
 }
 
 // Download-only counterpart of DownloadWithRetryAsync (zero-copy into a pooled buffer), written as straight-line code:
-// nothing blocks a thread, every wait is a co_await. The deadline is checked before each step and bounds each wait, so
-// a short caller timeout cannot be stretched by restarts. Failures are thrown rather than reported through a status.
+// nothing blocks a thread, every wait is a co_await. A caller's deadline arrives as a stop request, which cancels the
+// wait or download in progress; the checks below keep a restart from starting once the read was abandoned.
+// Failures are thrown rather than reported through a status.
 template <typename TBlob>
 BlobOperations::Task<typename BasicReadableFileImpl<TBlob>::ReadResult>
 BasicReadableFileImpl<TBlob>::ReadAsync(std::shared_ptr<const BasicReadableFileImpl<TBlob>> self, const int64_t offset,
-                                        const int64_t bytesToRead, int attemptsLeft,
-                                        const std::chrono::milliseconds timeout, const std::stop_token stopToken) {
-    const auto deadline = ReadableFileDetail::DeadlineAfter(timeout);
+                                        const int64_t bytesToRead, int attemptsLeft, const std::stop_token stopToken) {
     for (;;) {
         if (offset < 0 || bytesToRead <= 0) {
             co_return ReadResult{};
@@ -594,15 +593,12 @@ BasicReadableFileImpl<TBlob>::ReadAsync(std::shared_ptr<const BasicReadableFileI
         if (stopToken.stop_requested()) {
             std::rethrow_exception(ReadableFileDetail::ReadAbandonedError());
         }
-        if (ReadableFileDetail::StatusOf(deadline) == ReadableFileDetail::DeadlineStatus::Expired) {
-            std::rethrow_exception(ReadableFileDetail::ReadTimedOutError());
-        }
 
         auto [size, etag] = self->GetMetadata();
         const auto remaining = std::max<int64_t>(0, size - offset);
         if (remaining == 0) {
             // At the cached end of the blob: only re-read if another writer moved the blob on.
-            auto latest = co_await FetchMetadataAsync(self, deadline);
+            auto latest = co_await FetchMetadataAsync(self);
             if (latest.ETag == etag) {
                 self->ApplyRefreshedMetadata(latest.Size, std::move(latest.ETag), latest.Epoch);
                 co_return ReadResult{};
@@ -618,8 +614,7 @@ BasicReadableFileImpl<TBlob>::ReadAsync(std::shared_ptr<const BasicReadableFileI
         const auto toRead = std::min(bytesToRead, remaining);
         // co_await may not appear in a handler, so a stale read only leaves the try block and is refreshed below.
         try {
-            auto bytes = co_await BlobOperations::DownloadForReadAsync(*self->m_h.Blob, offset, toRead, std::move(etag),
-                                                                       ReadableFileDetail::Remaining(deadline));
+            auto bytes = co_await BlobOperations::DownloadForReadAsync(*self->m_h.Blob, offset, toRead, std::move(etag));
             if (static_cast<int64_t>(bytes.Data.size()) > remaining) {
                 bytes.Data = bytes.Data.substr(0, static_cast<size_t>(remaining));
             }
@@ -637,40 +632,22 @@ BasicReadableFileImpl<TBlob>::ReadAsync(std::shared_ptr<const BasicReadableFileI
             ReadableFileDetail::RefreshBudget::Exhausted) {
             throw ReadableFileDetail::StaleReadException();
         }
-        // Skip the properties call when the budget is already spent; the restart would only time out afterwards.
-        if (ReadableFileDetail::StatusOf(deadline) == ReadableFileDetail::DeadlineStatus::Expired) {
-            std::rethrow_exception(ReadableFileDetail::ReadTimedOutError());
-        }
-        auto fresh = co_await FetchMetadataAsync(self, deadline);
+        auto fresh = co_await FetchMetadataAsync(self);
         self->ApplyRefreshedMetadata(fresh.Size, std::move(fresh.ETag), fresh.Epoch);
     }
 }
 
 // Waits for fresh blob metadata. The first reader to ask starts the properties call; readers arriving while it is in
-// flight queue behind it (see JoinMetadataRefresh). The wait ends with a TimedOut error once `deadline` passes, but
-// the shared call is never cancelled on behalf of one reader that gave up.
+// flight queue behind it (see JoinMetadataRefresh). A stop request ends this reader's wait, but the shared call is
+// never cancelled on behalf of one reader that gave up.
 template <typename TBlob>
 BlobOperations::Task<typename BasicReadableFileImpl<TBlob>::FetchedMetadata>
-BasicReadableFileImpl<TBlob>::FetchMetadataAsync(std::shared_ptr<const BasicReadableFileImpl<TBlob>> file,
-                                                 const ReadDeadline deadline) {
+BasicReadableFileImpl<TBlob>::FetchMetadataAsync(std::shared_ptr<const BasicReadableFileImpl<TBlob>> file) {
     const auto executor = co_await boost::asio::this_coro::executor;
     auto waiter = std::make_shared<MetadataChannel>(executor, 1);
     JoinMetadataRefresh(file, waiter);
 
-    std::exception_ptr error;
-    FetchedMetadata fetched;
-    if (!deadline) {
-        std::tie(error, fetched) = co_await waiter->async_receive(boost::asio::use_awaitable);
-    } else {
-        using namespace boost::asio::experimental::awaitable_operators;
-        boost::asio::steady_timer timer(executor, *deadline);
-        auto outcome = co_await (waiter->async_receive(boost::asio::use_awaitable) ||
-                                 timer.async_wait(boost::asio::use_awaitable));
-        if (outcome.index() != 0) {
-            std::rethrow_exception(ReadableFileDetail::ReadTimedOutError());
-        }
-        std::tie(error, fetched) = std::move(std::get<0>(outcome));
-    }
+    auto [error, fetched] = co_await waiter->async_receive(boost::asio::use_awaitable);
     if (error) {
         std::rethrow_exception(std::move(error));
     }

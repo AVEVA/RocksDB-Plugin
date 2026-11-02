@@ -3,10 +3,12 @@
 
 #pragma once
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <rocksdb/file_system.h>
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -79,6 +81,14 @@ class AsyncReadRequest {
     /// </summary>
     void Complete(rocksdb::IOStatus status, std::string_view data);
 
+    /// <summary>
+    /// Fails the request with `status` and then cancels its private download. The status is recorded first so the
+    /// cancellation's own error cannot win the race. Used when a deadline passes.
+    /// </summary>
+    void Expire(rocksdb::IOStatus status) {
+        Complete(std::move(status), {});
+        m_stop.request_stop();
+    }
     /// <summary>
     /// Fills the scratch buffer through `fill(char* scratch) -> std::optional<size_t>` while holding the request lock,
     /// so an aborted request never has its (possibly released) scratch touched. Returns Done when the request is
@@ -160,6 +170,26 @@ class AsyncReadRequest {
 /// </summary>
 struct AsyncReadHandle {
     std::shared_ptr<AsyncReadRequest> Request;
+};
+
+/// <summary>
+/// Fails a request with `expiredStatus` and cancels its download once `deadline` passes; no deadline arms nothing.
+/// Destroying it disarms the timer, so the deadline lives exactly as long as whoever holds this object, and it never
+/// keeps the request alive or acts on one that has been released.
+/// </summary>
+class RequestDeadline {
+  public:
+    RequestDeadline(const AsyncReadRequest::Executor& executor,
+                    const std::optional<std::chrono::steady_clock::time_point>& deadline,
+                    const std::shared_ptr<AsyncReadRequest>& request, const rocksdb::IOStatus& expiredStatus);
+    RequestDeadline(const RequestDeadline&) = delete;
+    RequestDeadline& operator=(const RequestDeadline&) = delete;
+    RequestDeadline(RequestDeadline&&) = delete;
+    RequestDeadline& operator=(RequestDeadline&&) = delete;
+    ~RequestDeadline() = default;
+
+  private:
+    boost::asio::steady_timer m_timer;
 };
 
 void DeleteAsyncReadHandle(void* handle);

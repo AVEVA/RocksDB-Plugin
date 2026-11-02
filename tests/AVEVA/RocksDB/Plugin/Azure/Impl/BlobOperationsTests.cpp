@@ -115,7 +115,7 @@ TEST_F(BlobOperationsTests, DownloadAsyncRejectsBodyShorterThanContentRange) {
     std::promise<std::exception_ptr> done;
     AVEVA::RocksDB::Plugin::Azure::Impl::StartOperation(
         m_blob->get_executor(),
-        BlobOperations::DownloadForReadAsync(*m_blob, 0, 8, std::string(), std::chrono::milliseconds(0)),
+        BlobOperations::DownloadForReadAsync(*m_blob, 0, 8, std::string()),
         std::stop_token{}, [&](std::exception_ptr error, BlobOperations::DownloadedBytes) { done.set_value(error); });
 
     auto result = done.get_future();
@@ -814,7 +814,7 @@ TEST_F(BlobOperationsTests, DownloadAsyncStopAfterAcceptanceCancelsTheDeferredTr
     std::promise<std::exception_ptr> done;
     AVEVA::RocksDB::Plugin::Azure::Impl::StartOperation(
         m_blob->get_executor(),
-        BlobOperations::DownloadForReadAsync(*m_blob, 0, 8, std::string(), std::chrono::milliseconds(0)),
+        BlobOperations::DownloadForReadAsync(*m_blob, 0, 8, std::string()),
         source.get_token(), [&](std::exception_ptr error, BlobOperations::DownloadedBytes) {
             if (completions.fetch_add(1) == 0) {
                 done.set_value(error);
@@ -839,7 +839,7 @@ TEST_F(BlobOperationsTests, DownloadAsyncCompletingBeforeTheStopIsRequestedLeave
     std::promise<std::exception_ptr> done;
     AVEVA::RocksDB::Plugin::Azure::Impl::StartOperation(
         m_blob->get_executor(),
-        BlobOperations::DownloadForReadAsync(*m_blob, 0, 8, std::string(), std::chrono::milliseconds(0)),
+        BlobOperations::DownloadForReadAsync(*m_blob, 0, 8, std::string()),
         source.get_token(), [&](std::exception_ptr error, BlobOperations::DownloadedBytes) { done.set_value(error); });
     auto result = done.get_future();
     ASSERT_EQ(std::future_status::ready, result.wait_for(std::chrono::seconds(10)));
