@@ -9,8 +9,8 @@
 #include "AVEVA/RocksDB/Plugin/Core/Mocks/FileMock.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Mocks/FilesystemMock.hpp"
 
-#include "FakeBlobEnvironment.hpp"
-#include "SignedConfiguration.hpp"
+#include "Fakes/FakeBlobEnvironment.hpp"
+#include "Fakes/SignedConfiguration.hpp"
 
 #include <boost/asio/post.hpp>
 #include <gtest/gtest.h>

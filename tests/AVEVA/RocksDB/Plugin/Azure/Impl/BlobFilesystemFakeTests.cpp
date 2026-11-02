@@ -3,18 +3,18 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
-#include "AVEVA/RocksDB/Plugin/Core/Mocks/TempDirectory.hpp"
+#include "AVEVA/RocksDB/Plugin/Support/TempDirectory.hpp"
 #include "BasicReadableFile.ipp"
-#include "BlobFilesystemImpl.ipp"
-#include "ClientFactory.ipp"
-#include "FakeBlobEnvironment.hpp"
-#include "FakeBlobServer.hpp"
 #include "FakeHttpClient.hpp"
-#include "LockFileImpl.ipp"
-#include "ReadWriteFileImpl.ipp"
-#include "ReadableFileImpl.ipp"
-#include "SequentialFileImpl.ipp"
-#include "WriteableFileImpl.ipp"
+#include "Fakes/FakeBlobEnvironment.hpp"
+#include "Fakes/FakeBlobServer.hpp"
+#include "Impl/Files/LockFileImpl.ipp"
+#include "Impl/Files/ReadWriteFileImpl.ipp"
+#include "Impl/Files/ReadableFileImpl.ipp"
+#include "Impl/Files/SequentialFileImpl.ipp"
+#include "Impl/Files/WriteableFileImpl.ipp"
+#include "Impl/Filesystem/BlobFilesystemImpl.ipp"
+#include "Impl/Runtime/ClientFactory.ipp"
 
 #include <gtest/gtest.h>
 

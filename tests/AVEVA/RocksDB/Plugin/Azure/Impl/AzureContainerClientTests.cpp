@@ -3,9 +3,9 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AzureContainerClient.hpp"
 
-#include "BlobContainerClientMock.hpp"
-#include "FakeBlobEnvironment.hpp"
-#include "FakeBlobServer.hpp"
+#include "Fakes/BlobContainerClientMock.hpp"
+#include "Fakes/FakeBlobEnvironment.hpp"
+#include "Fakes/FakeBlobServer.hpp"
 #include "TestSupport.hpp"
 
 #include <boost/asio/io_context.hpp>

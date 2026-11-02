@@ -5,8 +5,8 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
+#include "Fakes/SignedConfiguration.hpp"
 #include "IntegrationTestHelpers.hpp"
-#include "SignedConfiguration.hpp"
 
 #include <gtest/gtest.h>
 

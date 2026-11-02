@@ -22,7 +22,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
 
-#include "FakeBlobEnvironment.hpp"
+#include "Fakes/FakeBlobEnvironment.hpp"
 
 #include <boost/log/core.hpp>
 #include <boost/log/expressions.hpp>

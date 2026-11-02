@@ -7,11 +7,11 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 
-#include "LockFileImpl.ipp"
-#include "ReadWriteFileImpl.ipp"
-#include "ReadableFileImpl.ipp"
-#include "SequentialFileImpl.ipp"
-#include "WriteableFileImpl.ipp"
+#include "Impl/Files/LockFileImpl.ipp"
+#include "Impl/Files/ReadWriteFileImpl.ipp"
+#include "Impl/Files/ReadableFileImpl.ipp"
+#include "Impl/Files/SequentialFileImpl.ipp"
+#include "Impl/Files/WriteableFileImpl.ipp"
 
 #include "BasicReadableFile.ipp"
 

@@ -4,7 +4,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntimeTransport.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/RequestHelpers.hpp"
 
-#include "FakeBlobEnvironment.hpp"
+#include "Fakes/FakeBlobEnvironment.hpp"
 
 #include <gtest/gtest.h>
 

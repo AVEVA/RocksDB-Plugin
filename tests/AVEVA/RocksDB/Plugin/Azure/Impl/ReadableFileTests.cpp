@@ -5,7 +5,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
-#include "FakeBlobEnvironment.hpp"
+#include "Fakes/FakeBlobEnvironment.hpp"
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>

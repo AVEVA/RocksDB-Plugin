@@ -5,7 +5,7 @@
 #include "AVEVA/RocksDB/Plugin/Core/Mocks/ContainerClientMock.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Mocks/FileMock.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Mocks/FilesystemMock.hpp"
-#include "AVEVA/RocksDB/Plugin/Core/Mocks/TempDirectory.hpp"
+#include "AVEVA/RocksDB/Plugin/Support/TempDirectory.hpp"
 
 #include <gtest/gtest.h>
 

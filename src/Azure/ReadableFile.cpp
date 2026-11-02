@@ -4,7 +4,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include "BasicReadableFile.ipp"
-#include "Impl/ReadableFileImpl.ipp" // ReadAsync/Prefetch are templates on the completion, so they instantiate here
+#include "Impl/Files/ReadableFileImpl.ipp" // ReadAsync/Prefetch are templates on the completion, so they instantiate here
 
 namespace AVEVA::RocksDB::Plugin::Azure {
 template class BasicReadableFile<Impl::ReadableFileImpl>;

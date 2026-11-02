@@ -5,9 +5,9 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/TaskGroup.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
-#include "AVEVA/RocksDB/Plugin/Core/Mocks/TempDirectory.hpp"
-#include "FakeBlobEnvironment.hpp"
+#include "AVEVA/RocksDB/Plugin/Support/TempDirectory.hpp"
 #include "FakeHttpClient.hpp"
+#include "Fakes/FakeBlobEnvironment.hpp"
 #include "TestSupport.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
@@ -114,9 +114,8 @@ TEST_F(BlobOperationsTests, DownloadAsyncRejectsBodyShorterThanContentRange) {
 
     std::promise<std::exception_ptr> done;
     AVEVA::RocksDB::Plugin::Azure::Impl::StartOperation(
-        m_blob->get_executor(),
-        BlobOperations::DownloadForReadAsync(*m_blob, 0, 8, std::string()),
-        std::stop_token{}, [&](std::exception_ptr error, BlobOperations::DownloadedBytes) { done.set_value(error); });
+        m_blob->get_executor(), BlobOperations::DownloadForReadAsync(*m_blob, 0, 8, std::string()), std::stop_token{},
+        [&](std::exception_ptr error, BlobOperations::DownloadedBytes) { done.set_value(error); });
 
     auto result = done.get_future();
     ASSERT_EQ(std::future_status::ready, result.wait_for(std::chrono::seconds(10)));
@@ -813,9 +812,8 @@ TEST_F(BlobOperationsTests, DownloadAsyncStopAfterAcceptanceCancelsTheDeferredTr
     std::atomic<int> completions{0};
     std::promise<std::exception_ptr> done;
     AVEVA::RocksDB::Plugin::Azure::Impl::StartOperation(
-        m_blob->get_executor(),
-        BlobOperations::DownloadForReadAsync(*m_blob, 0, 8, std::string()),
-        source.get_token(), [&](std::exception_ptr error, BlobOperations::DownloadedBytes) {
+        m_blob->get_executor(), BlobOperations::DownloadForReadAsync(*m_blob, 0, 8, std::string()), source.get_token(),
+        [&](std::exception_ptr error, BlobOperations::DownloadedBytes) {
             if (completions.fetch_add(1) == 0) {
                 done.set_value(error);
             }
@@ -838,9 +836,8 @@ TEST_F(BlobOperationsTests, DownloadAsyncCompletingBeforeTheStopIsRequestedLeave
     std::stop_source source;
     std::promise<std::exception_ptr> done;
     AVEVA::RocksDB::Plugin::Azure::Impl::StartOperation(
-        m_blob->get_executor(),
-        BlobOperations::DownloadForReadAsync(*m_blob, 0, 8, std::string()),
-        source.get_token(), [&](std::exception_ptr error, BlobOperations::DownloadedBytes) { done.set_value(error); });
+        m_blob->get_executor(), BlobOperations::DownloadForReadAsync(*m_blob, 0, 8, std::string()), source.get_token(),
+        [&](std::exception_ptr error, BlobOperations::DownloadedBytes) { done.set_value(error); });
     auto result = done.get_future();
     ASSERT_EQ(std::future_status::ready, result.wait_for(std::chrono::seconds(10)));
     EXPECT_TRUE(result.get() == nullptr);

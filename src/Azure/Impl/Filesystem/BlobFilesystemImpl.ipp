@@ -501,8 +501,8 @@ BasicBlobFilesystemImpl<THttp>::BasicBlobFilesystemImpl(
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
-#include "BlobFilesystemImpl.Delete.ipp"
-#include "BlobFilesystemImpl.FileOpen.ipp"
-#include "BlobFilesystemImpl.Locking.ipp"
-#include "BlobFilesystemImpl.Paths.ipp"
-#include "BlobFilesystemImpl.Rename.ipp"
+#include "Impl/Filesystem/BlobFilesystemImpl.Delete.ipp"
+#include "Impl/Filesystem/BlobFilesystemImpl.FileOpen.ipp"
+#include "Impl/Filesystem/BlobFilesystemImpl.Locking.ipp"
+#include "Impl/Filesystem/BlobFilesystemImpl.Paths.ipp"
+#include "Impl/Filesystem/BlobFilesystemImpl.Rename.ipp"

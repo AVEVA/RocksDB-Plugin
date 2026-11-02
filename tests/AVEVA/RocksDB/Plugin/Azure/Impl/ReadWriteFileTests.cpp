@@ -5,10 +5,10 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlobWriter.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
-#include "AVEVA/RocksDB/Plugin/TestLogger.hpp"
+#include "AVEVA/RocksDB/Plugin/Support/TestLogger.hpp"
 
-#include "FakeBlobEnvironment.hpp"
-#include "SignedConfiguration.hpp"
+#include "Fakes/FakeBlobEnvironment.hpp"
+#include "Fakes/SignedConfiguration.hpp"
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>

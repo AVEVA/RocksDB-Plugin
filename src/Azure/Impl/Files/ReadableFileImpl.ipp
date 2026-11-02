@@ -614,7 +614,8 @@ BasicReadableFileImpl<TBlob>::ReadAsync(std::shared_ptr<const BasicReadableFileI
         const auto toRead = std::min(bytesToRead, remaining);
         // co_await may not appear in a handler, so a stale read only leaves the try block and is refreshed below.
         try {
-            auto bytes = co_await BlobOperations::DownloadForReadAsync(*self->m_h.Blob, offset, toRead, std::move(etag));
+            auto bytes =
+                co_await BlobOperations::DownloadForReadAsync(*self->m_h.Blob, offset, toRead, std::move(etag));
             if (static_cast<int64_t>(bytes.Data.size()) > remaining) {
                 bytes.Data = bytes.Data.substr(0, static_cast<size_t>(remaining));
             }

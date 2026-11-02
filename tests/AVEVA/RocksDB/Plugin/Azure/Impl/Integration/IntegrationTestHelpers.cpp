@@ -7,8 +7,8 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientFactory.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
-#include "AVEVA/RocksDB/Plugin/TestLogger.hpp"
-#include "SignedConfiguration.hpp"
+#include "AVEVA/RocksDB/Plugin/Support/TestLogger.hpp"
+#include "Fakes/SignedConfiguration.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>

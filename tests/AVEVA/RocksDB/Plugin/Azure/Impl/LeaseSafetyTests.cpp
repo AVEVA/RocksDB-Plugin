@@ -5,10 +5,10 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntimeTransport.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
-#include "AVEVA/RocksDB/Plugin/TestLogger.hpp"
+#include "AVEVA/RocksDB/Plugin/Support/TestLogger.hpp"
 
-#include "BackgroundPump.hpp"
 #include "FakeHttpClient.hpp"
+#include "Fakes/BackgroundPump.hpp"
 #include "TestSupport.hpp"
 
 #include <boost/asio/io_context.hpp>

@@ -5,9 +5,9 @@
 
 #include "AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp"
-#include "AVEVA/RocksDB/Plugin/TestLogger.hpp"
+#include "AVEVA/RocksDB/Plugin/Support/TempDirectory.hpp"
+#include "AVEVA/RocksDB/Plugin/Support/TestLogger.hpp"
 #include "Mocks/FilesystemMock.hpp"
-#include "Mocks/TempDirectory.hpp"
 
 #include <rocksdb/advanced_options.h>
 #include <rocksdb/slice.h>

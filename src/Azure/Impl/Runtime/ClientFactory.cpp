@@ -3,7 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientFactory.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
-#include "ClientFactory.ipp"
+#include "Impl/Runtime/ClientFactory.ipp"
 
 #include <AVEVA/AzureClient/Credentials.hpp>
 

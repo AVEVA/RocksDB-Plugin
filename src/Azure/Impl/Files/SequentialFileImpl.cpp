@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
-#include "WriteableFileImpl.ipp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/SequentialFileImpl.hpp"
+#include "Impl/Files/SequentialFileImpl.ipp"
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-template class BasicWriteableFileImpl<PageBlobClient>;
+template class BasicSequentialFileImpl<PageBlobClient>;
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
