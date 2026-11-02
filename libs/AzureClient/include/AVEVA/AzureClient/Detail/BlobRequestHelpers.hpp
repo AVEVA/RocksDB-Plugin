@@ -1,0 +1,744 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
+#pragma once
+
+#include <AVEVA/AzureClient/AzureRequestOptions.hpp>
+#include <AVEVA/AzureClient/BlobClientOptions.hpp>
+#include <AVEVA/AzureClient/BlobOperationOptions.hpp>
+#include <AVEVA/AzureClient/BlobStorageError.hpp>
+#include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
+#include <AVEVA/AzureClient/HttpClientLike.hpp>
+#include <AVEVA/AzureClient/Models/BlobContainerModels.hpp>
+#include <AVEVA/AzureClient/Models/BlobModels.hpp>
+#include <AVEVA/AzureClient/Outcomes.hpp>
+#include <AVEVA/AzureClient/Response.hpp>
+#include <AVEVA/AzureClient/TokenCredential.hpp>
+#include <AVEVA/HttpClient/HttpHeader.hpp>
+#include <AVEVA/HttpClient/HttpRequest.hpp>
+#include <AVEVA/HttpClient/HttpResponse.hpp>
+#include <AVEVA/HttpClient/HttpStatusCode.hpp>
+
+#include <algorithm>
+#include <boost/asio/append.hpp>
+#include <boost/asio/associated_allocator.hpp>
+#include <boost/asio/associated_cancellation_slot.hpp>
+#include <boost/asio/associated_executor.hpp>
+#include <boost/asio/async_result.hpp>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/cancellation_signal.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/url/url_view_base.hpp>
+
+#include <AVEVA/HttpClient/Detail/Lifetime.hpp>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <concepts>
+#include <cstddef>
+#include <expected>
+#include <filesystem>
+#include <functional>
+#include <gsl/zstring>
+#include <memory>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace AVEVA::AzureClient::Private {
+// Parses a base-10 integer that must span the whole text (no sign for unsigned types, no padding, no trailing data).
+template <std::integral T> [[nodiscard]] constexpr std::optional<T> ParseExact(std::string_view text) noexcept {
+    T value{};
+    const char* const end = text.data() + text.size();
+    const auto [ptr, ec] = std::from_chars(text.data(), end, value);
+    if (ec != std::errc{} || ptr != end) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+// Lease duration limits defined by the Blob service.
+inline constexpr std::chrono::seconds MinFixedLeaseDuration{15};
+inline constexpr std::chrono::seconds MaxFixedLeaseDuration{60};
+
+// Gives an otherwise-plain string-like parameter a distinct type (tagged by `Tag`, an empty
+// caller-defined struct) so it is never adjacent-and-same-type with another string-like
+// parameter in a function signature (see bugprone-easily-swappable-parameters). Implicitly
+// constructible from anything that already implicitly converts to std::string_view at the call
+// site, so callers are unaffected.
+template <class Tag> struct AVEVA_GSL_POINTER StringLabel {
+    std::string_view Value;
+
+    constexpr StringLabel() noexcept = default;
+
+    constexpr StringLabel(gsl::czstring value AVEVA_LIFETIMEBOUND) noexcept : Value(value) {}
+
+    constexpr StringLabel(std::string_view value AVEVA_LIFETIMEBOUND) noexcept : Value(value) {}
+
+    StringLabel(const std::string& value AVEVA_LIFETIMEBOUND) noexcept : Value(value) {}
+};
+
+// Same purpose as StringLabel, but for a numeric parameter of type `T`.
+template <class T, class Tag> struct NumericLabel {
+    T Value;
+
+    constexpr NumericLabel(T value) noexcept : Value(value) {}
+};
+
+// Shared Key request signer, created once per connection: the account key is decoded and
+// an HMAC-SHA256 context keyed with it is initialised at construction, so each signature only
+// duplicates that context instead of re-decoding the key and re-fetching the algorithm (which
+// takes global locks in OpenSSL 3). Thread-safe; shared by every client of a connection.
+class SharedKeySigner {
+  public:
+    // Throws std::invalid_argument if `accountKeyBase64` is not valid base64.
+    SharedKeySigner(std::string accountName, std::string_view accountKeyBase64);
+    ~SharedKeySigner();
+    SharedKeySigner(const SharedKeySigner&) = delete;
+    SharedKeySigner& operator=(const SharedKeySigner&) = delete;
+    SharedKeySigner(SharedKeySigner&&) = delete;
+    SharedKeySigner& operator=(SharedKeySigner&&) = delete;
+
+    [[nodiscard]] const std::string& AccountName() const noexcept AVEVA_LIFETIMEBOUND { return m_accountName; }
+
+    // Base64 HMAC-SHA256 of `stringToSign`.
+    [[nodiscard]] std::string Sign(std::string_view stringToSign) const;
+    // The full "SharedKey <account>:<signature>" Authorization header value for `request`.
+    [[nodiscard]] std::string Authorize(const HttpRequest& request) const;
+
+  private:
+    struct Impl;
+    std::string m_accountName;
+    std::unique_ptr<Impl> m_impl;
+};
+
+// The Shared Key string-to-sign for `request` (Blob service, version 2009-09-19 and later).
+[[nodiscard]] std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpRequest& request);
+
+// Normalised, validated, immutable connection settings shared by a service client and every
+// container/blob client derived from it.
+struct ConnectionState {
+    std::string ServiceEndpoint;
+    std::string SasToken; // without a leading '?'
+    std::string ApiVersion;
+    std::shared_ptr<const std::vector<std::string>> TokenScopes; // shared with every request's RequestAuth
+    std::shared_ptr<const SharedKeySigner> Signer;               // set iff Shared Key authorization is used
+
+    std::string BasePrefix; // scheme://host[:port]
+    std::string BasePath;   // encoded endpoint path without a trailing '/', empty for the root
+
+    RetryOptions Retry;
+    AzureRequestOptions DefaultRequestOptions;
+};
+
+struct ContainerTarget {
+    std::shared_ptr<const ConnectionState> Connection;
+    std::string ContainerName;
+    // "<scheme://host[:port]><basePath>/<encoded container>", built once so each request only appends its query.
+    std::string EncodedResource;
+};
+
+struct BlobTarget {
+    std::shared_ptr<const ConnectionState> Connection;
+    std::string ContainerName;
+    std::string BlobName;
+    // "<scheme://host[:port]><basePath>/<encoded container>/<encoded blob>", built once so each request only
+    // appends its query string.
+    std::string EncodedResource;
+};
+
+// Normalise and validate client options (throw std::invalid_argument on invalid settings).
+// `tokenCredential` tells the validation whether the client was also given a token credential (which lives in the
+// client targets, not in the connection), so the "at most one credential type" rule covers it.
+[[nodiscard]] std::shared_ptr<const ConnectionState> MakeConnectionState(BlobServiceClientOptions options,
+                                                                         CredentialPresence tokenCredential);
+[[nodiscard]] std::shared_ptr<const ConnectionState> MakeConnectionState(BlobContainerClientOptions options,
+                                                                         CredentialPresence tokenCredential);
+[[nodiscard]] std::shared_ptr<const ConnectionState> MakeConnectionState(BlobClientOptions options,
+                                                                         CredentialPresence tokenCredential);
+[[nodiscard]] ContainerTarget MakeContainerTarget(std::shared_ptr<const ConnectionState> connection,
+                                                  std::string containerName);
+[[nodiscard]] BlobTarget MakeBlobTarget(std::shared_ptr<const ConnectionState> connection, std::string containerName,
+                                        std::string blobName);
+[[nodiscard]] ContainerTarget MakeContainerTarget(const BlobContainerClientOptions& options,
+                                                  CredentialPresence tokenCredential);
+[[nodiscard]] BlobTarget MakeBlobTarget(const BlobClientOptions& options, CredentialPresence tokenCredential);
+
+template <class T>
+[[nodiscard]] constexpr CredentialPresence PresenceOf(const std::shared_ptr<T>& credential) noexcept {
+    return credential != nullptr ? CredentialPresence::Present : CredentialPresence::Absent;
+}
+
+// The credential the clients actually authorize with: the caller's credential wrapped in a token cache (so
+// identity-provider credentials do not fetch a token per request), or null when none was given.
+template <TokenCredentialLike TCred>
+[[nodiscard]] std::shared_ptr<CachedTokenCredential<TCred>> MakeCachedCredential(std::shared_ptr<TCred> credential) {
+    if (!credential) {
+        return nullptr;
+    }
+    if constexpr (IsCachingTokenCredential<TCred>::value) {
+        return credential;
+    } else {
+        return CachingTokenCredential<TCred>::Create(std::move(credential));
+    }
+}
+
+// The targets carry the (cached) credential, so every request path sees the concrete credential type.
+template <class TCred> struct BasicContainerTarget : ContainerTarget {
+    std::shared_ptr<CachedTokenCredential<TCred>> Credential;
+};
+
+template <class TCred> struct BasicBlobTarget : BlobTarget {
+    std::shared_ptr<CachedTokenCredential<TCred>> Credential;
+};
+
+template <TokenCredentialLike TCred>
+[[nodiscard]] BasicContainerTarget<TCred> MakeContainerTarget(std::shared_ptr<const ConnectionState> connection,
+                                                              std::shared_ptr<CachedTokenCredential<TCred>> credential,
+                                                              std::string containerName) {
+    return {MakeContainerTarget(std::move(connection), std::move(containerName)), std::move(credential)};
+}
+
+template <TokenCredentialLike TCred>
+[[nodiscard]] BasicBlobTarget<TCred> MakeBlobTarget(std::shared_ptr<const ConnectionState> connection,
+                                                    std::shared_ptr<CachedTokenCredential<TCred>> credential,
+                                                    std::string containerName, std::string blobName) {
+    return {MakeBlobTarget(std::move(connection), std::move(containerName), std::move(blobName)),
+            std::move(credential)};
+}
+
+template <TokenCredentialLike TCred>
+[[nodiscard]] BasicContainerTarget<TCred> MakeContainerTarget(const BlobContainerClientOptions& options,
+                                                              std::shared_ptr<TCred> credential) {
+    return {MakeContainerTarget(options, PresenceOf(credential)), MakeCachedCredential(std::move(credential))};
+}
+
+template <TokenCredentialLike TCred>
+[[nodiscard]] BasicBlobTarget<TCred> MakeBlobTarget(const BlobClientOptions& options,
+                                                    std::shared_ptr<TCred> credential) {
+    return {MakeBlobTarget(options, PresenceOf(credential)), MakeCachedCredential(std::move(credential))};
+}
+
+inline constexpr std::string_view XMsVersionHeaderName = "x-ms-version";
+inline constexpr std::string_view XMsDateHeaderName = "x-ms-date";
+inline constexpr std::string_view XMsClientRequestIdHeaderName = "x-ms-client-request-id";
+inline constexpr std::string_view XMsRequestIdHeaderName = "x-ms-request-id";
+inline constexpr std::string_view XMsErrorCodeHeaderName = "x-ms-error-code";
+inline constexpr std::string_view XMsContentCrc64HeaderName = "x-ms-content-crc64";
+inline constexpr std::string_view XMsDeleteTypePermanentHeaderName = "x-ms-delete-type-permanent";
+inline constexpr std::string_view AuthorizationHeaderName = "Authorization";
+
+// "Bearer <token>" built with a single allocation, without first copying the token into a temporary string.
+[[nodiscard]] std::string MakeBearerValue(std::string_view token);
+inline constexpr std::string_view XMsMetaHeaderPrefix = "x-ms-meta-";
+inline constexpr std::string_view XMsBlobTypeHeaderName = "x-ms-blob-type";
+inline constexpr std::string_view XMsBlobContentLengthHeaderName = "x-ms-blob-content-length";
+inline constexpr std::string_view XMsPageWriteHeaderName = "x-ms-page-write";
+inline constexpr std::string_view XMsRangeHeaderName = "x-ms-range";
+inline constexpr std::string_view XMsCopySourceHeaderName = "x-ms-copy-source";
+inline constexpr std::string_view XMsSourceRangeHeaderName = "x-ms-source-range";
+inline constexpr std::string_view XMsSourceIfMatchHeaderName = "x-ms-source-if-match";
+inline constexpr std::string_view XMsCopySourceAuthorizationHeaderName = "x-ms-copy-source-authorization";
+// Placeholder value of x-ms-copy-source-authorization that the request pipeline replaces, per attempt, with the
+// credential the client itself authorizes with (a fresh token on every retry), or removes when that credential
+// is not a bearer token.
+inline constexpr std::string_view CopySourceClientCredentialMarker = "{client-credential}";
+inline constexpr std::string_view XMsLeaseIdHeaderName = "x-ms-lease-id";
+inline constexpr std::string_view XMsLeaseActionHeaderName = "x-ms-lease-action";
+inline constexpr std::string_view XMsLeaseDurationHeaderName = "x-ms-lease-duration";
+inline constexpr std::string_view XMsProposedLeaseIdHeaderName = "x-ms-proposed-lease-id";
+inline constexpr std::string_view ETagHeaderName = "ETag";
+inline constexpr std::string_view LastModifiedHeaderName = "Last-Modified";
+inline constexpr std::string_view ContentLengthHeaderName = "Content-Length";
+inline constexpr std::string_view ContentTypeHeaderName = "Content-Type";
+inline constexpr std::string_view ContentMd5HeaderName = "Content-MD5";
+inline constexpr std::string_view CacheControlHeaderName = "Cache-Control";
+inline constexpr std::string_view ContentEncodingHeaderName = "Content-Encoding";
+inline constexpr std::string_view ContentLanguageHeaderName = "Content-Language";
+inline constexpr std::string_view RangeHeaderName = "Range";
+inline constexpr std::string_view IfMatchHeaderName = "If-Match";
+inline constexpr std::string_view IfNoneMatchHeaderName = "If-None-Match";
+inline constexpr std::string_view IfModifiedSinceHeaderName = "If-Modified-Since";
+inline constexpr std::string_view IfUnmodifiedSinceHeaderName = "If-Unmodified-Since";
+
+struct RequestFailure {
+    std::error_code Error;
+    std::optional<BlobStorageError> Details;
+};
+
+// Locale-free ASCII folding: the std::locale based algorithms take a process-wide lock on MSVC per character.
+[[nodiscard]] constexpr char FoldAscii(char value) noexcept {
+    return (value >= 'A' && value <= 'Z') ? static_cast<char>(value | 0x20) : value;
+}
+
+// The HTTP client a shared_ptr constructor keeps alive; a null handle is a caller error.
+template <class THttp> THttp& RequireHttpClient(const std::shared_ptr<THttp>& httpClient) {
+    if (!httpClient) {
+        throw std::invalid_argument("The HTTP client must not be null.");
+    }
+    return *httpClient;
+}
+
+[[nodiscard]] constexpr StringMatch IEquals(std::string_view lhs, std::string_view rhs) noexcept {
+    return std::ranges::equal(lhs, rhs, {}, FoldAscii, FoldAscii) ? StringMatch::Match : StringMatch::Mismatch;
+}
+
+[[nodiscard]] constexpr StringMatch IStartsWith(std::string_view value, std::string_view prefix) noexcept {
+    return value.size() >= prefix.size() ? IEquals(value.substr(0, prefix.size()), prefix) : StringMatch::Mismatch;
+}
+
+[[nodiscard]] std::string ToLowerAscii(std::string_view value);
+// "localhost", any 127.0.0.0/8 address and ::1 are loopback.
+[[nodiscard]] HostLocality LocalityOf(const boost::urls::url_view_base& url) noexcept;
+[[nodiscard]] std::string_view TrimWhitespace(std::string_view value AVEVA_LIFETIMEBOUND) noexcept;
+// Whether `value` contains CR, LF or NUL (header injection / truncation).
+[[nodiscard]] ControlCharacters ControlCharactersIn(std::string_view value) noexcept;
+// A header is valid when it has a non-empty name without ':' and neither name nor value has control characters, so it
+// cannot be re-parsed differently on the wire, in a signature or in a multipart body.
+[[nodiscard]] Validity WireValidityOf(const HttpHeader& header) noexcept;
+// Throws std::invalid_argument unless `value` is canonical padded base64; returns the decoded length.
+// An empty value is accepted only when `emptyValue` is Allow.
+[[nodiscard]] std::size_t ValidateBase64AndGetDecodedLength(std::string_view value, EmptyValue emptyValue);
+[[nodiscard]] std::string_view FindHeaderValue(const HttpResponse& response AVEVA_LIFETIMEBOUND,
+                                               std::string_view headerName) noexcept;
+
+// Parses a "true"/"false" header or element into a two-valued enum whose second enumerator stands for true.
+template <class TFlag>
+    requires(std::is_enum_v<TFlag> && std::is_same_v<std::underlying_type_t<TFlag>, std::uint8_t>)
+[[nodiscard]] constexpr TFlag ParseFlag(std::string_view value) noexcept {
+    return static_cast<TFlag>(IEquals(value, "true") == StringMatch::Match ? 1U : 0U);
+}
+[[nodiscard]] Models::LeaseStatus ParseLeaseStatus(std::string_view value);
+[[nodiscard]] Models::LeaseState ParseLeaseState(std::string_view value);
+[[nodiscard]] Models::LeaseDurationType ParseLeaseDurationType(std::string_view value);
+[[nodiscard]] std::optional<std::chrono::system_clock::time_point> ParseHttpDateHeader(std::string_view value) noexcept;
+[[nodiscard]] std::string BuildDateHeaderValue(std::chrono::system_clock::time_point now);
+[[nodiscard]] std::string_view TrimTrailingSlashes(std::string_view value AVEVA_LIFETIMEBOUND) noexcept;
+[[nodiscard]] std::string_view TrimLeadingQuestionMark(std::string_view value AVEVA_LIFETIMEBOUND) noexcept;
+[[nodiscard]] std::string CreateClientRequestId();
+// RFC 7231 date name tables shared by the request formatter and the response parsers.
+inline constexpr std::array<std::string_view, 12> MonthNames{"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                                             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+inline constexpr std::array<std::string_view, 7> ShortWeekdayNames{"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+inline constexpr std::array<std::string_view, 7> LongWeekdayNames{"Sunday",   "Monday", "Tuesday", "Wednesday",
+                                                                  "Thursday", "Friday", "Saturday"};
+
+[[nodiscard]] std::span<char> AsChars(std::span<std::byte> bytes AVEVA_LIFETIMEBOUND) noexcept;
+[[nodiscard]] std::string_view AsChars(std::span<const std::byte> bytes AVEVA_LIFETIMEBOUND) noexcept;
+[[nodiscard]] std::string BytesToString(std::span<const std::byte> bytes);
+[[nodiscard]] std::string Base64Encode(std::span<const std::byte> bytes);
+[[nodiscard]] std::string UrlEncode(std::string_view value, std::string_view extraSafeChars);
+// Appends the percent-encoded `value` to `out` without an intermediate string.
+void UrlEncodeAppend(std::string& out, std::string_view value, std::string_view extraSafeChars);
+[[nodiscard]] std::string BuildQueryString(const std::vector<std::pair<std::string, std::string>>& parameters);
+[[nodiscard]] std::string BuildRangeHeaderValue(const Models::BlobByteRange& range);
+
+[[nodiscard]] RequestFailure DetermineBlobStorageFailure(std::error_code transportError, const HttpResponse& response);
+// A successful response whose content could not be parsed (BlobStorageErrorCode::InvalidResponse).
+[[nodiscard]] RequestFailure MakeInvalidResponseFailure(const HttpResponse& response, std::string message);
+
+struct ParsedContentRange {
+    std::uint64_t Start = 0;
+    std::uint64_t End = 0;
+    std::optional<std::uint64_t> Total;
+    // Whether this is "bytes */total" (an unsatisfied range); Start and End carry no meaning then.
+    RangeSatisfaction Satisfaction = RangeSatisfaction::Satisfied;
+};
+
+[[nodiscard]] std::optional<ParsedContentRange> ParseContentRange(std::string_view header) noexcept;
+
+[[nodiscard]] Models::BlobProperties ParseBlobProperties(const HttpResponse& response);
+[[nodiscard]] Models::DeleteBlobResult ParseDeleteBlobResult(const HttpResponse& response);
+[[nodiscard]] Models::AcquireBlobLeaseResult ParseAcquireBlobLeaseResult(const HttpResponse& response);
+[[nodiscard]] Models::ReleaseBlobLeaseResult ParseReleaseBlobLeaseResult(const HttpResponse& response);
+[[nodiscard]] Models::RenewBlobLeaseResult ParseRenewBlobLeaseResult(const HttpResponse& response);
+// Parses "YYYY-MM-DDThh:mm:ss[.fffffff]Z"; std::nullopt if malformed.
+[[nodiscard]] std::optional<std::chrono::system_clock::time_point> ParseIso8601Utc(std::string_view value) noexcept;
+
+[[nodiscard]] Models::ListBlobsResult ParseListBlobsResultXml(std::string_view xml);
+// Parses a Get Page Ranges response: the <PageList> body plus the ETag, Last-Modified and
+// x-ms-blob-content-length headers.
+[[nodiscard]] Models::GetPageRangesResult ParseGetPageRangesResult(const HttpResponse& response);
+
+[[nodiscard]] HttpRequest BuildBlobRequest(const BlobTarget& target, HttpMethod method,
+                                           std::string_view queryString = {});
+[[nodiscard]] std::string BuildBlobUrl(const BlobTarget& target, std::string_view queryString = {});
+[[nodiscard]] HttpRequest BuildContainerRequest(const ContainerTarget& target, HttpMethod method,
+                                                std::string_view queryString = {});
+[[nodiscard]] std::string BuildContainerUrl(const ContainerTarget& target, std::string_view queryString = {});
+[[nodiscard]] std::string BuildServiceUrl(const ConnectionState& connection, std::string_view queryString = {});
+
+// Convenience overloads that normalise and validate client options first (tests).
+[[nodiscard]] std::string BuildBlobUrl(const BlobClientOptions& options, std::string_view queryString = {});
+[[nodiscard]] HttpRequest BuildBlobRequest(const BlobClientOptions& options, HttpMethod method,
+                                           std::string_view queryString = {});
+[[nodiscard]] std::string BuildContainerUrl(const BlobContainerClientOptions& options,
+                                            std::string_view queryString = {});
+[[nodiscard]] HttpRequest BuildContainerRequest(const BlobContainerClientOptions& options, HttpMethod method,
+                                                std::string_view queryString = {});
+[[nodiscard]] std::string BuildServiceUrl(const BlobServiceClientOptions& options, std::string_view queryString = {});
+
+void AddHeader(HttpRequest& request, std::string_view name, std::string_view value);
+void AddHeader(HttpRequest& request, std::string_view name, std::string&& value);
+void AddHeaderIfNotEmpty(HttpRequest& request, std::string_view name, std::string_view value);
+void AddHeaderIfNotEmpty(HttpRequest& request, std::string_view name, std::string&& value);
+void ApplyBlobRequestConditions(HttpRequest& request, const Models::BlobRequestConditions& conditions);
+void ApplyMetadata(HttpRequest& request, const Models::MetadataMap& metadata);
+// Azure requires metadata names to be C# identifiers: [A-Za-z_][A-Za-z0-9_]*.
+[[nodiscard]] Validity ValidityOfMetadataName(std::string_view name) noexcept;
+// One-off Shared Key signing (constructs a temporary signer); clients use ConnectionState::Signer.
+void AuthorizeRequest(const SharedKeyCredentialOptions& options, HttpRequest& request);
+void AuthorizeRequest(const SharedKeySigner& signer, HttpRequest& request);
+
+// Maps the exception being handled to a BlobStorageError; must be called from a catch handler.
+[[nodiscard]] BlobStorageError MakeFailureFromCurrentException();
+
+// A BlobStorageError carrying only `error` and `message` (defaulting to error.message()).
+[[nodiscard]] BlobStorageError MakeClientError(std::error_code error, std::string message = {});
+
+// The failure's service details (or a client error built lazily) with Code set to the failure's error.
+[[nodiscard]] inline BlobStorageError ToDetails(RequestFailure&& failure) {
+    BlobStorageError details =
+        failure.Details.has_value() ? std::move(*failure.Details) : MakeClientError(failure.Error);
+    details.Code = failure.Error;
+    return details;
+}
+
+// Folds a transport/service std::error_code into the single std::expected error channel. Success
+// is governed solely by `error`: Exists*/*IfExists* clear it while leaving the suppressed
+// diagnostics (e.g. the 404's request id) available via Response<T>::Error().
+template <class T>
+[[nodiscard]] std::expected<Response<T>, BlobStorageError> ToExpected(std::error_code error, Response<T> response) {
+    if (!error) {
+        return response;
+    }
+
+    if (response.Error().has_value()) {
+        BlobStorageError details = std::move(*response.Error());
+        details.Code = error;
+        return std::unexpected(std::move(details));
+    }
+
+    return std::unexpected(MakeClientError(error));
+}
+
+// A client-side failure (e.g. argument validation) with `message` defaulting to error.message().
+template <class T>
+[[nodiscard]] std::expected<Response<T>, BlobStorageError> MakeError(std::error_code error, std::string message = {}) {
+    return std::unexpected(MakeClientError(error, std::move(message)));
+}
+
+// Parses a completed response with `parser`. A failure whose code is one of `suppressed` (the *IfExists /
+// *IfNotExists operations) becomes success with the real raw response, keeping the suppressed error's details in
+// Response<T>::Error(); `absorbed` is one more such code, chosen per call.
+template <class TModel, class TParser>
+[[nodiscard]] std::expected<Response<TModel>, BlobStorageError>
+ParseOutcome(HttpResult sent, TParser&& parser, std::span<const BlobStorageErrorCode> suppressed = {},
+             std::optional<BlobStorageErrorCode> absorbed = std::nullopt) {
+    std::error_code error;
+    HttpResponse response;
+    if (sent) {
+        response = std::move(*sent);
+    } else {
+        error = sent.error();
+    }
+    RequestFailure failure = DetermineBlobStorageFailure(error, response);
+    TModel model;
+    if (!failure.Error) {
+        try {
+            model = std::forward<TParser>(parser)(response);
+        } catch (const std::exception& exception) {
+            failure = MakeInvalidResponseFailure(response, exception.what());
+        }
+    }
+
+    Response<TModel> result{std::move(model), std::move(response), std::move(failure.Details)};
+    if (failure.Error &&
+        (std::ranges::contains(suppressed, failure.Error) || (absorbed.has_value() && failure.Error == *absorbed))) {
+        failure.Error.clear();
+    }
+    return ToExpected(failure.Error, std::move(result));
+}
+
+template <class T>
+    requires requires(T result) {
+        result.ETag;
+        result.LastModified;
+    }
+void ApplyETagAndLastModified(T& result, const HttpResponse& response) {
+    result.ETag = std::string{FindHeaderValue(response, ETagHeaderName)};
+    const std::string_view lastModified = FindHeaderValue(response, LastModifiedHeaderName);
+    if (!lastModified.empty()) {
+        const auto parsed = ParseHttpDateHeader(lastModified);
+        if (!parsed.has_value()) {
+            throw std::invalid_argument("Last-Modified header must contain a valid HTTP-date.");
+        }
+
+        result.LastModified = *parsed;
+    }
+}
+
+template <class T>
+    requires requires(T result) {
+        result.ETag;
+        result.LastModified;
+    }
+[[nodiscard]] T ParseETagAndLastModified(const HttpResponse& response) {
+    T result;
+    ApplyETagAndLastModified(result, response);
+    return result;
+}
+
+// Authorization material captured (by value) for the lifetime of a single logical request,
+// including all of its retry attempts. Exactly one of SAS (in URL), SharedKey or TokenCredential, or none;
+// otherwise construction of the client throws std::invalid_argument.
+struct RequestAuth {
+    enum class Kind : std::uint8_t { None, SharedKey, Token };
+
+    Kind Type = Kind::None;
+    std::shared_ptr<const SharedKeySigner> Signer;
+    std::shared_ptr<const std::vector<std::string>> TokenScopes;
+};
+
+// `tokenCredential` selects Kind::Token when no SAS or Shared Key applies.
+[[nodiscard]] RequestAuth MakeRequestAuth(const ConnectionState& connection, CredentialPresence tokenCredential);
+
+// Whether Azure Storage documents the transport error as transient.
+[[nodiscard]] Retriability RetriabilityOfTransportError(std::error_code error) noexcept;
+// Whether the transport error was raised after the request may have reached the service (the outcome is unknown), as
+// opposed to failures that happened before anything was sent (resolve, connect).
+[[nodiscard]] DeliveryCertainty DeliveryCertaintyOfTransportError(std::error_code error) noexcept;
+[[nodiscard]] Retriability RetriabilityOfStatus(HttpStatusCode status) noexcept;
+[[nodiscard]] Retriability RetriabilityOfFailure(std::error_code error, const HttpResponse& response) noexcept;
+
+// Server-provided retry delay (x-ms-retry-after-ms, then Retry-After in seconds), if any.
+[[nodiscard]] std::optional<std::chrono::milliseconds> ParseRetryAfter(const HttpResponse& response) noexcept;
+
+// Called before each attempt of a request is authorized and sent; see RequestPipeline.hpp.
+struct NoRebuild {};
+
+// Defined in RequestPipeline.hpp.
+template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild = NoRebuild>
+boost::asio::awaitable<HttpResult>
+SendWithRetry(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
+              HttpRequest request, AzureRequestOptions requestOptions,
+              NotFoundRetry notFoundRetry = NotFoundRetry::Fail, TRebuild rebuild = {},
+              ReplaySafety replaySafety = ReplaySafety::Unsafe);
+
+// Defined in RequestPipeline.hpp. `replaySafety` marks a request whose caller absorbs the outcome of a replay (the
+// *IfExists/*IfNotExists operations), so it may be retried even after an ambiguous transport error.
+template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild = NoRebuild>
+boost::asio::awaitable<HttpResult> SendAuthorizedRequest(THttp& httpClient, const ConnectionState& connection,
+                                                         std::shared_ptr<TCred> credential, HttpRequest request,
+                                                         AzureRequestOptions requestOptions, TRebuild rebuild = {},
+                                                         ReplaySafety replaySafety = ReplaySafety::Unsafe);
+
+template <HttpClientLike THttp, class TCred, class TRebuild = NoRebuild>
+boost::asio::awaitable<HttpResult> SendAuthorizedRequest(THttp& httpClient, const BasicContainerTarget<TCred>& target,
+                                                         HttpRequest request, AzureRequestOptions requestOptions,
+                                                         TRebuild rebuild = {},
+                                                         ReplaySafety replaySafety = ReplaySafety::Unsafe) {
+    co_return co_await SendAuthorizedRequest(httpClient, *target.Connection, target.Credential, std::move(request),
+                                             std::move(requestOptions), std::move(rebuild), replaySafety);
+}
+
+template <HttpClientLike THttp, class TCred, class TRebuild = NoRebuild>
+boost::asio::awaitable<HttpResult> SendAuthorizedRequest(THttp& httpClient, const BasicBlobTarget<TCred>& target,
+                                                         HttpRequest request, AzureRequestOptions requestOptions,
+                                                         TRebuild rebuild = {},
+                                                         ReplaySafety replaySafety = ReplaySafety::Unsafe) {
+    co_return co_await SendAuthorizedRequest(httpClient, *target.Connection, target.Credential, std::move(request),
+                                             std::move(requestOptions), std::move(rebuild), replaySafety);
+}
+
+// Maps the single-request download options onto the chunked engine's options (default chunk
+// size and concurrency).
+[[nodiscard]] DownloadToOptions ToDownloadToOptions(DownloadBlobOptions options);
+
+// Download engine (defined in BlobDownload.hpp). Each call owns all of its state; only `httpClient`
+// and the span/path destination (see below) must outlive the operation. The first request is a
+// ranged GET of ChunkSize bytes (a 0-byte blob's 416 falls back to one un-ranged GET); the
+// remaining bytes are fetched in ChunkSize ranges, up to Concurrency at a time, with
+// If-Match: <first ETag> unless the caller supplied If-Match, and written in order. On failure or
+// cancellation the in-flight requests are cancelled and drained before the single completion.
+// MaxSize limits the output, not transport buffering: it is checked once the first response (at most
+// ChunkSize bytes, already buffered) has revealed the blob size. AzureRequestOptions::SetTotalDeadline is one
+// absolute budget for the whole download; each request receives only the time remaining.
+// Cancelling the awaiting coroutine cancels the in-flight requests; the coroutine returns once they have drained.
+template <HttpClientLike THttp, class TCred>
+boost::asio::awaitable<std::expected<Response<Models::DownloadBlobResult>, BlobStorageError>>
+DownloadBlobAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
+                  DownloadBlobOptions operationOptions, AzureRequestOptions requestOptions);
+// Writes straight into `destination`, which must stay valid until the coroutine completes. A range larger than
+// the buffer fails the download; a shorter blob leaves the tail untouched (see BytesWritten).
+template <HttpClientLike THttp, class TCred>
+boost::asio::awaitable<std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>>
+DownloadBlobToSpanAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
+                        DownloadToOptions operationOptions, std::span<char> destination,
+                        AzureRequestOptions requestOptions);
+// Downloads into `<path>.partial-<id>` and renames it over `path` only on success.
+template <HttpClientLike THttp, class TCred>
+boost::asio::awaitable<std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>>
+DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
+                        DownloadToOptions operationOptions, std::filesystem::path path,
+                        AzureRequestOptions requestOptions);
+
+// Sends `request` to `target` and returns the TModel produced by `parser`. `suppressed` lists the service error
+// codes that count as success (the *IfExists/*IfNotExists operations); `replaySafety` allows replay after an
+// ambiguous transport failure.
+template <class TModel, HttpClientLike THttp, class TTarget, class TParser>
+boost::asio::awaitable<std::expected<Response<TModel>, BlobStorageError>>
+SendAndParse(THttp& httpClient, const TTarget& target, HttpRequest request, TParser parser,
+             AzureRequestOptions requestOptions, ReplaySafety replaySafety = ReplaySafety::Unsafe,
+             std::vector<BlobStorageErrorCode> suppressed = {}) {
+    HttpResult sent = co_await SendAuthorizedRequest(httpClient, target, std::move(request), std::move(requestOptions),
+                                                     NoRebuild{}, replaySafety);
+    co_return ParseOutcome<TModel>(std::move(sent), parser, suppressed);
+}
+
+template <HttpClientLike THttp, class TCred>
+boost::asio::awaitable<std::expected<Response<Models::DeleteBlobResult>, BlobStorageError>>
+DeleteBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, DeleteBlobOptions operationOptions,
+                AzureRequestOptions requestOptions, ReplaySafety replaySafety = ReplaySafety::Unsafe,
+                std::vector<BlobStorageErrorCode> suppressed = {}) {
+    HttpRequest request = BuildBlobRequest(options, HttpMethod::Delete);
+    ApplyBlobRequestConditions(request, operationOptions.Conditions);
+
+    co_return co_await SendAndParse<Models::DeleteBlobResult>(httpClient, options, std::move(request),
+                                                              ParseDeleteBlobResult, std::move(requestOptions),
+                                                              replaySafety, std::move(suppressed));
+}
+
+template <HttpClientLike THttp, class TCred>
+boost::asio::awaitable<std::expected<Response<Models::BlobProperties>, BlobStorageError>>
+GetBlobPropertiesAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options,
+                       GetBlobPropertiesOptions operationOptions, AzureRequestOptions requestOptions) {
+    HttpRequest request = BuildBlobRequest(options, HttpMethod::Head);
+    ApplyBlobRequestConditions(request, operationOptions.Conditions);
+
+    co_return co_await SendAndParse<Models::BlobProperties>(httpClient, options, std::move(request),
+                                                            ParseBlobProperties, std::move(requestOptions));
+}
+
+template <HttpClientLike THttp, class TCred>
+boost::asio::awaitable<std::expected<Response<Models::SetBlobMetadataResult>, BlobStorageError>>
+SetBlobMetadataAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, SetBlobMetadataOptions operationOptions,
+                     AzureRequestOptions requestOptions) {
+    HttpRequest request = BuildBlobRequest(options, HttpMethod::Put, "comp=metadata");
+    ApplyMetadata(request, operationOptions.Metadata);
+    ApplyBlobRequestConditions(request, operationOptions.Conditions);
+
+    co_return co_await SendAndParse<Models::SetBlobMetadataResult>(
+        httpClient, options, std::move(request), ParseETagAndLastModified<Models::SetBlobMetadataResult>,
+        std::move(requestOptions));
+}
+
+// A failed argument validation as an invalid_argument failure carrying `message`.
+[[nodiscard]] inline std::unexpected<BlobStorageError> InvalidArgument(std::string message) {
+    return std::unexpected(MakeClientError(std::make_error_code(std::errc::invalid_argument), std::move(message)));
+}
+
+// The lease id of a lease request comes from the options' LeaseId; Conditions.LeaseId is ignored.
+void ApplyLeaseRequestConditions(HttpRequest& request, Models::BlobRequestConditions conditions);
+
+// Lease requests (Lease Blob).
+[[nodiscard]] HttpRequest BuildLeaseRequest(const BlobTarget& target, std::string_view action);
+
+template <HttpClientLike THttp, class TTarget>
+boost::asio::awaitable<std::expected<Response<Models::AcquireBlobLeaseResult>, BlobStorageError>>
+AcquireLeaseAsync(THttp& httpClient, const TTarget& target, AcquireLeaseOptions operationOptions,
+                  AzureRequestOptions requestOptions) {
+    if (operationOptions.Duration.has_value() &&
+        (*operationOptions.Duration < MinFixedLeaseDuration || *operationOptions.Duration > MaxFixedLeaseDuration)) {
+        co_return InvalidArgument("Lease duration must be between 15 and 60 seconds, or infinite.");
+    }
+
+    HttpRequest request = BuildLeaseRequest(target, "acquire");
+    AddHeader(request, XMsLeaseDurationHeaderName,
+              operationOptions.Duration.has_value() ? std::to_string(operationOptions.Duration->count())
+                                                    : std::string{"-1"});
+    // A server-chosen lease ID would be lost if the response is, and the retry would hit 409 LeaseAlreadyPresent.
+    if (operationOptions.ProposedLeaseId.empty()) {
+        operationOptions.ProposedLeaseId = CreateClientRequestId();
+    }
+    AddHeader(request, XMsProposedLeaseIdHeaderName, operationOptions.ProposedLeaseId);
+    ApplyLeaseRequestConditions(request, std::move(operationOptions.Conditions));
+    co_return co_await SendAndParse<Models::AcquireBlobLeaseResult>(
+        httpClient, target, std::move(request), ParseAcquireBlobLeaseResult, std::move(requestOptions));
+}
+
+template <HttpClientLike THttp, class TTarget>
+boost::asio::awaitable<std::expected<Response<Models::RenewBlobLeaseResult>, BlobStorageError>>
+RenewLeaseAsync(THttp& httpClient, const TTarget& target, RenewLeaseOptions operationOptions,
+                AzureRequestOptions requestOptions) {
+    if (operationOptions.LeaseId.empty()) {
+        co_return InvalidArgument("LeaseId must not be empty.");
+    }
+
+    HttpRequest request = BuildLeaseRequest(target, "renew");
+    AddHeader(request, XMsLeaseIdHeaderName, operationOptions.LeaseId);
+    ApplyLeaseRequestConditions(request, std::move(operationOptions.Conditions));
+    co_return co_await SendAndParse<Models::RenewBlobLeaseResult>(httpClient, target, std::move(request),
+                                                                  ParseRenewBlobLeaseResult, std::move(requestOptions));
+}
+
+template <HttpClientLike THttp, class TTarget>
+boost::asio::awaitable<std::expected<Response<Models::ReleaseBlobLeaseResult>, BlobStorageError>>
+ReleaseLeaseAsync(THttp& httpClient, const TTarget& target, ReleaseLeaseOptions operationOptions,
+                  AzureRequestOptions requestOptions) {
+    if (operationOptions.LeaseId.empty()) {
+        co_return InvalidArgument("LeaseId must not be empty.");
+    }
+
+    HttpRequest request = BuildLeaseRequest(target, "release");
+    AddHeader(request, XMsLeaseIdHeaderName, operationOptions.LeaseId);
+    ApplyLeaseRequestConditions(request, std::move(operationOptions.Conditions));
+    // A release replayed after the first attempt's outcome was lost may find the lease already gone; counting
+    // replay after an ambiguous outcome lets that 409 be told apart from a genuine one (including one that follows
+    // a plain token-refresh repeat).
+    auto replayed = std::make_shared<AttemptKind>(AttemptKind::Initial);
+    HttpResult sent = co_await SendAuthorizedRequest(
+        httpClient, *target.Connection, target.Credential, std::move(request), std::move(requestOptions),
+        [replayed](HttpRequest&, std::string_view, AttemptKind attemptKind) { *replayed = attemptKind; },
+        ReplaySafety::Safe);
+    std::optional<BlobStorageErrorCode> absorbed;
+    if (*replayed == AttemptKind::AfterAmbiguousFailure) {
+        absorbed = BlobStorageErrorCode::LeaseNotPresentWithLeaseOperation;
+    }
+    co_return ParseOutcome<Models::ReleaseBlobLeaseResult>(std::move(sent), ParseReleaseBlobLeaseResult, {}, absorbed);
+}
+
+template <HttpClientLike THttp, class TCred>
+boost::asio::awaitable<std::expected<Response<Existence>, BlobStorageError>>
+ExistsBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, AzureRequestOptions requestOptions) {
+    HttpRequest request = BuildBlobRequest(options, HttpMethod::Head);
+
+    HttpResult sent =
+        co_await SendAuthorizedRequest(httpClient, options, std::move(request), std::move(requestOptions));
+    std::error_code error;
+    HttpResponse response;
+    if (sent) {
+        response = std::move(*sent);
+    } else {
+        error = sent.error();
+    }
+    RequestFailure failure = DetermineBlobStorageFailure(error, response);
+    Existence exists = Existence::Absent;
+    if (!failure.Error) {
+        exists = Existence::Present;
+    } else if (!error && response.GetStatus() == HttpStatus::NotFound) {
+        // A HEAD 404 carries no body, so the error code may be absent; any 404 (including a missing
+        // container) means the blob does not exist.
+        failure.Error = {};
+    }
+
+    co_return ToExpected(failure.Error, Response<Existence>{exists, std::move(response), std::move(failure.Details)});
+}
+} // namespace AVEVA::AzureClient::Private

@@ -72,21 +72,20 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, LookupRecordsHitStatistics) {
 // GetUsage reflects the number of bytes currently tracked on disk
 // --------------------------------------------------------------------------
 TEST_F(FileBasedCompressedSecondaryCacheTests, GetUsageReflectsCurrentSize) {
-    size_t usage = 999;
-    ASSERT_TRUE(m_cache->GetUsage(usage).ok());
+    auto usage = m_cache->GetUsage().Value();
     EXPECT_EQ(usage, 0u) << "Empty cache must report zero usage";
 
     const std::string data(1024, 'Z');
     TestPayload p1{data};
     ASSERT_TRUE(m_cache->Insert(MakeKey("usage_k1"), &p1, &m_helper, true).ok());
 
-    ASSERT_TRUE(m_cache->GetUsage(usage).ok());
-    EXPECT_EQ(usage, FileBasedCompressedSecondaryCache::kFileHeaderSize + data.size())
+    usage = m_cache->GetUsage().Value();
+    EXPECT_EQ(usage, FileBasedCompressedSecondaryCache::kFileHeaderSize.Value() + data.size())
         << "Usage must equal kFileHeaderSize + payload size after insert";
 
     m_cache->Erase(MakeKey("usage_k1"));
 
-    ASSERT_TRUE(m_cache->GetUsage(usage).ok());
+    usage = m_cache->GetUsage().Value();
     EXPECT_EQ(usage, 0u) << "Usage must return to zero after erasing the only entry";
 }
 
@@ -173,8 +172,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConstructorCleansStaleDirectory) 
         << "Constructor must remove stale files from a previous cache instance";
 
     // The new cache must be empty.
-    size_t usage = 0;
-    ASSERT_TRUE(m_cache->GetUsage(usage).ok());
+    const auto usage = m_cache->GetUsage().Value();
     EXPECT_EQ(usage, 0u);
 
     // Lookup for the old key must miss.

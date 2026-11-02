@@ -14,14 +14,14 @@ class FilesystemMock : public Filesystem {
     virtual ~FilesystemMock();
 
     MOCK_METHOD(std::unique_ptr<File>, Open, (const std::filesystem::path& path), (override));
-    MOCK_METHOD(bool, DeleteFile, (const std::filesystem::path& path), (override));
-    MOCK_METHOD(bool, DeleteDir, (const std::filesystem::path& path), (override));
-    MOCK_METHOD(bool, CreateDir, (const std::filesystem::path& path), (override));
+    MOCK_METHOD(FilesystemResult, DeleteFile, (const std::filesystem::path& path), (override));
+    MOCK_METHOD(FilesystemResult, DeleteDir, (const std::filesystem::path& path), (override));
+    MOCK_METHOD(FilesystemResult, CreateDir, (const std::filesystem::path& path), (override));
     MOCK_METHOD(std::optional<std::string>, ReadFileContents, (const std::filesystem::path& path),
                 (noexcept, override));
-    MOCK_METHOD(bool, WriteFileAtomic, (const std::filesystem::path& finalPath, const char* data, size_t size),
-                (noexcept, override));
-    MOCK_METHOD(bool, RenameFile, (const std::filesystem::path& from, const std::filesystem::path& to),
+    MOCK_METHOD(FilesystemResult, WriteFileAtomic,
+                (const std::filesystem::path& finalPath, std::span<const char> contents), (noexcept, override));
+    MOCK_METHOD(FilesystemResult, RenameFile, (const std::filesystem::path& from, const std::filesystem::path& to),
                 (noexcept, override));
 };
 } // namespace AVEVA::RocksDB::Plugin::Core::Mocks

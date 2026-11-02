@@ -4,11 +4,18 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LoggerImpl.hpp"
 #include <format>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-LoggerImpl::LoggerImpl(std::unique_ptr<WriteableFileImpl> file, int logLevel)
+LoggerImpl::LoggerImpl(std::unique_ptr<LogSink> file, int logLevel)
     : m_file(std::move(file)), m_logLevel(logLevel), m_buffer(4096) {}
 
-LoggerImpl::LoggerImpl(std::unique_ptr<WriteableFileImpl> file, int logLevel, std::unique_ptr<LogRateLimiter> rateLimiter)
+LoggerImpl::LoggerImpl(std::unique_ptr<LogSink> file, int logLevel, std::unique_ptr<LogRateLimiter> rateLimiter)
     : m_file(std::move(file)), m_logLevel(logLevel), m_buffer(4096), m_rateLimiter(std::move(rateLimiter)) {}
+
+LoggerImpl::LoggerImpl(std::unique_ptr<WriteableFileImpl> file, int logLevel)
+    : LoggerImpl(std::make_unique<FileLogSink<WriteableFileImpl>>(std::move(file)), logLevel) {}
+
+LoggerImpl::LoggerImpl(std::unique_ptr<WriteableFileImpl> file, int logLevel,
+                       std::unique_ptr<LogRateLimiter> rateLimiter)
+    : LoggerImpl(std::make_unique<FileLogSink<WriteableFileImpl>>(std::move(file)), logLevel, std::move(rateLimiter)) {}
 
 void LoggerImpl::Logv(const int logLevel, const char* format, ...) {
     va_list va;
@@ -18,10 +25,10 @@ void LoggerImpl::Logv(const int logLevel, const char* format, ...) {
 }
 
 void LoggerImpl::Logv(const int logLevel, const char* format, va_list ap) {
-    if (logLevel < m_logLevel) {
-        return;
-    }
-
+    // RocksDB has already filtered by the info log level it was configured with, so filtering again here would only
+    // drop messages the user asked for.
+    (void)logLevel;
+    std::scoped_lock lock(*m_mutex);
     if (m_rateLimiter) {
         const auto result = m_rateLimiter->CheckAndRecord(format);
         if (result.decision == RateDecision::Suppress) {
@@ -31,8 +38,8 @@ void LoggerImpl::Logv(const int logLevel, const char* format, va_list ap) {
             // Emit the suppression summary as its own line before the current message.
             // Format: "[N similar messages suppressed in last 30s]\n"
             const auto seconds = m_rateLimiter->Cooldown().count();
-            const auto summary = std::format("[{} similar messages suppressed in last {}s]\n",
-                result.suppressedCount, seconds);
+            const auto summary =
+                std::format("[{} similar messages suppressed in last {}s]\n", result.suppressedCount, seconds);
             m_file->Append(std::span(summary.data(), summary.data() + summary.size()));
         }
     }
@@ -47,7 +54,8 @@ void LoggerImpl::Logv(const int logLevel, const char* format, va_list ap) {
     gmtime_r(&now, &tm);
 #endif
 
-    const auto offset = strftime(m_buffer.data(), m_buffer.size(), "%Y-%m-%dT%H:%M:%SZ", &tm);
+    auto offset = strftime(m_buffer.data(), m_buffer.size(), "%Y-%m-%dT%H:%M:%SZ", &tm);
+    m_buffer[offset++] = ' ';
 
     // Copy va_list because vsnprintf may consume it
     va_list apCopy;
@@ -59,19 +67,27 @@ void LoggerImpl::Logv(const int logLevel, const char* format, va_list ap) {
         throw std::runtime_error("Unable to format log message");
     }
 
-    const auto totalBufferOffset = static_cast<size_t>(result) + offset;
-    if (totalBufferOffset + 1 > m_buffer.size()) {
+    auto totalBufferOffset = static_cast<size_t>(result) + offset;
+    // Room for the NUL terminator and the newline appended below.
+    if (totalBufferOffset + 2 > m_buffer.size()) {
         // vsnprintf truncates unless the buffer can also hold the trailing NUL terminator,
         // so size it for totalBufferOffset characters plus one NUL byte.
-        m_buffer.resize(totalBufferOffset + 1);
+        m_buffer.resize(totalBufferOffset + 2);
         const int newResult = vsnprintf(m_buffer.data() + offset, m_buffer.size() - offset, format, ap);
         if (newResult < 0) {
             throw std::runtime_error("Unable to format log message");
         }
     }
 
+    if (totalBufferOffset == offset || m_buffer[totalBufferOffset - 1] != '\n') {
+        m_buffer[totalBufferOffset++] = '\n';
+    }
+
     m_file->Append(std::span(m_buffer.data(), m_buffer.data() + totalBufferOffset));
 }
 
-void LoggerImpl::Flush() { m_file->Sync(); }
+void LoggerImpl::Flush() {
+    std::scoped_lock lock(*m_mutex);
+    m_file->Sync();
+}
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

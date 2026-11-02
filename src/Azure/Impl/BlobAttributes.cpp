@@ -7,5 +7,5 @@ BlobAttributes::BlobAttributes(const uint64_t size, std::string name) : m_size(s
 
 uint64_t BlobAttributes::GetSize() const noexcept { return m_size; }
 
-const std::string& BlobAttributes::GetName() const noexcept { return m_name; }
+std::string BlobAttributes::GetName() const { return m_name; }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

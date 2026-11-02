@@ -1,0 +1,844 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
+#include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
+
+#include "AVEVA/AzureClient/BlobClientOptions.hpp"
+#include "AVEVA/AzureClient/BlobContainerClient.hpp"
+#include "AVEVA/AzureClient/BlobOperationOptions.hpp"
+#include "AVEVA/AzureClient/BlobServiceClient.hpp"
+#include "AVEVA/AzureClient/BlobStorageError.hpp"
+#include "AVEVA/AzureClient/Models/BlobContainerModels.hpp"
+#include "AVEVA/AzureClient/Models/BlobModels.hpp"
+#include "AVEVA/AzureClient/PageBlobClient.hpp"
+#include "AVEVA/AzureClient/TokenCredential.hpp"
+#include "AVEVA/AzureClient/TokenEndpointError.hpp"
+#include "BlobStorageErrorCategory.hpp"
+#include "BlobXmlParser.hpp"
+
+#include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
+
+#include <AVEVA/AzureClient/AzureRequestOptions.hpp>
+#include <AVEVA/HttpClient/HttpClient.hpp>
+#include <AVEVA/HttpClient/HttpMethod.hpp>
+#include <AVEVA/HttpClient/HttpRequest.hpp>
+#include <AVEVA/HttpClient/HttpResponse.hpp>
+#include <boost/asio/error.hpp>
+#include <boost/system/system_error.hpp>
+#include <boost/url/encode.hpp> // IWYU pragma: keep (symbol is defined in a Boost impl/ header)
+#include <boost/url/parse.hpp>
+#include <boost/url/pct_string_view.hpp>
+#include <boost/url/rfc/unreserved_chars.hpp>
+#include <boost/url/scheme.hpp>
+#include <boost/url/url.hpp>
+#include <boost/url/url_view.hpp>
+#include <boost/uuid/random_generator.hpp>
+#include <boost/uuid/uuid_io.hpp>
+
+#include <cstddef>
+#include <cstdint>
+#include <initializer_list>
+#include <iterator>
+
+#include <openssl/crypto.h>
+#include <openssl/evp.h>
+
+#include <algorithm>
+#include <array>
+#include <charconv>
+#include <chrono>
+#include <format>
+#include <gsl/narrow>
+#include <gsl/util>
+#include <limits>
+#include <memory>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
+
+namespace AVEVA::AzureClient::Private {
+DownloadToOptions ToDownloadToOptions(DownloadBlobOptions options) {
+    DownloadToOptions result;
+    result.Range = options.Range;
+    result.Conditions = std::move(options.Conditions);
+    result.MaxSize = options.MaxSize;
+    result.WriteScheduler = std::move(options.WriteScheduler);
+    return result;
+}
+
+namespace {
+constexpr std::size_t MinContainerNameLength = 3U;
+constexpr std::size_t MaxContainerNameLength = 63U;
+// The first status that is not a success: 1xx and 2xx responses carry the result, everything from 300 on is a failure.
+constexpr HttpStatusCode FirstNonSuccessStatus{300};
+
+[[nodiscard]] constexpr Validity ValidityOfAlphaNumeric(char value) noexcept {
+    return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9')
+               ? Validity::Valid
+               : Validity::Invalid;
+}
+
+[[nodiscard]] boost::urls::url ParseAbsoluteUrl(std::string_view url) {
+    const auto parseResult = boost::urls::parse_uri(url);
+    if (!parseResult.has_value()) {
+        throw std::invalid_argument("ServiceEndpoint must be an absolute http or https URL.");
+    }
+
+    return {parseResult.value()};
+}
+
+} // end anonymous namespace
+
+HostLocality LocalityOf(const boost::urls::url_view_base& url) noexcept {
+    switch (url.host_type()) {
+    case boost::urls::host_type::ipv4:
+        return url.host_ipv4_address().to_bytes()[0] == 127 ? HostLocality::Loopback : HostLocality::Remote;
+    case boost::urls::host_type::ipv6:
+        return url.host_ipv6_address().is_loopback() ? HostLocality::Loopback : HostLocality::Remote;
+    case boost::urls::host_type::name:
+        return url.encoded_host_name() == "localhost" ? HostLocality::Loopback : HostLocality::Remote;
+    default:
+        return HostLocality::Remote;
+    }
+}
+
+std::string ToLowerAscii(std::string_view value) {
+    std::string result{value};
+    std::ranges::transform(result, result.begin(), FoldAscii);
+    return result;
+}
+
+[[nodiscard]] std::string_view TrimWhitespace(std::string_view value) noexcept {
+    constexpr std::string_view Whitespace = " \t\n\v\f\r";
+    const std::size_t first = value.find_first_not_of(Whitespace);
+    if (first == std::string_view::npos) {
+        return {};
+    }
+    return value.substr(first, value.find_last_not_of(Whitespace) - first + 1U);
+}
+
+ControlCharacters ControlCharactersIn(std::string_view value) noexcept {
+    // Every C0 control except HTAB, plus DEL, is illegal in a header field; CR, LF and NUL enable injection.
+    const auto present = std::ranges::any_of(value, [](char c) noexcept {
+        const auto byte = static_cast<unsigned char>(c);
+        return (byte < 0x20U && byte != '\t') || byte == 0x7FU;
+    });
+    return present ? ControlCharacters::Present : ControlCharacters::Absent;
+}
+
+Validity WireValidityOf(const HttpHeader& header) noexcept {
+    const std::string_view name = header.GetName();
+    const auto valid = !name.empty() && name.find(':') == std::string_view::npos &&
+                       ControlCharactersIn(name) == ControlCharacters::Absent &&
+                       ControlCharactersIn(header.GetValue()) == ControlCharacters::Absent;
+    return valid ? Validity::Valid : Validity::Invalid;
+}
+
+[[nodiscard]] constexpr Validity ValidityOfBase64Character(char value) noexcept {
+    return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9') ||
+                   value == '+' || value == '/'
+               ? Validity::Valid
+               : Validity::Invalid;
+}
+
+[[nodiscard]] std::size_t ValidateBase64AndGetDecodedLength(std::string_view value, EmptyValue emptyValue) {
+    if (value.empty()) {
+        if (emptyValue == EmptyValue::Allow) {
+            return 0U;
+        }
+
+        throw std::invalid_argument("Block IDs must be non-empty base64 strings.");
+    }
+    if ((value.size() % 4U) != 0U) {
+        throw std::invalid_argument("Value must be a valid base64 string.");
+    }
+
+    std::size_t paddingCount = 0U;
+    for (const char ch : value) {
+        if (ch == '=') {
+            ++paddingCount;
+            if (paddingCount > 2U) {
+                throw std::invalid_argument("Value must be a valid base64 string.");
+            }
+            continue;
+        }
+
+        if (paddingCount > 0U || ValidityOfBase64Character(ch) == Validity::Invalid) {
+            throw std::invalid_argument("Value must be a valid base64 string.");
+        }
+    }
+
+    if (paddingCount == 1U && value.back() != '=') {
+        throw std::invalid_argument("Value must be a valid base64 string.");
+    }
+    if (paddingCount == 2U && value.substr(value.size() - 2U) != "==") {
+        throw std::invalid_argument("Value must be a valid base64 string.");
+    }
+
+    return ((value.size() / 4U) * 3U) - paddingCount;
+}
+
+// Reservation hint only; an under- or over-estimate costs at most one reallocation.
+constexpr std::size_t TypicalRequestHeaderCount = 16U;
+
+namespace {
+struct ParsedErrorBody {
+    std::string Code;
+    std::string Message;
+    std::string AuthenticationDetail;
+};
+
+[[nodiscard]] ParsedErrorBody ParseErrorBody(std::string_view xml) {
+    const auto tree = TryReadXml(xml);
+    const XmlNode* root = tree ? tree->Root() : nullptr;
+    if (root == nullptr) {
+        return {};
+    }
+    return ParsedErrorBody{.Code = GetChildTextOrEmpty(*root, "Code"),
+                           .Message = GetChildTextOrEmpty(*root, "Message"),
+                           .AuthenticationDetail = GetChildTextOrEmpty(*root, "AuthenticationErrorDetail")};
+}
+
+void NormalizeTokenScopes(std::vector<std::string>& scopes) {
+    if (scopes.empty()) {
+        scopes.emplace_back(DefaultStorageScope);
+    }
+}
+
+// Splits a validated endpoint into "scheme://host[:port]" and its encoded path (no trailing
+// '/', empty for the root) once, so request URLs are built by concatenation.
+struct SplitEndpointParts {
+    std::string BasePrefix;
+    std::string BasePath;
+};
+
+[[nodiscard]] SplitEndpointParts SplitEndpoint(const boost::urls::url& parsed) {
+    SplitEndpointParts parts;
+    parts.BasePrefix = std::string(parsed.scheme()) + "://" + std::string(parsed.encoded_host());
+    if (parsed.has_port()) {
+        parts.BasePrefix += ':';
+        parts.BasePrefix += std::string(parsed.port());
+    }
+    parts.BasePath.assign(parsed.encoded_path().begin(), parsed.encoded_path().end());
+    parts.BasePath.resize(TrimTrailingSlashes(parts.BasePath).size());
+    return parts;
+}
+
+// Parses the endpoint once; the result also feeds the loopback check and SplitEndpoint. A path is allowed (Azurite or
+// proxy endpoints), but not userinfo, a query or a fragment.
+[[nodiscard]] boost::urls::url ValidateEndpoint(std::string_view endpoint) {
+    if (endpoint.empty()) {
+        throw std::invalid_argument("ServiceEndpoint must not be empty.");
+    }
+
+    boost::urls::url parsed = ParseAbsoluteUrl(endpoint);
+    if (parsed.scheme_id() != boost::urls::scheme::http && parsed.scheme_id() != boost::urls::scheme::https) {
+        throw std::invalid_argument("ServiceEndpoint must use http or https.");
+    }
+    if (parsed.encoded_host().empty()) {
+        throw std::invalid_argument("ServiceEndpoint must contain a host.");
+    }
+    if (parsed.has_userinfo() || parsed.has_query() || parsed.has_fragment()) {
+        throw std::invalid_argument("ServiceEndpoint must contain at least a host and may include a path but "
+                                    "must not contain userinfo, query or fragment.");
+    }
+    return parsed;
+}
+
+void ValidateContainerName(std::string_view name) {
+    // The service's special containers; their names would otherwise fail the length and character rules.
+    if (name == "$root" || name == "$logs" || name == "$web") {
+        return;
+    }
+    if (name.size() < MinContainerNameLength || name.size() > MaxContainerNameLength) {
+        throw std::invalid_argument("ContainerName must be between 3 and 63 characters.");
+    }
+    if (ValidityOfAlphaNumeric(name.front()) == Validity::Invalid ||
+        ValidityOfAlphaNumeric(name.back()) == Validity::Invalid) {
+        throw std::invalid_argument("ContainerName must start and end with a letter or number.");
+    }
+
+    enum class Previous : std::uint8_t { Other, Dash };
+    auto previous = Previous::Other;
+    for (const char value : name) {
+        const auto current = value == '-' ? Previous::Dash : Previous::Other;
+        if (current == Previous::Other && !(value >= 'a' && value <= 'z') && !(value >= '0' && value <= '9')) {
+            throw std::invalid_argument("ContainerName may contain only lowercase letters, numbers, and dashes.");
+        }
+        if (previous == Previous::Dash && current == Previous::Dash) {
+            throw std::invalid_argument("ContainerName may not contain consecutive dashes.");
+        }
+        previous = current;
+    }
+}
+
+void ValidateSharedKey(const SharedKeyCredentialOptions& sharedKey) {
+    if (sharedKey.AccountName.empty() != sharedKey.AccountKey.empty()) {
+        throw std::invalid_argument(
+            "SharedKey.AccountName and SharedKey.AccountKey must either both be set or both be empty.");
+    }
+    // The key itself is decoded (and rejected if malformed) once, by the SharedKeySigner.
+}
+
+// Credentials (bearer tokens, SAS and SharedKey signatures) must not travel in clear text, except to a loopback
+// emulator/proxy.
+void ValidateTokenTransport(const boost::urls::url& endpoint) {
+    if (endpoint.scheme_id() == boost::urls::scheme::http && LocalityOf(endpoint) == HostLocality::Remote) {
+        throw std::invalid_argument(
+            "Credentials require an https ServiceEndpoint (http is only allowed for loopback).");
+    }
+}
+
+// A SAS token / query string is spliced verbatim into the URL, so control characters, fragments or an embedded
+// '?' would change what is requested or signed. It must also be already URL-encoded `key=value` pairs joined by '&'.
+void ValidateSasToken(std::string_view sasToken) {
+    const auto hasForbidden = std::ranges::any_of(sasToken, [](const char value) {
+        const auto code = static_cast<unsigned char>(value);
+        return code < 0x20U || code == 0x7FU || value == ' ' || value == '#' || value == '?';
+    });
+    if (hasForbidden) {
+        throw std::invalid_argument("SasToken must not contain control characters, spaces, '#' or '?'.");
+    }
+    if (sasToken.empty()) {
+        return;
+    }
+    while (true) {
+        const std::size_t end = sasToken.find('&');
+        const std::string_view pair = sasToken.substr(0, end);
+        const std::size_t equals = pair.find('=');
+        if (equals == std::string_view::npos || equals == 0U) {
+            throw std::invalid_argument("SasToken must consist of key=value pairs joined by '&'.");
+        }
+        if (end == std::string_view::npos) {
+            break;
+        }
+        sasToken.remove_prefix(end + 1U);
+    }
+}
+
+template <class TOptions>
+[[nodiscard]] boost::urls::url ValidateConnectionOptions(const TOptions& options, CredentialPresence tokenCredential) {
+    const boost::urls::url endpoint = ValidateEndpoint(options.ServiceEndpoint);
+    ValidateSharedKey(options.SharedKey);
+    ValidateSasToken(options.SasToken);
+    if (options.InsecureHttp == InsecureHttpPolicy::Reject && endpoint.scheme_id() == boost::urls::scheme::http) {
+        throw std::invalid_argument("ServiceEndpoint must use https unless InsecureHttp is Allow.");
+    }
+
+    std::size_t credentialCount = 0U;
+    credentialCount += options.SasToken.empty() ? 0U : 1U;
+    credentialCount += options.SharedKey.AccountName.empty() ? 0U : 1U;
+    credentialCount += tokenCredential == CredentialPresence::Present ? 1U : 0U;
+    if (credentialCount > 1U) {
+        throw std::invalid_argument("Specify at most one credential type: SasToken, SharedKey, or TokenCredential.");
+    }
+    if (credentialCount > 0U) {
+        ValidateTokenTransport(endpoint);
+    }
+    return endpoint;
+}
+
+template <class TOptions>
+[[nodiscard]] std::shared_ptr<const ConnectionState> BuildConnection(TOptions& options,
+                                                                     CredentialPresence tokenCredential) {
+    // `options` is the caller's by-value copy; wipe the key on every exit path, including validation throws.
+    const auto wipeKey = gsl::finally([&options] {
+        auto& key = options.SharedKey.AccountKey;
+        OPENSSL_cleanse(key.data(), key.capacity());
+    });
+    // Trim in place: re-assigning from a view would copy the SAS token into a fresh string.
+    options.ServiceEndpoint.resize(TrimTrailingSlashes(options.ServiceEndpoint).size());
+    options.SasToken.erase(0, options.SasToken.size() - TrimLeadingQuestionMark(options.SasToken).size());
+    const boost::urls::url endpoint = ValidateConnectionOptions(options, tokenCredential);
+
+    auto state = std::make_shared<ConnectionState>();
+    state->ServiceEndpoint = std::move(options.ServiceEndpoint);
+    state->SasToken = std::move(options.SasToken);
+    state->ApiVersion = std::move(options.ApiVersion);
+    NormalizeTokenScopes(options.TokenScopes);
+    state->TokenScopes = std::make_shared<const std::vector<std::string>>(std::move(options.TokenScopes));
+    if (!options.SharedKey.AccountName.empty()) {
+        state->Signer = std::make_shared<const SharedKeySigner>(std::move(options.SharedKey.AccountName),
+                                                                options.SharedKey.AccountKey);
+    }
+    SplitEndpointParts endpointParts = SplitEndpoint(endpoint);
+    state->BasePrefix = std::move(endpointParts.BasePrefix);
+    state->BasePath = std::move(endpointParts.BasePath);
+    state->Retry = options.Retry;
+    state->DefaultRequestOptions = std::move(options.DefaultRequestOptions);
+    return state;
+}
+
+template <class TOptions>
+void AppendQueryParts(std::string& query, const TOptions& options, std::string_view queryString) {
+    const auto append = [&query](std::string_view part) {
+        if (part.empty()) {
+            return;
+        }
+        if (!query.empty()) {
+            query += '&';
+        }
+        query += part;
+    };
+    append(TrimLeadingQuestionMark(queryString));
+    append(options.SasToken);
+}
+
+template <class TOptions>
+[[nodiscard]] HttpRequest BuildRequest(const TOptions& options, HttpMethod method, std::string url) {
+    HttpRequest request;
+    request.SetMethod(method);
+    request.SetUrl(std::move(url));
+    request.GetHeaders().reserve(TypicalRequestHeaderCount);
+    AddHeader(request, XMsVersionHeaderName, options.ApiVersion);
+    AddHeader(request, XMsClientRequestIdHeaderName, CreateClientRequestId());
+    return request;
+}
+
+// Formats "bytes=<first>-[<last>]" into a stack buffer so only the returned string allocates.
+std::string FormatBytesRange(std::uint64_t first, std::optional<std::uint64_t> last) {
+    // "bytes=" + two 20-digit uint64 values + '-'.
+    std::array<char, 48> buffer{};
+    constexpr std::string_view prefix = "bytes=";
+    char* const begin = buffer.data();
+    char* const end = begin + buffer.size();
+    char* out = std::ranges::copy(prefix, begin).out;
+    out = std::to_chars(out, end, first).ptr;
+    *out++ = '-';
+    if (last.has_value()) {
+        out = std::to_chars(out, end, *last).ptr;
+    }
+    return std::string{begin, out};
+}
+} // namespace
+
+std::string BuildDateHeaderValue(std::chrono::system_clock::time_point now) {
+    const auto seconds = std::chrono::floor<std::chrono::seconds>(now);
+    const auto days = std::chrono::floor<std::chrono::days>(seconds);
+    const std::chrono::year_month_day calendarDate{days};
+    const std::chrono::weekday weekday{days};
+    const std::chrono::hh_mm_ss timeOfDay{seconds - days};
+
+    return std::format("{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT",
+                       ShortWeekdayNames.at(static_cast<std::size_t>(weekday.c_encoding())),
+                       static_cast<unsigned>(calendarDate.day()),
+                       MonthNames.at(static_cast<std::size_t>(static_cast<unsigned>(calendarDate.month()) - 1U)),
+                       static_cast<int>(calendarDate.year()), timeOfDay.hours().count(), timeOfDay.minutes().count(),
+                       timeOfDay.seconds().count());
+}
+
+std::string CreateClientRequestId() {
+    thread_local boost::uuids::random_generator generator;
+    return boost::uuids::to_string(generator());
+}
+
+BlobStorageError MakeFailureFromCurrentException() {
+    try {
+        throw;
+    } catch (const std::bad_alloc&) {
+        return MakeClientError(std::make_error_code(std::errc::not_enough_memory), "Out of memory.");
+    } catch (const std::invalid_argument& e) {
+        return MakeClientError(std::make_error_code(std::errc::invalid_argument), e.what());
+    } catch (const std::out_of_range& e) {
+        return MakeClientError(std::make_error_code(std::errc::invalid_argument), e.what());
+    } catch (const std::system_error& e) {
+        return MakeClientError(e.code(), e.what());
+    } catch (const boost::system::system_error& e) {
+        // A cancelled await unwinds with operation_aborted; the operation boundary reports it as a cancellation.
+        if (e.code() == boost::asio::error::operation_aborted) {
+            return MakeClientError(std::make_error_code(std::errc::operation_canceled), "The operation was canceled.");
+        }
+        return MakeClientError(std::make_error_code(std::errc::state_not_recoverable), e.what());
+    } catch (const std::exception& e) {
+        return MakeClientError(std::make_error_code(std::errc::state_not_recoverable), e.what());
+    } catch (...) {
+        return MakeClientError(std::make_error_code(std::errc::state_not_recoverable), "Unknown error.");
+    }
+}
+
+std::span<char> AsChars(std::span<std::byte> bytes) noexcept {
+    // Reinterpreting std::byte as char is always valid (both are character-like, so aliasing is allowed).
+    GSL_SUPPRESS(type.1)
+    return {reinterpret_cast<char*>(bytes.data()), bytes.size()};
+}
+
+std::string_view AsChars(std::span<const std::byte> bytes) noexcept {
+    GSL_SUPPRESS(type.1)
+    return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+}
+
+std::string BytesToString(std::span<const std::byte> bytes) { return std::string{AsChars(bytes)}; }
+
+std::string Base64Encode(std::span<const std::byte> bytes) {
+    if (bytes.empty()) {
+        return {};
+    }
+
+    // OpenSSL takes unsigned char buffers; std::byte aliases them legally.
+    GSL_SUPPRESS(type.1)
+    const auto* data = reinterpret_cast<const unsigned char*>(bytes.data());
+    std::string encoded;
+    encoded.resize(((bytes.size() + 2U) / 3U) * 4U);
+    // EVP_EncodeBlock takes an int length, so an input past INT_MAX throws rather than being truncated.
+    const int length = gsl::narrow<int>(bytes.size());
+    GSL_SUPPRESS(type.1)
+    const int written = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(encoded.data()), data, length);
+    encoded.resize(written > 0 ? gsl::narrow_cast<std::size_t>(written) : 0U);
+    return encoded;
+}
+
+std::string BuildRangeHeaderValue(const Models::BlobByteRange& range) {
+    if (range.Length.has_value()) {
+        if (*range.Length == 0U) {
+            throw std::invalid_argument("Range.Length must be greater than zero when specified.");
+        }
+        if ((*range.Length - 1U) > (std::numeric_limits<std::uint64_t>::max() - range.Offset)) {
+            throw std::invalid_argument("Range exceeds the maximum representable blob offset.");
+        }
+        return FormatBytesRange(range.Offset, range.Offset + *range.Length - 1U);
+    }
+
+    return FormatBytesRange(range.Offset, std::nullopt);
+}
+
+RequestFailure DetermineBlobStorageFailure(std::error_code transportError, const HttpResponse& response) {
+    if (transportError) {
+        // The coarse HttpClientError hides what actually failed (e.g. a certificate rejection vs a refused
+        // connection), so the lower-level cause is surfaced in the message.
+        if (const auto cause = response.GetCause()) {
+            BlobStorageError details;
+            details.Message = transportError.message() + ": " + cause.message();
+            return {.Error = transportError, .Details = std::move(details)};
+        }
+        return {.Error = transportError, .Details = std::nullopt};
+    }
+
+    if (response.GetStatus() < FirstNonSuccessStatus) {
+        return {};
+    }
+
+    const std::string headerCode = std::string{FindHeaderValue(response, XMsErrorCodeHeaderName)};
+    const ParsedErrorBody errorBody = ParseErrorBody(response.GetBody());
+    const std::string errorCode = !headerCode.empty() ? headerCode : errorBody.Code;
+    BlobStorageError details;
+    details.StatusCode = response.GetStatus();
+    details.ErrorCode = errorCode;
+    details.Message = errorBody.Message;
+    details.AuthenticationDetail = errorBody.AuthenticationDetail;
+    details.RequestId = std::string{FindHeaderValue(response, XMsRequestIdHeaderName)};
+    details.RetryAfter = ParseRetryAfter(response);
+    BlobStorageErrorCode code =
+        errorCode.empty() ? BlobStorageErrorCode::ServiceError : ParseBlobStorageErrorCode(errorCode);
+    if (errorCode.empty() && response.GetStatus() == HttpStatus::NotModified) {
+        // A conditional GET/HEAD whose If-None-Match / If-Modified-Since condition failed.
+        code = BlobStorageErrorCode::ConditionNotMet;
+    } else if (code == BlobStorageErrorCode::ServiceError) {
+        // An absent or unrecognized error code still carries a meaningful HTTP status.
+        switch (response.GetStatus().Value()) {
+        case 403:
+            code = BlobStorageErrorCode::AuthorizationFailure;
+            break;
+        case 404:
+            code = BlobStorageErrorCode::ResourceNotFound;
+            break;
+        case 412:
+            code = BlobStorageErrorCode::ConditionNotMet;
+            break;
+        case 500:
+            code = BlobStorageErrorCode::InternalError;
+            break;
+        case 503:
+            code = BlobStorageErrorCode::ServerBusy;
+            break;
+        default:
+            break;
+        }
+    }
+    return {.Error = make_error_code(code), .Details = std::move(details)};
+}
+
+RequestFailure MakeInvalidResponseFailure(const HttpResponse& response, std::string message) {
+    BlobStorageError details;
+    details.StatusCode = response.GetStatus();
+    details.Message = std::move(message);
+    details.RequestId = std::string{FindHeaderValue(response, XMsRequestIdHeaderName)};
+    return {.Error = make_error_code(BlobStorageErrorCode::InvalidResponse), .Details = std::move(details)};
+}
+
+std::shared_ptr<const ConnectionState> MakeConnectionState(BlobServiceClientOptions options,
+                                                           CredentialPresence tokenCredential) {
+    return BuildConnection(options, tokenCredential);
+}
+
+std::shared_ptr<const ConnectionState> MakeConnectionState(BlobContainerClientOptions options,
+                                                           CredentialPresence tokenCredential) {
+    return BuildConnection(options, tokenCredential);
+}
+
+std::shared_ptr<const ConnectionState> MakeConnectionState(BlobClientOptions options,
+                                                           CredentialPresence tokenCredential) {
+    return BuildConnection(options, tokenCredential);
+}
+
+ContainerTarget MakeContainerTarget(std::shared_ptr<const ConnectionState> connection, std::string containerName) {
+    ValidateContainerName(containerName);
+    std::string encodedResource;
+    encodedResource.reserve(connection->BasePrefix.size() + connection->BasePath.size() + containerName.size() + 1U);
+    encodedResource += connection->BasePrefix;
+    encodedResource += connection->BasePath;
+    encodedResource += '/';
+    UrlEncodeAppend(encodedResource, containerName, {});
+    return ContainerTarget{.Connection = std::move(connection),
+                           .ContainerName = std::move(containerName),
+                           .EncodedResource = std::move(encodedResource)};
+}
+
+BlobTarget MakeBlobTarget(std::shared_ptr<const ConnectionState> connection, std::string containerName,
+                          std::string blobName) {
+    ValidateContainerName(containerName);
+    if (blobName.empty()) {
+        throw std::invalid_argument("BlobName must not be empty.");
+    }
+    std::string encodedResource;
+    encodedResource.reserve(connection->BasePrefix.size() + connection->BasePath.size() + containerName.size() +
+                            blobName.size() + 2U);
+    encodedResource += connection->BasePrefix;
+    encodedResource += connection->BasePath;
+    encodedResource += '/';
+    UrlEncodeAppend(encodedResource, containerName, {});
+    encodedResource += '/';
+    UrlEncodeAppend(encodedResource, blobName, "/");
+    return BlobTarget{.Connection = std::move(connection),
+                      .ContainerName = std::move(containerName),
+                      .BlobName = std::move(blobName),
+                      .EncodedResource = std::move(encodedResource)};
+}
+
+ContainerTarget MakeContainerTarget(const BlobContainerClientOptions& options, CredentialPresence tokenCredential) {
+    return MakeContainerTarget(MakeConnectionState(options, tokenCredential), options.ContainerName);
+}
+
+BlobTarget MakeBlobTarget(const BlobClientOptions& options, CredentialPresence tokenCredential) {
+    return MakeBlobTarget(MakeConnectionState(options, tokenCredential), options.ContainerName, options.BlobName);
+}
+
+RequestAuth MakeRequestAuth(const ConnectionState& connection, CredentialPresence tokenCredential) {
+    RequestAuth auth;
+    if (!connection.SasToken.empty()) {
+        return auth;
+    }
+    if (connection.Signer) {
+        auth.Type = RequestAuth::Kind::SharedKey;
+        auth.Signer = connection.Signer;
+        return auth;
+    }
+    if (tokenCredential == CredentialPresence::Present) {
+        auth.Type = RequestAuth::Kind::Token;
+        auth.TokenScopes = connection.TokenScopes;
+    }
+    return auth;
+}
+
+namespace {
+// "<prefix><basePath>/<seg1>[/<seg2>][?query]" with pre-encoded segments.
+[[nodiscard]] std::string ComposeUrl(const ConnectionState& connection,
+                                     std::initializer_list<std::string_view> segments, std::string_view query) {
+    std::size_t size = connection.BasePrefix.size() + connection.BasePath.size() + query.size() + 2U;
+    for (const std::string_view segment : segments) {
+        size += segment.size() + 1U;
+    }
+    std::string url;
+    url.reserve(size);
+    url += connection.BasePrefix;
+    url += connection.BasePath;
+    for (const std::string_view segment : segments) {
+        url += '/';
+        url += segment;
+    }
+    if (!query.empty()) {
+        url += '?';
+        url += query;
+    }
+    return url;
+}
+} // namespace
+
+std::string BuildBlobUrl(const BlobTarget& target, std::string_view queryString) {
+    std::string query;
+    AppendQueryParts(query, *target.Connection, queryString);
+    std::string url;
+    url.reserve(target.EncodedResource.size() + query.size() + 1U);
+    url += target.EncodedResource;
+    if (!query.empty()) {
+        url += '?';
+        url += query;
+    }
+    return url;
+}
+
+std::string BuildContainerUrl(const ContainerTarget& target, std::string_view queryString) {
+    std::string query = "restype=container";
+    AppendQueryParts(query, *target.Connection, queryString);
+    std::string url;
+    url.reserve(target.EncodedResource.size() + query.size() + 1U);
+    url += target.EncodedResource;
+    url += '?';
+    url += query;
+    return url;
+}
+
+std::string BuildServiceUrl(const ConnectionState& connection, std::string_view queryString) {
+    std::string query;
+    AppendQueryParts(query, connection, queryString);
+    // The service root has no path ("https://host?comp=list"); a path-style endpoint keeps its path.
+    return ComposeUrl(connection, {}, query);
+}
+
+HttpRequest BuildBlobRequest(const BlobTarget& target, HttpMethod method, std::string_view queryString) {
+    return BuildRequest(*target.Connection, method, BuildBlobUrl(target, queryString));
+}
+
+HttpRequest BuildContainerRequest(const ContainerTarget& target, HttpMethod method, std::string_view queryString) {
+    return BuildRequest(*target.Connection, method, BuildContainerUrl(target, queryString));
+}
+
+std::string BuildBlobUrl(const BlobClientOptions& options, std::string_view queryString) {
+    return BuildBlobUrl(MakeBlobTarget(options, CredentialPresence::Absent), queryString);
+}
+
+HttpRequest BuildBlobRequest(const BlobClientOptions& options, HttpMethod method, std::string_view queryString) {
+    return BuildBlobRequest(MakeBlobTarget(options, CredentialPresence::Absent), method, queryString);
+}
+
+std::string BuildContainerUrl(const BlobContainerClientOptions& options, std::string_view queryString) {
+    return BuildContainerUrl(MakeContainerTarget(options, CredentialPresence::Absent), queryString);
+}
+
+HttpRequest BuildContainerRequest(const BlobContainerClientOptions& options, HttpMethod method,
+                                  std::string_view queryString) {
+    return BuildContainerRequest(MakeContainerTarget(options, CredentialPresence::Absent), method, queryString);
+}
+
+std::string BuildServiceUrl(const BlobServiceClientOptions& options, std::string_view queryString) {
+    return BuildServiceUrl(*MakeConnectionState(options, CredentialPresence::Absent), queryString);
+}
+
+void AddHeader(HttpRequest& request, std::string_view name, std::string_view value) {
+    request.AddHeader(HttpHeader{std::string{name}, std::string{value}});
+}
+
+void AddHeader(HttpRequest& request, std::string_view name, std::string&& value) {
+    request.AddHeader(HttpHeader{std::string{name}, std::move(value)});
+}
+
+void AddHeaderIfNotEmpty(HttpRequest& request, std::string_view name, std::string_view value) {
+    if (!value.empty()) {
+        AddHeader(request, name, value);
+    }
+}
+
+void AddHeaderIfNotEmpty(HttpRequest& request, std::string_view name, std::string&& value) {
+    if (!value.empty()) {
+        AddHeader(request, name, std::move(value));
+    }
+}
+
+void ApplyBlobRequestConditions(HttpRequest& request, const Models::BlobRequestConditions& conditions) {
+    AddHeaderIfNotEmpty(request, XMsLeaseIdHeaderName, conditions.LeaseId);
+    AddHeaderIfNotEmpty(request, IfMatchHeaderName, conditions.IfMatch);
+    AddHeaderIfNotEmpty(request, IfNoneMatchHeaderName, conditions.IfNoneMatch);
+    if (conditions.IfModifiedSince.has_value()) {
+        AddHeaderIfNotEmpty(request, IfModifiedSinceHeaderName, BuildDateHeaderValue(*conditions.IfModifiedSince));
+    }
+    if (conditions.IfUnmodifiedSince.has_value()) {
+        AddHeaderIfNotEmpty(request, IfUnmodifiedSinceHeaderName, BuildDateHeaderValue(*conditions.IfUnmodifiedSince));
+    }
+}
+
+Validity ValidityOfMetadataName(std::string_view name) noexcept {
+    const auto isAsciiLetter = [](char c) noexcept { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); };
+    if (name.empty() || (!isAsciiLetter(name.front()) && name.front() != '_')) {
+        return Validity::Invalid;
+    }
+    const auto valid =
+        std::ranges::all_of(name, [&](char c) { return isAsciiLetter(c) || (c >= '0' && c <= '9') || c == '_'; });
+    return valid ? Validity::Valid : Validity::Invalid;
+}
+
+void ApplyMetadata(HttpRequest& request, const Models::MetadataMap& metadata) {
+    for (const auto& [key, value] : metadata) {
+        AddHeader(request, std::string{XMsMetaHeaderPrefix} + key, value);
+    }
+}
+
+void AuthorizeRequest(const SharedKeyCredentialOptions& options, HttpRequest& request) {
+    AuthorizeRequest(SharedKeySigner{options.AccountName, options.AccountKey}, request);
+}
+
+void AuthorizeRequest(const SharedKeySigner& signer, HttpRequest& request) {
+    AddHeader(request, AuthorizationHeaderName, signer.Authorize(request));
+}
+
+[[nodiscard]] BlobStorageError MakeClientError(std::error_code error, std::string message) {
+    BlobStorageError details;
+    details.Message = message.empty() ? error.message() : std::move(message);
+    details.Code = error;
+    // A failed token acquisition has no service response, but the identity endpoint's status is the useful part.
+    if (const auto token = GetTokenEndpointFailure(error)) {
+        details.StatusCode = token->StatusCode;
+        details.ErrorCode = std::string{token->ErrorCode};
+    }
+    return details;
+}
+
+std::string MakeBearerValue(std::string_view token) {
+    constexpr std::string_view Scheme = "Bearer ";
+    std::string value;
+    value.reserve(Scheme.size() + token.size());
+    value.append(Scheme).append(token);
+    return value;
+}
+
+HttpRequest BuildCreateContainerRequest(const ContainerTarget& target, const CreateBlobContainerOptions& options) {
+    HttpRequest request = BuildContainerRequest(target, HttpMethod::Put);
+    ApplyMetadata(request, options.Metadata);
+    ApplyBlobRequestConditions(request, options.Conditions);
+    return request;
+}
+
+std::optional<std::string> ValidatePageAligned(std::uint64_t value, gsl::not_null<gsl::czstring> fieldName) {
+    if ((value % PageBlobPageSize) != 0U) {
+        return std::string(fieldName.get()) + " must be a multiple of 512 bytes.";
+    }
+
+    return std::nullopt;
+}
+
+std::expected<std::string, std::string> BuildPageWriteRangeHeaderValue(std::uint64_t offset, std::uint64_t length) {
+    if (length == 0U) {
+        return std::unexpected("length must be greater than zero.");
+    }
+    if ((length - 1U) > (std::numeric_limits<std::uint64_t>::max() - offset)) {
+        return std::unexpected("offset + length exceeds the maximum representable page range.");
+    }
+
+    return FormatBytesRange(offset, offset + length - 1U);
+}
+
+void ApplyLeaseRequestConditions(HttpRequest& request, Models::BlobRequestConditions conditions) {
+    conditions.LeaseId.clear();
+    ApplyBlobRequestConditions(request, conditions);
+}
+
+[[nodiscard]] HttpRequest BuildLeaseRequest(const BlobTarget& target, std::string_view action) {
+    HttpRequest request = BuildBlobRequest(target, HttpMethod::Put, "comp=lease");
+    AddHeader(request, XMsLeaseActionHeaderName, action);
+    return request;
+}
+} // namespace AVEVA::AzureClient::Private

@@ -21,6 +21,7 @@
 #include <iterator>
 #include <new>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -29,30 +30,47 @@
 namespace AVEVA::RocksDB::Plugin::Core {
 using namespace boost::log::trivial;
 
+using Logger = boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>;
+
 /// <summary>Filesystem path helpers and best-effort file deletion.</summary>
 struct FileUtil {
     /// <summary>
     /// Renames origPath to graveyardPath then deletes the graveyard file.
-    /// Both operations are best-effort; errors are silently ignored.
+    /// Both operations are best-effort; a failed rename falls back to deleting the file directly.
     /// See RemoveEntryLocked for the TOCTOU trade-off: a concurrent insert for the
     /// same key may have replaced origPath between the in-memory removal (under lock)
     /// and this rename.  In that case the rename moves the new file to the graveyard,
     /// causing one cache miss on its next Lookup; Lookup's corruption-cleanup code
     /// then removes the phantom index entry.  This is acceptable for a best-effort cache.
     /// </summary>
-    static void CommitEviction(Filesystem& fs, const std::pair<std::string, std::string>& p) noexcept {
-        if (p.first.empty())
-            return;
-        if (fs.RenameFile(p.first, p.second)) {
-            fs.DeleteFile(p.second);
+    static void CommitEviction(Filesystem& fs, Logger& logger,
+                               const std::optional<std::pair<std::string, std::string>>& pair) noexcept {
+        if (pair) {
+            CommitPair(fs, logger, *pair);
         }
     }
 
     /// <summary>Commits all rename+delete pairs produced by EvictUntilSizeLocked.</summary>
-    static void CommitEvictions(Filesystem& fs,
+    static void CommitEvictions(Filesystem& fs, Logger& logger,
                                 const std::vector<std::pair<std::string, std::string>>& pairs) noexcept {
         for (const auto& p : pairs) {
-            CommitEviction(fs, p);
+            CommitPair(fs, logger, p);
+        }
+    }
+
+  private:
+    static void CommitPair(Filesystem& fs, Logger& logger, const std::pair<std::string, std::string>& p) noexcept {
+        if (fs.RenameFile(p.first, p.second) == FilesystemResult::Succeeded) {
+            (void)fs.DeleteFile(p.second);
+            return;
+        }
+        // On Windows the rename fails while a reader still has the file open. The entry has already left the index,
+        // so a file left behind would stay on disk uncounted; delete it directly instead.
+        if (fs.DeleteFile(p.first) == FilesystemResult::Failed) {
+            try {
+                BOOST_LOG_SEV(logger, warning) << "Could not evict '" << p.first << "'; the file was left on disk";
+            } catch (...) {
+            }
         }
     }
 };
@@ -82,6 +100,8 @@ class FileBasedCompressedSecondaryCache::Impl {
     LruFileIndex m_lruIndex;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
 
+    enum class KeyLength : std::uint8_t { Fits, TooLong };
+
     /// <summary>
     /// Result of attempting to read a cache entry file.
     /// When status is Ok, contents holds the raw file bytes.
@@ -95,7 +115,7 @@ class FileBasedCompressedSecondaryCache::Impl {
     };
 
   public:
-    explicit Impl(std::filesystem::path cacheDir, std::shared_ptr<Filesystem> fs, size_t capacity,
+    explicit Impl(std::filesystem::path cacheDir, std::shared_ptr<Filesystem> fs, ByteCount capacity,
                   std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
         : m_cacheDir(std::move(cacheDir)), m_fs(std::move(fs)), m_lruIndex(m_cacheDir.string(), capacity),
           m_logger(std::move(logger)) {
@@ -103,23 +123,28 @@ class FileBasedCompressedSecondaryCache::Impl {
             throw std::invalid_argument("FileBasedCompressedSecondaryCache: logger cannot be null");
         }
 
-        m_fs->DeleteDir(m_cacheDir);
-        m_fs->CreateDir(m_cacheDir);
+        (void)m_fs->DeleteDir(m_cacheDir);
+        if (m_fs->CreateDir(m_cacheDir) == FilesystemResult::Failed) {
+            BOOST_LOG_SEV(*m_logger, error)
+                << "FileBasedCompressedSecondaryCache: failed to create dir '" << m_cacheDir.string() << "'";
+            throw std::runtime_error("FileBasedCompressedSecondaryCache: failed to create cache directory");
+        }
 
         BOOST_LOG_SEV(*m_logger, info) << "FileBasedCompressedSecondaryCache: initialized dir='" << m_cacheDir.string()
-                                       << "', capacity=" << capacity << " bytes";
+                                       << "', capacity=" << capacity.Value() << " bytes";
     }
 
     const char* Name() const noexcept { return "FileBasedCompressedSecondaryCache"; }
 
     rocksdb::Status Insert(const rocksdb::Slice& key, rocksdb::Cache::ObjectPtr obj,
-                           const rocksdb::Cache::CacheItemHelper* helper, const bool forceInsert) noexcept {
+                           const rocksdb::Cache::CacheItemHelper* helper,
+                           const LruFileIndex::InsertMode mode) noexcept {
         try {
             if (!helper || !helper->IsSecondaryCacheCompatible()) {
                 return rocksdb::Status::OK();
             }
 
-            if (IsKeyTooLong(key)) {
+            if (ClassifyKey(key) == KeyLength::TooLong) {
                 return rocksdb::Status::InvalidArgument("cache key hex exceeds maximum inline buffer");
             }
 
@@ -128,13 +153,16 @@ class FileBasedCompressedSecondaryCache::Impl {
                 return rocksdb::Status::OK();
             }
 
-            boost::container::small_vector<char, 4096> buf(dataSize);
-            auto s = helper->saveto_cb(obj, 0, dataSize, buf.data());
+            // One buffer in the on-disk layout: [type byte][payload]; saveto_cb writes straight into it.
+            boost::container::small_vector<char, 1 + 4096> buf(dataSize + kFileHeaderSize.Value(),
+                                                               boost::container::default_init);
+            buf[0] = static_cast<char>(static_cast<uint8_t>(rocksdb::CompressionType::kNoCompression));
+            auto s = helper->saveto_cb(obj, 0, dataSize, buf.data() + kFileHeaderSize.Value());
             if (!s.ok()) {
                 return s;
             }
 
-            return WriteEntry(key, rocksdb::CompressionType::kNoCompression, buf.data(), dataSize, forceInsert);
+            return WriteEntry(key, std::span<const char>{buf.data(), buf.size()}, mode);
         } catch (...) {
             const auto s = StatusUtil::CurrentExceptionToStatus();
             BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
@@ -149,11 +177,15 @@ class FileBasedCompressedSecondaryCache::Impl {
                 return rocksdb::Status::OK();
             }
 
-            if (IsKeyTooLong(key)) {
+            if (ClassifyKey(key) == KeyLength::TooLong) {
                 return rocksdb::Status::InvalidArgument("cache key hex exceeds maximum inline buffer");
             }
 
-            return WriteEntry(key, type, saved.data(), saved.size());
+            boost::container::small_vector<char, 1 + 4096> buf(saved.size() + kFileHeaderSize.Value(),
+                                                               boost::container::default_init);
+            buf[0] = static_cast<char>(static_cast<uint8_t>(type));
+            std::memcpy(buf.data() + kFileHeaderSize.Value(), saved.data(), saved.size());
+            return WriteEntry(key, std::span<const char>{buf.data(), buf.size()}, LruFileIndex::InsertMode::Force);
         } catch (...) {
             const auto s = StatusUtil::CurrentExceptionToStatus();
             BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
@@ -161,17 +193,30 @@ class FileBasedCompressedSecondaryCache::Impl {
         }
     }
 
-    std::unique_ptr<rocksdb::SecondaryCacheResultHandle>
-    Lookup(const rocksdb::Slice& key, const rocksdb::Cache::CacheItemHelper* cacheItemHelper,
-           rocksdb::Cache::CreateContext* createContext, bool /*wait*/, bool adviseErase, rocksdb::Statistics* stats,
-           bool& keptInSecondaryCache) noexcept {
+    /// <summary>Whether the entry stays in the cache after a lookup that found it.</summary>
+    enum class Retention : std::uint8_t {
+        Dropped,
+        Kept,
+    };
+
+    /// <summary>Whether the caller asked for a found entry to be erased as it is returned.</summary>
+    enum class EraseAdvice : std::uint8_t {
+        Keep,
+        Erase,
+    };
+
+    std::unique_ptr<rocksdb::SecondaryCacheResultHandle> Lookup(const rocksdb::Slice& key,
+                                                                const rocksdb::Cache::CacheItemHelper* cacheItemHelper,
+                                                                rocksdb::Cache::CreateContext* createContext,
+                                                                const EraseAdvice advice, rocksdb::Statistics* stats,
+                                                                Retention& retention) noexcept {
         try {
-            keptInSecondaryCache = false;
+            retention = Retention::Dropped;
             if (!cacheItemHelper || !cacheItemHelper->IsSecondaryCacheCompatible()) {
                 return nullptr;
             }
 
-            if (IsKeyTooLong(key)) {
+            if (ClassifyKey(key) == KeyLength::TooLong) {
                 return nullptr;
             }
 
@@ -186,31 +231,29 @@ class FileBasedCompressedSecondaryCache::Impl {
                 return nullptr;
             }
 
-            std::pair<std::string, std::string> deferredEviction;
-            if (adviseErase) {
+            std::optional<std::pair<std::string, std::string>> deferredEviction;
+            if (advice == EraseAdvice::Erase) {
                 deferredEviction = m_lruIndex.Remove(filename);
-                if (deferredEviction.first.empty()) {
+                if (!deferredEviction) {
                     return nullptr; // entry disappeared between map and this stage.
                 }
             } else {
-                if (!m_lruIndex.Touch(filename)) {
+                if (m_lruIndex.Touch(filename) == LruFileIndex::TouchResult::NotFound) {
                     return nullptr; // entry disappeared between map and this stage.
                 }
             }
 
             // Defer eviction I/O until after the mapped view is released to avoid
             // rename/delete failures on Windows while the file is still mapped.
-            auto evictionCleanup = boost::scope::make_scope_exit([&] noexcept {
-                if (!deferredEviction.first.empty()) {
-                    FileUtil::CommitEviction(*m_fs, deferredEviction);
-                }
-            });
+            auto evictionCleanup = boost::scope::make_scope_exit(
+                [&] noexcept { FileUtil::CommitEviction(*m_fs, *m_logger, deferredEviction); });
 
             // On any validation failure, remove the corrupt entry from the index.
-            // When advise_erase was set the entry is already gone, so no cleanup needed.
-            bool entryIsValid = false;
+            // When erase was advised the entry is already gone, so no cleanup needed.
+            enum class Validation : std::uint8_t { Pending, Valid };
+            Validation validation = Validation::Pending;
             auto corruptionCleanup = boost::scope::make_scope_exit([&] noexcept {
-                if (!entryIsValid && !adviseErase)
+                if (validation == Validation::Pending && advice == EraseAdvice::Keep)
                     CleanupCorruptEntry(filename);
             });
 
@@ -241,8 +284,8 @@ class FileBasedCompressedSecondaryCache::Impl {
 
             RecordHitStats(stats, cacheItemHelper->role);
 
-            entryIsValid = true;
-            keptInSecondaryCache = !adviseErase;
+            validation = Validation::Valid;
+            retention = advice == EraseAdvice::Keep ? Retention::Kept : Retention::Dropped;
             auto result = std::make_unique<ResultHandle>(outObj, outCharge);
             objCleanup.set_active(false);
             return result;
@@ -253,15 +296,14 @@ class FileBasedCompressedSecondaryCache::Impl {
         }
     }
 
-    bool SupportForceErase() const noexcept { return true; }
     void Erase(const rocksdb::Slice& key) noexcept {
         try {
-            if (IsKeyTooLong(key)) {
+            if (ClassifyKey(key) == KeyLength::TooLong) {
                 return;
             }
 
             const auto filename = KeyToFilename(key);
-            FileUtil::CommitEviction(*m_fs, m_lruIndex.Remove(filename));
+            FileUtil::CommitEviction(*m_fs, *m_logger, m_lruIndex.Remove(filename));
         } catch (...) {
             BOOST_LOG_SEV(*m_logger, error)
                 << Name() << "::" << __func__ << ": " << StatusUtil::CurrentExceptionToStatus().ToString();
@@ -270,9 +312,9 @@ class FileBasedCompressedSecondaryCache::Impl {
 
     void WaitAll(std::vector<rocksdb::SecondaryCacheResultHandle*> /*handles*/) noexcept {}
 
-    rocksdb::Status SetCapacity(size_t capacity) noexcept {
+    rocksdb::Status SetCapacity(const ByteCount capacity) noexcept {
         try {
-            FileUtil::CommitEvictions(*m_fs, m_lruIndex.SetCapacity(capacity));
+            FileUtil::CommitEvictions(*m_fs, *m_logger, m_lruIndex.SetCapacity(capacity));
             return rocksdb::Status::OK();
         } catch (...) {
             const auto s = StatusUtil::CurrentExceptionToStatus();
@@ -281,9 +323,11 @@ class FileBasedCompressedSecondaryCache::Impl {
         }
     }
 
-    rocksdb::Status GetCapacity(size_t& capacity) noexcept {
+    ByteCount GetCapacity() const noexcept { return m_lruIndex.GetCapacity(); }
+
+    rocksdb::Status Deflate(const ByteCount decrease) noexcept {
         try {
-            capacity = m_lruIndex.GetCapacity();
+            FileUtil::CommitEvictions(*m_fs, *m_logger, m_lruIndex.Deflate(decrease));
             return rocksdb::Status::OK();
         } catch (...) {
             const auto s = StatusUtil::CurrentExceptionToStatus();
@@ -292,18 +336,7 @@ class FileBasedCompressedSecondaryCache::Impl {
         }
     }
 
-    rocksdb::Status Deflate(const size_t decrease) noexcept {
-        try {
-            FileUtil::CommitEvictions(*m_fs, m_lruIndex.Deflate(decrease));
-            return rocksdb::Status::OK();
-        } catch (...) {
-            const auto s = StatusUtil::CurrentExceptionToStatus();
-            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
-            return s;
-        }
-    }
-
-    rocksdb::Status Inflate(const size_t increase) noexcept {
+    rocksdb::Status Inflate(const ByteCount increase) noexcept {
         try {
             m_lruIndex.Inflate(increase);
             return rocksdb::Status::OK();
@@ -314,16 +347,7 @@ class FileBasedCompressedSecondaryCache::Impl {
         }
     }
 
-    rocksdb::Status GetUsage(size_t& usage) const {
-        try {
-            usage = m_lruIndex.GetUsage();
-            return rocksdb::Status::OK();
-        } catch (...) {
-            const auto s = StatusUtil::CurrentExceptionToStatus();
-            BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
-            return s;
-        }
-    }
+    ByteCount GetUsage() const noexcept { return m_lruIndex.GetUsage(); }
 
   private:
     /// <summary>
@@ -332,7 +356,7 @@ class FileBasedCompressedSecondaryCache::Impl {
     /// </summary>
     [[nodiscard]] static boost::static_string<LruFileIndex::kMaxFilenameLen>
     KeyToFilename(const rocksdb::Slice& key) noexcept {
-        if (IsKeyTooLong(key)) {
+        if (ClassifyKey(key) == KeyLength::TooLong) {
             return {};
         }
 
@@ -342,48 +366,45 @@ class FileBasedCompressedSecondaryCache::Impl {
     }
 
     /// <summary>
-    /// Returns true when the hex-encoded key would exceed the inline filename buffer.
+    /// Classifies whether the hex-encoded key would exceed the inline filename buffer.
     /// Each input byte is encoded as two hex characters; uses an overflow-safe comparison.
     /// </summary>
-    [[nodiscard]] static bool IsKeyTooLong(const rocksdb::Slice& key) noexcept {
-        return key.size() > LruFileIndex::kMaxFilenameLen / 2;
+    [[nodiscard]] static KeyLength ClassifyKey(const rocksdb::Slice& key) noexcept {
+        return key.size() > LruFileIndex::kMaxFilenameLen / 2 ? KeyLength::TooLong : KeyLength::Fits;
     }
 
     /// <summary>
     /// Writes bytes to disk and updates the in-memory index.
     /// </summary>
     /// <param name="key">The key identifying the cache entry to write.</param>
-    /// <param name="type">The compression type of the data to store.</param>
-    /// <param name="data">Pointer to the bytes to write to disk.</param>
-    /// <param name="dataSize">Size in bytes of the data pointed to by <paramref name="data"/>.</param>
-    /// <param name="force_insert">When false, the write is skipped rather than evicting an existing entry to make
+    /// <param name="stored">Complete file image: the 1-byte compression type followed by the payload.</param>
+    /// <param name="mode">With IfRoom, the write is skipped rather than evicting an existing entry to make
     /// room.</param>
-    rocksdb::Status WriteEntry(const rocksdb::Slice& key, const rocksdb::CompressionType type, const char* data,
-                               const size_t dataSize, const bool forceInsert = true) noexcept {
+    rocksdb::Status WriteEntry(const rocksdb::Slice& key, const std::span<const char> stored,
+                               const LruFileIndex::InsertMode mode) noexcept {
         try {
-            if (IsKeyTooLong(key)) {
+            if (ClassifyKey(key) == KeyLength::TooLong) {
                 return rocksdb::Status::InvalidArgument("cache key hex exceeds maximum inline buffer");
             }
 
             const auto filename = KeyToFilename(key);
-            // storedSize includes the 1-byte compression type prefix
-            const size_t storedSize = dataSize + FileBasedCompressedSecondaryCache::kFileHeaderSize;
+            const ByteCount storedSize{stored.size()};
 
             // Phase 1: lock, gate capacity, pin existing entry, schedule evictions.
             //          Commit I/O (rename + delete) only after releasing the lock.
-            auto reserved = m_lruIndex.ReserveCapacity(filename, storedSize, forceInsert);
+            auto reserved = m_lruIndex.ReserveCapacity(filename, storedSize, mode);
             if (!reserved)
                 return rocksdb::Status::OK(); // admission control: over capacity, skip write
-            FileUtil::CommitEvictions(*m_fs, *reserved);
+            FileUtil::CommitEvictions(*m_fs, *m_logger, *reserved);
 
             // Phase 2: write the file — no lock held.
-            if (auto s = WriteToDisk(filename, type, data, dataSize, storedSize); !s.ok())
+            if (auto s = WriteToDisk(filename, stored); !s.ok())
                 return s;
 
             // Phase 3: lock, register the new entry, correct concurrent overshoot.
             //          Commit I/O (rename + delete) only after releasing the lock.
             const auto evictList = m_lruIndex.RegisterEntry(filename, storedSize);
-            FileUtil::CommitEvictions(*m_fs, evictList);
+            FileUtil::CommitEvictions(*m_fs, *m_logger, evictList);
 
             return rocksdb::Status::OK();
         } catch (...) {
@@ -395,19 +416,13 @@ class FileBasedCompressedSecondaryCache::Impl {
 
     /// <summary>
     /// Phase 2 of WriteEntry — called with no lock held.
-    /// Writes a 1-byte compression type prefix followed by the raw payload in a single
+    /// Writes the prepared file image ([1-byte compression type][payload bytes]) in a single
     /// atomic write call.
     /// </summary>
-    [[nodiscard]] rocksdb::Status WriteToDisk(const std::string_view filename, const rocksdb::CompressionType type,
-                                              const char* data, const size_t dataSize, const size_t storedSize) {
+    [[nodiscard]] rocksdb::Status WriteToDisk(const std::string_view filename, const std::span<const char> stored) {
         const std::string pathStr = m_lruIndex.MakePath(filename);
 
-        // File format: [1-byte compression type][payload bytes]
-        boost::container::small_vector<char, 1 + 4096> writeBuf(storedSize);
-        writeBuf[0] = static_cast<char>(static_cast<uint8_t>(type));
-        std::memcpy(writeBuf.data() + 1, data, dataSize);
-
-        if (!m_fs->WriteFileAtomic(pathStr, writeBuf.data(), writeBuf.size())) {
+        if (m_fs->WriteFileAtomic(pathStr, stored) == FilesystemResult::Failed) {
             BOOST_LOG_SEV(*m_logger, warning)
                 << "FileBasedCompressedSecondaryCache: failed to write cache entry '" << pathStr << "'";
             return rocksdb::Status::IOError("Failed to write cache entry file", pathStr);
@@ -441,7 +456,7 @@ class FileBasedCompressedSecondaryCache::Impl {
     /// Best-effort; never throws.</summary>
     void CleanupCorruptEntry(std::string_view filename) noexcept {
         try {
-            FileUtil::CommitEviction(*m_fs, m_lruIndex.Remove(filename));
+            FileUtil::CommitEviction(*m_fs, *m_logger, m_lruIndex.Remove(filename));
         } catch (...) {
             BOOST_LOG_SEV(*m_logger, error)
                 << Name() << "::" << __func__ << ": " << StatusUtil::CurrentExceptionToStatus().ToString();
@@ -472,7 +487,7 @@ class FileBasedCompressedSecondaryCache::Impl {
 };
 
 FileBasedCompressedSecondaryCache::FileBasedCompressedSecondaryCache(
-    std::filesystem::path cacheDir, std::shared_ptr<Filesystem> fs, const size_t capacity,
+    std::filesystem::path cacheDir, std::shared_ptr<Filesystem> fs, const ByteCount capacity,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
     : m_impl(std::make_unique<Impl>(std::move(cacheDir), std::move(fs), capacity, std::move(logger))) {}
 
@@ -480,10 +495,12 @@ AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache::~FileBasedCompr
 
 const char* FileBasedCompressedSecondaryCache::Name() const noexcept { return m_impl->Name(); }
 
+// The RocksDB overrides below keep RocksDB's bool/size_t signatures; each converts to the strong types straight away.
 rocksdb::Status FileBasedCompressedSecondaryCache::Insert(const rocksdb::Slice& key, rocksdb::Cache::ObjectPtr obj,
                                                           const rocksdb::Cache::CacheItemHelper* helper,
                                                           const bool forceInsert) noexcept {
-    return m_impl->Insert(key, obj, helper, forceInsert);
+    return m_impl->Insert(key, obj, helper,
+                          forceInsert ? LruFileIndex::InsertMode::Force : LruFileIndex::InsertMode::IfRoom);
 }
 
 rocksdb::Status FileBasedCompressedSecondaryCache::InsertSaved(const rocksdb::Slice& key, const rocksdb::Slice& saved,
@@ -492,12 +509,15 @@ rocksdb::Status FileBasedCompressedSecondaryCache::InsertSaved(const rocksdb::Sl
     return m_impl->InsertSaved(key, saved, type, source);
 }
 
-std::unique_ptr<rocksdb::SecondaryCacheResultHandle>
-FileBasedCompressedSecondaryCache::Lookup(const rocksdb::Slice& key,
-                                          const rocksdb::Cache::CacheItemHelper* cacheItemHelper,
-                                          rocksdb::Cache::CreateContext* createContext, bool wait, bool adviseErase,
-                                          rocksdb::Statistics* stats, bool& keptInSecondaryCache) noexcept {
-    return m_impl->Lookup(key, cacheItemHelper, createContext, wait, adviseErase, stats, keptInSecondaryCache);
+std::unique_ptr<rocksdb::SecondaryCacheResultHandle> FileBasedCompressedSecondaryCache::Lookup(
+    const rocksdb::Slice& key, const rocksdb::Cache::CacheItemHelper* cacheItemHelper,
+    rocksdb::Cache::CreateContext* createContext, bool /*wait*/, const bool adviseErase, rocksdb::Statistics* stats,
+    bool& keptInSecondaryCache) noexcept {
+    auto retention = Impl::Retention::Dropped;
+    auto result = m_impl->Lookup(key, cacheItemHelper, createContext,
+                                 adviseErase ? Impl::EraseAdvice::Erase : Impl::EraseAdvice::Keep, stats, retention);
+    keptInSecondaryCache = retention == Impl::Retention::Kept;
+    return result;
 }
 
 void FileBasedCompressedSecondaryCache::Erase(const rocksdb::Slice& key) noexcept { m_impl->Erase(key); }
@@ -507,23 +527,22 @@ void FileBasedCompressedSecondaryCache::WaitAll(std::vector<rocksdb::SecondaryCa
 }
 
 rocksdb::Status FileBasedCompressedSecondaryCache::SetCapacity(const size_t capacity) noexcept {
-    return m_impl->SetCapacity(capacity);
+    return m_impl->SetCapacity(ByteCount{capacity});
 }
 
 rocksdb::Status FileBasedCompressedSecondaryCache::GetCapacity(size_t& capacity) noexcept {
-    return m_impl->GetCapacity(capacity);
+    capacity = static_cast<size_t>(m_impl->GetCapacity().Value());
+    return rocksdb::Status::OK();
 }
 
-rocksdb::Status FileBasedCompressedSecondaryCache::GetUsage(size_t& usage) const noexcept {
-    return m_impl->GetUsage(usage);
-}
+ByteCount FileBasedCompressedSecondaryCache::GetUsage() const noexcept { return m_impl->GetUsage(); }
 
 rocksdb::Status FileBasedCompressedSecondaryCache::Deflate(const size_t decrease) noexcept {
-    return m_impl->Deflate(decrease);
+    return m_impl->Deflate(ByteCount{decrease});
 }
 
 rocksdb::Status FileBasedCompressedSecondaryCache::Inflate(const size_t increase) noexcept {
-    return m_impl->Inflate(increase);
+    return m_impl->Inflate(ByteCount{increase});
 }
 
 } // namespace AVEVA::RocksDB::Plugin::Core

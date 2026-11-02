@@ -3,114 +3,69 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/ReadWriteFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
-#include <azure/core/exception.hpp>
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/RangeCheck.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 #include <boost/log/trivial.hpp>
 #include <cassert>
 #include <limits>
 namespace AVEVA::RocksDB::Plugin::Azure {
 using namespace boost::log::trivial;
 ReadWriteFile::ReadWriteFile(
-    Impl::ReadWriteFileImpl file,
+    Impl::ReadWriteFileImpl&& file,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
-    : m_file(std::move(file)), m_logger(std::move(logger)) {}
+    : m_file(std::make_unique<Impl::ReadWriteFileImpl>(std::move(file))), m_logger(std::move(logger)) {}
+
+ReadWriteFile::~ReadWriteFile() = default;
 
 rocksdb::IOStatus ReadWriteFile::Write(uint64_t offset, const rocksdb::Slice& data, const rocksdb::IOOptions&,
                                        rocksdb::IODebugContext*) {
-    try {
-        assert(offset <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) && "Offset must fit in int64_t");
-        assert(data.size() <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) &&
-               "Data size must fit in int64_t");
+    return AzureErrorTranslator::Invoke(*m_logger, "Write", [&] {
+        if (Impl::RangeCheck::Check(offset, data.size()) == Impl::RangeCheck::Bounds::OutOfRange) {
+            return rocksdb::IOStatus::InvalidArgument("Write offset or size is out of range");
+        }
 
-        m_file.Write(static_cast<int64_t>(offset), data.data(), static_cast<int64_t>(data.size()));
-    } catch (const ::Azure::Core::RequestFailedException& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
-                                        << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when writing to file");
-    }
-
-    return rocksdb::IOStatus::OK();
+        m_file->Write(static_cast<int64_t>(offset), data.data(), static_cast<int64_t>(data.size()));
+        return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus ReadWriteFile::Read(uint64_t offset, size_t n, const rocksdb::IOOptions&, rocksdb::Slice* result,
                                       char* scratch, rocksdb::IODebugContext*) const {
-    try {
-        assert(offset <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) && "Offset must fit in int64_t");
-        assert(n <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) && "Bytes requested must fit in int64_t");
+    return AzureErrorTranslator::Invoke(*m_logger, "Read", [&] {
+        if (Impl::RangeCheck::Check(offset, n) == Impl::RangeCheck::Bounds::OutOfRange) {
+            return rocksdb::IOStatus::InvalidArgument("Read offset or size is out of range");
+        }
 
-        const auto bytesRead = m_file.Read(static_cast<int64_t>(offset), static_cast<int64_t>(n), scratch);
+        const auto bytesRead = m_file->Read(static_cast<int64_t>(offset), static_cast<int64_t>(n), scratch);
 
         assert(bytesRead >= 0 && "Bytes read should not be negative");
         assert(bytesRead <= static_cast<int64_t>(n) && "Bytes read should not exceed requested amount");
 
         result->data_ = scratch;
         result->size_ = static_cast<size_t>(bytesRead);
-    } catch (const ::Azure::Core::RequestFailedException& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
-                                        << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when reading file");
-    }
-
-    return rocksdb::IOStatus::OK();
+        return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus ReadWriteFile::Flush(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    try {
-        m_file.Flush();
-    } catch (const ::Azure::Core::RequestFailedException& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
-                                        << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when flushing file");
-    }
-
-    return rocksdb::IOStatus::OK();
+    return AzureErrorTranslator::Invoke(*m_logger, "Flush", [&] {
+        m_file->Flush();
+        return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus ReadWriteFile::Sync(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    try {
-        m_file.Sync();
-    } catch (const ::Azure::Core::RequestFailedException& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
-                                        << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when syncing file");
-    }
-
-    return rocksdb::IOStatus::OK();
+    return AzureErrorTranslator::Invoke(*m_logger, "Sync", [&] {
+        m_file->Sync();
+        return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus ReadWriteFile::Close(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    try {
-        m_file.Close();
-    } catch (const ::Azure::Core::RequestFailedException& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
-                                        << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when closing file");
-    }
-
-    return rocksdb::IOStatus::OK();
+    return AzureErrorTranslator::Invoke(*m_logger, "Close", [&] {
+        m_file->Close();
+        return rocksdb::IOStatus::OK();
+    });
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure

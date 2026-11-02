@@ -1,0 +1,119 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
+#pragma once
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/RequestHelpers.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/LockFile.hpp"
+#include <AVEVA/AzureClient/AzureRequestOptions.hpp>
+#include <AVEVA/AzureClient/BlobOperationOptions.hpp>
+#include <AVEVA/AzureClient/Outcomes.hpp>
+#include <atomic>
+#include <boost/asio/awaitable.hpp>
+#include <boost/intrusive/list.hpp>
+#include <boost/log/trivial.hpp>
+#include <chrono>
+#include <exception>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+namespace AVEVA::RocksDB::Plugin::Azure::Impl {
+/// <summary>Whether a renewal request was made: NotRenewed when the lease was not held or was released
+/// meanwhile.</summary>
+enum class RenewalOutcome : std::uint8_t { NotRenewed, Renewed };
+enum class LeaseHolding : std::uint8_t { NotHeld, Held };
+enum class AcquireProgress : std::uint8_t { Idle, Acquiring };
+enum class ReleaseProgress : std::uint8_t { NotReleasing, Releasing };
+
+template <typename TBlob>
+class BasicLockFileImpl
+    : public boost::intrusive::list_base_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>> {
+    std::shared_ptr<ClientRuntimeBase> m_runtime;
+    std::unique_ptr<TBlob> m_file;
+    std::optional<std::string> m_leaseId;
+    // Read by the renewal thread while Lock/Renew block on the network, hence atomic.
+    mutable std::atomic<std::chrono::steady_clock::time_point> m_lastRenewalTime;
+    std::atomic<LeaseHolding> m_holding{LeaseHolding::NotHeld};
+    std::chrono::seconds m_leaseLength;
+    // How long Lock() keeps retrying against a lease held by another owner; the lease length unless overridden.
+    std::chrono::milliseconds m_acquireTimeout;
+    std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
+    std::string m_fileName;
+    // Guards only m_leaseId and m_acquire and is never held across network I/O or sleeps, so a slow Lock
+    // cannot stall the renewal thread or state queries.
+    mutable std::mutex m_stateMutex;
+    AcquireProgress m_acquire = AcquireProgress::Idle;
+    // Set before ReleaseLease is issued so a renewal already in flight that the service rejects because the release
+    // won is classified as benign instead of fencing the filesystem. Guarded by m_stateMutex.
+    ReleaseProgress m_release = ReleaseProgress::NotReleasing;
+
+    [[nodiscard]] std::optional<std::string> CurrentLeaseId() const;
+    void RenewLease() const;
+    struct RenewalAttempt {
+        std::string LeaseId;
+        std::chrono::steady_clock::time_point Start;
+        AzureClient::RenewLeaseOptions Options;
+        AzureClient::AzureRequestOptions RequestOptions;
+    };
+    // Empty when no lease is held; throws when the renewal deadline has passed.
+    [[nodiscard]] std::optional<RenewalAttempt> BeginRenewal() const;
+    // Records a completed renewal request. `failure` is the request's failure (null on success); returns the failure
+    // to report and whether a renewal happened.
+    [[nodiscard]] std::pair<std::exception_ptr, RenewalOutcome>
+    FinishRenewal(const std::string& leaseId, std::chrono::steady_clock::time_point requestStart,
+                  std::exception_ptr failure) const;
+    // Requires m_stateMutex.
+    void PublishDeadlineLocked() const;
+    // Throws when the lease has expired or its renewal deadline has passed; otherwise returns the time left to renew.
+    [[nodiscard]] std::chrono::steady_clock::duration RenewalBudget() const;
+    // Added to steady_clock; non-zero only in tests so lease expiry can be simulated without waiting.
+    std::atomic<std::chrono::steady_clock::duration> m_clockOffset{std::chrono::steady_clock::duration::zero()};
+    [[nodiscard]] std::chrono::steady_clock::time_point Now() const {
+        return std::chrono::steady_clock::now() + m_clockOffset.load();
+    }
+
+  public:
+    // Shifts the lease clock by `offset` from real time. Safe to call at any time.
+    void SetClockOffsetForTesting(std::chrono::steady_clock::duration offset) { m_clockOffset = offset; }
+    BasicLockFileImpl(
+        std::shared_ptr<ClientRuntimeBase> runtime, std::unique_ptr<TBlob> file, std::chrono::seconds leaseLength,
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+        std::string fileName, std::optional<std::chrono::milliseconds> acquireTimeout = {});
+    ~BasicLockFileImpl();
+    // Reports HeldElsewhere when the lease is already held (by this object or, until the lease length elapses, another
+    // owner). Any other acquire failure throws RequestFailedException.
+    LockFile::LockResult Lock();
+    void Renew() const;
+    // Renews the lease unless it was released concurrently; NotRenewed when there was nothing to renew.
+    [[nodiscard]] RenewalOutcome RenewIfLocked() const;
+    // Renews the lease without blocking a thread, so many leases can renew at once. The request is cancelled at the
+    // renewal deadline. Reports whether a renewal happened: NotRenewed when the lease was not held or was released
+    // while the request was in flight, which is expected rather than a failure. Throws on any other failure,
+    // including a missed renewal deadline. The caller must keep this object alive until the awaitable completes.
+    [[nodiscard]] boost::asio::awaitable<RenewalOutcome> RenewAsync() const;
+    void Unlock();
+
+    [[nodiscard]] std::chrono::seconds TimeSinceLastRenewal() const;
+    // Expired once the time since the last renewal is past the lease length.
+    [[nodiscard]] AzureClient::DeadlineState LeaseLengthState() const;
+    // The last moment a renewal may still complete (and writes may still proceed): the end of the lease measured
+    // from when the last successful request was sent, less a safety margin.
+    [[nodiscard]] std::chrono::steady_clock::time_point RenewalDeadline() const;
+    // Time left until RenewalDeadline(); empty when the lock is not held.
+    [[nodiscard]] std::optional<std::chrono::steady_clock::duration> RenewalTimeRemaining() const;
+    // Expired while the lease is held but can no longer be assumed valid. Safe to call while a renewal is blocked.
+    [[nodiscard]] AzureClient::DeadlineState RenewalDeadlineState() const;
+
+    void unlink();
+};
+extern template class BasicLockFileImpl<PageBlobClient>;
+
+/// <summary>The production lock file, over the real page blob client. Non-template so it can be forward
+/// declared.</summary>
+class LockFileImpl : public BasicLockFileImpl<PageBlobClient> {
+  public:
+    using BasicLockFileImpl<PageBlobClient>::BasicLockFileImpl;
+};
+} // namespace AVEVA::RocksDB::Plugin::Azure::Impl

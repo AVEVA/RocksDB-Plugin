@@ -112,10 +112,10 @@ git config --system core.longpaths true
 # Also enable in registry: HKLM\SYSTEM\CurrentControlSet\Control\FileSystem -> LongPathsEnabled = 1
 ```
 
-### Azure SDK build failures on Linux
-Ensure OpenSSL development headers are installed:
+### Azure client (OpenSSL) build failures on Linux
+OpenSSL is built from source by vcpkg, so a system `libssl-dev` is not used. Make sure the vcpkg port prerequisites are installed:
 ```bash
-sudo apt-get install libssl-dev libcurl4-openssl-dev
+sudo apt-get install perl make linux-libc-dev
 ```
 
 ---

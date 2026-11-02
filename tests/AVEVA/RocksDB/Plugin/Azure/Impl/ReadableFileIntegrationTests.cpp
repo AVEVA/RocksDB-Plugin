@@ -1,43 +1,39 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/SequentialFileImpl.hpp"
 #include "IntegrationTestHelpers.hpp"
+#include "SignedConfiguration.hpp"
 
 #include <gtest/gtest.h>
-#include <azure/storage/blobs.hpp>
-#include <azure/identity.hpp>
-#include <azure/core/http/http.hpp>
+
+#include <algorithm>
 
 #include <string>
 
+namespace Configuration = AVEVA::RocksDB::Plugin::Azure::Impl::Tests::SignedConfiguration;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ReadableFileImpl;
-using AVEVA::RocksDB::Plugin::Azure::Impl::Configuration;
+using AVEVA::RocksDB::Plugin::Azure::Impl::SequentialFileImpl;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Testing::AzureIntegrationTestBase;
 
-class ReadableFileIntegrationTests : public AzureIntegrationTestBase
-{
-protected:
-    std::string GetBlobNamePrefix() const override
-    {
-        return "test-readable";
-    }
+class ReadableFileIntegrationTests : public AzureIntegrationTestBase {
+  protected:
+    std::string GetBlobNamePrefix() const override { return "test-readable"; }
 };
 
-TEST_F(ReadableFileIntegrationTests, SequentialRead_SmallFile_ReadsCorrectly)
-{
+TEST_F(ReadableFileIntegrationTests, SequentialRead_SmallFile_ReadsCorrectly) {
     // Arrange
     std::vector<char> testData(1024);
-    for (size_t i = 0; i < testData.size(); ++i)
-    {
+    for (size_t i = 0; i < testData.size(); ++i) {
         testData[i] = static_cast<char>(i % 256);
     }
 
     auto blobClient = CreateBlobWithData(testData);
-    ReadableFileImpl file(m_blobName, blobClient, nullptr, m_logger);
+    SequentialFileImpl file{std::make_shared<ReadableFileImpl>(m_blobName, m_runtime, blobClient, nullptr, m_logger)};
 
     // Act
     std::vector<char> readBuffer(testData.size());
@@ -49,17 +45,15 @@ TEST_F(ReadableFileIntegrationTests, SequentialRead_SmallFile_ReadsCorrectly)
     EXPECT_EQ(testData.size(), file.GetOffset());
 }
 
-TEST_F(ReadableFileIntegrationTests, SequentialRead_MultipleChunks_ReadsInOrder)
-{
+TEST_F(ReadableFileIntegrationTests, SequentialRead_MultipleChunks_ReadsInOrder) {
     // Arrange
     std::vector<char> testData(2048);
-    for (size_t i = 0; i < testData.size(); ++i)
-    {
+    for (size_t i = 0; i < testData.size(); ++i) {
         testData[i] = static_cast<char>(i % 256);
     }
 
     auto blobClient = CreateBlobWithData(testData);
-    ReadableFileImpl file(m_blobName, blobClient, nullptr, m_logger);
+    SequentialFileImpl file{std::make_shared<ReadableFileImpl>(m_blobName, m_runtime, blobClient, nullptr, m_logger)};
 
     // Act - Read in chunks
     std::vector<char> chunk1(512);
@@ -84,17 +78,15 @@ TEST_F(ReadableFileIntegrationTests, SequentialRead_MultipleChunks_ReadsInOrder)
     EXPECT_EQ(testData, combined);
 }
 
-TEST_F(ReadableFileIntegrationTests, RandomRead_DifferentOffsets_ReadsCorrectly)
-{
+TEST_F(ReadableFileIntegrationTests, RandomRead_DifferentOffsets_ReadsCorrectly) {
     // Arrange
     std::vector<char> testData(Configuration::PageBlob::PageSize * 2);
-    for (size_t i = 0; i < testData.size(); ++i)
-    {
+    for (size_t i = 0; i < testData.size(); ++i) {
         testData[i] = static_cast<char>(i % 256);
     }
 
     auto blobClient = CreateBlobWithData(testData);
-    ReadableFileImpl file(m_blobName, blobClient, nullptr, m_logger);
+    ReadableFileImpl file(m_blobName, m_runtime, blobClient, nullptr, m_logger);
 
     // Act - Random reads at different offsets
     std::vector<char> buffer1(100);
@@ -114,22 +106,17 @@ TEST_F(ReadableFileIntegrationTests, RandomRead_DifferentOffsets_ReadsCorrectly)
     EXPECT_TRUE(std::equal(buffer1.begin(), buffer1.end(), testData.begin()));
     EXPECT_TRUE(std::equal(buffer2.begin(), buffer2.end(), testData.begin() + 500));
     EXPECT_TRUE(std::equal(buffer3.begin(), buffer3.end(), testData.begin() + Configuration::PageBlob::PageSize));
-
-    // Sequential offset should not be affected by random reads
-    EXPECT_EQ(0, file.GetOffset());
 }
 
-TEST_F(ReadableFileIntegrationTests, Skip_AdvancesOffset_WithoutReading)
-{
+TEST_F(ReadableFileIntegrationTests, Skip_AdvancesOffset_WithoutReading) {
     // Arrange
     std::vector<char> testData(1024);
-    for (size_t i = 0; i < testData.size(); ++i)
-    {
+    for (size_t i = 0; i < testData.size(); ++i) {
         testData[i] = static_cast<char>(i % 256);
     }
 
     auto blobClient = CreateBlobWithData(testData);
-    ReadableFileImpl file(m_blobName, blobClient, nullptr, m_logger);
+    SequentialFileImpl file{std::make_shared<ReadableFileImpl>(m_blobName, m_runtime, blobClient, nullptr, m_logger)};
 
     // Act
     file.Skip(100);
@@ -142,12 +129,11 @@ TEST_F(ReadableFileIntegrationTests, Skip_AdvancesOffset_WithoutReading)
     EXPECT_TRUE(std::equal(buffer.begin(), buffer.end(), testData.begin() + 100));
 }
 
-TEST_F(ReadableFileIntegrationTests, GetSize_ReturnsCorrectSize)
-{
+TEST_F(ReadableFileIntegrationTests, GetSize_ReturnsCorrectSize) {
     // Arrange
     std::vector<char> testData(12345);
     auto blobClient = CreateBlobWithData(testData);
-    ReadableFileImpl file(m_blobName, blobClient, nullptr, m_logger);
+    ReadableFileImpl file(m_blobName, m_runtime, blobClient, nullptr, m_logger);
 
     // Act
     int64_t size = file.GetSize();
@@ -156,17 +142,15 @@ TEST_F(ReadableFileIntegrationTests, GetSize_ReturnsCorrectSize)
     EXPECT_EQ(testData.size(), size);
 }
 
-TEST_F(ReadableFileIntegrationTests, SequentialRead_BeyondFileSize_ReturnsAvailableData)
-{
+TEST_F(ReadableFileIntegrationTests, SequentialRead_BeyondFileSize_ReturnsAvailableData) {
     // Arrange
     std::vector<char> testData(500);
-    for (size_t i = 0; i < testData.size(); ++i)
-    {
+    for (size_t i = 0; i < testData.size(); ++i) {
         testData[i] = 'X';
     }
 
     auto blobClient = CreateBlobWithData(testData);
-    ReadableFileImpl file(m_blobName, blobClient, nullptr, m_logger);
+    SequentialFileImpl file{std::make_shared<ReadableFileImpl>(m_blobName, m_runtime, blobClient, nullptr, m_logger)};
 
     // Act - Try to read more than available
     std::vector<char> buffer(1000, 0);
@@ -177,12 +161,11 @@ TEST_F(ReadableFileIntegrationTests, SequentialRead_BeyondFileSize_ReturnsAvaila
     EXPECT_TRUE(std::equal(buffer.begin(), buffer.begin() + 500, testData.begin()));
 }
 
-TEST_F(ReadableFileIntegrationTests, ReadEmptyFile_ReturnsZero)
-{
+TEST_F(ReadableFileIntegrationTests, ReadEmptyFile_ReturnsZero) {
     // Arrange - Create empty blob
     std::vector<char> emptyData;
     auto blobClient = CreateBlobWithData(emptyData);
-    ReadableFileImpl file(m_blobName, blobClient, nullptr, m_logger);
+    SequentialFileImpl file{std::make_shared<ReadableFileImpl>(m_blobName, m_runtime, blobClient, nullptr, m_logger)};
 
     // Act
     std::vector<char> buffer(100);

@@ -5,35 +5,46 @@
 // with the RocksDB ObjectLibrary and then hands control to the stock
 // rocksdb::db_bench_tool. Configure the plugin via environment variables:
 //
-//   AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL  (required to enable Azure backend)
+//   AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL  (storage account endpoint)
 //   AVEVA_DB_BENCH_CONTAINER            (blob container name; used as dbName)
 //   AVEVA_DB_BENCH_TENANT_ID            (Service Principal auth)
 //   AVEVA_DB_BENCH_CLIENT_ID            (Service Principal auth)
 //   AVEVA_DB_BENCH_CLIENT_SECRET        (Service Principal auth)
 //
+// All five variables are required; the tool exits with status 2 when one is missing.
+//
 // Pass RocksDB db_bench flags on the command line as usual. To route I/O
 // through the plugin add:
 //
-//   --fs_uri=azblobfs<container>
+//   --fs_uri=auto
 //   --db=<account>+<container>/<db-subpath>
+//
+// `--fs_uri=auto` is replaced with the registered plugin name (Plugin::NameFor).
 //
 // See tools/db_bench/README.md for concrete invocation examples.
 
-#include <AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp>
 #include <AVEVA/RocksDB/Plugin/Azure/Models/ServicePrincipalStorageInfo.hpp>
 #include <AVEVA/RocksDB/Plugin/Azure/Plugin.hpp>
 
+#include <boost/asio/executor_work_guard.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/log/core.hpp>
+#include <boost/log/expressions.hpp>
 #include <boost/log/sources/severity_logger.hpp>
 #include <boost/log/trivial.hpp>
 #include <rocksdb/convenience.h>
 #include <rocksdb/db_bench_tool.h>
 #include <rocksdb/env.h>
 
+#include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <thread>
 
 namespace {
 
@@ -57,44 +68,71 @@ std::string Require(const char* name, const std::optional<std::string>& value) {
 
 int main(int argc, char** argv) {
     using AVEVA::RocksDB::Plugin::Azure::Plugin;
-    using AVEVA::RocksDB::Plugin::Azure::Impl::StorageAccount;
+
     using AVEVA::RocksDB::Plugin::Azure::Models::ServicePrincipalStorageInfo;
 
-    const auto storageAccountUrl = Require("AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL", Env("AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL"));
-    const auto container    = Require("AVEVA_DB_BENCH_CONTAINER",     Env("AVEVA_DB_BENCH_CONTAINER"));
-    const auto tenantId     = Require("AVEVA_DB_BENCH_TENANT_ID",     Env("AVEVA_DB_BENCH_TENANT_ID"));
-    const auto clientId     = Require("AVEVA_DB_BENCH_CLIENT_ID",     Env("AVEVA_DB_BENCH_CLIENT_ID"));
+    const auto storageAccountUrl =
+        Require("AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL", Env("AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL"));
+    const auto container = Require("AVEVA_DB_BENCH_CONTAINER", Env("AVEVA_DB_BENCH_CONTAINER"));
+    const auto tenantId = Require("AVEVA_DB_BENCH_TENANT_ID", Env("AVEVA_DB_BENCH_TENANT_ID"));
+    const auto clientId = Require("AVEVA_DB_BENCH_CLIENT_ID", Env("AVEVA_DB_BENCH_CLIENT_ID"));
     const auto clientSecret = Require("AVEVA_DB_BENCH_CLIENT_SECRET", Env("AVEVA_DB_BENCH_CLIENT_SECRET"));
 
     ServicePrincipalStorageInfo primary{
-        container,
-        storageAccountUrl,
-        clientId,
-        clientSecret,
-        tenantId,
+        container, storageAccountUrl, clientId, clientSecret, tenantId,
     };
 
-    auto logger = std::make_shared<
-        boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
+    boost::log::core::get()->set_filter(boost::log::trivial::severity >= boost::log::trivial::warning);
+
+    auto logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
 
     rocksdb::ConfigOptions configOptions;
     rocksdb::Env* env = nullptr;
     std::shared_ptr<rocksdb::Env> guard;
 
-    auto status = Plugin::Register(configOptions, &env, &guard, primary,
-                                   /* backup */ std::nullopt, logger);
-    if (!status.ok()) {
-        std::cerr << "aveva_db_bench: Plugin::Register failed: " << status.ToString() << "\n";
-        return 3;
+    // The plugin blocks on this context from RocksDB threads, so it must be run by dedicated threads
+    // that never call into RocksDB. Statics live until process exit (see std::_Exit below), which skips
+    // their destructors, so the detached threads never observe a destroyed context.
+    static auto ioContextStorage = std::make_shared<boost::asio::io_context>();
+    static auto workGuard = boost::asio::make_work_guard(*ioContextStorage);
+    auto* ioContext = ioContextStorage.get();
+    const auto ioThreadCount = std::max(2U, std::thread::hardware_concurrency());
+    for (unsigned i = 0; i < ioThreadCount; ++i) {
+        std::thread([ioContext] { ioContext->run(); }).detach();
     }
 
-    const auto fsUri  = std::string{Plugin::Name} + container;
-    const auto dbPath = StorageAccount::UniquePrefix(storageAccountUrl, container);
+    auto status = Plugin::Register(
+        configOptions, &env, &guard,
+        Plugin::RegisterOptions{.IoContext = ioContextStorage,
+                                .Accounts = Plugin::AccountPair<ServicePrincipalStorageInfo>{primary, std::nullopt},
+                                .Log = logger});
+    if (!status.ok()) {
+        std::cerr << "aveva_db_bench: Plugin::Register failed: " << status.ToString() << "\n";
+        // Not `return`: that runs static destructors while the detached threads are still inside run().
+        std::fflush(nullptr);
+        std::_Exit(3);
+    }
+
+    const auto fsUri = Plugin::NameFor(primary);
+    const auto dbPath = Plugin::UniquePrefix(storageAccountUrl, container);
 
     std::cerr << "aveva_db_bench: Azure plugin registered.\n"
               << "  Suggested flags:\n"
               << "    --fs_uri=" << fsUri << "\n"
               << "    --db=" << dbPath << "/<your-db-name>\n";
+
+    // Lets scripts pass `auto` instead of re-deriving the plugin name, in every form gflags accepts:
+    // --fs_uri=auto, -fs_uri=auto, --fs_uri auto and -fs_uri auto.
+    std::string fsUriValue = fsUri;
+    std::string fsUriFlag = "--fs_uri=" + fsUri;
+    for (int i = 1; i < argc; ++i) {
+        const std::string_view arg{argv[i]};
+        if (arg == "--fs_uri=auto" || arg == "-fs_uri=auto") {
+            argv[i] = fsUriFlag.data();
+        } else if ((arg == "--fs_uri" || arg == "-fs_uri") && i + 1 < argc && std::string_view{argv[i + 1]} == "auto") {
+            argv[++i] = fsUriValue.data();
+        }
+    }
 
     std::fflush(nullptr);
     std::cout.flush();

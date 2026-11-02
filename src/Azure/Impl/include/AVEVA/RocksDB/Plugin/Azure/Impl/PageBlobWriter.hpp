@@ -1,0 +1,100 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
+#pragma once
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFileHandles.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/SignedBytes.hpp"
+
+#include <algorithm>
+#include <cstdint>
+#include <limits>
+#include <string_view>
+#include <utility>
+
+namespace AVEVA::RocksDB::Plugin::Azure::Impl {
+/// <summary>
+/// What the writeable and read/write files have in common: the blob handles, the capacity tracked locally (so no
+/// round trip is needed to learn it), growth of that capacity, publishing the logical size, and invalidating the
+/// cached copy. Both files own one so these rules cannot drift apart, and moving a file moves the writer.
+/// </summary>
+template <typename TBlob> class PageBlobWriter {
+  public:
+    PageBlobWriter(std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
+                   std::shared_ptr<Core::FileCache> fileCache, BlobFileHandles<TBlob>::LoggerPtr logger,
+                   const int64_t capacity)
+        : H(name, std::move(runtime), std::move(blob), std::move(fileCache), std::move(logger)), m_capacity(capacity) {}
+
+    /// <summary>The handles, public because the files use them directly for reads and logging.</summary>
+    BlobFileHandles<TBlob> H;
+
+    [[nodiscard]] int64_t Capacity() const noexcept { return m_capacity; }
+
+    /// <summary>
+    /// Grows the blob so that `requiredCapacity` fits. Doubling alone under-sizes the blob when the capacity is zero
+    /// (an empty blob) or smaller than the pending write, so the required size is always honoured; the doubling
+    /// keeps repeated writes past the end from each paying for a resize request.
+    /// </summary>
+    void EnsureCapacity(const int64_t requiredCapacity) {
+        if (requiredCapacity > m_capacity) {
+            Block(*H.Blob, EnsureCapacityAsync(requiredCapacity));
+        }
+    }
+
+    /// <summary>The awaitable EnsureCapacity, for callers already running on the client's executor.</summary>
+    [[nodiscard]] BlobOperations::Task<void> EnsureCapacityAsync(const int64_t requiredCapacity) {
+        if (requiredCapacity <= m_capacity) {
+            co_return;
+        }
+        const auto [_, desiredSize] = BlobHelpers::RoundToEndOfNearestPage(GrowthTarget(requiredCapacity, m_capacity));
+
+        BOOST_LOG_SEV(*H.Logger, boost::log::trivial::debug)
+            << "Expanding file '" << H.Name << "' to " << desiredSize << " bytes";
+        co_await ResizeAsync(desiredSize);
+    }
+
+    /// <summary>
+    /// The capacity to grow to before page rounding: at least `required`, at least double `capacity` (saturating
+    /// rather than overflowing, and capped at the 8 TiB page blob limit) and at least the default blob size.
+    /// </summary>
+    [[nodiscard]] static int64_t GrowthTarget(const int64_t required, const int64_t capacity) noexcept {
+        const auto doubled =
+            capacity > std::numeric_limits<int64_t>::max() / 2 ? std::numeric_limits<int64_t>::max() : capacity * 2;
+        return std::max({required, std::min(doubled, SignedBytes(Configuration::PageBlob::MaxPageBlobSize)),
+                         SignedBytes(Configuration::PageBlob::DefaultSize)});
+    }
+
+    /// <summary>Records a capacity already known from the service (no request is made).</summary>
+    void AdoptCapacity(const int64_t capacity) noexcept { m_capacity = capacity; }
+
+    /// <summary>Sets the blob's capacity exactly and tracks it.</summary>
+    void Resize(const int64_t capacity) { Block(*H.Blob, ResizeAsync(capacity)); }
+
+    [[nodiscard]] BlobOperations::Task<void> ResizeAsync(const int64_t capacity) {
+        co_await BlobOperations::SetCapacityAsync(*H.Runtime, *H.Blob, capacity);
+        m_capacity = capacity;
+    }
+
+    /// <summary>
+    /// Records the logical size in the blob's metadata. The physical length is page-rounded, so this is a separate
+    /// write; it changes the ETag, which is why callers skip it when nothing new is to be published.
+    /// </summary>
+    void PublishSize(const int64_t size) { BlobOperations::SetSize(*H.Runtime, *H.Blob, size); }
+
+    [[nodiscard]] BlobOperations::Task<void> PublishSizeAsync(const int64_t size) {
+        co_await BlobOperations::SetSizeAsync(*H.Runtime, *H.Blob, size);
+    }
+
+    /// <summary>Marks the cached copy stale before the blob changes, so a reader never serves the old bytes.</summary>
+    void MarkStale() const {
+        if (H.FileCache) {
+            H.FileCache->MarkFileAsStaleIfExists(H.Name);
+        }
+    }
+
+  private:
+    int64_t m_capacity;
+};
+} // namespace AVEVA::RocksDB::Plugin::Azure::Impl

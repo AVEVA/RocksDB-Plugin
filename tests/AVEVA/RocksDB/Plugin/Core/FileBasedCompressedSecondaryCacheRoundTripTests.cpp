@@ -88,8 +88,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, EraseRemovesEntry) {
 TEST_F(FileBasedCompressedSecondaryCacheTests, EraseNonExistentKeyIsNoOp) {
     m_cache->Erase(MakeKey("never_inserted_key"));
 
-    size_t usage = 0;
-    ASSERT_TRUE(m_cache->GetUsage(usage).ok());
+    const auto usage = m_cache->GetUsage().Value();
     EXPECT_EQ(usage, 0u);
 
     TestPayload p{"data after no-op erase"};
@@ -131,8 +130,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, InsertSavedZeroSize_ReturnsOkWith
     bool kept = false;
     EXPECT_EQ(m_cache->Lookup(MakeKey("zero_size_key"), &m_helper, nullptr, true, false, nullptr, kept), nullptr);
 
-    size_t usage = 0;
-    ASSERT_TRUE(m_cache->GetUsage(usage).ok());
+    const auto usage = m_cache->GetUsage().Value();
     EXPECT_EQ(usage, 0u);
 }
 

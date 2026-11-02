@@ -2,18 +2,31 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
+#include <boost/log/sources/severity_logger.hpp>
+#include <boost/log/trivial.hpp>
 #include <rocksdb/file_system.h>
-namespace AVEVA::RocksDB::Plugin::Azure
-{
-    class ReadableFile final : public rocksdb::FSSequentialFile, public rocksdb::FSRandomAccessFile
-    {
-        Impl::ReadableFileImpl m_file;
-    public:
-        explicit ReadableFile(Impl::ReadableFileImpl file);
 
-        virtual rocksdb::IOStatus Read(size_t n, const rocksdb::IOOptions& options, rocksdb::Slice* result, char* scratch, rocksdb::IODebugContext* dbg) override;
-        virtual rocksdb::IOStatus Read(uint64_t offset, size_t n, const rocksdb::IOOptions& options, rocksdb::Slice* result, char* scratch, rocksdb::IODebugContext* dbg) const override;
-        virtual rocksdb::IOStatus Skip(uint64_t n) override;
-    };
+#include <functional>
+#include <memory>
+
+namespace AVEVA::RocksDB::Plugin::Azure::Impl {
+class ReadableFileImpl;
 }
+
+namespace AVEVA::RocksDB::Plugin::Azure {
+class BlobFilesystem;
+
+/// <summary>
+/// A random access file over a page blob. The implementation (and with it Boost.Asio and the Azure client) stays
+/// behind a pimpl, so this header pulls in nothing beyond RocksDB and Boost.Log.
+/// </summary>
+class ReadableFile : public rocksdb::FSRandomAccessFile {
+  protected:
+    // Only the library's implementation class derives from this; instances come from
+    // BlobFilesystem::NewRandomAccessFile.
+    ReadableFile() = default;
+
+  public:
+    ~ReadableFile() override = default;
+};
+} // namespace AVEVA::RocksDB::Plugin::Azure

@@ -18,7 +18,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, Insert_StoresDataAsIs) {
     const auto filePath = m_cacheDir / hex;
 
     const std::uintmax_t fileSize = std::filesystem::file_size(filePath);
-    EXPECT_EQ(fileSize, FileBasedCompressedSecondaryCache::kFileHeaderSize + raw.size())
+    EXPECT_EQ(fileSize, FileBasedCompressedSecondaryCache::kFileHeaderSize.Value() + raw.size())
         << "File must be exactly kFileHeaderSize + payload bytes; no compression is applied";
 }
 
@@ -39,7 +39,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, InsertSaved_StoresDataAsIs) {
     const auto filePath = m_cacheDir / hex;
 
     const std::uintmax_t fileSize = std::filesystem::file_size(filePath);
-    EXPECT_EQ(fileSize, FileBasedCompressedSecondaryCache::kFileHeaderSize + raw.size())
+    EXPECT_EQ(fileSize, FileBasedCompressedSecondaryCache::kFileHeaderSize.Value() + raw.size())
         << "InsertSaved must store data as-is; no compression is applied by the cache";
 }
 
